@@ -967,6 +967,18 @@ async fn grep_survives_byte_matches_and_rejects_bad_include_globs() {
         .await;
     assert_eq!(result.is_error, None, "{}", text(&result));
     assert_eq!(structured(&result)["matches"][0]["column"], 4);
+    for pattern in ["(?-u:\\xA9)", "(?-u:\\xC3)"] {
+        let result = workspace
+            .call(
+                &reads,
+                "grep",
+                json!({ "pattern": pattern, "path": "accent.txt", "outputMode": "content", "multiline": true }),
+            )
+            .await;
+        assert_eq!(result.is_error, None, "{}", text(&result));
+        assert_eq!(structured(&result)["matches"][0]["column"], 4);
+        assert_eq!(structured(&result)["matches"][0]["content"], "é");
+    }
     for path in ["accent.txt", "."] {
         let rejected = workspace
             .call(

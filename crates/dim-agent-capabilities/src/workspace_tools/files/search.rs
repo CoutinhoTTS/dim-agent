@@ -1025,21 +1025,25 @@ impl FileSearch<'_> {
             let Ok(Some(found_match)) = self.matcher.find_at(haystack, at) else {
                 break;
             };
-            let start = found_match.start();
+            // Byte regexes may start or end inside UTF-8. Widen only the
+            // displayed span; keep advancing in the matcher's byte domain.
+            let start = text.floor_char_boundary(found_match.start());
+            let end = if found_match.is_empty() {
+                start
+            } else {
+                text.ceil_char_boundary(found_match.end())
+            };
             let line_start = text[..start].rfind('\n').map_or(0, |index| index + 1);
             found.push(ContentMatch {
                 file: file.clone(),
                 line: text[..start].matches('\n').count() as u64 + 1,
                 column: js_len(&text[line_start..start]) + 1,
-                content: text[start..found_match.end()].to_owned(),
+                content: text[start..end].to_owned(),
                 before_start_line: None,
                 context: None,
             });
             at = if found_match.is_empty() {
-                text[found_match.end()..]
-                    .chars()
-                    .next()
-                    .map_or(haystack.len() + 1, |c| found_match.end() + c.len_utf8())
+                found_match.end() + 1
             } else {
                 found_match.end()
             };
@@ -1216,10 +1220,7 @@ impl FileSink<'_> {
                     .map_or(0, |found| found.start());
                 // A byte pattern may match inside a character; count from the
                 // character it falls in.
-                let start = (0..=start)
-                    .rev()
-                    .find(|index| text.is_char_boundary(*index))
-                    .unwrap_or(0);
+                let start = text.floor_char_boundary(start);
                 let mut record = ContentMatch {
                     file: self.file.clone(),
                     line,
