@@ -431,7 +431,7 @@ struct SecurityDescriptor {
     pointer: PSECURITY_DESCRIPTOR,
     derived: bool,
 }
-/// Snapshot the native DACL (including protection flags), without a storage
+/// Snapshot native ownership and DACL (including protection flags), without a storage
 /// authorization/service dependency. Used to detect concurrent security changes.
 pub(crate) fn workspace_security_revision(file: &File) -> io::Result<Vec<u8>> {
     // Native replacement does not merge alternate streams. Until stream copy
@@ -459,7 +459,12 @@ pub(crate) fn workspace_security_revision(file: &File) -> io::Result<Vec<u8>> {
             "atomic workspace replacement cannot preserve alternate data streams",
         ));
     }
-    let security = SecurityDescriptor::read(file)?;
+    let security = SecurityDescriptor::read(
+        file,
+        DACL_SECURITY_INFORMATION
+            | windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION
+            | windows_sys::Win32::Security::GROUP_SECURITY_INFORMATION,
+    )?;
     let length =
         unsafe { windows_sys::Win32::Security::GetSecurityDescriptorLength(security.pointer) };
     Ok(
@@ -479,13 +484,13 @@ impl Drop for SecurityDescriptor {
     }
 }
 impl SecurityDescriptor {
-    fn read(file: &File) -> io::Result<Self> {
+    fn read(file: &File, sections: u32) -> io::Result<Self> {
         let mut pointer = null_mut();
         let error = unsafe {
             GetSecurityInfo(
                 file.as_raw_handle(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                sections,
                 null_mut(),
                 null_mut(),
                 null_mut(),
@@ -502,7 +507,7 @@ impl SecurityDescriptor {
         })
     }
     fn inherit(parent: &File) -> io::Result<Self> {
-        let parent = Self::read(parent)?;
+        let parent = Self::read(parent, DACL_SECURITY_INFORMATION)?;
         let mut token = null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return Err(io::Error::last_os_error());
@@ -572,7 +577,7 @@ pub(crate) fn create_temp(
         FILE_NON_DIRECTORY_FILE,
         null_mut(),
     ) {
-        Ok(file) => SecurityDescriptor::read(&file)?,
+        Ok(file) => SecurityDescriptor::read(&file, DACL_SECURITY_INFORMATION)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             SecurityDescriptor::inherit(business_parent)?
         }

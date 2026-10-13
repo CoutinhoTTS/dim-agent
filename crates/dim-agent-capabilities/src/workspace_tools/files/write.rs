@@ -352,8 +352,8 @@ pub(super) fn write_target(
         #[cfg(windows)]
         if metadata_revision(&temporary.1).ok().as_ref() != metadata_before.as_ref() {
             return Ok(Err(failed(
-                "File security changed during preparation.",
-                json!({"code": "file_modified_since_read"}),
+                "Cannot preserve the file's owner, group or access control during replacement.",
+                json!({"code": "write_error"}),
             )));
         }
     }
@@ -443,50 +443,51 @@ fn preserve_metadata(source: &std::fs::File, target: &std::fs::File) -> std::io:
     {
         use std::os::fd::AsRawFd;
         // A sibling can inherit a default ACL or security labels which the
-        // source did not have. Copy the exact set, not their union.
-        let target_fd = target.as_raw_fd();
-        let size = unsafe { libc::flistxattr(target_fd, std::ptr::null_mut(), 0) };
-        if size < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut inherited = vec![0u8; (size as usize).max(1)];
-        let size =
-            unsafe { libc::flistxattr(target_fd, inherited.as_mut_ptr().cast(), inherited.len()) };
-        if size < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        for name in inherited[..size as usize].split_inclusive(|b| *b == 0) {
-            if unsafe { libc::fremovexattr(target_fd, name.as_ptr().cast()) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-        let fd = source.as_raw_fd();
-        let size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0) };
-        if size < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut names = vec![0u8; (size as usize).max(1)];
-        let size = unsafe { libc::flistxattr(fd, names.as_mut_ptr().cast(), names.len()) };
-        if size < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        for name in names[..size as usize].split_inclusive(|b| *b == 0) {
-            let name = name.as_ptr().cast();
-            let size = unsafe { libc::fgetxattr(fd, name, std::ptr::null_mut(), 0) };
+        // source did not have. Preserve the exact set, without trying to
+        // remove/reapply unchanged labels (e.g. security.selinux).
+        let read = |file: &std::fs::File| -> std::io::Result<std::collections::BTreeMap<Vec<u8>, Vec<u8>>> {
+            let fd = file.as_raw_fd();
+            let size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0) };
             if size < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            let mut value = vec![0u8; (size as usize).max(1)];
-            let size = unsafe { libc::fgetxattr(fd, name, value.as_mut_ptr().cast(), value.len()) };
+            let mut names = vec![0u8; (size as usize).max(1)];
+            let size = unsafe { libc::flistxattr(fd, names.as_mut_ptr().cast(), names.len()) };
             if size < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            let mut attributes = std::collections::BTreeMap::new();
+            for name in names[..size as usize].split_inclusive(|b| *b == 0) {
+                let size = unsafe { libc::fgetxattr(fd, name.as_ptr().cast(), std::ptr::null_mut(), 0) };
+                if size < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut value = vec![0u8; (size as usize).max(1)];
+                let size = unsafe { libc::fgetxattr(fd, name.as_ptr().cast(), value.as_mut_ptr().cast(), value.len()) };
+                if size < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                value.truncate(size as usize);
+                attributes.insert(name.to_vec(), value);
+            }
+            Ok(attributes)
+        };
+        let (wanted, inherited) = (read(source)?, read(target)?);
+        for name in inherited.keys().filter(|name| !wanted.contains_key(*name)) {
+            if unsafe { libc::fremovexattr(target.as_raw_fd(), name.as_ptr().cast()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        for (name, value) in wanted {
+            if inherited.get(&name) == Some(&value) {
+                continue;
             }
             if unsafe {
                 libc::fsetxattr(
                     target.as_raw_fd(),
-                    name,
+                    name.as_ptr().cast(),
                     value.as_ptr().cast(),
-                    size as usize,
+                    value.len(),
                     0,
                 )
             } != 0
