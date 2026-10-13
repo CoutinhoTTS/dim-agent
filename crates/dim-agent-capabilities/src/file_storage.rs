@@ -482,6 +482,8 @@ fn read(
     }
 }
 
+/// Clones share authorized root identities; each apply opens fresh I/O resources.
+#[derive(Clone)]
 pub struct FileStoragePlugin {
     roots: Arc<Mutex<Vec<PathBuf>>>,
 }

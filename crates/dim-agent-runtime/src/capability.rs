@@ -40,8 +40,10 @@ pub(crate) fn typed<P: Capability>(plugin: P) -> Box<dyn rutis::Plugin> {
 }
 
 /// Registers a capability as a loader module named after the plugin and
-/// returns the name. Each load builds a new plugin with `make`; the keys are
-/// those of the first one, so `make` must build plugins with the same keys.
+/// returns the name. `make` must be pure: registration constructs and drops
+/// one plugin to read its metadata, and each load constructs another. Every
+/// plugin must have the same name and keys. Capture shared configuration in
+/// `make` when it must survive a reload; acquire I/O resources only in apply.
 pub fn register_capability<P: Capability>(
     builtins: &mut rutis_loader::Builtins,
     make: impl Fn() -> P + Send + Sync + 'static,

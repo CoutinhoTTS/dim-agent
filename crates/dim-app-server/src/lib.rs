@@ -341,10 +341,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
-    let roots = config.file_roots.clone();
-    rows.push(register_capability(&mut builtins, move || {
-        dim_agent_capabilities::file_storage::FileStoragePlugin::new(roots.clone())
-    }));
+    let files =
+        dim_agent_capabilities::file_storage::FileStoragePlugin::new(config.file_roots.clone());
+    rows.push(register_capability(&mut builtins, move || files.clone()));
     if config.model_catalog.is_some() || product_root.is_some() {
         rows.push(register_capability(&mut builtins, || {
             dim_agent_aimux::AimuxPlugin

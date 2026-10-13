@@ -36,6 +36,139 @@ impl Capability for Capture {
     }
 }
 
+struct ProcessSettings(
+    tokio::sync::watch::Sender<Option<(Arc<SettingsService>, Arc<rutis_loader::Loader>)>>,
+);
+impl TypedPlugin for ProcessSettings {
+    type Deps = (Arc<SettingsService>, Arc<rutis_loader::Loader>);
+    fn name(&self) -> &str {
+        "test.process-settings"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        services: Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            self.0.send_replace(Some(services));
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for ProcessSettings {
+    fn keys(&self) -> KeysOf<Self> {
+        ((), ())
+    }
+}
+
+#[tokio::test]
+async fn server_reload_preserves_project_root_identity_and_settings() {
+    use dim_agent_capabilities::defaults;
+    use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
+    use dim_app_server::{ServerConfig, serve};
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let home = std::env::temp_dir().join(format!("dim-server-roots-{}", uuid::Uuid::new_v4()));
+        let project_a = home.join("project-a");
+        let project_b = home.join("project-b");
+        fs::create_dir_all(&project_a).unwrap();
+        fs::create_dir_all(&project_b).unwrap();
+        let (home, project_a, project_b) = (
+            home.canonicalize().unwrap(),
+            project_a.canonicalize().unwrap(),
+            project_b.canonicalize().unwrap(),
+        );
+        fs::write(
+            project_a.join(".mcp.json"),
+            br#"{"mcpServers":{},"project":"a"}"#,
+        )
+        .unwrap();
+        fs::write(
+            project_b.join(".mcp.json"),
+            br#"{"mcpServers":{},"project":"b"}"#,
+        )
+        .unwrap();
+        let (capture, mut services) = tokio::sync::watch::channel(None);
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::mock_hosts(&mut builder);
+        defaults::install(&mut builder);
+        builder.session_plugin(move |_| ProcessSettings(capture.clone()));
+        let server = serve(
+            builder,
+            ServerConfig {
+                product_home: Some(home.clone()),
+                target_home: Some(home.join("runtime")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let agent = server.agent().unwrap();
+        let _session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let (settings, loader) = services.borrow().clone().unwrap();
+        let cancel = CancellationToken::new();
+        let root_a = settings
+            .authorize_project(project_a.clone(), &cancel)
+            .await
+            .unwrap();
+        let expected = settings
+            .read(SettingsSource::ProjectMcp(root_a), &cancel)
+            .await
+            .unwrap();
+
+        loader.restart("FileStorage").await.unwrap();
+        let current = services
+            .wait_for(|value| {
+                value
+                    .as_ref()
+                    .is_some_and(|(current, _)| !Arc::ptr_eq(current, &settings))
+            })
+            .await
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(current.project_root(&project_a), Some(root_a));
+        let root_b = current
+            .authorize_project(project_b.clone(), &cancel)
+            .await
+            .unwrap();
+        assert_ne!(
+            root_a, root_b,
+            "a new project must not reuse an authorized root"
+        );
+        assert!(
+            current
+                .read(SettingsSource::ProjectMcp(root_a), &cancel)
+                .await
+                .unwrap()
+                .document
+                == expected.document
+        );
+        assert_eq!(
+            current.authorize_project(project_a, &cancel).await.unwrap(),
+            root_a
+        );
+        assert!(
+            current
+                .read(SettingsSource::ProjectMcp(root_b), &cancel)
+                .await
+                .unwrap()
+                .document
+                != expected.document
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+        fs::remove_dir_all(home).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let home = std::env::temp_dir().join(format!("dim-settings-late-{}", uuid::Uuid::new_v4()));
