@@ -8,12 +8,16 @@ use std::sync::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+type ShutdownReply = Box<dyn FnOnce(bool) -> BoxFuture<'static, ()> + Send>;
+
 /// Process admission: the readiness gate, shutdown intent and listener faults.
 pub struct ServerControl {
     ready: watch::Sender<bool>,
     shutdown: CancellationToken,
     force: AtomicBool,
     fault: Mutex<Option<ServerError>>,
+    // Only detached reply I/O, never graph-owned connections or RPC tasks.
+    shutdown_replies: Mutex<Vec<ShutdownReply>>,
 }
 impl ServerControl {
     fn new() -> Self {
@@ -22,7 +26,19 @@ impl ServerControl {
             shutdown: CancellationToken::new(),
             force: AtomicBool::new(false),
             fault: Mutex::new(None),
+            shutdown_replies: Mutex::new(Vec::new()),
         }
+    }
+    pub(crate) fn defer_shutdown_reply(&self, reply: ShutdownReply) {
+        self.shutdown_replies
+            .lock()
+            .expect("shutdown replies")
+            .push(reply);
+    }
+    /// Called only after graph cleanup has joined all connection handoffs.
+    pub(crate) async fn complete_shutdown(&self, success: bool) {
+        let replies = std::mem::take(&mut *self.shutdown_replies.lock().expect("shutdown replies"));
+        futures_util::future::join_all(replies.into_iter().map(|reply| reply(success))).await;
     }
     pub(crate) fn open(&self) {
         self.ready.send_replace(true);

@@ -39,6 +39,7 @@ pub(crate) struct Connection {
     hub: Arc<ConnectionHub>,
     pub closed: CancellationToken,
     pub sender: Sender,
+    pub shutdown_reply: Mutex<Option<RequestId>>,
     ids: Mutex<HashSet<RequestId>>,
     attachments: Mutex<HashMap<String, Attachment>>,
     next_attachment: AtomicU64,
@@ -71,6 +72,7 @@ impl Connection {
             local,
             closed,
             sender,
+            shutdown_reply: Mutex::new(None),
             hub,
             ids: Mutex::new(HashSet::new()),
             attachments: Mutex::new(HashMap::new()),
@@ -454,9 +456,20 @@ impl Connection {
                 server_version: SERVER_VERSION,
             })),
             Call::Shutdown(params) => {
-                if params.force {
-                    rpc.control.force();
+                if !params.force {
+                    // The connection transfers only its final-reply writer to the
+                    // process coordinator. This RPC must leave the graph before
+                    // that coordinator can join cleanup and publish completion.
+                    let mut reply = self.shutdown_reply.lock().expect("shutdown reply");
+                    if reply.is_some() {
+                        return Some(Err(RpcError::invalid("Shutdown already requested")));
+                    }
+                    *reply = Some(id);
+                    self.closed.cancel();
+                    rpc.control.shutdown().cancel();
+                    return None;
                 }
+                rpc.control.force();
                 let ack = self
                     .sender
                     .send(Outbound::result(id, Ok(Reply::empty())), true);

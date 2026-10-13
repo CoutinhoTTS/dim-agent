@@ -204,35 +204,62 @@ fn daemon_stop_without_an_endpoint_never_creates_state_or_spawns_a_server() {
 }
 
 #[test]
-fn daemon_stop_waits_for_graceful_closure_while_retaining_home_state() {
+fn daemon_stop_waits_for_completion_and_closure_without_touching_a_successor() {
     let home = Home::new();
     fs::write(home.0.join("account-marker"), "retained").unwrap();
     let socket = home.0.join("rust/daemon.sock");
     let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":"0".repeat(64)},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":"0".repeat(64)},"features":["session.create","session.history","daemon.shutdown.completed"]}));
         let shutdown = wire.read("daemon.shutdown");
         assert_eq!(shutdown["params"], json!({}));
+        thread::sleep(Duration::from_millis(100));
+        fs::remove_file(&socket).unwrap();
+        let _successor = UnixListener::bind(&socket).unwrap();
         wire.reply(&shutdown, json!({}));
         thread::sleep(Duration::from_millis(100));
         wire.0.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
-        thread::sleep(Duration::from_millis(100));
-        fs::remove_file(socket).unwrap();
     });
     let started = Instant::now();
     let output = home.command().args(["daemon", "stop"]).output().unwrap();
+    let elapsed = started.elapsed();
     daemon.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(started.elapsed() >= Duration::from_millis(200));
-    assert!(!home.0.join("rust/daemon.sock").exists());
+    assert!(elapsed >= Duration::from_millis(200));
+    assert!(home.0.join("rust/daemon.sock").exists());
     assert_eq!(
         fs::read_to_string(home.0.join("account-marker")).unwrap(),
         "retained"
     );
+}
+
+#[test]
+fn daemon_stop_never_treats_old_protocol_eof_or_cleanup_failure_as_completion() {
+    for case in ["old", "eof", "failed"] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            let hello = wire.read("hello");
+            let mut features = vec!["session.create", "session.history"];
+            if case != "old" { features.push("daemon.shutdown.completed"); }
+            wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features}));
+            if case == "old" {
+                let mut line = String::new();
+                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "must not stop an incompatible daemon");
+            } else {
+                let request = wire.read("daemon.shutdown");
+                if case == "failed" { wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"Daemon cleanup failed"}})); }
+            }
+        });
+        let output = home.command().args(["daemon", "stop"]).output().unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{case}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Daemon stopped."));
+        assert!(!output.stderr.is_empty());
+    }
 }
 
 #[test]

@@ -745,17 +745,21 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
         errors.push(error.into());
     }
     let cleanup = AgentError::aggregate(errors);
-    if let Some(fault) = control.take_fault() {
-        return Err(match cleanup {
+    let result = if let Some(fault) = control.take_fault() {
+        Err(match cleanup {
             Ok(()) => fault,
             Err(cleanup) => ServerError::Cleanup {
                 cause: Box::new(fault),
                 cleanup,
             },
-        });
-    }
-    cleanup?;
-    Ok(ShutdownReason::Graceful)
+        })
+    } else {
+        cleanup
+            .map(|()| ShutdownReason::Graceful)
+            .map_err(ServerError::from)
+    };
+    control.complete_shutdown(result.is_ok()).await;
+    result
 }
 
 struct NodeRuntime(Arc<rutis_bridge::runtime::LocalRuntime>);

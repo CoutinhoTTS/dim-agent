@@ -619,15 +619,18 @@ async fn run_connection(
         loop {
             let mut frame = tokio::select! {biased;_=closed.cancelled()=>break,frame=outbound.recv()=>match frame{Some(frame)=>frame,None=>break}};
             let bytes = std::mem::take(&mut frame.bytes);
-            let result = tokio::select! {biased;_=closed.cancelled()=>break,result=tokio::time::timeout(timeout,writer.write(bytes))=>result};
+            // Never hand off a writer with an interrupted, partially sent frame.
+            // The existing write deadline also bounds connection teardown.
+            let result = tokio::time::timeout(timeout, writer.write(bytes)).await;
             if !matches!(result, Ok(Ok(()))) {
                 closed.cancel();
-                break;
+                return None;
             }
             if let Some(ack) = frame.written.take() {
                 let _ = ack.send(());
             }
         }
+        Some(writer)
     });
     let deadline = tokio::time::Instant::now() + hub.config().hello_timeout;
     let mut hello = false;
@@ -691,7 +694,7 @@ async fn run_connection(
                                 features: (params.protocol_version >= 3).then(|| {
                                     let mut features =
                                         if local || hub.config().product_home.is_none() {
-                                            vec!["session.summaries"]
+                                            vec!["session.summaries", "daemon.shutdown.completed"]
                                         } else {
                                             vec![]
                                         };
@@ -759,5 +762,30 @@ async fn run_connection(
         }
     }
     connection.finish().await;
-    let _ = writer_task.await;
+    if let Ok(Some(mut writer)) = writer_task.await
+        && let Some(id) = connection
+            .shutdown_reply
+            .lock()
+            .expect("shutdown reply")
+            .take()
+    {
+        // Captures only I/O and the request ID. No graph-owned service or task
+        // waits for the graph whose cleanup this final response certifies.
+        hub.control.defer_shutdown_reply(Box::new(move |success| {
+            Box::pin(async move {
+                let result = if success {
+                    Ok(Reply::empty())
+                } else {
+                    Err(RpcError::app(
+                        -32000,
+                        "shutdown_failed",
+                        "Daemon cleanup failed",
+                    ))
+                };
+                if let Ok(bytes) = serde_json::to_vec(&Outbound::result(id, result)) {
+                    let _ = tokio::time::timeout(timeout, writer.write(bytes)).await;
+                }
+            })
+        }));
+    }
 }

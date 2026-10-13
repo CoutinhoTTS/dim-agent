@@ -118,7 +118,7 @@ The repository root `./dev` prepares the local provider package, builds incremen
 dimcode --home /path/to/plugin-home daemon stop
 ```
 
-`daemon stop` authenticates an existing endpoint for the selected home without spawning a server or creating a missing home. It requests normal shutdown and waits up to 30 seconds for settlement and endpoint closure; a timeout reports failure without force-killing the process. Account and session files remain available for restart. This command accepts a daemon with a different model profile and does not read model/plugin files, so configuration edits cannot prevent an explicit stop. On Unix it also waits for the original socket to disappear; a replacement endpoint is left untouched.
+`daemon stop` authenticates an existing endpoint for the selected home without spawning a server or creating a missing home. It requires `daemon.shutdown.completed`, requests normal shutdown, and waits up to 30 seconds for a successful cleanup-completion response followed by connection closure. EOF alone, cleanup errors and timeout report failure without force-killing the process. An older daemon without the feature is left running; stop it using its matching CLI before upgrading. Account and session files remain available for restart. This command accepts a daemon with a different model profile and does not read model/plugin files, so configuration edits cannot prevent an explicit stop. It never removes or waits on a replacement endpoint; successful cleanup includes releasing the original daemon's storage and listener ownership.
 
 ## Home, transport and output
 

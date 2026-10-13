@@ -34,6 +34,12 @@ The configured digest is SHA-256 of the same original bytes parsed and validated
 
 Unix endpoint directories must be private (0700), sockets use 0600, and cleanup removes only the inode acquired by this listener. Named pipe ownership and local identity checks remain in the transport. Ordinary client disconnect detaches; it does not delete a session. See the [public architecture](../../docs/architecture/README.md).
 
+### Shutdown completion
+
+For authorized transports, v3 `hello.features` includes `daemon.shutdown.completed`. A successful `daemon.shutdown` response with `force: false` (the default) certifies that Agent work, trace writers, connections and the Rutis process tree have settled, including storage and plugin disposal. Cleanup failure returns `shutdown_failed` without exposing disposer error details. EOF alone is not success. `force: true` retains its early acknowledgement and does not promise cleanup.
+
+The requesting connection hands only its final-response writer to the existing process coordinator before leaving the plugin graph. The coordinator sends the result after `root.shutdown()`; no graph-owned RPC task waits on its own disposal. Reply writes are bounded by the transport write deadline. Client disconnect does not cancel accepted cleanup. Clients must check the feature before relying on this completion contract from an older daemon.
+
 ## Optional managed provider
 
 The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.10.0:

@@ -851,6 +851,108 @@ async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+#[derive(Clone)]
+struct ShutdownCleanup {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    fail: bool,
+}
+impl TypedPlugin for ShutdownCleanup {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "ShutdownCleanup"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        (): (),
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        let cleanup = self.clone();
+        Box::pin(async move {
+            Ok(rutis::Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    cleanup.entered.notify_one();
+                    cleanup.release.notified().await;
+                    if cleanup.fail {
+                        return Err(rutis::CordisError::PluginFailed(Box::new(
+                            std::io::Error::other("private cleanup detail"),
+                        )));
+                    }
+                    Ok(())
+                })
+            })))
+        })
+    }
+}
+impl Capability for ShutdownCleanup {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_shutdown_reports_completion_after_cleanup_and_preserves_failures() {
+    for (ws, fail, disconnect) in [
+        (false, false, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let home =
+            std::path::PathBuf::from("/tmp").join(format!("dim-shutdown-{}", uuid::Uuid::new_v4()));
+        let cleanup = ShutdownCleanup {
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            fail,
+        };
+        let owner = cleanup.clone();
+        let (server, _) = launch_with(
+            Arc::new(MockTools),
+            ServerConfig {
+                target_home: Some(home.clone()),
+                ..Default::default()
+            },
+            move |builder| {
+                builder.session_plugin(move |_| owner.clone());
+            },
+        )
+        .await;
+        let mut client = Client::new_version(&server, ws, 3).await;
+        assert_ok(&client.rpc("session.create", create(json!([]))).await);
+        let id = client.send("daemon.shutdown", json!({})).await;
+        tokio::time::timeout(Duration::from_secs(5), cleanup.entered.notified())
+            .await
+            .expect("cleanup entered");
+        if disconnect {
+            drop(client);
+            cleanup.release.notify_one();
+        } else {
+            let early = tokio::time::timeout(Duration::from_millis(30), client.response(id)).await;
+            cleanup.release.notify_one();
+            let premature = early.is_ok();
+            let result = match early {
+                Ok(result) => result,
+                Err(_) => client.response(id).await,
+            };
+            if fail {
+                assert_eq!(result["error"]["data"]["appError"], "shutdown_failed");
+                assert!(!result.to_string().contains("private cleanup detail"));
+            } else {
+                assert_ok(&result);
+                let db = dim_app_server::storage::SqliteStorage::open(home.join("dimcode.sqlite"))
+                    .expect("successful stop released SQLite before replying");
+                db.close().await.unwrap();
+            }
+            assert!(
+                !premature,
+                "shutdown acknowledged completion before its disposer settled"
+            );
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .expect("cleanup survives caller disconnect");
+        assert_eq!(result.is_err(), fail);
+        let _ = std::fs::remove_dir_all(home);
+    }
+}
+
 struct ConfirmTool {
     calls: Arc<AtomicUsize>,
     seen: Arc<Mutex<Vec<String>>>,

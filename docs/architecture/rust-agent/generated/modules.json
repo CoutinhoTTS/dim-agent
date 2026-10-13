@@ -2173,6 +2173,7 @@
       "references": [
         "path HostError::Failed",
         "path ModelChunk::MessageStart",
+        "path ModelChunk::Text",
         "path ModelChunk::Usage",
         "path ModelProtocol::OpenaiChat",
         "path ModelStream"
@@ -11852,6 +11853,7 @@
         "path Outbound::result",
         "path PROTOCOL_VERSION",
         "path Reply::Hello",
+        "path Reply::empty",
         "path RpcError::app",
         "path RpcError::wire",
         "path SERVER_VERSION",
