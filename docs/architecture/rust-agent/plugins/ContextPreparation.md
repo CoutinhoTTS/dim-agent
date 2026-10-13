@@ -26,7 +26,10 @@ failure. Its publisher commits prompt changes, adopted inputs and
 cancelled by stop/steer and joined during cleanup; cleanup aggregates failures.
 Replay settles unmatched handoffs without rerunning host work. The mock profile
 has no context resolver. Completed compaction facts remain authoritative across
-checkpoint selection; optional snapshot separation is not yet implemented.
+checkpoint selection. Recovery snapshots are built from the final adopted cut,
+saved separately after fact publication, and selected by interpreter compatibility.
+Snapshot construction or save failure keeps the successful summary and falls back
+to fact replay; it does not repeat model work.
 
 ## Tests
 

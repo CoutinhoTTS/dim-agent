@@ -157,7 +157,6 @@ impl ContextPolicy {
                 summary,
                 context_baseline,
                 diagnostics,
-                checkpoint,
             } = &mut outcome
             {
                 match authoritative_baseline(&history, cursor).and_then(|baseline| {
@@ -166,17 +165,6 @@ impl ContextPolicy {
                 }) {
                     Ok(baseline) => {
                         *context_baseline = baseline.to_vec();
-                        // Recovery state accelerates replay; it is not a
-                        // prerequisite for retaining a successful summary.
-                        *checkpoint = match (self.history.checkpoint)(&context, cursor) {
-                            Ok(state) => Some(Box::new(state)),
-                            Err(_) => {
-                                tracing::warn!(
-                                    "projection snapshot unavailable; using fact replay"
-                                );
-                                None
-                            }
-                        };
                     }
                     Err(error) => {
                         outcome = ContextCompactionResult::Failed {
@@ -210,6 +198,29 @@ impl ContextPolicy {
                     ..
                 } => {
                     prepared = compacted_request(cursor, summary, context_baseline.clone().into())?;
+                    // Build from the final middleware-adopted cursor, then save
+                    // independently of the immutable fact. Cache failures do
+                    // not discard a successful summary or repeat model work.
+                    if data.through == source.through {
+                        let saved = async {
+                            let checkpoint = (self.history.checkpoint)(&context, cursor)?;
+                            let state = serde_json::to_string(&checkpoint)
+                                .map_err(|error| error.to_string())?;
+                            self.timeline
+                                .save_snapshot(RecoverySnapshot {
+                                    sequence: event.sequence,
+                                    event_id: event.id.clone(),
+                                    interpreter: self.history.checkpoint_interpreter.into(),
+                                    state,
+                                })
+                                .await
+                                .map_err(|error| error.to_string())
+                        }
+                        .await;
+                        if saved.is_err() {
+                            tracing::warn!("projection snapshot unavailable; using fact replay");
+                        }
+                    }
                 }
                 ContextCompactionResult::Failed { error, .. } if source.recovery.is_some() => {
                     return Err(HostError::failed(error.clone()));

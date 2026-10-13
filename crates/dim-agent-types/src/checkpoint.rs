@@ -8,6 +8,17 @@ pub struct TimelinePosition {
     pub sequence: u64,
 }
 
+/// Disposable interpreter state anchored to an immutable committed event.
+/// Inspect `interpreter` before decoding `state`; storage does not interpret it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverySnapshot {
+    #[serde(with = "crate::safe_integer")]
+    pub sequence: u64,
+    pub event_id: String,
+    pub interpreter: String,
+    pub state: String,
+}
+
 /// Internal projection state immediately before replaying `resume`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectionCheckpoint {

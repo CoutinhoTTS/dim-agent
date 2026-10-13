@@ -231,7 +231,7 @@ impl TimelineTree {
                 }
                 if let Some((timeline, through)) = validate {
                     let context = tokio::select! {
-                        result = timeline.context(through) => result?,
+                        result = crate::history::read_context(&timeline, through) => result?,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                         _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                     };
@@ -595,12 +595,15 @@ impl TimelineTreeControl for TimelineTree {
                         let parent_context = self.owned_context(parent).expect("restored parent");
                         let timeline = parent_context.timeline();
                         let cut = next.branch_point.expect("validated child cut");
-                        let context = timeline.context(cut).await.map_err(|error| {
-                            AgentError::Storage(format!(
-                                "branch {} cannot be restored: {error}",
-                                next.id
-                            ))
-                        })?;
+                        let context =
+                            crate::history::read_context(timeline, cut)
+                                .await
+                                .map_err(|error| {
+                                    AgentError::Storage(format!(
+                                        "branch {} cannot be restored: {error}",
+                                        next.id
+                                    ))
+                                })?;
                         crate::history::validate_context_boundary(&context)
                             .map_err(AgentError::Storage)?;
                         let mut ancestors = timeline.ancestors();
@@ -655,7 +658,7 @@ impl TimelineTreeControl for TimelineTree {
             // Reject an untrusted requested cut before any trusted `before`
             // hook can transform the draft. The final transformed cut is
             // checked independently by the branch build task.
-            let requested = timeline.context(at).await?;
+            let requested = crate::history::read_context(timeline, at).await?;
             crate::history::validate_context_boundary(&requested)
                 .map_err(AgentError::InvalidInput)?;
             let original = BranchCreateData {

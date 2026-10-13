@@ -44,8 +44,10 @@ Timeline facts are durable; state cells, watches and runtime handles are not.
 Replay must not rerun uncertain external effects. Runtime context enters through
 adopted raw inputs containing final content, or public tool results, not a
 domain-specific second history projection. Completed compaction facts must
-remain effective without a selected recovery snapshot. Current snapshot storage
-is still inline: fact/snapshot separation is **not implemented**. These pages
+remain effective without a selected recovery snapshot. Snapshots are separate,
+optional interpreter caches; compatibility is checked before decoding state.
+`Timeline.context` reads full facts; `HistoryRenderer.context` selects a supported
+snapshot, and `history::read_context` uses the default interpreter. These pages
 describe current source, not the planned dynamic-event, loader-configuration or
 cross-language APIs in the [foundation ADR](../../../adr/001-harness-foundation.md).
 

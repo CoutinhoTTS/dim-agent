@@ -3,7 +3,8 @@ use std::sync::Mutex;
 
 #[tokio::test]
 async fn failed_snapshot_builder_keeps_completed_compaction_for_later_requests() {
-    let agent = builder_with_context(
+    let store = Arc::new(MemoryTimelineStore::default());
+    let mut builder = builder_with_context(
         Arc::new(EchoModel),
         HistoryRenderer {
             checkpoint: |_, _| Err("snapshot encoder unavailable".into()),
@@ -13,8 +14,9 @@ async fn failed_snapshot_builder_keeps_completed_compaction_for_later_requests()
             threshold: Some(900.),
             ..Context::default()
         },
-    )
-    .build();
+    );
+    builder.timeline_store(store.clone());
+    let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
         .await
@@ -37,8 +39,22 @@ async fn failed_snapshot_builder_keeps_completed_compaction_for_later_requests()
         .collect();
     assert!(
         matches!(compactions.as_slice(), [ContextCompactionResult::Completed {
-        summary, checkpoint: None, ..
+        summary, ..
     }] if summary == "short")
+    );
+    assert!(
+        store
+            .latest_snapshot(
+                &TimelineKey {
+                    session_id: session.id().into(),
+                    branch_id: "main".into(),
+                },
+                events.last().unwrap().sequence,
+                "dim/context-projection/v1"
+            )
+            .await
+            .unwrap()
+            .is_none()
     );
     let requests: Vec<_> = events
         .iter()
@@ -152,12 +168,6 @@ impl TypedPlugin for RewriteCompaction {
                                 summary: "committed summary".into(),
                                 diagnostics,
                                 context_baseline: Vec::new(),
-                                checkpoint: Some(Box::new(
-                                    dim_agent_capabilities::history::projection_checkpoint(
-                                        &context, cursor,
-                                    )
-                                    .map_err(AgentError::InvalidInput)?,
-                                )),
                             };
                         }
                         Edit::Failed => {

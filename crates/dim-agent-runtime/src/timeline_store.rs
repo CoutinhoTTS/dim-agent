@@ -1,5 +1,5 @@
 use crate::{BoxFuture, Result, SessionConfig, TimelineInfo, TimelineTrace};
-use dim_agent_types::{AgentEvent, ContextCompactionData};
+use dim_agent_types::{AgentEvent, RecoverySnapshot};
 use std::{ops::RangeInclusive, sync::Arc};
 
 /// Storage address of one Timeline inside an Agent's shared store.
@@ -120,9 +120,23 @@ pub trait TimelineStore: Send + Sync + 'static {
         key: &'a TimelineKey,
         sequence: u64,
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>>;
-    fn latest_checkpoint<'a>(
+    /// Optional acceleration only. Save after the anchoring fact commits;
+    /// failures must not roll back or poison the fact stream.
+    fn save_snapshot<'a>(
         &'a self,
-        key: &'a TimelineKey,
-        through: u64,
-    ) -> BoxFuture<'a, Result<Option<ContextCompactionData>>>;
+        _key: &'a TimelineKey,
+        _snapshot: RecoverySnapshot,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    /// Return the latest compatible candidate without interpreting its state.
+    /// The caller validates the decoded resume position before trimming history.
+    fn latest_snapshot<'a>(
+        &'a self,
+        _key: &'a TimelineKey,
+        _through: u64,
+        _interpreter: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        Box::pin(async { Ok(None) })
+    }
 }

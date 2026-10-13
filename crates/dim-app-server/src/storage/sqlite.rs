@@ -11,7 +11,7 @@ use std::{
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 11))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 12))",
     ),
     (
         "provider_imports",
@@ -51,11 +51,11 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     ),
     (
         "timeline_events",
-        "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, checkpoint INTEGER NOT NULL CHECK (checkpoint IN (0, 1)), event_id TEXT, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))",
+        "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, event_id TEXT, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))",
     ),
     (
-        "timeline_events_checkpoints",
-        "CREATE INDEX timeline_events_checkpoints ON timeline_events (session_id, branch_id, checkpoint, sequence)",
+        "timeline_snapshots",
+        "CREATE TABLE timeline_snapshots (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), interpreter TEXT NOT NULL, event_id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (session_id, branch_id, interpreter, sequence), FOREIGN KEY (session_id, branch_id, sequence) REFERENCES timeline_events(session_id, branch_id, sequence))",
     ),
     (
         "session_owners_by_agent",
@@ -154,7 +154,7 @@ impl SqliteStorage {
             for (_, sql) in SCHEMA {
                 tx.execute_batch(sql).map_err(storage)?;
             }
-            tx.execute("INSERT INTO agent_store_format VALUES (11)", [])
+            tx.execute("INSERT INTO agent_store_format VALUES (12)", [])
                 .map_err(storage)?;
         } else {
             if actual.len() != SCHEMA.len()
@@ -176,7 +176,7 @@ impl SqliteStorage {
                 .map_err(storage)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(storage)?;
-            if versions != [11] {
+            if versions != [12] {
                 return Err(storage(format!(
                     "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
                     path.display()

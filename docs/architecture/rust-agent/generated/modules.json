@@ -225,6 +225,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "tracing::warn",
         "unreachable"
       ]
     },
@@ -889,6 +890,7 @@
       "file": "crates/dim-agent-runtime/src/memory_timeline_store.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "vec"
       ]
     },
@@ -2977,6 +2979,7 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::checkpoint",
       "references": [
+        "path RecoverySnapshot",
         "path checkpoint"
       ]
     },
@@ -3045,6 +3048,7 @@
         "path HistoryRenderer",
         "path context_configuration",
         "path context_messages",
+        "path crate::history::read_context",
         "path with_input_guide",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_configuration",
@@ -3582,7 +3586,16 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path ContextHistory",
-        "use dim_agent_runtime::ContextHistory"
+        "path Timeline",
+        "use dim_agent_runtime::ContextHistory",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
       ]
     },
     {
@@ -3598,6 +3611,7 @@
       "references": [
         "path ProjectionCheckpoint",
         "path ProjectionCheckpointState",
+        "path RecoverySnapshot",
         "path checkpoint"
       ]
     },
@@ -4352,6 +4366,13 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path crate::history::read_context"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError::Cancelled",
@@ -4754,7 +4775,6 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "path ContextCompactionResult::Completed",
         "path EventKind::BranchStart",
         "path EventKind::ContextScope",
         "path EventKind::PromptChanged",
@@ -5389,6 +5409,7 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::history",
       "references": [
+        "path crate::history::read_context",
         "path crate::history::validate_context_boundary"
       ]
     },
@@ -5584,6 +5605,7 @@
       "to": "dim_agent_capabilities::history",
       "references": [
         "path context_configuration",
+        "path crate::history::read_context",
         "use crate::history::context_configuration"
       ]
     },
@@ -7753,7 +7775,11 @@
       "from": "dim_agent_runtime::core::timeline",
       "to": "dim_agent_types::checkpoint",
       "references": [
+        "path ProjectionCheckpoint",
+        "path RecoverySnapshot",
         "path TimelinePosition",
+        "use dim_agent_types::ProjectionCheckpoint",
+        "use dim_agent_types::RecoverySnapshot",
         "use dim_agent_types::TimelinePosition"
       ]
     },
@@ -7762,12 +7788,9 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "path ContextCompactionData",
-        "path ContextCompactionResult::Completed",
         "path EventDraft",
         "path EventKind::ContextCompaction",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::ContextCompactionData",
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventDraft",
         "use dim_agent_types::EventKind"
@@ -7855,15 +7878,21 @@
     },
     {
       "from": "dim_agent_runtime::memory_timeline_store",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path RecoverySnapshot",
+        "use dim_agent_types::RecoverySnapshot"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::memory_timeline_store",
       "to": "dim_agent_types::events",
       "references": [
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
-        "path ContextCompactionData",
         "path EventKind::BranchCreate",
-        "path EventKind::ContextCompaction",
         "use dim_agent_types::BranchCreateAt",
-        "use dim_agent_types::ContextCompactionData",
+        "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind"
       ]
     },
@@ -8110,12 +8139,18 @@
     },
     {
       "from": "dim_agent_runtime::timeline_store",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path RecoverySnapshot",
+        "use dim_agent_types::RecoverySnapshot"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "path ContextCompactionData",
-        "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::ContextCompactionData"
+        "use dim_agent_types::AgentEvent"
       ]
     },
     {
@@ -8255,13 +8290,6 @@
       "to": "dim_agent_types",
       "references": [
         "path JsonObject"
-      ]
-    },
-    {
-      "from": "dim_agent_types::events",
-      "to": "dim_agent_types::checkpoint",
-      "references": [
-        "path ProjectionCheckpoint"
       ]
     },
     {
@@ -11670,19 +11698,24 @@
     },
     {
       "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path RecoverySnapshot",
+        "use dim_agent_types::RecoverySnapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_types::events",
       "references": [
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
-        "path ContextCompactionData",
-        "path ContextCompactionResult::Completed",
         "path EventKind::BranchCreate",
         "path EventKind::ContextCompaction",
         "path EventKind::Text",
         "path EventKind::Thinking",
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateAt",
-        "use dim_agent_types::ContextCompactionData",
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind"
       ]

@@ -656,7 +656,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO timeline_events(session_id, branch_id, sequence, last_sequence, kind, body, checkpoint) VALUES (?1, 'missing', 1, 1, 'step/text', '{}', 0)",
+            "INSERT INTO timeline_events(session_id, branch_id, sequence, last_sequence, kind, body) VALUES (?1, 'missing', 1, 1, 'step/text', '{}')",
             [&damaged_reference],
         )
         .unwrap();

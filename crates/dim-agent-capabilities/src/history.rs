@@ -1,5 +1,5 @@
 use crate::prompt_state::PromptSnapshot;
-use dim_agent_runtime::ContextHistory;
+use dim_agent_runtime::{ContextHistory, Timeline};
 use dim_agent_types::*;
 use std::{collections::HashMap, sync::Arc};
 
@@ -38,6 +38,9 @@ pub type BuildProjectionCheckpoint =
 pub struct HistoryRenderer {
     pub render: RenderHistory,
     pub checkpoint: BuildProjectionCheckpoint,
+    /// Identifies the saved projection semantics, independently of store format.
+    pub checkpoint_interpreter: &'static str,
+    pub decode_checkpoint: fn(&RecoverySnapshot) -> Option<ProjectionCheckpoint>,
 }
 
 impl Default for HistoryRenderer {
@@ -45,8 +48,30 @@ impl Default for HistoryRenderer {
         Self {
             render: project_context_history,
             checkpoint: projection_checkpoint,
+            checkpoint_interpreter: "dim/context-projection/v1",
+            decode_checkpoint: |snapshot| serde_json::from_str(&snapshot.state).ok(),
         }
     }
+}
+
+impl HistoryRenderer {
+    pub async fn context(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+    ) -> dim_agent_runtime::Result<ContextHistory> {
+        timeline
+            .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
+            .await
+    }
+}
+
+/// Read the shared prompt/input/output projection using its supported cache.
+pub async fn read_context(
+    timeline: &Timeline,
+    through: u64,
+) -> dim_agent_runtime::Result<ContextHistory> {
+    HistoryRenderer::default().context(timeline, through).await
 }
 
 /// One message an input or the projection places, with the in-effect
@@ -344,17 +369,12 @@ fn initial_state(context: &ContextHistory) -> Option<&ProjectionCheckpointState>
     context
         .checkpoint
         .as_ref()
-        .and_then(|data| match &data.outcome {
-            ContextCompactionResult::Completed {
-                checkpoint: Some(checkpoint),
-                ..
-            } => Some(&checkpoint.state),
-            _ => None,
-        })
+        .map(|checkpoint| &checkpoint.state)
 }
 
 /// Compression is a durable fact, not a side effect of selecting a snapshot.
-/// A newer fact in the replay suffix supersedes the snapshot's compression.
+/// The snapshot resumes before its anchoring fact; the suffix retains every
+/// subsequent compression, including completions without a saved snapshot.
 pub(crate) fn context_compaction(context: &ContextHistory) -> Option<&ContextCompactionData> {
     context
         .events
@@ -368,7 +388,6 @@ pub(crate) fn context_compaction(context: &ContextHistory) -> Option<&ContextCom
             }
             _ => None,
         })
-        .or(context.checkpoint.as_ref())
 }
 
 pub fn project_context_history(context: &ContextHistory) -> Result<Vec<HistoryEntry>, String> {

@@ -54,13 +54,7 @@ impl PromptSnapshot {
         let mut state = context
             .checkpoint
             .as_ref()
-            .and_then(|data| match &data.outcome {
-                ContextCompactionResult::Completed {
-                    checkpoint: Some(checkpoint),
-                    ..
-                } => Some(Self::from_checkpoint(&checkpoint.state.prompts)),
-                _ => None,
-            })
+            .map(|checkpoint| Self::from_checkpoint(&checkpoint.state.prompts))
             .unwrap_or_default();
         for event in &context.events {
             state.apply(event);

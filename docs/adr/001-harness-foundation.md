@@ -131,7 +131,7 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Unit | Status | Acceptance |
 | --- | --- | --- |
 | Public contracts and contributor rules | Implemented as documentation | Current and planned behavior remain distinct; no private source content |
-| Recovery facts and snapshots | Partial: model replay honors completed facts independently of the selected checkpoint; snapshot storage is still inline | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
+| Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots; native storage v12 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
 | Scoped persisted loader configuration | Not implemented | Scope isolation, save failure, trust limits, secret-free notifications |

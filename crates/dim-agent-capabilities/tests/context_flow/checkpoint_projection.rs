@@ -131,30 +131,170 @@ fn diagnostics() -> Box<CompactionDiagnosticsRecord> {
     )
 }
 
+#[tokio::test]
+async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let key = TimelineKey {
+        session_id: "compatibility".into(),
+        branch_id: "main".into(),
+    };
+    store
+        .create_session(&key.session_id, &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(Ctx::root().unwrap(), key.clone(), vec![], store.clone());
+    let input = timeline
+        .append(EventKind::InputMessage(InputMessageData::text("original", None)).into())
+        .unwrap();
+    let consumed = timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: input.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let through = timeline.sequence();
+    let checkpoint =
+        projection_checkpoint(&timeline.context(through).await.unwrap(), &consumed.id).unwrap();
+    let fact = timeline
+        .append(
+            EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                through,
+                outcome: ContextCompactionResult::Completed {
+                    cursor: consumed.id.clone(),
+                    summary: "authoritative".into(),
+                    diagnostics: diagnostics(),
+                    context_baseline: vec![],
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .save_snapshot(RecoverySnapshot {
+            sequence: fact.sequence,
+            event_id: fact.id.clone(),
+            interpreter: "foreign/v1".into(),
+            state: "not this renderer's format".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .latest_snapshot(&key, fact.sequence, "foreign/v1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let renderer = HistoryRenderer {
+        render: external_history,
+        checkpoint_interpreter: "custom/v1",
+        decode_checkpoint: |_| panic!("must not decode an incompatible interpreter"),
+        ..HistoryRenderer::default()
+    };
+    let replay = renderer.context(&timeline, fact.sequence).await.unwrap();
+    assert!(replay.checkpoint.is_none());
+    assert_eq!(replay.events.len(), 3);
+    assert_eq!(
+        dim_agent_capabilities::history::context_messages(
+            &replay,
+            &(renderer.render)(&replay).unwrap()
+        ),
+        vec![dim_agent_capabilities::history::summary_message(
+            "authoritative"
+        )]
+    );
+
+    // Matching custom interpreters can opt in to their own decoder, while
+    // Timeline.context remains independent of any cache or renderer.
+    timeline
+        .save_snapshot(RecoverySnapshot {
+            sequence: fact.sequence,
+            event_id: fact.id.clone(),
+            interpreter: "custom/v1".into(),
+            state: serde_json::to_string(&checkpoint).unwrap(),
+        })
+        .await
+        .unwrap();
+    let renderer = HistoryRenderer {
+        decode_checkpoint: |snapshot| {
+            assert_eq!(snapshot.interpreter, "custom/v1");
+            serde_json::from_str(&snapshot.state).ok()
+        },
+        ..renderer
+    };
+    let accelerated = renderer.context(&timeline, fact.sequence).await.unwrap();
+    assert_eq!(accelerated.checkpoint, Some(checkpoint));
+    assert!(accelerated.events.iter().any(|event| event.id == fact.id));
+    assert_eq!(
+        (renderer.render)(&accelerated).unwrap(),
+        (renderer.render)(&replay).unwrap()
+    );
+    let full = timeline.context(fact.sequence).await.unwrap();
+    assert!(full.checkpoint.is_none());
+    assert_eq!(full.events, replay.events);
+    assert_eq!(full.positions, replay.positions);
+    timeline.close().await.unwrap();
+}
+
 fn resume(context: &ContextHistory, cursor: &str) -> ContextHistory {
-    let checkpoint = projection_checkpoint(context, cursor).unwrap();
+    // Production snapshots are built from the preparation prefix, before
+    // their Completed fact, never from later input/compaction events.
+    let mut source = context.clone();
+    if let Some(index) = context.events.iter().position(|event| {
+        matches!(&event.kind, EventKind::ContextCompaction(data)
+            if matches!(&data.outcome, ContextCompactionResult::Completed { cursor: saved, .. } if saved == cursor))
+    }) {
+        source.events.truncate(index);
+        source.positions.truncate(index);
+    }
+    let checkpoint = projection_checkpoint(&source, cursor).unwrap();
     let index = context
         .positions
         .iter()
         .position(|position| position == &checkpoint.resume)
         .unwrap();
-    ContextHistory {
+    let mut resumed = ContextHistory {
         events: context.events[index..].to_vec(),
         positions: context.positions[index..].to_vec(),
         ancestry: context.ancestry.clone(),
-        checkpoint: Some(ContextCompactionData {
-            turn_id: "turn".into(),
-            request_id: "request".into(),
-            through: context.events.last().unwrap().sequence,
-            outcome: ContextCompactionResult::Completed {
-                cursor: cursor.into(),
-                summary: "summary".into(),
-                diagnostics: diagnostics(),
-                context_baseline: Vec::new(),
-                checkpoint: Some(Box::new(checkpoint)),
-            },
-        }),
+        checkpoint: Some(checkpoint),
+    };
+    // Pure projection fixtures also need an authoritative compaction fact;
+    // decoded state alone neither supplies a summary nor removes its cursor.
+    // Preserve real A/B facts rather than replacing their asymmetric summaries.
+    if !resumed.events.iter().any(|event| {
+        matches!(&event.kind,
+        EventKind::ContextCompaction(data) if matches!(&data.outcome,
+            ContextCompactionResult::Completed { cursor: saved, .. } if saved == cursor))
+    }) {
+        let through = context.events.last().unwrap().sequence;
+        resumed.events.push(Arc::new(AgentEvent {
+            id: format!("checkpoint-anchor-{cursor}"),
+            sequence: through + 1,
+            create_at: 0,
+            tags: None,
+            kind: EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                through,
+                outcome: ContextCompactionResult::Completed {
+                    cursor: cursor.into(),
+                    summary: "summary".into(),
+                    diagnostics: diagnostics(),
+                    context_baseline: Vec::new(),
+                },
+            }),
+        }));
+        resumed.positions.push(TimelinePosition {
+            branch_id: "main".into(),
+            sequence: through + 1,
+        });
     }
+    resumed
 }
 
 #[test]
@@ -175,7 +315,6 @@ fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
                     source_event: cursor.into(),
                     message: Message::text(Role::User, text),
                 }],
-                checkpoint: None,
             },
         })
     };
@@ -225,22 +364,14 @@ fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
         let candidate = match cut {
             None => context.clone(),
             Some((cursor, fact_index)) => {
-                let mut candidate = resume(&context, cursor);
-                let EventKind::ContextCompaction(fact) = &context.events[fact_index].kind else {
-                    unreachable!()
-                };
-                let saved = candidate.checkpoint.take().unwrap();
-                let mut fact = fact.clone();
-                if let (
-                    ContextCompactionResult::Completed { checkpoint, .. },
-                    ContextCompactionResult::Completed {
-                        checkpoint: saved, ..
-                    },
-                ) = (&mut fact.outcome, saved.outcome)
-                {
-                    *checkpoint = saved;
-                }
-                candidate.checkpoint = Some(fact);
+                let candidate = resume(&context, cursor);
+                assert!(
+                    candidate
+                        .events
+                        .iter()
+                        .any(|event| event.id == context.events[fact_index].id),
+                    "the authoritative compaction fact must remain in the suffix"
+                );
                 candidate
             }
         };
@@ -276,13 +407,7 @@ fn repeated_checkpoint_retains_restored_pending_input() {
     ]);
     let once = resume(&context, "event-3");
     let twice = resume(&once, "event-3");
-    let ContextCompactionResult::Completed {
-        checkpoint: Some(checkpoint),
-        ..
-    } = &twice.checkpoint.as_ref().unwrap().outcome
-    else {
-        panic!("checkpoint must be present");
-    };
+    let checkpoint = twice.checkpoint.as_ref().unwrap();
     assert!(
         checkpoint
             .state
@@ -452,7 +577,13 @@ fn checkpoint_replay_preserves_prompt_configuration_pending_input_and_internal_t
             PromptSnapshot::from_context(&context)
         );
         assert_eq!(context_configuration(&resumed), Some(configuration.clone()));
-        assert!(resumed.checkpoint.as_ref().is_some_and(|data| matches!(&data.outcome, ContextCompactionResult::Completed { checkpoint: Some(checkpoint), .. } if checkpoint.state.inputs.iter().any(|(id, _)| id == "event-3"))));
+        assert!(resumed.checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint
+                .state
+                .inputs
+                .iter()
+                .any(|(id, _)| id == "event-3")
+        }));
         // A second checkpoint inherits the first checkpoint's restored state.
         context = resumed;
     }

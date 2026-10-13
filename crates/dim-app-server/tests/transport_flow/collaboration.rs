@@ -113,15 +113,23 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     > {
         self.memory.trace(key, sequence)
     }
-    fn latest_checkpoint<'a>(
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        snapshot: dim_agent_types::RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
         &'a self,
         key: &'a dim_agent_runtime::TimelineKey,
         through: u64,
+        interpreter: &'a str,
     ) -> dim_agent_runtime::BoxFuture<
         'a,
-        dim_agent_runtime::Result<Option<dim_agent_types::ContextCompactionData>>,
+        dim_agent_runtime::Result<Option<dim_agent_types::RecoverySnapshot>>,
     > {
-        self.memory.latest_checkpoint(key, through)
+        self.memory.latest_snapshot(key, through, interpreter)
     }
 }
 
