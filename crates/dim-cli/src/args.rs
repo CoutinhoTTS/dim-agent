@@ -6,7 +6,9 @@ Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n
 Commands:\n\
   login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
-  logout PROVIDER                  Sign out of an account provider\n\n\
+  logout PROVIDER                  Sign out of an account provider\n\
+  models PROVIDER [--refresh]       List model IDs and availability\n\
+  daemon stop                      Gracefully stop an existing daemon\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
@@ -30,6 +32,8 @@ pub enum Action {
     Login(String),
     Account(String),
     Logout(String),
+    Models(String),
+    DaemonStop,
     Help,
     Version,
 }
@@ -49,6 +53,7 @@ pub struct Options {
     pub model: Option<String>,
     pub directory: Option<String>,
     pub device: bool,
+    pub refresh: bool,
     pub redirect_uri: String,
 }
 
@@ -75,6 +80,7 @@ impl Options {
             model: None,
             directory: None,
             device: false,
+            refresh: false,
             redirect_uri: "http://localhost:1455/auth/callback".into(),
         };
         let mut args = args;
@@ -106,12 +112,22 @@ impl Options {
                 "--directory" => options.directory = Some(value(&mut args)?),
                 "--redirect-uri" => options.redirect_uri = value(&mut args)?,
                 "--device" => options.device = true,
-                "login" | "account" | "logout" if matches!(options.action, Action::Chat) => {
+                "--refresh" => options.refresh = true,
+                "daemon" if matches!(options.action, Action::Chat) => {
+                    if value(&mut args)? != "stop" {
+                        return Err("Use daemon stop".into());
+                    }
+                    options.action = Action::DaemonStop;
+                }
+                "login" | "account" | "logout" | "models"
+                    if matches!(options.action, Action::Chat) =>
+                {
                     let provider = value(&mut args)?;
                     options.action = match arg.as_str() {
                         "login" => Action::Login(provider),
                         "account" => Action::Account(provider),
-                        _ => Action::Logout(provider),
+                        "logout" => Action::Logout(provider),
+                        _ => Action::Models(provider),
                     };
                 }
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
@@ -145,7 +161,10 @@ impl Options {
         if !matches!(options.action, Action::Chat)
             && (options.prompt.is_some() || options.resume.is_some() || options.model.is_some())
         {
-            return Err("Account commands cannot be combined with chat options".into());
+            return Err("Commands cannot be combined with chat options".into());
+        }
+        if options.refresh && !matches!(options.action, Action::Models(_)) {
+            return Err("--refresh requires the models command".into());
         }
         if matches!(options.action, Action::Login(_)) && options.directory.is_none() {
             return Err("login requires --directory URL".into());
@@ -158,6 +177,10 @@ impl Options {
         options.cwd = std::fs::canonicalize(options.cwd)?;
         if !options.cwd.is_dir() {
             return Err("--cwd must name a directory".into());
+        }
+        // Stopping an existing daemon does not consume model or plugin files.
+        if matches!(options.action, Action::DaemonStop) {
+            return Ok(options);
         }
         for path in [&mut options.model_config, &mut options.server]
             .into_iter()

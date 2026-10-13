@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -65,13 +65,15 @@ pub struct Client {
     next_id: u64,
     frame: Vec<u8>,
     pub notices: VecDeque<Message>,
+    #[cfg(unix)]
+    endpoint: (PathBuf, u64, u64),
     #[cfg(windows)]
     _bridge: tokio::process::Child,
 }
 impl Client {
     async fn open(endpoint: &Path, _binary: &Path) -> io::Result<Self> {
         #[cfg(unix)]
-        let stream = {
+        let (stream, endpoint) = {
             use std::os::unix::fs::FileTypeExt;
             use std::os::unix::fs::MetadataExt;
             let metadata = std::fs::symlink_metadata(endpoint)?;
@@ -91,7 +93,10 @@ impl Client {
                     "Daemon belongs to a different user",
                 ));
             }
-            stream
+            (
+                stream,
+                (endpoint.to_owned(), metadata.dev(), metadata.ino()),
+            )
         };
         #[cfg(windows)]
         let (read, write, bridge) = {
@@ -145,6 +150,8 @@ impl Client {
             next_id: 0,
             frame: Vec::new(),
             notices: VecDeque::new(),
+            #[cfg(unix)]
+            endpoint,
             #[cfg(windows)]
             _bridge: bridge,
         })
@@ -241,7 +248,7 @@ impl Client {
         serde_json::from_value(value).map_err(|_| format!("Invalid {method} response").into())
     }
 
-    async fn hello(&mut self, profile: &DaemonProfile) -> Result<()> {
+    async fn hello(&mut self, profile: Option<&DaemonProfile>) -> Result<()> {
         let hello: Hello = tokio::time::timeout(Duration::from_secs(5), self.typed("hello", json!({"protocolVersion":PROTOCOL_VERSION,"clientKind":"cli","clientName":"dimcode"}))).await??;
         if hello.protocol_version != PROTOCOL_VERSION
             || hello.instance_id.is_empty()
@@ -257,7 +264,7 @@ impl Client {
         {
             return Err("Incompatible daemon; use an isolated --home or explicitly restart the daemon you own".into());
         }
-        if &hello.daemon_profile != profile {
+        if profile.is_some_and(|profile| &hello.daemon_profile != profile) {
             return Err("Existing daemon uses a different model profile; use a separate --home for --model-config".into());
         }
         Ok(())
@@ -265,22 +272,73 @@ impl Client {
 }
 
 pub async fn connect(options: &Options) -> Result<Client> {
-    let profile = match &options.model_config {
-        Some(path) => DaemonProfile::Configured {
-            model_config_sha256: format!("{:x}", Sha256::digest(std::fs::read(path)?)),
-        },
-        None => DaemonProfile::Product,
+    connect_inner(options, true)
+        .await?
+        .ok_or_else(|| "App Server did not start".into())
+}
+
+pub async fn stop(options: &Options) -> Result<i32> {
+    let Some(mut client) = connect_inner(options, false).await? else {
+        println!("Daemon is not running.");
+        return Ok(0);
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        client.rpc("daemon.shutdown", json!({})).await?;
+        loop {
+            let buffer = client.read.fill_buf().await?;
+            if buffer.is_empty() {
+                break;
+            }
+            let size = buffer.len();
+            client.read.consume(size);
+        }
+        #[cfg(unix)]
+        loop {
+            use std::os::unix::fs::MetadataExt;
+            let (path, device, inode) = &client.endpoint;
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.dev() == *device && metadata.ino() == *inode => {}
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error.into()),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok::<_, crate::Error>(())
+    })
+    .await
+    .map_err(|_| "Daemon shutdown timed out; it is still settling and was not force-killed")??;
+    println!("Daemon stopped.");
+    Ok(0)
+}
+
+async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>> {
+    let profile = if !start {
+        None
+    } else {
+        Some(match &options.model_config {
+            Some(path) => DaemonProfile::Configured {
+                model_config_sha256: format!("{:x}", Sha256::digest(std::fs::read(path)?)),
+            },
+            None => DaemonProfile::Product,
+        })
     };
     let native_home = options.home.join("rust");
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+    if start {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&native_home)?;
     }
-    builder.create(&native_home)?;
-    let native_home = std::fs::canonicalize(native_home)?;
+    let native_home = match std::fs::canonicalize(native_home) {
+        Ok(path) => path,
+        Err(error) if !start && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -297,7 +355,7 @@ pub async fn connect(options: &Options) -> Result<Client> {
             "{:x}",
             Sha256::digest(format!("dimcode:{}", native_home.display()))
         );
-        std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
+        PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
     let binary = match &options.server {
         Some(path) => path.clone(),
@@ -312,11 +370,14 @@ pub async fn connect(options: &Options) -> Result<Client> {
     };
     match Client::open(&endpoint, &binary).await {
         Ok(mut client) => {
-            client.hello(&profile).await?;
-            return Ok(client);
+            client.hello(profile.as_ref()).await?;
+            return Ok(Some(client));
         }
         Err(error) if missing(&error) => {}
         Err(error) => return Err(error.into()),
+    }
+    if !start {
+        return Ok(None);
     }
     if !binary.is_file() {
         return Err(format!(
@@ -412,8 +473,8 @@ pub async fn connect(options: &Options) -> Result<Client> {
     loop {
         match Client::open(&endpoint, &binary).await {
             Ok(mut client) => {
-                client.hello(&profile).await?;
-                return Ok(client);
+                client.hello(profile.as_ref()).await?;
+                return Ok(Some(client));
             }
             Err(error) if missing(&error) => {}
             Err(error) => return Err(error.into()),

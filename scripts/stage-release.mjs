@@ -5,6 +5,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdt
   readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { extractPluginArchive, pluginArchiveLimit } from './plugin-package.mjs';
 
 const [binaryDirectory, destination, version, sourceCommit, mode, ...extra] = process.argv.slice(2);
 assert(binaryDirectory && destination && version && sourceCommit && extra.length === 0,
@@ -62,37 +63,16 @@ try {
       try {
         for await (const chunk of response.body) {
           size += chunk.length;
-          assert(size <= 16 * 1024 * 1024, 'Plugin archive is too large');
+          assert(size <= pluginArchiveLimit, 'Plugin archive is too large');
           chunks.push(chunk);
         }
       } catch { throw new Error('Private plugin download failed or exceeded its size limit'); }
       data = Buffer.concat(chunks);
     }
-    assert(data.length <= 16 * 1024 * 1024, 'Plugin archive is too large');
-    assert.equal(digest(data), expectedDigest, 'Plugin archive digest mismatch');
     const archive = path.join(scratch, 'plugin.tar.gz');
     writeFileSync(archive, data);
-    const names = run('tar', ['-tzf', archive]).trim().split('\n').map((name) => name.replace(/^\.\//, '')).filter(Boolean);
-    const required = ['package.json', 'dim-plugin.json', 'dist/index.js'];
-    assert.equal(new Set(names).size, names.length, 'Duplicate plugin archive entries');
-    assert.deepEqual(names.filter((name) => !name.endsWith('/')).sort(), required.toSorted(), 'Unexpected plugin archive files');
-    assert(names.every((name) => required.includes(name) || ['', 'dist/'].includes(name)), 'Unsafe plugin archive path');
-    assert(run('tar', ['-tvzf', archive]).trim().split('\n').every((line) => ['-', 'd'].includes(line[0])), 'Plugin archive links are forbidden');
     const extracted = path.join(scratch, 'plugin');
-    mkdirSync(extracted);
-    run('tar', ['-xzf', archive, '-C', extracted]);
-    const manifest = JSON.parse(readFileSync(path.join(extracted, 'dim-plugin.json')));
-    const metadata = JSON.parse(readFileSync(path.join(extracted, 'package.json')));
-    assert.equal(manifest.schemaVersion, 1, 'Unsupported plugin schema');
-    assert.equal(manifest.id, 'dim-oauth', 'Unexpected plugin ID');
-    assert.equal(manifest.hostApiVersion, 1, 'Unsupported host API');
-    assert.equal(manifest.rutisVersion, '0.10.0', 'Unsupported rutis version');
-    assert.equal(manifest.entry, 'dist/index.js', 'Unexpected plugin entry');
-    assert.equal(metadata.type, 'module', 'Plugin must be ESM');
-    assert.equal(metadata.version, manifest.version, 'Plugin version mismatch');
-    assert.deepEqual(Object.keys(manifest.files), ['dist/index.js'], 'Unexpected plugin file manifest');
-    assert.equal(manifest.files['dist/index.js'], digest(readFileSync(path.join(extracted, 'dist/index.js'))), 'Plugin entry digest mismatch');
-    plugin = { version: manifest.version, sha256: expectedDigest, hostApiVersion: 1, rutisVersion: '0.10.0' };
+    plugin = extractPluginArchive(archive, expectedDigest, extracted);
   }
   mkdirSync(path.join(output, 'bin'), { recursive: true });
   copyFileSync(cli, path.join(output, 'bin', `dimcode${suffix}`));

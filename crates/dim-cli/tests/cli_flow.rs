@@ -121,6 +121,121 @@ fn help_and_version_do_not_create_product_state() {
 }
 
 #[test]
+fn model_catalog_lists_safe_ids_and_availability_and_refreshes_explicitly() {
+    for refresh in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+            let request = wire.read(if refresh { "provider.refresh" } else { "provider.catalog" });
+            assert_eq!(request["params"], json!({"providerId":"fixture"}));
+            let catalog = json!({"account":{"accessToken":"must-not-print"},"version":1,"disabledModelIds":["disabled"],"models":[
+                {"id":"model\u{1b}[2J-id","name":"Model\nName\tvalue","unavailableReason":null},
+                {"id":"disabled","name":"Disabled","unavailableReason":null},
+                {"id":"missing","name":"Missing","unavailableReason":"private diagnostic must-not-print"}
+            ]});
+            wire.reply(&request, if refresh { catalog } else { json!({"catalog":catalog}) });
+        });
+        let mut command = home.command();
+        command.args(["models", "fixture"]);
+        if refresh {
+            command.arg("--refresh");
+        }
+        let output = command.output().unwrap();
+        daemon.join().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "model-id\tModel Name value\tavailable\ndisabled\tDisabled\tdisabled\nmissing\tMissing\tunavailable\n"
+        );
+        assert!(output.stderr.is_empty());
+    }
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let catalog = wire.read("provider.catalog");
+        wire.reply(&catalog, json!({"catalog":null}));
+    });
+    let output = home.command().args(["models", "fixture"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--refresh"));
+}
+
+#[test]
+fn daemon_stop_without_an_endpoint_never_creates_state_or_spawns_a_server() {
+    let home = Home::new();
+    fs::remove_dir_all(home.0.join("rust")).unwrap();
+    let output = home
+        .command()
+        .args([
+            "--server",
+            "/missing-app-server",
+            "--model-config",
+            "/missing-model-config",
+            "daemon",
+            "stop",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!home.0.join("rust").exists());
+    fs::create_dir(home.0.join("rust")).unwrap();
+    fs::set_permissions(home.0.join("rust"), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        home.command()
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(!home.0.join("rust/daemon.log").exists());
+}
+
+#[test]
+fn daemon_stop_waits_for_graceful_closure_while_retaining_home_state() {
+    let home = Home::new();
+    fs::write(home.0.join("account-marker"), "retained").unwrap();
+    let socket = home.0.join("rust/daemon.sock");
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":"0".repeat(64)},"features":["session.create","session.history"]}));
+        let shutdown = wire.read("daemon.shutdown");
+        assert_eq!(shutdown["params"], json!({}));
+        wire.reply(&shutdown, json!({}));
+        thread::sleep(Duration::from_millis(100));
+        wire.0.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        fs::remove_file(socket).unwrap();
+    });
+    let started = Instant::now();
+    let output = home.command().args(["daemon", "stop"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(!home.0.join("rust/daemon.sock").exists());
+    assert_eq!(
+        fs::read_to_string(home.0.join("account-marker")).unwrap(),
+        "retained"
+    );
+}
+
+#[test]
 fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -634,8 +749,28 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
         assert!(output.stdout.is_empty());
         assert!(socket.exists());
         assert!(daemon.try_wait().unwrap().is_none());
+        fs::write(&requested, "invalid changed configuration").unwrap();
+        let stopped = home
+            .command()
+            .args([
+                "--server",
+                &binary,
+                "--model-config",
+                requested.to_str().unwrap(),
+                "daemon",
+                "stop",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            stopped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+        assert!(!socket.exists());
+        assert!(home.0.join("rust").exists());
         drop(owned);
-        let _ = wait(daemon);
+        assert!(wait(daemon).status.success());
     }
 }
 

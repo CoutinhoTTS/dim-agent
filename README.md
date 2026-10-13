@@ -8,6 +8,21 @@ This workspace contains Agent v4 and the native CLI. It builds independently of 
 
 Run commands at the repository root. The Rust toolchain is pinned in `rust-toolchain.toml`.
 
+For local development with the sibling private OAuth source repository, use `./dev`. It builds and packages the private source, verifies its runtime archive, incrementally builds both Rust executables and normally restarts only the isolated development daemon. Dependencies are installed when their lockfiles change; account and session files survive restart. Private source and credentials are never committed here.
+
+```sh
+cp .env.example .env.dev                 # optional local defaults
+./dev setup                            # optional preparation without compiling Rust
+./dev login PROVIDER --directory URL --device
+./dev models PROVIDER --refresh
+./dev --provider PROVIDER --model MODEL_ID
+./dev stop
+```
+
+Set the paired `DIMCODE_PROVIDER`/`DIMCODE_MODEL` defaults in `.env.dev` to start subsequent chats with just `./dev`. `DIM_OAUTH_SOURCE_DIR` overrides the sibling source location. API-key development uses `./dev --model-config /absolute/path/to/model.json` and does not require the private source or Node. See the [development contract](docs/architecture/development.md) for restart, configuration and runtime boundaries. `./dev check` runs explicit basic checks; startup does not run tests or produce release/npm distributions.
+
+The direct Cargo path remains available without a launcher:
+
 ```sh
 cargo build --locked -p dim-cli -p dim-app-server
 export OPENAI_API_KEY=your-key

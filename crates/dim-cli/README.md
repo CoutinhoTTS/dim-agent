@@ -102,12 +102,23 @@ dimcode --home /path/to/plugin-home login PROVIDER \
   --directory https://account-directory.example --device
 dimcode --home /path/to/plugin-home account PROVIDER
 dimcode --home /path/to/plugin-home logout PROVIDER
+dimcode --home /path/to/plugin-home models PROVIDER --refresh
 dimcode --home /path/to/plugin-home --provider PROVIDER --model MODEL_ID
 ```
 
 Device login prints the verification address and device code, then polls the attempt. `Ctrl+C` cancels it. Account output is a non-secret identity view; the CLI never requests token/credential lease APIs. An already accepted browser exchange is owned by the plugin: if the waiter leaves during settlement, inspect it with `account PROVIDER` before starting another login.
 
+`models PROVIDER` reads the cached catalog; `--refresh` obtains and persists a fresh catalog through the provider. Each line contains the model ID, display name and `available`, `disabled` or `unavailable`, separated by tabs. Credential/account fields and private failure details are not printed. A missing cached catalog gives sign-in and refresh guidance. Select an available model with `--provider PROVIDER --model MODEL_ID` for a new session.
+
 An existing shared daemon is reused. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
+
+The repository root `./dev` prepares the local provider package, builds incrementally and restarts only its development daemon. See [local development](../../docs/architecture/development.md) for setup and source selection.
+
+```bash
+dimcode --home /path/to/plugin-home daemon stop
+```
+
+`daemon stop` authenticates an existing endpoint for the selected home without spawning a server or creating a missing home. It requests normal shutdown and waits up to 30 seconds for settlement and endpoint closure; a timeout reports failure without force-killing the process. Account and session files remain available for restart. This command accepts a daemon with a different model profile and does not read model/plugin files, so configuration edits cannot prevent an explicit stop. On Unix it also waits for the original socket to disappear; a replacement endpoint is left untouched.
 
 ## Home, transport and output
 
@@ -144,7 +155,7 @@ DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server" \
   -- --ignored
 ```
 
-The daemon-profile check rejects an already running mock or different configured daemon and verifies that its process and endpoint remain intact:
+The daemon-profile check rejects an already running mock or different configured daemon, verifies that its process and endpoint remain intact, then explicitly stops it through the CLI despite a changed invalid model configuration:
 
 ```bash
 DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server" \

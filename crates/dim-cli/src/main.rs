@@ -58,6 +58,9 @@ fn prepare() -> Result<Option<Options>> {
 }
 
 async fn run(options: Options) -> Result<i32> {
+    if matches!(options.action, Action::DaemonStop) {
+        return client::stop(&options).await;
+    }
     let mut client = client::connect(&options).await?;
     match &options.action {
         Action::Login(provider) => login::login(&mut client, &options, provider).await,
@@ -91,7 +94,54 @@ async fn run(options: Options) -> Result<i32> {
             println!("Signed out.");
             Ok(0)
         }
+        Action::Models(provider) => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Catalog {
+                models: Vec<Model>,
+                disabled_model_ids: Vec<String>,
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Model {
+                id: String,
+                name: String,
+                unavailable_reason: Option<String>,
+            }
+            let params = serde_json::json!({"providerId":provider});
+            let catalog = if options.refresh {
+                Some(client.typed::<Catalog>("provider.refresh", params).await?)
+            } else {
+                #[derive(serde::Deserialize)]
+                struct Snapshot {
+                    catalog: Option<Catalog>,
+                }
+                client
+                    .typed::<Snapshot>("provider.catalog", params)
+                    .await?
+                    .catalog
+            };
+            if let Some(catalog) = catalog {
+                for model in catalog.models {
+                    let availability = if catalog.disabled_model_ids.contains(&model.id) {
+                        "disabled"
+                    } else if model.unavailable_reason.is_some() {
+                        "unavailable"
+                    } else {
+                        "available"
+                    };
+                    println!(
+                        "{}\t{}\t{availability}",
+                        display::safe(&model.id).replace(['\n', '\t'], " "),
+                        display::safe(&model.name).replace(['\n', '\t'], " "),
+                    );
+                }
+            } else {
+                eprintln!("No cached catalog. Sign in and run models PROVIDER --refresh.");
+            }
+            Ok(0)
+        }
         Action::Chat => session::chat(&mut client, &options).await,
-        Action::Help | Action::Version => unreachable!(),
+        Action::Help | Action::Version | Action::DaemonStop => unreachable!(),
     }
 }

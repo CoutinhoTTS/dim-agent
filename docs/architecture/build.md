@@ -11,6 +11,8 @@ cargo build --workspace --locked
 
 A normal Cargo installation is sufficient; compiler caching is optional. Each worktree keeps its own target directory. Existing source caches can be reused without sharing build outputs.
 
+The root `./dev` entry performs incremental CLI/App Server builds without disabling Cargo incremental compilation. It prepares a local private source package when selected and uses a separate development home. Use `./dev --model-config PATH` for an API-key flow without private source or Node; see the [development contract](development.md). Tests and full release packaging are explicit operations.
+
 Node is only needed for packaging, packaging checks and JS account-plugin development. `.node-version` pins the Node version bundled into account-enabled releases. The `runtime/package-lock.json` fixes the rutis Node runtime and its transitive dependencies; `npm ci --ignore-scripts --prefix runtime` installs them for local bridge testing. The private plugin bundles its SDK and requires no runtime dependency installation in its own directory.
 
 Release runners build natively for macOS arm64/x64, Linux arm64/x64 and Windows x64. They require Rust, a C/C++ toolchain and CMake, the pinned official Node distribution including npm and its LICENSE, tar, and Bash (Git Bash on Windows). Each runner's OS/libc baseline must be recorded and verified before declaring that platform supported. Cross-compilation alone is not installation acceptance.
