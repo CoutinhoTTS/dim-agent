@@ -72,7 +72,7 @@ test('local package loading extracts the verified bytes when the source archive 
     mkdirSync(path.join(source, 'dist'), { recursive: true });
     writeFileSync(path.join(source, 'package.json'), JSON.stringify({ version: '0.1.0', type: 'module' }));
     writeFileSync(path.join(source, 'dist/index.js'), text);
-    writeFileSync(path.join(source, 'dim-plugin.json'), JSON.stringify({ schemaVersion: 1, id: 'dim-oauth', version: '0.1.0', hostApiVersion: 1, rutisVersion: '0.10.0', entry: 'dist/index.js', files: { 'dist/index.js': digest(text) } }));
+    writeFileSync(path.join(source, 'dim-plugin.json'), JSON.stringify({ schemaVersion: 1, id: 'dim-oauth', version: '0.1.0', hostApiVersion: 2, rutisVersion: '0.10.0', entry: 'dist/index.js', files: { 'dist/index.js': digest(text) } }));
     const archive = `${source}.tar.gz`;
     assert.equal(spawnSync(realTar, ['-czf', archive, '-C', source, '.']).status, 0);
     return archive;

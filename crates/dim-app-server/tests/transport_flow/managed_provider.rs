@@ -37,7 +37,7 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     .unwrap();
     std::fs::write(
         plugin_dir.join("dim-plugin.json"),
-        r#"{"schemaVersion":1,"hostApiVersion":1,"rutisVersion":"0.10.0","entry":"index.mjs"}"#,
+        r#"{"schemaVersion":1,"hostApiVersion":2,"rutisVersion":"0.10.0","entry":"index.mjs"}"#,
     )
     .unwrap();
     let fixture = include_str!("../fixtures/managed-provider.mjs").replace(
@@ -225,6 +225,17 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .await;
     assert!(lost.get("error").is_some());
     assert!(!lost.to_string().contains("fixture-secret"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while home.join("fixture-state.lock").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime loss must release the native transaction");
+    assert_eq!(
+        std::fs::read_to_string(home.join("fixture-state")).unwrap(),
+        "before-crash"
+    );
     assert!(
         prompt(&mut client, &server, &home, "static-fixture")
             .await

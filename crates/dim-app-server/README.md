@@ -55,7 +55,7 @@ The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
   "schemaVersion": 1,
   "id": "my-managed-provider",
   "version": "1.0.0",
-  "hostApiVersion": 1,
+  "hostApiVersion": 2,
   "rutisVersion": "0.10.0",
   "entry": "dist/index.js",
   "files": {"dist/index.js": "<sha256>"}
@@ -78,7 +78,33 @@ export default definePlugin({
 })
 ```
 
-This fragment shows declaration and ownership; a usable account plugin implements the full service contract below. It owns account persistence, authentication, token refresh and catalog normalization. The Rust provider host does not interpret supplier-specific responses or own refresh tokens.
+This fragment shows declaration and ownership; a usable account plugin implements the full service contract below. It owns account schema, authentication, token refresh and catalog normalization. The Rust provider host does not interpret supplier-specific responses. Host API 2 requires `quiesce` and offers native file transactions; API 1 packages are rejected rather than silently losing shutdown guarantees.
+
+### Trusted plugin storage
+
+A plugin declares `inject: ['pluginFiles']` and opens a fresh scope during each `apply`. Register `scope.close()` with `ctx.effect` immediately after opening, then register business cleanup. The host chooses the authorized product root; the plugin supplies relative file paths only. This is a trusted-plugin API, not a sandbox for untrusted Node code.
+
+```ts
+type FileResult<T> = { ok: true; value: T } |
+  { ok: false; error: 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'io' }
+interface FileLease {
+  read(): Promise<FileResult<string | null>>
+  replace(text: string): Promise<FileResult<null>>
+  backup(suffix: string): Promise<FileResult<null>>
+}
+interface FileScope {
+  withLock<T>(path: string, work: (file: FileLease) => Promise<T>, cancelled?: Promise<void>): Promise<FileResult<T>>
+  quiesce(): Promise<void>
+  close(): Promise<void>
+}
+interface PluginFiles { open(): Promise<FileScope> }
+```
+
+`withLock` holds the native FileStorage lease through the complete callback, including asynchronous work. Reads require UTF-8; a missing file returns null. Replacement is atomic and flushed, with Unix mode 0600 and native Windows DACL handling. `backup` creates a flushed, exclusive sibling copy with an alphanumeric/hyphen suffix. A failed partial backup is retained; an existing backup is never overwritten. Storage errors expose only fixed codes, never file contents or exception text. An error after replacement does not imply rollback or authorize replaying remote side effects.
+
+Quiesce rejects new transactions and cancels acquisition, but permits an acquired transaction to persist before close joins it. The optional Promise cancels acquisition when it settles; Node must settle it on ordinary completion too so a pending exported Promise cannot hold runtime drain open. Rutis 0.10 does not encode Node AbortSignal arguments; do not pass one. Escaped file callbacks are revoked before releasing the lease. Abandoning the caller does not abandon issued I/O. Runtime loss revokes the lease after admitted native I/O settles; it cannot guarantee persistence of an external side effect whose result died with the runtime.
+
+Credential bytes, including refresh tokens, may pass through this trusted local bridge. They must never be forwarded to terminal RPC, model requests, history, diagnostics or logs. OAuth policy and file schema remain in the private package. Startup follows current loader row identities: Rutis may replace an offline JS row when it discovers its declared injections, so a disposed provisional fiber is not itself a startup failure.
 
 ## Service contract
 

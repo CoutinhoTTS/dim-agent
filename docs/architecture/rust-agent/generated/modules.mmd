@@ -126,29 +126,30 @@ flowchart LR
   m122["dim_app_server::mcp::tests"]
   m123["dim_app_server::model_catalog"]
   m124["dim_app_server::outbound"]
-  m125["dim_app_server::protocol"]
-  m126["dim_app_server::provider"]
-  m127["dim_app_server::provider::drivers"]
-  m128["dim_app_server::provider::legacy"]
-  m129["dim_app_server::provider::new_api"]
-  m130["dim_app_server::provider::preferences"]
-  m131["dim_app_server::provider::remote"]
-  m132["dim_app_server::provider::secrets"]
-  m133["dim_app_server::settings"]
-  m134["dim_app_server::storage"]
-  m135["dim_app_server::storage::codec"]
-  m136["dim_app_server::storage::sqlite"]
-  m137["dim_app_server::storage::timeline"]
-  m138["dim_app_server::trace"]
-  m139["dim_app_server::transport"]
-  m140["dim_app_server::tree_protocol"]
-  m141["dim_cli::@bin:dimcode"]
-  m142["dim_cli::@bin:dimcode::args"]
-  m143["dim_cli::@bin:dimcode::client"]
-  m144["dim_cli::@bin:dimcode::display"]
-  m145["dim_cli::@bin:dimcode::input"]
-  m146["dim_cli::@bin:dimcode::login"]
-  m147["dim_cli::@bin:dimcode::session"]
+  m125["dim_app_server::plugin_files"]
+  m126["dim_app_server::protocol"]
+  m127["dim_app_server::provider"]
+  m128["dim_app_server::provider::drivers"]
+  m129["dim_app_server::provider::legacy"]
+  m130["dim_app_server::provider::new_api"]
+  m131["dim_app_server::provider::preferences"]
+  m132["dim_app_server::provider::remote"]
+  m133["dim_app_server::provider::secrets"]
+  m134["dim_app_server::settings"]
+  m135["dim_app_server::storage"]
+  m136["dim_app_server::storage::codec"]
+  m137["dim_app_server::storage::sqlite"]
+  m138["dim_app_server::storage::timeline"]
+  m139["dim_app_server::trace"]
+  m140["dim_app_server::transport"]
+  m141["dim_app_server::tree_protocol"]
+  m142["dim_cli::@bin:dimcode"]
+  m143["dim_cli::@bin:dimcode::args"]
+  m144["dim_cli::@bin:dimcode::client"]
+  m145["dim_cli::@bin:dimcode::display"]
+  m146["dim_cli::@bin:dimcode::input"]
+  m147["dim_cli::@bin:dimcode::login"]
+  m148["dim_cli::@bin:dimcode::session"]
   m0 -.-> m1
   m0 -.-> m2
   m0 --> m3
@@ -841,13 +842,14 @@ flowchart LR
   m101 -.-> m124
   m101 --> m125
   m101 --> m126
-  m101 --> m133
-  m101 -.-> m134
-  m101 --> m136
+  m101 --> m127
+  m101 --> m134
+  m101 -.-> m135
   m101 --> m137
   m101 --> m138
   m101 --> m139
-  m101 -.-> m140
+  m101 --> m140
+  m101 -.-> m141
   m102 --> m1
   m102 --> m3
   m102 --> m4
@@ -865,10 +867,10 @@ flowchart LR
   m102 --> m103
   m102 --> m108
   m102 --> m116
-  m102 --> m125
+  m102 --> m126
   m104 --> m80
   m104 --> m96
-  m104 --> m136
+  m104 --> m137
   m105 --> m28
   m105 --> m69
   m105 --> m70
@@ -882,16 +884,16 @@ flowchart LR
   m105 --> m97
   m105 --> m101
   m105 --> m104
-  m105 --> m125
-  m105 --> m133
-  m105 --> m136
+  m105 --> m126
+  m105 --> m134
   m105 --> m137
   m105 --> m138
+  m105 --> m139
   m106 --> m16
   m106 --> m69
   m106 --> m80
   m106 --> m91
-  m106 --> m125
+  m106 --> m126
   m107 --> m23
   m107 --> m72
   m107 --> m115
@@ -945,18 +947,18 @@ flowchart LR
   m109 --> m117
   m109 --> m121
   m109 --> m124
-  m109 --> m125
   m109 --> m126
-  m109 --> m133
-  m109 --> m140
+  m109 --> m127
+  m109 --> m134
+  m109 --> m141
   m110 --> m53
   m110 --> m69
   m110 --> m105
   m110 --> m109
   m110 --> m117
   m110 --> m121
-  m110 --> m125
-  m110 --> m133
+  m110 --> m126
+  m110 --> m134
   m111 --> m41
   m111 --> m69
   m111 --> m71
@@ -968,15 +970,15 @@ flowchart LR
   m111 --> m106
   m111 --> m109
   m111 --> m110
-  m111 --> m125
-  m111 --> m140
+  m111 --> m126
+  m111 --> m141
   m112 --> m27
   m112 --> m74
   m112 --> m80
   m112 --> m91
   m112 --> m109
-  m112 --> m125
-  m112 --> m140
+  m112 --> m126
+  m112 --> m141
   m113 --> m72
   m113 --> m101
   m114 --> m23
@@ -993,7 +995,7 @@ flowchart LR
   m117 --> m118
   m117 --> m121
   m117 -.-> m122
-  m117 --> m133
+  m117 --> m134
   m118 --> m72
   m118 --> m84
   m118 --> m87
@@ -1002,7 +1004,7 @@ flowchart LR
   m118 --> m117
   m118 -.-> m119
   m118 --> m120
-  m118 --> m133
+  m118 --> m134
   m119 --> m118
   m120 --> m118
   m121 --> m28
@@ -1020,135 +1022,137 @@ flowchart LR
   m122 --> m72
   m122 --> m117
   m122 --> m118
-  m122 --> m133
+  m122 --> m134
   m123 --> m87
   m123 --> m93
-  m124 --> m125
-  m125 --> m45
-  m125 --> m80
-  m125 --> m87
-  m125 --> m91
-  m125 --> m95
-  m125 --> m96
-  m125 --> m100
-  m125 --> m105
-  m125 --> m115
-  m125 --> m116
-  m125 --> m123
-  m125 --> m126
-  m125 --> m128
-  m125 --> m130
-  m125 --> m140
-  m126 --> m28
-  m126 --> m72
+  m124 --> m126
+  m125 --> m23
+  m125 --> m72
+  m126 --> m45
   m126 --> m80
   m126 --> m87
-  m126 --> m93
+  m126 --> m91
+  m126 --> m95
   m126 --> m96
-  m126 --> m97
-  m126 --> m107
-  m126 --> m114
+  m126 --> m100
+  m126 --> m105
   m126 --> m115
   m126 --> m116
   m126 --> m123
   m126 --> m127
-  m126 --> m128
-  m126 -.-> m129
-  m126 --> m130
+  m126 --> m129
   m126 --> m131
-  m126 --> m132
-  m126 --> m136
+  m126 --> m141
   m127 --> m28
+  m127 --> m72
+  m127 --> m80
+  m127 --> m87
+  m127 --> m93
+  m127 --> m96
+  m127 --> m97
+  m127 --> m107
+  m127 --> m114
+  m127 --> m115
+  m127 --> m116
   m127 --> m123
+  m127 --> m128
   m127 --> m129
+  m127 -.-> m130
+  m127 --> m131
+  m127 --> m132
+  m127 --> m133
+  m127 --> m137
   m128 --> m28
-  m128 --> m87
-  m128 --> m93
   m128 --> m123
-  m128 --> m126
-  m128 --> m132
+  m128 --> m130
   m129 --> m28
+  m129 --> m87
+  m129 --> m93
   m129 --> m123
-  m129 --> m126
+  m129 --> m127
+  m129 --> m133
   m130 --> m28
-  m130 --> m93
-  m130 --> m126
+  m130 --> m123
+  m130 --> m127
   m131 --> m28
   m131 --> m93
-  m131 --> m123
-  m131 --> m126
-  m131 --> m129
-  m131 --> m132
+  m131 --> m127
   m132 --> m28
-  m132 --> m126
-  m133 --> m23
-  m133 --> m44
-  m133 --> m72
-  m133 --> m84
-  m134 -.-> m135
-  m134 --> m136
-  m134 --> m137
-  m135 --> m78
-  m135 --> m80
-  m135 --> m86
-  m135 --> m89
-  m135 --> m91
-  m135 --> m93
-  m135 --> m99
-  m135 --> m136
-  m136 --> m72
+  m132 --> m93
+  m132 --> m123
+  m132 --> m127
+  m132 --> m130
+  m132 --> m133
+  m133 --> m28
+  m133 --> m127
+  m134 --> m23
+  m134 --> m44
+  m134 --> m72
+  m134 --> m84
+  m135 -.-> m136
+  m135 --> m137
+  m135 --> m138
+  m136 --> m78
   m136 --> m80
+  m136 --> m86
+  m136 --> m89
+  m136 --> m91
+  m136 --> m93
+  m136 --> m99
+  m136 --> m137
   m137 --> m72
-  m137 --> m73
-  m137 --> m74
-  m137 --> m78
   m137 --> m80
-  m137 --> m86
-  m137 --> m91
-  m137 --> m96
-  m137 --> m125
-  m137 --> m135
-  m137 --> m136
-  m138 --> m54
-  m138 --> m55
-  m138 --> m69
-  m138 --> m70
+  m138 --> m72
   m138 --> m73
-  m138 --> m105
-  m138 --> m125
-  m139 --> m72
-  m139 --> m101
-  m139 --> m109
-  m139 --> m113
-  m139 --> m124
-  m139 --> m125
-  m139 --> m136
-  m140 --> m71
-  m140 --> m74
-  m140 --> m91
-  m141 --> m142
-  m141 --> m143
-  m141 -.-> m144
-  m141 -.-> m145
-  m141 --> m146
-  m141 --> m147
-  m142 --> m141
-  m143 --> m141
+  m138 --> m74
+  m138 --> m78
+  m138 --> m80
+  m138 --> m86
+  m138 --> m91
+  m138 --> m96
+  m138 --> m126
+  m138 --> m136
+  m138 --> m137
+  m139 --> m54
+  m139 --> m55
+  m139 --> m69
+  m139 --> m70
+  m139 --> m73
+  m139 --> m105
+  m139 --> m126
+  m140 --> m72
+  m140 --> m101
+  m140 --> m109
+  m140 --> m113
+  m140 --> m124
+  m140 --> m126
+  m140 --> m137
+  m141 --> m71
+  m141 --> m74
+  m141 --> m91
+  m142 --> m143
+  m142 --> m144
+  m142 -.-> m145
+  m142 -.-> m146
+  m142 --> m147
+  m142 --> m148
   m143 --> m142
-  m144 --> m87
-  m144 --> m89
-  m144 --> m91
-  m144 --> m141
-  m145 --> m141
-  m146 --> m141
+  m144 --> m142
+  m144 --> m143
+  m145 --> m87
+  m145 --> m89
+  m145 --> m91
+  m145 --> m142
   m146 --> m142
-  m146 --> m143
-  m146 --> m144
-  m146 --> m145
-  m147 --> m91
-  m147 --> m96
-  m147 --> m141
   m147 --> m142
   m147 --> m143
   m147 --> m144
   m147 --> m145
+  m147 --> m146
+  m148 --> m91
+  m148 --> m96
+  m148 --> m142
+  m148 --> m143
+  m148 --> m144
+  m148 --> m145
+  m148 --> m146

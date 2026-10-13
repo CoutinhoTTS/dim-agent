@@ -1295,6 +1295,18 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::plugin_files",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/plugin_files.rs",
+      "unexpandedMacros": [
+        "json",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::protocol",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -8558,7 +8570,9 @@
       "references": [
         "path AgentError::Build",
         "path AgentError::aggregate",
+        "path AgentError::from",
         "path dim_agent_runtime::AgentError",
+        "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
       ]
     },
@@ -8655,6 +8669,7 @@
         "mod managed_provider",
         "path managed_provider::ManagedPluginConfig",
         "path managed_provider::ManagedProviderBinding",
+        "path managed_provider::ManagedProviders",
         "path managed_provider::ManagedProvidersPlugin"
       ]
     },
@@ -8685,6 +8700,14 @@
       "to": "dim_app_server::outbound",
       "references": [
         "mod outbound"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::plugin_files",
+      "references": [
+        "mod plugin_files",
+        "path plugin_files::PluginFilesPlugin"
       ]
     },
     {
@@ -10730,6 +10753,33 @@
       "references": [
         "path Outbound",
         "use crate::protocol::Outbound"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_files",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileLease",
+        "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Closed",
+        "path FileStorageError::InvalidPath",
+        "path FileStorageError::Io",
+        "path FileStorageError::Locked",
+        "use dim_agent_capabilities::file_storage::FileLease",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_files",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf"
       ]
     },
     {

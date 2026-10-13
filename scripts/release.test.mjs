@@ -63,7 +63,7 @@ test('private archive gate rejects hash, schema and link violations before creat
   assert.notEqual(run('stage-release.mjs',args,{...env,DIM_OAUTH_PACKAGE_SHA256:'b'.repeat(64)}).status,0);
   assert.notEqual(run('stage-release.mjs',args,env).status,0);
   assert.equal(existsSync(destination),false);
-  manifest.hostApiVersion=1;
+  manifest.hostApiVersion=2;
   writeFileSync(path.join(source,'dim-plugin.json'),JSON.stringify(manifest));
   rmSync(path.join(source,'dist/index.js'));
   symlinkSync('/etc/passwd',path.join(source,'dist/index.js'));

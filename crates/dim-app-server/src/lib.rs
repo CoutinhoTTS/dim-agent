@@ -11,6 +11,7 @@ pub mod managed_provider;
 pub mod mcp;
 pub mod model_catalog;
 mod outbound;
+pub mod plugin_files;
 pub mod protocol;
 pub mod provider;
 pub mod settings;
@@ -157,17 +158,9 @@ impl RunningServer {
             ))));
         }
         // Dependents were evicted during the unload; settle their queued reloads.
-        let views = self.processes.views();
-        for view in &views {
-            let _ = view.await;
-        }
-        wait_active(
-            &self.root,
-            &views,
-            self.config.startup_timeout,
-            &CancellationToken::new(),
-        )
-        .await?;
+        self.processes
+            .wait_active(&self.root, self.config.startup_timeout)
+            .await?;
         Ok(())
     }
     /// The default Agent of the current Agents generation.
@@ -211,6 +204,39 @@ impl Processes {
             .filter(|entry| entry.parent.is_none() && entry.instance.is_none())
             .filter_map(|entry| entry.view);
         std::iter::once(self.view.clone()).chain(rows).collect()
+    }
+
+    async fn wait_active(&self, root: &Ctx, timeout: Duration) -> dim_agent_runtime::Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // RuntimeRows refreshes offline JS declarations after Node starts.
+            // New injections replace the row's fiber; a saved view can become
+            // Disposed even though the current row is loading successfully.
+            let views = self.views();
+            let mut ready = true;
+            for view in &views {
+                let snapshot = view.watch().borrow().clone();
+                match snapshot.state {
+                    rutis::FiberState::Active => {}
+                    rutis::FiberState::Failed => {
+                        return Err(snapshot.error.map(AgentError::from).unwrap_or_else(|| {
+                            AgentError::Build(format!("{}: Failed", view.name()))
+                        }));
+                    }
+                    _ => ready = false,
+                }
+            }
+            if ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return wait_active(root, &views, Duration::ZERO, &CancellationToken::new()).await;
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
+            )
+            .await;
+        }
     }
 }
 
@@ -338,6 +364,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut builtins = rutis_loader::Builtins::new();
     let mut service_catalog = rutis_loader::ServiceCatalog::new();
     service_catalog.register_shared("managedProvider");
+    service_catalog.register_shared("pluginFiles");
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
@@ -386,6 +413,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             managed_provider::ManagedProvidersPlugin
         }));
         if let Some(plugin) = &config.managed_plugin {
+            rows.push(register_capability(&mut builtins, move || {
+                plugin_files::PluginFilesPlugin(home_root)
+            }));
             let plugin = plugin.clone();
             let manifest: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(plugin.plugin_dir.join("dim-plugin.json"))?)
@@ -393,7 +423,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                         ServerError::Configuration("invalid managed plugin manifest".into())
                     })?;
             if manifest["schemaVersion"] != 1
-                || manifest["hostApiVersion"] != 1
+                || manifest["hostApiVersion"] != 2
                 || manifest["rutisVersion"] != "0.10.0"
             {
                 return Err(ServerError::Configuration(
@@ -583,13 +613,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             )));
         }
         // The report omits rows still Pending; the deadline names them.
-        wait_active(
-            &root,
-            &processes.views(),
-            remaining(),
-            &CancellationToken::new(),
-        )
-        .await
+        processes.wait_active(&root, remaining()).await
     }
     .await;
     if let Err(error) = started {
