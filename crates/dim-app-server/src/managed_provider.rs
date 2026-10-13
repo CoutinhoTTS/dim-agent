@@ -79,6 +79,9 @@ struct LeaseRelease {
     binding: Binding,
     provider_id: String,
     lease_id: String,
+    // A delivered or buffered result still belongs to the issuing generation.
+    // Drop enqueues release before this token can let its drain finish.
+    _owner: tokio_util::task::task_tracker::TaskTrackerToken,
 }
 impl Drop for LeaseRelease {
     fn drop(&mut self) {
@@ -387,6 +390,7 @@ impl ManagedProviders {
             .ok_or_else(invalid)?
             .to_owned();
         let release = Arc::new(LeaseRelease {
+            _owner: binding.tasks.token(),
             binding,
             provider_id: id.into(),
             lease_id,

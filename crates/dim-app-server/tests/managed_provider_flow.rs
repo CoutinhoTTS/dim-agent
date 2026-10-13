@@ -250,3 +250,35 @@ async fn reload_drains_accepted_lease_and_cooperative_cancel_does_not_abort_it()
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generation_cannot_finish_closing_before_a_delivered_lease_is_released() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let (root, fixture, owner, _) = setup().await;
+        fixture.resume.notify_one();
+        let lease = owner
+            .credential("fixture", "model", &CancellationToken::new())
+            .await
+            .unwrap();
+        let mut closing = tokio::spawn(async move { root.shutdown().await });
+        while owner
+            .call::<serde_json::Value>("providers", json!(null), &CancellationToken::new())
+            .await
+            .is_ok()
+        {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut closing)
+                .await
+                .is_err(),
+            "generation closed while a caller still held its credential"
+        );
+        drop(lease);
+        closing.await.unwrap().unwrap();
+        assert_eq!(*fixture.issued.lock().unwrap(), ["lease-0"]);
+        assert_eq!(*fixture.released.lock().unwrap(), ["lease-0"]);
+    })
+    .await
+    .unwrap();
+}

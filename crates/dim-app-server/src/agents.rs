@@ -236,32 +236,6 @@ pub struct AgentIndex {
 impl AgentIndex {
     const SUMMARY_SCAN_LIMIT: usize = 256;
     const SUMMARY_PREVIEW_CHARS: usize = 120;
-    fn new(
-        directory: Arc<AgentDirectory>,
-        builder: AgentBuilder,
-        config: &ServerConfig,
-        records: Option<Arc<AgentRecords>>,
-        session_store: Option<Arc<SessionStore>>,
-        settings: Option<Arc<SettingsService>>,
-        model_selection: Option<Arc<ModelSelectionHost>>,
-        process: rutis::InstanceId,
-    ) -> Self {
-        Self {
-            directory,
-            session_restored: EventKey::of().instance(process),
-            tools: builder.provided_tools().map(str::to_owned).collect(),
-            builder,
-            session_defaults: config.session_defaults.clone(),
-            ctx: OnceLock::new(),
-            loader: OnceLock::new(),
-            startup_timeout: config.startup_timeout,
-            records,
-            session_store,
-            settings,
-            model_selection,
-            stopping: CancellationToken::new(),
-        }
-    }
     /// Process Session defaults that Agent profiles apply on top of.
     pub fn session_defaults(&self) -> &SessionConfig {
         &self.session_defaults
@@ -1066,22 +1040,21 @@ impl TypedPlugin for AgentsPlugin {
             // Agent succeeds from the moment the service is visible, and an
             // Agent loaded by an earlier generation keeps its identity.
             let _ = directory.default_agent_id.set(default_id);
-            let index = AgentIndex::new(
-                directory.clone(),
+            let index = AgentIndex {
+                directory,
+                session_restored: EventKey::of().instance(self.root.instance()),
+                tools: builder.provided_tools().map(str::to_owned).collect(),
                 builder,
-                &self.config,
+                session_defaults: self.config.session_defaults.clone(),
+                ctx: OnceLock::from(ctx.clone()),
+                loader: OnceLock::from(((*loader).clone(), self.root.clone())),
+                startup_timeout: self.config.startup_timeout,
                 records,
                 session_store,
                 settings,
                 model_selection,
-                self.root.instance(),
-            );
-            if index.ctx.set(ctx.clone()).is_err() {
-                return Err(CordisError::PluginFailed(
-                    "AgentsPlugin applied twice".into(),
-                ));
-            }
-            let _ = index.loader.set(((*loader).clone(), self.root.clone()));
+                stopping: CancellationToken::new(),
+            };
             let index = Arc::new(index);
             let cleanup = index.clone();
             ctx.effect(move || {
