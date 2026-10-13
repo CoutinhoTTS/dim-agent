@@ -1,6 +1,67 @@
 use super::*;
 use std::sync::Mutex;
 
+#[tokio::test]
+async fn failed_snapshot_builder_keeps_completed_compaction_for_later_requests() {
+    let agent = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer {
+            checkpoint: |_, _| Err("snapshot encoder unavailable".into()),
+            ..HistoryRenderer::default()
+        },
+        Context {
+            threshold: Some(900.),
+            ..Context::default()
+        },
+    )
+    .build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let original = "x".repeat(1_500);
+    for input in [&original, "next"] {
+        session
+            .submit(input.into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let events = session.history("main", None).await.unwrap();
+    let compactions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) => Some(&data.outcome),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(compactions.as_slice(), [ContextCompactionResult::Completed {
+        summary, checkpoint: None, ..
+    }] if summary == "short")
+    );
+    let requests: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(&data.request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert_eq!(
+            request.messages[0].as_ref(),
+            &dim_agent_capabilities::history::summary_message("short")
+        );
+        assert!(
+            !request
+                .messages
+                .contains(&Arc::new(Message::text(Role::User, &original)))
+        );
+    }
+    agent.close().await.unwrap();
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Edit {
     None,

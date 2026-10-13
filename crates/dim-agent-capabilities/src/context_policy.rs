@@ -166,10 +166,17 @@ impl ContextPolicy {
                 }) {
                     Ok(baseline) => {
                         *context_baseline = baseline.to_vec();
-                        *checkpoint = Some(Box::new(
-                            (self.history.checkpoint)(&context, cursor)
-                                .map_err(HostError::failed)?,
-                        ));
+                        // Recovery state accelerates replay; it is not a
+                        // prerequisite for retaining a successful summary.
+                        *checkpoint = match (self.history.checkpoint)(&context, cursor) {
+                            Ok(state) => Some(Box::new(state)),
+                            Err(_) => {
+                                tracing::warn!(
+                                    "projection snapshot unavailable; using fact replay"
+                                );
+                                None
+                            }
+                        };
                     }
                     Err(error) => {
                         outcome = ContextCompactionResult::Failed {
