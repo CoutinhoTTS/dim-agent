@@ -1,19 +1,20 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
+mod publication;
 pub mod server;
 mod session;
+pub use publication::{McpApplication, McpPublication};
 pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState, install};
 
 use crate::settings::{
     McpServerSettings, SettingsDocument, SettingsError, SettingsService, SettingsSource,
 };
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin, wait_active};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, TypeKey, TypedPlugin};
-use server::{McpServer, McpServerError, McpServerPlugin};
+use dim_agent_runtime::{Capability, KeysOf};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use server::{McpServer, McpServerError};
 use std::{
     collections::BTreeMap,
     future::Future,
-    sync::{Arc, Mutex, Weak},
-    time::Duration,
+    sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -57,8 +58,8 @@ impl McpServerEntry {
     }
 }
 
-/// Each revision is a file CAS token, not a connection or tool-source version.
-/// Files are read independently; this is not a cross-file transaction.
+/// Source CAS tokens are distinct from connection and tool-source versions.
+/// Sources are read independently, not in a cross-source transaction.
 pub struct McpCatalog {
     pub user_revision: String,
     pub project_revision: Option<String>,
@@ -74,8 +75,8 @@ pub enum McpChange {
 /// A lease on one connection generation. Tool handlers retain this lease,
 /// not a lookup into the directory's newest generation.
 pub struct McpConnection {
-    view: FiberView,
     service: Arc<McpServer>,
+    released: tokio::sync::watch::Sender<()>,
 }
 impl McpConnection {
     pub fn state(&self) -> server::McpServerState {
@@ -101,22 +102,15 @@ impl McpConnection {
 }
 impl Drop for McpConnection {
     fn drop(&mut self) {
-        // rutis initiates shutdown synchronously; dropping the waiter does not
-        // abandon cleanup. The parent still owns and drains the child subtree.
-        drop(self.view.shutdown());
+        // Release only a binding. The host publishes retirement eligibility;
+        // only the loader can remove a configured generation's plugin.
+        self.released.send_replace(());
     }
-}
-
-#[derive(Default)]
-struct ServerRegistration {
-    current: Weak<McpConnection>,
-    generations: Vec<Weak<McpConnection>>,
 }
 
 pub struct McpService {
     settings: Arc<SettingsService>,
-    context: Ctx,
-    servers: tokio::sync::Mutex<BTreeMap<(Option<usize>, String), ServerRegistration>>,
+    publication: Arc<publication::Publication>,
     stopping: CancellationToken,
     gate: Mutex<()>,
     tasks: TaskTracker,
@@ -132,82 +126,7 @@ impl McpService {
     ) -> Result<Arc<McpConnection>> {
         let owner = self.clone();
         self.run(cancel, move |_, cancel| async move {
-            let mut servers = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(McpError::Cancelled),
-                servers = owner.servers.lock() => servers,
-            };
-            servers.retain(|_, registration| {
-                registration
-                    .generations
-                    .retain(|lease| lease.strong_count() > 0);
-                !registration.generations.is_empty()
-            });
-            // Read after admission to the directory lock: a queued acquisition
-            // must not replace a newer connection with an older file snapshot.
-            let mut entry = owner
-                .catalog(project, &cancel)
-                .await?
-                .servers
-                .remove(&id)
-                .ok_or(McpError::UnknownServer)?;
-            let source = match entry.source {
-                SettingsSource::UserMcp => None,
-                SettingsSource::ProjectMcp(root) => Some(root),
-                SettingsSource::Skills => unreachable!("MCP directory contains only MCP sources"),
-            };
-            let identity = (source, id);
-            if !entry.enabled() {
-                return Err(McpError::Disabled);
-            }
-            if let (Some(root), McpServerSettings::Stdio { cwd, .. }) =
-                (source, &mut entry.configuration)
-                && cwd.is_none()
-            {
-                *cwd = Some(
-                    owner
-                        .settings
-                        .project_path(root)?
-                        .to_str()
-                        .ok_or(SettingsError::Invalid("project cwd must be UTF-8"))?
-                        .to_owned(),
-                );
-            }
-            if let Some(current) = servers.get(&identity).and_then(|r| r.current.upgrade())
-                && current.service.configuration == entry.configuration
-                && !matches!(
-                    current.state(),
-                    server::McpServerState::Failed | server::McpServerState::Closed
-                )
-            {
-                return Ok(current);
-            }
-            let plugin = McpServerPlugin::new(entry.configuration)?;
-            let key = plugin.key.clone();
-            let view = owner.context.plugin(capability_plugin(plugin));
-            if wait_active(
-                &owner.context,
-                std::slice::from_ref(&view),
-                Duration::from_secs(5),
-                &cancel,
-            )
-            .await
-            .is_err()
-            {
-                view.shutdown().await.map_err(|_| McpServerError::Cleanup)?;
-                return Err(McpError::Unavailable);
-            }
-            // Parent owns the dynamic child; adding an inject back to it would
-            // create a readiness cycle. Resolve its provided port after Active.
-            let Some(service) = owner.context.get_as::<McpServer>(key) else {
-                view.shutdown().await.map_err(|_| McpServerError::Cleanup)?;
-                return Err(McpError::Unavailable);
-            };
-            let connection = Arc::new(McpConnection { view, service });
-            let registration = servers.entry(identity).or_default();
-            registration.current = Arc::downgrade(&connection);
-            registration.generations.push(Arc::downgrade(&connection));
-            Ok(connection)
+            owner.publication.acquire(project, id, &cancel).await
         })
         .await
     }
@@ -220,37 +139,18 @@ impl McpService {
         id: String,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let source = match source {
-            SettingsSource::UserMcp => None,
-            SettingsSource::ProjectMcp(root) => Some(root),
-            SettingsSource::Skills => return Err(McpError::InvalidSource),
-        };
+        if source == SettingsSource::Skills {
+            return Err(McpError::InvalidSource);
+        }
         let owner = self.clone();
         self.run(cancel, move |_, cancel| async move {
-            let mut servers = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(McpError::Cancelled),
-                servers = owner.servers.lock() => servers,
-            };
-            let identity = (source, id);
-            let mut result = Ok(());
-            if let Some(server) = servers.remove(&identity) {
-                // Own the complete closing set before the first await; callers
-                // dropping their leases must not detach our cleanup waits.
-                let generations: Vec<_> = server
-                    .generations
-                    .iter()
-                    .filter_map(Weak::upgrade)
-                    .collect();
-                for generation in generations {
-                    if generation.view.shutdown().await.is_err() {
-                        result = Err(McpServerError::Cleanup.into());
-                    }
-                }
-            }
-            result
+            owner.publication.disconnect(source, id, &cancel).await
         })
         .await
+    }
+
+    pub fn application(&self, source: SettingsSource) -> McpApplication {
+        self.publication.application(source)
     }
 
     /// Project ids are host-authorized FileStorage indices, never client paths.
@@ -260,6 +160,9 @@ impl McpService {
         project: Option<usize>,
         cancel: &CancellationToken,
     ) -> Result<McpCatalog> {
+        // Explicit reads also request convergence of externally edited workspace
+        // files. This is coalesced and is not an application acknowledgement.
+        self.publication.refresh();
         self.run(cancel, move |settings, cancel| async move {
             let mut catalog = McpCatalog {
                 user_revision: String::new(),
@@ -384,20 +287,20 @@ impl McpService {
 
 pub struct McpPlugin;
 impl TypedPlugin for McpPlugin {
-    type Deps = (Arc<SettingsService>,);
+    type Deps = (Arc<SettingsService>, Arc<publication::Publication>);
     fn name(&self) -> &str {
         "Mcp"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings,): Self::Deps,
+        (settings, publication): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            publication.bind(settings.clone());
             let service = Arc::new(McpService {
                 settings,
-                context: ctx.clone(),
-                servers: tokio::sync::Mutex::new(BTreeMap::new()),
+                publication,
                 stopping: ctx.cancellation_token(),
                 gate: Mutex::new(()),
                 tasks: TaskTracker::new(),
@@ -422,123 +325,6 @@ impl TypedPlugin for McpPlugin {
 }
 impl Capability for McpPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        ((),)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Inject failure at the framework cleanup boundary: actual OS child-reap
-    // failures are not portable to induce in an external process fixture.
-    #[tokio::test]
-    async fn disconnect_drains_every_generation_after_a_plugin_cleanup_error() {
-        struct CleanupFailure(McpServerPlugin);
-        impl TypedPlugin for CleanupFailure {
-            type Deps = <McpServerPlugin as TypedPlugin>::Deps;
-            fn name(&self) -> &str {
-                "McpCleanupFailure"
-            }
-            fn apply<'a>(
-                &'a self,
-                ctx: &'a Ctx,
-                deps: Self::Deps,
-            ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-                Box::pin(async move {
-                    ctx.effect(|| {
-                        Effect::AsyncDisposer(Box::new(|| {
-                            Box::pin(async {
-                                Err(CordisError::PluginFailed(Box::new(McpServerError::Cleanup)))
-                            })
-                        }))
-                    })?;
-                    self.0.apply(ctx, deps).await
-                })
-            }
-        }
-        impl Capability for CleanupFailure {
-            fn keys(&self) -> KeysOf<Self> {
-                self.0.keys()
-            }
-        }
-
-        let home = std::env::temp_dir().join(format!("mcp-cleanup-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&home).unwrap();
-        let home = home.canonicalize().unwrap();
-        let configuration = serde_json::json!({"type":"http","url":"http://127.0.0.1:1/mcp"});
-        std::fs::write(
-            home.join("mcp.json"),
-            serde_json::json!({"mcpServers":{"docs":configuration}}).to_string(),
-        )
-        .unwrap();
-        let root = Ctx::root().unwrap();
-        let views = [
-            root.plugin(dim_agent_runtime::capability_plugin(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            )),
-            root.plugin(dim_agent_runtime::capability_plugin(
-                crate::settings::SettingsPlugin::new(0, vec![]),
-            )),
-            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin)),
-        ];
-        let cancel = CancellationToken::new();
-        wait_active(&root, &views, Duration::from_secs(5), &cancel)
-            .await
-            .unwrap();
-        let directory = root.get::<McpService>().unwrap();
-        let mut leases = Vec::new();
-        for fails in [true, false] {
-            let plugin =
-                McpServerPlugin::new(serde_json::from_value(configuration.clone()).unwrap())
-                    .unwrap();
-            let key = plugin.key.clone();
-            let view = if fails {
-                directory
-                    .context
-                    .plugin(capability_plugin(CleanupFailure(plugin)))
-            } else {
-                directory.context.plugin(capability_plugin(plugin))
-            };
-            wait_active(
-                &directory.context,
-                std::slice::from_ref(&view),
-                Duration::from_secs(5),
-                &cancel,
-            )
-            .await
-            .unwrap();
-            leases.push(Arc::new(McpConnection {
-                view,
-                service: directory.context.get_as(key).unwrap(),
-            }));
-        }
-        directory.servers.lock().await.insert(
-            (None, "docs".into()),
-            ServerRegistration {
-                current: Arc::downgrade(&leases[1]),
-                generations: leases.iter().map(Arc::downgrade).collect(),
-            },
-        );
-        let result = directory
-            .disconnect(SettingsSource::UserMcp, "docs".into(), &cancel)
-            .await;
-        let states: Vec<_> = leases.iter().map(|lease| lease.state()).collect();
-        let replacement = directory
-            .server(None, "docs".into(), &cancel)
-            .await
-            .unwrap();
-        let reused = leases.iter().any(|lease| Arc::ptr_eq(lease, &replacement));
-        drop(replacement);
-        drop(leases);
-        // Framework errors remain reportable even after child unmounting.
-        let _ = root.shutdown().await;
-        std::fs::remove_dir_all(home).unwrap();
-        assert!(result.is_err());
-        assert_eq!(states, vec![server::McpServerState::Closed; 2]);
-        assert!(
-            !reused,
-            "a failed disconnect must not preserve a live route"
-        );
+        ((), ())
     }
 }

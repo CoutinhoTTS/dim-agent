@@ -264,7 +264,6 @@ enum TransportConfig {
 }
 
 pub struct McpServer {
-    pub(super) configuration: McpServerSettings,
     transport: TransportConfig,
     state: StateCell<McpServerState>,
     tool_changes: StateCell<u64>,
@@ -615,11 +614,10 @@ fn http_client() -> Result<Client> {
 
 pub(super) struct McpServerPlugin {
     pub key: TypeKey,
-    configuration: McpServerSettings,
     transport: TransportConfig,
 }
 impl McpServerPlugin {
-    pub fn new(configuration: McpServerSettings) -> Result<Self> {
+    pub fn new(configuration: McpServerSettings, key: TypeKey) -> Result<Self> {
         let transport = match &configuration {
             McpServerSettings::Stdio {
                 command,
@@ -642,11 +640,7 @@ impl McpServerPlugin {
                 }
             }
         };
-        Ok(Self {
-            key: TypeKey::keyed_dynamic::<McpServer>(uuid::Uuid::new_v4().to_string()),
-            transport,
-            configuration,
-        })
+        Ok(Self { key, transport })
     }
 }
 impl TypedPlugin for McpServerPlugin {
@@ -662,7 +656,6 @@ impl TypedPlugin for McpServerPlugin {
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(McpServer {
-                configuration: self.configuration.clone(),
                 transport: self.transport.clone(),
                 state: StateCell::new(McpServerState::Disconnected),
                 tool_changes: StateCell::new(0),

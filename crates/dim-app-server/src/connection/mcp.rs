@@ -63,13 +63,14 @@ pub(super) async fn management(rpc: &RpcService, call: Call) -> Result<Reply, Rp
     let cancel = &rpc.unloading;
     match call {
         Call::McpCatalog(p) => {
-            let catalog = directory
-                .catalog(project(rpc, p.cwd).await?, cancel)
-                .await
-                .map_err(error)?;
+            let project = project(rpc, p.cwd).await?;
+            let catalog = directory.catalog(project, cancel).await.map_err(error)?;
             Ok(Reply::McpCatalog(McpCatalogResult {
                 user_revision: catalog.user_revision,
                 project_revision: catalog.project_revision,
+                user_application: directory.application(SettingsSource::UserMcp),
+                project_application: project
+                    .map(|root| directory.application(SettingsSource::ProjectMcp(root))),
                 servers: catalog
                     .servers
                     .into_iter()

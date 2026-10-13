@@ -1211,10 +1211,36 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/mcp.rs",
       "unexpandedMacros": [
-        "matches",
         "tokio::pin",
         "tokio::select",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::publication",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/publication.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::publication::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::publication",
+      "file": "crates/dim-app-server/src/mcp/publication.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json",
+        "vec"
       ]
     },
     {
@@ -1257,19 +1283,6 @@
         "matches",
         "tokio::pin",
         "tokio::select"
-      ]
-    },
-    {
-      "id": "dim_app_server::mcp::tests",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::mcp",
-      "file": "crates/dim-app-server/src/mcp.rs",
-      "unexpandedMacros": [
-        "assert",
-        "assert_eq",
-        "format",
-        "serde_json::json",
-        "vec"
       ]
     },
     {
@@ -8734,6 +8747,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::mcp::publication",
+      "references": [
+        "path mcp::McpPublication",
+        "path mcp::McpPublication::register"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::mcp::session",
       "references": [
         "path mcp::install"
@@ -10402,22 +10423,12 @@
     },
     {
       "from": "dim_app_server::mcp",
-      "to": "dim_agent_runtime::assembly",
-      "references": [
-        "path wait_active",
-        "use dim_agent_runtime::wait_active"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
         "path KeysOf",
-        "path capability_plugin",
         "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::capability_plugin"
+        "use dim_agent_runtime::KeysOf"
       ]
     },
     {
@@ -10436,20 +10447,28 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::publication",
+      "references": [
+        "mod publication",
+        "path McpApplication",
+        "path publication",
+        "path publication::Publication",
+        "use publication::McpApplication",
+        "use publication::McpPublication"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::server",
       "references": [
         "mod server",
         "path McpServer",
         "path McpServerError",
-        "path McpServerError::Cleanup",
-        "path McpServerPlugin::new",
-        "path server",
         "path server::McpServerState",
         "path server::McpTool",
         "path server::Result",
         "use server::McpServer",
-        "use server::McpServerError",
-        "use server::McpServerPlugin"
+        "use server::McpServerError"
       ]
     },
     {
@@ -10466,13 +10485,6 @@
     },
     {
       "from": "dim_app_server::mcp",
-      "to": "dim_app_server::mcp::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp",
       "to": "dim_app_server::settings",
       "references": [
         "path McpServerSettings",
@@ -10481,7 +10493,6 @@
         "path SettingsDocument::Mcp",
         "path SettingsError",
         "path SettingsError::Conflict",
-        "path SettingsError::Invalid",
         "path SettingsService",
         "path SettingsSource",
         "path SettingsSource::ProjectMcp",
@@ -10492,6 +10503,140 @@
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService",
         "use crate::settings::SettingsSource"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path register_capability",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::register_capability"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_runtime::state",
+      "references": [
+        "path StateCell",
+        "path StateCell::new",
+        "use dim_agent_runtime::StateCell"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_app_server::mcp",
+      "references": [
+        "path McpConnection",
+        "path McpError::Disabled",
+        "path McpError::InvalidSource",
+        "path McpError::Unavailable",
+        "path McpError::UnknownServer",
+        "path Result",
+        "use super::McpConnection",
+        "use super::McpError",
+        "use super::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_app_server::mcp::publication::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_app_server::mcp::server",
+      "references": [
+        "path McpServerError::Cleanup",
+        "path McpServerPlugin",
+        "path McpServerPlugin::new",
+        "path super::server::McpServer",
+        "use super::server::McpServerError",
+        "use super::server::McpServerPlugin",
+        "use super::server::McpServerState"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path SettingsDocument::Mcp",
+        "path SettingsService",
+        "path SettingsSource",
+        "path SettingsSource::ProjectMcp",
+        "path SettingsSource::UserMcp",
+        "path crate::settings::SettingsError::Invalid",
+        "use crate::settings::McpServerSettings",
+        "use crate::settings::SettingsDocument",
+        "use crate::settings::SettingsService",
+        "use crate::settings::SettingsSource"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path wait_active",
+        "use dim_agent_runtime::wait_active"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path capability_plugin",
+        "use dim_agent_runtime::capability_plugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_app_server::mcp",
+      "references": [
+        "path McpChange::Put",
+        "path McpPlugin",
+        "path McpService",
+        "use crate::mcp::McpChange",
+        "use crate::mcp::McpPlugin",
+        "use crate::mcp::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_app_server::mcp::publication",
+      "references": [
+        "path McpPublication::register",
+        "path ServerFactory"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_app_server::mcp::server",
+      "references": [
+        "path McpServerError::Cleanup",
+        "path McpServerPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsSource::UserMcp",
+        "path crate::settings::SettingsPlugin::new"
       ]
     },
     {
@@ -10738,57 +10883,6 @@
       ]
     },
     {
-      "from": "dim_app_server::mcp::tests",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::tests",
-      "to": "dim_agent_runtime::assembly",
-      "references": [
-        "path wait_active"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::tests",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path capability_plugin",
-        "path dim_agent_runtime::capability_plugin"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::tests",
-      "to": "dim_app_server::mcp",
-      "references": [
-        "path McpConnection",
-        "path McpPlugin",
-        "path McpService",
-        "path ServerRegistration"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::tests",
-      "to": "dim_app_server::mcp::server",
-      "references": [
-        "path McpServerError::Cleanup",
-        "path McpServerPlugin",
-        "path McpServerPlugin::new"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::tests",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsSource::UserMcp",
-        "path crate::settings::SettingsPlugin::new"
-      ]
-    },
-    {
       "from": "dim_app_server::model_catalog",
       "to": "dim_agent_types",
       "references": [
@@ -10939,6 +11033,13 @@
       "references": [
         "path crate::managed_provider::AccountSnapshot",
         "path crate::managed_provider::ProviderDescriptor"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
+      "to": "dim_app_server::mcp::publication",
+      "references": [
+        "path crate::mcp::McpApplication"
       ]
     },
     {

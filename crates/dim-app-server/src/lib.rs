@@ -211,7 +211,11 @@ impl Processes {
             .loader
             .entries()
             .into_iter()
-            .filter(|entry| entry.parent.is_none() && entry.instance.is_none())
+            .filter(|entry| {
+                entry.parent.is_none()
+                    && entry.instance.is_none()
+                    && entry.owner == rutis_loader::Owner::Layer(0)
+            })
             .filter_map(|entry| entry.view);
         std::iter::once(self.view.clone()).chain(rows).collect()
     }
@@ -524,8 +528,12 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         let settings = settings::SettingsPlugin::native(home_root, vec![]);
         rows.push(register_capability(&mut builtins, move || settings.clone()));
     }
+    let mut publication = None;
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
+        let (publisher, row) = mcp::McpPublication::register(&mut builtins);
+        publication = Some(publisher);
+        rows.push(row);
         rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
@@ -614,6 +622,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         loader,
         view: loader_view,
     };
+    let assembly = rutis_loader::Layer::new(
+        "assembly",
+        vec![rutis_loader::Patch {
+            insert: Some(rows),
+            ..Default::default()
+        }],
+    );
     // One deadline covers the loader, the reconcile and the rows: reconcile
     // waits while a row is Loading, so a hung `apply` must not outlive it.
     let deadline = tokio::time::Instant::now() + config.startup_timeout;
@@ -626,11 +641,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &CancellationToken::new(),
         )
         .await?;
-        let rows = serde_json::from_value(serde_json::json!([{ "insert": rows }]))
-            .map_err(|error| AgentError::Build(error.to_string()))?;
-        let reconcile = processes
-            .loader
-            .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None);
+        let reconcile = processes.loader.reconcile(vec![assembly.clone()], None);
         let report = match tokio::time::timeout_at(deadline, reconcile).await {
             Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
             // The deadline has passed: this names the rows not yet Active.
@@ -690,7 +701,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .get::<ListenAddresses>()
         .ok_or_else(|| ServerError::Configuration("listener addresses missing".into()))?;
     handle.open();
-    let task = tokio::spawn(coordinate(root.clone(), handle.clone()));
+    let publication = publication.map(|publisher| (publisher, processes.loader.clone(), assembly));
+    let task = tokio::spawn(coordinate(root.clone(), handle.clone(), publication));
     startup.armed = false;
     Ok(RunningServer {
         unix_path: addresses.unix_path.clone(),
@@ -731,7 +743,18 @@ impl dim_agent_runtime::Capability for NodeRows {
 
 /// Graceful shutdown: stop admission, settle Agent work, drain commands and
 /// trace writers, close connections, then release the process tree.
-async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownReason> {
+async fn coordinate(
+    root: Ctx,
+    control: Arc<ServerControl>,
+    publication: Option<(
+        mcp::McpPublication,
+        rutis_loader::Loader,
+        rutis_loader::Layer,
+    )>,
+) -> Result<ShutdownReason> {
+    let publication = publication.map(|(publisher, loader, assembly)| {
+        tokio::spawn(publisher.run(root.clone(), loader, assembly, control.shutdown().clone()))
+    });
     control.shutdown().cancelled().await;
     if control.forced() {
         return Ok(ShutdownReason::Forced);
@@ -758,6 +781,13 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
     }
     if let Some(hub) = hub {
         hub.close().await;
+    }
+    if let Some(publication) = publication
+        && publication.await.is_err()
+    {
+        errors.push(AgentError::Build(
+            "MCP configuration publisher failed".into(),
+        ));
     }
     if let Err(error) = root.shutdown().await {
         errors.push(error.into());

@@ -110,6 +110,15 @@ reply certifies persistence, not loader application or business settlement. Gene
 reference private revision-bound configuration rather than embedding MCP secrets. Management
 services and leases do not own or shut down these configured rows.
 
+MCP publication uses distinct loader rows for overlapping generations. Replacing a single row
+would dispose the old connection while an accepted model request still holds its tools; a loader
+group instance does not pin its old template. Retire a superseded row when its last binding is
+released. Explicit disconnect removes every generation for the selected source and server,
+waits for loader disposal, and reports cleanup errors even when reconciliation itself succeeds.
+The stable part of a row identity hashes the canonical workspace (or user scope) and server id;
+the generation suffix is transient. Private immutable configuration remains available until the
+loader removes its row. Network connection remains lazy and generation-owned.
+
 User MCP and Skill documents have one SQLite authority after a successful lazy import. Store
 the document and import marker atomically, leave originals intact, and permit retry after failed
 import. Workspace sources keep file authority and file CAS. The standalone Settings plugin can
@@ -150,9 +159,9 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots; native storage v12 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
-| Scoped persisted loader configuration | Partial: user MCP/Skills source authority and import implemented in native storage v13; composed loader publication not implemented | Scope isolation, save failure, trust limits, secret-free notifications |
+| Scoped persisted loader configuration | Implemented for MCP: source-first publication to the root loader; user MCP/Skills authority and import use native storage v13. General content-plugin rows remain future work | Scope isolation, save failure, protected-local management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
-| Loader-owned MCP instances | Not implemented | Scoped stable identities; generation drain survives reload and restart |
+| Loader-owned MCP instances | Implemented: scoped logical identities, overlapping generation rows, host publication, explicit disconnect and cleanup receipts | Bound tools survive replacement; all generations drain; logical identities survive restart and root reordering |
 
 Keep implementation on one integration branch with reviewable commits. The persistence format,
 runtime assembly and lifecycle have one coordinated owner. Whole-plugin documentation coverage

@@ -470,6 +470,8 @@ pub struct RemoveMcp {
 pub struct McpCatalogResult {
     pub user_revision: String,
     pub project_revision: Option<String>,
+    pub user_application: crate::mcp::McpApplication,
+    pub project_application: Option<crate::mcp::McpApplication>,
     pub servers: Vec<McpCatalogEntry>,
 }
 #[derive(Debug, Serialize)]

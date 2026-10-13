@@ -48,11 +48,31 @@ Project edits require an authorized workspace `cwd`; they write `.mcp.json`, not
   persisted intent.
 
 Successful configuration mutations return `{}` after persistence, not after connection/tool
-adoption. Read the catalog for current revisions and `session.mcp` for runtime state. A conflict
-requires rereading the source; interruption may follow an already committed write, so never retry
+adoption. The catalog also returns `userApplication` and optional `projectApplication`, each with
+`appliedRevision`, `error` and `cleanupError`. Application confirms that the published rows are
+active or deliberately disabled; it does not confirm a network connection or tool adoption.
+An application error leaves persisted intent intact. Cleanup errors remain visible for that
+source during this publisher's lifetime, including after later successful application.
+Read `session.mcp` for runtime state. A conflict requires rereading the source;
+interruption may follow an already committed write, so never retry
 blindly. Use these methods rather than editing imported user files. `skills.set_enabled` likewise
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
+
+The host publishes source changes to the existing root loader, preserving the assembly layer.
+Catalog reads and connection acquisition also request refresh of external workspace-file edits;
+there is no background filesystem watcher. A catalog reply is not a refresh-completion barrier.
+Already bound tools retain their connection generation during replacement. After the last old
+binding is released, the publisher removes that generation's row and the loader disposes it.
+Explicit disconnect drains all generations of the selected source/server, without changing its
+configuration; a later acquisition can reconnect. It reports cleanup failure rather than treating
+loader reconciliation as proof of successful cleanup.
+
+Standalone hosts using `McpPlugin` register `McpPublication` with their `Builtins`, include its
+returned row in the immutable assembly, and run its publisher outside the plugin tree after
+assembly activation. Join the publisher before root shutdown. Its typed port is a dependency of
+`McpPlugin`; neither the directory nor connection leases spawn or dispose configured plugins.
+No second loader, editable-layer target or SQLite dependency is required by this port.
 
 `--mock-model` selects the explicit deterministic test profile. It uses mock model/tool hosts. Product, configured and mock daemons identify themselves in `hello.daemonProfile`:
 

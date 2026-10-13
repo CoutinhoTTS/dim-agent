@@ -53,9 +53,12 @@ impl Capability for Capture {
 
 struct Fixture {
     root: Ctx,
+    publication: mcp_host::Host,
     mcp: Arc<McpService>,
     home: PathBuf,
 }
+#[path = "fixtures/mcp_host.rs"]
+mod mcp_host;
 impl Fixture {
     async fn new(url: &str, token: &str) -> Self {
         Self::configured(json!({"type":"http","url":url,"auth":{"type":"bearer","token":token}}))
@@ -82,6 +85,7 @@ impl Fixture {
         file.write_all(&serde_json::to_vec(&json!({"mcpServers":{"docs":configuration}})).unwrap())
             .unwrap();
         let root = Ctx::root().unwrap();
+        let (publication, _) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         let views = vec![
             root.plugin(capability_plugin(FileStoragePlugin::new(vec![
@@ -101,11 +105,13 @@ impl Fixture {
         .unwrap();
         Self {
             root,
+            publication,
             mcp: capture.get().unwrap().clone(),
             home,
         }
     }
     async fn close(&self) {
+        self.publication.close().await;
         self.root.shutdown().await.unwrap();
     }
 }

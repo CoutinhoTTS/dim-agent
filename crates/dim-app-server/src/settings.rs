@@ -50,7 +50,7 @@ pub type Result<T> = std::result::Result<T, SettingsError>;
 
 /// Roots are authorized FileStorage indices supplied by the product host, not
 /// arbitrary paths received from RPC. Project files are always `.mcp.json`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SettingsSource {
     UserMcp,
     ProjectMcp(usize),
@@ -160,6 +160,9 @@ impl SettingsService {
         cwd: PathBuf,
         cancel: &CancellationToken,
     ) -> Result<usize> {
+        if cwd.to_str().is_none() {
+            return Err(SettingsError::Invalid("project cwd must be UTF-8"));
+        }
         let task = {
             let _guard = self.gate.lock().unwrap();
             self.check_open(cancel)?;
@@ -169,7 +172,9 @@ impl SettingsService {
                 let root = owner.files.register_root(cwd.clone(), &cancel).await?;
                 let _guard = owner.gate.lock().unwrap();
                 owner.check_open(&cancel)?;
-                owner.projects.lock().unwrap().insert(cwd, root);
+                if owner.projects.lock().unwrap().insert(cwd, root) != Some(root) {
+                    owner.changed.update(|version| *version += 1);
+                }
                 Ok(root)
             })
         };
@@ -180,13 +185,16 @@ impl SettingsService {
         self.projects.lock().unwrap().get(cwd).copied()
     }
 
-    pub(crate) fn project_path(&self, root: usize) -> Result<PathBuf> {
-        self.projects
-            .lock()
-            .unwrap()
-            .iter()
-            .find_map(|(path, index)| (*index == root).then(|| path.clone()))
-            .ok_or(SettingsError::Invalid("unauthorized project"))
+    pub(crate) fn mcp_sources(&self) -> Vec<(SettingsSource, Option<PathBuf>)> {
+        std::iter::once((SettingsSource::UserMcp, None))
+            .chain(
+                self.projects
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(path, index)| (SettingsSource::ProjectMcp(*index), Some(path.clone()))),
+            )
+            .collect()
     }
 
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -582,6 +590,11 @@ impl TypedPlugin for SettingsPlugin {
                 let path = files
                     .root_path(*root)
                     .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                if path.to_str().is_none() {
+                    return Err(CordisError::PluginFailed(Box::new(SettingsError::Invalid(
+                        "project cwd must be UTF-8",
+                    ))));
+                }
                 self.projects.lock().unwrap().insert(path, *root);
             }
             let service = Arc::new(SettingsService {

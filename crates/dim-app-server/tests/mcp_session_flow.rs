@@ -208,6 +208,7 @@ impl ModelDriver for Model {
 
 struct Env {
     root: Ctx,
+    publication: mcp_host::Host,
     home: PathBuf,
     agent: Agent,
     model: Arc<Model>,
@@ -217,6 +218,8 @@ struct Env {
     stop: CancellationToken,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
+#[path = "fixtures/mcp_host.rs"]
+mod mcp_host;
 impl Env {
     async fn new() -> Self {
         let remote = Remote::new();
@@ -242,6 +245,7 @@ impl Env {
         )
         .unwrap();
         let root = Ctx::root().unwrap();
+        let (publication, _) = mcp_host::Host::start(&root).await;
         let views = vec![
             root.plugin(capability_plugin(
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
@@ -284,6 +288,7 @@ impl Env {
         let agent = builder.build_in(&root);
         Self {
             root,
+            publication,
             home,
             agent,
             model,
@@ -339,6 +344,7 @@ impl Env {
     }
     async fn close(self) {
         self.agent.close().await.unwrap();
+        self.publication.close().await;
         self.root.shutdown().await.unwrap();
         self.stop.cancel();
         self.server.await.unwrap().unwrap();
