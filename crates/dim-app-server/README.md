@@ -1,6 +1,6 @@
 # App Server
 
-The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows named pipe. The server owns Agent v4 execution, approvals, model/provider selection and native storage. WebSocket transport remains available for compatible clients; account/provider management is limited to local transports.
+The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows named pipe. The server owns Agent v4 execution, approvals, model/provider selection and native storage. Product and configured profiles require protected local transports for execution and management; their WebSocket endpoint supports only `hello` and `ping`. The explicit mock profile permits WebSocket execution for protocol testing.
 
 Commands below run from the repository root:
 
@@ -11,7 +11,9 @@ cargo run --locked -p dim-app-server -- \
   --unix /absolute/product-home/rust/daemon.sock --no-ws
 ```
 
-A configured model file uses the same real workspace tools and approval policy:
+A configured model file uses the same public execution capabilities: workspace tools, approvals,
+Skills, prompt sources, MCP, branches and collaboration. Provider selection does not select a
+different harness. Account/provider management remains specific to the product provider.
 
 ```sh
 cargo run --locked -p dim-app-server -- \
@@ -19,6 +21,14 @@ cargo run --locked -p dim-app-server -- \
   --home /absolute/development-home \
   --unix /absolute/development-home/daemon.sock --no-ws
 ```
+
+Configured execution requires `--home` or `--database`; the CLI supplies `--home` automatically.
+Its user MCP and Skill settings and shell preference live under the native home (or next to the
+explicit database). The product profile retains its existing product-home settings location.
+Workspace `.mcp.json` files remain independent sources. A missing account plugin does not disable
+these public capabilities. Protocol v3 advertises their management methods on local connections.
+Configured model changes validate against the supplied catalog and adopt that model's generation
+settings; model preferences requiring capability declarations are rejected rather than guessed.
 
 `--mock-model` selects the explicit deterministic test profile. It uses mock model/tool hosts. Product, configured and mock daemons identify themselves in `hello.daemonProfile`:
 
@@ -30,7 +40,7 @@ cargo run --locked -p dim-app-server -- \
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. SQLite format v11 includes normalized managed-provider records. Unsupported formats, including the source project's v10, are rejected and preserved; there is no automatic migration. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
+`--home` and `--database` are mutually exclusive. SQLite format v12 includes normalized managed-provider records and optional recovery snapshots separate from Timeline facts. Unsupported formats are rejected and preserved; there is no automatic migration. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
 Unix endpoint directories must be private (0700), sockets use 0600, and cleanup removes only the inode acquired by this listener. Named pipe ownership and local identity checks remain in the transport. Ordinary client disconnect detaches; it does not delete a session. See the [public architecture](../../docs/architecture/README.md).
 

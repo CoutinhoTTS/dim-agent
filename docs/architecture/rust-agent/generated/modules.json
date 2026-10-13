@@ -1771,12 +1771,14 @@
         "path HttpModelConnection",
         "path ModelConnection::Http",
         "path ModelHost",
+        "path ModelSelectionHost",
         "path ModelSettings",
         "path ModelSettings::new",
         "path PrepareModel",
         "path PrepareModelHost",
         "path ProviderConnectionResolver",
         "path ResolveModelConnection",
+        "path ResolveModelSelection",
         "path ResolvedModelConnection"
       ]
     },
@@ -1837,6 +1839,20 @@
         "path dim_agent_types::ModelRequest",
         "path model",
         "use dim_agent_types::SystemPrompt"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::plugin",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::plugin",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path dim_agent_types::ModelSelection"
       ]
     },
     {
@@ -8539,16 +8555,8 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_agent_capabilities::skill_settings",
-      "references": [
-        "path dim_agent_capabilities::skill_settings::SkillSettingsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
-        "path dim_agent_capabilities::skills::MemorySkillSettings::default",
         "path dim_agent_capabilities::skills::SkillsCatalogPlugin::new"
       ]
     },
@@ -9509,7 +9517,8 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path dim_agent_capabilities::host::HostError",
-        "path dim_agent_capabilities::host::HostError::Cancelled"
+        "path dim_agent_capabilities::host::HostError::Cancelled",
+        "path dim_agent_capabilities::host::HostError::failed"
       ]
     },
     {
@@ -9922,6 +9931,13 @@
       "to": "dim_app_server::provider",
       "references": [
         "path crate::provider::ProviderService"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path crate::provider::ModelPreferences"
       ]
     },
     {

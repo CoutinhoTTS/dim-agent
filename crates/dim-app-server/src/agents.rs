@@ -1077,8 +1077,8 @@ impl Capability for AgentsPlugin {
     fn keys(&self) -> KeysOf<Self> {
         (
             self.config.database_path.is_some().then_some(((), ())),
-            (self.config.product_home.is_some() && self.config.session_execution).then_some(()),
-            self.config.product_home.is_some().then_some(()),
+            self.config.local_execution().then_some(()),
+            self.config.protected_profile().then_some(()),
             (),
             (),
         )

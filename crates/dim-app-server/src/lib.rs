@@ -75,6 +75,16 @@ impl Default for ServerConfig {
         }
     }
 }
+impl ServerConfig {
+    /// Public execution capabilities do not depend on an account provider.
+    pub(crate) fn local_execution(&self) -> bool {
+        self.session_execution && self.protected_profile()
+    }
+
+    pub(crate) fn protected_profile(&self) -> bool {
+        self.product_home.is_some() || self.model_catalog.is_some()
+    }
+}
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("server I/O: {0}")]
@@ -270,6 +280,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             "managed plugins require a product home".into(),
         ));
     }
+    if config.model_catalog.is_some() && config.product_home.is_some() {
+        return Err(ServerError::Configuration(
+            "configured and product model providers are mutually exclusive".into(),
+        ));
+    }
+    if config.model_catalog.is_some()
+        && config.target_home.is_none()
+        && config.database_path.is_none()
+    {
+        return Err(ServerError::Configuration(
+            "configured execution requires --home or --database for persistent settings".into(),
+        ));
+    }
     if config.product_home.is_some() {
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
@@ -346,6 +369,32 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
+    let execution_root = if config.local_execution() {
+        let cwd = std::env::current_dir()?;
+        let home = config
+            .product_home
+            .clone()
+            .or_else(|| config.target_home.clone())
+            .or_else(|| {
+                cwd.join(config.database_path.as_ref()?)
+                    .parent()
+                    .map(PathBuf::from)
+            })
+            .ok_or_else(|| ServerError::Configuration("database must name a file".into()))?;
+        std::fs::create_dir_all(&home)?;
+        let home = std::fs::canonicalize(home)?;
+        Some(
+            match config.file_roots.iter().position(|root| root == &home) {
+                Some(index) => index,
+                None => {
+                    config.file_roots.push(home);
+                    config.file_roots.len() - 1
+                }
+            },
+        )
+    } else {
+        None
+    };
     let config = Arc::new(config);
     let root = Ctx::root_with_sink(
         tokio::runtime::Handle::current(),
@@ -386,16 +435,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_aimux::ConfiguredModelsPlugin(models.clone())
         }));
-        rows.push(register_capability(&mut builtins, || {
-            ConfiguredSkillSettings
-        }));
-        rows.push(register_capability(&mut builtins, || {
-            dim_agent_capabilities::host_platform::HostPlatformPlugin::new(Default::default())
-        }));
-        rows.push(register_capability(
-            &mut builtins,
-            dim_agent_capabilities::skills::SkillsCatalogPlugin::new,
-        ));
     }
     if let Some(path) = &config.database_path {
         let path = path.clone();
@@ -407,8 +446,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }));
     }
     if let Some(home_root) = product_root {
-        let settings = settings::SettingsPlugin::new(home_root, vec![]);
-        rows.push(register_capability(&mut builtins, move || settings.clone()));
         rows.push(register_capability(&mut builtins, || {
             managed_provider::ManagedProvidersPlugin
         }));
@@ -482,21 +519,25 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &mut builtins,
             provider::ProviderPlugin::default,
         ));
-        if config.session_execution {
-            mcp::install(&mut builder);
-            rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
-            rows.push(register_capability(&mut builtins, move || {
-                dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
-                    dim_agent_capabilities::host_platform::HostPlatformConfig {
-                        exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                    },
-                )
-            }));
-            rows.push(register_capability(
-                &mut builtins,
-                dim_agent_capabilities::skills::SkillsCatalogPlugin::new,
-            ));
-        }
+    }
+    if let Some(home_root) = execution_root.or(product_root) {
+        let settings = settings::SettingsPlugin::new(home_root, vec![]);
+        rows.push(register_capability(&mut builtins, move || settings.clone()));
+    }
+    if let Some(home_root) = execution_root {
+        mcp::install(&mut builder);
+        rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
+        rows.push(register_capability(&mut builtins, move || {
+            dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
+                dim_agent_capabilities::host_platform::HostPlatformConfig {
+                    exec_shell_file: Some((home_root, "exec-shell.json".into())),
+                },
+            )
+        }));
+        rows.push(register_capability(
+            &mut builtins,
+            dim_agent_capabilities::skills::SkillsCatalogPlugin::new,
+        ));
     }
     agents::register(&mut builtins);
     rows.push(register_capability(&mut builtins, || {
@@ -661,29 +702,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle,
         task: Some(task),
     })
-}
-
-struct ConfiguredSkillSettings;
-impl rutis::TypedPlugin for ConfiguredSkillSettings {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "ConfiguredSkillSettings"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            ctx.provide(dim_agent_capabilities::skill_settings::SkillSettingsHost(
-                Arc::new(dim_agent_capabilities::skills::MemorySkillSettings::default()),
-            ))?;
-            Ok(rutis::Effect::Done)
-        })
-    }
-}
-impl dim_agent_runtime::Capability for ConfiguredSkillSettings {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {}
 }
 
 struct NodeRows(Arc<rutis_loader::RuntimeResolver>);

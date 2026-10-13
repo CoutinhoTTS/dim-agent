@@ -135,7 +135,8 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
 | Scoped persisted loader configuration | Not implemented | Scope isolation, save failure, trust limits, secret-free notifications |
-| Common assembly and MCP instances | Not implemented | Real API-key path includes public capabilities; generation drain survives reload and restart |
+| Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
+| Loader-owned MCP instances | Not implemented | Scoped stable identities; generation drain survives reload and restart |
 
 Keep implementation on one integration branch with reviewable commits. The persistence format,
 runtime assembly and lifecycle have one coordinated owner. Whole-plugin documentation coverage

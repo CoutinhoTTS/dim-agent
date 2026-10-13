@@ -18,7 +18,7 @@ mod tree;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock, Weak,
         atomic::{AtomicU64, Ordering},
@@ -173,22 +173,27 @@ impl Connection {
         *self.version.get().expect("handshake precedes requests")
     }
     fn validate_call(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
-        if rpc.config.product_home.is_some()
+        if rpc.config.protected_profile()
             && !self.local
             && !matches!(call, Call::Hello(_) | Call::Ping)
         {
             return Err(RpcError::app(
                 -32000,
                 "local_transport_required",
-                "Product operations require a protected local connection",
+                "Execution and management require a protected local connection",
             ));
         }
-        if call.is_management() || call.is_product_session() {
-            if self.protocol_version() < 3 || rpc.config.product_home.is_none() {
+        if call.is_management() || call.is_execution_session() {
+            let available = if call.is_execution_management() || call.is_execution_session() {
+                rpc.config.local_execution()
+            } else {
+                rpc.config.product_home.is_some()
+            };
+            if self.protocol_version() < 3 || !available {
                 return Err(RpcError::app(
                     -32601,
                     "unknown_method",
-                    "Product management is unavailable",
+                    "Management method is unavailable",
                 ));
             }
             if !self.local {
@@ -425,12 +430,12 @@ impl Connection {
         } else {
             None
         };
-        if call.is_product_session() {
+        if call.is_execution_session() {
             // Capability owners retain admitted work when the RPC generation ends.
             return Some(tokio::select! {
                 biased;
                 _ = rpc.unloading.cancelled() => Err(RpcError::app(-32000, "operation_interrupted", "Service reloaded; the operation may already have committed. Read the current state before retrying")),
-                result = self.product_session(rpc, &usage.as_ref().expect("product operation pins its Session").session, call) => result,
+                result = self.execution_session(rpc, &usage.as_ref().expect("execution operation pins its Session").session, call) => result,
             });
         }
         // Capture the subscription before waiting for execution. A replacement
@@ -725,7 +730,7 @@ impl Connection {
             _ => unreachable!("management methods are dispatched before session operations"),
         })
     }
-    async fn product_session(
+    async fn execution_session(
         &self,
         rpc: &RpcService,
         session: &Session,
@@ -796,21 +801,19 @@ impl Connection {
             }
             Call::ModelUpdate(p) => {
                 if p.branch_id != "main" {
-                    return Err(RpcError::invalid("Product model updates only support main"));
+                    return Err(RpcError::invalid("Model updates only support main"));
                 }
                 if p.model_id.trim().is_empty() {
                     return Err(RpcError::invalid("modelId must not be empty"));
                 }
-                let provider = rpc.provider.as_ref().expect("product provider dependency");
-                let model = provider
-                    .configuration(
+                let model = rpc
+                    .model_selection(
                         Some(dim_agent_types::ModelId {
                             provider_id: p.provider_id,
                             model_id: p.model_id,
                         }),
-                        Some(Path::new(&session.config().cwd)),
+                        Some(PathBuf::from(&session.config().cwd)),
                         p.model_preferences,
-                        &rpc.unloading,
                     )
                     .await
                     .map_err(provider_error)?;
@@ -834,9 +837,7 @@ impl Connection {
             }
             Call::PromptRefresh(p) => {
                 if p.branch_id != "main" {
-                    return Err(RpcError::invalid(
-                        "Product prompt refresh only supports main",
-                    ));
+                    return Err(RpcError::invalid("Prompt refresh only supports main"));
                 }
                 let outcome = session
                     .configure(
@@ -848,7 +849,7 @@ impl Connection {
                     outcome: configuration_outcome(outcome)?,
                 })
             }
-            _ => unreachable!("only product Session operations reach this boundary"),
+            _ => unreachable!("only execution Session operations reach this boundary"),
         })
     }
     async fn create(&self, rpc: &RpcService, params: Create) -> Result<Reply, RpcError> {
@@ -885,12 +886,12 @@ impl Connection {
             .to_str()
             .ok_or_else(|| RpcError::invalid("cwd must be UTF-8"))?
             .into();
-        if rpc.provider.is_none() && params.model_preferences != Default::default() {
+        if rpc.index.model_selection.is_none() && params.model_preferences != Default::default() {
             return Err(RpcError::invalid(
                 "Model preferences require the product provider",
             ));
         }
-        if let Some(provider) = &rpc.provider {
+        if rpc.index.model_selection.is_some() {
             if params
                 .model
                 .as_ref()
@@ -900,8 +901,8 @@ impl Connection {
                     "Explicit model requires provider and modelId",
                 ));
             }
-            config.model = provider
-                .configuration(
+            config.model = rpc
+                .model_selection(
                     params
                         .model
                         .as_ref()
@@ -918,9 +919,8 @@ impl Connection {
                                 })
                         })
                         .or_else(|| host.profile.model.clone()),
-                    Some(&cwd),
+                    Some(cwd.clone()),
                     params.model_preferences,
-                    &rpc.unloading,
                 )
                 .await
                 .map_err(provider_error)?;
@@ -990,6 +990,12 @@ impl Connection {
             Call::McpCatalog(_) | Call::McpSetEnabled(_) | Call::McpDisconnect(_)
         ) {
             return mcp::management(rpc, call).await;
+        }
+        if matches!(
+            call,
+            Call::SkillsCatalog(_) | Call::SkillSetEnabled(_) | Call::SkillsRefresh(_)
+        ) {
+            return self.skills_management(rpc, call).await;
         }
         let oauth = rpc
             .oauth
@@ -1320,6 +1326,12 @@ impl Connection {
                     .map_err(provider_error)?;
                 Reply::empty()
             }
+            _ => unreachable!("only provider management calls reach this boundary"),
+        })
+    }
+
+    async fn skills_management(&self, rpc: &RpcService, call: Call) -> Result<Reply, RpcError> {
+        Ok(match call {
             Call::SkillsCatalog(params) => {
                 let catalog = rpc.skills.as_ref().ok_or_else(|| {
                     RpcError::app(
@@ -1650,6 +1662,33 @@ pub(crate) struct RpcService {
     pub unloading: CancellationToken,
 }
 
+impl RpcService {
+    async fn model_selection(
+        &self,
+        explicit: Option<dim_agent_types::ModelId>,
+        cwd: Option<PathBuf>,
+        preferences: crate::provider::ModelPreferences,
+    ) -> Result<dim_agent_types::ModelSelection, dim_agent_capabilities::host::HostError> {
+        if let Some(provider) = &self.provider {
+            return provider
+                .configuration(explicit, cwd.as_deref(), preferences, &self.unloading)
+                .await;
+        }
+        if preferences != Default::default() {
+            return Err(dim_agent_capabilities::host::HostError::failed(
+                "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
+            ));
+        }
+        self.index
+            .model_selection
+            .as_ref()
+            .expect("execution profiles declare model selection")
+            .0
+            .resolve(explicit, cwd, self.unloading.clone())
+            .await
+    }
+}
+
 pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
 }
@@ -1665,7 +1704,7 @@ type ProductServices = (
     Arc<crate::grok_oauth::GrokOAuthService>,
     Arc<crate::provider::ProviderService>,
 );
-/// Skills, MCP and settings management of a product profile that executes Sessions.
+/// Public capabilities shared by every local execution profile.
 type ExecutionServices = (
     Arc<SkillsCatalog>,
     Arc<crate::mcp::McpService>,
@@ -1750,7 +1789,7 @@ impl Capability for RpcPlugin {
             (),
             (),
             product.then_some(((), (), (), ())),
-            (product && self.config.session_execution).then_some(((), (), ())),
+            self.config.local_execution().then_some(((), (), ())),
         )
     }
 }

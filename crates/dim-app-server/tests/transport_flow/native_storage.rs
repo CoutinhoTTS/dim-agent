@@ -269,7 +269,7 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
             "defaultModel":{"providerId":"local","modelId":"test"},
             "providers":[{"id":"local","kind":"openai-compatible","baseUrl":endpoint,"models":[{"id":"test","config":{"maxTokens":64}}]}]
         })).unwrap()).unwrap());
-        let home = std::env::temp_dir().join(format!("dim-l0-{}", uuid::Uuid::new_v4()));
+        let home = std::path::PathBuf::from("/tmp").join(format!("dim-l0-{}", uuid::Uuid::new_v4()));
         let mut builder = AgentBuilder::new(AgentConfig { model: models.default_model().clone(), ..Default::default() });
         defaults::install_with_process_model(&mut builder);
         builder.session_value(Arc::new(HistoryRenderer::default()))
@@ -280,12 +280,13 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
         dim_app_server::collaboration::install(&mut builder);
         let config = ServerConfig {
             target_home: Some(home.clone()), model_catalog: Some(models.clone()),
+            unix_path: Some(home.join("ipc/server.sock")),
             session_defaults: dim_agent_runtime::SessionConfig { model: dim_agent_types::ModelSelection { provider_id: models.default_model().provider_id.clone(), model_id: models.default_model().model_id.clone(), capability_snapshot: None, config: None, metadata: None }, ..Default::default() },
             ..Default::default()
         };
         let server = serve(builder, config).await.unwrap();
         let agent = server.agent().unwrap();
-        let mut client = Client::new_version(&server, true, 3).await;
+        let mut client = Client::new_version(&server, false, 3).await;
         let mut sessions = Vec::new();
         for _ in 0..2 {
             let created = client.rpc("session.create", create(json!([]))).await;

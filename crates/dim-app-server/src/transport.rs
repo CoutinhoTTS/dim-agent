@@ -692,14 +692,14 @@ async fn run_connection(
                                 protocol_version: params.protocol_version,
                                 daemon_profile: hub.config().daemon_profile.clone(),
                                 features: (params.protocol_version >= 3).then(|| {
-                                    let mut features =
-                                        if local || hub.config().product_home.is_none() {
-                                            vec!["session.summaries", "daemon.shutdown.completed"]
-                                        } else {
-                                            vec![]
-                                        };
+                                    let mut features = if local || !hub.config().protected_profile()
+                                    {
+                                        vec!["session.summaries", "daemon.shutdown.completed"]
+                                    } else {
+                                        vec![]
+                                    };
                                     if hub.config().session_execution
-                                        && (local || hub.config().product_home.is_none())
+                                        && (local || !hub.config().protected_profile())
                                     {
                                         features.extend([
                                             "session.history",
@@ -710,10 +710,10 @@ async fn run_connection(
                                     }
                                     if local && hub.config().product_home.is_some() {
                                         features.extend(MANAGEMENT_METHODS);
-                                        if hub.config().session_execution {
-                                            features.extend(LOCAL_EXECUTION_METHODS);
-                                            features.extend(MCP_METHODS);
-                                        }
+                                    }
+                                    if local && hub.config().local_execution() {
+                                        features.extend(LOCAL_EXECUTION_METHODS);
+                                        features.extend(MCP_METHODS);
                                     }
                                     features
                                 }),

@@ -222,7 +222,19 @@ impl Call {
         )
     }
 
-    pub(crate) fn is_product_session(&self) -> bool {
+    pub(crate) fn is_execution_management(&self) -> bool {
+        matches!(
+            self,
+            Self::SkillsCatalog(_)
+                | Self::SkillSetEnabled(_)
+                | Self::SkillsRefresh(_)
+                | Self::McpCatalog(_)
+                | Self::McpSetEnabled(_)
+                | Self::McpDisconnect(_)
+        )
+    }
+
+    pub(crate) fn is_execution_session(&self) -> bool {
         matches!(
             self,
             Self::PermissionGet(_)
