@@ -1483,6 +1483,7 @@
         "format",
         "json",
         "matches",
+        "println",
         "write"
       ]
     },
@@ -11760,9 +11761,11 @@
         "mod args",
         "path Action::Account",
         "path Action::Chat",
+        "path Action::DaemonStop",
         "path Action::Help",
         "path Action::Login",
         "path Action::Logout",
+        "path Action::Models",
         "path Action::Version",
         "path Options",
         "path Options::parse",
@@ -11776,7 +11779,8 @@
       "references": [
         "mod client",
         "path client",
-        "path client::connect"
+        "path client::connect",
+        "path client::stop"
       ]
     },
     {
@@ -11822,6 +11826,7 @@
       "to": "dim_cli::@bin:dimcode",
       "references": [
         "path Result",
+        "path crate::Error",
         "use crate::Result"
       ]
     },
