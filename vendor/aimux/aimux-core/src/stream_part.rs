@@ -1,0 +1,180 @@
+﻿//! `StreamPart` — the individual chunk types emitted by `do_stream`.
+//!
+//! Aligned with V4 `LanguageModelV4StreamPart`. v0.1 implements the P0/P1 variants;
+//! P2 variants (reasoning, file, source) are defined but not yet emitted by providers.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use ts_rs::TS;
+
+use crate::error::AiMuxError;
+use crate::shared::FileData;
+use crate::types::{FinishReason, ProviderMetadata, Usage, Warning};
+
+/// A single chunk in the stream returned by `do_stream`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum StreamPart {
+    // ── P0: text ──
+    /// Start of a text segment.
+    TextStart {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    /// A delta of generated text.
+    TextDelta {
+        id: String,
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    /// End of a text segment.
+    TextEnd {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    // ── P0: stream lifecycle ──
+    /// First chunk — carries warnings from the provider.
+    StreamStart { warnings: Vec<Warning> },
+    /// Final chunk — carries usage, finish reason, and metadata.
+    Finish {
+        finish_reason: FinishReason,
+        usage: Usage,
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    /// An error occurred mid-stream.
+    Error { error: AiMuxError },
+
+    // ── P1: tool calls ──
+    /// Start of a tool call's input streaming.
+    ToolInputStart {
+        id: String,
+        tool_name: String,
+        /// Whether the tool call will be executed by the provider.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+        /// Optional title for the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    /// A delta of tool call input (partial JSON).
+    ToolInputDelta {
+        id: String,
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    /// End of a tool call's input streaming.
+    ToolInputEnd {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    /// A complete tool call (alternative to the start/delta/end flow).
+    ToolCall {
+        tool_call_id: String,
+        tool_name: String,
+        /// Serialized argument text in a `Value::String` from `do_stream`;
+        /// parsed input after `stream_text`.
+        input: Value,
+        /// Whether the tool call will be executed by the provider.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_executed: Option<bool>,
+        /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+        /// Provider-assigned thought signature (e.g. Google Gemini
+        /// `thoughtSignature`). Must be echoed back verbatim on the follow-up
+        /// turn when the tool result is sent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
+        /// Set by Core when the call remains invalid after optional repair.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invalid: Option<bool>,
+        /// Typed lookup, parsing, schema, or repair failure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<AiMuxError>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    /// A tool result (provider-executed tools).
+    ToolResult {
+        tool_call_id: String,
+        tool_name: String,
+        result: Value,
+        /// Whether the result is an error or error message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+        /// Whether the result is preliminary (replaces prior, e.g. image previews).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preliminary: Option<bool>,
+        /// Whether the tool is dynamic (defined at runtime, e.g. MCP tools).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic: Option<bool>,
+        /// Additional provider-specific metadata for the tool result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    // ── P2: file ──
+    /// A file generated by the model (e.g. an image or document).
+    ///
+    /// Mirrors the Vercel AI SDK `file` stream part. `data` is a tagged union
+    /// covering base64 data, URL, or provider reference.
+    File {
+        data: FileData,
+        media_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    // ── P2: reasoning ──
+    ReasoningStart {
+        id: String,
+        /// Provider-specific metadata (e.g. xAI `itemId`).
+        #[allow(unused)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningDelta {
+        id: String,
+        delta: String,
+        /// Provider-specific metadata (e.g. xAI `itemId`).
+        #[allow(unused)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+    ReasoningEnd {
+        id: String,
+        /// Provider-specific metadata (e.g. xAI `itemId`, `reasoningEncryptedContent`).
+        #[allow(unused)]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    // ── P2: metadata ──
+    /// Response metadata (id, timestamp, model_id).
+    ResponseMetadata {
+        id: Option<String>,
+        timestamp: Option<String>,
+        model_id: Option<String>,
+    },
+
+    /// A source / citation (e.g. URL citation from search-preview models).
+    Source {
+        id: String,
+        source_type: String,
+        url: Option<String>,
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<ProviderMetadata>,
+    },
+
+    /// A raw chunk from the provider (for debugging, when `include_raw_chunks` is set).
+    Raw { raw_value: Value },
+}

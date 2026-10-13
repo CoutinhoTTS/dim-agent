@@ -1,0 +1,497 @@
+//! Prompt sources: the system prompt (`dim/base`, `dim/session`), the
+//! AGENTS.md rules (`dim/instructions/project`, `dim/instructions/user`) and
+//! the runtime environment and date states. Prompt delivers them; each loaded
+//! branch checks the changing ones and has Prompt adopt changes.
+use crate::{
+    context_block,
+    host::{HostError, HostFuture, LoadPrompt, PromptHost},
+    host_platform::{
+        ExecShellRuntime, HostPlatform, Os, OutputEncoding, ShellEdition, ShellStatus,
+    },
+    prompt_registry::{PromptRegistryPlugin, PromptSource, targets},
+    prompt_state::PromptSnapshot,
+};
+use dim_agent_runtime::{
+    AgentBuilder, BranchLifecycle, BranchScope, Capability, ConfigureControl, ConfigureUpdate,
+    InBranch, InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionScope, StateCell,
+    scoped,
+};
+use dim_agent_types::*;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use sha2::{Digest, Sha256};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+pub const BASE: &str = "dim/base";
+pub const PROJECT_INSTRUCTIONS: &str = "dim/instructions/project";
+pub const USER_INSTRUCTIONS: &str = "dim/instructions/user";
+pub const SESSION: &str = "dim/session";
+pub const ENVIRONMENT: &str = "dim/environment/context";
+pub const DATE: &str = "dim/environment/date";
+/// Sources whose content changes while a Session runs, compared by each
+/// loaded branch.
+const CHECKED: [&str; 4] = [PROJECT_INSTRUCTIONS, USER_INSTRUCTIONS, ENVIRONMENT, DATE];
+
+/// Today's date as `YYYY-MM-DD` in the process-local time zone.
+pub type Today = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// How often a loaded branch compares the AGENTS.md files, the runtime
+/// environment and the local date with what it adopted. Polling the wall clock, instead of sleeping
+/// until midnight on the monotonic clock, follows system sleep and clock or
+/// zone changes; polling the files avoids watchers tied to branch lifetimes.
+const DATE_CHECK: Duration = Duration::from_secs(60);
+
+/// Registers PromptSources with the process-local clock.
+pub fn install(builder: &mut AgentBuilder) {
+    install_with_clock(builder, Arc::new(local_today), DATE_CHECK);
+}
+
+/// Registers PromptSources with a replaceable date source, checked every
+/// `every`.
+pub fn install_with_clock(builder: &mut AgentBuilder, today: Today, every: Duration) {
+    for name in SOURCES {
+        builder.session_prompt_source(name);
+    }
+    builder
+        .session_prompt_registry(PromptRegistryPlugin::new)
+        .session_plugin(move |scope| PromptSourcesPlugin::new(scope, today.clone()))
+        .timeline_plugin(move |scope| PromptSourcesBranchPlugin::new(scope, every));
+}
+
+/// Every source this capability provides, in delivery order.
+const SOURCES: [&str; 6] = [
+    BASE,
+    SESSION,
+    PROJECT_INSTRUCTIONS,
+    USER_INSTRUCTIONS,
+    ENVIRONMENT,
+    DATE,
+];
+
+/// The explicit refresh of every source this capability provides.
+pub fn refresh_update() -> ConfigureUpdate {
+    ConfigureUpdate {
+        sources: targets(SOURCES),
+        model: None,
+    }
+}
+
+/// Mirrors TS `formatCurrentDate`.
+pub fn local_today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+pub(crate) fn sha256_version(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    let mut version = String::with_capacity(7 + digest.len() * 2);
+    version.push_str("sha256:");
+    for byte in digest {
+        version.push_str(&format!("{byte:02x}"));
+    }
+    version
+}
+
+// Copied from TS `packages/agent/src/prompt/catalog/locales/en.ts` (`identity`
+// with the `dim` brand, `defaults`). Lines about tools and features absent from
+// the first release (TodoWrite, AskUserQuestion, web tools) are omitted, as is
+// the line treating system-reminder tags as instructions.
+const IDENTITY: &str = "You are DimAgent. You and the user work together in their workspace toward whatever they're trying to get done.";
+const DEFAULTS: &str = "Safety:
+Never introduce code that exposes, logs, or commits secrets, tokens, or credentials.
+Do not weaken existing authentication, authorization, or input validation unless the user explicitly asks.
+Refuse work clearly intended to attack or compromise systems the user does not own. For ambiguous security work, proceed only when there is a clear legitimate purpose.
+
+Tone and communication:
+Think and respond in the same language as the user unless asked otherwise.
+Keep responses concise; add detail only when it materially helps; skip preamble and wrap-up; use emojis only when asked.
+
+Objectivity:
+Prioritize technical accuracy over agreeing with the user. Disagree when warranted; correction beats false agreement.
+Do not fabricate facts, capabilities, results, or whether tests passed. If unsure, say so and verify.
+
+Engineering:
+Follow the user's request and the repository's existing conventions, libraries, and patterns.
+Make the smallest change that fully solves the problem; avoid unrelated refactors.
+Fail fast on invalid input and surface clear errors.
+Run relevant tests or checks after code changes, using repository-documented commands.
+
+Git:
+Stage only files you intentionally changed for the current task, using explicit paths.
+Protect unrelated user changes when editing, resolving conflicts, staging, or committing.
+Avoid `git add -A`, `git add .`, `git stash`, `git reset --hard`, `git checkout .`, `git clean -fd`, `git commit --no-verify`, and force push.
+Do not commit unless the user asks you to.
+
+Working method:
+If the user only needs information or explanation, answer directly.
+
+Ending a turn:
+Finish any independent work that can be done now before ending the turn.
+When the remaining work depends on asynchronous background tasks or agent notifications, end the turn or use the wait tool; do not poll or sleep.
+Otherwise continue until the task is complete, explicit user input is required, or a real external blocker prevents further progress.
+
+Other:
+When referencing specific code, include `file_path:line_number`.
+When mentioning a file, especially a local file, render it as a markdown link (e.g. `[name](path)`) so the client can display it. To link to a specific line, append `#L{line}` to the href (e.g. `[name](path/to/file#L42)`). `:{line}` is also supported as a fallback.
+When linking to a local file outside the current workspace, preserve the complete absolute path or use an exact workspace-relative path including every required `..` segment (for example, `../Documents/file.md`); never shorten it to a workspace-relative-looking path such as `Documents/file.md`.";
+
+const POSIX_GUIDANCE: &str = "Use POSIX shell syntax. Quote paths with single quotes and escape an embedded single quote as '\\''.";
+const FILE_ENCODING_GUIDANCE: &str = "The read, edit, and write tools receive text as Unicode strings and do not pass it through the shell code page. Shell encoding concerns do not change the dedicated file tool selection rules. If read returns text_encoding_required, retry with an explicit read.encoding such as gbk or cp936; do not guess legacy encodings.";
+
+fn shell_guidance(edition: ShellEdition) -> (&'static str, &'static str) {
+    match edition {
+        ShellEdition::Pwsh => (
+            "pwsh",
+            "Use PowerShell 7 syntax: $env:NAME; invoke a quoted executable path with & 'C:\\path with spaces\\app.exe'; && is supported.",
+        ),
+        ShellEdition::WindowsPowershell => (
+            "windows-powershell",
+            "Use Windows PowerShell 5.1 syntax: $env:NAME; invoke a quoted executable path with & 'C:\\path with spaces\\app.exe'; do not use &&.",
+        ),
+        ShellEdition::Cmd => (
+            "cmd",
+            "Use cmd.exe syntax: %NAME%; quote paths with double quotes; escape metacharacters with ^; %NAME% expands even inside quotes; delayed ! expansion is disabled; do not use PowerShell syntax.",
+        ),
+        ShellEdition::GitBash => (
+            "git-bash",
+            "Use Git Bash POSIX syntax. Quote paths with single quotes and escape an embedded single quote as '\\''. Shell commands use Git Bash paths such as /c/path; read, write, and edit keep native Windows paths.",
+        ),
+        ShellEdition::Bash => ("bash", POSIX_GUIDANCE),
+        ShellEdition::Zsh => ("zsh", POSIX_GUIDANCE),
+        ShellEdition::Sh => ("sh", POSIX_GUIDANCE),
+        ShellEdition::Dash => ("dash", POSIX_GUIDANCE),
+        ShellEdition::Ksh => ("ksh", POSIX_GUIDANCE),
+    }
+}
+
+fn xml_tag(name: &str, value: &str) -> String {
+    format!("<{name}>{}</{name}>", context_block::text(value))
+}
+
+/// The runtime environment (TS `renderRuntimeEnvironment`): one tag per
+/// line, values escaped; the date is its own source.
+fn environment(platform: &HostPlatform, cwd: &str) -> String {
+    let os = match platform.os {
+        Os::Macos => "darwin",
+        Os::Linux => "linux",
+        Os::Windows => "win32",
+    };
+    let mut entries = vec![
+        xml_tag("cwd", cwd),
+        xml_tag("home", &platform.home.to_string_lossy()),
+    ];
+    match &platform.shell {
+        ShellStatus::Available(ExecShellRuntime {
+            executable_path,
+            edition,
+            output_encoding,
+            ..
+        }) => {
+            let (edition, guidance) = shell_guidance(*edition);
+            entries.push(xml_tag("shell", &executable_path.to_string_lossy()));
+            entries.push(xml_tag("shell_edition", edition));
+            entries.push(xml_tag("shell_guidance", guidance));
+            entries.push(xml_tag(
+                "shell_output_encoding",
+                match output_encoding {
+                    OutputEncoding::Utf8 => "utf8",
+                    OutputEncoding::Unknown => "unknown",
+                },
+            ));
+            if platform.os == Os::Windows {
+                entries.push(xml_tag("file_encoding_guidance", FILE_ENCODING_GUIDANCE));
+            }
+        }
+        ShellStatus::Unavailable { reason, .. } => {
+            entries.push(xml_tag("shell", &format!("unavailable: {reason}")));
+        }
+    }
+    entries.push(xml_tag("platform", os));
+    if let Some(timezone) = &platform.timezone {
+        entries.push(xml_tag("timezone", timezone));
+    }
+    format!("\n{}\n", entries.join("\n"))
+}
+
+fn read_project_instructions(path: &Path) -> Result<String, HostError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        HostError::failed(format!(
+            "{PROJECT_INSTRUCTIONS}: AGENTS.md not readable: {}",
+            error.kind()
+        ))
+    })?;
+    String::from_utf8(bytes).map_err(|_| {
+        HostError::failed(format!("{PROJECT_INSTRUCTIONS}: AGENTS.md not valid UTF-8"))
+    })
+}
+
+/// The project and user rule bodies, escaped. Mirrors TS `manager.ts`: the nearest
+/// `AGENTS.md` from cwd upwards fails the load when unreadable;
+/// `~/AGENTS.md` is ignored when unreadable or when it is the project file.
+#[derive(PartialEq)]
+struct Instructions {
+    project: Option<String>,
+    user: Option<String>,
+}
+
+fn read_instructions(cwd: &Path, home: &Path) -> Result<Instructions, HostError> {
+    let project_path = cwd
+        .ancestors()
+        .map(|dir| dir.join("AGENTS.md"))
+        .find(|candidate| candidate.exists());
+    let mut project = None;
+    if let Some(path) = &project_path {
+        let content = read_project_instructions(path)?;
+        let content = content.trim();
+        if !content.is_empty() {
+            project = Some(format!(
+                "# Project instructions ({}; applies to this directory and below)\n{}",
+                context_block::text(&path.display().to_string()),
+                context_block::text(content)
+            ));
+        }
+    }
+    let user_path = home.join("AGENTS.md");
+    let same = project_path.as_ref().is_some_and(|project| {
+        matches!(
+            (project.canonicalize(), user_path.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        )
+    });
+    let user = std::fs::read_to_string(&user_path)
+        .ok()
+        .filter(|content| !same && !content.trim().is_empty())
+        .map(|content| {
+            format!(
+                "# User instructions (~/AGENTS.md)\n{}",
+                context_block::text(content.trim())
+            )
+        });
+    Ok(Instructions { project, user })
+}
+
+async fn load_instructions(cwd: &str, home: &Path) -> Result<Instructions, HostError> {
+    let (cwd, home) = (PathBuf::from(cwd), home.to_owned());
+    tokio::task::spawn_blocking(move || read_instructions(&cwd, &home))
+        .await
+        .map_err(|_| HostError::failed("AGENTS.md read task failed"))?
+}
+
+struct Sources {
+    platform: Arc<HostPlatform>,
+    config: Arc<SessionConfig>,
+    today: Today,
+    stopped: CancellationToken,
+}
+
+impl LoadPrompt for Sources {
+    fn load(
+        &self,
+        target: PromptSourceTarget,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Option<PromptEntry>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled("prompt source load cancelled".into()));
+            }
+            if self.stopped.is_cancelled() {
+                return Err(HostError::failed("prompt sources reloading"));
+            }
+            let (body, delivery, order) = match target.source.as_str() {
+                BASE => (
+                    Some(format!("{IDENTITY}\n{DEFAULTS}")),
+                    PromptDelivery::System,
+                    0,
+                ),
+                PROJECT_INSTRUCTIONS | USER_INSTRUCTIONS => {
+                    let instructions =
+                        load_instructions(&self.config.cwd, &self.platform.home).await?;
+                    let body = if target.source == PROJECT_INSTRUCTIONS {
+                        instructions.project
+                    } else {
+                        instructions.user
+                    };
+                    let order = if target.source == PROJECT_INSTRUCTIONS {
+                        100
+                    } else {
+                        110
+                    };
+                    (body, PromptDelivery::Context, order)
+                }
+                ENVIRONMENT => (
+                    Some(environment(&self.platform, &self.config.cwd)),
+                    PromptDelivery::State,
+                    200,
+                ),
+                DATE => (
+                    Some(context_block::text(&(self.today)())),
+                    PromptDelivery::State,
+                    210,
+                ),
+                SESSION => (
+                    (!self.config.system_prompt.trim().is_empty())
+                        .then(|| self.config.system_prompt.clone()),
+                    PromptDelivery::System,
+                    50,
+                ),
+                other => {
+                    return Err(HostError::failed(format!("unknown prompt source: {other}")));
+                }
+            };
+            Ok(body.map(|body| PromptEntry {
+                source: target.source,
+                version: sha256_version(&body),
+                body,
+                scope: target.scope,
+                delivery,
+                order,
+            }))
+        })
+    }
+}
+
+/// Session part: provides each of its sources to the prompt registry by name.
+pub struct PromptSourcesPlugin {
+    scope: SessionScope,
+    today: Today,
+}
+impl PromptSourcesPlugin {
+    pub fn new(scope: &SessionScope, today: Today) -> Self {
+        Self {
+            scope: *scope,
+            today,
+        }
+    }
+}
+impl TypedPlugin for PromptSourcesPlugin {
+    type Deps = (Arc<HostPlatform>, InSession<SessionConfig>);
+    fn name(&self) -> &str {
+        "PromptSources"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (platform, InSession(config)): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let sources: Arc<dyn LoadPrompt> = Arc::new(Sources {
+                platform,
+                config,
+                today: self.today.clone(),
+                stopped: ctx.cancellation_token(),
+            });
+            for name in SOURCES {
+                ctx.provide_as(
+                    self.scope.named_key::<PromptSource>(name),
+                    Arc::new(PromptSource(sources.clone())),
+                )?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for PromptSourcesPlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
+/// Branch part: while the branch is loaded, compares what the checked
+/// sources hold now (AGENTS.md, runtime environment, date) with what Prompt
+/// adopted on this branch, and has Prompt adopt any difference. The first
+/// check runs when the branch becomes Active, then every `every`. What a new
+/// or resumed branch receives first is Prompt's, at `branch/start` and
+/// `branch/resume`.
+pub struct PromptSourcesBranchPlugin {
+    scope: BranchScope,
+    every: Duration,
+}
+impl PromptSourcesBranchPlugin {
+    pub fn new(scope: &BranchScope, every: Duration) -> Self {
+        Self {
+            scope: *scope,
+            every,
+        }
+    }
+}
+impl TypedPlugin for PromptSourcesBranchPlugin {
+    type Deps = (
+        InBranch<BranchLifecycle>,
+        InSession<PromptHost>,
+        InBranch<dyn ConfigureControl>,
+        InBranch<StateCell<PromptSnapshot>>,
+    );
+    fn name(&self) -> &str {
+        "PromptSourcesBranch"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (InBranch(branch), InSession(host), InBranch(configure), InBranch(prompts)): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let (every, lifecycle) = (self.every, ctx.cancellation_token());
+            let tasks = TaskTracker::new();
+            tasks.spawn(async move {
+                // Background work begins once the branch is Active.
+                tokio::select! {
+                    _ = lifecycle.cancelled() => return,
+                    active = branch.activated() => if !active { return },
+                }
+                loop {
+                    let mut changed = Vec::new();
+                    for target in targets(CHECKED) {
+                        let key = (target.source.clone(), target.scope.clone());
+                        let current = tokio::select! {
+                            _ = lifecycle.cancelled() => return,
+                            loaded = host.0.load(target, lifecycle.child_token()) => loaded,
+                        };
+                        match current {
+                            Ok(current) if current.as_ref() != prompts.get().entries.get(&key) => {
+                                changed.push(key.0);
+                            }
+                            Ok(_) => {}
+                            // Retried at the next check.
+                            Err(error) => tracing::warn!(%error, source = key.0, "prompt source was not checked"),
+                        }
+                    }
+                    if !changed.is_empty() {
+                        let update = ConfigureUpdate {
+                            sources: targets(changed.iter().map(String::as_str)),
+                            model: None,
+                        };
+                        tokio::select! {
+                            _ = lifecycle.cancelled() => return,
+                            result = configure.clone().configure(update) => if let Err(error) = result {
+                                tracing::warn!(%error, "changed prompt sources were not adopted");
+                            },
+                        }
+                    }
+                    tokio::select! {
+                        _ = lifecycle.cancelled() => return,
+                        _ = branch.closing() => return,
+                        _ = tokio::time::sleep(every) => {}
+                    }
+                }
+            });
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        tasks.close();
+                        tasks.wait().await;
+                        Ok(())
+                    })
+                }))
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for PromptSourcesBranchPlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}

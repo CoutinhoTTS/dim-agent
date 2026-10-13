@@ -1,0 +1,2779 @@
+use axum::{
+    Json, Router,
+    extract::State,
+    http::HeaderMap,
+    response::sse::{Event, Sse},
+    routing::post,
+};
+use dim_agent_capabilities::{
+    file_storage::FileStoragePlugin,
+    host::{
+        AwsCredentials, BedrockAuth, ModelChunk, ModelConnection, ModelHost,
+        ProviderConnectionResolver,
+    },
+};
+use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
+use dim_agent_types::{Message, ModelId, ModelRequest, Role};
+use dim_app_server::{
+    managed_provider::ManagedProvidersPlugin,
+    model_catalog::ModelEntry,
+    provider::{
+        CredentialUpdate, ModelPreferences, ProviderInput, ProviderPlugin, ProviderService,
+        StaticAuth,
+    },
+    storage::SqliteStoragePlugin,
+};
+use futures_util::{StreamExt, stream};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypedPlugin};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Debug)]
+struct Seen {
+    path: String,
+    authorization: Option<String>,
+    api_key: Option<String>,
+    marker: Option<String>,
+    app_code: Option<String>,
+    session_id: Option<String>,
+    body: Value,
+}
+
+async fn completion(
+    State(seen): State<Arc<Mutex<Vec<Seen>>>>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    seen.lock().unwrap().push(Seen {
+        path: uri.path().into(),
+        authorization: headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        api_key: headers
+            .get("api-key")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        marker: headers
+            .get("x-marker")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        app_code: headers
+            .get("app-code")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        session_id: headers
+            .get("x-opencode-session")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        body: body.clone(),
+    });
+    let frames = if uri.path().ends_with("/responses") {
+        vec![
+            json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":body["model"]}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[]}}),
+            json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+            json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"ok"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}}),
+            json!({"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}),
+        ]
+    } else if uri.path().contains(":streamGenerateContent") {
+        vec![
+            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}}),
+        ]
+    } else if uri.path().ends_with("/messages") {
+        vec![
+            json!({"type":"message_start","message":{"id":"msg-1","type":"message","role":"assistant","model":body["model"],"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}),
+            json!({"type":"message_stop"}),
+        ]
+    } else {
+        vec![
+            json!({"id":"x","object":"chat.completion.chunk","created":0,"model":body["model"],"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}),
+        ]
+    };
+    Sse::new(stream::iter(frames.into_iter().map(|frame| {
+        let event = Event::default().data(frame.to_string());
+        Ok(match frame["type"].as_str() {
+            Some(kind) => event.event(kind),
+            None => event,
+        })
+    })))
+}
+
+struct Capture(Arc<OnceLock<(Arc<ProviderService>, Arc<ProviderConnectionResolver>)>>);
+impl TypedPlugin for Capture {
+    type Deps = (Arc<ProviderService>, Arc<ProviderConnectionResolver>);
+    fn name(&self) -> &str {
+        "test.provider.capture"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        services: Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            self.0
+                .set(services)
+                .map_err(|_| CordisError::PluginFailed("duplicate capture".into()))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for Capture {
+    fn keys(&self) -> KeysOf<Self> {
+        ((), ())
+    }
+}
+
+async fn active(view: &rutis::FiberView) {
+    let mut status = view.watch();
+    while status.borrow().state != FiberState::Active {
+        assert_ne!(
+            status.borrow().state,
+            FiberState::Failed,
+            "{:?}",
+            *status.borrow()
+        );
+        status.changed().await.unwrap();
+    }
+}
+fn model(id: &str, max: u64) -> ModelEntry {
+    serde_json::from_value(json!({
+        "modelId":id, "displayName":id, "status":"active",
+        "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":32000,"maxOutputTokens":max}
+    })).unwrap()
+}
+fn input(
+    id: &str,
+    base: &str,
+    auth: StaticAuth,
+    credential: Option<&str>,
+    marker: &str,
+    max: u64,
+) -> ProviderInput {
+    ProviderInput {
+        provider_id: id.into(),
+        display_name: id.into(),
+        driver_kind: "openai-compatible".into(),
+        base_url: base.into(),
+        auth,
+        network: None,
+        headers: Some(HashMap::from([("x-marker".into(), marker.into())])),
+        credential: credential.map(|value| CredentialUpdate::Set {
+            value: value.into(),
+        }),
+        models: Some(vec![model("same", max)]),
+        enabled: true,
+    }
+}
+fn target(provider: &str) -> ModelId {
+    ModelId {
+        provider_id: provider.into(),
+        model_id: "same".into(),
+    }
+}
+
+#[tokio::test]
+async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies() {
+    use axum::{
+        body::Body,
+        http::{StatusCode, Uri},
+        response::{IntoResponse, Response},
+    };
+    use dim_agent_capabilities::host::ModelNetwork;
+    type Requests = Arc<Mutex<Vec<(Uri, HeaderMap)>>>;
+    async fn endpoint(State(seen): State<Requests>, uri: Uri, headers: HeaderMap) -> Response {
+        seen.lock().unwrap().push((uri.clone(), headers));
+        if uri.path().contains("redirect") {
+            return (
+                StatusCode::TEMPORARY_REDIRECT,
+                [("location", "/v1/chat/completions")],
+            )
+                .into_response();
+        }
+        if uri.path().ends_with("/models") {
+            if uri.path().contains("slow") {
+                return Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from_stream(stream::pending::<
+                        Result<String, std::io::Error>,
+                    >()))
+                    .unwrap();
+            }
+            return Json(
+                json!({"data":[{"id":"same","context_window":32000,"max_output_tokens":47}]}),
+            )
+            .into_response();
+        }
+        let first = Event::default().data(json!({"id":"network","choices":[{"index":0,"delta":{"content":"network reply"},"finish_reason":null}]}).to_string());
+        let last = Event::default().data(
+            json!({"id":"network","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})
+                .to_string(),
+        );
+        let events = stream::iter([Ok::<_, std::convert::Infallible>(first)]);
+        if uri.path().contains("slow") {
+            Sse::new(events.chain(stream::pending())).into_response()
+        } else {
+            Sse::new(events.chain(stream::iter([Ok(last)]))).into_response()
+        }
+    }
+    let direct: Requests = Arc::new(Mutex::new(Vec::new()));
+    let proxied: Requests = Arc::new(Mutex::new(Vec::new()));
+    let mut servers = Vec::new();
+    let mut addresses = Vec::new();
+    for seen in [&direct, &proxied] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        addresses.push(listener.local_addr().unwrap());
+        let app = Router::new().fallback(endpoint).with_state(seen.clone());
+        servers.push(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap()
+        }));
+    }
+    let base = format!("http://{}/v1", addresses[0]);
+    let proxy = format!("http://user:proxy-secret@{}", addresses[1]);
+    let home = std::env::temp_dir().join(format!("provider-network-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let cancel = CancellationToken::new();
+    for restart in [false, true] {
+        let root = Ctx::root().unwrap();
+        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            home.clone(),
+        ])));
+        root.plugin(capability_plugin(SqliteStoragePlugin::new(
+            home.join("native.sqlite"),
+        )));
+        root.plugin(capability_plugin(ManagedProvidersPlugin));
+        root.plugin(capability_plugin(
+            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+        ));
+        root.plugin(capability_plugin(
+            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+        ));
+        active(&root.plugin(dim_agent_runtime::capability_plugin(
+            ProviderPlugin::default(),
+        )))
+        .await;
+        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+        let provider = root.get::<ProviderService>().unwrap();
+        let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        let mut config = input(
+            "proxy",
+            &base,
+            StaticAuth::Bearer,
+            Some("model-secret"),
+            "network",
+            47,
+        );
+        if !restart {
+            config.network = Some(ModelNetwork {
+                proxy: Some(proxy.clone()),
+                timeout_ms: Some(3000),
+            });
+            let saved = provider
+                .save_static(config.clone(), None, &cancel)
+                .await
+                .unwrap();
+            assert!(saved.proxy_configured);
+            assert_eq!(saved.timeout_ms, Some(3000));
+            let mut other = config.clone();
+            other.provider_id = "direct".into();
+            other.network = None;
+            provider.save_static(other, None, &cancel).await.unwrap();
+            config.network = None;
+            let kept = provider
+                .save_static(config.clone(), Some(saved.version), &cancel)
+                .await
+                .unwrap();
+            assert!(kept.proxy_configured);
+            for network in [
+                json!({"proxy":"socks5://localhost:1080"}),
+                json!({"proxy":"https://host/path"}),
+                json!({"proxy":"https://host?secret=value"}),
+                json!({"timeoutMs":0}),
+                json!({"timeoutMs":9_007_199_254_740_992u64}),
+            ] {
+                let mut invalid = config.clone();
+                invalid.network = Some(serde_json::from_value(network).unwrap());
+                assert!(
+                    provider
+                        .save_static(invalid, Some(kept.version), &cancel)
+                        .await
+                        .is_err()
+                );
+            }
+        }
+        let listing = provider.list(&cancel).await.unwrap();
+        let summary = listing
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "proxy")
+            .unwrap();
+        assert!(summary.proxy_configured);
+        assert!(
+            !serde_json::to_string(&listing)
+                .unwrap()
+                .contains("proxy-secret")
+        );
+        let mut version = summary.version;
+        for id in ["proxy", "direct"] {
+            let selection = provider
+                .configuration(Some(target(id)), None, ModelPreferences::default(), &cancel)
+                .await
+                .unwrap();
+            let request = Arc::new(ModelRequest {
+                capability_snapshot: selection.capability_snapshot,
+                config: selection.config,
+                ..ModelRequest::new(id, "same", vec![Message::text(Role::User, "hello")])
+            });
+            let connection = resolver
+                .0
+                .resolve(request.clone(), cancel.clone())
+                .await
+                .unwrap();
+            let mut output = host
+                .0
+                .invoke(request, connection.connection, cancel.clone())
+                .await
+                .unwrap();
+            let mut text = String::new();
+            while let Some(chunk) = output.next().await {
+                if let ModelChunk::Text(value) = chunk.unwrap() {
+                    text.push_str(&value);
+                }
+            }
+            assert_eq!(text, "network reply");
+        }
+        assert_eq!(direct.lock().unwrap().len(), if restart { 2 } else { 1 });
+        assert_eq!(proxied.lock().unwrap().len(), if restart { 3 } else { 1 });
+        let refreshed = provider.refresh_for("proxy".into(), &cancel).await.unwrap();
+        assert_eq!(refreshed.version, version + 1);
+        version = refreshed.version;
+        {
+            let seen = proxied.lock().unwrap();
+            for (uri, headers) in seen.iter() {
+                assert_eq!(uri.authority().unwrap().as_str(), addresses[0].to_string());
+                assert_eq!(headers["authorization"], "Bearer model-secret");
+                assert_eq!(
+                    headers["proxy-authorization"],
+                    "Basic dXNlcjpwcm94eS1zZWNyZXQ="
+                );
+            }
+        }
+        if restart {
+            // A failed explicit proxy must not silently use a reachable origin.
+            let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dead = format!("http://user:private-proxy@{}", unused.local_addr().unwrap());
+            drop(unused);
+            config.network = Some(ModelNetwork {
+                proxy: Some(dead),
+                timeout_ms: Some(500),
+            });
+            version = provider
+                .save_static(config.clone(), Some(version), &cancel)
+                .await
+                .unwrap()
+                .version;
+            let error = provider
+                .refresh_for("proxy".into(), &cancel)
+                .await
+                .err()
+                .unwrap();
+            assert!(!error.to_string().contains("private-proxy"));
+            assert_eq!(direct.lock().unwrap().len(), 2);
+            // Clearing the override restores direct/default transport.
+            config.network = Some(ModelNetwork::default());
+            provider
+                .save_static(config.clone(), Some(version), &cancel)
+                .await
+                .unwrap();
+            version = provider
+                .refresh_for("proxy".into(), &cancel)
+                .await
+                .unwrap()
+                .version;
+            assert_eq!(direct.lock().unwrap().len(), 3);
+            config.base_url = format!("http://{}/slow/v1", addresses[0]);
+            config.network = Some(ModelNetwork {
+                proxy: None,
+                timeout_ms: Some(500),
+            });
+            version = provider
+                .save_static(config.clone(), Some(version), &cancel)
+                .await
+                .unwrap()
+                .version;
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    provider.refresh_for("proxy".into(), &cancel)
+                )
+                .await
+                .unwrap()
+                .is_err()
+            );
+            assert_eq!(
+                provider
+                    .catalog_for("proxy".into(), &cancel)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .version,
+                version
+            );
+            let selection = provider
+                .configuration(
+                    Some(target("proxy")),
+                    None,
+                    ModelPreferences::default(),
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let request = Arc::new(ModelRequest {
+                capability_snapshot: selection.capability_snapshot,
+                ..ModelRequest::new("proxy", "same", vec![Message::text(Role::User, "hello")])
+            });
+            let connection = resolver
+                .0
+                .resolve(request.clone(), cancel.clone())
+                .await
+                .unwrap();
+            let mut output = host
+                .0
+                .invoke(request.clone(), connection.connection, cancel.clone())
+                .await
+                .unwrap();
+            let (mut text, mut failed, mut stopped) = (String::new(), false, false);
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(chunk) = output.next().await {
+                    match chunk {
+                        Ok(ModelChunk::Text(value)) => text.push_str(&value),
+                        Ok(ModelChunk::MessageStop { .. }) => stopped = true,
+                        Err(_) => failed = true,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(text, "network reply");
+            assert!(failed && !stopped);
+            config.base_url = format!("http://{}/redirect/v1", addresses[0]);
+            provider
+                .save_static(config, Some(version), &cancel)
+                .await
+                .unwrap();
+            let before = direct.lock().unwrap().len();
+            let connection = resolver
+                .0
+                .resolve(request.clone(), cancel.clone())
+                .await
+                .unwrap();
+            assert!(
+                host.0
+                    .invoke(request, connection.connection, cancel.clone())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(direct.lock().unwrap().len(), before + 1);
+        }
+        root.shutdown().await.unwrap();
+    }
+    for server in servers {
+        server.abort();
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
+    use dim_agent_capabilities::host::{HostError, HostErrorKind, HostFuture};
+    use dim_app_server::provider::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
+    use tokio::sync::{mpsc, oneshot};
+    type Lookup = (
+        String,
+        String,
+        oneshot::Sender<Result<ProviderSecret, HostError>>,
+    );
+    #[derive(Clone)]
+    struct Secrets(mpsc::Sender<Lookup>);
+    impl ResolveProviderSecret for Secrets {
+        fn resolve(
+            &self,
+            id: String,
+            reference: String,
+            _: CancellationToken,
+        ) -> HostFuture<'_, ProviderSecret> {
+            Box::pin(async move {
+                let (reply, response) = oneshot::channel();
+                self.0
+                    .send((id, reference, reply))
+                    .await
+                    .map_err(|_| HostError::failed("fixture closed"))?;
+                response
+                    .await
+                    .map_err(|_| HostError::failed("fixture closed"))?
+            })
+        }
+    }
+    impl TypedPlugin for Secrets {
+        type Deps = ();
+        fn name(&self) -> &str {
+            "test.secrets"
+        }
+        fn apply<'a>(
+            &'a self,
+            ctx: &'a Ctx,
+            (): Self::Deps,
+        ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+            Box::pin(async move {
+                ctx.provide(ProviderSecretHost(Arc::new(self.clone())))?;
+                Ok(Effect::Done)
+            })
+        }
+    }
+    impl Capability for Secrets {
+        fn keys(&self) -> KeysOf<Self> {}
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let catalog_auth = Arc::new(Mutex::new(Vec::new()));
+    let recorded = catalog_auth.clone();
+    let app = Router::new().route("/v1/chat/completions", post(completion))
+        .route("/v1/models", axum::routing::get(move |headers: HeaderMap| {
+            recorded.lock().unwrap().push(headers["authorization"].to_str().unwrap().to_owned());
+            async { Json(json!({"data":[{"id":"same", "context_window":32000,"max_output_tokens":43}]})) }
+        })).with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-secrets-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
+    )));
+    root.plugin(capability_plugin(ManagedProvidersPlugin));
+    root.plugin(capability_plugin(
+        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+    ));
+    root.plugin(capability_plugin(
+        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+    ));
+    let plain = root.plugin(dim_agent_runtime::capability_plugin(
+        ProviderPlugin::default(),
+    ));
+    active(&plain).await;
+    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let mut config = input("external", &base, StaticAuth::Bearer, None, "secrets", 43);
+    config.credential = Some(CredentialUpdate::SetRef {
+        reference: "opaque-account-key".into(),
+    });
+    let mut invalid = config.clone();
+    invalid.auth = StaticAuth::ApiKey {
+        header_name: "x-key".into(),
+        prefix: "bad\r\nprefix".into(),
+    };
+    assert!(provider.save_static(invalid, None, &cancel).await.is_err());
+    let summary = provider
+        .save_static(config.clone(), None, &cancel)
+        .await
+        .unwrap();
+    assert!(summary.credential_configured);
+    assert!(
+        !serde_json::to_string(&summary)
+            .unwrap()
+            .contains("opaque-account-key")
+    );
+    assert!(matches!(
+        provider.refresh_for("external".into(), &cancel).await,
+        Err(HostError::Failed {
+            kind: HostErrorKind::Unsupported,
+            ..
+        })
+    ));
+    let mut anonymous = config.clone();
+    anonymous.provider_id = "anonymous".into();
+    anonymous.auth = StaticAuth::Anonymous;
+    provider
+        .save_static(anonymous, None, &cancel)
+        .await
+        .unwrap();
+    let anonymous = provider
+        .configuration(
+            Some(target("anonymous")),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let anonymous = Arc::new(ModelRequest {
+        capability_snapshot: anonymous.capability_snapshot,
+        ..ModelRequest::new("anonymous", "same", vec![])
+    });
+    let anonymous = root
+        .get::<ProviderConnectionResolver>()
+        .unwrap()
+        .0
+        .resolve(anonymous, cancel.clone())
+        .await
+        .unwrap();
+    assert!(
+        matches!(anonymous.connection, ModelConnection::Http(connection) if connection.bearer.is_none())
+    );
+    let selection = provider
+        .configuration(
+            Some(target("external")),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let request = Arc::new(ModelRequest {
+        capability_snapshot: selection.capability_snapshot,
+        config: selection.config,
+        ..ModelRequest::new("external", "same", vec![Message::text(Role::User, "hello")])
+    });
+    assert!(matches!(
+        root.get::<ProviderConnectionResolver>()
+            .unwrap()
+            .0
+            .resolve(request.clone(), cancel.clone())
+            .await,
+        Err(HostError::Failed {
+            kind: HostErrorKind::Unsupported,
+            ..
+        })
+    ));
+    plain.dispose().await.unwrap();
+
+    let view = root.plugin(dim_agent_runtime::capability_plugin(
+        ProviderPlugin::with_secret_host(),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), active(&view))
+            .await
+            .is_err()
+    );
+    assert!(root.get::<ProviderService>().is_none());
+    let (send, mut lookups) = mpsc::channel::<Lookup>(8);
+    let secrets = root.plugin(capability_plugin(Secrets(send)));
+    active(&secrets).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let spawn = |cancel: CancellationToken| {
+        let resolver = resolver.clone();
+        let request = request.clone();
+        tokio::spawn(async move { resolver.0.resolve(request, cancel).await })
+    };
+    for token in ["resolved-first", "resolved-rotated"] {
+        let task = spawn(cancel.clone());
+        let (id, reference, reply) = lookups.recv().await.unwrap();
+        assert_eq!(id, "external");
+        assert_eq!(reference, "opaque-account-key");
+        assert!(reply.send(Ok(ProviderSecret::Token(token.into()))).is_ok());
+        let resolved = task.await.unwrap().unwrap();
+        assert!(resolved.recovery.is_none());
+        let mut output = host
+            .0
+            .invoke(request.clone(), resolved.connection, cancel.clone())
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(chunk) = output.next().await {
+            if let ModelChunk::Text(delta) = chunk.unwrap() {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, "ok");
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .authorization
+                .as_deref(),
+            Some(format!("Bearer {token}").as_str())
+        );
+    }
+    let owner = provider.clone();
+    let refresh = tokio::spawn(async move {
+        owner
+            .refresh_for("external".into(), &CancellationToken::new())
+            .await
+    });
+    let (_, _, reply) = lookups.recv().await.unwrap();
+    assert!(
+        reply
+            .send(Ok(ProviderSecret::Token("catalog-resolved".into())))
+            .is_ok()
+    );
+    assert_eq!(refresh.await.unwrap().unwrap().version, 2);
+    assert_eq!(*catalog_auth.lock().unwrap(), ["Bearer catalog-resolved"]);
+    let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let record: String = db
+        .query_row(
+            "SELECT record FROM providers WHERE provider_id='external'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&record).unwrap()["credential"],
+        json!({"secretRef":"opaque-account-key"})
+    );
+    assert!(!record.contains("resolved"));
+    drop(db);
+
+    for result in [
+        Ok(ProviderSecret::Token("".into())),
+        Ok(ProviderSecret::Token("injected\r\nsecret".into())),
+        Ok(ProviderSecret::Aws(AwsCredentials {
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
+            session_token: None,
+        })),
+        Err(HostError::failed("sensitive-backend-secret")),
+    ] {
+        let task = spawn(cancel.clone());
+        let (_, _, reply) = lookups.recv().await.unwrap();
+        assert!(reply.send(result).is_ok());
+        let error = task.await.unwrap().err().unwrap().to_string();
+        assert!(!error.contains("sensitive-backend-secret"));
+        assert!(!error.contains("injected"));
+    }
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    let stopped = CancellationToken::new();
+    let task = spawn(stopped.clone());
+    let (_, _, reply) = lookups.recv().await.unwrap();
+    stopped.cancel();
+    assert!(matches!(task.await.unwrap(), Err(HostError::Cancelled(_))));
+    assert!(reply.is_closed());
+    let task = spawn(cancel.clone());
+    let (_, _, reply) = lookups.recv().await.unwrap();
+    // Dependency removal must unload Provider and settle its old handles.
+    tokio::time::timeout(std::time::Duration::from_secs(5), secrets.dispose())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(HostError::Failed {
+            kind: HostErrorKind::OwnerClosed,
+            ..
+        })
+    ));
+    assert!(reply.is_closed());
+    assert!(provider.list(&cancel).await.is_err());
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_results() {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, HeaderMap, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(8);
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |uri: Uri, headers: HeaderMap| {
+            let send = send.clone();
+            async move {
+                let (reply, response) = oneshot::channel();
+                send.send((uri, headers, reply)).await.unwrap();
+                response
+                    .await
+                    .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-refresh-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
+    )));
+    root.plugin(capability_plugin(ManagedProvidersPlugin));
+    root.plugin(capability_plugin(
+        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+    ));
+    root.plugin(capability_plugin(
+        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+    ));
+    let view = root.plugin(dim_agent_runtime::capability_plugin(
+        ProviderPlugin::default(),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let mut config = input(
+        "remote",
+        &format!("{base}/tenant/v1beta"),
+        StaticAuth::Bearer,
+        Some("catalog-key"),
+        "refresh",
+        37,
+    );
+    config.driver_kind = "new-api-router".into();
+    provider
+        .save_static(config.clone(), None, &cancel)
+        .await
+        .unwrap();
+    let edited = provider
+        .update_model_config(
+            "remote".into(),
+            1,
+            "same".into(),
+            serde_json::from_value(json!({"displayName":"My model","maxOutputTokens":91})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let disabled = provider
+        .set_enabled_models("remote".into(), edited.version, vec![], &cancel)
+        .await
+        .unwrap();
+    let spawn = |id: &str, cancel: CancellationToken| {
+        let provider = provider.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move { provider.refresh_for(id, &cancel).await })
+    };
+    let refresh = spawn("remote", cancel.clone());
+    let (uri, headers, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/tenant/v1/models");
+    assert_eq!(headers["authorization"], "Bearer catalog-key");
+    assert_eq!(headers["x-marker"], "refresh");
+    reply.send((StatusCode::OK, Json(json!({"data":[
+        {"id":"same","context_window":65001,"max_output_tokens":407,"endpoint_type":"anthropic"},
+        {"id":"other","context_window":83003,"max_output_tokens":509,"endpoint_type":"openai-response"}
+    ]})))).unwrap();
+    let result = refresh.await.unwrap().unwrap();
+    assert_eq!(result.version, disabled.version + 1);
+    assert_eq!(result.disabled_model_ids, ["same"]);
+    assert_eq!(result.models[0].name, "My model");
+    assert_eq!(result.models[0].config.max_tokens, Some(91.0));
+    assert_eq!(result.models[1].capabilities.context_window, 83003);
+    assert_eq!(result.models[1].config.max_tokens, Some(509.0));
+    let selection = provider
+        .configuration(
+            Some(ModelId {
+                provider_id: "remote".into(),
+                model_id: "other".into(),
+            }),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+    let resolved = resolver
+        .0
+        .resolve(
+            Arc::new(ModelRequest {
+                capability_snapshot: selection.capability_snapshot,
+                ..ModelRequest::new("remote", "other", vec![])
+            }),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+    let ModelConnection::Http(connection) = resolved.connection else {
+        panic!("HTTP connection expected")
+    };
+    assert_eq!(
+        connection.protocol,
+        dim_agent_capabilities::host::ModelProtocol::OpenaiResponses
+    );
+
+    // A malformed or rejected refresh cannot erase the last usable catalog.
+    for (status, body) in [
+        (
+            StatusCode::UNAUTHORIZED,
+            json!({"error":"secret must not be echoed"}),
+        ),
+        (StatusCode::OK, json!({"unexpected":[]})),
+        (StatusCode::OK, json!({"data":[{}]})),
+        (
+            StatusCode::OK,
+            json!({"data":[{"id":"bad","endpoint_type":"invalid"}]}),
+        ),
+        (
+            StatusCode::OK,
+            json!({"data":[{"id":"bad","context_window":0}]}),
+        ),
+        (
+            StatusCode::OK,
+            json!({"data":[{"id":"bad","limit":{"output":1.5}}]}),
+        ),
+    ] {
+        let refresh = spawn("remote", cancel.clone());
+        requests
+            .recv()
+            .await
+            .unwrap()
+            .2
+            .send((status, Json(body)))
+            .unwrap();
+        assert!(refresh.await.unwrap().is_err());
+        assert_eq!(
+            provider
+                .catalog_for("remote".into(), &cancel)
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            result.version
+        );
+    }
+    let refresh = spawn("remote", cancel.clone());
+    let (_, _, reply) = requests.recv().await.unwrap();
+    config.models = None;
+    config.credential = None;
+    config.display_name = "Changed while refreshing".into();
+    let saved = provider
+        .save_static(config, Some(result.version), &cancel)
+        .await
+        .unwrap();
+    reply
+        .send((StatusCode::OK, Json(json!({"data":[]}))))
+        .unwrap();
+    assert!(
+        refresh
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("version conflict")
+    );
+    let cancelled = CancellationToken::new();
+    let refresh = spawn("remote", cancelled.clone());
+    let (_, _, reply) = requests.recv().await.unwrap();
+    cancelled.cancel();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), refresh)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    drop(reply);
+    assert_eq!(
+        provider
+            .catalog_for("remote".into(), &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        saved.version
+    );
+
+    let refresh = spawn("remote", cancel.clone());
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .2
+        .send((StatusCode::OK, Json(json!({"data":[]}))))
+        .unwrap();
+    let empty = refresh.await.unwrap().unwrap();
+    assert!(empty.models.is_empty());
+    assert_eq!(empty.disabled_model_ids, ["same"]);
+    assert!(
+        provider
+            .list(&cancel)
+            .await
+            .unwrap()
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "remote")
+            .unwrap()
+            .enabled
+    );
+
+    for (id, driver, header, prefix, path, first, next, second) in [
+        (
+            "paged-google",
+            "gemini",
+            "x-goog-api-key",
+            "/tenant/v1beta/",
+            "/tenant/v1beta/models",
+            json!({"models":[{"name":"models/first","inputTokenLimit":17003,"outputTokenLimit":103}],"nextPageToken":"a+b"}),
+            "pageToken=a%2Bb",
+            json!({"models":[{"name":"models/last","inputTokenLimit":19009,"outputTokenLimit":109,"supportedGenerationMethods":["embedContent"]}]}),
+        ),
+        (
+            "paged-anthropic",
+            "anthropic",
+            "x-api-key",
+            "/tenant/v1/",
+            "/tenant/v1/models",
+            json!({"data":[{"id":"first","type":"model"}],"has_more":true,"last_id":"a+b"}),
+            "after_id=a%2Bb",
+            json!({"data":[{"id":"last"}],"has_more":false}),
+        ),
+        (
+            "paged-anthropic-unversioned",
+            "anthropic",
+            "x-api-key",
+            "/tenant",
+            "/tenant/v1/models",
+            json!({"data":[{"id":"first","type":"model"}],"has_more":true,"last_id":"a+b"}),
+            "after_id=a%2Bb",
+            json!({"data":[{"id":"last"}],"has_more":false}),
+        ),
+    ] {
+        let mut config = input(
+            id,
+            &format!("{base}{prefix}"),
+            StaticAuth::ApiKey {
+                header_name: header.into(),
+                prefix: String::new(),
+            },
+            Some("page-key"),
+            "pages",
+            41,
+        );
+        config.driver_kind = driver.into();
+        config.models = Some(Vec::new());
+        provider.save_static(config, None, &cancel).await.unwrap();
+        assert!(
+            provider
+                .configuration(
+                    Some(ModelId {
+                        provider_id: id.into(),
+                        model_id: "first".into()
+                    }),
+                    None,
+                    ModelPreferences::default(),
+                    &cancel
+                )
+                .await
+                .is_err()
+        );
+        let refresh = spawn(id, cancel.clone());
+        let (uri, headers, reply) = requests.recv().await.unwrap();
+        assert_eq!(uri.path(), path);
+        assert_eq!(uri.query(), None);
+        assert_eq!(headers[header], "page-key");
+        if driver == "anthropic" {
+            assert_eq!(headers["anthropic-version"], "2023-06-01");
+        }
+        reply.send((StatusCode::OK, Json(first.clone()))).unwrap();
+        let (uri, _, reply) = requests.recv().await.unwrap();
+        assert_eq!(uri.path(), path);
+        assert_eq!(uri.query(), Some(next));
+        reply.send((StatusCode::OK, Json(second))).unwrap();
+        let page = refresh.await.unwrap().unwrap();
+        assert_eq!(
+            page.models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "last"]
+        );
+        if driver == "gemini" {
+            assert_eq!(page.models[1].config.max_tokens, Some(109.0));
+            assert!(page.models[1].unavailable_reason.is_some());
+        } else {
+            assert!(page.models.iter().all(|m| m.unavailable_reason.is_none()));
+        }
+        let refresh = spawn(id, cancel.clone());
+        requests
+            .recv()
+            .await
+            .unwrap()
+            .2
+            .send((StatusCode::OK, Json(first.clone())))
+            .unwrap();
+        requests
+            .recv()
+            .await
+            .unwrap()
+            .2
+            .send((StatusCode::OK, Json(first)))
+            .unwrap();
+        assert!(
+            refresh
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("pagination")
+        );
+        assert_eq!(
+            provider
+                .catalog_for(id.into(), &cancel)
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            page.version
+        );
+    }
+    let aba = input(
+        "recreated",
+        &base,
+        StaticAuth::Bearer,
+        Some("old-key"),
+        "old",
+        23,
+    );
+    provider
+        .save_static(aba.clone(), None, &cancel)
+        .await
+        .unwrap();
+    let refresh = spawn("recreated", cancel.clone());
+    let (_, _, reply) = requests.recv().await.unwrap();
+    provider
+        .delete_static("recreated".into(), 1, &cancel)
+        .await
+        .unwrap();
+    let mut replacement = aba;
+    replacement.credential = Some(CredentialUpdate::Set {
+        value: "new-key".into(),
+    });
+    replacement.models = Some(vec![model("replacement", 71)]);
+    provider
+        .save_static(replacement, None, &cancel)
+        .await
+        .unwrap();
+    reply
+        .send((StatusCode::OK, Json(json!({"data":[]}))))
+        .unwrap();
+    assert!(
+        refresh.await.unwrap().is_err(),
+        "A recreated connection must reject the old refresh"
+    );
+    assert_eq!(
+        provider
+            .catalog_for("recreated".into(), &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .models[0]
+            .id,
+        "replacement"
+    );
+    let builtin = provider
+        .list(&cancel)
+        .await
+        .unwrap()
+        .providers
+        .into_iter()
+        .find(|p| p.provider_id == "openai")
+        .unwrap();
+    provider
+        .save_static(
+            ProviderInput {
+                provider_id: builtin.provider_id,
+                display_name: builtin.display_name,
+                driver_kind: builtin.driver_kind,
+                auth: builtin.auth,
+                base_url: format!("{base}/v1"),
+                network: None,
+                headers: None,
+                credential: Some(CredentialUpdate::Set {
+                    value: "builtin-key".into(),
+                }),
+                models: None,
+                enabled: true,
+            },
+            Some(builtin.version),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let refresh = spawn("openai", cancel.clone());
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .2
+        .send((StatusCode::OK, Json(json!({"data":[]}))))
+        .unwrap();
+    let builtin_empty = refresh.await.unwrap().unwrap();
+    assert!(builtin_empty.models.is_empty());
+    assert!(
+        provider
+            .refresh_for("openai-codex".into(), &cancel)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("does not support")
+    );
+    root.shutdown().await.unwrap();
+    {
+        // Simulate a new bundled definition without changing the user record.
+        let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        db.execute("UPDATE providers SET record=json_set(record,'$.definitionFingerprint','previous-bundle') WHERE provider_id='openai'", []).unwrap();
+    }
+    let root = Ctx::root().unwrap();
+    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
+    )));
+    root.plugin(capability_plugin(ManagedProvidersPlugin));
+    root.plugin(capability_plugin(
+        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+    ));
+    root.plugin(capability_plugin(
+        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        active(&root.plugin(dim_agent_runtime::capability_plugin(
+            ProviderPlugin::default(),
+        ))),
+    )
+    .await
+    .unwrap();
+    let reopened = root.get::<ProviderService>().unwrap();
+    let upgraded = reopened
+        .catalog_for("openai".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(upgraded.models.is_empty());
+    assert_eq!(upgraded.version, builtin_empty.version + 1);
+    assert!(
+        reopened
+            .list(&cancel)
+            .await
+            .unwrap()
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "openai")
+            .unwrap()
+            .enabled
+    );
+    assert!(
+        reopened
+            .catalog_for("remote".into(), &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .models
+            .is_empty()
+    );
+    assert!(
+        provider
+            .refresh_for("remote".into(), &cancel)
+            .await
+            .is_err()
+    );
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{*path}", post(completion))
+        .with_state(seen.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/vendor-route-flow")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&home).unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
+    )));
+    root.plugin(capability_plugin(ManagedProvidersPlugin));
+    root.plugin(capability_plugin(
+        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+    ));
+    root.plugin(capability_plugin(
+        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+    ));
+    active(&root.plugin(dim_agent_runtime::capability_plugin(
+        ProviderPlugin::default(),
+    )))
+    .await;
+    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+    let provider = root.get::<ProviderService>().unwrap();
+    let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let cancel = CancellationToken::new();
+    for (index, (driver, model_id, suffix, max_field, app_code)) in [
+        (
+            "custom",
+            "plain",
+            "/v1/chat/completions",
+            "max_tokens",
+            None,
+        ),
+        (
+            "deepseek",
+            "deepseek-v4-pro",
+            "/v1/chat/completions",
+            "max_tokens",
+            None,
+        ),
+        (
+            "moonshotai",
+            "kimi-k2.5",
+            "/v1/chat/completions",
+            "max_completion_tokens",
+            None,
+        ),
+        (
+            "aihubmix",
+            "plain",
+            "/v1/chat/completions",
+            "max_tokens",
+            Some("WHVL9885"),
+        ),
+        (
+            "aihubmix",
+            "anthropic/claude-test",
+            "/v1/responses",
+            "max_output_tokens",
+            Some("WHVL9885"),
+        ),
+        (
+            "aihubmix-responses",
+            "plain",
+            "/v1/responses",
+            "max_output_tokens",
+            Some("custom-code"),
+        ),
+        (
+            "aihubmix",
+            "custom-header",
+            "/v1/chat/completions",
+            "max_tokens",
+            Some("fixture-secret"),
+        ),
+        (
+            "zenmux",
+            "plain",
+            "/v1/chat/completions",
+            "max_tokens",
+            None,
+        ),
+        (
+            "zenmux",
+            "anthropic/claude-test",
+            "/anthropic/v1/messages",
+            "max_tokens",
+            None,
+        ),
+        (
+            "azure-openai",
+            "deployment-alias",
+            "/openai/v1/responses",
+            "max_output_tokens",
+            None,
+        ),
+        (
+            "xai",
+            "grok-alias",
+            "/v1/chat/completions",
+            "max_completion_tokens",
+            None,
+        ),
+        (
+            "xai-responses",
+            "grok-alias",
+            "/v1/responses",
+            "max_output_tokens",
+            None,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("route-{index}");
+        let base = format!("http://{address}/{id}/v1/");
+        let mut input = input(
+            &id,
+            &base,
+            StaticAuth::Bearer,
+            Some("fixture-secret"),
+            "kept",
+            1357,
+        );
+        input.driver_kind = driver.into();
+        let azure = driver == "azure-openai";
+        if azure {
+            input.base_url = "https://fixture.services.ai.azure.com/openai/".into();
+            input.auth = StaticAuth::ApiKey {
+                header_name: "api-key".into(),
+                prefix: String::new(),
+            };
+        }
+        let mut entry = model(model_id, 1357);
+        entry.capabilities.reasoning = true;
+        entry.metadata = Some(
+            serde_json::from_value(json!({
+                "reasoning":{"supported":true,"effortOptions":["high"]},
+                "serviceTier":{"supported":true,"options":["priority"]}
+            }))
+            .unwrap(),
+        );
+        input.models = Some(vec![entry]);
+        if app_code == Some("custom-code") {
+            input
+                .headers
+                .as_mut()
+                .unwrap()
+                .insert("app-code".into(), "custom-code".into());
+        }
+        if model_id == "custom-header" {
+            input.auth = StaticAuth::CustomHeader {
+                header_name: "app-code".into(),
+            };
+            input
+                .headers
+                .as_mut()
+                .unwrap()
+                .insert("Authorization".into(), "Bearer fixture-secret".into());
+        }
+        provider.save_static(input, None, &cancel).await.unwrap();
+        let target = ModelId {
+            provider_id: id.clone(),
+            model_id: model_id.into(),
+        };
+        let anthropic = suffix.ends_with("/messages");
+        let xai = matches!(driver, "xai" | "xai-responses");
+        if xai {
+            assert!(
+                provider
+                    .configuration(
+                        Some(target.clone()),
+                        None,
+                        ModelPreferences {
+                            service_tier: Some("priority".into()),
+                            ..Default::default()
+                        },
+                        &cancel
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        let selection = provider
+            .configuration(
+                Some(target),
+                None,
+                ModelPreferences {
+                    reasoning_effort: Some("high".into()),
+                    service_tier: (!anthropic && !xai).then(|| "priority".into()),
+                },
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let mut request =
+            ModelRequest::new(&id, model_id, vec![Message::text(Role::User, "hello")]);
+        request.capability_snapshot = selection.capability_snapshot;
+        request.config = selection.config;
+        let request = Arc::new(request);
+        let mut resolved = resolver
+            .0
+            .resolve(request.clone(), cancel.clone())
+            .await
+            .unwrap();
+        let ModelConnection::Http(connection) = &mut resolved.connection else {
+            panic!("HTTP expected")
+        };
+        if azure {
+            assert_eq!(
+                connection.base_url,
+                "https://fixture.services.ai.azure.com/openai/v1"
+            );
+            // Exercise the real adapter locally after production endpoint admission.
+            connection.base_url = format!("http://{address}/{id}/openai/v1");
+        }
+        assert_eq!(
+            connection
+                .headers
+                .keys()
+                .filter(|k| k.eq_ignore_ascii_case("app-code"))
+                .count(),
+            usize::from(app_code.is_some())
+        );
+        let mut output = host
+            .0
+            .invoke(request, resolved.connection, cancel.clone())
+            .await
+            .unwrap();
+        let mut text = String::new();
+        let mut stopped = false;
+        while let Some(chunk) = output.next().await {
+            match chunk.unwrap() {
+                ModelChunk::Text(value) => text.push_str(&value),
+                ModelChunk::MessageStop { .. } => stopped = true,
+                _ => {}
+            }
+        }
+        assert_eq!(text, "ok", "{driver}/{model_id}");
+        assert!(stopped);
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), index + 1);
+        let sent = requests.last().unwrap();
+        assert_eq!(sent.path, format!("/{id}{suffix}"));
+        assert_eq!(
+            sent.authorization.as_deref(),
+            (!azure).then_some("Bearer fixture-secret")
+        );
+        assert_eq!(sent.api_key.as_deref(), azure.then_some("fixture-secret"));
+        assert_eq!(sent.marker.as_deref(), Some("kept"));
+        assert_eq!(sent.app_code.as_deref(), app_code);
+        assert_eq!(sent.body["model"], model_id);
+        assert_eq!(sent.body[max_field], 1357, "{driver}/{model_id}");
+        for other in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+            if other != max_field {
+                assert!(sent.body.get(other).is_none());
+            }
+        }
+        if anthropic {
+            assert_eq!(sent.body["output_config"]["effort"], "high");
+        } else if suffix.ends_with("/responses") {
+            assert_eq!(sent.body["reasoning"]["effort"], "high");
+            assert_eq!(
+                sent.body.get("service_tier").and_then(Value::as_str),
+                (!xai).then_some("priority")
+            );
+            if xai {
+                assert_eq!(sent.body["store"], false);
+                assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
+            }
+        } else {
+            assert_eq!(sent.body["reasoning_effort"], "high");
+            assert_eq!(
+                sent.body.get("service_tier").and_then(Value::as_str),
+                (!xai).then_some("priority")
+            );
+        }
+    }
+    for base in [
+        "http://fixture.openai.azure.com/openai",
+        "https://fixture.openai.azure.com.evil.test/openai",
+        "https://fixture.openai.azure.com/",
+        "https://fixture.openai.azure.com/openai/v1",
+        "https://fixture.openai.azure.com/openai?api-version=v1",
+    ] {
+        let mut invalid = input(
+            "invalid-azure",
+            base,
+            StaticAuth::Bearer,
+            Some("key"),
+            "",
+            1357,
+        );
+        invalid.driver_kind = "azure-openai".into();
+        assert!(
+            provider.save_static(invalid, None, &cancel).await.is_err(),
+            "{base}"
+        );
+    }
+    let azure = provider
+        .list(&cancel)
+        .await
+        .unwrap()
+        .providers
+        .into_iter()
+        .find(|p| p.provider_id == "azure-openai")
+        .unwrap();
+    assert_eq!(
+        azure.auth,
+        StaticAuth::ApiKey {
+            header_name: "api-key".into(),
+            prefix: String::new()
+        }
+    );
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{*path}", post(completion))
+        .with_state(seen.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/new-api-flow")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&home).unwrap();
+    let mut saved_version = 0;
+    for restart in [false, true] {
+        let root = Ctx::root().unwrap();
+        root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            home.clone(),
+        ])));
+        root.plugin(capability_plugin(SqliteStoragePlugin::new(
+            home.join("native.sqlite"),
+        )));
+        root.plugin(capability_plugin(ManagedProvidersPlugin));
+        root.plugin(capability_plugin(
+            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+        ));
+        root.plugin(capability_plugin(
+            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+        ));
+        active(&root.plugin(dim_agent_runtime::capability_plugin(
+            ProviderPlugin::default(),
+        )))
+        .await;
+        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+        let provider = root.get::<ProviderService>().unwrap();
+        let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        let cancel = CancellationToken::new();
+        for (model_id, raw, suffix) in [
+            (
+                "claude-explicit",
+                json!({"endpointType":"openai-response"}),
+                Some("/v1/responses"),
+            ),
+            (
+                "by-owner",
+                json!({"ownedBy":"Google"}),
+                Some("/v1beta/models/by-owner:streamGenerateContent"),
+            ),
+            ("claude-inferred", json!({}), Some("/v1/messages")),
+            (
+                "claude-limited",
+                json!({"supportedEndpointTypes":["openai","openai-response"]}),
+                Some("/v1/chat/completions"),
+            ),
+            (
+                "only-one",
+                json!({"supportedEndpointTypes":["future-kind","anthropic","anthropic"]}),
+                Some("/v1/messages"),
+            ),
+            (
+                "type-hint",
+                json!({"type":"openai-response"}),
+                Some("/v1/responses"),
+            ),
+            (
+                "snake",
+                json!({"endpoint_type":"anthropic"}),
+                Some("/v1/messages"),
+            ),
+            (
+                "claude-empty",
+                json!({"supportedEndpointTypes":[]}),
+                Some("/v1/messages"),
+            ),
+            ("superclaude", json!({}), Some("/v1/chat/completions")),
+            (
+                "selectable",
+                json!({"supportedEndpointTypes":["anthropic","gemini"],"selectableEndpointTypes":["openai-response"]}),
+                Some("/v1/responses"),
+            ),
+            (
+                "ambiguous",
+                json!({"supportedEndpointTypes":["anthropic","gemini"]}),
+                None,
+            ),
+            (
+                "future-only",
+                json!({"supportedEndpointTypes":["future-kind"]}),
+                None,
+            ),
+            ("video", json!({"endpointType":"video-generation"}), None),
+            (
+                "compact",
+                json!({"endpointType":"openai-response-compact"}),
+                None,
+            ),
+        ] {
+            let id = format!("router-{model_id}");
+            if !restart {
+                let mut entry = model(model_id, 765);
+                entry.metadata = Some(serde_json::from_value(json!({"raw":raw})).unwrap());
+                let mut input = input(
+                    &id,
+                    &format!("http://{address}/prefix/V1beta/"),
+                    StaticAuth::Bearer,
+                    Some("router-key"),
+                    "router",
+                    765,
+                );
+                input.driver_kind = "new-api-router".into();
+                input.models = Some(vec![entry]);
+                provider.save_static(input, None, &cancel).await.unwrap();
+            }
+            let target = ModelId {
+                provider_id: id.clone(),
+                model_id: model_id.into(),
+            };
+            let catalog = provider
+                .catalog_for(id.clone(), &cancel)
+                .await
+                .unwrap()
+                .unwrap();
+            let selection = provider
+                .configuration(Some(target), None, ModelPreferences::default(), &cancel)
+                .await;
+            let Some(suffix) = suffix else {
+                assert!(catalog.models[0].unavailable_reason.is_some(), "{model_id}");
+                assert!(selection.is_err(), "{model_id}");
+                continue;
+            };
+            assert!(catalog.models[0].unavailable_reason.is_none(), "{model_id}");
+            let selection = selection.unwrap();
+            let mut request =
+                ModelRequest::new(&id, model_id, vec![Message::text(Role::User, "hello")]);
+            request.capability_snapshot = selection.capability_snapshot;
+            request.config = selection.config;
+            let request = Arc::new(request);
+            let resolved = resolver
+                .0
+                .resolve(request.clone(), cancel.clone())
+                .await
+                .unwrap();
+            let mut stream = host
+                .0
+                .invoke(request, resolved.connection, cancel.clone())
+                .await
+                .unwrap();
+            let mut text = String::new();
+            let mut stopped = false;
+            while let Some(chunk) = stream.next().await {
+                match chunk.unwrap() {
+                    ModelChunk::Text(value) => text.push_str(&value),
+                    ModelChunk::MessageStop { .. } => stopped = true,
+                    _ => {}
+                }
+            }
+            assert_eq!(text, "ok");
+            assert!(stopped);
+            let sent = seen.lock().unwrap().last().unwrap().clone();
+            assert_eq!(sent.path, format!("/prefix{suffix}"));
+            assert_eq!(sent.authorization.as_deref(), Some("Bearer router-key"));
+        }
+        for raw in [
+            json!({"endpointType":"unknown"}),
+            json!({"endpointType":7}),
+            json!({"supportedEndpointTypes":"openai"}),
+            json!({"selectableEndpointTypes":[""]}),
+            json!({"supportedEndpointTypes":[5]}),
+        ] {
+            let mut entry = model("invalid", 1000);
+            entry.metadata = Some(serde_json::from_value(json!({"raw":raw})).unwrap());
+            let mut input = input(
+                "invalid-route",
+                &format!("http://{address}"),
+                StaticAuth::Anonymous,
+                None,
+                "bad",
+                1000,
+            );
+            input.driver_kind = "new-api-router".into();
+            input.models = Some(vec![entry]);
+            assert!(provider.save_static(input, None, &cancel).await.is_err());
+            assert!(
+                provider
+                    .catalog_for("invalid-route".into(), &cancel)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let builtin = provider
+            .list(&cancel)
+            .await
+            .unwrap()
+            .providers
+            .into_iter()
+            .find(|p| p.provider_id == "opencode-go")
+            .unwrap();
+        if !restart {
+            saved_version = provider
+                .save_static(
+                    ProviderInput {
+                        provider_id: builtin.provider_id,
+                        display_name: builtin.display_name,
+                        driver_kind: builtin.driver_kind,
+                        auth: builtin.auth,
+                        base_url: format!("http://{address}/go/v1"),
+                        network: None,
+                        headers: Some(HashMap::from([(
+                            "X-OpenCode-Session".into(),
+                            "stale".into(),
+                        )])),
+                        credential: Some(CredentialUpdate::Set {
+                            value: "builtin-key".into(),
+                        }),
+                        models: None,
+                        enabled: true,
+                    },
+                    Some(builtin.version),
+                    &cancel,
+                )
+                .await
+                .unwrap()
+                .version;
+        } else {
+            assert_eq!(
+                builtin.version, saved_version,
+                "routing fingerprints must be stable"
+            );
+        }
+        for (model_id, path) in [
+            ("qwen3.7-max", "/go/v1/messages"),
+            ("gpt-5.6-luna", "/go/v1/responses"),
+        ] {
+            let selection = provider
+                .configuration(
+                    Some(ModelId {
+                        provider_id: "opencode-go".into(),
+                        model_id: model_id.into(),
+                    }),
+                    None,
+                    ModelPreferences::default(),
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let mut request = ModelRequest::new(
+                "opencode-go",
+                model_id,
+                vec![Message::text(Role::User, "hello")],
+            );
+            request.capability_snapshot = selection.capability_snapshot;
+            request.config = selection.config;
+            assert!(
+                resolver
+                    .0
+                    .resolve(Arc::new(request.clone()), cancel.clone())
+                    .await
+                    .is_err()
+            );
+            request.metadata = Some(dim_agent_types::RequestMetadata {
+                session_id: Some("test-session".into()),
+                ..Default::default()
+            });
+            let request = Arc::new(request);
+            let resolved = resolver
+                .0
+                .resolve(request.clone(), cancel.clone())
+                .await
+                .unwrap();
+            let mut stream = host
+                .0
+                .invoke(request, resolved.connection, cancel.clone())
+                .await
+                .unwrap();
+            let mut stopped = false;
+            while let Some(chunk) = stream.next().await {
+                stopped |= matches!(chunk.unwrap(), ModelChunk::MessageStop { .. });
+            }
+            assert!(stopped);
+            let sent = seen.lock().unwrap().last().unwrap().clone();
+            assert_eq!(sent.path, path);
+            assert_eq!(sent.session_id.as_deref(), Some("test-session"));
+            assert_eq!(sent.authorization.as_deref(), Some("Bearer builtin-key"));
+        }
+        root.shutdown().await.unwrap();
+    }
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn public_static_provider_selection_resolution_execution_and_lifecycle_flow() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{*path}", post(completion))
+        .with_state(seen.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{address}");
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/provider-flow")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), "{broken").unwrap();
+
+    let root = Ctx::root().unwrap();
+    let files = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    let oauth = root.plugin(capability_plugin(ManagedProvidersPlugin));
+    root.plugin(capability_plugin(
+        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+    ));
+    root.plugin(capability_plugin(
+        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+    ));
+    let sqlite = root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
+    )));
+    let provider_plugin = root.plugin(dim_agent_runtime::capability_plugin(
+        ProviderPlugin::default(),
+    ));
+    let aimux = root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
+    let captured = Arc::new(OnceLock::new());
+    let capture = root.plugin(capability_plugin(Capture(captured.clone())));
+    for plugin in [&files, &oauth, &sqlite, &provider_plugin, &aimux, &capture] {
+        active(plugin).await;
+    }
+    let (provider, resolver) = captured.get().unwrap();
+    let cancel = CancellationToken::new();
+
+    let bedrock = provider
+        .list(&cancel)
+        .await
+        .unwrap()
+        .providers
+        .into_iter()
+        .find(|provider| provider.provider_id == "aws-bedrock")
+        .unwrap();
+    assert_eq!(bedrock.auth, StaticAuth::AwsBedrock);
+    let bedrock = provider
+        .save_static(
+            ProviderInput {
+                provider_id: bedrock.provider_id.clone(),
+                display_name: bedrock.display_name,
+                driver_kind: bedrock.driver_kind,
+                base_url: "https://bedrock-runtime.us-west-2.amazonaws.com".into(),
+                auth: bedrock.auth,
+                network: None,
+                headers: Some(HashMap::from([("x-marker".into(), "safe".into())])),
+                credential: Some(CredentialUpdate::SetAws {
+                    value: AwsCredentials {
+                        access_key_id: "fixture-access".into(),
+                        secret_access_key: "fixture-secret".into(),
+                        session_token: Some("fixture-session".into()),
+                    },
+                }),
+                models: None,
+                enabled: true,
+            },
+            Some(bedrock.version),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(bedrock.credential_configured);
+    let catalog = provider
+        .catalog_for("aws-bedrock".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let model_id = catalog.models[0].id.clone();
+    let selection = provider
+        .configuration(
+            Some(ModelId {
+                provider_id: "aws-bedrock".into(),
+                model_id: model_id.clone(),
+            }),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let mut request = ModelRequest::new(
+        "aws-bedrock",
+        model_id,
+        vec![Message::text(Role::User, "hello")],
+    );
+    request.capability_snapshot = selection.capability_snapshot;
+    let bedrock_request = Arc::new(request);
+    let resolved = resolver
+        .0
+        .resolve(bedrock_request.clone(), cancel.clone())
+        .await
+        .unwrap();
+    assert!(resolved.recovery.is_none());
+    let ModelConnection::Bedrock(connection) = resolved.connection else {
+        panic!("Bedrock connection expected")
+    };
+    assert!(matches!(
+        connection.auth,
+        BedrockAuth::SigV4 { region, credentials }
+            if region == "us-west-2" && credentials.access_key_id == "fixture-access"
+                && credentials.secret_access_key == "fixture-secret"
+                && credentials.session_token.as_deref() == Some("fixture-session")
+    ));
+    assert_eq!(connection.headers["x-marker"], "safe");
+    let public = serde_json::to_string(&provider.list(&cancel).await.unwrap()).unwrap();
+    assert!(!public.contains("fixture-access") && !public.contains("fixture-secret"));
+    let bedrock_input = ProviderInput {
+        provider_id: bedrock.provider_id.clone(),
+        display_name: bedrock.display_name.clone(),
+        driver_kind: bedrock.driver_kind.clone(),
+        base_url: bedrock.base_url.clone(),
+        auth: bedrock.auth.clone(),
+        network: None,
+        headers: None,
+        credential: Some(CredentialUpdate::Keep),
+        models: None,
+        enabled: true,
+    };
+    for base_url in [
+        "http://bedrock-runtime.us-west-2.amazonaws.com",
+        "https://bedrock-runtime.us-west-2.amazonaws.com:444",
+        "https://bedrock-runtime.us-west-2.amazonaws.com/path",
+        "https://bedrock-runtime.us-west-2.amazonaws.com?secret=value",
+        "https://bedrock-runtime.us-west-2.amazonaws.com.attacker.invalid",
+    ] {
+        let mut invalid = bedrock_input.clone();
+        invalid.base_url = base_url.into();
+        assert!(
+            provider
+                .save_static(invalid, Some(bedrock.version), &cancel)
+                .await
+                .is_err()
+        );
+    }
+    for header in [
+        "Authorization",
+        "Host",
+        "X-Amz-Date",
+        "x-amz-content-sha256",
+        "X-Amz-Security-Token",
+        "Content-Type",
+    ] {
+        let mut invalid = bedrock_input.clone();
+        invalid.headers = Some(HashMap::from([(header.into(), "reserved".into())]));
+        assert!(
+            provider
+                .save_static(invalid, Some(bedrock.version), &cancel)
+                .await
+                .is_err()
+        );
+    }
+    for (access, secret, session) in [
+        ("", "secret", None),
+        ("access", "", None),
+        ("access\n", "secret", None),
+        ("access", "secret", Some("bad\r\ntoken")),
+    ] {
+        let mut invalid = bedrock_input.clone();
+        invalid.credential = Some(CredentialUpdate::SetAws {
+            value: AwsCredentials {
+                access_key_id: access.into(),
+                secret_access_key: secret.into(),
+                session_token: session.map(str::to_owned),
+            },
+        });
+        assert!(
+            provider
+                .save_static(invalid, Some(bedrock.version), &cancel)
+                .await
+                .is_err()
+        );
+    }
+    let mut wrong_driver = input("wrong-aws", &base, StaticAuth::Bearer, None, "", 4096);
+    wrong_driver.credential = Some(CredentialUpdate::SetAws {
+        value: AwsCredentials {
+            access_key_id: "access".into(),
+            secret_access_key: "secret".into(),
+            session_token: None,
+        },
+    });
+    assert!(
+        provider
+            .save_static(wrong_driver.clone(), None, &cancel)
+            .await
+            .is_err()
+    );
+    wrong_driver.auth = StaticAuth::AwsBedrock;
+    assert!(
+        provider
+            .save_static(wrong_driver, None, &cancel)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_string(&provider.list(&cancel).await.unwrap()).unwrap(),
+        public
+    );
+    assert!(
+        provider
+            .save_static(bedrock_input.clone(), Some(bedrock.version - 1), &cancel)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        provider
+            .save_static(bedrock_input, Some(bedrock.version), &cancel)
+            .await
+            .unwrap()
+            .version,
+        bedrock.version + 1
+    );
+
+    let a = provider
+        .save_static(
+            input(
+                "a",
+                &format!("{base}/a"),
+                StaticAuth::Bearer,
+                Some("key-a"),
+                "secret-a",
+                1234,
+            ),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let b = provider
+        .save_static(
+            input(
+                "b",
+                &format!("{base}/b"),
+                StaticAuth::Anonymous,
+                None,
+                "public-b",
+                5678,
+            ),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(a.credential_configured && !b.credential_configured);
+    let public = serde_json::to_string(&provider.list(&cancel).await.unwrap()).unwrap();
+    assert!(
+        !public.contains("key-a") && !public.contains("secret-a") && !public.contains("public-b")
+    );
+    assert!(
+        provider
+            .save_static(
+                input("missing", &base, StaticAuth::Bearer, None, "x", 100),
+                None,
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+
+    let global = provider
+        .select(None, target("b"), None, &cancel)
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .select(None, target("a"), None, &cancel)
+            .await
+            .is_err()
+    );
+    let workspace = std::path::Path::new("/workspace/provider-flow");
+    provider
+        .select(Some(workspace), target("a"), None, &cancel)
+        .await
+        .unwrap();
+    let chosen = provider
+        .configuration(None, Some(workspace), ModelPreferences::default(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            chosen.provider_id.as_str(),
+            chosen.config.as_ref().unwrap().max_tokens
+        ),
+        ("a", Some(1234.0))
+    );
+    let catalog = provider
+        .set_enabled_models("a".into(), a.version, vec![], &cancel)
+        .await
+        .unwrap();
+    let fallback = provider
+        .configuration(None, Some(workspace), ModelPreferences::default(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(fallback.provider_id, "b");
+    assert_eq!(
+        provider
+            .selection(Some(workspace), &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .provider_id,
+        "a"
+    );
+    assert_eq!(global.version, 1);
+    provider
+        .set_enabled_models("a".into(), catalog.version, vec!["same".into()], &cancel)
+        .await
+        .unwrap();
+
+    for id in ["a", "b"] {
+        let selection = provider
+            .configuration(Some(target(id)), None, ModelPreferences::default(), &cancel)
+            .await
+            .unwrap();
+        let mut request = ModelRequest::new(id, "same", vec![Message::text(Role::User, "hello")]);
+        request.capability_snapshot = selection.capability_snapshot;
+        request.config = selection.config;
+        let request = Arc::new(request);
+        let resolved = resolver
+            .0
+            .resolve(request.clone(), cancel.clone())
+            .await
+            .unwrap();
+        let ModelConnection::Http(connection) = &resolved.connection else {
+            panic!("HTTP expected")
+        };
+        assert!(connection.base_url.ends_with(&format!("/{id}")));
+        let mut output = root
+            .get::<ModelHost>()
+            .unwrap()
+            .0
+            .invoke(request, resolved.connection, cancel.clone())
+            .await
+            .unwrap();
+        while let Some(chunk) = output.next().await {
+            if let ModelChunk::Text(text) = chunk.unwrap() {
+                assert_eq!(text, "ok");
+            }
+        }
+    }
+    {
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].path.starts_with("/a/") && requests[1].path.starts_with("/b/"));
+        assert_eq!(requests[0].authorization.as_deref(), Some("Bearer key-a"));
+        assert_eq!(requests[1].authorization, None);
+        assert_eq!(requests[0].marker.as_deref(), Some("secret-a"));
+        assert_eq!(requests[1].marker.as_deref(), Some("public-b"));
+        assert_eq!(requests[0].body["max_tokens"], 1234);
+        assert_eq!(requests[1].body["max_tokens"], 5678);
+    }
+
+    let mut media = input("media", &base, StaticAuth::Anonymous, None, "media", 99);
+    media.models.as_mut().unwrap()[0].metadata =
+        Some(serde_json::from_value(json!({"raw":{"type":"embedding"}})).unwrap());
+    provider.save_static(media, None, &cancel).await.unwrap();
+    assert!(
+        provider
+            .select(None, target("media"), Some(global.version), &cancel)
+            .await
+            .is_err()
+    );
+    assert!(
+        provider
+            .configuration(
+                Some(target("media")),
+                None,
+                ModelPreferences::default(),
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+
+    let before = provider
+        .catalog_for("b".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let edited = provider
+        .update_model_config(
+            "b".into(),
+            before.version,
+            "same".into(),
+            Some(
+                serde_json::from_value(json!({"maxOutputTokens":3333,"displayName":"Edited"}))
+                    .unwrap(),
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.models[0].config.max_tokens, Some(3333.));
+    let reset = provider
+        .update_model_config("b".into(), edited.version, "same".into(), None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(reset.models[0].config.max_tokens, Some(5678.));
+    assert!(
+        provider
+            .update_model_config("b".into(), edited.version, "same".into(), None, &cancel)
+            .await
+            .is_err()
+    );
+
+    // A missing, disabled model keeps its preference through edits and rediscovery.
+    let disabled = provider
+        .set_enabled_models("b".into(), reset.version, vec![], &cancel)
+        .await
+        .unwrap();
+    let mut changed = input(
+        "b",
+        &format!("{base}/b"),
+        StaticAuth::Anonymous,
+        None,
+        "public-b",
+        5678,
+    );
+    changed.models = Some(vec![model("other", 765)]);
+    let changed = provider
+        .save_static(changed, Some(disabled.version), &cancel)
+        .await
+        .unwrap();
+    let enabled = provider
+        .set_enabled_models("b".into(), changed.version, vec!["other".into()], &cancel)
+        .await
+        .unwrap();
+    assert!(enabled.disabled_model_ids.contains(&"same".into()));
+    let mut returned = input(
+        "b",
+        &format!("{base}/b"),
+        StaticAuth::Anonymous,
+        None,
+        "public-b",
+        5678,
+    );
+    returned.models.as_mut().unwrap().push(model("other", 765));
+    let returned = provider
+        .save_static(returned, Some(enabled.version), &cancel)
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .catalog_for("b".into(), &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled_model_ids
+            .contains(&"same".into())
+    );
+    assert!(
+        provider
+            .configuration(
+                Some(target("b")),
+                None,
+                ModelPreferences::default(),
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+
+    // Invalid persisted provider choices are retained but skipped before the global choice.
+    {
+        let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        database.execute("UPDATE provider_selections SET provider_id='missing-provider', model_id='missing' WHERE scope='workspace:/workspace/provider-flow'", []).unwrap();
+    }
+    provider
+        .set_enabled_models(
+            "b".into(),
+            returned.version,
+            vec!["same".into(), "other".into()],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .configuration(None, Some(workspace), ModelPreferences::default(), &cancel)
+            .await
+            .unwrap()
+            .provider_id,
+        "b"
+    );
+    assert_eq!(
+        provider
+            .selection(Some(workspace), &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .provider_id,
+        "missing-provider"
+    );
+
+    let builtin = provider
+        .list(&cancel)
+        .await
+        .unwrap()
+        .providers
+        .into_iter()
+        .find(|p| p.provider_id == "anthropic")
+        .unwrap();
+    let builtin = provider
+        .save_static(
+            ProviderInput {
+                provider_id: builtin.provider_id.clone(),
+                display_name: builtin.display_name,
+                driver_kind: builtin.driver_kind,
+                base_url: format!("{base}/builtin"),
+                auth: builtin.auth,
+                network: None,
+                headers: None,
+                credential: Some(CredentialUpdate::Set {
+                    value: "builtin-key".into(),
+                }),
+                models: None,
+                enabled: true,
+            },
+            Some(builtin.version),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let builtin_models = provider
+        .catalog_for(builtin.provider_id.clone(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let builtin_target = ModelId {
+        provider_id: builtin.provider_id.clone(),
+        model_id: builtin_models
+            .models
+            .iter()
+            .find(|m| m.unavailable_reason.is_none())
+            .unwrap()
+            .id
+            .clone(),
+    };
+    let selection = provider
+        .select(None, builtin_target, Some(global.version), &cancel)
+        .await
+        .unwrap();
+    provider
+        .delete_static(builtin.provider_id.clone(), builtin.version, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .selection(None, &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .provider_id,
+        "anthropic"
+    );
+    assert_ne!(
+        provider
+            .configuration(None, None, ModelPreferences::default(), &cancel)
+            .await
+            .unwrap()
+            .provider_id,
+        "anthropic"
+    );
+    assert_eq!(
+        provider
+            .selection(None, &cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        selection.version
+    );
+    let persisted = serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap();
+    let last_selection = provider
+        .configuration(
+            Some(target("a")),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    capture.dispose().await.unwrap();
+    provider_plugin.dispose().await.unwrap();
+    assert!(matches!(
+        provider.list(&cancel).await,
+        Err(dim_agent_capabilities::host::HostError::Failed {
+            kind: dim_agent_capabilities::host::HostErrorKind::OwnerClosed,
+            ..
+        })
+    ));
+    let request = Arc::new(ModelRequest {
+        capability_snapshot: last_selection.capability_snapshot,
+        ..ModelRequest::new("a", "same", vec![])
+    });
+    assert!(matches!(
+        resolver.0.resolve(request, cancel.clone()).await,
+        Err(dim_agent_capabilities::host::HostError::Failed {
+            kind: dim_agent_capabilities::host::HostErrorKind::OwnerClosed,
+            ..
+        })
+    ));
+    root.shutdown().await.unwrap();
+
+    let restarted = Ctx::root().unwrap();
+    let plugins = [
+        restarted.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            home.clone(),
+        ]))),
+        restarted.plugin(capability_plugin(SqliteStoragePlugin::new(
+            home.join("native.sqlite"),
+        ))),
+        restarted.plugin(capability_plugin(ManagedProvidersPlugin)),
+        restarted.plugin(capability_plugin(
+            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+        )),
+        restarted.plugin(capability_plugin(
+            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+        )),
+        restarted.plugin(dim_agent_runtime::capability_plugin(
+            ProviderPlugin::default(),
+        )),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let reloaded = restarted.get::<ProviderService>().unwrap();
+    assert_eq!(
+        serde_json::to_value(reloaded.list(&cancel).await.unwrap()).unwrap(),
+        persisted
+    );
+    let resolved = restarted
+        .get::<ProviderConnectionResolver>()
+        .unwrap()
+        .0
+        .resolve(bedrock_request, cancel.clone())
+        .await
+        .unwrap();
+    assert!(
+        matches!(resolved.connection, ModelConnection::Bedrock(connection)
+        if matches!(&connection.auth, BedrockAuth::SigV4 { credentials, region }
+            if credentials.secret_access_key == "fixture-secret"
+                && credentials.session_token.as_deref() == Some("fixture-session")
+                && region == "us-west-2"))
+    );
+    assert_eq!(
+        reloaded
+            .configuration(
+                Some(target("a")),
+                None,
+                ModelPreferences::default(),
+                &cancel
+            )
+            .await
+            .unwrap()
+            .config
+            .unwrap()
+            .max_tokens,
+        Some(1234.)
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join("auth.json")).unwrap(),
+        "{broken"
+    );
+    restarted.shutdown().await.unwrap();
+
+    // An unreadable optional record must neither block startup nor be reseeded.
+    {
+        let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        // Simulate an older bundled definition and a removed builtin. Connection
+        // fields and user model preferences must survive the definition upgrade.
+        let body: String = database
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='openai'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut old: Value = serde_json::from_str(&body).unwrap();
+        old["displayName"] = json!("Old definition");
+        old["definitionFingerprint"] = json!("old");
+        old["baseUrl"] = json!(format!("{base}/preserved"));
+        old["credential"] = json!("preserved-secret");
+        old["headers"] = json!({"x-old":"preserved-header"});
+        old["disabledModelIds"] = json!(["missing-model"]);
+        old["modelConfigOverrides"] = json!([model("missing-model", 817)]);
+        old["models"] = json!([]);
+        database
+            .execute(
+                "UPDATE providers SET record=?1 WHERE provider_id='openai'",
+                [old.to_string()],
+            )
+            .unwrap();
+        let custom: String = database
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut removed: Value = serde_json::from_str(&custom).unwrap();
+        removed["kind"] = json!("builtin");
+        database.execute("INSERT INTO providers(provider_id,version,record) VALUES ('removed-builtin',?1,?2)", rusqlite::params![removed["version"].as_i64().unwrap(), removed.to_string()]).unwrap();
+        database
+            .execute(
+                "INSERT INTO providers(provider_id,version,record) VALUES ('0-broken',1,'{broken')",
+                [],
+            )
+            .unwrap();
+        database
+            .execute(
+                "UPDATE providers SET record='{broken' WHERE provider_id='anthropic'",
+                [],
+            )
+            .unwrap();
+    }
+    let isolated = Ctx::root().unwrap();
+    let plugins = [
+        isolated.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            home.clone(),
+        ]))),
+        isolated.plugin(capability_plugin(SqliteStoragePlugin::new(
+            home.join("native.sqlite"),
+        ))),
+        isolated.plugin(capability_plugin(ManagedProvidersPlugin)),
+        isolated.plugin(capability_plugin(
+            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+        )),
+        isolated.plugin(capability_plugin(
+            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+        )),
+        isolated.plugin(dim_agent_runtime::capability_plugin(
+            ProviderPlugin::default(),
+        )),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let usable = isolated.get::<ProviderService>().unwrap();
+    for id in ["0-broken", "anthropic"] {
+        assert!(usable.catalog_for(id.into(), &cancel).await.is_err());
+    }
+    let listing = usable.list(&cancel).await.unwrap();
+    assert!(listing.providers.iter().any(|p| p.provider_id == "a"));
+    let upgraded = listing
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "openai")
+        .unwrap();
+    assert_eq!(upgraded.version, 2);
+    assert_ne!(upgraded.display_name, "Old definition");
+    assert_eq!(upgraded.base_url, format!("{base}/preserved"));
+    assert!(upgraded.credential_configured);
+    assert!(
+        !listing
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "removed-builtin")
+            .unwrap()
+            .enabled
+    );
+    let catalog = usable
+        .catalog_for("openai".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!catalog.models.is_empty());
+    assert!(!catalog.models.iter().any(|m| m.id == "missing-model"));
+    assert_eq!(catalog.disabled_model_ids, ["missing-model"]);
+    assert_eq!(
+        listing
+            .errors
+            .iter()
+            .map(|e| e.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        ["0-broken", "anthropic", "grok-build", "openai-codex"]
+    );
+    assert_eq!(
+        usable
+            .configuration(None, None, ModelPreferences::default(), &cancel)
+            .await
+            .unwrap()
+            .provider_id,
+        "a"
+    );
+    assert!(
+        usable
+            .configuration(
+                Some(target("0-broken")),
+                None,
+                ModelPreferences::default(),
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+    isolated.shutdown().await.unwrap();
+    {
+        let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        let body: String = database
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='openai'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let upgraded: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(upgraded["credential"], "preserved-secret");
+        assert_eq!(upgraded["headers"]["x-old"], "preserved-header");
+        assert_eq!(
+            upgraded["modelConfigOverrides"][0]["capabilities"]["maxOutputTokens"],
+            817
+        );
+        for id in ["0-broken", "anthropic"] {
+            assert_eq!(
+                database
+                    .query_row(
+                        "SELECT record FROM providers WHERE provider_id=?1",
+                        [id],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "{broken"
+            );
+        }
+    }
+    server.abort();
+    let _ = server.await;
+    let _ = std::fs::remove_dir_all(home);
+}

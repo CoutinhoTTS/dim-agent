@@ -1,0 +1,37 @@
+{
+  "baseline": "8565538d5ff70a63bbf10cb9ad9198107244bac0",
+  "sources": {
+    "packages/agent-v4/src/events.ts": "bc0de47b3b12bcfe31579b5236606e5b1003618b4e1c5928ba659a0312c52483",
+    "packages/types/src/content.ts": "034ce0109f33a52909eb701bed26624803e59544b9ca9f8d1c13aafbbceafd75",
+    "packages/types/src/common.ts": "a6634a6d37838f8ef6a29920701161792ca0c8ca4586062cec11190c5d6f7619",
+    "packages/types/src/tool.ts": "43fa10ef0d86873c8cd1c65e1817ff766db2db31e6ac67570a7718329e18f9b8",
+    "packages/types/src/blob.ts": "5d26cd08e43d08c0e2a1affdcc153224e56b34e448810855548ea42273ea8487",
+    "packages/types/src/provider.ts": "1bcc9a426c9393178b85cea4edc87d91a48b2b54a5663d6aaf62a7358d7893f3",
+    "packages/types/src/compaction.ts": "0f8f34e6cf83e786932d6b573295f8ea5ac43fe133b67ab3c5cbccce46bd7af3"
+  },
+  "eventKinds": [
+    "branch/create",
+    "branch/start",
+    "context/budget",
+    "context/compaction",
+    "context/prepare",
+    "input/applied",
+    "input/message",
+    "model/call",
+    "model/usage",
+    "step/model-output-end",
+    "step/model-start",
+    "step/text",
+    "step/thinking",
+    "step/tool-call",
+    "step/tool-completed",
+    "step/tool-result",
+    "step/tool-start",
+    "step/tool-use",
+    "task/ended",
+    "task/started",
+    "turn/end",
+    "turn/start"
+  ],
+  "fixtureCount": 42
+}

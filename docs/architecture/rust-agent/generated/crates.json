@@ -1,0 +1,130 @@
+[
+  {
+    "from": "dim-agent-runtime",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-agent-runtime",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-agent-runtime",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-agent-capabilities",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-agent-capabilities",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-agent-capabilities",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-agent-capabilities",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-agent-aimux",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-agent-aimux",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-agent-aimux",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-agent-aimux",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-app-server",
+    "to": "dim-agent-aimux"
+  },
+  {
+    "from": "dim-app-server",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-app-server",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-app-server",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-app-server",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-app-server",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-cli",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-agent-aimux"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "xtask",
+    "to": "rutis"
+  },
+  {
+    "from": "test-extension-a",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "test-extension-a",
+    "to": "rutis"
+  },
+  {
+    "from": "test-extension-b",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "test-extension-b",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-agent-integration-tests",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-agent-integration-tests",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-agent-integration-tests",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-agent-integration-tests",
+    "to": "rutis"
+  }
+]

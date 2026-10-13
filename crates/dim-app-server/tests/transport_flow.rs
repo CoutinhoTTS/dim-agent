@@ -1,0 +1,1873 @@
+#![cfg(unix)]
+
+use dim_agent_capabilities::{
+    adapters::MockTools,
+    defaults,
+    host::{HostFuture, ToolDriver, ToolExecutionContext},
+};
+use dim_agent_runtime::{
+    AgentBuilder, AgentConfig, Capability, InBranch, InSession, KeysOf, capability_plugin, scoped,
+};
+use dim_agent_types::{EventKind, ToolCall, ToolDefinition, ToolResult};
+use dim_app_server::{RunningServer, ServerConfig, ShutdownReason, serve};
+use futures_util::{SinkExt, StreamExt};
+use rutis::TypedPlugin;
+use serde_json::{Value, json};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpStream, UnixStream},
+    sync::Mutex,
+};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use tokio_util::sync::CancellationToken;
+
+#[path = "transport_flow/approval.rs"]
+mod approval;
+
+#[path = "transport_flow/tool_cleanup.rs"]
+mod tool_cleanup;
+
+#[path = "transport_flow/branch_events.rs"]
+mod branch_events;
+
+#[path = "transport_flow/tree.rs"]
+mod tree;
+
+#[path = "transport_flow/reload.rs"]
+mod reload;
+
+#[path = "transport_flow/agents.rs"]
+mod agents;
+
+#[path = "transport_flow/collaboration.rs"]
+mod collaboration;
+
+#[path = "transport_flow/native_storage.rs"]
+mod native_storage;
+
+#[path = "transport_flow/barrier.rs"]
+mod barrier;
+
+#[path = "transport_flow/product_protocol.rs"]
+mod product_protocol;
+
+#[path = "transport_flow/summaries.rs"]
+mod summaries;
+
+enum Transport {
+    Unix(BufReader<UnixStream>),
+    Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+}
+struct Client {
+    transport: Transport,
+    id: u64,
+    notices: Vec<Value>,
+    instance: Value,
+    features: Value,
+}
+impl Client {
+    async fn new(server: &RunningServer, ws: bool) -> Self {
+        Self::new_version(server, ws, 1).await
+    }
+
+    async fn new_version(server: &RunningServer, ws: bool, version: u32) -> Self {
+        let transport = if ws {
+            Transport::Ws(Box::new(
+                tokio_tungstenite::connect_async_with_config(
+                    format!("ws://{}/ws", server.websocket_address.unwrap()),
+                    Some(
+                        tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                            .max_frame_size(Some(128 * 1024 * 1024))
+                            .max_message_size(Some(128 * 1024 * 1024)),
+                    ),
+                    false,
+                )
+                .await
+                .unwrap()
+                .0,
+            ))
+        } else {
+            Transport::Unix(BufReader::new(
+                UnixStream::connect(server.unix_path.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+            ))
+        };
+        let mut this = Self {
+            transport,
+            id: 0,
+            notices: vec![],
+            instance: Value::Null,
+            features: Value::Null,
+        };
+        let result = this
+            .rpc(
+                "hello",
+                json!({"protocolVersion":version,"clientKind":"other"}),
+            )
+            .await;
+        assert_eq!(result["result"]["protocolVersion"], version);
+        if version == 3 {
+            assert!(result["result"]["features"].is_array());
+        }
+        this.instance = result["result"]["instanceId"].clone();
+        this.features = result["result"]["features"].clone();
+        this
+    }
+    async fn send(&mut self, method: &str, params: Value) -> u64 {
+        self.id += 1;
+        let value = json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params});
+        self.raw(value).await;
+        self.id
+    }
+    async fn raw(&mut self, value: Value) {
+        let text = value.to_string();
+        match &mut self.transport {
+            Transport::Unix(stream) => {
+                stream.get_mut().write_all(text.as_bytes()).await.unwrap();
+                stream.get_mut().write_all(b"\n").await.unwrap();
+            }
+            Transport::Ws(stream) => stream.send(Message::Text(text.into())).await.unwrap(),
+        }
+    }
+    async fn read(&mut self) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            match &mut self.transport {
+                Transport::Unix(stream) => {
+                    let mut line = String::new();
+                    assert_ne!(
+                        stream.read_line(&mut line).await.unwrap(),
+                        0,
+                        "connection unexpectedly closed"
+                    );
+                    serde_json::from_str(&line).unwrap()
+                }
+                Transport::Ws(stream) => loop {
+                    match stream.next().await.unwrap().unwrap() {
+                        Message::Text(text) => break serde_json::from_str(&text).unwrap(),
+                        Message::Ping(_) | Message::Pong(_) => {}
+                        other => panic!("unexpected websocket: {other:?}"),
+                    }
+                },
+            }
+        })
+        .await
+        .expect("response deadline")
+    }
+    async fn response(&mut self, id: u64) -> Value {
+        if let Some(index) = self.notices.iter().position(|v| v["id"] == id) {
+            return self.notices.remove(index);
+        }
+        loop {
+            let value = self.read().await;
+            if value["id"] == id {
+                return value;
+            }
+            self.notices.push(value);
+        }
+    }
+    async fn rpc(&mut self, method: &str, params: Value) -> Value {
+        let id = self.send(method, params).await;
+        self.response(id).await
+    }
+    async fn notice(&mut self, method: &str) -> Value {
+        if let Some(index) = self.notices.iter().position(|v| v["method"] == method) {
+            return self.notices.remove(index);
+        }
+        loop {
+            let value = self.read().await;
+            if value["method"] == method {
+                return value;
+            }
+            self.notices.push(value);
+        }
+    }
+}
+async fn launch(tools: Arc<dyn ToolDriver>, config: ServerConfig) -> RunningServer {
+    launch_with_agent(tools, config).await.0
+}
+async fn launch_with_agent(
+    tools: Arc<dyn ToolDriver>,
+    config: ServerConfig,
+) -> (RunningServer, dim_agent_runtime::Agent) {
+    launch_with(tools, config, |_| {}).await
+}
+/// `launch_with_agent` with extra capabilities installed after the defaults.
+async fn launch_with(
+    tools: Arc<dyn ToolDriver>,
+    mut config: ServerConfig,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> (RunningServer, dim_agent_runtime::Agent) {
+    config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
+        "dim-server-test-{}/server.sock",
+        uuid::Uuid::new_v4()
+    )));
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
+    dim_app_server::collaboration::install(&mut builder);
+    extra(&mut builder);
+    let server = serve(builder, config).await.unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+/// Provides the Session `ToolHost` from a child plugin; restarting it reloads
+/// ToolRegistry and every capability downstream of it.
+#[derive(Clone, Default)]
+struct ToolReload(
+    Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
+    /// Holds the next provider start until notified.
+    Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+);
+impl ToolReload {
+    fn install(&self, builder: &mut AgentBuilder, tools: Arc<dyn ToolDriver>) {
+        builder.host_tools(tools.definitions().into_iter().map(|tool| tool.name));
+        let views = self.0.clone();
+        let hold = self.1.clone();
+        builder.session_plugin(move |scope| ToolHostOwner {
+            scope: *scope,
+            tools: tools.clone(),
+            views: views.clone(),
+            hold: hold.clone(),
+        });
+    }
+    /// The next restart keeps everything downstream unloaded until the
+    /// returned gate is notified.
+    #[allow(dead_code)]
+    fn hold_next(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.1.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+    /// Restarts the provider of the most recently created Session.
+    async fn restart(&self) {
+        let view = self.0.lock().unwrap().last().cloned().expect("a Session");
+        view.restart().await.unwrap();
+    }
+}
+struct ToolHostOwner {
+    scope: dim_agent_runtime::SessionScope,
+    tools: Arc<dyn ToolDriver>,
+    views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
+    hold: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+}
+impl TypedPlugin for ToolHostOwner {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "ToolHostOwner"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let view = ctx.plugin(capability_plugin(ToolHostPlugin(
+                self.scope,
+                self.tools.clone(),
+                self.hold.clone(),
+            )));
+            self.views.lock().unwrap().push(view);
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for ToolHostOwner {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+struct ToolHostPlugin(
+    dim_agent_runtime::SessionScope,
+    Arc<dyn ToolDriver>,
+    Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+);
+impl TypedPlugin for ToolHostPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "ToolHost"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let hold = self.2.lock().unwrap().take();
+            if let Some(gate) = hold {
+                gate.notified().await;
+            }
+            ctx.provide_as(
+                self.0.key::<dim_agent_capabilities::host::ToolHost>(),
+                Arc::new(dim_agent_capabilities::host::ToolHost(self.1.clone())),
+            )?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for ToolHostPlugin {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+fn create(tools: Value) -> Value {
+    json!({"cwd":std::env::temp_dir(),"tools":tools,"permissionPolicy":{"allowedTools":["echo","wait"]}})
+}
+fn assert_ok(value: &Value) {
+    assert!(value.get("error").is_none(), "{value}");
+}
+
+async fn read_trace(path: &str) -> Vec<Value> {
+    let text = tokio::fs::read_to_string(path).await.unwrap();
+    let mut rows: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(rows.iter().all(|row| row["version"] == 2));
+    assert_eq!(rows[0]["kind"], "archive_start");
+    assert_eq!(rows[0]["content"], "sensitive_content");
+    let end = rows.pop().unwrap();
+    assert_eq!(end["kind"], "archive_end");
+    assert_eq!(end["incomplete"], false);
+    rows.remove(0);
+    assert_eq!(end["records"], rows.len());
+    assert!(!rows.is_empty());
+    rows
+}
+
+fn trace_payloads(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter(|row| row["record"]["kind"] == "timeline")
+        .map(|row| row["record"]["payload"].clone())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trace_preserves_initialization_rollback_and_never_overwrites_evidence() {
+    for ws in [false, true] {
+        let directory =
+            std::env::temp_dir().join(format!("dim-trace-rollback-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("failed.jsonl");
+        // Missing TimelineTreeControl fails after the per-create Trace plugin is ready.
+        let builder = AgentBuilder::new(AgentConfig::default());
+        let server = serve(
+            builder,
+            ServerConfig {
+                unix_path: Some(
+                    std::path::PathBuf::from("/tmp")
+                        .join(format!("dim-trace-{}/server.sock", uuid::Uuid::new_v4())),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let agent = server.agent().unwrap();
+        let mut client = Client::new_version(&server, ws, 2).await;
+        for invalid in [json!(false), json!("")] {
+            let mut params = create(json!([]));
+            params["trace"] = invalid;
+            assert_eq!(
+                client.rpc("session.create", params).await["error"]["code"],
+                -32602
+            );
+            assert!(agent.sessions().is_empty());
+        }
+        let mut params = create(json!([]));
+        params["trace"] = json!(path);
+        let failed = client.rpc("session.create", params.clone()).await;
+        assert_eq!(failed["error"]["data"]["appError"], "session_build_failed");
+        assert!(agent.sessions().is_empty());
+        let rows = read_trace(path.to_str().unwrap()).await;
+        for phase in ["ready", "released"] {
+            assert!(rows.iter().any(|r| r["record"]["kind"] == "component"
+                && r["record"]["name"] == "Trace"
+                && r["record"]["phase"] == phase));
+        }
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        let conflict = client.rpc("session.create", params).await;
+        assert_eq!(conflict["error"]["message"], "Cannot create trace file");
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+        assert!(agent.sessions().is_empty());
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+/// Exercises both loader Waiting (missing dependency) and Loading (apply
+/// has not returned); neither may prevent the trace extension from starting.
+struct UnreadyCapability(bool);
+impl Capability for UnreadyCapability {
+    fn keys(&self) -> KeysOf<Self> {
+        self.0.then_some(())
+    }
+}
+impl TypedPlugin for UnreadyCapability {
+    type Deps = dim_agent_runtime::When<rutis::Gate<UnreadyCapability>>;
+    fn name(&self) -> &str {
+        "UnreadyCapability"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            ctx.cancellation_token().cancelled().await;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trace_records_session_initialization_timeout_and_rollback() {
+    for missing_dependency in [false, true] {
+        let (server, agent) =
+            launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+                builder.startup_timeout(Duration::from_millis(500));
+                builder.session_plugin(move |_| UnreadyCapability(missing_dependency));
+            })
+            .await;
+        let directory =
+            std::env::temp_dir().join(format!("dim-trace-init-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("failed.jsonl");
+        let mut client = Client::new_version(&server, false, 2).await;
+        let mut params = create(json!([]));
+        params["trace"] = json!(path);
+        assert_eq!(
+            client.rpc("session.create", params).await["error"]["data"]["appError"],
+            "session_build_failed"
+        );
+        assert!(agent.sessions().is_empty());
+        let rows = read_trace(path.to_str().unwrap()).await;
+        assert!(rows.iter().any(|row| row["record"]["kind"] == "component"
+            && row["record"]["name"] == "Trace"
+            && row["record"]["phase"] == "released"));
+        // read_trace checks archive_end and incomplete=false. Closed is the
+        // archive's control record, consumed rather than written to the file.
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+fn v1_events(events: &[Arc<dim_agent_types::AgentEvent>], after: u64) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|event| event.sequence > after)
+        .filter_map(|event| dim_agent_types::v1::EventRef::new(event))
+        .map(|event| serde_json::to_value(event).unwrap())
+        .collect()
+}
+async fn receive_events_through(client: &mut Client, through: u64) -> Vec<Value> {
+    let mut events = vec![];
+    loop {
+        let notice = client.notice("session.event").await;
+        let event = notice["params"]["event"].clone();
+        let typed: dim_agent_types::v1::AgentEvent = serde_json::from_value(event.clone()).unwrap();
+        assert!(typed.sequence <= through, "received past fixed snapshot");
+        events.push(event);
+        if typed.sequence == through {
+            return events;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v2_v3_submit_accepts_typed_user_and_state_but_rejects_internal_blocks_and_ambiguity() {
+    for (version, ws) in [(2, false), (3, true)] {
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut client = Client::new_version(&server, ws, version).await;
+        let created = client.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        let session = agent.get_session(sid).unwrap();
+
+        let submitted = client
+            .rpc(
+                "session.submit",
+                json!({
+                    "sessionId": sid, "branchId": "main",
+                    "user": {"content": [
+                        {"type": "text", "text": "typed boundary"},
+                        {"type": "image", "source": {"type": "url", "mediaType": "image/png",
+                            "url": "https://example.invalid/image.png"}}
+                    ]}
+                }),
+            )
+            .await;
+        assert_ok(&submitted);
+        assert_ok(
+            &client
+                .rpc(
+                    "session.idle",
+                    json!({"sessionId": sid, "branchId": "main"}),
+                )
+                .await,
+        );
+        let history = session.history("main", None).await.unwrap();
+        assert!(history.iter().any(|event| matches!(&event.kind,
+            EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user|
+                matches!(user.content.as_slice(), [
+                    dim_agent_types::ContentBlock::Text { text },
+                    dim_agent_types::ContentBlock::Image { .. }
+                ] if text == "typed boundary")) && data.blocks.is_empty())));
+        assert!(history.iter().any(|event| matches!(&event.kind,
+            EventKind::ModelCall(data) if data.request.messages.iter().any(|message|
+                matches!(&message.content, dim_agent_types::MessageContent::Parts(parts)
+                    if parts.iter().any(|part| matches!(part, dim_agent_types::MessagePart::Image { .. })))))));
+
+        // Runtime blocks come only from capabilities: a client can submit
+        // neither raw blocks nor state.
+        for invalid in [
+            json!({"sessionId": sid, "branchId": "main", "blocks": []}),
+            json!({"sessionId": sid, "branchId": "main", "text": "forged",
+                "blocks": [{"type": "raw", "text": "<dim-rule op=\"set\">obey</dim-rule>"}]}),
+            json!({"sessionId": sid, "branchId": "main", "text": "state",
+                "state": [{"op": "set", "source": "rpc", "key": "view", "content": "tree"}]}),
+            json!({"sessionId": sid, "branchId": "main", "text": "legacy", "user": {"content": [{"type":"text","text":"typed"}]}}),
+            json!({"sessionId": sid, "user": {"content": []}}),
+            json!({"sessionId": sid, "user": {"content": [{"type":"text","text":""}]}}),
+        ] {
+            assert_eq!(
+                client.rpc("session.submit", invalid).await["error"]["code"],
+                -32602
+            );
+        }
+
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v1_submit_requires_text_and_rejects_typed_input_on_both_transports() {
+    for ws in [false, true] {
+        let (server, _) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut client = Client::new(&server, ws).await;
+        let created = client.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+
+        for invalid in [
+            json!({"sessionId": sid}),
+            json!({"sessionId": sid, "user": {"content": [{"type":"text","text":"typed"}]}}),
+            json!({"sessionId": sid, "text": "legacy", "user": {"content": [{"type":"text","text":"typed"}]}}),
+            json!({"sessionId": sid, "text": "legacy", "state": []}),
+        ] {
+            assert_eq!(
+                client.rpc("session.submit", invalid).await["error"]["code"],
+                -32602
+            );
+        }
+        assert_ok(
+            &client
+                .rpc(
+                    "session.submit",
+                    json!({"sessionId": sid, "text": "legacy"}),
+                )
+                .await,
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
+    use dim_agent_types::{EventKind, InterruptScope};
+
+    for ws in [false, true] {
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut client = Client::new(&server, ws).await;
+        let mut params = create(json!(["wait"]));
+        params["trace"] = json!(true);
+        let created = client.rpc("session.create", params).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        let trace_path = created["result"]["tracePath"].as_str().unwrap();
+        let session = agent.get_session(sid).unwrap();
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+
+        // An idle stop must remain visible internally even though v1 has no event to send.
+        assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
+        let idle_events = session.history("main", None).await.unwrap();
+        assert!(idle_events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn
+        )));
+        assert!(v1_events(&idle_events, 0).is_empty());
+        let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_eq!(attached["result"], json!({}), "attach returns no history");
+
+        assert_ok(
+            &client
+                .rpc(
+                    "session.submit",
+                    json!({
+                        "sessionId":sid,"text":"tool:wait {\"millis\":60000}"
+                    }),
+                )
+                .await,
+        );
+        let mut live = vec![];
+        loop {
+            let event = client.notice("session.event").await["params"]["event"].clone();
+            assert_ne!(event["type"], "stop");
+            let started = event["type"] == "step" && event["name"] == "tool-call";
+            live.push(event);
+            if started {
+                break;
+            }
+        }
+        assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
+        assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
+        let stopped = session.history("main", None).await.unwrap();
+        let expected = v1_events(&stopped, 0);
+        let last_business = expected.last().unwrap()["sequence"].as_u64().unwrap();
+        live.extend(receive_events_through(&mut client, last_business).await);
+        assert_eq!(
+            live, expected,
+            "live events must retain their real IDs and sequences"
+        );
+        assert!(
+            live.windows(2)
+                .any(|pair| pair[1]["sequence"].as_u64().unwrap()
+                    > pair[0]["sequence"].as_u64().unwrap() + 1)
+        );
+        let high = session.sequence("main").unwrap();
+        drop(client);
+
+        // A new connection receives only what is dispatched after its attach.
+        let mut client = Client::new(&server, ws).await;
+        let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_eq!(attached["result"], json!({}));
+        assert_ok(
+            &client
+                .rpc("session.submit", json!({"sessionId":sid,"text":"resumed"}))
+                .await,
+        );
+        assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
+        let resumed = session.history("main", None).await.unwrap();
+        let expected = v1_events(&resumed, high);
+        let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
+        assert_eq!(receive_events_through(&mut client, last).await, expected);
+
+        // Filtered controls leave gaps; sequences stay the Timeline's own.
+        assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
+        let high = session.sequence("main").unwrap();
+        assert_ok(
+            &client
+                .rpc(
+                    "session.submit",
+                    json!({"sessionId":sid,"text":"after future cursor"}),
+                )
+                .await,
+        );
+        assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
+        let final_events = session.history("main", None).await.unwrap();
+        let expected = v1_events(&final_events, high);
+        let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
+        assert_eq!(receive_events_through(&mut client, last).await, expected);
+        assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
+        client.notice("session.closed").await;
+        assert!(
+            client
+                .notices
+                .iter()
+                .filter(|notice| notice["method"] == "session.event")
+                .all(|notice| notice["params"]["event"]["type"] != "stop")
+        );
+
+        let records = trace_payloads(&read_trace(trace_path).await);
+        let traced: Vec<dim_agent_types::AgentEvent> = records
+            .iter()
+            .map(|record| serde_json::from_value(record["event"].clone()).unwrap())
+            .collect();
+        for (index, event) in traced.iter().enumerate() {
+            assert_eq!(event.sequence, (index + 1) as u64);
+        }
+        assert_eq!(
+            &traced[..final_events.len()],
+            final_events
+                .iter()
+                .map(AsRef::as_ref)
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            traced
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
+        );
+        std::fs::remove_file(trace_path).unwrap();
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+struct FailInterrupt(dim_agent_runtime::BranchScope);
+impl FailInterrupt {
+    fn new(scope: &dim_agent_runtime::BranchScope) -> Self {
+        Self(*scope)
+    }
+}
+impl TypedPlugin for FailInterrupt {
+    type Deps = InBranch<dim_agent_runtime::Dispatcher>;
+    fn name(&self) -> &str {
+        "transport-test.fail-interrupt"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        InBranch(dispatcher): Self::Deps,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            dispatcher.subscribe(
+                ctx,
+                "transport-test.fail-interrupt",
+                &["stop/interrupt"],
+                |_| {
+                    Box::pin(async {
+                        Err(dim_agent_runtime::AgentError::fault(
+                            "transport-test.fail-interrupt",
+                            "interrupt handler failed",
+                        ))
+                    })
+                },
+            )?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for FailInterrupt {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_transports_report_stop_failure_instead_of_success() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    builder.timeline_plugin(FailInterrupt::new);
+    let config = ServerConfig {
+        unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
+            "dim-stop-failure-{}/server.sock",
+            uuid::Uuid::new_v4()
+        ))),
+        ..Default::default()
+    };
+    let server = serve(builder, config).await.unwrap();
+    for ws in [false, true] {
+        let mut client = Client::new(&server, ws).await;
+        let created = client.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        let stopped = client.rpc("session.stop", json!({"sessionId":sid})).await;
+        assert_eq!(stopped["error"]["code"], -32603, "{stopped}");
+        assert!(stopped.get("result").is_none());
+        assert!(stopped["error"].get("data").is_none());
+        assert_ok(&client.rpc("daemon.ping", json!({})).await);
+    }
+    server.shutdown();
+    // The Session's original fault may also be reported by final cleanup.
+    let _ = tokio::time::timeout(Duration::from_secs(10), server.join())
+        .await
+        .expect("failed stop must not prevent server cleanup");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut local = Client::new(&server, false).await;
+    let mut remote = Client::new(&server, true).await;
+    let ping = local.rpc("daemon.ping", json!({})).await;
+    assert_eq!(ping["result"]["connections"], 2);
+    let created = local
+        .rpc("session.create", create(json!(["echo", "wait"])))
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let attach = remote.rpc("session.attach", json!({"sessionId":sid})).await;
+    assert_eq!(attach["result"], json!({}));
+    let listed = local.rpc("session.list", json!({})).await;
+    assert_eq!(listed["result"][0]["attachedClients"], 1);
+    let submitted = local
+        .rpc(
+            "session.submit",
+            json!({"sessionId":sid,"text":"tool:wait {\"millis\":80,\"text\":\"done\"}"}),
+        )
+        .await;
+    assert_ok(&submitted);
+    drop(local); // Accepted work remains Session-owned.
+    assert_ok(&remote.rpc("session.idle", json!({"sessionId":sid})).await);
+    // The remote attached before the work: the whole turn arrives live.
+    let mut events = vec![];
+    loop {
+        let event = remote.notice("session.event").await["params"]["event"].clone();
+        let end = event["type"] == "turn" && event["name"] == "end";
+        events.push(event);
+        if end {
+            break;
+        }
+    }
+    assert!(events.len() > 5);
+    // v1 skips filtered sequences, such as input/consumed.
+    for pair in events.windows(2) {
+        assert!(pair[1]["sequence"].as_u64().unwrap() > pair[0]["sequence"].as_u64().unwrap());
+    }
+    let high = events.last().unwrap()["sequence"].as_u64().unwrap();
+    remote.notices.clear();
+    assert_ok(
+        &remote
+            .rpc("session.submit", json!({"sessionId":sid,"text":"next"}))
+            .await,
+    );
+    let next = remote.notice("session.event").await;
+    assert!(next["params"]["event"]["sequence"].as_u64().unwrap() > high);
+    assert_ok(&remote.rpc("session.idle", json!({"sessionId":sid})).await);
+    assert_ok(&remote.rpc("session.detach", json!({"sessionId":sid})).await);
+    let listed = remote.rpc("session.list", json!({})).await;
+    assert_eq!(listed["result"][0]["attachedClients"], 0);
+    assert_ok(&remote.rpc("session.attach", json!({"sessionId":sid})).await);
+    assert_ok(&remote.rpc("session.stop", json!({"sessionId":sid})).await);
+    assert_ok(&remote.rpc("session.close", json!({"sessionId":sid})).await);
+    let closed = remote.notice("session.closed").await;
+    assert_eq!(closed["params"]["sessionId"], sid);
+    assert_ok(&remote.rpc("session.close", json!({"sessionId":sid})).await);
+    assert_ok(&remote.rpc("daemon.shutdown", json!({})).await);
+    let path = server.unix_path.clone().unwrap();
+    assert_eq!(server.join().await.unwrap(), ShutdownReason::Graceful);
+    assert!(!path.exists());
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+struct ConfirmTool {
+    calls: Arc<AtomicUsize>,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+impl ToolDriver for ConfirmTool {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![dim_agent_capabilities::tool_registry::definition(
+            "confirm",
+            "Approval test",
+            json!({"type":"object"}),
+        )]
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        _context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(dim_agent_capabilities::host::HostError::Cancelled(
+                    "cancelled".into(),
+                ));
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().await.push(call.id);
+            Ok(ToolResult::text("confirmed"))
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approvals_survive_disconnect_compete_and_cancel_before_execution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = launch(
+        Arc::new(ConfirmTool {
+            calls: calls.clone(),
+            seen: Arc::new(Mutex::new(vec![])),
+        }),
+        ServerConfig::default(),
+    )
+    .await;
+    let mut a = Client::new(&server, false).await;
+    let mut input = create(json!(["confirm"]));
+    input["permissionPolicy"] = json!({"preset":"workspace-write"});
+    let created = a.rpc("session.create", input).await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(&a.rpc("session.attach", json!({"sessionId":sid})).await);
+    assert_ok(
+        &a.rpc(
+            "session.submit",
+            json!({"sessionId":sid,"text":"tool:confirm {}"}),
+        )
+        .await,
+    );
+    let first = a.notice("approval.request").await;
+    let request = first["params"]["requestId"].clone();
+    drop(a);
+    let mut b = Client::new(&server, true).await;
+    let mut c = Client::new(&server, false).await;
+    assert_ok(&b.rpc("session.attach", json!({"sessionId":sid})).await);
+    assert_eq!(
+        b.notice("approval.request").await["params"]["requestId"],
+        request
+    );
+    assert_ok(&c.rpc("session.attach", json!({"sessionId":sid})).await);
+    c.notice("approval.request").await;
+    let wait = b.send("session.idle", json!({"sessionId":sid})).await;
+    b.raw(json!({"jsonrpc":"2.0","id":wait as f64,"method":"daemon.ping"}))
+        .await;
+    let duplicate_id = b.response(wait).await;
+    assert_eq!(duplicate_id["error"]["code"], -32602);
+    assert_ok(
+        &b.rpc(
+            "approval.respond",
+            json!({"sessionId":sid,"requestId":request,"decision":"allow"}),
+        )
+        .await,
+    );
+    let duplicate = c
+        .rpc(
+            "approval.respond",
+            json!({"sessionId":sid,"requestId":request,"decision":"allow"}),
+        )
+        .await;
+    assert_eq!(duplicate["error"]["data"]["appError"], "invalid_params");
+    assert_ok(&b.response(wait).await);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_ok(
+        &b.rpc(
+            "session.submit",
+            json!({"sessionId":sid,"text":"tool:confirm {}"}),
+        )
+        .await,
+    );
+    let request = b.notice("approval.request").await["params"]["requestId"].clone();
+    let wait = b.send("session.idle", json!({"sessionId":sid})).await;
+    assert_ok(&c.rpc("session.stop", json!({"sessionId":sid})).await);
+    let cancelled = b.notice("approval.cancelled").await;
+    assert_eq!(cancelled["params"]["requestId"], request);
+    assert_ok(&b.response(wait).await);
+    let late = c
+        .rpc(
+            "approval.respond",
+            json!({"sessionId":sid,"requestId":request,"decision":"allow"}),
+        )
+        .await;
+    assert!(late.get("error").is_some());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_ok(&c.rpc("session.close", json!({"sessionId":sid})).await);
+    server.shutdown();
+    assert_eq!(server.join().await.unwrap(), ShutdownReason::Graceful);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_errors_and_trace_are_real_transport_boundaries() {
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            hello_timeout: Duration::from_millis(100),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut raw = BufReader::new(
+        UnixStream::connect(server.unix_path.as_ref().unwrap())
+            .await
+            .unwrap(),
+    );
+    raw.get_mut()
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"daemon.ping\"}\n")
+        .await
+        .unwrap();
+    let mut line = String::new();
+    raw.read_line(&mut line).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&line).unwrap()["error"]["code"],
+        -32600
+    );
+    line.clear();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), raw.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    let (mut mismatch, _) =
+        tokio_tungstenite::connect_async(format!("ws://{}/ws", server.websocket_address.unwrap()))
+            .await
+            .unwrap();
+    mismatch.send(Message::Text(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":4,"clientKind":"other"}}).to_string().into())).await.unwrap();
+    let error = mismatch.next().await.unwrap().unwrap().into_text().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&error).unwrap()["error"]["data"]["appError"],
+        "protocol_version"
+    );
+    let mut client = Client::new(&server, false).await;
+    let invalid = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":"missing","text":"x","mode":"wrong"}),
+        )
+        .await;
+    assert_eq!(invalid["error"]["code"], -32602);
+    for after in [
+        json!(-1),
+        json!(null),
+        json!(0.5),
+        json!(9007199254740992u64),
+    ] {
+        let response = client
+            .rpc(
+                "session.attach",
+                json!({"sessionId":"missing","after":after}),
+            )
+            .await;
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    client
+        .raw(json!({"jsonrpc":"2.0","id":-1.5,"method":"daemon.ping"}))
+        .await;
+    let negative_id = client.read().await;
+    assert_eq!(negative_id["id"], json!(-1.5));
+    assert_ok(&negative_id);
+    let unknown = client.rpc("unknown", json!({})).await;
+    assert_eq!(unknown["error"]["code"], -32601);
+    let mut params = create(json!(["wait"]));
+    params["trace"] = json!(true);
+    let created = client.rpc("session.create", params).await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].clone();
+    let path = created["result"]["tracePath"].as_str().unwrap();
+    assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"text":"tool:wait {\"millis\":1000}"}),
+            )
+            .await,
+    );
+    let mut observed = vec![];
+    loop {
+        let event = client.notice("session.event").await;
+        observed.push(event["params"]["event"].clone());
+        if event["params"]["event"]["name"] == "tool-call" {
+            break;
+        }
+    }
+    // Close immediately while execution and trace writing are active; do not idle first.
+    assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
+    client.notice("session.closed").await;
+    observed.extend(
+        client
+            .notices
+            .iter()
+            .filter(|notice| notice["method"] == "session.event")
+            .map(|notice| notice["params"]["event"].clone()),
+    );
+    let records = trace_payloads(&read_trace(path).await);
+    assert!(records.len() > 5);
+    assert!(observed.iter().all(|event| event["type"] != "stop"));
+    let native_events: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"]["type"] != "stop")
+        .map(|record| {
+            Arc::new(
+                serde_json::from_value::<dim_agent_types::AgentEvent>(record["event"].clone())
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(v1_events(&native_events, 0), observed);
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(record["event"]["sequence"], index + 1);
+    }
+    assert!(
+        records
+            .iter()
+            .any(|r| r["event"]["type"] == "turn" && r["event"]["name"] == "end")
+    );
+    std::fs::remove_file(path).unwrap();
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn force_shutdown_flushes_response_then_exits_the_child_process() {
+    use std::process::Stdio;
+    let directory =
+        std::path::PathBuf::from("/tmp").join(format!("dim-server-force-{}", uuid::Uuid::new_v4()));
+    let socket = directory.join("server.sock");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+        .args([
+            "--mock-model",
+            "--unix",
+            socket.to_str().unwrap(),
+            "--no-ws",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), output.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(line.contains("unixPath"), "{line}");
+    let mut client = Client {
+        transport: Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())),
+        id: 0,
+        notices: vec![],
+        instance: Value::Null,
+        features: Value::Null,
+    };
+    assert_ok(
+        &client
+            .rpc("hello", json!({"protocolVersion":1.0,"clientKind":"other"}))
+            .await,
+    );
+    let created = client.rpc("session.create", create(json!(["wait"]))).await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].clone();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"text":"tool:wait {\"millis\":60000}"}),
+            )
+            .await,
+    );
+    assert_ok(&client.rpc("daemon.shutdown", json!({"force":true})).await);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("force must not await the running tool")
+            .unwrap()
+            .success()
+    );
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+struct LargeModel;
+impl dim_agent_capabilities::host::ModelDriver for LargeModel {
+    fn invoke(
+        &self,
+        _request: Arc<dim_agent_types::ModelRequest>,
+        _: dim_agent_capabilities::host::ModelConnection,
+        _cancel: CancellationToken,
+    ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
+        Box::pin(async {
+            use dim_agent_capabilities::host::{ModelChunk, ModelStopReason, ModelStream};
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "large".into(),
+                }),
+                // Large but within the CLI's 16 MiB frame contract, including
+                // the enclosing event JSON. Oversized frames fail closed.
+                Ok(ModelChunk::Text("L".repeat(8 * 1024 * 1024))),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "large".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
+    use dim_agent_capabilities::{
+        adapters::DefaultPrepareModelPlugin,
+        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+    };
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    builder
+        .session_value(Arc::new(
+            dim_agent_capabilities::history::HistoryRenderer::default(),
+        ))
+        .session_value(Arc::new(ModelHost(Arc::new(LargeModel))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_plugin(DefaultPrepareModelPlugin::new);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    let socket =
+        std::path::PathBuf::from("/tmp").join(format!("dim-large-{}/s", uuid::Uuid::new_v4()));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(socket),
+            write_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut control = Client::new(&server, false).await;
+    let created = control.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].clone();
+    assert_ok(
+        &control
+            .rpc("session.attach", json!({"sessionId":sid}))
+            .await,
+    );
+    let mut remote = Client::new(&server, true).await;
+    assert_ok(&remote.rpc("session.attach", json!({"sessionId":sid})).await);
+    // A third reader never reads the large event. Its write deadline expires.
+    let mut slow = Client::new(&server, false).await;
+    assert_ok(&slow.rpc("session.attach", json!({"sessionId":sid})).await);
+    assert_ok(
+        &control
+            .rpc("session.submit", json!({"sessionId":sid,"text":"large"}))
+            .await,
+    );
+    for client in [&mut control, &mut remote] {
+        let text = loop {
+            let event = client.notice("session.event").await["params"]["event"].clone();
+            if event["name"] == "text" {
+                break event;
+            }
+        };
+        assert_eq!(
+            text["data"]["delta"].as_str().unwrap().len(),
+            8 * 1024 * 1024
+        );
+    }
+    drop(remote);
+    assert_ok(&control.rpc("session.idle", json!({"sessionId":sid})).await);
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let ping = control.rpc("daemon.ping", json!({})).await;
+            assert_eq!(ping["result"]["sessions"], 1);
+            if ping["result"]["connections"] == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("slow connection is removed without closing its Session");
+    drop(slow);
+    let listed = control.rpc("session.list", json!({})).await;
+    assert_eq!(listed["result"].as_array().unwrap().len(), 1);
+    assert_ok(&control.rpc("session.close", json!({"sessionId":sid})).await);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_replies_first_and_replays_only_current_pending_approvals() {
+    use dim_agent_types::InputMode;
+    for ws in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::install(&mut builder);
+        defaults::mock_model_hosts(&mut builder);
+        dim_agent_capabilities::defaults::tool_host(
+            &mut builder,
+            Arc::new(ConfirmTool {
+                calls: calls.clone(),
+                seen: Arc::new(Mutex::new(vec![])),
+            }),
+        );
+        let server = serve(
+            builder,
+            ServerConfig {
+                unix_path: Some(
+                    std::path::PathBuf::from("/tmp")
+                        .join(format!("dim-attach-{}/s", uuid::Uuid::new_v4())),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut control = Client::new(&server, !ws).await;
+        let created = control
+            .rpc(
+                "session.create",
+                json!({"cwd":std::env::temp_dir(),"tools":["confirm"],"permissionPolicy":{"preset":"workspace-write"}}),
+            )
+            .await;
+        assert_ok(&created);
+        let session = server
+            .agent()
+            .unwrap()
+            .get_session(created["result"]["sessionId"].as_str().unwrap())
+            .unwrap();
+        assert_ok(
+            &control
+                .rpc("session.attach", json!({"sessionId":session.id()}))
+                .await,
+        );
+        session
+            .submit("tool:confirm {}".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let old_request = control.notice("approval.request").await["params"]["requestId"].clone();
+        assert_ok(
+            &control
+                .rpc(
+                    "approval.respond",
+                    json!({"sessionId":session.id(),"requestId":old_request,"decision":"allow"}),
+                )
+                .await,
+        );
+        session.idle("main").await.unwrap();
+        session
+            .submit("tool:confirm {}".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let current_request =
+            control.notice("approval.request").await["params"]["requestId"].clone();
+        assert_ne!(current_request, old_request);
+
+        let mut client = Client::new(&server, ws).await;
+        let attach = client
+            .send("session.attach", json!({"sessionId":session.id()}))
+            .await;
+        let reply = client.read().await;
+        assert_eq!(reply["id"], attach, "the reply precedes every notification");
+        assert_eq!(reply["result"], json!({}));
+        assert_eq!(
+            client.notice("approval.request").await["params"]["requestId"],
+            current_request
+        );
+        let last = session
+            .submit("after attach".into(), InputMode::Append, "main")
+            .await
+            .unwrap();
+        receive_events_through(&mut client, last.sequence).await;
+        assert!(
+            !client
+                .notices
+                .iter()
+                .any(|notice| notice["method"] == "approval.request"),
+            "a resolved request is never replayed"
+        );
+        // Replacement replays the current pending request exactly once.
+        assert_eq!(
+            client
+                .rpc("session.attach", json!({"sessionId":session.id()}))
+                .await["result"],
+            json!({})
+        );
+        assert_eq!(
+            client.notice("approval.request").await["params"]["requestId"],
+            current_request
+        );
+        assert_ok(
+            &client
+                .rpc("session.detach", json!({"sessionId":session.id()}))
+                .await,
+        );
+        assert_ok(
+            &client
+                .rpc("session.attach", json!({"sessionId":session.id()}))
+                .await,
+        );
+        drop(client);
+        assert_ok(
+            &control
+                .rpc("session.stop", json!({"sessionId":session.id()}))
+                .await,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .expect("dropped subscriptions are released")
+            .unwrap();
+    }
+}
+
+struct NamedTools(Arc<AtomicUsize>);
+impl ToolDriver for NamedTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        ["echo", "write"]
+            .into_iter()
+            .map(|name| {
+                dim_agent_capabilities::tool_registry::definition(
+                    name,
+                    "A host implementation with a familiar name",
+                    json!({"type":"object"}),
+                )
+            })
+            .collect()
+    }
+    fn execute(
+        &self,
+        _call: ToolCall,
+        _context: ToolExecutionContext,
+        _cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::text("executed"))
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn familiar_tool_names_do_not_grant_permissions_on_either_transport() {
+    for ws in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = launch(Arc::new(NamedTools(calls.clone())), ServerConfig::default()).await;
+        let mut client = Client::new(&server, ws).await;
+        for (tool, policy, expected_calls, approve) in [
+            ("echo", json!({"preset":"read-only"}), 0, false),
+            (
+                "echo",
+                json!({"preset":"read-only","allowedTools":["echo"]}),
+                1,
+                false,
+            ),
+            (
+                "echo",
+                json!({"preset":"full-access","allowedTools":["echo"],"disallowedTools":["echo"]}),
+                1,
+                false,
+            ),
+            ("write", json!({"preset":"workspace-write"}), 2, true),
+        ] {
+            let mut params = create(json!([tool]));
+            params["permissionPolicy"] = policy;
+            let created = client.rpc("session.create", params).await;
+            assert_ok(&created);
+            let sid = created["result"]["sessionId"].clone();
+            assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+            assert_ok(
+                &client
+                    .rpc(
+                        "session.submit",
+                        json!({"sessionId":sid,"text":format!("tool:{tool} {{}}") }),
+                    )
+                    .await,
+            );
+            if approve {
+                let request = client.notice("approval.request").await;
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    expected_calls - 1,
+                    "workspace-write cannot grant authority from the name write"
+                );
+                assert_ok(&client.rpc("approval.respond", json!({"sessionId":sid,"requestId":request["params"]["requestId"],"decision":"allow"})).await);
+            }
+            assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unix_accept_recovers_from_descriptor_exhaustion_and_shutdown_interrupts_retry() {
+    use std::process::Stdio;
+    for shutdown_while_exhausted in [false, true] {
+        let directory = std::path::PathBuf::from("/tmp")
+            .join(format!("dim-server-accept-{}", uuid::Uuid::new_v4()));
+        let socket = directory.join("server.sock");
+        // Exhaust only the child server's descriptors, not the test runner's runtime.
+        let mut child = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                "ulimit -n 64; exec \"$@\"",
+                "sh",
+                env!("CARGO_BIN_EXE_dim-app-server"),
+                "--mock-model",
+                "--unix",
+                socket.to_str().unwrap(),
+                "--no-ws",
+            ])
+            .env("RUST_LOG", "warn")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), output.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(line.contains("unixPath"), "{line}");
+        let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+        let mut control = Client {
+            transport: Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())),
+            id: 0,
+            notices: vec![],
+            instance: Value::Null,
+            features: Value::Null,
+        };
+        assert_ok(
+            &control
+                .rpc("hello", json!({"protocolVersion":1,"clientKind":"other"}))
+                .await,
+        );
+        let created = control.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].clone();
+        let mut connections = vec![];
+        let mut error = String::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = errors.next_line() => {
+                        error = result.unwrap().expect("server exited before retrying accept");
+                        if error.contains("Unix accept failed; retrying") { break; }
+                    }
+                    result = UnixStream::connect(&socket) => {
+                        match result {
+                            Ok(connection) => connections.push(connection),
+                            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                                // macOS refuses connections when the live listener's backlog fills.
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            Err(error) => panic!("unexpected connection failure: {error}"),
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("server reached its descriptor limit");
+        assert!(error.contains("Unix accept failed; retrying"), "{error}");
+        assert_ok(&control.rpc("daemon.ping", json!({})).await);
+        if shutdown_while_exhausted {
+            assert_ok(&control.rpc("daemon.shutdown", json!({})).await);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(3), child.wait())
+                    .await
+                    .expect("shutdown interrupts accept backoff")
+                    .unwrap()
+                    .success()
+            );
+        } else {
+            drop(connections);
+            let mut restored = Client {
+                transport: Transport::Unix(BufReader::new(
+                    UnixStream::connect(&socket).await.unwrap(),
+                )),
+                id: 0,
+                notices: vec![],
+                instance: Value::Null,
+                features: Value::Null,
+            };
+            assert_ok(
+                &restored
+                    .rpc("hello", json!({"protocolVersion":1,"clientKind":"other"}))
+                    .await,
+            );
+            let sessions = restored.rpc("session.list", json!({})).await;
+            assert_eq!(
+                sessions["result"][0]["sessionId"], sid,
+                "accept failure must preserve the live Session"
+            );
+            assert_ok(&control.rpc("daemon.shutdown", json!({})).await);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(3), child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert!(!socket.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unix_daemon_recovers_after_a_crash_without_stealing_endpoints() {
+    use std::{
+        os::unix::fs::{FileTypeExt, MetadataExt},
+        process::Stdio,
+    };
+    let directory = std::path::PathBuf::from("/tmp")
+        .join(format!("dim-server-recovery-{}", uuid::Uuid::new_v4()));
+    let socket = directory.join("ipc/server.sock");
+    let lock = directory.join("ipc/server.sock.lock");
+    let home = directory.join("home");
+    let spawn = |target_home: &std::path::Path, endpoint: &std::path::Path| {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+            .args([
+                "--mock-model",
+                "--unix",
+                endpoint.to_str().unwrap(),
+                "--no-ws",
+                "--home",
+                target_home.to_str().unwrap(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    };
+    let mut first = spawn(&home, &socket);
+    let mut line = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        BufReader::new(first.stdout.as_mut().unwrap()).read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(line.contains("unixPath"), "{line}");
+    let original_socket = std::fs::symlink_metadata(&socket).unwrap();
+    let original_lock = std::fs::symlink_metadata(&lock).unwrap();
+    let database_lock = home.join("dimcode.sqlite.lock");
+    let original_database_lock = std::fs::symlink_metadata(&database_lock).unwrap();
+    let blocked_socket = directory.join("blocked/server.sock");
+    let storage_loser = tokio::time::timeout(
+        Duration::from_secs(5),
+        spawn(&home, &blocked_socket).wait_with_output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!storage_loser.status.success());
+    let diagnostic = String::from_utf8_lossy(&storage_loser.stderr);
+    assert!(
+        diagnostic.contains("another process owns the SQLite database"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(home.join("dimcode.sqlite").to_str().unwrap()),
+        "{diagnostic}"
+    );
+    assert!(
+        !blocked_socket.exists(),
+        "transport must wait for native storage ownership"
+    );
+    assert!(
+        !directory.join("blocked/server.sock.lock").exists(),
+        "failed storage admission must not even acquire the endpoint lock"
+    );
+    let loser = tokio::time::timeout(
+        Duration::from_secs(5),
+        spawn(&directory.join("other-home"), &socket).wait_with_output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!loser.status.success());
+    assert!(String::from_utf8_lossy(&loser.stderr).contains("socket endpoint is owned"));
+    assert_eq!(
+        std::fs::symlink_metadata(&socket).unwrap().ino(),
+        original_socket.ino()
+    );
+    let mut client = Client {
+        transport: Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())),
+        id: 0,
+        notices: vec![],
+        instance: Value::Null,
+        features: Value::Null,
+    };
+    assert_ok(
+        &client
+            .rpc("hello", json!({"protocolVersion":1,"clientKind":"other"}))
+            .await,
+    );
+    assert_ok(&client.rpc("daemon.ping", json!({})).await);
+    first.kill().await.unwrap(); // Unix Child::kill sends SIGKILL and reaps it.
+    drop(client);
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    assert_eq!(
+        UnixStream::connect(&socket).await.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+
+    let mut recovered = spawn(&home, &socket);
+    line.clear();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        BufReader::new(recovered.stdout.as_mut().unwrap()).read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(line.contains("unixPath"), "{line}");
+    let retained_lock = std::fs::symlink_metadata(&lock).unwrap();
+    assert_eq!(
+        (retained_lock.dev(), retained_lock.ino()),
+        (original_lock.dev(), original_lock.ino())
+    );
+    let retained_database_lock = std::fs::symlink_metadata(&database_lock).unwrap();
+    assert_eq!(
+        (retained_database_lock.dev(), retained_database_lock.ino()),
+        (original_database_lock.dev(), original_database_lock.ino())
+    );
+    let mut client = Client {
+        transport: Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())),
+        id: 0,
+        notices: vec![],
+        instance: Value::Null,
+        features: Value::Null,
+    };
+    assert_ok(
+        &client
+            .rpc("hello", json!({"protocolVersion":1,"clientKind":"other"}))
+            .await,
+    );
+    assert_ok(&client.rpc("daemon.shutdown", json!({})).await);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), recovered.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(!socket.exists());
+    assert_eq!(
+        std::fs::symlink_metadata(&lock).unwrap().ino(),
+        original_lock.ino()
+    );
+
+    // A live endpoint from a server without the lock is also protected.
+    let foreign = tokio::net::UnixListener::bind(&socket).unwrap();
+    let foreign_socket = std::fs::symlink_metadata(&socket).unwrap();
+    let rejected = tokio::time::timeout(
+        Duration::from_secs(5),
+        spawn(&home, &socket).wait_with_output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(
+        std::fs::symlink_metadata(&socket).unwrap().ino(),
+        foreign_socket.ino()
+    );
+    tokio::time::timeout(Duration::from_secs(5), foreign.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(foreign);
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::write(&socket, b"keep this file").unwrap();
+    let regular = std::fs::symlink_metadata(&socket).unwrap();
+    let rejected = tokio::time::timeout(
+        Duration::from_secs(5),
+        spawn(&home, &socket).wait_with_output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(
+        std::fs::symlink_metadata(&socket).unwrap().ino(),
+        regular.ino()
+    );
+    assert_eq!(std::fs::read(&socket).unwrap(), b"keep this file");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_binary_uses_native_aimux_over_unix_and_websocket() {
+    use axum::{Json, Router, routing::post};
+    use std::process::Stdio;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = requests.clone();
+        let router = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().await.push(body);
+                ([ ("content-type", "text/event-stream") ], format!("data: {}\n\ndata: [DONE]\n\n", json!({"id":"remote","choices":[{"index":0,"delta":{"content":"native server answer"},"finish_reason":"stop"}]})))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let stop = CancellationToken::new(); let cancel = stop.clone();
+        let http = tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(cancel.cancelled_owned()).await.unwrap(); });
+        let directory = std::path::PathBuf::from("/tmp").join(format!("dim-aimux-server-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("ipc/server.sock"); let configuration = directory.join("models.json");
+        std::fs::write(&configuration, json!({"defaultModel":{"providerId":"local","modelId":"native-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"native-model","config":{"maxTokens":4096}}]}]}).to_string()).unwrap();
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+            .args(["--model-config", configuration.to_str().unwrap(), "--unix", socket.to_str().unwrap(), "--ws", "127.0.0.1:0"])
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap()); let mut line = String::new();
+        output.read_line(&mut line).await.unwrap();
+        if line.is_empty() {
+            let failed = child.wait_with_output().await.unwrap();
+            panic!("server startup failed: {}", String::from_utf8_lossy(&failed.stderr));
+        }
+        let address: Value = serde_json::from_str(&line).unwrap();
+        for ws in [false, true] {
+            let transport = if ws {
+                Transport::Ws(Box::new(tokio_tungstenite::connect_async(format!("ws://{}/ws", address["websocketAddress"].as_str().unwrap())).await.unwrap().0))
+            } else { Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())) };
+            let mut client = Client { transport, id: 0, notices: vec![], instance: Value::Null, features: Value::Null };
+            assert_ok(&client.rpc("hello", json!({"protocolVersion":1,"clientKind":"other"})).await);
+            let created = client.rpc("session.create", create(json!([]))).await; assert_ok(&created);
+            let sid = created["result"]["sessionId"].clone();
+            assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+            assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"text":"hello native"})).await);
+            let mut events = vec![];
+            loop {
+                let event = client.notice("session.event").await["params"]["event"].clone();
+                serde_json::from_value::<dim_agent_types::v1::AgentEvent>(event.clone()).unwrap();
+                let end = event["type"] == "turn" && event["name"] == "end";
+                events.push(event);
+                if end { break; }
+            }
+            assert!(events.iter().any(|event| event["data"]["delta"] == "native server answer"));
+            assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
+            if ws {
+                assert_ok(&client.rpc("daemon.shutdown", json!({"force":false})).await);
+            }
+        }
+        assert!(child.wait().await.unwrap().success());
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|body| body["model"] == "native-model" && body.get("tools").is_none()));
+        drop(requests);
+        stop.cancel(); http.await.unwrap(); std::fs::remove_dir_all(directory).unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn model_configuration_errors_exit_before_listening() {
+    let directory = std::env::temp_dir().join(format!("dim-aimux-config-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let config = directory.join("invalid.json");
+    std::fs::write(&config, "{\"requestLimits\":{}}").unwrap();
+    for args in [
+        vec![],
+        vec!["--mock-model", "--model-config", config.to_str().unwrap()],
+        vec!["--model-config", config.to_str().unwrap()],
+    ] {
+        let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[path = "transport_flow/managed_provider.rs"]
+mod managed_provider;

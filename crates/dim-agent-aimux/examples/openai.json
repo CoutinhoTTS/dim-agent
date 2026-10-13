@@ -1,0 +1,14 @@
+{
+  "defaultModel": { "providerId": "openai", "modelId": "gpt-4o" },
+  "providers": [
+    {
+      "id": "openai",
+      "kind": "openai-chat",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "baseUrl": "https://api.openai.com/v1",
+      "models": [
+        { "id": "gpt-4o", "config": { "maxTokens": 4096 } }
+      ]
+    }
+  ]
+}

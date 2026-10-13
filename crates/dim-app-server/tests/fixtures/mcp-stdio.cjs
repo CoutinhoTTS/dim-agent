@@ -1,0 +1,38 @@
+// Opt-in interoperability fixture: uses the workspace's official MCP SDK.
+const { createRequire } = require('node:module');
+const { resolve } = require('node:path');
+const { writeFileSync } = require('node:fs');
+const sdk = createRequire(resolve(__dirname, '../../../../runtime/package.json'));
+const { McpServer } = sdk('@modelcontextprotocol/sdk/server/mcp.js');
+const { StdioServerTransport } = sdk('@modelcontextprotocol/sdk/server/stdio.js');
+const { z } = sdk('zod');
+
+async function main() {
+  const mode = process.argv[2];
+  writeFileSync(process.env.MCP_PID_FILE, String(process.pid));
+  const keepAlive = setInterval(() => {}, 1000);
+  if (mode === 'silent') {
+    process.stdin.resume();
+    return;
+  }
+  if (mode === 'invalid') {
+    process.stdout.write('not json\n');
+    process.stdin.resume();
+    return;
+  }
+  if (mode !== 'stubborn') {
+    process.stdin.on('end', () => clearInterval(keepAlive));
+  }
+  const server = new McpServer({ name: 'stdio-interop', version: '1' });
+  server.registerTool('inspect', { inputSchema: { a: z.number(), b: z.number() } }, async ({ a, b }) => ({
+    content: [{ type: 'text', text: JSON.stringify({ value: a * 100 + b, cwd: process.cwd(), argument: process.argv[3], env: process.env.MCP_TEST_VALUE }) }],
+  }));
+  server.registerTool('slow', { inputSchema: {} }, async (_, { signal }) => {
+    writeFileSync(process.env.MCP_PID_FILE + '.called', '1');
+    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    writeFileSync(process.env.MCP_PID_FILE + '.cancelled', '1');
+    return { content: [{ type: 'text', text: 'cancelled' }] };
+  });
+  await server.connect(new StdioServerTransport());
+}
+main().catch(() => process.exit(1));

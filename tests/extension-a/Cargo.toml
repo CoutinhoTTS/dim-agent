@@ -1,0 +1,8 @@
+[package]
+name = "test-extension-a"
+version.workspace = true
+edition.workspace = true
+publish = false
+[dependencies]
+rutis.workspace = true
+dim-agent-runtime.workspace = true

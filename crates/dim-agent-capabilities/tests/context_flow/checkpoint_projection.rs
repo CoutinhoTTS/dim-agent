@@ -1,0 +1,684 @@
+use super::*;
+use dim_agent_capabilities::{
+    context_block,
+    history::{context_configuration, project_context_history, projection_checkpoint},
+    prompt_state::PromptSnapshot,
+};
+
+fn fixed(events: Vec<EventKind>) -> ContextHistory {
+    let events: Vec<_> = events
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| {
+            Arc::new(AgentEvent {
+                id: format!("event-{index}"),
+                sequence: index as u64 + 1,
+                create_at: index as u64,
+                tags: None,
+                kind,
+            })
+        })
+        .collect();
+    ContextHistory {
+        positions: events
+            .iter()
+            .map(|event| TimelinePosition {
+                branch_id: "main".into(),
+                sequence: event.sequence,
+            })
+            .collect(),
+        events,
+        checkpoint: None,
+        ancestry: Vec::new(),
+    }
+}
+
+fn keyed(text: &str, key: &str) -> InputBlock {
+    context_block::raw(text.into(), Some(key.into()))
+}
+
+#[tokio::test]
+async fn keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired() {
+    let agent = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(600.),
+            ..Context::default()
+        },
+    )
+    .build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let inputs = [
+        vec![keyed("<live>a</live>", "a"), keyed("<live>b</live>", "b")],
+        vec![context_block::retire("<ended>b</ended>".into(), "b".into())],
+        Vec::new(),
+    ];
+    for (blocks, text) in inputs
+        .into_iter()
+        .zip(["x".repeat(500), "y".repeat(500), "next".into()])
+    {
+        session
+            .input(
+                InputMessageData {
+                    blocks,
+                    ..InputMessageData::text(text, Some(InputMode::Queue))
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let events = session.history("main", None).await.unwrap();
+    let compactions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(compactions.len(), 2);
+    let ContextCompactionResult::Completed {
+        context_baseline, ..
+    } = &compactions[1].outcome
+    else {
+        panic!("second compaction must complete");
+    };
+    assert_eq!(
+        context_baseline
+            .iter()
+            .map(|entry| (entry.key.as_str(), entry.message.clone()))
+            .collect::<Vec<_>>(),
+        [("a", Message::text(Role::User, "<live>a</live>"))]
+    );
+    let request = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(&data.request),
+            _ => None,
+        })
+        .unwrap();
+    // Summary, then the live key verbatim, then the retained history.
+    assert_eq!(
+        *request.messages[1],
+        Message::text(Role::User, "<live>a</live>")
+    );
+    assert!(
+        !request
+            .messages
+            .contains(&Arc::new(Message::text(Role::User, "<live>b</live>")))
+    );
+    agent.close().await.unwrap();
+}
+
+fn diagnostics() -> Box<CompactionDiagnosticsRecord> {
+    Box::new(
+        serde_json::from_value(serde_json::json!({
+            "reason":"auto", "candidateMessageCount":1, "inputMessageCount":1,
+            "retainedMessageCount":0, "retainedTokenBudget":0, "retainedTokens":0,
+            "serializedChars":1, "estimatedInputTokens":1, "estimatedCompressedTokens":1,
+            "estimatedPostCompactionTokens":1, "summaryInputBudget":1, "preflightInputTokens":1,
+            "preflightOutputTokens":1, "compactedToolPayloadCount":0, "droppedMessageCount":0,
+            "chunkCount":1, "summaryChars":1, "estimatedSummaryTokens":1, "modelCallCount":1,
+            "durationMs":1
+        }))
+        .unwrap(),
+    )
+}
+
+fn resume(context: &ContextHistory, cursor: &str) -> ContextHistory {
+    let checkpoint = projection_checkpoint(context, cursor).unwrap();
+    let index = context
+        .positions
+        .iter()
+        .position(|position| position == &checkpoint.resume)
+        .unwrap();
+    ContextHistory {
+        events: context.events[index..].to_vec(),
+        positions: context.positions[index..].to_vec(),
+        ancestry: context.ancestry.clone(),
+        checkpoint: Some(ContextCompactionData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            through: context.events.last().unwrap().sequence,
+            outcome: ContextCompactionResult::Completed {
+                cursor: cursor.into(),
+                summary: "summary".into(),
+                diagnostics: diagnostics(),
+                context_baseline: Vec::new(),
+                checkpoint: Some(Box::new(checkpoint)),
+            },
+        }),
+    }
+}
+
+#[test]
+fn notification_preview_is_bounded_and_utf8_safe() {
+    let preview = context_block::preview(&["<&🦀".repeat(8 * 1024).as_str()]);
+    assert!(preview.len() <= 16 * 1024);
+    assert!(preview.ends_with("[Preview truncated at 16 KiB.]"));
+    assert!(preview.starts_with("&lt;&amp;🦀"));
+    assert!(!preview.contains("&\n"));
+}
+
+#[test]
+fn repeated_checkpoint_retains_restored_pending_input() {
+    let context = fixed(vec![
+        EventKind::InputMessage(InputMessageData::text("pending", None)),
+        EventKind::InputMessage(InputMessageData {
+            blocks: vec![context_block::raw("<report/>".into(), None)],
+            ..InputMessageData::default()
+        }),
+        EventKind::InputMessage(InputMessageData::text("first", None)),
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: "event-2".into(),
+        }),
+    ]);
+    let once = resume(&context, "event-3");
+    let twice = resume(&once, "event-3");
+    let ContextCompactionResult::Completed {
+        checkpoint: Some(checkpoint),
+        ..
+    } = &twice.checkpoint.as_ref().unwrap().outcome
+    else {
+        panic!("checkpoint must be present");
+    };
+    assert!(
+        checkpoint
+            .state
+            .inputs
+            .iter()
+            .any(|(id, _)| id == "event-1")
+    );
+}
+
+#[test]
+fn checkpoint_replay_preserves_prompt_configuration_pending_input_and_internal_tool_cursor() {
+    let scope = PromptScope::Branch {
+        timeline: "main".into(),
+    };
+    let prompt = PromptEntry {
+        source: "host".into(),
+        version: "v1".into(),
+        body: "rules".into(),
+        scope: scope.clone(),
+        delivery: PromptDelivery::Context,
+        order: 0,
+    };
+    let configuration = ContextConfiguredData {
+        timeline: "main".into(),
+        revision: "config".into(),
+        previous: None,
+        prompt: None,
+        settings: Box::new(ModelConfiguration {
+            provider_id: "provider".into(),
+            model_id: "model".into(),
+            capability_snapshot: None,
+            tools: None,
+            tool_sources: Vec::new(),
+            config: None,
+            metadata: None,
+        }),
+        system: Some(SystemPrompt::Text("system".into())),
+    };
+    let input = |text: &str| InputMessageData {
+        user: InputMessageData::text(text, None).user,
+        blocks: vec![keyed(text, "selection")],
+        mode: Some(InputMode::Queue),
+        ..InputMessageData::default()
+    };
+    let mut context = fixed(vec![
+        EventKind::ContextConfigured(configuration.clone()),
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "turn".into(),
+        }),
+        EventKind::PromptChanged(PromptChangedData {
+            timeline: "main".into(),
+            revision: "prompt".into(),
+            previous: None,
+            reason: PromptChangeReason::Initialize,
+            changes: vec![
+                PromptChange::Set { entry: prompt },
+                PromptChange::Set {
+                    entry: PromptEntry {
+                        source: "system".into(),
+                        version: "s1".into(),
+                        body: "system rules".into(),
+                        scope: scope.clone(),
+                        delivery: PromptDelivery::System,
+                        order: 0,
+                    },
+                },
+            ],
+        }),
+        EventKind::InputMessage(input("queued")),
+        EventKind::InputMessage(input("first")),
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: "event-4".into(),
+        }),
+        EventKind::ModelStart(ModelStartData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+        }),
+        EventKind::ToolUseStart(ToolUseStartData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            call_id: "a".into(),
+            name: "echo".into(),
+        }),
+        EventKind::ToolUseStart(ToolUseStartData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            call_id: "b".into(),
+            name: "echo".into(),
+        }),
+        EventKind::ToolUse(ToolUseData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            call: ToolCall {
+                id: "a".into(),
+                name: "echo".into(),
+                input: JsonObject::new(),
+            },
+        }),
+        EventKind::ToolUse(ToolUseData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            call: ToolCall {
+                id: "b".into(),
+                name: "echo".into(),
+                input: JsonObject::new(),
+            },
+        }),
+        EventKind::PromptChanged(PromptChangedData {
+            timeline: "main".into(),
+            revision: "during-tools".into(),
+            previous: None,
+            reason: PromptChangeReason::Refresh,
+            changes: vec![PromptChange::Set {
+                entry: PromptEntry {
+                    source: "host".into(),
+                    version: "v2".into(),
+                    body: "new rules".into(),
+                    scope: scope.clone(),
+                    delivery: PromptDelivery::Context,
+                    order: 0,
+                },
+            }],
+        }),
+        EventKind::ModelOutputEnd(ModelOutputEndData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            outcome: ModelOutputOutcome::Completed {
+                finish_reason: FinishReason::ToolUse,
+            },
+        }),
+        EventKind::ToolResult(ToolResultData {
+            call_event_id: Some("tool-call".into()),
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            results: vec![
+                ToolCallResult {
+                    call_id: "a".into(),
+                    result: ToolResult::text("first result"),
+                },
+                ToolCallResult {
+                    call_id: "b".into(),
+                    result: ToolResult::text("second result"),
+                },
+            ],
+        }),
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: "event-3".into(),
+        }),
+        EventKind::PromptChanged(PromptChangedData {
+            timeline: "main".into(),
+            revision: "revoke".into(),
+            previous: None,
+            reason: PromptChangeReason::Refresh,
+            changes: vec![PromptChange::Revoke {
+                source: "host".into(),
+                scope,
+            }],
+        }),
+    ]);
+    let whole = project_context_history(&context).unwrap();
+    for cursor in ["event-5", "event-13:0"] {
+        let resumed = resume(&context, cursor);
+        let cut = whole.iter().position(|entry| entry.id == cursor).unwrap();
+        assert_eq!(project_context_history(&resumed).unwrap(), whole[cut + 1..]);
+        assert_eq!(
+            PromptSnapshot::from_context(&resumed),
+            PromptSnapshot::from_context(&context)
+        );
+        assert_eq!(context_configuration(&resumed), Some(configuration.clone()));
+        assert!(resumed.checkpoint.as_ref().is_some_and(|data| matches!(&data.outcome, ContextCompactionResult::Completed { checkpoint: Some(checkpoint), .. } if checkpoint.state.inputs.iter().any(|(id, _)| id == "event-3"))));
+        // A second checkpoint inherits the first checkpoint's restored state.
+        context = resumed;
+    }
+}
+
+/// Output facts of one request in turn `turn`, built as ModelProvider and Loop
+/// commit them (ADR agent-029).
+mod output {
+    use super::*;
+
+    pub fn start(request: &str) -> EventKind {
+        EventKind::ModelStart(ModelStartData {
+            turn_id: "turn".into(),
+            request_id: request.into(),
+        })
+    }
+    pub fn text(request: &str, delta: &str) -> EventKind {
+        EventKind::Text(TextData {
+            turn_id: "turn".into(),
+            request_id: request.into(),
+            delta: delta.into(),
+        })
+    }
+    pub fn thinking(request: &str, delta: &str) -> EventKind {
+        EventKind::Thinking(ThinkingData {
+            turn_id: "turn".into(),
+            request_id: request.into(),
+            delta: delta.into(),
+        })
+    }
+    pub fn tool_start(request: &str, call: &str) -> EventKind {
+        EventKind::ToolUseStart(ToolUseStartData {
+            turn_id: "turn".into(),
+            request_id: request.into(),
+            call_id: call.into(),
+            name: "echo".into(),
+        })
+    }
+    pub fn tool_input() -> JsonObject {
+        serde_json::from_value(serde_json::json!({"text": "x"})).unwrap()
+    }
+    pub fn tool_use(request: &str, call: &str) -> EventKind {
+        EventKind::ToolUse(ToolUseData {
+            turn_id: "turn".into(),
+            request_id: request.into(),
+            call: ToolCall {
+                id: call.into(),
+                name: "echo".into(),
+                input: tool_input(),
+            },
+        })
+    }
+    /// Closes calls that were never dispatched.
+    pub fn closure(request: &str, results: &[(&str, &str)]) -> EventKind {
+        EventKind::ToolResult(ToolResultData {
+            turn_id: "turn".into(),
+            request_id: request.into(),
+            call_event_id: None,
+            results: results
+                .iter()
+                .map(|(call, text)| ToolCallResult {
+                    call_id: (*call).into(),
+                    result: ToolResult::error(*text),
+                })
+                .collect(),
+        })
+    }
+    pub fn end(request: &str, outcome: ModelOutputOutcome) -> EventKind {
+        EventKind::ModelOutputEnd(ModelOutputEndData {
+            turn_id: "turn".into(),
+            request_id: request.into(),
+            outcome,
+        })
+    }
+    pub fn cancelled() -> ModelOutputOutcome {
+        ModelOutputOutcome::Cancelled {
+            reason: "stopped".into(),
+        }
+    }
+    pub fn completed() -> ModelOutputOutcome {
+        ModelOutputOutcome::Completed {
+            finish_reason: FinishReason::ToolUse,
+        }
+    }
+    pub fn turn_end() -> EventKind {
+        EventKind::TurnEnd(TurnEndData {
+            turn_id: "turn".into(),
+            outcome: TurnOutcome::Cancelled {
+                reason: "stopped".into(),
+            },
+        })
+    }
+    pub fn prompt(text: &str, consumed: &str) -> [EventKind; 2] {
+        [
+            EventKind::InputMessage(InputMessageData::text(text, None)),
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: consumed.into(),
+            }),
+        ]
+    }
+}
+
+fn assistant(parts: Vec<MessagePart>) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: MessageContent::Parts(parts),
+    }
+}
+
+fn text_part(text: &str) -> MessagePart {
+    MessagePart::Text {
+        provider_metadata: None,
+        text: text.into(),
+        start_time: None,
+        end_time: None,
+    }
+}
+
+fn tool_part(id: &str, input: JsonObject) -> MessagePart {
+    MessagePart::ToolUse {
+        provider_metadata: None,
+        id: id.into(),
+        name: "echo".into(),
+        input,
+        start_time: None,
+    }
+}
+
+fn result_of(entry: &HistoryEntry) -> (&str, &str) {
+    match &entry.message.content {
+        MessageContent::Parts(parts) => match parts.as_slice() {
+            [
+                MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error: Some(true),
+                    ..
+                },
+            ] => match content {
+                ToolContent::Text(text) => (tool_use_id, text),
+                other => panic!("expected text, got {other:?}"),
+            },
+            other => panic!("expected one error result, got {other:?}"),
+        },
+        other => panic!("expected parts, got {other:?}"),
+    }
+}
+
+/// Replaying from a checkpoint at every cursor yields the rest of the full
+/// replay, including cuts inside an open output and between its calls.
+fn assert_checkpoints_match(context: &ContextHistory) {
+    let whole = project_context_history(context).unwrap();
+    for (cut, entry) in whole.iter().enumerate() {
+        let resumed = resume(context, &entry.id);
+        assert_eq!(
+            project_context_history(&resumed).unwrap(),
+            whole[cut + 1..],
+            "cursor {}",
+            entry.id
+        );
+    }
+}
+
+#[test]
+fn an_interrupted_output_keeps_its_text_and_started_calls_and_drops_its_thinking() {
+    use output::*;
+    let [input, consumed] = prompt("go", "event-0");
+    let [next, next_consumed] = prompt("next", "event-11");
+    let context = fixed(vec![
+        input,
+        consumed,
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "turn".into(),
+        }),
+        start("r1"),
+        thinking("r1", "plan"),
+        text("r1", "Hello"),
+        tool_start("r1", "a"),
+        tool_start("r1", "b"),
+        tool_use("r1", "a"),
+        // Stop: the started-only and the complete call close with the output.
+        closure(
+            "r1",
+            &[
+                ("a", "Tool was not executed: the model output ended"),
+                (
+                    "b",
+                    "Tool was not executed: the model output ended before its arguments were complete",
+                ),
+            ],
+        ),
+        end("r1", cancelled()),
+        next,
+        next_consumed,
+        turn_end(),
+    ]);
+    let history = project_context_history(&context).unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["event-1", "event-9", "event-9:0", "event-9:1", "event-12"]
+    );
+    // One message with the committed text and calls in start order; the
+    // started-only call renders with an empty input; no thinking.
+    assert_eq!(
+        history[1].message,
+        assistant(vec![
+            text_part("Hello"),
+            tool_part("a", tool_input()),
+            tool_part("b", JsonObject::new()),
+        ])
+    );
+    assert_eq!(
+        result_of(&history[2]),
+        ("a", "Tool was not executed: the model output ended")
+    );
+    assert_eq!(result_of(&history[3]).0, "b");
+    dim_agent_capabilities::history::validate_history_boundary(&context.events).unwrap();
+    assert_checkpoints_match(&context);
+
+    // Text alone becomes a message; thinking alone leaves none.
+    let failed = ModelOutputOutcome::Failed {
+        error: "aborted".into(),
+        budget: None,
+        presentation: None,
+    };
+    let text_only = fixed(vec![
+        start("r1"),
+        thinking("r1", "plan"),
+        text("r1", "half"),
+        end("r1", failed.clone()),
+    ]);
+    assert_eq!(
+        project_context_history(&text_only).unwrap()[0].message,
+        assistant(vec![text_part("half")])
+    );
+    let thinking_only = fixed(vec![start("r1"), thinking("r1", "plan"), end("r1", failed)]);
+    assert!(project_context_history(&thinking_only).unwrap().is_empty());
+}
+
+#[test]
+fn a_completed_output_closed_by_the_loop_before_turn_end_keeps_its_thinking() {
+    use output::*;
+    let context = fixed(vec![
+        start("r1"),
+        thinking("r1", "plan"),
+        tool_start("r1", "a"),
+        tool_use("r1", "a"),
+        end("r1", completed()),
+        closure("r1", &[("a", "Tool was not executed: stopped")]),
+        turn_end(),
+    ]);
+    let history = project_context_history(&context).unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["event-4", "event-5:0"]
+    );
+    assert_eq!(
+        history[0].message,
+        assistant(vec![
+            MessagePart::Thinking {
+                provider_metadata: None,
+                thinking: "plan".into(),
+                start_time: None,
+                end_time: None,
+            },
+            tool_part("a", tool_input()),
+        ])
+    );
+    assert_eq!(
+        result_of(&history[1]),
+        ("a", "Tool was not executed: stopped")
+    );
+    dim_agent_capabilities::history::validate_history_boundary(&context.events).unwrap();
+    assert_checkpoints_match(&context);
+}
+
+#[test]
+fn an_unclosed_call_or_an_open_output_fails_the_next_request_context() {
+    use output::*;
+    let proposed = vec![
+        start("r1"),
+        tool_start("r1", "a"),
+        tool_use("r1", "a"),
+        end("r1", completed()),
+    ];
+    // A prefix ending mid-turn renders the call before its result exists.
+    let pending = fixed(proposed.clone());
+    assert_eq!(project_context_history(&pending).unwrap().len(), 1);
+    assert!(dim_agent_capabilities::history::validate_context_boundary(&pending).is_err());
+    for later in [turn_end(), start("r2")] {
+        let mut events = proposed.clone();
+        events.push(later);
+        let error = project_context_history(&fixed(events)).unwrap_err();
+        assert!(error.contains("no closing result"), "{error}");
+    }
+
+    // A request replaced by a steer ends Cancelled before the next one
+    // starts and, without output, leaves no message.
+    let replaced = fixed(vec![
+        start("r1"),
+        end("r1", cancelled()),
+        start("r2"),
+        text("r2", "kept"),
+    ]);
+    assert!(project_context_history(&replaced).unwrap().is_empty());
+    // A request never starts while the previous output has no terminal.
+    for open in [
+        vec![],
+        vec![text("r1", "late")],
+        vec![tool_start("r1", "a")],
+    ] {
+        let mut events = vec![start("r1")];
+        events.extend(open);
+        events.push(start("r2"));
+        let error = project_context_history(&fixed(events)).unwrap_err();
+        assert!(error.contains("previous model output"), "{error}");
+    }
+}

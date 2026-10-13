@@ -1,0 +1,231 @@
+//! OpenAI Responses API language model.
+//!
+//! Implements the [`LanguageModel`] trait against the `/v1/responses`
+//! endpoint. The Responses API uses a different request/response format from
+//! chat completions: requests carry an `input` array (not `messages`), and
+//! streaming events are typed as `response.output_text.delta`,
+//! `response.function_call_arguments.delta`, etc.
+//!
+//! Mirrors the TS `OpenAIResponsesLanguageModel`. The core paths implemented
+//! here are:
+//! - **Request building**: input array, instructions, store,
+//!   previous_response_id, reasoning (effort/summary), response_format
+//!   (json_schema/json_object) — see [`convert::build_responses_request_body`].
+//! - **Non-streaming**: text, function-call, and reasoning output items -- see
+//!   [`OpenAIResponsesModel::do_generate`].
+//! - **Streaming**: the `response.created -> output_item.added ->
+//!   output_text.delta -> output_text.done -> output_item.done ->
+//!   response.completed` main path, plus `function_call_arguments.delta/done`
+//!   and `reasoning_summary_text.delta` -- see [`OpenAIResponsesModel::do_stream`].
+//!
+//! The non-streaming output parser and the streaming SSE event reducer are
+//! shared with the Azure OpenAI Responses provider via
+//! [`responses_convert`] (RFC-0012 §3.5).
+
+pub mod convert;
+pub mod responses_convert;
+pub mod types;
+
+pub use convert::{
+    ResponsesInputResult, ResponsesRequestBodyResult, build_responses_request_body,
+    convert_responses_usage, convert_to_responses_input, map_responses_finish_reason,
+    prepare_responses_tools,
+};
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use serde_json::Value;
+
+use aimux_core::error::AiMuxError;
+use aimux_core::language_model::LanguageModel;
+use aimux_core::options::CallOptions;
+use aimux_core::result::{GenerateResult, StreamResult};
+
+use aimux_provider_utils::HttpRequest;
+
+use super::OpenAIConfig;
+use responses_convert::build_header_list;
+
+/// An OpenAI Responses API language model.
+///
+/// Uses the shared HTTP client unless a caller-owned pool is supplied.
+///
+/// Created via `OpenAIResponsesProvider` or
+/// directly with [`OpenAIResponsesModel::new`].
+pub struct OpenAIResponsesModel {
+    model_id: String,
+    config: OpenAIConfig,
+    client: Option<reqwest::Client>,
+}
+
+impl OpenAIResponsesModel {
+    #[must_use]
+    pub fn new(model_id: String, config: OpenAIConfig) -> Self {
+        Self {
+            model_id,
+            config,
+            client: None,
+        }
+    }
+
+    /// Use the caller-owned HTTP connection pool for every exchange.
+    #[must_use]
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    pub(crate) fn build_headers(
+        &self,
+        extra: Option<&HashMap<String, String>>,
+    ) -> HashMap<String, String> {
+        let mut headers = HashMap::new();
+        if !self.config.api_key.is_empty() {
+            headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer {}", self.config.api_key),
+            );
+        }
+        if let Some(ref org) = self.config.org_id {
+            headers.insert("OpenAI-Organization".to_string(), org.clone());
+        }
+        if let Some(extra) = extra {
+            for (k, v) in extra {
+                headers.insert(k.clone(), v.clone());
+            }
+        }
+        headers
+    }
+
+    fn endpoint(&self) -> Result<String, AiMuxError> {
+        let mut url = reqwest::Url::parse(&self.config.base_url)
+            .map_err(|error| AiMuxError::Other(format!("invalid OpenAI base URL: {error}")))?;
+        url.path_segments_mut()
+            .map_err(|()| AiMuxError::Other("OpenAI base URL cannot be a base".into()))?
+            .pop_if_empty()
+            .push("responses");
+        Ok(url.into())
+    }
+
+    /// The provider-metadata key: `"azure"` when the provider string contains
+    /// `"azure"`, otherwise `"openai"`. Mirrors the TS `providerOptionsName`.
+    fn provider_options_name(&self) -> &str {
+        if self.config.provider.contains("azure") {
+            "azure"
+        } else {
+            "openai"
+        }
+    }
+}
+
+#[async_trait]
+impl LanguageModel for OpenAIResponsesModel {
+    fn provider(&self) -> &str {
+        &self.config.provider
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn retry_config(&self) -> aimux_core::retry::RetryConfig {
+        self.config.retry_config
+    }
+
+    fn config_snapshot(&self) -> aimux_core::recording::ProviderRecord {
+        super::config_snapshot_from_config(&self.config.provider, &self.model_id, &self.config)
+    }
+
+    async fn do_generate(&self, options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
+        let headers = self.build_headers(options.headers.as_ref());
+        let request_result = build_responses_request_body(&self.model_id, options, false);
+        let body = request_result.body;
+        let provider_key = self.provider_options_name().to_string();
+
+        let endpoint = self.endpoint()?;
+        let resp = aimux_provider_utils::post_json_to_api(
+            HttpRequest {
+                client: self.client.clone(),
+                ..HttpRequest::new(endpoint.clone(), build_header_list(&headers), options)
+            },
+            body.clone(),
+            aimux_provider_utils::create_json_response_handler::<Value>(),
+            super::openai_failed_response_handler(),
+        )
+        .await?;
+
+        let response_headers = resp.response_headers;
+        let raw_body = resp
+            .raw_value
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let data = resp.value;
+
+        responses_convert::build_responses_generate_result(
+            &data,
+            &raw_body,
+            request_result.warnings,
+            provider_key,
+            endpoint,
+            body,
+            response_headers,
+        )
+    }
+
+    async fn do_stream(&self, options: &CallOptions) -> Result<StreamResult, AiMuxError> {
+        let headers = self.build_headers(options.headers.as_ref());
+        let request_result = build_responses_request_body(&self.model_id, options, true);
+        let body = request_result.body;
+        let warnings = request_result.warnings;
+        let provider_key = self.provider_options_name().to_string();
+
+        // Retain the shared reducer's public `store` argument. Every summary
+        // waits for its final item metadata regardless of storage mode.
+        let store_flag = options
+            .provider_options
+            .as_ref()
+            .and_then(|m| m.get("openai"))
+            .and_then(|o| o.get("store"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+
+        let endpoint = self.endpoint()?;
+        let resp = aimux_provider_utils::post_json_to_api(
+            HttpRequest {
+                client: self.client.clone(),
+                ..HttpRequest::new(endpoint.clone(), build_header_list(&headers), options)
+            },
+            body.clone(),
+            aimux_provider_utils::create_event_source_response_handler::<Value>(),
+            super::openai_failed_response_handler(),
+        )
+        .await?;
+
+        let response_headers = resp.response_headers;
+
+        let mut sse_stream = resp.value;
+        let first_event = match sse_stream.next().await {
+            Some(Err(error @ AiMuxError::ApiCall(_))) => return Err(error),
+            first_event => first_event,
+        };
+        let stream = responses_convert::build_responses_event_stream(
+            first_event,
+            sse_stream,
+            provider_key,
+            warnings,
+            store_flag,
+            endpoint,
+            body.clone(),
+            response_headers.clone(),
+        )?;
+
+        Ok(StreamResult {
+            stream,
+            request_body: Some(body),
+            response_headers: Some(response_headers),
+        })
+    }
+}

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+inherited_names=()
+inherited_values=()
+for setting in DIM_OAUTH_SOURCE_DIR DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL; do
+  if declare -p "$setting" >/dev/null 2>&1; then
+    inherited_names+=("$setting")
+    inherited_values+=("${!setting}")
+  fi
+done
+if [[ -f "$repository/.env.dev" ]]; then
+  set -a
+  source "$repository/.env.dev"
+  set +a
+fi
+for ((index=0; index<${#inherited_names[@]}; index++)); do
+  printf -v "${inherited_names[$index]}" '%s' "${inherited_values[$index]}"
+  export "${inherited_names[$index]}"
+done
+
+action=run
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    setup|restart|stop|check|help) action=$1; shift ;;
+  esac
+fi
+if [[ "$action" == help ]]; then
+  cat <<'USAGE'
+Usage: ./dev [CLI arguments]
+       ./dev setup | restart [CLI arguments] | stop | check
+
+Build and load the sibling dim-oauth-plugin source package by default.
+Use --model-config PATH for independent API-key development.
+Optional local configuration: .env.dev (see .env.example).
+USAGE
+  exit 0
+fi
+if [[ "$action" == check ]]; then
+  [[ $# == 0 ]] || { echo 'check takes no arguments.' >&2; exit 1; }
+  (
+    cd -- "$repository"
+    cargo fmt --all -- --check
+    cargo clippy --locked -p dim-cli -p dim-app-server --all-targets -- -D warnings
+  ) >&2
+  exit 0
+fi
+
+caller_args=("$@")
+model_config=${DIMCODE_MODEL_CONFIG:-}
+product_home=${DIMCODE_HOME:-}
+explicit_model_config=false
+explicit_selection=false
+chat=true
+native_help=false
+resumed=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model-config|--home)
+      [[ $# -ge 2 ]] || { echo "$1 requires a path." >&2; exit 1; }
+      if [[ "$1" == --model-config ]]; then
+        model_config=$2
+        explicit_model_config=true
+      else
+        product_home=$2
+      fi
+      shift
+      ;;
+    --provider|--model)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 1; }
+      explicit_selection=true
+      shift
+      ;;
+    --resume)
+      [[ $# -ge 2 ]] || { echo '--resume requires a value.' >&2; exit 1; }
+      resumed=true
+      shift
+      ;;
+    --prompt|-p|--cwd|--server|--directory|--redirect-uri|--plugin-dir|--node|--js-runtime)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 1; }
+      shift
+      ;;
+    login|account|logout|models|daemon) chat=false ;;
+    --help|-h|--version|-V) native_help=true ;;
+  esac
+  shift
+done
+if [[ -z "$product_home" ]]; then
+  [[ -n "${HOME:-}" ]] || { echo 'Set DIMCODE_HOME when HOME is absent.' >&2; exit 1; }
+  scope=$(printf '%s' "$repository" | git hash-object --stdin)
+  product_home="$HOME/.dimcode-dev/${scope:0:10}"
+fi
+
+binary="$repository/target/debug/dimcode"
+if [[ "$action" == stop ]]; then
+  [[ ${#caller_args[@]} == 0 ]] || { echo 'Use DIMCODE_HOME to select the home for stop.' >&2; exit 1; }
+  if [[ ! -x "$binary" ]]; then
+    if [[ ! -e "$product_home/rust" ]]; then
+      echo 'Daemon is not running.' >&2
+      exit 0
+    fi
+    echo 'A built CLI is required to stop an existing development home. Run ./dev first.' >&2
+    exit 1
+  fi
+  exec "$binary" --home "$product_home" daemon stop
+fi
+
+options=(--home "$product_home")
+if [[ "$native_help" == false ]]; then
+  if [[ -n "$model_config" ]]; then
+    if [[ "$explicit_model_config" == false ]]; then options+=(--model-config "$model_config"); fi
+  else
+    source_directory=${DIM_OAUTH_SOURCE_DIR:-"$repository/../dim-oauth-plugin"}
+    if [[ "$source_directory" != /* ]]; then source_directory="$repository/$source_directory"; fi
+    [[ -f "$source_directory/package.json" ]] || {
+      echo 'Local OAuth source is missing. Set DIM_OAUTH_SOURCE_DIR or use --model-config PATH.' >&2
+      exit 1
+    }
+    node "$repository/scripts/prepare-dev.mjs" "$source_directory" >&2
+    options+=(--plugin-dir "$repository/.dev/plugin" --node "$(node -p 'process.execPath')"
+      --js-runtime "$repository/runtime/node_modules/@arcships/rutis-runtime")
+  fi
+fi
+if [[ "$action" == setup ]]; then
+  [[ ${#caller_args[@]} == 0 ]] || { echo 'setup takes no CLI arguments.' >&2; exit 1; }
+  echo 'Development dependencies and local provider are ready.' >&2
+  exit 0
+fi
+if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]]; then
+  if [[ -n "${DIMCODE_PROVIDER:-}" || -n "${DIMCODE_MODEL:-}" ]]; then
+    [[ -n "${DIMCODE_PROVIDER:-}" && -n "${DIMCODE_MODEL:-}" ]] || {
+      echo 'Set DIMCODE_PROVIDER and DIMCODE_MODEL together.' >&2
+      exit 1
+    }
+    options+=(--provider "$DIMCODE_PROVIDER" --model "$DIMCODE_MODEL")
+  fi
+fi
+
+(cd -- "$repository" && cargo build --locked -p dim-cli -p dim-app-server) >&2
+if [[ "$native_help" == false ]]; then
+  mkdir -p -m 700 -- "$product_home"
+  product_home=$(cd -- "$product_home" && pwd)
+  "$binary" --home "$product_home" daemon stop >&2
+fi
+exec "$binary" "${options[@]}" "${caller_args[@]}"

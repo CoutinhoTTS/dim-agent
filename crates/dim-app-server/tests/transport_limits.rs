@@ -1,0 +1,375 @@
+#![cfg(unix)]
+use dim_agent_capabilities::{adapters::MockTools, defaults};
+use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_app_server::{RunningServer, ServerConfig, serve};
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpStream, UnixStream},
+};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+
+const LIMIT: usize = 16 * 1024 * 1024;
+enum Client {
+    Local(BufReader<UnixStream>),
+    Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+}
+impl Client {
+    async fn connect(server: &RunningServer, ws: bool) -> Self {
+        let mut client = if ws {
+            Self::Ws(Box::new(
+                tokio_tungstenite::connect_async(format!(
+                    "ws://{}/ws",
+                    server.websocket_address.unwrap()
+                ))
+                .await
+                .unwrap()
+                .0,
+            ))
+        } else {
+            Self::Local(BufReader::new(
+                UnixStream::connect(server.unix_path.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+            ))
+        };
+        client.send(json!({"jsonrpc":"2.0","id":0,"method":"hello","params":{"protocolVersion":3,"clientKind":"other"}}).to_string()).await.unwrap();
+        assert!(client.read().await.unwrap()["result"].is_object());
+        client
+    }
+    async fn send(&mut self, text: String) -> Result<(), ()> {
+        match self {
+            Self::Local(s) => {
+                s.get_mut()
+                    .write_all(text.as_bytes())
+                    .await
+                    .map_err(|_| ())?;
+                s.get_mut().write_all(b"\n").await.map_err(|_| ())
+            }
+            Self::Ws(s) => s.send(Message::Text(text.into())).await.map_err(|_| ()),
+        }
+    }
+    async fn read(&mut self) -> Option<Value> {
+        match self {
+            Self::Local(s) => {
+                let mut text = String::new();
+                match s.read_line(&mut text).await {
+                    Ok(n) if n > 0 && text.ends_with('\n') => {
+                        Some(serde_json::from_str(&text).unwrap())
+                    }
+                    _ => None,
+                }
+            }
+            Self::Ws(s) => loop {
+                match s.next().await {
+                    Some(Ok(Message::Text(t))) => break Some(serde_json::from_str(&t).unwrap()),
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    _ => break None,
+                }
+            },
+        }
+    }
+}
+async fn launch() -> RunningServer {
+    launch_with(|_| {}).await
+}
+async fn launch_with(extra: impl FnOnce(&mut AgentBuilder)) -> RunningServer {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    extra(&mut builder);
+    serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(
+                std::path::PathBuf::from("/tmp")
+                    .join(format!("dim-limits-{}/server.sock", uuid::Uuid::new_v4())),
+            ),
+            write_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+fn padded_ping(size: usize) -> String {
+    let mut text = json!({"jsonrpc":"2.0","id":1,"method":"daemon.ping","params":{}}).to_string();
+    text.extend(std::iter::repeat_n(' ', size - text.len()));
+    text
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boundary_frames_and_oversized_frames_on_both_transports() {
+    for ws in [false, true] {
+        let server = launch().await;
+        let mut client = Client::connect(&server, ws).await;
+        client.send(padded_ping(LIMIT)).await.unwrap();
+        assert!(client.read().await.unwrap()["result"].is_object());
+        // NDJSON also accepts CRLF without charging framing bytes to payload.
+        if !ws {
+            let mut text = padded_ping(LIMIT);
+            text.push('\r');
+            client.send(text).await.unwrap();
+            assert!(client.read().await.unwrap()["result"].is_object());
+        }
+        let _ = client.send(padded_ping(LIMIT + 1)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), client.read())
+                .await
+                .unwrap()
+                .is_none(),
+            "oversized frame must close, not execute"
+        );
+        server.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+struct HoldCleanup {
+    scope: dim_agent_runtime::SessionScope,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_ndjson_and_fragmented_websocket_are_bounded() {
+    use tokio_tungstenite::tungstenite::protocol::frame::{
+        Frame,
+        coding::{Data, OpCode},
+    };
+    let server = launch().await;
+    let mut local = Client::connect(&server, false).await;
+    if let Client::Local(s) = &mut local {
+        // No delimiter: the server must enforce the limit before read_line
+        // could ever return, rather than waiting for a terminator or EOF.
+        let _ = s
+            .get_mut()
+            .write_all(padded_ping(LIMIT + 1).as_bytes())
+            .await;
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), local.read())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut ws = Client::connect(&server, true).await;
+    let send_fragments = async |client: &mut Client, text: String| {
+        let Client::Ws(s) = client else {
+            unreachable!()
+        };
+        let split = text.len() / 2;
+        s.send(Message::Frame(Frame::message(
+            text.as_bytes()[..split].to_vec(),
+            OpCode::Data(Data::Text),
+            false,
+        )))
+        .await
+        .unwrap();
+        let _ = s
+            .send(Message::Frame(Frame::message(
+                text.as_bytes()[split..].to_vec(),
+                OpCode::Data(Data::Continue),
+                true,
+            )))
+            .await;
+    };
+    send_fragments(&mut ws, padded_ping(LIMIT)).await;
+    assert!(ws.read().await.unwrap()["result"].is_object());
+    // Each fragment is below the frame limit, but the assembled message is not.
+    send_fragments(&mut ws, padded_ping(LIMIT + 1)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), ws.read())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), server.join())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_size_limit_preserves_large_valid_replies() {
+    for ws in [false, true] {
+        let server = launch().await;
+        let mut client = Client::connect(&server, ws).await;
+        let ping = |id: String| json!({"jsonrpc":"2.0","id":id,"method":"daemon.ping"}).to_string();
+        client
+            .send(ping("x".repeat(15 * 1024 * 1024)))
+            .await
+            .unwrap();
+        assert_eq!(
+            client.read().await.unwrap()["id"].as_str().unwrap().len(),
+            15 * 1024 * 1024
+        );
+        // The inbound envelope fits exactly, but the echoed id plus the
+        // result envelope exceeds the outbound contract. Close explicitly.
+        let overhead = ping(String::new()).len();
+        let text = ping("x".repeat(LIMIT - overhead));
+        assert_eq!(text.len(), LIMIT);
+        client.send(text).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), client.read())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+impl rutis::TypedPlugin for HoldCleanup {
+    type Deps = dim_agent_runtime::InSession<dim_agent_runtime::SessionIdentity>;
+    fn name(&self) -> &str {
+        "test.transport-hold-cleanup"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        Box::pin(async move {
+            ctx.effect(move || {
+                rutis::Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    })
+                }))
+            })?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl dim_agent_runtime::Capability for HoldCleanup {
+    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
+        dim_agent_runtime::scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
+    for ws in [false, true] {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let start = entered.clone();
+        let finish = release.clone();
+        let server = launch_with(move |builder| {
+            builder.session_plugin(move |scope| HoldCleanup {
+                scope: *scope,
+                entered: start.clone(),
+                release: finish.clone(),
+            });
+        })
+        .await;
+        let mut client = Client::connect(&server, ws).await;
+        client
+            .send(
+                json!({"jsonrpc":"2.0","id":1,"method":"session.create","params":{"cwd":"/tmp"}})
+                    .to_string(),
+            )
+            .await
+            .unwrap();
+        let created = client.read().await.unwrap();
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        for id in 2..66 {
+            client.send(json!({"jsonrpc":"2.0","id":id,"method":"session.close","params":{"sessionId":sid}}).to_string()).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        client
+            .send(json!({"jsonrpc":"2.0","id":100,"method":"daemon.ping"}).to_string())
+            .await
+            .unwrap();
+        let busy = tokio::time::timeout(Duration::from_secs(5), client.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(busy["id"], 100);
+        assert_eq!(busy["error"]["data"]["appError"], "connection_busy");
+        // Eight more cleanup calls are admitted; the ninth is rejected.
+        for id in 66..75 {
+            client.send(json!({"jsonrpc":"2.0","id":id,"method":"session.close","params":{"sessionId":sid}}).to_string()).await.unwrap();
+        }
+        let busy = tokio::time::timeout(Duration::from_secs(5), client.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(busy["id"], 74);
+        assert_eq!(busy["error"]["data"]["appError"], "connection_busy");
+        drop(client);
+        server.shutdown();
+        let mut join = Box::pin(server.join());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut join)
+                .await
+                .is_err(),
+            "accepted cleanup was abandoned on disconnect"
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_consumer_closes_and_server_settles_on_both_transports() {
+    for ws in [false, true] {
+        let server = launch().await;
+        let mut client = Client::connect(&server, ws).await;
+        // Large echoed request ids generate large replies without runtime
+        // fixtures; do not read any response while filling the connection.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            for i in 0..100 {
+                let id = format!("{i}{}", "x".repeat(1024 * 1024));
+                if client
+                    .send(
+                        json!({"jsonrpc":"2.0","id":id,"method":"daemon.ping","params":{}})
+                            .to_string(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut replies = 0;
+            while client.read().await.is_some() {
+                replies += 1;
+            }
+            assert!(
+                replies < 100,
+                "slow consumer unexpectedly accepted every reply"
+            );
+        })
+        .await
+        .expect("slow consumer was not closed");
+        server.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}

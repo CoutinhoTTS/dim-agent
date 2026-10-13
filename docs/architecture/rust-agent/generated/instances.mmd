@@ -1,0 +1,6 @@
+%% Generated from live Session/Timeline registrations. Random identities are aliased.
+flowchart TB
+  agent[Agent] --> session[Session]
+  session --> timeline_0["main / phase=Idle / queued=0"]
+  session --> timeline_1["timeline_1 / phase=Idle / queued=0"]
+  timeline_0 -.->|branch| timeline_1

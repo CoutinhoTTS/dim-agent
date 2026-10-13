@@ -1,0 +1,579 @@
+use super::*;
+
+fn v2_create() -> Value {
+    json!({
+        "cwd": std::env::temp_dir(),
+        "tools": ["branch"],
+        "permissionPolicy": {"allowedTools": ["branch"]}
+    })
+}
+
+fn error_name(value: &Value) -> &str {
+    value["error"]["data"]["appError"].as_str().unwrap()
+}
+
+struct FailChildBuild(dim_agent_runtime::BranchScope);
+impl FailChildBuild {
+    fn new(scope: &dim_agent_runtime::BranchScope) -> Self {
+        Self(*scope)
+    }
+}
+impl TypedPlugin for FailChildBuild {
+    type Deps = InBranch<dim_agent_runtime::TimelineIdentity>;
+    fn name(&self) -> &str {
+        "test.fail-child-build /private/config token=test-secret"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        InBranch(identity): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            if identity.branch_id != "main" {
+                // Trigger the real assembly validation error, rather than a
+                // framework error (whose wire mapping is already sanitized):
+                // an undeclared read of a service provided outside the scope.
+                let _ = ctx.get_as::<dim_agent_capabilities::tool_registry::ToolRegistry>(
+                    self.0
+                        .session
+                        .key::<dim_agent_capabilities::tool_registry::ToolRegistry>(),
+                );
+            }
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for FailChildBuild {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
+// The failure comes from the debug-build assembly check.
+#[cfg_attr(not(debug_assertions), ignore)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_branch_build_keeps_diagnostics_off_both_transports() {
+    for ws in [false, true] {
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+        defaults::install(&mut builder);
+        defaults::mock_model_hosts(&mut builder);
+        dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+        builder.timeline_plugin(FailChildBuild::new);
+        let server = serve(
+            builder,
+            ServerConfig {
+                unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
+                    "dim-build-error-{}/server.sock",
+                    uuid::Uuid::new_v4()
+                ))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut client = Client::new_version(&server, ws, 2).await;
+        let mut params = v2_create();
+        params["trace"] = json!(true);
+        let created = client.rpc("session.create", params).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        let path = created["result"]["tracePath"].as_str().unwrap();
+        let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_eq!(attached["result"], json!({}));
+        let failed = client
+            .rpc(
+                "session.branch_create",
+                json!({
+                    "sessionId":sid,"parentBranchId":"main","at":0,"prompt":"child"
+                }),
+            )
+            .await;
+        assert_eq!(error_name(&failed), "session_build_failed");
+        assert_eq!(failed["error"]["message"], "Session initialization failed");
+        let failure = loop {
+            let notice = client.notice("session.event").await;
+            let entry = &notice["params"];
+            if entry["event"]["type"] == "branch" && entry["event"]["name"] == "create-failed" {
+                break entry.clone();
+            }
+        };
+        assert_eq!(failure["branchId"], "main");
+        assert_eq!(failure["event"]["data"]["error"], "branch creation failed");
+        let failures = [failure];
+        let visible = std::iter::once(&failed)
+            .chain(&failures)
+            .chain(&client.notices)
+            .map(Value::to_string);
+        for encoded in visible {
+            for private in ["/private/config", "test-secret", "test.fail-child-build"] {
+                assert!(!encoded.contains(private), "{encoded}");
+            }
+        }
+        let listed = server.agent().unwrap().get_session(sid).unwrap().branches();
+        assert_eq!(listed.len(), 1, "a failed candidate is not listed");
+        assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
+        let records = read_trace(path).await;
+        let failure = records
+            .iter()
+            .find(|r| r["record"]["event"]["key"] == "branch/create-failed")
+            .unwrap();
+        assert_eq!(failure["record"]["event"]["outcome"], "failed");
+        assert_eq!(
+            failure["record"]["event"]["branch"],
+            failures[0]["event"]["data"]["branch"]
+        );
+        assert_eq!(
+            failure["record"]["event"]["create_event"],
+            failures[0]["event"]["data"]["createEvent"]
+        );
+        assert!(failure["record"]["event"].get("error").is_none());
+        let rejected_branch = failure["record"]["event"]["branch"].as_str().unwrap();
+        assert!(records.iter().any(|r| r["branch_id"] == rejected_branch
+            && r["record"]["kind"] == "component"
+            && r["record"]["phase"] == "released"));
+        std::fs::remove_file(path).unwrap();
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports() {
+    for ws in [false, true] {
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut tree = Client::new_version(&server, ws, 2).await;
+        let mut legacy = Client::new(&server, !ws).await;
+
+        let unbound = agent
+            .create_session(dim_agent_runtime::SessionConfig::default())
+            .await
+            .unwrap();
+        for client in [&mut tree, &mut legacy] {
+            assert_eq!(
+                error_name(
+                    &client
+                        .rpc("session.attach", json!({"sessionId":unbound.id()}))
+                        .await
+                ),
+                "session_protocol_version"
+            );
+            assert_eq!(
+                error_name(
+                    &client
+                        .rpc("session.close", json!({"sessionId":unbound.id()}))
+                        .await
+                ),
+                "session_protocol_version"
+            );
+        }
+        assert!(agent.get_session(unbound.id()).is_some());
+        unbound.close().await.unwrap();
+
+        let mut params = v2_create();
+        params["trace"] = json!(true);
+        let created = tree.rpc("session.create", params).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        let path = created["result"]["tracePath"].as_str().unwrap();
+        let session = agent.get_session(sid).unwrap();
+
+        // A v2 request may never silently select main, and a v1 connection may
+        // neither discover nor operate on a v2 session.
+        for (method, params) in [
+            ("session.submit", json!({"sessionId":sid,"text":"parent"})),
+            ("session.stop", json!({"sessionId":sid})),
+            ("session.idle", json!({"sessionId":sid})),
+        ] {
+            assert_eq!(tree.rpc(method, params).await["error"]["code"], -32602);
+        }
+        assert_eq!(
+            legacy.rpc("session.list", json!({})).await["result"],
+            json!([])
+        );
+        assert_eq!(
+            error_name(&legacy.rpc("session.attach", json!({"sessionId":sid})).await),
+            "session_protocol_version"
+        );
+
+        assert_ok(
+            &tree
+                .rpc(
+                    "session.submit",
+                    json!({
+                        "sessionId":sid, "branchId":"main", "text":"parent"
+                    }),
+                )
+                .await,
+        );
+        let idle = tree
+            .rpc(
+                "session.idle",
+                json!({
+                    "sessionId":sid, "branchId":"main"
+                }),
+            )
+            .await;
+        assert_ok(&idle);
+        // The barrier is main's Timeline end: a user-observed history boundary.
+        let at = idle["result"]["sequence"].as_u64().unwrap();
+        assert_eq!(at, session.sequence("main").unwrap());
+        let attached = tree.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_eq!(attached["result"], json!({}), "attach returns no history");
+        assert_eq!(
+            tree.rpc("session.attach", json!({"sessionId":sid,"after":1}))
+                .await["error"]["data"]["appError"],
+            "invalid_params"
+        );
+        let state = tree.notice("session.state").await;
+        assert_eq!(state["params"]["branchId"], "main");
+
+        let child = tree
+            .rpc(
+                "session.branch_create",
+                json!({
+                    "sessionId":sid, "parentBranchId":"main", "at":at, "prompt":"child"
+                }),
+            )
+            .await;
+        assert_ok(&child);
+        let child_id = child["result"]["branch"]["branchId"].as_str().unwrap();
+        assert_ne!(child_id, "main");
+        assert_eq!(child["result"]["branch"]["parentBranchId"], "main");
+        assert!(child["result"]["branch"]["branchPoint"].is_number());
+        assert!(child["result"]["branch"]["createEvent"].is_number());
+
+        assert_eq!(
+            tree.rpc(
+                "session.submit",
+                json!({
+                    "sessionId":sid, "branchId":"missing", "text":"must not reach main"
+                })
+            )
+            .await["error"]["data"]["appError"],
+            "session_invalid_input"
+        );
+        assert_ok(
+            &tree
+                .rpc(
+                    "session.submit",
+                    json!({
+                        "sessionId":sid, "branchId":child_id, "text":"child input"
+                    }),
+                )
+                .await,
+        );
+        assert_ok(
+            &tree
+                .rpc(
+                    "session.idle",
+                    json!({
+                        "sessionId":sid, "branchId":child_id
+                    }),
+                )
+                .await,
+        );
+
+        // Only events after attach arrive, for every branch.
+        let child_end = session.sequence(child_id).unwrap();
+        loop {
+            let notice = tree.notice("session.event").await;
+            let entry = &notice["params"];
+            let sequence = entry["event"]["sequence"].as_u64().unwrap();
+            if entry["branchId"] == "main" {
+                assert!(sequence > at, "events before attach are not replayed");
+            } else {
+                assert_eq!(entry["branchId"], child_id);
+                if sequence == child_end {
+                    break;
+                }
+            }
+        }
+
+        assert_ok(&tree.rpc("session.close", json!({"sessionId":sid})).await);
+        let records = read_trace(path).await;
+        assert!(records.iter().all(|r| r["session_id"] == sid));
+        for branch in ["main", child_id] {
+            let branch_records: Vec<_> = records
+                .iter()
+                .filter(|r| r["branch_id"] == branch)
+                .collect();
+            let actual: Vec<dim_agent_types::AgentEvent> = branch_records
+                .iter()
+                .filter(|r| r["record"]["kind"] == "timeline")
+                .map(|r| serde_json::from_value(r["record"]["payload"]["event"].clone()).unwrap())
+                .collect();
+            let expected: Vec<_> = session
+                .local(branch, ..)
+                .await
+                .unwrap()
+                .iter()
+                .map(|e| (**e).clone())
+                .collect();
+            assert!(!actual.is_empty());
+            assert_eq!(
+                actual, expected,
+                "all original events, including hidden model requests and shutdown, must be archived per branch"
+            );
+            assert!(
+                branch_records
+                    .iter()
+                    .any(|r| r["record"]["kind"] == "component" && r["record"]["phase"] == "ready")
+            );
+            assert!(
+                branch_records
+                    .iter()
+                    .any(|r| r["record"]["kind"] == "component"
+                        && r["record"]["phase"] == "released")
+            );
+            assert!(
+                branch_records
+                    .iter()
+                    .any(|r| r["record"]["kind"] == "span" && r["record"]["phase"] == "end")
+            );
+        }
+        let create_record = records
+            .iter()
+            .find(|r| r["record"]["event"]["key"] == "branch/create")
+            .unwrap();
+        assert_eq!(create_record["record"]["event"]["source"]["kind"], "host");
+        assert!(create_record["record"]["event"]["source"]["operation_id"].is_string());
+        assert_eq!(
+            create_record["record"]["event"]["source"],
+            create_record["record"]["payload"]["event"]["data"]["source"]
+        );
+        assert!(
+            records
+                .iter()
+                .any(|r| r["record"]["fields"]["operation"] == "session.close"
+                    && r["record"]["phase"] == "end")
+        );
+        // Per-create installation must not enable tracing on later Sessions.
+        let plain = agent
+            .create_session(dim_agent_runtime::SessionConfig::default())
+            .await
+            .unwrap();
+        assert!(
+            plain
+                .diagnostics()
+                .unwrap()
+                .plugins
+                .iter()
+                .all(|p| p.name != "Trace")
+        );
+        plain.close().await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_branch_creation_publishes_the_anchor_before_the_child_start() {
+    for ws in [false, true] {
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut observer = Client::new_version(&server, ws, 2).await;
+        let created = observer.rpc("session.create", v2_create()).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        let session = agent.get_session(sid).unwrap();
+        assert_ok(
+            &observer
+                .rpc("session.attach", json!({"sessionId":sid}))
+                .await,
+        );
+        // The first release has no branch creation admission: the trusted
+        // entry creates the branch without an approval request.
+        let mut creator = Client::new_version(&server, !ws, 2).await;
+        let child = creator
+            .rpc(
+                "session.branch_create",
+                json!({"sessionId":sid,"parentBranchId":"main","at":0,"prompt":"child"}),
+            )
+            .await;
+        assert_ok(&child);
+        let child_id = child["result"]["branch"]["branchId"].as_str().unwrap();
+        assert_eq!(session.branches().len(), 2);
+        // The observer attached before the create: the anchor and the child's
+        // start arrive live, in that order, and main's model steps stay private.
+        let (mut anchor, mut start) = (None, None);
+        while start.is_none() {
+            let notice = observer.notice("session.event").await;
+            let entry = &notice["params"];
+            let (kind, name) = (&entry["event"]["type"], &entry["event"]["name"]);
+            assert!(!(entry["branchId"] == "main" && kind == "step"));
+            if entry["branchId"] == "main" && kind == "branch" && name == "create" {
+                anchor = Some(entry.clone());
+            }
+            if entry["branchId"] == child_id && kind == "branch" && name == "start" {
+                assert!(
+                    anchor.is_some(),
+                    "the parent anchor precedes the child start"
+                );
+                start = Some(entry.clone());
+            }
+        }
+        let (anchor, start) = (anchor.unwrap(), start.unwrap());
+        assert_eq!(anchor["event"]["data"]["source"]["kind"], "host");
+        assert_eq!(start["event"]["sequence"], 1);
+        assert_eq!(
+            start["event"]["data"]["createEvent"],
+            anchor["event"]["sequence"]
+        );
+        assert!(
+            observer
+                .notices
+                .iter()
+                .all(|notice| notice["method"] != "approval.request")
+        );
+        assert_ok(
+            &observer
+                .rpc("session.close", json!({"sessionId":sid}))
+                .await,
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn builtin_branch_is_a_session_tool_under_the_permission_policy() {
+    for ws in [false, true] {
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut client = Client::new_version(&server, ws, 2).await;
+        for policy in [
+            json!({"preset":"full-access","disallowedTools":["branch"]}),
+            json!({"preset":"read-only"}),
+        ] {
+            let denied = policy["preset"] == "full-access";
+            let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["branch"],"permissionPolicy":policy})).await;
+            assert_ok(&created);
+            let sid = created["result"]["sessionId"].as_str().unwrap();
+            let session = agent.get_session(sid).unwrap();
+            assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+            assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"branchId":"main","text":"tool:branch {\"prompt\":\"child\"}"})).await);
+            assert_ok(
+                &client
+                    .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+                    .await,
+            );
+            // `branch` declares the session risk: allowed without approval
+            // unless the policy disallows it by name.
+            assert_eq!(session.branches().len(), if denied { 1 } else { 2 });
+            assert!(
+                client
+                    .notices
+                    .iter()
+                    .all(|notice| notice["method"] != "approval.request")
+            );
+            let result = session
+                .history("main", None)
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|event| match &event.kind {
+                    dim_agent_types::EventKind::ToolResult(data) => {
+                        Some(data.results[0].result.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(result.is_error == Some(true), denied);
+            assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tree_attach_forwards_later_events_of_every_branch_in_branch_order() {
+    for ws in [false, true] {
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+        let mut control = Client::new_version(&server, !ws, 2).await;
+        let created = control.rpc("session.create", v2_create()).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].as_str().unwrap();
+        let session = agent.get_session(sid).unwrap();
+        session
+            .submit(
+                "before attach".into(),
+                dim_agent_types::InputMode::Queue,
+                "main",
+            )
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let high = session.sequence("main").unwrap();
+        let mut client = Client::new_version(&server, ws, 2).await;
+        let attach = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_eq!(attach["result"], json!({}), "attach returns no history");
+
+        let child = control
+            .rpc(
+                "session.branch_create",
+                json!({"sessionId":sid,"parentBranchId":"main","at":0,"prompt":"child"}),
+            )
+            .await;
+        assert_ok(&child);
+        let child_id = child["result"]["branch"]["branchId"].as_str().unwrap();
+        session.idle(child_id).await.unwrap();
+        let grandchild = control
+            .rpc(
+                "session.branch_create",
+                json!({"sessionId":sid,"parentBranchId":child_id,"at":0,"prompt":"grandchild"}),
+            )
+            .await;
+        assert_ok(&grandchild);
+        let grandchild_id = grandchild["result"]["branch"]["branchId"].as_str().unwrap();
+        session.idle(grandchild_id).await.unwrap();
+        let stop = control
+            .rpc(
+                "session.stop",
+                json!({"sessionId":sid,"branchId":grandchild_id}),
+            )
+            .await;
+        assert_ok(&stop);
+        let end = session.sequence(grandchild_id).unwrap();
+        assert_eq!(stop["result"], json!({"sequence": end}));
+
+        let mut last = std::collections::HashMap::<String, u64>::new();
+        let mut first = std::collections::HashMap::<String, Value>::new();
+        loop {
+            let notice = client.notice("session.event").await;
+            let params = &notice["params"];
+            let branch = params["branchId"].as_str().unwrap().to_owned();
+            let sequence = params["event"]["sequence"].as_u64().unwrap();
+            if branch == "main" {
+                assert!(sequence > high, "events before attach are not replayed");
+            }
+            if let Some(previous) = last.insert(branch.clone(), sequence) {
+                assert!(sequence > previous, "branch order is kept");
+            }
+            first
+                .entry(branch.clone())
+                .or_insert_with(|| params["event"].clone());
+            if branch == grandchild_id && sequence == end {
+                assert_eq!(params["event"]["type"], "stop");
+                break;
+            }
+        }
+        for branch in [child_id, grandchild_id] {
+            let start = &first[branch];
+            assert_eq!(
+                (&start["type"], &start["name"], &start["sequence"]),
+                (&json!("branch"), &json!("start"), &json!(1))
+            );
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}

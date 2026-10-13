@@ -1,0 +1,17 @@
+[package]
+name = "dim-agent-integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+[dev-dependencies]
+dim-agent-runtime = { workspace = true, features = ["testing"] }
+dim-agent-capabilities.workspace = true
+dim-agent-types.workspace = true
+rutis.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+futures-util.workspace = true
+test-extension-a = { path = "../extension-a" }
+test-extension-b = { path = "../extension-b" }

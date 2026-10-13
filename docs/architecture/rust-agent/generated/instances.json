@@ -1,0 +1,36 @@
+{
+  "source": "Session branches/state and typed capability snapshots",
+  "identities": "stable aliases for generated random IDs",
+  "timelines": [
+    {
+      "alias": "timeline_0",
+      "parent": null,
+      "branchPoint": null,
+      "createAnchor": null,
+      "status": {
+        "running": false,
+        "stopping": false,
+        "closed": false,
+        "failure": null
+      },
+      "phase": "idle",
+      "queued": 0,
+      "pluginDrivers": 13
+    },
+    {
+      "alias": "timeline_1",
+      "parent": "timeline_0",
+      "branchPoint": 0,
+      "createAnchor": 2,
+      "status": {
+        "running": false,
+        "stopping": false,
+        "closed": false,
+        "failure": null
+      },
+      "phase": "idle",
+      "queued": 0,
+      "pluginDrivers": 13
+    }
+  ]
+}

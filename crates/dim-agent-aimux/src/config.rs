@@ -1,0 +1,60 @@
+use dim_agent_capabilities::host::HostError;
+use dim_agent_runtime::ModelId;
+use dim_agent_types::ModelConfig;
+use serde::Deserialize;
+use std::{collections::HashMap, path::Path};
+
+/// Development catalog settings; credentials remain environment references.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelConfigFile {
+    pub default_model: ModelId,
+    pub providers: Vec<ProviderConfig>,
+}
+impl ModelConfigFile {
+    pub fn load(path: &Path) -> Result<Self, HostError> {
+        let bytes = std::fs::read(path).map_err(|error| {
+            HostError::failed(format!(
+                "Cannot read model configuration {}: {error}",
+                path.display()
+            ))
+        })?;
+        // Serde errors can include field values; keep credentials out of diagnostics.
+        serde_json::from_slice(&bytes).map_err(|error| {
+            HostError::failed(format!(
+                "Invalid model configuration {} at line {}, column {}",
+                path.display(),
+                error.line(),
+                error.column()
+            ))
+        })
+    }
+}
+
+pub use dim_agent_capabilities::host::ModelProtocol as ProviderKind;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderConfig {
+    pub id: String,
+    pub kind: ProviderKind,
+    pub api_key_env: Option<String>,
+    pub base_url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    pub compatible: Option<CompatibleConfig>,
+    pub models: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibleConfig {
+    pub preset: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEntry {
+    pub id: String,
+    pub config: ModelConfig,
+}

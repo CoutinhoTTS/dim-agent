@@ -1,0 +1,1116 @@
+//! Pure model descriptor projection owned by the provider service.
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::{HashMap, HashSet};
+
+pub use dim_agent_types::{
+    ModelCapabilities, ModelReasoning, ModelServiceTier, ReasoningBudget, ReasoningOff,
+};
+
+const CATALOG: &str = include_str!("../resources/default-catalog.json");
+const REASONING_OFF: &str = include_str!("../resources/reasoning-off-overrides.json");
+
+/// Limits cross the JSON boundary into JavaScript clients without rounding.
+pub const MAX_MODEL_TOKENS: u64 = dim_agent_types::JS_MAX_SAFE_INTEGER;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectionError {
+    #[error("invalid bundled model catalog: {0}")]
+    Catalog(#[from] serde_json::Error),
+    #[error("model descriptor requires a non-empty id")]
+    MissingModelId,
+    #[error("model descriptor must be an object")]
+    InvalidDescriptor,
+    #[error("model limits must be positive safe JSON integers")]
+    InvalidLimits,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelSource {
+    Builtin,
+    Custom,
+    Oauth,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelEntry {
+    pub model_id: String,
+    pub display_name: String,
+    pub status: ModelStatus,
+    pub capabilities: ModelCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_guide_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ModelMetadata>,
+}
+
+/// The editable surface excludes model identity, lookup diagnostics and raw
+/// provider fields. Resetting an override is a separate provider operation.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelEdit {
+    pub display_name: Option<String>,
+    pub context_window: Option<std::num::NonZeroU64>,
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
+    pub tool_calling: Option<bool>,
+    pub vision: Option<bool>,
+    pub reasoning: Option<ReasoningEdit>,
+    pub modality_capabilities: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReasoningEdit {
+    pub supported: bool,
+    pub effort_options: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelStatus {
+    #[default]
+    Active,
+    Beta,
+    Deprecated,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ModelReasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ModelServiceTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_strategy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_match_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_override_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub raw: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPricing {
+    pub input_token_price: Option<f64>,
+    pub output_token_price: Option<f64>,
+    pub currency: Option<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimit {
+    pub requests_per_minute: Option<u64>,
+    pub tokens_per_minute: Option<u64>,
+}
+#[derive(Clone, Debug, Default)]
+pub struct ProviderProjection {
+    pub provider_id: String,
+    pub source: Option<ModelSource>,
+    pub capability_defaults: Option<ModelCapabilities>,
+    pub models: Vec<ModelEntry>,
+    pub context_window_override: Option<u64>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextWindowFallback {
+    window: u64,
+    #[serde(default, deserialize_with = "compile_patterns")]
+    model_id_patterns: Vec<Regex>,
+}
+
+fn compile_patterns<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Regex>, D::Error> {
+    Vec::<String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|pattern| Regex::new(&pattern).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogMetadata {
+    context_window_override: Option<u64>,
+    context_window_fallback: Option<ContextWindowFallback>,
+    pub(crate) remote_model_list: Option<bool>,
+    #[serde(default)]
+    reasoning_off_overrides: bool,
+    pub(crate) raw: Option<CatalogRawMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogRawMetadata {
+    #[serde(default)]
+    pub(crate) endpoint_type_by_model: std::collections::BTreeMap<String, NewApiEndpoint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum NewApiEndpoint {
+    Openai,
+    OpenaiResponse,
+    OpenaiResponseCompact,
+    OpenaiAlphaSearch,
+    Anthropic,
+    Gemini,
+    JinaRerank,
+    ImageGeneration,
+    Embeddings,
+    #[serde(alias = "video-generation")]
+    OpenaiVideo,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogFile {
+    providers: Vec<CatalogProvider>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogProvider {
+    pub provider_id: String,
+    pub display_name: String,
+    pub driver_kind: String,
+    pub default_base_url: Option<String>,
+    pub auth: CatalogAuth,
+    pub models: Vec<ModelEntry>,
+    #[serde(default)]
+    pub(crate) metadata: Option<CatalogMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAuth {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub header_name: Option<String>,
+    #[serde(default)]
+    pub prefix: String,
+}
+
+#[derive(Deserialize)]
+struct OffFile {
+    providers: HashMap<String, OffProvider>,
+}
+#[derive(Deserialize)]
+struct OffProvider {
+    models: std::collections::BTreeMap<String, OffModel>,
+}
+#[derive(Deserialize)]
+struct OffModel {
+    reasoning: OffReasoning,
+}
+#[derive(Deserialize)]
+struct OffReasoning {
+    off: Option<ReasoningOff>,
+}
+
+/// Parsed bundled data and its indexes. Construct once as a normal ProviderPlugin member.
+pub struct BundledCatalog {
+    providers: Vec<CatalogProvider>,
+    by_provider: HashMap<String, usize>,
+    reasoning_off: HashMap<(String, String), ReasoningOff>,
+}
+
+impl BundledCatalog {
+    pub fn load() -> Result<Self, ProjectionError> {
+        let file: CatalogFile = serde_json::from_str(CATALOG)?;
+        let by_provider = file
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.provider_id.clone(), i))
+            .collect();
+        let off_file: OffFile = serde_json::from_str(REASONING_OFF)?;
+        let mut reasoning_off = HashMap::new();
+        for (provider, overrides) in off_file.providers {
+            for (model, entry) in overrides.models {
+                if let Some(off) = entry.reasoning.off {
+                    for variant in variants(&model) {
+                        reasoning_off.insert((provider.clone(), variant), off.clone());
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            providers: file.providers,
+            by_provider,
+            reasoning_off,
+        })
+    }
+
+    pub fn bundled_models(&self, provider_id: &str) -> Option<&[ModelEntry]> {
+        self.by_provider
+            .get(provider_id)
+            .map(|i| self.providers[*i].models.as_slice())
+    }
+
+    pub fn providers(&self) -> impl Iterator<Item = &CatalogProvider> {
+        self.providers.iter()
+    }
+
+    pub fn provider(&self, provider_id: &str) -> Option<&CatalogProvider> {
+        self.by_provider
+            .get(provider_id)
+            .map(|index| &self.providers[*index])
+    }
+
+    pub fn project(
+        &self,
+        provider: &ProviderProjection,
+        descriptor: &Value,
+    ) -> Result<ModelEntry, ProjectionError> {
+        let value = descriptor;
+        let original = value
+            .as_object()
+            .ok_or(ProjectionError::InvalidDescriptor)?;
+        let id = string(original.get("id"))
+            .ok_or(ProjectionError::MissingModelId)?
+            .to_owned();
+        let input = value
+            .as_object()
+            .ok_or(ProjectionError::InvalidDescriptor)?;
+        let mut entry = descriptor_entry(
+            &provider.provider_id,
+            &id,
+            input,
+            provider.capability_defaults.clone().unwrap_or_default(),
+        )?;
+        let explicit = entry
+            .metadata
+            .as_ref()
+            .map(|m| m.capability_override_fields.clone())
+            .unwrap_or_default();
+        let lookup = self.lookup(provider, &id);
+        if let Some((pid, found, strategy, score)) = lookup {
+            entry = merge_entry(
+                entry,
+                &found,
+                &explicit,
+                &provider.capability_defaults.clone().unwrap_or_default(),
+            );
+            let declared = input.get("capabilities").and_then(Value::as_object);
+            if input.get("modalities").is_none()
+                && input.get("vision") != Some(&Value::Bool(true))
+                && declared.is_none_or(|value| !value.contains_key("modalities"))
+            {
+                entry.capabilities.modalities = found.capabilities.modalities.clone();
+            }
+            macro_rules! inherit_capability {
+                ($json:literal, $field:ident) => {
+                    if input.get($json).is_none()
+                        && declared.is_none_or(|value| !value.contains_key($json))
+                    {
+                        entry.capabilities.$field = found.capabilities.$field;
+                    }
+                };
+            }
+            inherit_capability!("toolCalling", tool_calling);
+            inherit_capability!("streaming", streaming);
+            inherit_capability!("structuredOutput", structured_output);
+            inherit_capability!("vision", vision);
+            inherit_capability!("audio", audio);
+            let metadata = entry.metadata.get_or_insert_default();
+            metadata.metadata_source = Some(pid.clone());
+            metadata.matched_provider_id = Some(pid);
+            metadata.matched_model_id = Some(found.model_id.clone());
+            metadata.match_strategy = Some(strategy);
+            metadata.match_score = Some(score);
+        } else {
+            let metadata = entry.metadata.get_or_insert_default();
+            metadata.metadata_source = Some("provider-default".into());
+            metadata.match_strategy = Some("provider-default".into());
+            metadata.metadata_match_reason = Some("no_unique_match".into());
+        }
+        self.apply_provider_rules(provider, &mut entry);
+        if [
+            entry.capabilities.context_window,
+            entry.capabilities.max_output_tokens,
+        ]
+        .into_iter()
+        .any(|limit| limit == 0 || limit > MAX_MODEL_TOKENS)
+        {
+            return Err(ProjectionError::InvalidLimits);
+        }
+        Ok(entry)
+    }
+
+    pub fn effective_models(
+        &self,
+        provider: &ProviderProjection,
+        defaults: &[ModelEntry],
+        overrides: &[ModelEntry],
+    ) -> Vec<ModelEntry> {
+        let capabilities = provider.capability_defaults.clone().unwrap_or_default();
+        let mut models = defaults
+            .iter()
+            .map(|model| {
+                let mut model = model.clone();
+                if let Some((provider_id, fallback, strategy, score)) =
+                    self.lookup(provider, &model.model_id)
+                {
+                    let explicit = model
+                        .metadata
+                        .as_ref()
+                        .map(|m| m.capability_override_fields.clone())
+                        .unwrap_or_default();
+                    model = merge_entry(model, &fallback, &explicit, &capabilities);
+                    let metadata = model.metadata.get_or_insert_default();
+                    metadata.metadata_source = Some(provider_id.clone());
+                    metadata.matched_provider_id = Some(provider_id);
+                    metadata.matched_model_id = Some(fallback.model_id.clone());
+                    metadata.match_strategy = Some(strategy);
+                    metadata.match_score = Some(score);
+                    metadata.metadata_match_reason = None;
+                }
+                self.apply_provider_rules(provider, &mut model);
+                model
+            })
+            .collect::<Vec<_>>();
+        for item in overrides {
+            if let Some(pos) = models.iter().position(|m| m.model_id == item.model_id) {
+                models[pos] = item.clone()
+            } else {
+                models.push(item.clone())
+            }
+        }
+        if let Some(window) = provider.context_window_override {
+            for model in &mut models {
+                model.capabilities.context_window = window;
+            }
+        }
+        models
+    }
+
+    /// Applies an editor patch to visible fields while retaining all hidden metadata.
+    pub fn merge_visible_edit(&self, existing: &ModelEntry, edit: ModelEdit) -> ModelEntry {
+        let mut model = existing.clone();
+        if let Some(name) = edit.display_name {
+            model.display_name = name;
+        }
+        if let Some(tool_calling) = edit.tool_calling {
+            model.capabilities.tool_calling = tool_calling;
+        }
+        if let Some(vision) = edit.vision {
+            model.capabilities.vision = vision;
+        }
+        for (field, value, target) in [
+            (
+                "contextWindow",
+                edit.context_window,
+                &mut model.capabilities.context_window,
+            ),
+            (
+                "maxOutputTokens",
+                edit.max_output_tokens,
+                &mut model.capabilities.max_output_tokens,
+            ),
+        ] {
+            if let Some(value) = value {
+                *target = value.get();
+                let fields = &mut model
+                    .metadata
+                    .get_or_insert_default()
+                    .capability_override_fields;
+                if !fields.iter().any(|name| name == field) {
+                    fields.push(field.into());
+                }
+            }
+        }
+        if let Some(reasoning) = edit.reasoning {
+            model.capabilities.reasoning = reasoning.supported;
+            let current = model
+                .metadata
+                .get_or_insert_default()
+                .reasoning
+                .get_or_insert_default();
+            current.supported = reasoning.supported;
+            current.effort_options = if reasoning.supported {
+                reasoning.effort_options
+            } else {
+                None
+            };
+        }
+        if let Some(capabilities) = edit.modality_capabilities {
+            model.metadata.get_or_insert_default().raw.insert(
+                "imageGeneration".into(),
+                Value::Bool(capabilities.iter().any(|id| id == "image.generate")),
+            );
+            model.metadata.get_or_insert_default().raw.insert(
+                "modalityCapabilities".into(),
+                Value::Array(capabilities.into_iter().map(Value::String).collect()),
+            );
+        }
+        model
+    }
+
+    fn lookup(
+        &self,
+        provider: &ProviderProjection,
+        id: &str,
+    ) -> Option<(String, ModelEntry, String, f64)> {
+        if provider.source != Some(ModelSource::Custom)
+            && let Some(m) = provider.models.iter().find(|m| m.model_id == id)
+        {
+            return Some((
+                provider.provider_id.clone(),
+                m.clone(),
+                "provider-exact".into(),
+                1.,
+            ));
+        }
+        let mut ids = vec!["custom-provider"];
+        let normalized = variants(id);
+        for (prefix, sources) in [
+            ("deepseek-", &["deepseek"][..]),
+            ("glm-", &["zai", "zhipuai"]),
+            ("qwen", &["bailian-coding-plan", "bailian"]),
+            ("kimi-", &["moonshot", "moonshot-ai"]),
+            ("claude-", &["anthropic"]),
+            ("gemini-", &["google"]),
+            ("gpt-", &["openai"]),
+            ("minimax-", &["minimax", "minimax-cn"]),
+            ("seed-", &["doubao-seed"]),
+        ] {
+            if normalized.iter().any(|variant| variant.starts_with(prefix)) {
+                ids.extend_from_slice(sources);
+            }
+        }
+        ids.extend([
+            "openrouter",
+            "zenmux",
+            "vercel-ai-gateway",
+            "jiekou",
+            "ppinfra",
+            "aihubmix",
+        ]);
+        for pid in ids {
+            if let Some(models) = self.bundled_models(pid)
+                && let Some((m, kind, score)) = match_models(models, id)
+            {
+                return Some((pid.into(), m.clone(), format!("{pid}-{kind}"), score));
+            }
+        }
+        // Media lookup is deliberately non-fuzzy and compares all candidate
+        // signatures before choosing a provider, rather than first-match wins.
+        for exact in [true, false] {
+            let candidates: Vec<_> = self
+                .providers
+                .iter()
+                .filter(|p| !matches!(p.provider_id.as_str(), "custom-provider" | "aihubmix"))
+                .flat_map(|p| p.models.iter().map(move |m| (p, m)))
+                .filter(|(_, m)| {
+                    if exact {
+                        m.model_id == id
+                    } else {
+                        !variants(&m.model_id).is_disjoint(&normalized)
+                    }
+                })
+                .filter_map(|(p, m)| media_signature(m).map(|signature| (p, m, signature)))
+                .collect();
+            if let Some((p, m, signature)) = candidates.first()
+                && candidates.iter().all(|(_, _, other)| other == signature)
+            {
+                let kind = if exact { "exact" } else { "normalized" };
+                return Some((
+                    p.provider_id.clone(),
+                    (*m).clone(),
+                    format!("{}-{kind}", p.provider_id),
+                    if exact { 1. } else { 0.98 },
+                ));
+            }
+        }
+        if provider.source == Some(ModelSource::Custom) {
+            provider.models.iter().find(|m| m.model_id == id).map(|m| {
+                (
+                    provider.provider_id.clone(),
+                    m.clone(),
+                    "custom-config-exact".into(),
+                    1.,
+                )
+            })
+        } else {
+            None
+        }
+    }
+
+    fn apply_provider_rules(&self, provider: &ProviderProjection, entry: &mut ModelEntry) {
+        let bundled = self
+            .by_provider
+            .get(&provider.provider_id)
+            .map(|i| &self.providers[*i]);
+        let metadata = bundled.and_then(|p| p.metadata.as_ref());
+        let override_window = provider
+            .context_window_override
+            .or_else(|| metadata.and_then(|m| m.context_window_override));
+        if let Some(window) = override_window {
+            entry.capabilities.context_window = window;
+        }
+        let fallback = metadata.and_then(|m| m.context_window_fallback.as_ref());
+        if let Some(fallback) = fallback
+            && override_window.is_none()
+            && fallback
+                .model_id_patterns
+                .iter()
+                .any(|r| variants(&entry.model_id).iter().any(|id| r.is_match(id)))
+        {
+            entry.capabilities.context_window = fallback.window;
+        }
+        let enabled = metadata.is_some_and(|m| m.reasoning_off_overrides);
+        if enabled
+            && entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.reasoning.as_ref())
+                .is_some_and(|r| r.supported && r.off.is_none())
+            && let Some(off) = variants(&entry.model_id).iter().find_map(|id| {
+                self.reasoning_off
+                    .get(&(provider.provider_id.clone(), id.clone()))
+            })
+        {
+            entry
+                .metadata
+                .as_mut()
+                .unwrap()
+                .reasoning
+                .as_mut()
+                .unwrap()
+                .off = Some(off.clone());
+        }
+    }
+}
+
+fn descriptor_entry(
+    provider_id: &str,
+    id: &str,
+    input: &Map<String, Value>,
+    defaults: ModelCapabilities,
+) -> Result<ModelEntry, ProjectionError> {
+    let limit = input.get("limit").and_then(Value::as_object);
+    let capabilities = input.get("capabilities").and_then(Value::as_object);
+    let context = positive(input.get("contextWindow"))
+        .or_else(|| limit.and_then(|x| positive(x.get("context"))))
+        .or_else(|| capabilities.and_then(|x| positive(x.get("contextWindow"))));
+    let output = positive(input.get("maxOutputTokens"))
+        .or_else(|| limit.and_then(|x| positive(x.get("output"))))
+        .or_else(|| capabilities.and_then(|x| positive(x.get("maxOutputTokens"))));
+    let reasoning_value = input.get("reasoning");
+    let reasoning_options = input.get("reasoning_options").or_else(|| {
+        input
+            .get("raw")
+            .and_then(|raw| raw.get("reasoning_options"))
+    });
+    let reasoning = project_reasoning(reasoning_value, reasoning_options)?;
+    let mut caps = defaults;
+    if let Some(v) = capabilities {
+        apply_capabilities(&mut caps, v);
+    }
+    if let Some(values) = input.get("modalities").and_then(Value::as_array) {
+        caps.modalities = strings(values);
+    }
+    if let Some(v) = input.get("toolCalling").and_then(Value::as_bool) {
+        caps.tool_calling = v;
+    }
+    if let Some(v) = input.get("vision").and_then(Value::as_bool) {
+        caps.vision = v;
+        if v && input.get("modalities").is_none()
+            && capabilities.is_none_or(|c| !c.contains_key("modalities"))
+        {
+            caps.modalities = vec!["text".into(), "image".into()];
+        }
+    }
+    if let Some(r) = &reasoning {
+        caps.reasoning = r.supported;
+    }
+    if let Some(v) = context {
+        caps.context_window = v;
+    }
+    if let Some(v) = output {
+        caps.max_output_tokens = v;
+    }
+    let mut raw = input
+        .get("raw")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    raw.insert("id".into(), Value::String(id.into()));
+    raw.insert("providerId".into(), Value::String(provider_id.into()));
+    for field in ["name", "imageGeneration", "modalityCapabilities"] {
+        if let Some(value) = input.get(field) {
+            raw.insert(field.into(), value.clone());
+        }
+    }
+    if let Some(capabilities) = input.get("modalityCapabilities").and_then(Value::as_array) {
+        raw.insert(
+            "imageGeneration".into(),
+            Value::Bool(
+                capabilities
+                    .iter()
+                    .any(|id| id.as_str() == Some("image.generate")),
+            ),
+        );
+    }
+    if input.get("imageGeneration") == Some(&Value::Bool(true))
+        && !input.contains_key("modalityCapabilities")
+    {
+        raw.insert("type".into(), Value::String("image-generation".into()));
+    }
+    if let Some(field) = reasoning_value.and_then(|r| r.get("interleavedField")) {
+        let interleaved = raw
+            .entry("interleaved")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(interleaved) = interleaved.as_object_mut() {
+            interleaved.insert("field".into(), field.clone());
+        }
+    }
+    let pricing = pricing(&raw);
+    let service_tier = service_tier(input.get("serviceTier"), &raw);
+    let mut metadata = ModelMetadata {
+        pricing,
+        reasoning,
+        service_tier,
+        raw,
+        ..Default::default()
+    };
+    if context.is_some() {
+        metadata
+            .capability_override_fields
+            .push("contextWindow".into());
+    }
+    if output.is_some() {
+        metadata
+            .capability_override_fields
+            .push("maxOutputTokens".into());
+    }
+    Ok(ModelEntry {
+        model_id: id.into(),
+        display_name: string(input.get("displayName"))
+            .or_else(|| string(input.get("display_name")))
+            .or_else(|| string(input.get("name")))
+            .unwrap_or(id)
+            .into(),
+        status: input
+            .get("status")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        capabilities: caps,
+        model_guide_prompt: None,
+        metadata: Some(metadata),
+    })
+}
+
+fn merge_entry(
+    mut current: ModelEntry,
+    fallback: &ModelEntry,
+    explicit: &[String],
+    default: &ModelCapabilities,
+) -> ModelEntry {
+    if current.display_name == current.model_id {
+        current.display_name = fallback.display_name.clone();
+    }
+    if current.capabilities.context_window == default.context_window
+        && !explicit.iter().any(|x| x == "contextWindow")
+    {
+        current.capabilities.context_window = fallback.capabilities.context_window;
+    }
+    if current.capabilities.max_output_tokens == default.max_output_tokens
+        && !explicit.iter().any(|x| x == "maxOutputTokens")
+    {
+        current.capabilities.max_output_tokens = fallback.capabilities.max_output_tokens;
+    }
+    let cm = current.metadata.get_or_insert_default();
+    if let Some(fm) = &fallback.metadata {
+        if cm.description.is_none() {
+            cm.description = fm.description.clone();
+        }
+        if cm.release_date.is_none() {
+            cm.release_date = fm.release_date.clone();
+        }
+        if let Some(pricing) = &fm.pricing {
+            let current = cm.pricing.get_or_insert_default();
+            current.input_token_price = current.input_token_price.or(pricing.input_token_price);
+            current.output_token_price = current.output_token_price.or(pricing.output_token_price);
+            if current.currency.is_none() {
+                current.currency = pricing.currency.clone();
+            }
+        }
+        if let Some(rate_limit) = &fm.rate_limit {
+            let current = cm.rate_limit.get_or_insert_default();
+            current.requests_per_minute = current
+                .requests_per_minute
+                .or(rate_limit.requests_per_minute);
+            current.tokens_per_minute = current.tokens_per_minute.or(rate_limit.tokens_per_minute);
+        }
+        cm.reasoning = match (&cm.reasoning, &fm.reasoning) {
+            (Some(r), _) if !r.supported => Some(r.clone()),
+            (Some(r), Some(f)) => {
+                let mut n = r.clone();
+                inherit_reasoning(&mut n, f);
+                Some(n)
+            }
+            (None, f) => f.clone(),
+            (r, _) => r.clone(),
+        };
+        match (&mut cm.service_tier, &fm.service_tier) {
+            (Some(tier), Some(fallback)) if tier.supported => {
+                if tier.default.is_none() {
+                    tier.default = fallback.default.clone();
+                }
+                if tier.options.is_empty() {
+                    tier.options = fallback.options.clone();
+                }
+            }
+            (None, fallback) => cm.service_tier = fallback.clone(),
+            _ => {}
+        }
+        for (k, v) in &fm.raw {
+            cm.raw.entry(k.clone()).or_insert(v.clone());
+        }
+    }
+    if let Some(reasoning) = &cm.reasoning {
+        current.capabilities.reasoning = reasoning.supported;
+    }
+    if current.model_guide_prompt.is_none() {
+        current.model_guide_prompt = fallback.model_guide_prompt.clone();
+    }
+    if let Some(state) = &fallback.capabilities.provider_state {
+        let current = current.capabilities.provider_state.get_or_insert_default();
+        for (key, value) in state {
+            current.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    current
+}
+
+fn inherit_reasoning(current: &mut ModelReasoning, fallback: &ModelReasoning) {
+    if !current.supported {
+        return;
+    }
+    macro_rules! inherit {
+        ($($field:ident),*) => { $(
+            if current.$field.is_none() { current.$field = fallback.$field.clone(); }
+        )* };
+    }
+    inherit!(
+        default_enabled,
+        mode,
+        effort,
+        effort_options,
+        level,
+        level_options,
+        verbosity,
+        verbosity_options,
+        interleaved,
+        summaries,
+        visibility,
+        continuation,
+        budget,
+        notes,
+        off
+    );
+}
+
+fn project_reasoning(
+    value: Option<&Value>,
+    options: Option<&Value>,
+) -> Result<Option<ModelReasoning>, ProjectionError> {
+    let options = options
+        .and_then(Value::as_array)
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x.get("type").and_then(Value::as_str) == Some("effort"))
+        })
+        .and_then(|x| x.get("values"))
+        .and_then(Value::as_array)
+        .map(|values| strings(values))
+        .filter(|values| !values.is_empty());
+    Ok(match value {
+        Some(Value::Bool(v)) => Some(ModelReasoning {
+            supported: *v,
+            effort_options: if *v { options } else { None },
+            ..Default::default()
+        }),
+        Some(Value::Object(m)) => {
+            let supported = m.get("supported").and_then(Value::as_bool).unwrap_or(true);
+            let mut details = m.clone();
+            details.remove("supported");
+            details.remove("interleavedField");
+            if let Some(default) = details.remove("default") {
+                details.entry("defaultEnabled").or_insert(default);
+            }
+            if let Some(options) = details.remove("effort_options") {
+                details.entry("effortOptions").or_insert(options);
+            }
+            if !details.contains_key("effortOptions")
+                && supported
+                && let Some(v) = options
+            {
+                details.insert(
+                    "effortOptions".into(),
+                    Value::Array(v.into_iter().map(Value::String).collect()),
+                );
+            }
+            details.insert("supported".into(), Value::Bool(supported));
+            Some(serde_json::from_value(Value::Object(details))?)
+        }
+        None => options.map(|v| ModelReasoning {
+            supported: true,
+            effort_options: Some(v),
+            ..Default::default()
+        }),
+        _ => None,
+    })
+}
+fn service_tier(value: Option<&Value>, raw: &Map<String, Value>) -> Option<ModelServiceTier> {
+    if value == Some(&Value::Bool(false)) {
+        return Some(ModelServiceTier {
+            supported: false,
+            default: None,
+            options: vec![],
+        });
+    }
+    let extra = raw.get("extra_capabilities");
+    let direct = raw.get("serviceTier").or_else(|| raw.get("service_tier"));
+    let extra = extra.and_then(|v| v.get("serviceTier").or_else(|| v.get("service_tier")));
+    let fast = raw
+        .get("experimental")
+        .and_then(|v| v.pointer("/modes/fast/provider/body"))
+        .and_then(|v| string(v.get("service_tier").or_else(|| v.get("serviceTier"))));
+    let mut supported = None;
+    let mut default = None;
+    let mut options = vec![];
+    for v in [direct, extra, value].into_iter().flatten() {
+        let preference = v
+            .is_object()
+            .then(|| string(v.get("default").or_else(|| v.get("default_tier"))))
+            .flatten()
+            .or_else(|| v.as_str());
+        let support = v
+            .as_bool()
+            .or_else(|| v.get("supported").and_then(Value::as_bool));
+        if support.is_some() && (supported.is_none() || Some(v) == value) {
+            supported = support;
+        }
+        if preference.is_some() && (default.is_none() || Some(v) == value) {
+            default = preference.map(str::to_owned);
+        }
+        if let Some(values) = v.get("options").and_then(Value::as_array) {
+            options.extend(strings(values));
+        } else if let Some(v) = v.as_str() {
+            options.push(v.to_owned());
+        }
+    }
+    if let Some(fast) = fast {
+        options.extend(["default".into(), fast.into()]);
+    }
+    let mut seen = HashSet::new();
+    options.retain(|option| seen.insert(option.clone()));
+    let default = default
+        .or_else(|| options.iter().find(|v| *v == "default").cloned())
+        .or_else(|| options.first().cloned());
+    let supported =
+        supported.or_else(|| (default.is_some() || !options.is_empty()).then_some(true))?;
+    Some(ModelServiceTier {
+        supported,
+        default,
+        options,
+    })
+}
+fn pricing(raw: &Map<String, Value>) -> Option<ModelPricing> {
+    let c = raw.get("pricing")?.as_object()?;
+    Some(ModelPricing {
+        input_token_price: c.get("input").and_then(Value::as_f64).filter(|n| *n >= 0.),
+        output_token_price: c.get("output").and_then(Value::as_f64).filter(|n| *n >= 0.),
+        currency: None,
+    })
+}
+fn apply_capabilities(c: &mut ModelCapabilities, m: &Map<String, Value>) {
+    if let Some(a) = m.get("modalities").and_then(Value::as_array) {
+        c.modalities = strings(a)
+    }
+    macro_rules! b {
+        ($j:literal,$f:ident) => {
+            if let Some(v) = m.get($j).and_then(Value::as_bool) {
+                c.$f = v
+            }
+        };
+    }
+    b!("toolCalling", tool_calling);
+    b!("streaming", streaming);
+    b!("structuredOutput", structured_output);
+    b!("vision", vision);
+    b!("audio", audio);
+    b!("reasoning", reasoning);
+    if let Some(state) = m.get("providerState").and_then(Value::as_object) {
+        c.provider_state
+            .get_or_insert_default()
+            .extend(state.clone());
+    }
+}
+
+fn media_signature(model: &ModelEntry) -> Option<Value> {
+    let raw = model.metadata.as_ref().map(|m| &m.raw);
+    let get = |name: &str| raw.and_then(|r| r.get(name));
+    let sorted = |values: Vec<String>| {
+        let mut values: Vec<_> = values
+            .into_iter()
+            .map(|v| v.trim().to_lowercase())
+            .filter(|v| !v.is_empty())
+            .collect();
+        values.sort();
+        values.dedup();
+        values
+    };
+    let list = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_array)
+            .map(|v| strings(v))
+            .unwrap_or_default()
+    };
+    let kind = string(get("type")).map(|s| s.to_lowercase().replace('_', "-"));
+    let hints = sorted(list(get("typeHints").or_else(|| get("type_hints"))));
+    let actions = sorted(list(
+        get("modalityCapabilities").or_else(|| get("modality_capabilities")),
+    ));
+    let input = sorted(list(get("modalities").and_then(|v| v.get("input"))));
+    let output = sorted(list(get("modalities").and_then(|v| v.get("output"))));
+    let modalities = sorted(model.capabilities.modalities.clone());
+    let is_media = model.capabilities.audio
+        || model.capabilities.vision
+        || kind.as_ref().is_some_and(|kind| kind != "chat")
+        || !actions.is_empty()
+        || hints.iter().any(|kind| kind != "chat")
+        || input
+            .iter()
+            .chain(&output)
+            .chain(&modalities)
+            .any(|v| v != "text");
+    is_media.then(|| {
+        serde_json::json!({
+            "type": kind, "typeHints": hints, "modalityCapabilities": actions,
+            "input": input, "output": output, "modalities": modalities,
+            "audio": model.capabilities.audio, "vision": model.capabilities.vision,
+        })
+    })
+}
+
+fn match_models<'a>(
+    models: &'a [ModelEntry],
+    id: &str,
+) -> Option<(&'a ModelEntry, &'static str, f64)> {
+    if let Some(m) = models.iter().find(|m| m.model_id == id) {
+        return Some((m, "exact", 1.));
+    }
+    let target = variants(id);
+    let normalized: Vec<_> = models
+        .iter()
+        .filter(|m| variants(&m.model_id).iter().any(|v| target.contains(v)))
+        .collect();
+    if normalized.len() == 1 {
+        return Some((normalized[0], "normalized", 0.98));
+    }
+    let nums = numbers(id);
+    let mut scored: Vec<_> = models
+        .iter()
+        .filter(|m| numbers(&m.model_id) == nums)
+        .map(|m| (m, similarity(id, &m.model_id)))
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let best = scored.first()?;
+    if best.1 >= 0.82 && best.1 - scored.get(1).map(|x| x.1).unwrap_or(0.) >= 0.08 {
+        Some((best.0, "fuzzy", best.1))
+    } else {
+        None
+    }
+}
+fn variants(s: &str) -> HashSet<String> {
+    let c = canonical(s);
+    let mut r = HashSet::from([c.clone()]);
+    if let Some((_, tail)) = c.rsplit_once('/') {
+        r.insert(tail.into());
+    }
+    r
+}
+fn canonical(s: &str) -> String {
+    let lower = s.trim().to_lowercase();
+    let mut result = String::new();
+    let mut separator = false;
+    for ch in lower.strip_prefix("models/").unwrap_or(&lower).chars() {
+        if ch == '_' || ch == ':' || ch.is_whitespace() {
+            if !separator {
+                result.push('-');
+            }
+            separator = true;
+        } else {
+            result.push(ch);
+            separator = false;
+        }
+    }
+    result
+}
+fn numbers(s: &str) -> Vec<String> {
+    s.split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+fn similarity(a: &str, b: &str) -> f64 {
+    let (a, b) = (canonical(a), canonical(b));
+    let max = a.len().max(b.len());
+    if max == 0 {
+        return 1.;
+    }
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.bytes().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.bytes().enumerate() {
+            let old = row[j + 1];
+            row[j + 1] = (row[j + 1] + 1)
+                .min(row[j] + 1)
+                .min(prev + usize::from(ca != cb));
+            prev = old;
+        }
+    }
+    1. - row[b.len()] as f64 / max as f64
+}
+fn string(v: Option<&Value>) -> Option<&str> {
+    v.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+fn positive(v: Option<&Value>) -> Option<u64> {
+    v.and_then(Value::as_u64).filter(|x| *x > 0)
+}
+fn strings(v: &[Value]) -> Vec<String> {
+    v.iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(str::to_owned)
+        .collect()
+}

@@ -1,0 +1,575 @@
+use crate::core::TailLock;
+use crate::lifecycle::{CloseOnce, guarded};
+use crate::*;
+use dim_agent_types::{AgentEvent, EventKind, InputMessageData, InterruptScope, StopInterruptData};
+use rutis::{Ctx, FiberView};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::{
+    sync::{Mutex as AsyncMutex, watch},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+
+/// Runtime owner of one loaded branch: its rutis subtree, the Timeline that
+/// holds its durable facts, the Dispatcher that drives its capabilities, and
+/// the branch lifecycle. Business state in memory belongs to the capabilities
+/// of the subtree, which rebuild it from the Timeline; this owner only finds
+/// them per call and never caches their instances or aggregates their state.
+///
+/// Obtained only from [`TimelineFactory::build`] and held by the branch tree.
+/// Callers outside the tree get a [`Branch`], which cannot write arbitrary
+/// events.
+pub struct TimelineContext {
+    id: String,
+    ctx: Ctx,
+    view: FiberView,
+    children: Vec<FiberView>,
+    scope: BranchScope,
+    timeline: Timeline,
+    dispatcher: Dispatcher,
+    lifecycle: BranchLifecycle,
+    opening: Arc<BranchOpening>,
+    /// Signals a possible change of [`BranchStatus`]; the status itself is
+    /// read from its owners on query.
+    changed: watch::Sender<()>,
+    /// A failure recorded by the branch's owner outside dispatch.
+    failure: Mutex<Option<String>>,
+    stop: CancellationToken,
+    tasks: Mutex<Option<(JoinHandle<()>, JoinHandle<()>)>>,
+    /// Serializes stop and close.
+    control: AsyncMutex<()>,
+    close: CloseOnce,
+    stop_operation: Mutex<Option<StopOperation>>,
+}
+/// How often a wait looks for a reloading Loop's successor.
+const LOOP_RETURN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The latest stop and the sequence of its interrupt (0 until written).
+type StopOperation = (Arc<CloseOnce<u64>>, Arc<AtomicU64>);
+
+/// Receipts registered synchronously by the unique branch opening dispatch.
+/// Work remains owned and joined by the capability, not by this collector.
+pub struct BranchOpening(Mutex<Option<Vec<BoxFuture<'static, Result<()>>>>>);
+impl BranchService for BranchOpening {}
+impl BranchOpening {
+    pub fn register(&self, receipt: BoxFuture<'static, Result<()>>) -> Result<()> {
+        let mut receipts = self.0.lock().unwrap();
+        receipts
+            .as_mut()
+            .ok_or_else(|| AgentError::Closed("branch opening".into()))?
+            .push(receipt);
+        Ok(())
+    }
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(Some(Vec::new())))
+    }
+    async fn finish(&self) -> Result<()> {
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+        let receipts = self.0.lock().unwrap().take().unwrap_or_default();
+        let mut pending: FuturesUnordered<_> = receipts.into_iter().collect();
+        while let Some(result) = pending.next().await {
+            result?;
+        }
+        Ok(())
+    }
+}
+
+impl TimelineContext {
+    /// Called after opening dispatch: seal registration, await capability work,
+    /// then dispatch a fixed committed fence before the first input.
+    pub async fn finish_opening(&self) -> Result<()> {
+        let mut dispatch = self.dispatcher.watch();
+        let receipts = self.opening.finish();
+        tokio::pin!(receipts);
+        loop {
+            if let Some(error) = dispatch.borrow_and_update().failure.clone() {
+                return Err(error);
+            }
+            tokio::select! {
+                result = &mut receipts => { result?; break; }
+                changed = dispatch.changed() => {
+                    changed.map_err(|_| AgentError::Closed("branch dispatch".into()))?;
+                }
+            }
+        }
+        let through = self.timeline.committed();
+        loop {
+            let state = dispatch.borrow_and_update().clone();
+            if let Some(error) = state.failure {
+                return Err(error);
+            }
+            if state.sequence >= through {
+                return Ok(());
+            }
+            dispatch
+                .changed()
+                .await
+                .map_err(|_| AgentError::Closed("branch dispatch".into()))?;
+        }
+    }
+
+    /// Starts dispatch once every capability of the subtree is Active.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start(
+        id: String,
+        ctx: Ctx,
+        view: FiberView,
+        children: Vec<FiberView>,
+        scope: BranchScope,
+        timeline: Timeline,
+        dispatcher: Dispatcher,
+        lifecycle: BranchLifecycle,
+        opening: Arc<BranchOpening>,
+        faults: FaultReporter,
+    ) -> Arc<Self> {
+        let this = Arc::new(Self {
+            id,
+            ctx,
+            view,
+            children,
+            scope,
+            timeline,
+            dispatcher,
+            lifecycle,
+            opening,
+            changed: watch::channel(()).0,
+            failure: Mutex::new(None),
+            stop: CancellationToken::new(),
+            tasks: Mutex::new(None),
+            control: AsyncMutex::new(()),
+            close: CloseOnce::default(),
+            stop_operation: Mutex::new(None),
+        });
+        let dispatcher = this.dispatcher.clone();
+        let timeline = this.timeline.clone();
+        let ctx = this.ctx.clone();
+        let stop = this.stop.clone();
+        let driver = tokio::spawn(async move {
+            dispatcher.run(timeline, ctx, stop).await;
+            if let Some(error) = dispatcher.failure() {
+                faults.report(error);
+            }
+        });
+        let weak = Arc::downgrade(&this);
+        let stop = this.stop.clone();
+        let mut dispatcher = this.dispatcher.watch();
+        let monitor = tokio::spawn(async move {
+            // Signals every change of what the status is read from: Loop's
+            // state channel, dispatch progress, and Loop leaving or returning
+            // on reload. Readers compare against what they last reported; the
+            // monitor keeps no status of its own.
+            let mut phase: Option<watch::Receiver<LoopSnapshot>> = None;
+            let mut signal = true;
+            loop {
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                let had = phase.is_some();
+                if phase.as_ref().is_none_or(|rx| rx.has_changed().is_err()) {
+                    phase = inner
+                        .ctx
+                        .get_as::<dyn LoopState>(inner.scope.key::<dyn LoopState>())
+                        .map(|state| state.watch());
+                }
+                if signal || had != phase.is_some() {
+                    inner.changed.send_replace(());
+                }
+                drop(inner);
+                signal = match phase.as_mut() {
+                    Some(rx) => {
+                        tokio::select! {_=stop.cancelled()=>return,_=rx.changed()=>true,_=dispatcher.changed()=>true}
+                    }
+                    // Loop is reloading: look for its successor again.
+                    None => {
+                        tokio::select! {_=stop.cancelled()=>return,_=dispatcher.changed()=>true,_=tokio::time::sleep(LOOP_RETURN_POLL)=>false}
+                    }
+                };
+            }
+        });
+        *this.tasks.lock().unwrap() = Some((driver, monitor));
+        this
+    }
+    /// Marks the branch Active once its owner finished starting it: after
+    /// dispatch began and the branch was published. Background work its
+    /// capabilities spawned in `apply` begins now.
+    pub fn activate(&self) {
+        if !self.close.started() {
+            self.lifecycle.advance(BranchPhase::Active);
+        }
+    }
+    /// The facade handed to callers outside the branch tree.
+    pub fn branch(self: &Arc<Self>) -> Branch {
+        Branch(self.clone())
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    /// The branch's Timeline, including writes: for the branch tree, which
+    /// records branch lifecycle facts on it.
+    pub fn timeline(&self) -> &Timeline {
+        &self.timeline
+    }
+    pub(crate) fn mark_failure(&self, error: &AgentError) {
+        *self.failure.lock().unwrap() = Some(error.to_string());
+        self.changed.send_replace(());
+    }
+    pub fn is_closing(&self) -> bool {
+        self.close.started()
+    }
+    /// Read on query: execution from Loop, failure from dispatch or the
+    /// owner, closure from the branch lifecycle. Reloading while Loop is
+    /// being replaced.
+    pub(crate) fn state(&self) -> Result<BranchStatus> {
+        let failure = self
+            .dispatcher
+            .failure()
+            .map(|error| error.to_string())
+            .or_else(|| self.failure.lock().unwrap().clone());
+        let lifecycle = self.lifecycle.phase();
+        if lifecycle == BranchPhase::Closed {
+            return Ok(BranchStatus {
+                closed: true,
+                failure,
+                ..BranchStatus::default()
+            });
+        }
+        let phase = match self.loop_state() {
+            Ok(state) => state.state().phase,
+            // Closing unloads Loop with the rest of the subtree.
+            Err(_) if lifecycle == BranchPhase::Closing => LoopPhase::Idle,
+            Err(error) => return Err(error),
+        };
+        Ok(BranchStatus {
+            running: phase != LoopPhase::Idle,
+            stopping: phase == LoopPhase::Stopping,
+            closed: false,
+            failure,
+        })
+    }
+    /// Changes when [`Self::state`] may read differently.
+    pub(crate) fn watch(&self) -> watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+    pub(crate) fn dispatch_watch(&self) -> watch::Receiver<crate::core::DispatchState> {
+        self.dispatcher.watch()
+    }
+    fn loop_state(&self) -> Result<Arc<dyn LoopState>> {
+        self.port::<dyn LoopState>("Loop")
+    }
+    /// Capability ports are looked up per call: a reloading capability is absent.
+    pub(crate) fn port<T: ?Sized + BranchService>(&self, name: &str) -> Result<Arc<T>> {
+        self.ctx
+            .get_as::<T>(self.scope.key::<T>())
+            .ok_or_else(|| AgentError::Reloading(name.into()))
+    }
+    /// The branch scope and the capabilities it installed.
+    pub(crate) fn diagnostics(&self) -> rutis::RuntimeDiagnostics {
+        let scope = self.view.id;
+        let mut snapshot = self.ctx.diagnostics();
+        snapshot
+            .plugins
+            .retain(|p| p.id == scope || p.parent == Some(scope));
+        let members: Vec<_> = snapshot.plugins.iter().map(|p| p.id).collect();
+        snapshot.bindings.retain(|b| members.contains(&b.provider));
+        snapshot
+    }
+    pub(crate) fn state_cell<S: Clone + Send + Sync + 'static>(&self) -> Option<Arc<StateCell<S>>> {
+        self.ctx
+            .get_as::<StateCell<S>>(self.scope.key::<StateCell<S>>())
+    }
+    pub(crate) async fn configure(&self, update: ConfigureUpdate) -> Result<ConfigureOutcome> {
+        if self.close.started() {
+            return Err(AgentError::Closed(self.id().into()));
+        }
+        let control = self
+            .ctx
+            .get_as::<dyn ConfigureControl>(self.scope.key::<dyn ConfigureControl>())
+            .ok_or_else(|| AgentError::Build("ConfigureControl is not installed".into()))?;
+        control.configure(update).await
+    }
+    /// Validates input from outside the branch and appends it. Whether it
+    /// starts a turn is Loop's decision when the input is dispatched.
+    pub(crate) fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
+        // A dispatch defect is the root cause of any concurrent close: report
+        // it before the generic closed rejection so callers keep the context.
+        if let Some(error) = self.dispatcher.failure() {
+            return Err(error);
+        }
+        if self.close.started() {
+            return Err(AgentError::Closed(self.id().into()));
+        }
+        data.validate()
+            .map_err(|reason| AgentError::InvalidInput(reason.into()))?;
+        self.timeline.append(EventKind::InputMessage(data).into())
+    }
+    /// Waits until Loop has dispatched the Timeline tail and has no unclosed
+    /// turn; returns that dispatched sequence.
+    pub(crate) async fn idle(&self) -> Result<u64> {
+        let mut dispatch = self.dispatcher.watch();
+        let mut log = self.timeline.watch();
+        let mut phase = self.loop_watch().await?;
+        loop {
+            if let Some(error) = self.dispatcher.failure() {
+                return Err(error);
+            }
+            let dispatched = self.dispatcher.sequence();
+            if phase.borrow().phase == LoopPhase::Idle
+                && !self.timeline.has_pending()
+                && dispatched >= self.timeline.sequence()
+            {
+                return Ok(dispatched);
+            }
+            tokio::select! {
+                _ = dispatch.changed() => {},
+                _ = log.changed() => {},
+                changed = phase.changed() => if changed.is_err() {
+                    phase = self.loop_watch().await?;
+                },
+            }
+        }
+    }
+    pub(crate) fn stop(self: &Arc<Self>, reason: String) -> BoxFuture<'static, Result<u64>> {
+        if self.close.started() {
+            let id = self.id().to_owned();
+            return Box::pin(async move { Err(AgentError::Closed(id)) });
+        }
+        let mut active = self.stop_operation.lock().unwrap();
+        // A stop joins the previous one while that one still covers the
+        // current turn: its interrupt is not yet dispatched, or Loop is still
+        // stopping. A turn started after it needs an interrupt of its own.
+        let (operation, written) = match &*active {
+            Some((operation, written))
+                if !operation.finished() && {
+                    let interrupt = written.load(Ordering::Acquire);
+                    interrupt == 0
+                        || self.dispatcher.sequence() < interrupt
+                        || self
+                            .loop_state()
+                            .is_ok_and(|state| state.state().phase != LoopPhase::Running)
+                } =>
+            {
+                (operation.clone(), written.clone())
+            }
+            _ => {
+                let started = (Arc::new(CloseOnce::default()), Arc::new(AtomicU64::new(0)));
+                *active = Some(started.clone());
+                started
+            }
+        };
+        let this = self.clone();
+        operation.start(self.ctx.handle(), async move {
+            let _guard = this.control.lock().await;
+            let result = if this.close.started() {
+                Err(AgentError::Closed(this.id().into()))
+            } else {
+                guarded("timeline.stop", async {
+                    this.stop_inner(reason, InterruptScope::Turn, Some(&written))
+                        .await
+                })
+                .await
+            };
+            // Stop is an operation: its errors go to the caller. Only a defect
+            // in the stop itself (a caught panic) faults the branch; a write
+            // refused while the branch unloads or closes does not.
+            if let Err(error @ AgentError::Fault { .. }) = &result
+                && !this.close.started()
+            {
+                this.dispatcher.fail(error.clone());
+            }
+            result
+        })
+    }
+    pub(crate) fn interrupt(&self, reason: String) -> Result<u64> {
+        if self.close.started() {
+            return Err(AgentError::Closed(self.id().into()));
+        }
+        self.commit_interrupt(reason, InterruptScope::Turn, None)
+    }
+    fn commit_interrupt(
+        &self,
+        reason: String,
+        scope: InterruptScope,
+        written: Option<&AtomicU64>,
+    ) -> Result<u64> {
+        if let Some(error) = self.dispatcher.failure() {
+            return Err(error);
+        }
+        // The sequence is recorded under the commit lock, before the
+        // interrupt can be dispatched, so a later stop never sees it unset
+        // once a turn after it has started.
+        let interrupt = self.timeline.append_registered(
+            EventKind::StopInterrupt(StopInterruptData { reason, scope }).into(),
+            |event| {
+                if let Some(written) = written {
+                    written.store(event.sequence, Ordering::Release);
+                }
+                Ok(())
+            },
+        )?;
+        Ok(interrupt.sequence)
+    }
+    async fn stop_inner(
+        &self,
+        reason: String,
+        scope: InterruptScope,
+        written: Option<&AtomicU64>,
+    ) -> Result<u64> {
+        let interrupt = self.commit_interrupt(reason, scope, written)?;
+        // Capabilities release their resources before writing cancellation
+        // terminals, and Loop closes the turn after those terminals. Once Loop
+        // has dispatched the interrupt and no longer stops a turn, the stopped
+        // turn has settled; input written afterwards may already run a new one.
+        let mut dispatch = self.dispatcher.watch();
+        let mut phase = self.loop_watch().await?;
+        let mut settled_through = None;
+        loop {
+            if let Some(error) = self.dispatcher.failure() {
+                return Err(error);
+            }
+            let dispatched = self.dispatcher.sequence();
+            if settled_through.is_none()
+                && dispatched >= interrupt
+                && phase.borrow().phase != LoopPhase::Stopping
+            {
+                // Loop can settle from committed events during reload, before
+                // their publication or dispatch. Capture that fence once,
+                // without chasing later turns.
+                settled_through = Some(self.timeline.committed());
+            }
+            if settled_through.is_some_and(|through| dispatched >= through) {
+                return Ok(dispatched);
+            }
+            tokio::select! {
+                _ = dispatch.changed() => {},
+                changed = phase.changed() => if changed.is_err() {
+                    phase = self.loop_watch().await?;
+                },
+            }
+        }
+    }
+    /// Loop's state channel. A reloading Loop is a restart of Loop: its
+    /// successor takes over from the committed history, the interrupt
+    /// included, so this waits for it. Closed once the branch closes and
+    /// Loop is gone for good.
+    async fn loop_watch(&self) -> Result<watch::Receiver<LoopSnapshot>> {
+        loop {
+            match self.loop_state() {
+                Ok(state) => return Ok(state.watch()),
+                Err(_) if self.close.started() => return Err(AgentError::Closed(self.id().into())),
+                Err(AgentError::Reloading(_)) => {}
+                Err(error) => return Err(error),
+            }
+            if let Some(error) = self.dispatcher.failure() {
+                return Err(error);
+            }
+            // rutis offers no signal for a service being provided again.
+            tokio::time::sleep(LOOP_RETURN_POLL).await;
+        }
+    }
+    /// Holds the commit lock and returns it when Loop is idle, nothing is
+    /// pending and dispatch has reached the tail; `None` otherwise, without
+    /// freezing or rejecting appends. Detached work is judged by the host.
+    pub(crate) fn lock_idle(&self) -> Option<TailLock<'_>> {
+        if self.is_closing() || self.dispatcher.failure().is_some() {
+            return None;
+        }
+        let tail = self.timeline.lock_tail()?;
+        let idle = self.dispatcher.sequence() == tail.sequence()
+            && self
+                .loop_state()
+                .is_ok_and(|state| state.state().phase == LoopPhase::Idle);
+        idle.then_some(tail)
+    }
+    /// Releases the instance after an idle check: no stop is recorded.
+    pub fn unload(self: &Arc<Self>) -> BoxFuture<'static, Result<()>> {
+        self.finish(true)
+    }
+    /// Ends the branch: interrupts it, settles, then unloads its subtree.
+    pub fn close(self: &Arc<Self>) -> BoxFuture<'static, Result<()>> {
+        self.finish(false)
+    }
+    fn finish(self: &Arc<Self>, unloading: bool) -> BoxFuture<'static, Result<()>> {
+        let this = self.clone();
+        self.lifecycle.advance(BranchPhase::Closing);
+        self.close.start(self.ctx.handle(), async move {
+            let _guard = this.control.lock().await;
+            // Diagnostics only observe the close: without them the branch
+            // still settles, stops its tasks and closes its Timeline.
+            let diagnostics = this.scope.service::<Diagnostics>(&this.ctx).ok();
+            let span = diagnostics
+                .as_ref()
+                .map(|diagnostics| diagnostics.span("timeline.close", None, None, None));
+
+            let mut errors = vec![];
+            let stopped = if unloading {
+                Ok(this.timeline.sequence())
+            } else {
+                // An idle release may have frozen appends at its check and then
+                // lost the race to this close: the close settles the branch
+                // itself, so it reopens appends for its interrupt and terminals.
+                this.timeline.thaw();
+                guarded("timeline.stop", async {
+                    this.stop_inner("timeline closed".into(), InterruptScope::Branch, None)
+                        .await
+                })
+                .await
+            };
+            // A Loop reloading when the close started never returns to this
+            // branch: the interrupt is committed and nothing is left to wait
+            // for. Its unfinished turn settles as a reload does.
+            let stopped = match stopped {
+                Err(AgentError::Closed(_)) if this.loop_state().is_err() => Ok(0),
+                stopped => stopped,
+            };
+            errors.extend(stopped.err());
+            // Business settlement has drained dispatchable work. Stop the driver
+            // before unloading subscribers, but keep storage open for finalizers.
+            this.stop.cancel();
+            let tasks = this.tasks.lock().unwrap().take();
+            if let Some((driver, monitor)) = tasks {
+                if let Err(error) = driver.await {
+                    errors.push(AgentError::fault("timeline driver", error.to_string()));
+                }
+                if let Err(error) = monitor.await {
+                    errors.push(AgentError::fault("timeline monitor", error.to_string()));
+                }
+            }
+            // An idle release froze appends at its check; with dispatch
+            // stopped, reopen them so finalizers can commit terminal facts.
+            if unloading {
+                this.timeline.thaw();
+            }
+            if let Err(error) = crate::assembly::shutdown_scope(&this.view, &this.children).await {
+                errors.push(error);
+            }
+            // Cleanup can enqueue terminal facts even after a handler failure.
+            // Closing now waits for every accepted write; storage faults still
+            // reject appends and propagate through this result.
+            errors.extend(this.timeline.close().await.err());
+            this.lifecycle.advance(BranchPhase::Closed);
+            this.changed.send_replace(());
+            if let Some(diagnostics) = &diagnostics {
+                crate::assembly::announce(
+                    diagnostics,
+                    &this.view,
+                    &this.children,
+                    ComponentPhase::Released,
+                );
+            }
+            if let Some(span) = &span {
+                span.record(
+                    "outcome",
+                    if errors.is_empty() {
+                        "returned"
+                    } else {
+                        "failure"
+                    },
+                );
+            }
+            AgentError::aggregate(errors)
+        })
+    }
+}
