@@ -12,7 +12,7 @@ use dim_agent_capabilities::{
     model_provider::ModelProviderPlugin,
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
-    workspace_tools::WorkspaceToolsConfig,
+    workspace_tools::{FileWriteCoordinatorPlugin, WorkspaceToolsConfig},
 };
 use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
@@ -63,6 +63,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
     )?;
     (&process.plugin(capability_plugin(SkillsCatalogPlugin::new()))).await?;
+    (&process.plugin(capability_plugin(FileWriteCoordinatorPlugin::default()))).await?;
 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_model_hosts(&mut builder);

@@ -404,6 +404,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "tokio::pin",
         "tokio::select",
         "unreachable",
         "vec"
@@ -697,6 +698,19 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::files",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/files.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json",
+        "unreachable"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::workspace_tools::files::read",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools::files",
@@ -728,7 +742,8 @@
         "cfg",
         "format",
         "json",
-        "matches"
+        "matches",
+        "vec"
       ]
     },
     {
@@ -759,6 +774,7 @@
         "format",
         "json",
         "matches",
+        "tokio::pin",
         "tokio::select",
         "tracing::error",
         "vec"
@@ -896,6 +912,7 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/timeline_context.rs",
       "unexpandedMacros": [
+        "tokio::pin",
         "tokio::select",
         "vec"
       ]
@@ -3306,6 +3323,13 @@
     },
     {
       "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::shell_session",
+      "references": [
+        "path crate::shell_session::ShellSessionPlugin::session"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::shell_tools",
       "references": [
         "path crate::shell_tools::install"
@@ -4352,6 +4376,7 @@
       "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path BranchLifecycle",
         "path TimelineIdentity"
       ]
     },
@@ -4426,6 +4451,13 @@
         "path StateCell",
         "path StateCell::new",
         "path state"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt",
+      "to": "dim_agent_runtime::timeline_context",
+      "references": [
+        "path BranchOpening"
       ]
     },
     {
@@ -4800,6 +4832,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "use crate::host::HostError"
       ]
@@ -4845,6 +4878,8 @@
         "path Capability",
         "path InBranch",
         "path KeysOf",
+        "path dim_agent_runtime::InBranch",
+        "path dim_agent_runtime::InSession",
         "path scoped",
         "use dim_agent_runtime::BranchGate",
         "use dim_agent_runtime::Capability",
@@ -4857,7 +4892,10 @@
       "from": "dim_agent_capabilities::shell_session",
       "to": "dim_agent_runtime::config",
       "references": [
-        "path dim_agent_runtime::BranchLifecycle"
+        "path dim_agent_runtime::BranchLifecycle",
+        "path dim_agent_runtime::CollaborationRole::Member",
+        "path dim_agent_runtime::SessionConfig",
+        "path dim_agent_runtime::TimelineIdentity"
       ]
     },
     {
@@ -5601,6 +5639,9 @@
       "from": "dim_agent_capabilities::tool_binding",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::Closed",
+        "path AgentError::fault",
+        "path crate::host::panic_message",
         "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
       ]
@@ -5611,6 +5652,14 @@
       "references": [
         "path BranchScope",
         "use dim_agent_runtime::BranchScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_binding",
+      "to": "dim_agent_runtime::timeline_context",
+      "references": [
+        "path BranchOpening",
+        "use dim_agent_runtime::BranchOpening"
       ]
     },
     {
@@ -6162,8 +6211,10 @@
         "path FileTools",
         "path FileTools::definitions",
         "path FileTools::handles",
-        "path FileTools::new",
-        "use files::FileTools"
+        "path FileTools::with_coordinator",
+        "path FileWriteCoordinator",
+        "use files::FileTools",
+        "use files::FileWriteCoordinator"
       ]
     },
     {
@@ -6505,6 +6556,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::files",
+      "to": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "references": [
+        "mod mutation_tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files",
       "to": "dim_agent_capabilities::workspace_tools::files::read",
       "references": [
         "mod read",
@@ -6642,6 +6700,7 @@
         "path resolve_path",
         "path revision",
         "path succeeded",
+        "path super::CommitHook",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
@@ -6691,6 +6750,39 @@
       "references": [
         "path ToolResult",
         "use dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads",
+      "references": [
+        "path FileReads",
+        "path FileReads::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path FileTools",
+        "path FileTools::new",
+        "path FileTools::with_coordinator",
+        "path FileWriteCoordinator"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolResult"
       ]
     },
     {
@@ -6840,6 +6932,16 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::files::write",
+      "to": "dim_agent_capabilities::file_storage::windows",
+      "references": [
+        "path crate::file_storage::windows::create_temp",
+        "path crate::file_storage::windows::open_root",
+        "path crate::file_storage::windows::replace",
+        "path crate::file_storage::windows::workspace_security_revision"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::write",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -6880,6 +6982,7 @@
         "path resolve_path",
         "path revision",
         "path succeeded",
+        "path super::CommitHook",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
@@ -7338,6 +7441,8 @@
       "from": "dim_agent_runtime::assembly",
       "to": "dim_agent_runtime::timeline_context",
       "references": [
+        "path BranchOpening",
+        "path BranchOpening::new",
         "path TimelineContext",
         "path TimelineContext::start"
       ]
@@ -8405,6 +8510,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities::workspace_tools",
+      "references": [
+        "path dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_runtime::agent",
       "references": [
         "path Agent",
@@ -8829,6 +8941,14 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelSelectionHost",
+        "use dim_agent_capabilities::host::ModelSelectionHost"
       ]
     },
     {
@@ -9283,6 +9403,13 @@
     },
     {
       "from": "dim_app_server::collaboration",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration",
       "to": "dim_agent_types::profile",
       "references": [
         "path AgentProfile",
@@ -9587,9 +9714,10 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::outbound",
       "references": [
+        "path Frame",
         "path Sender",
         "path Sender::new",
-        "path crate::outbound::Frame",
+        "use crate::outbound::Frame",
         "use crate::outbound::Sender"
       ]
     },
@@ -11651,6 +11779,14 @@
       "references": [
         "path ServerControl",
         "use crate::control::ServerControl"
+      ]
+    },
+    {
+      "from": "dim_app_server::transport",
+      "to": "dim_app_server::outbound",
+      "references": [
+        "path MAX_FRAME_BYTES",
+        "use crate::outbound::MAX_FRAME_BYTES"
       ]
     },
     {

@@ -39,6 +39,7 @@ flowchart LR
   p12 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p22
   p12 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p22
   p12 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p22
+  p12 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p22
   p20 -->|"dim_agent_capabilities::permission::Permission@main"| p21
   p12 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p21
   p12 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p21
@@ -61,11 +62,13 @@ flowchart LR
   p15 -->|"dim_agent_capabilities::context_preparation::ConfigurationPublisher@main"| p16
   p6 -->|"dim_agent_capabilities::host::PromptHost@session"| p16
   p6 -->|"dim_agent_capabilities::prompt::InitialPromptConfiguration@session"| p16
+  p12 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p16
   p12 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p16
   p12 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p16
   p12 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p16
   p12 -->|"dim_agent_runtime::diagnostics::Diagnostics@main"| p16
   p6 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p16
+  p12 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p16
   p6 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p15
   p6 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p15
   p6 -->|"dim_agent_capabilities::host::PrepareContextHost@session"| p15
