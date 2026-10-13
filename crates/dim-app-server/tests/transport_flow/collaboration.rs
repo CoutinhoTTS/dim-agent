@@ -129,6 +129,84 @@ async fn launch_team() -> (RunningServer, Agent) {
     launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await
 }
 
+struct CaptureMemberConfig {
+    scope: dim_agent_runtime::SessionScope,
+    configs: Arc<std::sync::Mutex<Vec<Arc<dim_agent_runtime::SessionConfig>>>>,
+}
+impl TypedPlugin for CaptureMemberConfig {
+    type Deps = InSession<dim_agent_runtime::SessionConfig>;
+    fn name(&self) -> &str {
+        "capture-member-config"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        InSession(config): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            self.configs.lock().unwrap().push(config);
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for CaptureMemberConfig {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn product_collaboration_adopts_profile_and_default_capabilities() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let home = std::env::temp_dir().join(format!("dim-team-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let configs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = configs.clone();
+        let (server, agent) = launch_with(Arc::new(MockTools), ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        }, move |builder| {
+            builder.session_plugin(move |scope| CaptureMemberConfig { scope: *scope, configs: observed.clone() });
+        }).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let capabilities = dim_agent_types::ModelCapabilities {
+            context_window: 32000,
+            max_output_tokens: 128,
+            ..Default::default()
+        };
+        let models = ["alpha", "beta"].map(|id| json!({"modelId":id,"displayName":id,"status":"active",
+            "capabilities":capabilities}));
+        assert_ok(&client.rpc("provider.save", json!({"provider":{
+            "providerId":"team-fixture","displayName":"Team fixture","driverKind":"openai-compatible",
+            "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"models":models,"enabled":true
+        }})).await);
+        assert_ok(&client.rpc("provider.select", json!({"providerId":"team-fixture","modelId":"alpha"})).await);
+        let lead = leader(&mut client, allowed()).await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        for (step, (model, expected)) in [(Some("beta"), "beta"), (None, "alpha")].into_iter().enumerate() {
+            let mut profile = json!({"name":"worker","description":"fixture","systemPrompt":"work","tools":["agent"]});
+            if let Some(model) = model {
+                profile["model"] = json!({"providerId":"team-fixture","modelId":model});
+            }
+            say(&mut client, &lead, tool(json!({"action":"request","profile":profile,"prompt":"hello"})), "queue").await;
+            returned(&mut client, &lead, &lead_session, step + 1).await;
+            let result = last_ok(&events(&lead_session).await);
+            assert!(result["sessionId"].is_string());
+            let config = configs.lock().unwrap().last().unwrap().clone();
+            assert_eq!(config.collaboration_role, CollaborationRole::Member);
+            let selected = &config.model;
+            assert_eq!(selected.model_id, expected);
+            let snapshot = selected.capability_snapshot.as_ref().expect("product member must adopt capabilities");
+            assert_eq!(snapshot.target.model_id, expected);
+            assert_eq!(snapshot.capabilities.context_window, 32000);
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }).await.unwrap();
+}
+
 struct LargeReportModel;
 impl dim_agent_capabilities::host::ModelDriver for LargeReportModel {
     fn invoke(

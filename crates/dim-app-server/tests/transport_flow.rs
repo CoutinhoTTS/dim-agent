@@ -1172,7 +1172,9 @@ impl dim_agent_capabilities::host::ModelDriver for LargeModel {
                 Ok(ModelChunk::MessageStart {
                     message_id: "large".into(),
                 }),
-                Ok(ModelChunk::Text("L".repeat(34 * 1024 * 1024))),
+                // Large but within the CLI's 16 MiB frame contract, including
+                // the enclosing event JSON. Oversized frames fail closed.
+                Ok(ModelChunk::Text("L".repeat(8 * 1024 * 1024))),
                 Ok(ModelChunk::MessageStop {
                     message_id: "large".into(),
                     reason: ModelStopReason::EndTurn,
@@ -1238,7 +1240,7 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
         };
         assert_eq!(
             text["data"]["delta"].as_str().unwrap().len(),
-            34 * 1024 * 1024
+            8 * 1024 * 1024
         );
     }
     drop(remote);

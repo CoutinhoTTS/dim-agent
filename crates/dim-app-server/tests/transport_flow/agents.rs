@@ -683,3 +683,68 @@ async fn agent_profile_supplies_session_defaults() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn product_session_model_priority_is_request_then_profile_then_default() {
+    let home = std::env::temp_dir().join(format!("dim-profile-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let capabilities = dim_agent_types::ModelCapabilities::default();
+    let models = ["alpha", "beta"].map(
+        |id| json!({"modelId":id,"displayName":id,"status":"active","capabilities":capabilities}),
+    );
+    assert_ok(&client.rpc("provider.save", json!({"provider":{
+        "providerId":"profile-fixture","displayName":"Fixture","driverKind":"openai-compatible",
+        "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"models":models,"enabled":true
+    }})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":"profile-fixture","modelId":"alpha"}),
+            )
+            .await,
+    );
+    let profiled = client
+        .rpc(
+            "agent.create",
+            json!({"profile":{
+                "name":"profiled","description":"fixture","systemPrompt":"work","tools":[],
+                "model":{"providerId":"profile-fixture","modelId":"beta"}
+            }}),
+        )
+        .await;
+    assert_ok(&profiled);
+    for (agent, explicit, expected) in [
+        (
+            Some(profiled["result"]["agentId"].clone()),
+            Some("alpha"),
+            "alpha",
+        ),
+        (None, None, "alpha"),
+        (Some(profiled["result"]["agentId"].clone()), None, "beta"),
+    ] {
+        let mut params = json!({"cwd":home});
+        if let Some(agent) = agent {
+            params["agentId"] = agent;
+        }
+        if let Some(model) = explicit {
+            params["model"] = json!({"provider":"profile-fixture","modelId":model});
+        }
+        let created = client.rpc("session.create", params).await;
+        assert_ok(&created);
+        assert_eq!(created["result"]["model"]["modelId"], expected);
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

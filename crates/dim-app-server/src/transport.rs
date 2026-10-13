@@ -2,6 +2,7 @@ use crate::{
     ServerConfig, ServerError,
     connection::{Connection, ConnectionHub},
     control::ServerControl,
+    outbound::MAX_FRAME_BYTES,
     protocol::*,
     storage::SqliteStorage,
 };
@@ -501,8 +502,8 @@ async fn upgrade(
     if hub.control.shutdown().is_cancelled() {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    ws.max_message_size(usize::MAX)
-        .max_frame_size(usize::MAX)
+    ws.max_message_size(MAX_FRAME_BYTES)
+        .max_frame_size(MAX_FRAME_BYTES)
         .on_upgrade(move |socket| async move {
             let tracker = hub.tasks.clone();
             let task = tracker.spawn(async move {
@@ -513,7 +514,7 @@ async fn upgrade(
 }
 enum Reader {
     #[cfg(any(unix, windows))]
-    Local(BufReader<ReadHalf<LocalStream>>),
+    Local(BufReader<ReadHalf<LocalStream>>, Vec<u8>),
     Ws(SplitStream<WebSocket>),
 }
 enum Writer {
@@ -525,8 +526,9 @@ impl Reader {
     async fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
         match self {
             #[cfg(any(unix, windows))]
-            Self::Local(reader) => {
-                let mut bytes = Vec::new();
+            Self::Local(reader, bytes) => {
+                // The partial frame lives in Reader, so cancelling next() does
+                // not discard already-consumed bytes.
                 loop {
                     let part = reader.fill_buf().await?;
                     if part.is_empty() {
@@ -537,15 +539,23 @@ impl Reader {
                         };
                     }
                     let newline = part.iter().position(|byte| *byte == b'\n');
-                    let n = newline.map_or(part.len(), |index| index + 1);
+                    let n = newline.unwrap_or(part.len());
+                    if bytes.len() + n > MAX_FRAME_BYTES + 1 {
+                        return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
+                    }
                     bytes.extend_from_slice(&part[..n]);
-                    reader.consume(n);
+                    reader.consume(n + usize::from(newline.is_some()));
                     if newline.is_some() {
-                        bytes.pop();
                         if bytes.last() == Some(&b'\r') {
                             bytes.pop();
                         }
-                        return Ok(Some(bytes));
+                        if bytes.len() > MAX_FRAME_BYTES {
+                            return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
+                        }
+                        return Ok(Some(std::mem::take(bytes)));
+                    }
+                    if bytes.len() > MAX_FRAME_BYTES && bytes.last() != Some(&b'\r') {
+                        return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
                     }
                 }
             }
@@ -586,7 +596,7 @@ async fn run_local(hub: Arc<ConnectionHub>, stream: LocalStream) {
     let (read, write) = tokio::io::split(stream);
     run_connection(
         hub,
-        Reader::Local(BufReader::new(read)),
+        Reader::Local(BufReader::new(read), Vec::new()),
         Writer::Local(write),
         true,
     )

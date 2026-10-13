@@ -182,6 +182,30 @@ impl Collaboration {
         config.cwd = leader.config().cwd.clone();
         config.permission_policy = leader.config().permission_policy.clone();
         config.collaboration_role = CollaborationRole::Member;
+        if let Some(selection) = &self.index.model_selection {
+            config.model = match selection
+                .0
+                .resolve(
+                    host.profile.model.clone(),
+                    Some(config.cwd.clone().into()),
+                    self.stop.clone(),
+                )
+                .await
+            {
+                Ok(model) => model,
+                Err(error) => {
+                    if owned {
+                        let _ = self.index.close(&host.agent_id).await;
+                        self.directory
+                            .temporary
+                            .lock()
+                            .unwrap()
+                            .remove(&host.agent_id);
+                    }
+                    return Err(member_create_failed(error.to_string()));
+                }
+            };
+        }
         if !config.tools.iter().any(|tool| tool == AGENT_TOOL) {
             config.tools.push(AGENT_TOOL.into());
         }

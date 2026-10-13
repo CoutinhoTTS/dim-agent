@@ -76,21 +76,21 @@ pub struct CredentialLease {
     release: Arc<LeaseRelease>,
 }
 struct LeaseRelease {
-    owner: Arc<ManagedProviders>,
-    generation: uuid::Uuid,
+    binding: Binding,
     provider_id: String,
     lease_id: String,
 }
 impl Drop for LeaseRelease {
     fn drop(&mut self) {
-        let owner = self.owner.clone();
-        let generation = self.generation;
+        let dispatch = self.binding.dispatch.clone();
         let args = json!({"providerId":self.provider_id,"leaseId":self.lease_id});
-        let tasks = owner.tasks.clone();
-        tasks.spawn(async move {
-            let _ = owner
-                .call_generation::<Value>("release", args, generation, &CancellationToken::new())
-                .await;
+        self.binding.tasks.spawn(async move {
+            if let Ok(RpcValue::Reference(reference)) =
+                dispatch.invoke("release", json!([args]).into())
+                && reference.is_future()
+            {
+                let _ = reference.wait_async().await;
+            }
         });
     }
 }
@@ -184,7 +184,6 @@ pub struct ManagedProviders {
     binding: Mutex<Option<Binding>>,
     providers: Mutex<Vec<ProviderDescriptor>>,
     stop: CancellationToken,
-    tasks: TaskTracker,
 }
 impl ManagedProviders {
     fn binding(&self) -> Result<Binding, ManagedProviderError> {
@@ -197,7 +196,19 @@ impl ManagedProviders {
         generation: uuid::Uuid,
         cancel: &CancellationToken,
     ) -> Result<T, ManagedProviderError> {
-        let task = {
+        self.call_adopt(method, args, generation, cancel, |value, _| Ok(value))
+            .await
+    }
+    async fn call_adopt<T: DeserializeOwned + Send + 'static, R: Send + 'static>(
+        self: &Arc<Self>,
+        method: &'static str,
+        args: Value,
+        generation: uuid::Uuid,
+        cancel: &CancellationToken,
+        adopt: impl FnOnce(T, Binding) -> Result<R, ManagedProviderError> + Send + 'static,
+    ) -> Result<R, ManagedProviderError> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        {
             let slot = self.binding.lock().unwrap();
             let binding = slot.as_ref().ok_or_else(unavailable)?;
             if binding.generation != generation
@@ -208,37 +219,62 @@ impl ManagedProviders {
                 return Err(unavailable());
             }
             let dispatch = binding.dispatch.clone();
+            let accepted = binding.clone();
+            let owner = self.clone();
             binding.tasks.spawn(async move {
-                let args = if args.is_null() {
-                    json!([])
-                } else {
-                    json!([args])
-                };
-                let result = dispatch
-                    .invoke(method, args.into())
-                    .map_err(|_| unavailable())?;
-                let result = match result {
-                    RpcValue::Reference(reference) if reference.is_future() => {
-                        reference.wait_async().await.map_err(|_| unavailable())?
-                    }
-                    value => value,
-                };
-                let result = result.json().map_err(|_| invalid())?;
-                // A boolean tag is decoded at this sole cross-language boundary.
-                if result.get("ok") == Some(&Value::Bool(true)) {
-                    serde_json::from_value(result.get("value").cloned().ok_or_else(invalid)?)
-                        .map_err(|_| invalid())
-                } else if result.get("ok") == Some(&Value::Bool(false)) {
-                    Err(plugin_error(
-                        serde_json::from_value(result.get("error").cloned().ok_or_else(invalid)?)
+                let result = async move {
+                    let args = if args.is_null() {
+                        json!([])
+                    } else {
+                        json!([args])
+                    };
+                    let result = dispatch
+                        .invoke(method, args.into())
+                        .map_err(|_| unavailable())?;
+                    let result = match result {
+                        RpcValue::Reference(reference) if reference.is_future() => {
+                            reference.wait_async().await.map_err(|_| unavailable())?
+                        }
+                        value => value,
+                    };
+                    let result = result.json().map_err(|_| invalid())?;
+                    // A boolean tag is decoded at this sole cross-language boundary.
+                    if result.get("ok") == Some(&Value::Bool(true)) {
+                        let value = serde_json::from_value(
+                            result.get("value").cloned().ok_or_else(invalid)?,
+                        )
+                        .map_err(|_| invalid())?;
+                        adopt(value, accepted)
+                    } else if result.get("ok") == Some(&Value::Bool(false)) {
+                        Err(plugin_error(
+                            serde_json::from_value(
+                                result.get("error").cloned().ok_or_else(invalid)?,
+                            )
                             .map_err(|_| invalid())?,
-                    ))
-                } else {
-                    Err(invalid())
+                        ))
+                    } else {
+                        Err(invalid())
+                    }
                 }
-            })
-        };
-        let result = task.await.map_err(|_| unavailable())?;
+                .await;
+                let slot = owner.binding.lock().unwrap();
+                let result = if slot
+                    .as_ref()
+                    .is_some_and(|binding| binding.generation == generation)
+                {
+                    result
+                } else {
+                    // Reload revoked the handoff. Drop any adopted lease while
+                    // its original generation is still draining this task.
+                    drop(result);
+                    Err(unavailable())
+                };
+                // A dropped waiter returns ownership here, before this tracked
+                // task ends; its release joins the same generation's drain.
+                let _ = send.send(result);
+            });
+        }
+        let result = receive.await.map_err(|_| unavailable())?;
         if self.binding()?.generation != generation {
             return Err(unavailable());
         }
@@ -327,22 +363,35 @@ impl ManagedProviders {
         cancel: &CancellationToken,
     ) -> Result<CredentialLease, ManagedProviderError> {
         let binding = self.binding()?;
-        let lease = self
-            .call_generation(
-                "credential",
-                json!({"providerId":id,"modelId":model}),
-                binding.generation,
-                cancel,
-            )
-            .await?;
-        self.lease(id, binding.generation, lease)
+        let id = id.to_owned();
+        self.call_adopt(
+            "credential",
+            json!({"providerId":id,"modelId":model}),
+            binding.generation,
+            cancel,
+            move |lease, binding| Self::lease(&id, binding, lease),
+        )
+        .await
     }
     fn lease(
-        self: &Arc<Self>,
         id: &str,
-        generation: uuid::Uuid,
-        lease: WireLease,
+        binding: Binding,
+        value: Value,
     ) -> Result<CredentialLease, ManagedProviderError> {
+        // Adopt before validation so every issued lease has an owner, even
+        // when validation fails or the awaiting caller disappears.
+        let lease_id = value
+            .get("leaseId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(invalid)?
+            .to_owned();
+        let release = Arc::new(LeaseRelease {
+            binding,
+            provider_id: id.into(),
+            lease_id,
+        });
+        let lease: WireLease = serde_json::from_value(value).map_err(|_| invalid())?;
         validate_account(&lease.account)?;
         let url = url::Url::parse(&lease.base_url).map_err(|_| invalid())?;
         if lease.lease_id.is_empty()
@@ -367,12 +416,7 @@ impl ManagedProviders {
             base_url: lease.base_url,
             headers: lease.headers,
             bearer: lease.bearer,
-            release: Arc::new(LeaseRelease {
-                owner: self.clone(),
-                generation,
-                provider_id: id.into(),
-                lease_id: lease.lease_id,
-            }),
+            release,
         })
     }
     pub async fn recover(
@@ -381,22 +425,25 @@ impl ManagedProviders {
         cancel: &CancellationToken,
     ) -> Result<CredentialLease, ManagedProviderError> {
         let release = &lease.release;
-        let next = self
-            .call_generation(
-                "recoverRejected",
-                json!({"providerId":release.provider_id,"leaseId":release.lease_id}),
-                release.generation,
-                cancel,
-            )
-            .await?;
-        let next = self.lease(&release.provider_id, release.generation, next)?;
-        if next.account != lease.account {
-            return Err(ManagedProviderError {
-                code: "account_changed",
-                message: "Managed account changed during recovery",
-            });
-        }
-        Ok(next)
+        let id = release.provider_id.clone();
+        let account = lease.account.clone();
+        self.call_adopt(
+            "recoverRejected",
+            json!({"providerId":release.provider_id,"leaseId":release.lease_id}),
+            release.binding.generation,
+            cancel,
+            move |wire, binding| {
+                let next = Self::lease(&id, binding, wire)?;
+                if next.account != account {
+                    return Err(ManagedProviderError {
+                        code: "account_changed",
+                        message: "Managed account changed during recovery",
+                    });
+                }
+                Ok(next)
+            },
+        )
+        .await
     }
     pub async fn finish_rejected(
         self: &Arc<Self>,
@@ -408,7 +455,7 @@ impl ManagedProviders {
             .call_generation(
                 "finishRejected",
                 json!({"providerId":release.provider_id,"leaseId":release.lease_id}),
-                release.generation,
+                release.binding.generation,
                 cancel,
             )
             .await?;
@@ -446,17 +493,12 @@ impl TypedPlugin for ManagedProvidersPlugin {
                 binding: Mutex::new(None),
                 providers: Mutex::new(vec![]),
                 stop: CancellationToken::new(),
-                tasks: TaskTracker::new(),
             });
             let owner = service.clone();
             ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.stop.cancel();
-                        owner.tasks.close();
-                        owner.tasks.wait().await;
-                        Ok(())
-                    })
+                Effect::Disposer(Box::new(move || {
+                    owner.stop.cancel();
+                    Ok(())
                 }))
             })?;
             ctx.provide_as(rutis::TypeKey::of::<ManagedProviders>(), service)?;

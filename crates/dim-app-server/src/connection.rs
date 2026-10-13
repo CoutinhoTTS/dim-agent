@@ -1,5 +1,9 @@
 use crate::{
-    ServerConfig, agents::AgentIndex, control::ServerControl, outbound::Sender, protocol::*,
+    ServerConfig,
+    agents::AgentIndex,
+    control::ServerControl,
+    outbound::{Frame, Sender},
+    protocol::*,
 };
 use dim_agent_capabilities::{
     permission::{Permission, PermissionState, PermissionUpdateError},
@@ -22,6 +26,9 @@ use std::{
 };
 use subscription::Attachment;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+const MAX_REQUESTS: usize = 64;
+const CONTROL_RESERVE: usize = 8;
 
 pub(crate) struct Connection {
     pub id: String,
@@ -54,10 +61,7 @@ impl Connection {
     pub fn new(
         hub: Arc<ConnectionHub>,
         local: bool,
-    ) -> (
-        Arc<Self>,
-        tokio::sync::mpsc::UnboundedReceiver<crate::outbound::Frame>,
-    ) {
+    ) -> (Arc<Self>, tokio::sync::mpsc::Receiver<Frame>) {
         let closed = hub.closing.child_token();
         let (sender, receiver) = Sender::new(closed.clone());
         let connection = Arc::new(Self {
@@ -130,14 +134,28 @@ impl Connection {
         }
     }
     fn admit(self: &Arc<Self>, request: &Request) -> Result<Inflight, RpcError> {
-        if !self
-            .ids
-            .lock()
-            .expect("request identities")
-            .insert(request.id.clone())
-        {
+        let mut ids = self.ids.lock().expect("request identities");
+        if ids.contains(&request.id) {
             return Err(RpcError::invalid("Request id is already in flight"));
         }
+        let control = matches!(
+            request.call,
+            Call::Stop(_)
+                | Call::Close(_)
+                | Call::AgentClose(_)
+                | Call::ExecStop(_)
+                | Call::Detach(_)
+                | Call::ApprovalRespond(_)
+                | Call::Shutdown(_)
+        );
+        if ids.len() >= MAX_REQUESTS + if control { CONTROL_RESERVE } else { 0 } {
+            return Err(RpcError::app(
+                -32000,
+                "connection_busy",
+                "Connection request limit reached",
+            ));
+        }
+        ids.insert(request.id.clone());
         Ok(Inflight {
             connection: self.clone(),
             id: request.id.clone(),
@@ -871,18 +889,22 @@ impl Connection {
             }
             config.model = provider
                 .configuration(
-                    params.model.as_ref().and_then(|model| {
-                        model
-                            .model_id
-                            .as_ref()
-                            .map(|model_id| dim_agent_types::ModelId {
-                                provider_id: model
-                                    .provider
-                                    .clone()
-                                    .expect("explicit provider was validated"),
-                                model_id: model_id.clone(),
-                            })
-                    }),
+                    params
+                        .model
+                        .as_ref()
+                        .and_then(|model| {
+                            model
+                                .model_id
+                                .as_ref()
+                                .map(|model_id| dim_agent_types::ModelId {
+                                    provider_id: model
+                                        .provider
+                                        .clone()
+                                        .expect("explicit provider was validated"),
+                                    model_id: model_id.clone(),
+                                })
+                        })
+                        .or_else(|| host.profile.model.clone()),
                     Some(&cwd),
                     params.model_preferences,
                     &rpc.unloading,

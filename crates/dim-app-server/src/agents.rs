@@ -6,6 +6,7 @@ use crate::{
     storage::{SessionStore, SqliteStorage},
     trace::Traces,
 };
+use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, Capability, KeysOf, NoConfig, Session,
     SessionConfig, TimelineKey, When, capability_plugin,
@@ -216,6 +217,9 @@ pub struct AgentIndex {
     pub(crate) session_restored: EventKey<SessionRestored>,
     builder: AgentBuilder,
     session_defaults: SessionConfig,
+    // Gated product dependency: a soft optional read can miss Provider during
+    // startup. Member creation uses the same host as product selection.
+    pub(crate) model_selection: Option<Arc<ModelSelectionHost>>,
     /// Tools the process assembly provides: host tools and contributions.
     tools: BTreeSet<String>,
     /// Loading context of `AgentsPlugin`.
@@ -239,6 +243,7 @@ impl AgentIndex {
         records: Option<Arc<AgentRecords>>,
         session_store: Option<Arc<SessionStore>>,
         settings: Option<Arc<SettingsService>>,
+        model_selection: Option<Arc<ModelSelectionHost>>,
         process: rutis::InstanceId,
     ) -> Self {
         Self {
@@ -253,6 +258,7 @@ impl AgentIndex {
             records,
             session_store,
             settings,
+            model_selection,
             stopping: CancellationToken::new(),
         }
     }
@@ -1025,6 +1031,7 @@ impl TypedPlugin for AgentsPlugin {
     type Deps = (
         When<(Arc<SessionStore>, Arc<SqliteStorage>)>,
         When<Arc<SettingsService>>,
+        When<Arc<ModelSelectionHost>>,
         Arc<Loader>,
         Arc<AgentDirectory>,
     );
@@ -1034,7 +1041,7 @@ impl TypedPlugin for AgentsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (When(stored), When(settings), loader, directory): Self::Deps,
+        (When(stored), When(settings), When(model_selection), loader, directory): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let mut builder = self.builder.clone();
@@ -1066,6 +1073,7 @@ impl TypedPlugin for AgentsPlugin {
                 records,
                 session_store,
                 settings,
+                model_selection,
                 self.root.instance(),
             );
             if index.ctx.set(ctx.clone()).is_err() {
@@ -1097,6 +1105,7 @@ impl Capability for AgentsPlugin {
         (
             self.config.database_path.is_some().then_some(((), ())),
             (self.config.product_home.is_some() && self.config.session_execution).then_some(()),
+            self.config.product_home.is_some().then_some(()),
             (),
             (),
         )

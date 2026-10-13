@@ -205,6 +205,7 @@ async fn model(
             json!({"type":"response.content_part.added","item_id":"m","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
             json!({"type":"response.output_text.delta","item_id":"m","output_index":0,"content_index":0,"delta":"ok"}),
             json!({"type":"response.output_text.done","item_id":"m","output_index":0,"content_index":0,"text":"ok"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"id":"m","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}}),
             json!({"type":"response.completed","response":{"id":"r","model":body["model"],"created_at":1,"status":"completed","usage":{"input_tokens":7,"output_tokens":2,"total_tokens":9}}}),
         ]
     } else {
