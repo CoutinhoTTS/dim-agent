@@ -1,6 +1,6 @@
 # Release packaging
 
-All GitHub workflow templates are stored as `.yml.disabled`. They are not registered workflows and cannot run. Current development commits and merge requests stay on the internal GitLab repositories; GitHub synchronization and workflow activation require an explicit separate instruction.
+All GitHub workflow templates are stored as `.yml.disabled`. They are not registered workflows and cannot run. Workflow activation and publication require an explicit separate instruction.
 
 The public source uses MIT. An account-enabled distribution can contain a separately supplied private runtime plugin; `NOTICE` excludes that artifact from the public source license. This project does not select or publish a license for that private plugin.
 
@@ -62,4 +62,4 @@ Publication validates every package before the first registry write. A retry com
 
 ## Public source export
 
-Internal extraction plans and review records are not part of the public source bundle. `scripts/export-public-source.sh OUTPUT.tar.gz` exports a whitelist of tracked public source and documentation from HEAD, without `.git`, old monorepo history, `docs/plan`, private plugins, caches or staging directories. This creates a local archive only and does not push to any remote. Verify the export before any later GitHub synchronization.
+`scripts/export-public-source.sh OUTPUT.tar.gz` exports a whitelist of tracked public source and documentation from HEAD, without `.git`, repository history, private plugins, caches or staging directories. This creates a local archive only and does not push to any remote. Start a public repository from this verified source archive so internal development history is not imported.
