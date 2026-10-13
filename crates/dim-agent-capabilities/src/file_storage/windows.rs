@@ -173,7 +173,7 @@ fn directories(parent: &File) -> io::Result<(File, File)> {
 pub(super) fn temporary_directory(parent: &File) -> io::Result<File> {
     Ok(directories(parent)?.1)
 }
-pub(super) fn open_root(path: &Path) -> Result<File> {
+pub(crate) fn open_root(path: &Path) -> Result<File> {
     if !path.is_absolute() {
         return Err(FileStorageError::InvalidPath(
             "authorized roots must be absolute",
@@ -431,6 +431,42 @@ struct SecurityDescriptor {
     pointer: PSECURITY_DESCRIPTOR,
     derived: bool,
 }
+/// Snapshot the native DACL (including protection flags), without a storage
+/// authorization/service dependency. Used to detect concurrent security changes.
+pub(crate) fn workspace_security_revision(file: &File) -> io::Result<Vec<u8>> {
+    // Native replacement does not merge alternate streams. Until stream copy
+    // is supported, fail explicitly instead of silently dropping user data.
+    let mut streams = vec![0usize; 8192];
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStreamInfo,
+            streams.as_mut_ptr().cast(),
+            (streams.len() * size_of::<usize>()) as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let stream = unsafe { &*streams.as_ptr().cast::<FILE_STREAM_INFO>() };
+    let default_name: Vec<u16> = "::$DATA".encode_utf16().collect();
+    let default_stream = stream.StreamNameLength as usize == default_name.len() * 2
+        && unsafe { std::slice::from_raw_parts(stream.StreamName.as_ptr(), default_name.len()) }
+            == default_name;
+    if stream.NextEntryOffset != 0 || (stream.StreamNameLength != 0 && !default_stream) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic workspace replacement cannot preserve alternate data streams",
+        ));
+    }
+    let security = SecurityDescriptor::read(file)?;
+    let length =
+        unsafe { windows_sys::Win32::Security::GetSecurityDescriptorLength(security.pointer) };
+    Ok(
+        unsafe { std::slice::from_raw_parts(security.pointer.cast::<u8>(), length as usize) }
+            .to_vec(),
+    )
+}
 impl Drop for SecurityDescriptor {
     fn drop(&mut self) {
         unsafe {
@@ -521,7 +557,7 @@ impl SecurityDescriptor {
         Ok(())
     }
 }
-pub(super) fn create_temp(
+pub(crate) fn create_temp(
     parent: &File,
     name: &OsString,
     business_parent: &File,
@@ -580,7 +616,7 @@ pub(super) fn sync_replacement(file: &File, _: &File, _: &File) -> io::Result<()
     // Windows cannot provide the Unix directory-fsync durability contract.
     file.sync_all()
 }
-pub(super) fn replace(
+pub(crate) fn replace(
     file: &File,
     _: &File,
     _: &OsString,

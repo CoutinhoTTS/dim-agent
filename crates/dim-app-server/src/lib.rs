@@ -344,6 +344,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let files =
         dim_agent_capabilities::file_storage::FileStoragePlugin::new(config.file_roots.clone());
     rows.push(register_capability(&mut builtins, move || files.clone()));
+    let file_writes =
+        dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default();
+    rows.push(register_capability(&mut builtins, move || {
+        file_writes.clone()
+    }));
     if config.model_catalog.is_some() || product_root.is_some() {
         rows.push(register_capability(&mut builtins, || {
             dim_agent_aimux::AimuxPlugin

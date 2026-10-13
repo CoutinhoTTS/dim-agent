@@ -22,13 +22,37 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use file_reads::{FileReads, FileReadsPlugin};
-use files::FileTools;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use files::{FileTools, FileWriteCoordinator};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use std::{path::PathBuf, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Host tools this capability provides.
 pub const TOOL_NAMES: [&str; 6] = ["read", "write", "edit", "glob", "grep", "exec"];
+
+/// Process-owned coordinator. Clone the plugin across loader generations so
+/// in-flight mutations and newly loaded Sessions retain the same lock domain.
+#[derive(Clone, Default)]
+pub struct FileWriteCoordinatorPlugin(Arc<FileWriteCoordinator>);
+impl TypedPlugin for FileWriteCoordinatorPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "FileWriteCoordinator"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as(TypeKey::of::<FileWriteCoordinator>(), self.0.clone())?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for FileWriteCoordinatorPlugin {
+    fn keys(&self) -> KeysOf<Self> {}
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceToolsConfig {
@@ -142,6 +166,7 @@ impl WorkspaceToolsPlugin {
 impl TypedPlugin for WorkspaceToolsPlugin {
     type Deps = (
         Arc<HostPlatform>,
+        Arc<FileWriteCoordinator>,
         InSession<SessionConfig>,
         InSession<SessionIdentity>,
         InSession<TreeCommands>,
@@ -152,14 +177,19 @@ impl TypedPlugin for WorkspaceToolsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, InSession(config), InSession(identity), InSession(tree)): Self::Deps,
+        (platform, coordinator, InSession(config), InSession(identity), InSession(tree)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             // `session.create` validated and canonicalized the cwd.
             let cwd = PathBuf::from(&config.cwd);
             let output_dir = self.config.output_root.join(&identity.session_id);
             let tools = Arc::new(WorkspaceTools {
-                files: FileTools::new(cwd.clone(), platform.home.clone(), output_dir.clone()),
+                files: FileTools::with_coordinator(
+                    cwd.clone(),
+                    platform.home.clone(),
+                    output_dir.clone(),
+                    coordinator,
+                ),
                 output_dir,
                 member: config.collaboration_role == CollaborationRole::Member,
                 cwd,

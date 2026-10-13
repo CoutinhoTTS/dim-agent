@@ -258,9 +258,12 @@ impl Harness {
         let (cwd, output_root) = (scratch("cwd"), scratch("output"));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
         let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let file_writes = root.plugin(capability_plugin(
+            workspace_tools::FileWriteCoordinatorPlugin::default(),
+        ));
         wait_active(
             &root,
-            &[view],
+            &[view, file_writes],
             Duration::from_secs(5),
             &CancellationToken::new(),
         )

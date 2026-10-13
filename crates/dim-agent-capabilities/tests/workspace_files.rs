@@ -84,6 +84,91 @@ fn text(result: &ToolResult) -> &str {
         other => panic!("unexpected content {other:?}"),
     }
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn atomic_mutations_preserve_native_metadata() {
+    use std::{os::unix::fs::MetadataExt, process::Command};
+    for tool in ["write", "edit"] {
+        let workspace = Workspace::new();
+        workspace.put("file", b"before\n");
+        let path = workspace.path("file");
+        assert!(
+            Command::new("xattr")
+                .args(["-w", "com.dim.regression", "private"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(path.join("..namedfork/rsrc"), b"resource fork").unwrap();
+        let user =
+            String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+        assert!(
+            Command::new("chmod")
+                .arg("+a")
+                .arg(format!(
+                    "{} allow read,write,readattr,writeattr,readextattr,writeextattr,readsecurity",
+                    user.trim()
+                ))
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let acl = Command::new("ls")
+            .arg("-le")
+            .arg(&path)
+            .output()
+            .unwrap()
+            .stdout;
+        let acl = String::from_utf8(acl)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let before = fs::metadata(&path).unwrap();
+        let reads = FileReads::default();
+        workspace.read(&reads, "file").await;
+        let result = workspace.call(&reads, tool, json!({"path": "file", "content": "after\n", "oldText": "before", "newText": "after"})).await;
+        assert_eq!(result.is_error, None, "{}", text(&result));
+        assert_eq!(workspace.bytes("file"), b"after\n");
+        assert_eq!(
+            fs::read(path.join("..namedfork/rsrc")).unwrap(),
+            b"resource fork"
+        );
+        assert_eq!(
+            Command::new("xattr")
+                .args(["-p", "com.dim.regression"])
+                .arg(&path)
+                .output()
+                .unwrap()
+                .stdout,
+            b"private\n"
+        );
+        let after_acl = Command::new("ls")
+            .arg("-le")
+            .arg(&path)
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(
+            String::from_utf8(after_acl)
+                .unwrap()
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            acl
+        );
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+    }
+}
 fn structured(result: &ToolResult) -> &serde_json::Map<String, Value> {
     result.structured_content.as_ref().unwrap()
 }
@@ -97,6 +182,93 @@ fn ok(result: &ToolResult) -> &str {
 }
 fn utf16le(text: &str) -> Vec<u8> {
     text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn coordinated_sessions_reject_stale_mutations() {
+    use dim_agent_capabilities::workspace_tools::files::FileWriteCoordinator;
+    use std::sync::Arc;
+    let mut workspace = Workspace::new();
+    let coordinator = Arc::new(FileWriteCoordinator::default());
+    workspace.tools = FileTools::with_coordinator(
+        workspace.root.clone(),
+        workspace.root.clone(),
+        workspace.root.join("outputs"),
+        coordinator.clone(),
+    );
+    let other = FileTools::with_coordinator(
+        workspace.root.clone(),
+        workspace.root.clone(),
+        workspace.root.join("outputs"),
+        coordinator,
+    );
+    workspace.put("shared", b"before\r\n");
+    let (a, b) = (FileReads::default(), FileReads::default());
+    workspace.read(&a, "shared").await;
+    let call = |name: &str, input: Value| ToolCall {
+        id: "other".into(),
+        name: name.into(),
+        input: input.as_object().unwrap().clone(),
+    };
+    other
+        .execute(
+            &call("read", json!({"path": "shared"})),
+            &b,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let second_call = call("write", json!({"path": "shared", "content": "two\n"}));
+    let (first, second) = tokio::join!(
+        workspace.call(&a, "write", json!({"path": "shared", "content": "one\n"})),
+        other.execute(&second_call, &b, CancellationToken::new())
+    );
+    let second = second.unwrap();
+    assert_ne!(first.is_error, second.is_error);
+    let rejected = if first.is_error == Some(true) {
+        &first
+    } else {
+        &second
+    };
+    assert_eq!(code(rejected), "file_modified_since_read");
+    assert!(matches!(
+        workspace.bytes("shared").as_slice(),
+        b"one\r\n" | b"two\r\n"
+    ));
+    assert_eq!(fs::read_dir(&workspace.root).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replacement_preserves_permissions_and_open_original() {
+    use std::{io::Read, os::unix::fs::PermissionsExt};
+    let workspace = Workspace::new();
+    workspace.put("private", b"before\r\n");
+    fs::set_permissions(workspace.path("private"), fs::Permissions::from_mode(0o600)).unwrap();
+    let mut original = fs::File::open(workspace.path("private")).unwrap();
+    let reads = FileReads::default();
+    workspace.read(&reads, "private").await;
+    ok(&workspace
+        .call(
+            &reads,
+            "write",
+            json!({"path": "private", "content": "after\n"}),
+        )
+        .await);
+    let mut old = Vec::new();
+    original.read_to_end(&mut old).unwrap();
+    assert_eq!(old, b"before\r\n");
+    assert_eq!(workspace.bytes("private"), b"after\r\n");
+    assert_eq!(
+        fs::metadata(workspace.path("private"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(fs::read_dir(&workspace.root).unwrap().count(), 1);
 }
 
 #[test]

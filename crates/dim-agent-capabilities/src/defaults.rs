@@ -112,9 +112,9 @@ pub fn install_minimal_execution(
 }
 
 /// Product profile of the local execution and context capabilities. The
-/// composition root also registers the process plugins `HostPlatformPlugin`
-/// and `SkillsCatalogPlugin` and the product `SkillSettingsHost`; a new
-/// Session adopts `SessionConfig.model` with its prompt sources.
+/// composition root also registers the process plugins `HostPlatformPlugin`,
+/// `FileWriteCoordinatorPlugin`, and `SkillsCatalogPlugin`, plus the product
+/// `SkillSettingsHost`. A new Session adopts `SessionConfig.model` with its prompt sources.
 pub fn install_local_execution(
     builder: &mut AgentBuilder,
     model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,

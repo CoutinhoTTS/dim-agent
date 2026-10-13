@@ -30,23 +30,39 @@ const TOOL_NAMES: [&str; 5] = ["read", "write", "edit", "glob", "grep"];
 const CANCELLED: &str = "Tool execution cancelled.";
 
 /// Session-level executor of the file tools. Bindings belong to the calling
-/// branch and are passed per call; write locks guard the physical file and
-/// therefore live here.
+/// branch and are passed per call. Product Sessions share a process-owned
+/// coordinator; standalone callers may use an isolated coordinator.
 pub struct FileTools {
     cwd: PathBuf,
     home: PathBuf,
     /// Session output directory; large `read` results are written here.
     output_dir: PathBuf,
-    locks: PathLocks,
+    locks: Arc<FileWriteCoordinator>,
+    #[cfg(test)]
+    before_commit: Option<CommitHook>,
 }
+
+#[cfg(test)]
+type CommitHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 impl FileTools {
     pub fn new(cwd: PathBuf, home: PathBuf, output_dir: PathBuf) -> Self {
+        Self::with_coordinator(cwd, home, output_dir, Arc::default())
+    }
+
+    pub fn with_coordinator(
+        cwd: PathBuf,
+        home: PathBuf,
+        output_dir: PathBuf,
+        locks: Arc<FileWriteCoordinator>,
+    ) -> Self {
         Self {
             cwd,
             home,
             output_dir,
-            locks: PathLocks::default(),
+            locks,
+            #[cfg(test)]
+            before_commit: None,
         }
     }
 
@@ -287,22 +303,22 @@ fn not_regular(display: &str) -> ToolResult {
 
 /// Per-path FIFO mutation locks shared by `write` and `edit` (TS `locks.ts`).
 #[derive(Default)]
-struct PathLocks {
+pub struct FileWriteCoordinator {
     entries: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
-struct PathLock<'a> {
-    locks: &'a PathLocks,
+struct PathLock {
+    locks: Arc<FileWriteCoordinator>,
     path: PathBuf,
     entry: Option<Arc<tokio::sync::Mutex<()>>>,
     guard: Option<OwnedMutexGuard<()>>,
 }
-impl PathLocks {
+impl FileWriteCoordinator {
     /// Waits in FIFO order; a cancelled waiter returns at once.
     async fn lock(
-        &self,
+        self: &Arc<Self>,
         path: &Path,
         cancel: &CancellationToken,
-    ) -> Result<PathLock<'_>, HostError> {
+    ) -> Result<PathLock, HostError> {
         let entry = self
             .entries
             .lock()
@@ -310,16 +326,17 @@ impl PathLocks {
             .entry(path.to_owned())
             .or_default()
             .clone();
-        let guard = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => None,
-            guard = entry.clone().lock_owned() => Some(guard),
-        };
-        let lock = PathLock {
-            locks: self,
+        let mut lock = PathLock {
+            locks: self.clone(),
             path: path.to_owned(),
             entry: Some(entry),
-            guard,
+            guard: None,
+        };
+        let acquire = lock.entry.as_ref().unwrap().clone().lock_owned();
+        lock.guard = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            guard = acquire => Some(guard),
         };
         if lock.guard.is_none() {
             return Err(cancelled());
@@ -327,7 +344,7 @@ impl PathLocks {
         Ok(lock)
     }
 }
-impl Drop for PathLock<'_> {
+impl Drop for PathLock {
     fn drop(&mut self) {
         let mut entries = self.locks.entries.lock().unwrap();
         self.guard.take();
@@ -338,5 +355,241 @@ impl Drop for PathLock<'_> {
         {
             entries.remove(&self.path);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod mutation_tests {
+    use super::*;
+
+    async fn call(
+        tools: &FileTools,
+        reads: &FileReads,
+        name: &str,
+        input: Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, HostError> {
+        tools
+            .execute(
+                &ToolCall {
+                    id: "mutation".into(),
+                    name: name.into(),
+                    input: input.as_object().unwrap().clone(),
+                },
+                reads,
+                cancel,
+            )
+            .await
+    }
+
+    // The instance-owned hook runs after a complete sibling is synced, before
+    // commit verification. No sleeps, production hooks, or global test locks.
+    #[tokio::test]
+    async fn staged_mutations_fail_closed() {
+        for name in ["write", "edit"] {
+            for scenario in [
+                "external",
+                "replacement",
+                "cancel",
+                "absent",
+                "commit_failure",
+                "permissions",
+                "temp_swap",
+                #[cfg(target_os = "macos")]
+                "metadata",
+            ] {
+                if name == "edit" && scenario == "absent" {
+                    continue;
+                }
+                let root = std::env::temp_dir().join(format!("dim-stage-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir(&root).unwrap();
+                let root = root.canonicalize().unwrap();
+                let target = root.join("file");
+                let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+                let reads = FileReads::default();
+                if scenario != "absent" {
+                    std::fs::write(&target, b"before\r\n").unwrap();
+                    call(
+                        &tools,
+                        &reads,
+                        "read",
+                        json!({"path": "file"}),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                }
+                let cancel = CancellationToken::new();
+                let cancellation = cancel.clone();
+                tools.before_commit = Some(Arc::new(move |path| match scenario {
+                    "external" | "absent" => std::fs::write(path, b"external").unwrap(),
+                    "replacement" => {
+                        let replacement = path.with_file_name("replacement");
+                        std::fs::write(&replacement, b"before\r\n").unwrap();
+                        std::fs::rename(replacement, path).unwrap();
+                    }
+                    "cancel" => cancellation.cancel(),
+                    "permissions" => {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))
+                            .unwrap();
+                    }
+                    #[cfg(target_os = "macos")]
+                    "metadata" => {
+                        assert!(
+                            std::process::Command::new("xattr")
+                                .args(["-w", "com.dim.concurrent", "changed"])
+                                .arg(path)
+                                .status()
+                                .unwrap()
+                                .success()
+                        );
+                    }
+                    "temp_swap" => {
+                        for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+                            let entry = entry.unwrap();
+                            if entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with(".dim-write-")
+                            {
+                                std::fs::remove_file(entry.path()).unwrap();
+                                std::fs::write(entry.path(), b"foreign").unwrap();
+                            }
+                        }
+                    }
+                    "commit_failure" => {
+                        for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+                            let entry = entry.unwrap();
+                            if entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with(".dim-write-")
+                            {
+                                std::fs::remove_file(entry.path()).unwrap();
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }));
+                let input = if name == "write" {
+                    json!({"path": "file", "content": "after\n"})
+                } else {
+                    json!({"path": "file", "oldText": "before", "newText": "after"})
+                };
+                let result = call(&tools, &reads, name, input, cancel).await;
+                if scenario == "cancel" {
+                    assert!(matches!(result, Err(HostError::Cancelled(_))));
+                } else {
+                    let result = result.unwrap();
+                    assert_eq!(result.is_error, Some(true));
+                    assert_eq!(
+                        result.structured_content.unwrap()["code"],
+                        if scenario == "absent" {
+                            "text_binding_required"
+                        } else if matches!(scenario, "commit_failure" | "temp_swap") {
+                            "write_error"
+                        } else {
+                            "file_modified_since_read"
+                        }
+                    );
+                }
+                assert_eq!(
+                    std::fs::read(&target).unwrap(),
+                    if matches!(scenario, "external" | "absent") {
+                        b"external".as_slice()
+                    } else {
+                        b"before\r\n".as_slice()
+                    }
+                );
+                assert_eq!(
+                    std::fs::read_dir(&root).unwrap().count(),
+                    if scenario == "temp_swap" { 2 } else { 1 },
+                    "temporary artifact in {scenario}"
+                );
+                if scenario == "temp_swap" {
+                    let foreign = std::fs::read_dir(&root)
+                        .unwrap()
+                        .map(Result::unwrap)
+                        .find(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with(".dim-write-")
+                        })
+                        .unwrap();
+                    assert_eq!(std::fs::read(foreign.path()).unwrap(), b"foreign");
+                }
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn coordinated_sessions_wait_through_preparation() {
+        let root = std::env::temp_dir().join(format!("dim-coordinate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("file"), b"before").unwrap();
+        let coordinator: Arc<FileWriteCoordinator> = Arc::default();
+        let mut first = FileTools::with_coordinator(
+            root.clone(),
+            root.clone(),
+            root.join("out"),
+            coordinator.clone(),
+        );
+        let second =
+            FileTools::with_coordinator(root.clone(), root.clone(), root.join("out"), coordinator);
+        let (a, b) = (FileReads::default(), FileReads::default());
+        for (tools, reads) in [(&first, &a), (&second, &b)] {
+            call(
+                tools,
+                reads,
+                "read",
+                json!({"path": "file"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let release = barrier.clone();
+        let (ready, prepared) = tokio::sync::oneshot::channel();
+        let ready = Mutex::new(Some(ready));
+        first.before_commit = Some(Arc::new(move |_| {
+            ready.lock().unwrap().take().unwrap().send(()).unwrap();
+            release.wait();
+        }));
+        let first = tokio::spawn(async move {
+            call(
+                &first,
+                &a,
+                "write",
+                json!({"path": "file", "content": "one"}),
+                CancellationToken::new(),
+            )
+            .await
+        });
+        prepared.await.unwrap();
+        let second_result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            call(
+                &second,
+                &b,
+                "write",
+                json!({"path": "file", "content": "two"}),
+                CancellationToken::new(),
+            ),
+        )
+        .await;
+        barrier.wait();
+        let first_result = first.await.unwrap().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            second_result.is_err(),
+            "another Session entered during preparation"
+        );
+        assert_eq!(first_result.is_error, None);
     }
 }

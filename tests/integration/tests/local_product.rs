@@ -50,6 +50,11 @@ async fn product(dirs: &Dirs) -> Product {
     (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
         .await
         .unwrap();
+    (&root.plugin(capability_plugin(
+        dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default(),
+    )))
+        .await
+        .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder

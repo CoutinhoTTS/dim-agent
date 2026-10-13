@@ -110,9 +110,21 @@ pub(super) async fn run(
     let _lock = tools.locks.lock(&path, &cancel).await?;
     let established = reads.get(&path);
     let target = path.clone();
-    let (result, binding) = blocking(move || edit_locked(&target, &input, established, &cancel))
-        .await?
-        .map_err(|Cancelled| cancelled())?;
+    #[cfg(test)]
+    let hook = tools.before_commit.clone();
+    let (_lock, written) = blocking(move || {
+        let written = edit_locked(
+            &target,
+            &input,
+            established,
+            &cancel,
+            #[cfg(test)]
+            hook,
+        );
+        (_lock, written)
+    })
+    .await?;
+    let (result, binding) = written.map_err(|Cancelled| cancelled())?;
     if let Some(binding) = binding {
         reads.set(path, binding);
     }
@@ -124,6 +136,7 @@ fn edit_locked(
     input: &Input,
     established: Option<TextFileBinding>,
     cancel: &CancellationToken,
+    #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
     let done = |result| Ok((result, None));
     let display = &input.path;
@@ -224,8 +237,16 @@ fn edit_locked(
         Err(error) => return done(error.into_result()),
     };
     Cancelled::check(cancel)?;
-    // Writing has begun: cancellation is no longer observed.
-    if let Err(result) = write_target(path, &written, display) {
+    if let Err(result) = write_target(
+        path,
+        &written,
+        display,
+        Some(limited.get_ref()),
+        &binding.raw_revision,
+        cancel,
+        #[cfg(test)]
+        hook,
+    )? {
         return done(result);
     }
     let raw_revision = revision(&written);
