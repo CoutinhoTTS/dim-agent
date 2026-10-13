@@ -50,7 +50,7 @@ depends-on: []
 
 公共与私有实现、默认禁用的 CI/发布模板、本机打包和独立验收已完成，具体证据与未执行项见 [验收记录](../reviews/rust-cli-extraction-001.md)。
 
-- 公共 MR：https://gitlab.bfbops.com/nextim/dimrust-cli/-/merge_requests/1
+- 公共 MR：https://gitlab.bfbops.com/nextim/dimrust-cli/-/merge_requests/2
 - 私有 MR：https://gitlab.bfbops.com/nextim/dim-oauth-plugin/-/merge_requests/1
 - 固定源工作区干净；业务修改仅在两个新仓库。
 - GitHub同步、workflow启用与真实发布均未执行。其余四个平台原生验收在启用相应runner后完成，不宣称已通过。
