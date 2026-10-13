@@ -1,6 +1,7 @@
 # Documentation
 
 - [Architecture and ownership](architecture/README.md)
+- [Architecture decisions and implementation status](adr/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
