@@ -1,5 +1,84 @@
 use super::*;
 
+pub(super) struct NamedExtension(pub String, pub Arc<AtomicUsize>);
+impl TypedPlugin for NamedExtension {
+    type Deps = ();
+    fn name(&self) -> &str {
+        &self.0
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        (): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for NamedExtension {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+#[tokio::test]
+async fn scoped_plugin_names_cannot_replace_process_modules() {
+    let names = [
+        "FileStorage",
+        "Rpc",
+        "FileStorage#2",
+        "SessionScope",
+        "AgentScope",
+    ];
+    let counts: Vec<_> = names
+        .iter()
+        .map(|_| Arc::new(AtomicUsize::new(0)))
+        .collect();
+    let (server, agent) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        for (name, count) in names.into_iter().zip(&counts) {
+            let session = count.clone();
+            builder.session_plugin(move |_| NamedExtension(name.into(), session.clone()));
+            let branch = count.clone();
+            builder.timeline_plugin(move |_| NamedExtension(name.into(), branch.clone()));
+        }
+    })
+    .await;
+    let mut client = Client::new(&server, true).await;
+    for _ in 0..2 {
+        let created = client.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        assert!(
+            agent
+                .get_session(created["result"]["sessionId"].as_str().unwrap())
+                .is_some()
+        );
+    }
+    // Both scope levels must still load each extension, not just avoid a crash.
+    for (name, count) in names.into_iter().zip(counts) {
+        assert_eq!(count.load(Ordering::SeqCst), 4, "{name}");
+    }
+    server.restart("Rpc").await.unwrap();
+    let listed = client.rpc("session.list", json!({})).await;
+    assert_ok(&listed);
+    assert_eq!(listed["result"].as_array().unwrap().len(), 2);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // Group IDs are public instance selectors, unlike plugin display names.
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.session_extension("Rpc", "extension", |_, _: &()| {
+        NamedExtension("extension".into(), Arc::new(AtomicUsize::new(0)))
+    });
+    let error = serve(builder, ServerConfig::default())
+        .await
+        .err()
+        .expect("a group must not shadow a process row");
+    assert!(
+        error.to_string().contains("reserved extension group: Rpc"),
+        "{error}"
+    );
+}
+
 async fn app_error(client: &mut Client, method: &str) -> Value {
     client.rpc(method, json!({})).await["error"]["data"]["appError"].clone()
 }

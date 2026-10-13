@@ -4,7 +4,7 @@ use rutis::{
     BoxFuture as RutisFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin,
     PluginFactory, PluginId, TypeKey, TypedPlugin,
 };
-use rutis_loader::{Build, Builtins, CreateInstance, InstanceResult, Loader};
+use rutis_loader::{Build, Builtins, CreateInstance, InstanceResult, Loader, Resolver};
 use serde_json::{Value, json};
 use std::time::Duration;
 use std::{
@@ -242,10 +242,19 @@ impl AgentBuilder {
     ///
     /// A fiber is shown under its module name, so each module is named after
     /// its plugin: a plugin is built once with `ctx`'s instance to read it.
-    /// A name used twice gets a `#n` suffix.
+    /// Register host modules first: names already in `builtins` or used by
+    /// another row get a `#n` suffix. Extension group names cannot be renamed.
+    /// Pass host identities absent from `builtins` in `reserved_names`: both
+    /// module names resolved by another runtime and row IDs that differ from
+    /// their module names.
     /// Construction and metadata panics are returned as build errors.
-    pub fn install(&self, builtins: &mut Builtins, ctx: &Ctx) -> Result<Value> {
-        catch_unwind(AssertUnwindSafe(|| {
+    pub async fn install<'a>(
+        &self,
+        builtins: &mut Builtins,
+        ctx: &Ctx,
+        reserved_names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Value> {
+        AssertUnwindSafe(async {
             let assembly = &self.assembly;
             let names = Arc::new((
                 assembly.tools.clone(),
@@ -269,14 +278,17 @@ impl AgentBuilder {
                 ]
                 .map(str::to_owned),
             ));
+            modules
+                .0
+                .extend(reserved_names.into_iter().map(str::to_owned));
             for (name, _) in &assembly.extensions {
-                if !modules.0.insert(name.clone()) {
+                if !modules.0.insert(name.clone()) || builtins.resolve(name).await.is_ok() {
                     return Err(AgentError::Build(format!(
                         "reserved extension group: {name}"
                     )));
                 }
             }
-            let session_scope_module = modules.name("SessionScope");
+            let session_scope_module = modules.name("SessionScope", builtins).await;
             builtins.register_with::<NoConfig, _, _>(session_scope_module.clone(), |build| {
                 let owner = build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
                     CordisError::PluginFailed("Session created without its assembly".into())
@@ -287,7 +299,7 @@ impl AgentBuilder {
                 *owner.instance.lock().unwrap() = Some(scope.instance);
                 Factory::new(move || typed(SessionScopePlugin((*owner).clone(), scope)))
             });
-            let branch_scope_module = modules.name("BranchScope");
+            let branch_scope_module = modules.name("BranchScope", builtins).await;
             builtins.register_with::<NoConfig, _, _>(branch_scope_module.clone(), |build| {
                 let owner = build.value::<Arc<BranchAssembly>>().ok_or_else(|| {
                     CordisError::PluginFailed("branch created without its assembly".into())
@@ -298,7 +310,7 @@ impl AgentBuilder {
             });
             let mut session = vec![row(&session_scope_module)];
             if !assembly.extensions.is_empty() {
-                let module = modules.name("SessionExtension");
+                let module = modules.name("SessionExtension", builtins).await;
                 session.push(row(&module));
                 builtins.register_with::<NoConfig, _, _>(module, |build| {
                     let owner = build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
@@ -329,7 +341,7 @@ impl AgentBuilder {
                         },
                     )
                 };
-                let module = modules.name(build_with(&sample).name());
+                let module = modules.name(build_with(&sample).name(), builtins).await;
                 session.push(row(&module));
                 let build_with = Arc::new(build_with);
                 builtins.register_with::<NoConfig, _, _>(module, move |build| {
@@ -339,7 +351,7 @@ impl AgentBuilder {
             }
             let mut branch = vec![row(&branch_scope_module)];
             for make in &assembly.timeline {
-                let module = modules.name(make(&sample_branch).name());
+                let module = modules.name(make(&sample_branch).name(), builtins).await;
                 branch.push(row(&module));
                 let make = make.clone();
                 builtins.register_with::<NoConfig, _, _>(module, move |build| {
@@ -351,7 +363,7 @@ impl AgentBuilder {
             for (name, makes) in &assembly.extensions {
                 let mut rows = vec![];
                 for (plugin, make) in makes {
-                    let module = modules.name(plugin);
+                    let module = modules.name(plugin, builtins).await;
                     rows.push(row(&module));
                     let (make, plugin) = (make.clone(), plugin.clone());
                     builtins.register_with::<NoConfig, _, _>(module, move |build| {
@@ -370,7 +382,9 @@ impl AgentBuilder {
                 session.push(group(name, rows));
             }
             Ok(group(SESSION_GROUP, session))
-        }))
+        })
+        .catch_unwind()
+        .await
         .unwrap_or_else(|_| Err(AgentError::Build("plugin registration panicked".into())))
     }
     /// Sessions own a private rutis root that the Agent shuts down on close.
@@ -458,13 +472,13 @@ impl PluginFactory<NoConfig> for Factory {
         }
     }
 }
-/// Module names in use; a repeated plugin name gets a `#n` suffix.
+/// Reserved identities outside Builtins, which owns registered module names.
 struct Modules(HashSet<String>);
 impl Modules {
-    fn name(&mut self, plugin: &str) -> String {
+    async fn name(&self, plugin: &str, builtins: &Builtins) -> String {
         let mut name = plugin.to_owned();
         let mut suffix = 2;
-        while !self.0.insert(name.clone()) {
+        while self.0.contains(&name) || builtins.resolve(&name).await.is_ok() {
             name = format!("{plugin}#{suffix}");
             suffix += 1;
         }
@@ -540,7 +554,13 @@ pub(crate) async fn own_placement(
         ),
     };
     let mut builtins = Builtins::new();
-    let session_row = match builder.install(&mut builtins, &parent) {
+    builtins.register_with::<NoConfig, _, _>("AgentAnchor", |build| {
+        let slot = build
+            .value::<AnchorSlot>()
+            .ok_or_else(|| CordisError::PluginFailed("Agent created without its slot".into()))?;
+        Factory::new(move || typed(AgentAnchor((*slot).clone())))
+    });
+    let session_row = match builder.install(&mut builtins, &parent, []).await {
         Ok(row) => row,
         Err(error) => {
             if let Some(root) = root {
@@ -549,12 +569,6 @@ pub(crate) async fn own_placement(
             return Err(error);
         }
     };
-    builtins.register_with::<NoConfig, _, _>("AgentAnchor", |build| {
-        let slot = build
-            .value::<AnchorSlot>()
-            .ok_or_else(|| CordisError::PluginFailed("Agent created without its slot".into()))?;
-        Factory::new(move || typed(AgentAnchor((*slot).clone())))
-    });
     let plugin = rutis_loader::LoaderPlugin::new(builtins, rutis_loader::LoaderOptions::default());
     let loader = plugin.handle();
     let view = parent.plugin(plugin);

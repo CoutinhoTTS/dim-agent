@@ -463,20 +463,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ));
         }
     }
-    // Agents, their Sessions and branches are instances of the same loader,
-    // with the assembly as the builder ends up.
-    let session_row = match builder.install(&mut builtins, &root) {
-        Ok(row) => row,
-        Err(error) => {
-            startup.armed = false;
-            handle.shutdown().cancel();
-            return Err(match root.shutdown().await {
-                Ok(()) => error,
-                Err(cleanup) => error.with_cleanup(cleanup.into()),
-            }
-            .into());
-        }
-    };
     agents::register(&mut builtins);
     rows.push(register_capability(&mut builtins, || {
         agents::AgentDirectoryPlugin
@@ -485,7 +471,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         collaboration::CollaborationDirectoryPlugin
     }));
     {
-        let (config, root) = (config.clone(), root.clone());
+        let (builder, config, root) = (builder.clone(), config.clone(), root.clone());
         rows.push(register_capability(&mut builtins, move || {
             AgentsPlugin::new(builder.clone(), config.clone(), root.clone())
         }));
@@ -509,6 +495,24 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             TransportPlugin::new(config.clone())
         }));
     }
+    // Register every host module before allocating scoped module names.
+    // Agents, Sessions and branches are instances of this same loader.
+    let reserved_names = private_row
+        .iter()
+        .flat_map(|row| [&row["id"], &row["name"]])
+        .filter_map(serde_json::Value::as_str);
+    let session_row = match builder.install(&mut builtins, &root, reserved_names).await {
+        Ok(row) => row,
+        Err(error) => {
+            startup.armed = false;
+            handle.shutdown().cancel();
+            return Err(match root.shutdown().await {
+                Ok(()) => error,
+                Err(cleanup) => error.with_cleanup(cleanup.into()),
+            }
+            .into());
+        }
+    };
     let mut rows: Vec<_> = rows
         .iter()
         .map(|name| serde_json::json!({ "id": name, "name": name }))

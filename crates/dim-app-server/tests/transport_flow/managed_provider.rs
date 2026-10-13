@@ -83,34 +83,43 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
-    let server = serve(
-        builder,
-        ServerConfig {
-            unix_path: Some(home.join("daemon.sock")),
-            product_home: Some(home.clone()),
-            target_home: Some(home.join("rust")),
-            managed_plugin: Some(ManagedPluginConfig {
-                plugin_dir,
-                node,
-                js_runtime,
-            }),
-            session_defaults: dim_agent_runtime::SessionConfig {
-                tools: [
-                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-                ]
-                .map(String::from)
-                .to_vec(),
-                permission_policy: dim_agent_types::PermissionPolicy {
-                    preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
-                    ..Default::default()
-                },
+    // Neither the JS row ID nor its module path is registered in Builtins.
+    let names = [
+        "ManagedProviderPlugin".to_owned(),
+        plugin_dir.join("index.mjs").to_str().unwrap().to_owned(),
+    ];
+    let counts: Vec<_> = names
+        .iter()
+        .map(|_| Arc::new(AtomicUsize::new(0)))
+        .collect();
+    for (name, count) in names.iter().zip(&counts) {
+        let (name, count) = (name.clone(), count.clone());
+        builder.session_plugin(move |_| reload::NamedExtension(name.clone(), count.clone()));
+    }
+    let config = ServerConfig {
+        unix_path: Some(home.join("daemon.sock")),
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("rust")),
+        managed_plugin: Some(ManagedPluginConfig {
+            plugin_dir,
+            node,
+            js_runtime,
+        }),
+        session_defaults: dim_agent_runtime::SessionConfig {
+            tools: [
+                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+            ]
+            .map(String::from)
+            .to_vec(),
+            permission_policy: dim_agent_types::PermissionPolicy {
+                preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
             },
             ..Default::default()
         },
-    )
-    .await
-    .unwrap();
+        ..Default::default()
+    };
+    let server = serve(builder, config.clone()).await.unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     assert_eq!(
         client.rpc("account.providers", json!({})).await["result"][0]["providerId"],
@@ -185,6 +194,9 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         history.to_string()
     }
     let history = prompt(&mut client, &server, &home, "managed-fixture").await;
+    for (name, count) in names.iter().zip(counts) {
+        assert_eq!(count.load(Ordering::SeqCst), 1, "{name}");
+    }
     assert!(history.contains("managed reply"), "{history}");
     assert!(!history.contains("fixture-secret"));
     assert_eq!(
@@ -225,5 +237,22 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     assert_ok(&client.rpc("daemon.shutdown", json!({})).await);
     server.join().await.unwrap();
     http.abort();
+
+    for name in names {
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        builder.session_extension(&name, "extension", |_, _: &()| {
+            reload::NamedExtension("extension".into(), Arc::new(AtomicUsize::new(0)))
+        });
+        let error = serve(builder, config.clone())
+            .await
+            .err()
+            .expect("a group must not shadow a JS process module or row");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("reserved extension group: {name}")),
+            "{error}"
+        );
+    }
     std::fs::remove_dir_all(home).unwrap();
 }
