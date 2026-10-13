@@ -407,3 +407,167 @@ async fn dropping_output_stream_releases_transport_without_another_poll() {
     drop(stream);
     assert!(dropped.load(Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn malformed_tool_lifecycles_fail_and_release_transport() {
+    let input_start = || StreamPart::ToolInputStart {
+        id: "call-1".into(),
+        tool_name: "lookup".into(),
+        provider_executed: None,
+        dynamic: None,
+        title: None,
+        provider_metadata: None,
+    };
+    let delta = || StreamPart::ToolInputDelta {
+        id: "call-1".into(),
+        delta: "{}".into(),
+        provider_metadata: None,
+    };
+    let end = || StreamPart::ToolInputEnd {
+        id: "call-1".into(),
+        provider_metadata: None,
+    };
+    let mut mismatched = tool("{}");
+    if let StreamPart::ToolCall { tool_name, .. } = &mut mismatched {
+        *tool_name = "different".into();
+    }
+    let cases = [
+        (vec![delta()], "Tool delta without an active tool input"),
+        (
+            vec![input_start(), input_start()],
+            "Duplicate tool input start",
+        ),
+        (
+            vec![input_start(), end(), delta()],
+            "Tool delta without an active tool input",
+        ),
+        (
+            vec![input_start(), end(), end()],
+            "Duplicate or late tool input end",
+        ),
+        (
+            vec![input_start(), mismatched],
+            "Duplicate or mismatched tool call",
+        ),
+        (
+            vec![tool("{}"), tool("{}")],
+            "Duplicate or mismatched tool call",
+        ),
+        (
+            vec![tool("{}"), input_start()],
+            "Duplicate tool input start",
+        ),
+        (vec![tool("{}"), end()], "Duplicate or late tool input end"),
+        (
+            vec![
+                input_start(),
+                finish(FinishReasonUnified::Stop, NativeUsage::default()),
+            ],
+            "incomplete blocks or tool calls",
+        ),
+        (
+            vec![
+                end(),
+                finish(FinishReasonUnified::Stop, NativeUsage::default()),
+            ],
+            "incomplete blocks or tool calls",
+        ),
+    ];
+    for (parts, diagnostic) in cases {
+        let (stream, _, abort, dropped) = fixture(parts.into_iter().map(Ok).collect());
+        let chunks = stream.collect::<Vec<_>>().await;
+        let Some(Err(failure)) = chunks.last() else {
+            panic!("missing failure: {chunks:?}")
+        };
+        assert!(matches!(
+            failure,
+            HostError::Failed {
+                kind: HostErrorKind::Other,
+                ..
+            }
+        ));
+        assert!(
+            failure.to_string().contains("invalid_response_data"),
+            "{failure}"
+        );
+        assert!(failure.to_string().contains(diagnostic), "{failure}");
+        assert!(abort.is_aborted());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+}
+
+#[tokio::test]
+async fn whole_tool_with_input_end_and_truncated_open_blocks_remain_valid() {
+    let (stream, _, _, _) = fixture(vec![
+        Ok(StreamPart::ToolInputEnd {
+            id: "call-1".into(),
+            provider_metadata: None,
+        }),
+        Ok(tool("{}")),
+        Ok(finish(
+            FinishReasonUnified::ToolCalls,
+            NativeUsage::default(),
+        )),
+    ]);
+    let chunks = stream.collect::<Vec<_>>().await;
+    assert!(chunks.iter().all(Result::is_ok));
+    assert!(matches!(&chunks[0], Ok(ModelChunk::ToolStart { .. })));
+    assert!(matches!(&chunks[1], Ok(ModelChunk::ToolUse(_))));
+
+    for reason in [FinishReasonUnified::Stop, FinishReasonUnified::Length] {
+        let (stream, _, _, _) = fixture(vec![
+            Ok(StreamPart::TextStart {
+                id: "text".into(),
+                provider_metadata: None,
+            }),
+            Ok(finish(reason, NativeUsage::default())),
+        ]);
+        let chunks = stream.collect::<Vec<_>>().await;
+        if reason == FinishReasonUnified::Length {
+            assert!(matches!(
+                chunks.last(),
+                Some(Ok(ModelChunk::MessageStop {
+                    reason: ModelStopReason::MaxTokens,
+                    ..
+                }))
+            ));
+        } else {
+            assert!(matches!(chunks.last(), Some(Err(_))));
+        }
+    }
+}
+
+#[tokio::test]
+async fn block_ends_are_validated_even_without_native_content_preservation() {
+    let text_start = || StreamPart::TextStart {
+        id: "block".into(),
+        provider_metadata: None,
+    };
+    let text_end = || StreamPart::TextEnd {
+        id: "block".into(),
+        provider_metadata: None,
+    };
+    let reasoning_end = || StreamPart::ReasoningEnd {
+        id: "block".into(),
+        provider_metadata: None,
+    };
+    for parts in [
+        vec![text_end()],
+        vec![reasoning_end()],
+        vec![text_start(), reasoning_end()],
+        vec![text_start(), text_end(), text_end()],
+        vec![text_start(), text_end(), text_start()],
+    ] {
+        let (stream, _, abort, dropped) = fixture(parts.into_iter().map(Ok).collect());
+        let chunks = stream.collect::<Vec<_>>().await;
+        let Some(Err(failure)) = chunks.last() else {
+            panic!("missing failure: {chunks:?}")
+        };
+        assert!(
+            failure.to_string().contains("invalid_response_data"),
+            "{failure}"
+        );
+        assert!(abort.is_aborted());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+}

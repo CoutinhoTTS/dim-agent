@@ -877,6 +877,90 @@ fn sse(events: Vec<Value>) -> String {
         .collect()
 }
 
+#[tokio::test]
+async fn malformed_native_block_lifecycle_is_a_classified_failure() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(capability_plugin(AimuxPlugin)).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let server = MockServer::start().await;
+    let text_start =
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}});
+    let text_delta = json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unexpected"}});
+    let end = json!({"type":"content_block_stop","index":0});
+    for (events, diagnostic) in [
+        (
+            vec![text_delta.clone()],
+            "Text delta without an active text block",
+        ),
+        (
+            vec![
+                text_start.clone(),
+                text_delta.clone(),
+                text_start.clone(),
+                text_delta.clone(),
+            ],
+            "Duplicate text start",
+        ),
+        (
+            vec![text_start.clone(), text_delta.clone(), end, text_delta],
+            "Text delta without an active text block",
+        ),
+        (
+            vec![
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            ],
+            "Duplicate reasoning start",
+        ),
+        (
+            vec![
+                text_start,
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"wrong kind"}}),
+            ],
+            "Reasoning delta without an active reasoning block",
+        ),
+        (
+            vec![
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"missing start"}}),
+            ],
+            "Reasoning delta without an active reasoning block",
+        ),
+    ] {
+        server.reset().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse(events)),
+            )
+            .mount(&server)
+            .await;
+        let failure =
+            invoke_failure(&host, ModelProtocol::Anthropic, server.uri(), "malformed").await;
+        assert!(
+            matches!(
+                &failure,
+                HostError::Failed {
+                    kind: HostErrorKind::Other,
+                    ..
+                }
+            ),
+            "{failure:?}"
+        );
+        assert!(
+            failure.to_string().contains("invalid_response_data"),
+            "{failure}"
+        );
+        assert!(
+            failure.to_string().contains(diagnostic),
+            "expected {diagnostic}: {failure}"
+        );
+    }
+    root.shutdown().await.unwrap();
+}
+
 async fn invoke_failure(
     host: &ModelHost,
     protocol: ModelProtocol,
