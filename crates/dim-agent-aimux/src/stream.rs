@@ -39,8 +39,9 @@ pub(crate) fn convert(
         let mut parts = Vec::new();
         let mut blocks = HashMap::new();
         let mut tool_blocks = HashMap::new();
-        // Retain closed identities so a duplicate start cannot reuse a block.
-        let mut block_active = HashMap::new();
+        // StreamPart IDs identify active segments, not response-wide identities.
+        // A balanced end permits reuse; overlapping starts remain invalid.
+        let mut block_active = HashSet::new();
         let mut ended_inputs = HashSet::new();
         let mut completed_calls = HashSet::new();
         // Thinking blocks are reported whole at their end, for every protocol.
@@ -89,7 +90,7 @@ pub(crate) fn convert(
                     yield Ok(ModelChunk::MessageStart { message_id: message_id.clone() });
                 }
                 StreamPart::TextStart { id, provider_metadata } => {
-                    if block_active.insert((false, id.clone()), true).is_some() {
+                    if !block_active.insert((false, id.clone())) {
                         break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate text start".into()), &cancel)));
                     }
                     if preserve {
@@ -99,7 +100,7 @@ pub(crate) fn convert(
                     }
                 }
                 StreamPart::ReasoningStart { id, provider_metadata } => {
-                    if block_active.insert((true, id.clone()), true).is_some() {
+                    if !block_active.insert((true, id.clone())) {
                         break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate reasoning start".into()), &cancel)));
                     }
                     thinking.insert(id.clone(), String::new());
@@ -110,7 +111,7 @@ pub(crate) fn convert(
                     }
                 }
                 StreamPart::TextDelta { id, delta, provider_metadata } => {
-                    if block_active.get(&(false, id.clone())) != Some(&true) {
+                    if !block_active.contains(&(false, id.clone())) {
                         break Some(Err(error(AiMuxError::InvalidResponseData("Text delta without an active text block".into()), &cancel)));
                     }
                     if preserve {
@@ -124,7 +125,7 @@ pub(crate) fn convert(
                     if !delta.is_empty() { yield Ok(ModelChunk::Text(delta)); }
                 }
                 StreamPart::ReasoningDelta { id, delta, provider_metadata } => {
-                    if block_active.get(&(true, id.clone())) != Some(&true) {
+                    if !block_active.contains(&(true, id.clone())) {
                         break Some(Err(error(AiMuxError::InvalidResponseData("Reasoning delta without an active reasoning block".into()), &cancel)));
                     }
                     let Some(thought) = thinking.get_mut(&id) else {
@@ -144,7 +145,7 @@ pub(crate) fn convert(
                 end @ (StreamPart::TextEnd { .. } | StreamPart::ReasoningEnd { .. }) => {
                     let reasoning = matches!(&end, StreamPart::ReasoningEnd { .. });
                     let (id, provider_metadata) = match end { StreamPart::TextEnd { id, provider_metadata } | StreamPart::ReasoningEnd { id, provider_metadata } => (id, provider_metadata), _ => unreachable!() };
-                    if block_active.insert((reasoning, id.clone()), false) != Some(true) {
+                    if !block_active.remove(&(reasoning, id.clone())) {
                         break Some(Err(error(AiMuxError::InvalidResponseData("Block end without a matching active block".into()), &cancel)));
                     }
                     if preserve {
@@ -261,7 +262,7 @@ pub(crate) fn convert(
                             break Some(Err(HostError::failed("Model returned an unsupported finish reason")));
                         }
                     };
-                    if reason != ModelStopReason::MaxTokens && (block_active.values().any(|active| *active) || !calls.is_empty() || !ended_inputs.is_empty()) {
+                    if reason != ModelStopReason::MaxTokens && (!block_active.is_empty() || !calls.is_empty() || !ended_inputs.is_empty()) {
                         break Some(Err(error(AiMuxError::InvalidResponseData("Model finished with incomplete blocks or tool calls".into()), &cancel)));
                     }
                     if reason != ModelStopReason::MaxTokens && parts.iter().any(|part| {

@@ -556,10 +556,15 @@ async fn block_ends_are_validated_even_without_native_content_preservation() {
         vec![reasoning_end()],
         vec![text_start(), reasoning_end()],
         vec![text_start(), text_end(), text_end()],
-        vec![text_start(), text_end(), text_start()],
+        vec![text_start(), text_start()],
     ] {
         let (stream, _, abort, dropped) = fixture(parts.into_iter().map(Ok).collect());
-        let chunks = stream.collect::<Vec<_>>().await;
+        let chunks = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
         let Some(Err(failure)) = chunks.last() else {
             panic!("missing failure: {chunks:?}")
         };
@@ -570,4 +575,48 @@ async fn block_ends_are_validated_even_without_native_content_preservation() {
         assert!(abort.is_aborted());
         assert!(dropped.load(Ordering::SeqCst));
     }
+    let (stream, _, _, dropped) = fixture(vec![
+        Ok(text_start()),
+        Ok(StreamPart::TextDelta {
+            id: "block".into(),
+            delta: "first".into(),
+            provider_metadata: None,
+        }),
+        Ok(text_end()),
+        Ok(text_start()),
+        Ok(StreamPart::TextDelta {
+            id: "block".into(),
+            delta: " second".into(),
+            provider_metadata: None,
+        }),
+        Ok(text_end()),
+        Ok(finish(FinishReasonUnified::Stop, NativeUsage::default())),
+    ]);
+    let chunks = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
+    let chunks: Vec<_> = chunks.into_iter().collect::<Result<_, _>>().unwrap();
+    let text: Vec<_> = chunks
+        .iter()
+        .filter_map(|chunk| match chunk {
+            ModelChunk::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, ["first", " second"]);
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|chunk| matches!(chunk, ModelChunk::TextEnd))
+            .count(),
+        2
+    );
+    assert!(matches!(
+        chunks.last(),
+        Some(ModelChunk::MessageStop { .. })
+    ));
+    assert!(dropped.load(Ordering::SeqCst));
 }

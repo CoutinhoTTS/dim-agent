@@ -40,6 +40,8 @@ The CLI disables terminal echo before inviting callback input and restores it on
 
 Model adapters validate incoming HTTP/SSE data at their boundary. Event serialization is covered by frozen compatibility fixtures; the original TypeScript source generator is not needed at build time. `ProviderPresentation` transports generic nonempty source/reason/action strings and public diagnostics; private classification policies are not part of the Rust contract.
 
+AiMux text and reasoning IDs identify active segments: a completed ID may start a new segment, while overlapping starts, unpaired deltas/ends and unfinished successful output remain errors. Each lifetime keeps its own content and continuation metadata. Tool-call identity and native provider metadata follow their separate contracts; neither is rewritten to accommodate text/reasoning ID reuse.
+
 ## Generated architecture
 
 ```sh
