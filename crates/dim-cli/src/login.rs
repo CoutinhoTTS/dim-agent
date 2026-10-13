@@ -85,9 +85,9 @@ pub async fn login(client: &mut Client, options: &Options, provider_id: &str) ->
     println!("Open: {}", safe(&browser.authorization_url));
     open_browser(&browser.authorization_url);
     let mut input = Input::new()?;
+    let echo = input.hide_echo()?;
     println!("After authorization, paste the full callback URL. Input is hidden.");
     input.prompt("Callback URL: ")?;
-    let echo = input.hide_echo()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;

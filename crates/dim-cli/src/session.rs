@@ -238,8 +238,12 @@ async fn wait_turn(
                 "[approval] {}: {}",
                 approval.call.name, approval.reason
             ))?;
-            // Only display known non-secret context; arbitrary extension input may contain credentials.
-            for key in ["path", "filePath", "description"] {
+            // Review executable code verbatim, but never dump arbitrary extension arguments.
+            let keys: &[&str] = match approval.call.name.as_str() {
+                "exec" | "execute" => &["command", "cwd", "description"],
+                _ => &["path", "filePath", "description"],
+            };
+            for &key in keys {
                 if let Some(Value::String(value)) = approval.call.input.get(key) {
                     display.record(&format!("  {key}: {value}"))?;
                 }

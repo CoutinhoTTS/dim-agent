@@ -503,7 +503,7 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
         let idle = wire.read("session.idle");
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"first-request","textOffset":0,"text":"working"}));
         thread::sleep(Duration::from_millis(150));
-        wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"description":"Inspect workspace","secret":"never print me"}},"reason":"shell command"}));
+        wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"description":"Inspect workspace","command":"printf workspace-inspected","cwd":"/tmp/approval-fixture","secret":"never print me"}},"reason":"shell command"}));
         let answer = wire.read("approval.respond");
         assert_eq!(answer["params"]["decision"],"deny");
         wire.reply(&answer,json!({}));
@@ -542,6 +542,18 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
     let output = wait(child);
     daemon.join().unwrap();
     assert!(output.status.success());
+    assert!(
+        terminal
+            .transcript
+            .contains("command: printf workspace-inspected"),
+        "{}",
+        terminal.transcript
+    );
+    assert!(
+        terminal.transcript.contains("cwd: /tmp/approval-fixture"),
+        "{}",
+        terminal.transcript
+    );
     assert!(!terminal.transcript.contains("never print me"));
 }
 
@@ -569,7 +581,17 @@ fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let output = wait(child);
     daemon.join().unwrap();
     assert!(output.status.success());
-    assert!(!terminal.transcript.contains("secret-code"));
+    assert!(
+        !terminal.transcript.contains("secret-code"),
+        "{}",
+        terminal.transcript
+    );
+    let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
+    assert_eq!(
+        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), attributes.as_mut_ptr()) },
+        0
+    );
+    assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
 }
 
 #[test]

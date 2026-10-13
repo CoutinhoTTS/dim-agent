@@ -36,6 +36,8 @@ Transport admission is bounded per connection: 16 MiB per decoded frame (excludi
 
 Timeline and Dispatcher deliver both business events and interrupts. Capabilities cancel their own work and emit terminal outcomes after cleanup. A stopped turn must settle before the CLI accepts another prompt. Client detach does not delete or close a persisted session. Storage rejects incompatible data explicitly; see the [storage format](../design/appserver/native-storage-format.md).
 
+The CLI disables terminal echo before inviting callback input and restores it on every exit. Built-in shell approvals intentionally show the command and cwd for informed consent; commands may themselves contain sensitive values. Arbitrary extension arguments are not printed. The npm launcher requires Node 22.19+ on the 22.x line or 23.11+ so POSIX execution can replace the wrapper without duplicate terminal signals.
+
 Model adapters validate incoming HTTP/SSE data at their boundary. Event serialization is covered by frozen compatibility fixtures; the original TypeScript source generator is not needed at build time. `ProviderPresentation` transports generic nonempty source/reason/action strings and public diagnostics; private classification policies are not part of the Rust contract.
 
 ## Generated architecture

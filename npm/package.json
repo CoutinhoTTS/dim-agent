@@ -7,7 +7,7 @@
   "type": "module",
   "bin": { "dim": "bin/dimcode.mjs", "dimcode": "bin/dimcode.mjs" },
   "files": ["bin", "README.md", "LICENSE"],
-  "engines": { "node": ">=22.19.0" },
+  "engines": { "node": "^22.19.0 || >=23.11.0" },
   "optionalDependencies": {
     "dimcode-darwin-arm64": "0.1.0",
     "dimcode-darwin-x64": "0.1.0",
