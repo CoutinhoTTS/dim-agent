@@ -183,12 +183,33 @@ struct Binding {
     dispatch: Arc<dyn HostDispatch>,
     tasks: TaskTracker,
 }
+impl Binding {
+    async fn quiesce(&self) {
+        // Keep the original dispatch alive. Provider disposal happens only
+        // after this consumer drains; it cannot be our cancellation trigger.
+        if let Ok(RpcValue::Reference(reference)) =
+            self.dispatch.invoke("quiesce", json!([]).into())
+            && reference.is_future()
+        {
+            let _ = reference.wait_async().await;
+        }
+    }
+}
 pub struct ManagedProviders {
     binding: Mutex<Option<Binding>>,
     providers: Mutex<Vec<ProviderDescriptor>>,
     stop: CancellationToken,
 }
 impl ManagedProviders {
+    /// Called before Agent/RPC settlement, not only during plugin disposal.
+    pub async fn quiesce(&self) {
+        self.stop.cancel();
+        let binding = self.binding.lock().unwrap().clone();
+        if let Some(binding) = binding {
+            binding.quiesce().await;
+        }
+    }
+
     fn binding(&self) -> Result<Binding, ManagedProviderError> {
         self.binding.lock().unwrap().clone().ok_or_else(unavailable)
     }
@@ -527,11 +548,12 @@ impl TypedPlugin for ManagedProviderBinding {
         Box::pin(async move {
             let generation = uuid::Uuid::new_v4();
             let tasks = TaskTracker::new();
-            *owner.binding.lock().unwrap() = Some(Binding {
+            let binding = Binding {
                 generation,
                 dispatch,
                 tasks: tasks.clone(),
-            });
+            };
+            *owner.binding.lock().unwrap() = Some(binding.clone());
             let cleanup = owner.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
@@ -543,6 +565,7 @@ impl TypedPlugin for ManagedProviderBinding {
                                 *slot = None;
                             }
                         }
+                        binding.quiesce().await;
                         tasks.wait().await;
                         Ok(())
                     })

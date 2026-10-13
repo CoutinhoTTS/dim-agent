@@ -695,6 +695,9 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
         return Ok(ShutdownReason::Forced);
     }
     let mut errors = vec![];
+    if let Some(providers) = root.get::<managed_provider::ManagedProviders>() {
+        providers.quiesce().await;
+    }
     // One generation throughout: its archives finish after its Sessions close.
     let index = root.get::<AgentIndex>();
     if let Some(index) = &index {

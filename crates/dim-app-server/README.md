@@ -97,11 +97,12 @@ type Account = {
 }
 ```
 
-`providers()` has no arguments. Every other method receives one DTO, carried as `[dto]` by rutis. `providerId` is always explicit. There is no default managed supplier.
+`providers()` and `quiesce()` have no arguments. Every other method receives one DTO, carried as `[dto]` by rutis. `providerId` is always explicit. There is no default managed supplier.
 
 | Service method | DTO | Successful value |
 | --- | --- | --- |
 | `providers` | None | `Provider[]` |
+| `quiesce` | None | `{}` |
 | `status`, `recover`, `logout` | `{providerId}` | `Account` |
 | `beginBrowser` | `{providerId,directory,email?,redirectUri}` | `{attemptId,authorizationUrl,expiresAt}` |
 | `beginDevice` | `{providerId,directory,email?}` | `{attemptId,verificationUri,verificationUriComplete?,userCode,expiresAt}` |
@@ -139,6 +140,8 @@ type CredentialLease = {
 `baseUrl` is the final protocol base URL; the existing model adapter adds its protocol endpoint. Headers and bearer are request-local secrets. `leaseId` is an opaque short-lived handle bound to the plugin runtime, account and credential revision. A plugin rejects expired/old handles and bounds their count and lifetime. `recoverRejected` performs one controlled recovery, and `finishRejected` settles rejection of the recovered credential. Host recovery is limited to HTTP 401; unrelated failures retain the account.
 
 Credential methods are internal to the model resolver and never appear in terminal RPC, history, Timeline, configuration replies or logs. Refresh tokens stay inside the plugin. Rust releases a lease when its last request/recovery owner drops it. A withdrawn binding rejects new calls, closes its generation's task tracker and drains already admitted promises. A caller disappearing does not drop an accepted token rotation. Runtime loss invalidates old handles and is not automatically replayed or restarted; API-key providers keep working.
+
+Before draining Agent/RPC work, the host calls the idempotent `quiesce()` on the retained provider dispatch. Binding unload does the same before waiting for its generation. Quiesce stops admission and cancels preflight/lock waiters without awaiting those callers; it must not abandon an issued refresh or revoke delivered credentials. `release` remains available until final disposal. The plugin's unload disposer then joins accepted work. Rutis consumer-first disposal cannot substitute for this pre-drain phase.
 
 Plugin error messages are not forwarded. The host maps canonical `invalid_store`, `unsupported_schema`, `identity_rejected`, `invalid_input`, `invalid_callback`, `config_error`, `attempt_not_found`, `attempt_closed`, `token_missing`, `refresh_rejected`, `account_changed`, `account_recovery_required`, `account_reset_blocked` and `service_reloading` into fixed public diagnostics. Malformed responses fail explicitly. Account corruption and unavailable plugins are not represented as a signed-out account.
 

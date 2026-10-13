@@ -3,7 +3,7 @@ import { appendFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-const methods = ['providers', 'status', 'attemptStatus', 'catalog', 'credential', 'recoverRejected', 'finishRejected', 'release']
+const methods = ['providers', 'status', 'attemptStatus', 'catalog', 'credential', 'recoverRejected', 'finishRejected', 'release', 'quiesce']
 export default definePlugin({
   name: 'ManagedFixture',
   provides: { managedProvider: Object.fromEntries(methods.map(name => [name, 'async'])) },
@@ -37,6 +37,7 @@ export default definePlugin({
       },
       async finishRejected() { await record('finishRejected'); return { ok: true, value: {} } },
       async release({ leaseId }) { leases.delete(leaseId); await record('release'); return { ok: true, value: {} } },
+      async quiesce() { return { ok: true, value: {} } },
     })
     ctx.effect(async () => { leases.clear(); await record('close') })
   },

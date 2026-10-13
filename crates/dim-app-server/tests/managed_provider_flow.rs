@@ -16,12 +16,17 @@ struct Fixture {
     response_error: Mutex<Option<&'static str>>,
     entered: Notify,
     resume: Notify,
+    preflight_cancelled: Notify,
 }
 impl HostDispatch for Fixture {
     fn invoke(&self, method: &str, args: Value) -> Reply {
         let args = args.json().unwrap();
         let mut value = match method {
             "providers" => json!([]),
+            "quiesce" => {
+                self.preflight_cancelled.notify_one();
+                json!({})
+            }
             "release" => {
                 self.released
                     .lock()
@@ -56,7 +61,17 @@ impl HostDispatch for Fixture {
 struct AsyncFixture(Arc<Fixture>);
 impl HostDispatch for AsyncFixture {
     fn invoke(&self, method: &str, args: Value) -> Reply {
-        if matches!(method, "credential" | "recoverRejected") {
+        if method == "status" {
+            let owner = self.0.clone();
+            Ok(Value::future(async move {
+                owner.entered.notify_one();
+                owner.preflight_cancelled.notified().await;
+                Ok(
+                    json!({"ok":false,"error":{"code":"service_reloading","message":"stopping"}})
+                        .into(),
+                )
+            }))
+        } else if matches!(method, "credential" | "recoverRejected") {
             let owner = self.0.clone();
             let method = method.to_owned();
             Ok(Value::future(async move {
@@ -281,4 +296,24 @@ async fn generation_cannot_finish_closing_before_a_delivered_lease_is_released()
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unload_quiesces_preflight_before_draining_calls() {
+    let (root, fixture, owner, _) = setup().await;
+    let waiter = tokio::spawn(async move {
+        owner
+            .call::<serde_json::Value>(
+                "status",
+                json!({"providerId":"fixture"}),
+                &CancellationToken::new(),
+            )
+            .await
+    });
+    fixture.entered.notified().await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), root.shutdown())
+        .await
+        .expect("shutdown waited for work that only quiesce can cancel")
+        .unwrap();
+    assert!(waiter.await.unwrap().is_err());
 }
