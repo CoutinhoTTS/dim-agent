@@ -6,7 +6,7 @@ use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use rutis_bridge::session::{HostDispatch, Value};
 use serde_json::json;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime},
 };
@@ -79,10 +79,10 @@ impl Capability for Capture {
         DepKey::dynamic("pluginFiles")
     }
 }
-async fn mount(path: &PathBuf) -> (Ctx, Value) {
+async fn mount(path: &Path) -> (Ctx, Value) {
     let root = Ctx::root().unwrap();
     (&root.plugin(capability_plugin(FileStoragePlugin::new(vec![
-        path.clone(),
+        path.to_path_buf(),
     ]))))
         .await
         .unwrap();
