@@ -1,6 +1,7 @@
 # 001: Extensible harness foundation
 
-Decision status: Accepted (2026-10-14)
+Decision status: Accepted for recovery and configuration work on this branch;
+event registration and dependency-loss refinements remain Proposed for maintainer alignment.
 
 Implementation status: In progress; the table below is authoritative for delivery status.
 
@@ -18,7 +19,7 @@ SQLite, Node, a TUI or a private account plugin.
 
 ## Decisions
 
-### Events and ownership
+### Events and ownership (Proposed; issue #2)
 
 Runtime mechanism facts, public capability protocol events and domain events share one
 registration and persistence mechanism. A Rust core-event enum is a convenience view, not
@@ -35,20 +36,29 @@ Distinguish three lifetimes:
 3. History retains immutable declaration content and references. Reading or importing a
    declaration never installs code, grants permissions or resumes external work.
 
-Domain keys use their declaring module's namespace. Check duplicate identities and conflicting
-declarations at admission and activation. A namespace is not authentication. The declaration
-owner defines the data contract; legitimate producers use the appropriate public ports and
-work ownership, rather than being limited to the type's declaring instance.
+Use stable type keys and reject conflicting declarations. Namespaces express ownership conventions,
+not authentication or a central approval process. The declaration owner defines the data contract;
+legitimate producers use the appropriate public ports and work ownership, rather than being limited
+to the type's declaring instance. Bind active registration and its cleanup to rutis, not a second
+plugin lifecycle manager. Revoke registration after the generation's required terminal writes drain.
 
 Validate the final payload at the write boundary. Persist a declaration and its first use
 atomically. Hashes identify content, not schema or semantic compatibility. Preserve unknown
 historical events without executing them. Declaration size and reference resolution are bounded;
 declarations contain no resolved credentials. All stores and portable exports preserve the
-reference closure, including branch history and trace records.
+reference closure, including branch history and trace records. Archived schemas provide contract
+provenance, not executable business interpretation. Unknown payloads remain readable as data.
+
+Preserve the existing v1-v3 protocol contracts. A new dynamic protocol should preserve unknown
+event types without requiring a server-side adapter for every extension. Visibility, authorization
+and sensitive-data filtering remain host responsibilities, independent of compatibility conversion.
+Do not require a universal event version counter: storage, snapshot interpretation and business
+semantics have separate compatibility boundaries. Incompatible semantics require an explicit contract.
 
 ### Model context and recovery
 
-Domain events do not directly project into model context. Capabilities deliver final runtime
+The proposed event extension boundary preserves the existing adopted-input contract: domain events
+do not independently project into model context. Capabilities deliver final runtime
 content through adopted inputs or public tool results. The host interprets public protocol
 facts, including assistant output, input consumption, tool results, adopted configuration and
 compression. Optional UI rendering does not change what the model sees.
@@ -72,11 +82,16 @@ snapshots. Independently verify full replay and accelerated replay agree at a fi
 
 ### Configuration and lifecycle
 
-The loader's editable persisted intent is the single authority for plugin enablement and
-configuration. Management services retain business routing, not independent generation ownership.
+The loader owns plugin enablement and runtime configuration composed from explicit sources.
+Management services retain business routing, not independent generation ownership.
 Distinguish user, workspace and Session scopes, source provenance and temporary overrides.
-File-backed configuration remains an explicit source; migration has one writer and no silent
-conflicting authority. Providers are a selection dimension, not different harness feature sets.
+Each source has an explicit persistence authority and one write path; management edits name their
+target source rather than writing back a merged view. Preserve shared workspace files as sources.
+Import legacy product-home configuration before switching authority, retain originals on failure,
+and do not automatically delete them. Scope row identities and configuration mappings so one
+workspace cannot change another's instances. The loader owns the composed runtime intent; its
+single editable layer does not itself define multi-scope persistence. Providers are a selection
+dimension, not different harness feature sets.
 
 SQLite is the App Server's default configuration persistence implementation, with revision checks.
 It is not a runtime dependency. Report accepted intent, persisted revision, applied revision,
@@ -84,6 +99,13 @@ runtime state and business settlement separately. Loader edits are not atomic tr
 external effects; runtime convergence can precede a failed save. Notifications trigger state
 refresh, not an assumption of durable success. Stable MCP identity survives process restarts;
 connections and leases remain generation-owned.
+
+The dependency-loss refinement is Proposed for issue #6: distinguish loader state, cleanup
+completion and successful business settlement. Pending can occur before a plugin ever becomes
+active, and rutis can publish Pending after reporting cleanup errors. Capabilities must own and
+join their background work; retained service handles need generation checks where stale operations
+would be unsafe. Do not infer successful terminal commits from loader state or retry unknown
+external outcomes. Use existing rutis lifecycle hooks and the harness fault path.
 
 ### Trust and cross-language calls
 
@@ -128,6 +150,21 @@ boundaries run workspace, lint, graph and packaging-script checks. Review P0–P
 unnecessary machinery before committing. Storage compatibility follows actual format changes,
 not a preallocated version shared across incompatible branch commits. Use disposable databases;
 never overwrite a user's existing store to make a test pass.
+
+## Existing issue ownership
+
+- [#2](https://github.com/arcships/dim/issues/2) tracks dynamic events. Resolve the Proposed contracts
+  above before committing its envelope, declaration storage and append API as a public format.
+- [#3](https://github.com/arcships/dim/issues/3) tracks loader configuration and MCP ownership;
+  [#4](https://github.com/arcships/dim/issues/4) tracks cross-language capabilities. Validate the
+  latter immediately after the public dynamic-event path is usable.
+- [#5](https://github.com/arcships/dim/issues/5) tracks remote nodes;
+  [#6](https://github.com/arcships/dim/issues/6) tracks typed-dependency questions and startup tests;
+  [#7](https://github.com/arcships/dim/issues/7) tracks contributor documentation and graph checks.
+
+Recovery facts/snapshots and common API-key assembly are additional work, not completion of those
+issues. They and configuration can progress without settling dynamic events. Do not equate this
+branch's accepted implementation direction with maintainer approval of Proposed issue changes.
 
 ## Alternatives and consequences
 
