@@ -45,3 +45,7 @@ Removed unnecessary layers include the old TypeScript CLI/core, OpenTUI, the pri
 - The opt-in live Context7 network test, which requires an external API key.
 
 Old databases have no migration path in this extraction. Use an isolated home; unsupported files are preserved. Select a new unused npm product version and configure environments/publishers before any future activation.
+
+The public source archive was unpacked outside either source checkout and built with the locked dependencies. Its configured API-key CLI flow also exercised production workspace tools and persisted-session restoration. The release-profile macOS platform archive passed an actual offline npm installation and account/plugin discovery; its 305 staged files match the manifest and no development SDK is packaged.
+
+Unix home paths must fit the platform's socket-path limit after canonicalization. macOS test homes should use a short path such as `/tmp/dim-dev`; a 105-byte canonical socket path is rejected explicitly and logged without changing account data.
