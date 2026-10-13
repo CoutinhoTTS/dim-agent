@@ -346,7 +346,7 @@ async fn final_outcome_controls_normal_preparation_and_budget_recovery() {
 }
 
 #[tokio::test]
-async fn a_committed_compaction_with_a_cursor_outside_history_is_skipped_not_fatal() {
+async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history() {
     let edit = Arc::new(Mutex::new(Edit::BrokenCursor));
     let mut builder = builder_with_context(
         std::sync::Arc::new(EchoModel),
@@ -385,8 +385,8 @@ async fn a_committed_compaction_with_a_cursor_outside_history_is_skipped_not_fat
             ..
         })
     )));
-    // With the hook repaired, the next turn skips the unusable checkpoint
-    // and a fresh compaction restores the session instead of bricking it.
+    // Repairing the hook cannot repair a damaged durable fact. In particular,
+    // recovery must not silently generate a different summary of that history.
     *edit.lock().unwrap() = Edit::None;
     session
         .submit(
@@ -398,24 +398,27 @@ async fn a_committed_compaction_with_a_cursor_outside_history_is_skipped_not_fat
         .unwrap();
     session.idle("main").await.unwrap();
     let events = session.history("main", None).await.unwrap();
-    // The repaired turn compacts successfully: the model request starts from
-    // the committed summary, and the session keeps serving turns.
-    let MessageContent::Text(summary) =
-        dim_agent_capabilities::history::summary_message("short").content
-    else {
-        panic!("summary must be text");
-    };
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        EventKind::Text(data)
-            if data.delta == format!("Echo: {summary}")
-    )));
-    assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        EventKind::TurnEnd(TurnEndData {
-            outcome: TurnOutcome::Completed { .. },
-            ..
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ContextCompaction(_)))
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ModelCall(_)))
+    );
+    let ends: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => Some(&data.outcome),
+            _ => None,
         })
-    )));
+        .collect();
+    assert_eq!(ends.len(), 2);
+    assert!(matches!(ends[1], TurnOutcome::Failed { error }
+        if error.contains("Compaction cursor is outside")));
     agent.close().await.unwrap();
 }

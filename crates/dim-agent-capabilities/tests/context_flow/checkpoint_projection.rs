@@ -158,6 +158,101 @@ fn resume(context: &ContextHistory, cursor: &str) -> ContextHistory {
 }
 
 #[test]
+fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
+    use dim_agent_capabilities::history::{context_messages, summary_message};
+
+    let compaction = |cursor: &str, summary: &str, through, text: &str| {
+        EventKind::ContextCompaction(ContextCompactionData {
+            turn_id: "turn".into(),
+            request_id: summary.into(),
+            through,
+            outcome: ContextCompactionResult::Completed {
+                cursor: cursor.into(),
+                summary: summary.into(),
+                diagnostics: diagnostics(),
+                context_baseline: vec![ContextBaselineEntry {
+                    key: "rule".into(),
+                    source_event: cursor.into(),
+                    message: Message::text(Role::User, text),
+                }],
+                checkpoint: None,
+            },
+        })
+    };
+    let input = |text: &str, rule: &str| {
+        EventKind::InputMessage(InputMessageData {
+            blocks: vec![keyed(rule, "rule")],
+            ..InputMessageData::text(text, None)
+        })
+    };
+    let context = fixed(vec![
+        input("first", "old rule"),
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: "event-0".into(),
+        }),
+        compaction("event-1", "summary A", 2, "old rule"),
+        input("second", "new rule"),
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: "event-3".into(),
+        }),
+        compaction("event-4", "summary B", 5, "new rule"),
+        EventKind::InputMessage(InputMessageData {
+            blocks: vec![context_block::retire("rule ended".into(), "rule".into())],
+            ..InputMessageData::text("tail", None)
+        }),
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: "event-6".into(),
+        }),
+        EventKind::ContextCompaction(ContextCompactionData {
+            turn_id: "turn".into(),
+            request_id: "failed".into(),
+            through: 8,
+            outcome: ContextCompactionResult::Failed {
+                error: "unavailable".into(),
+                diagnostics: None,
+            },
+        }),
+    ]);
+    let expected = vec![
+        summary_message("summary B"),
+        Message::text(Role::User, "new rule"),
+        Message::text(Role::User, "rule ended"),
+        Message::text(Role::User, "tail"),
+    ];
+    // Neither a missing snapshot nor an older usable one may roll the model
+    // view back to A. Expectations are literal, not derived from full replay.
+    for cut in [None, Some(("event-1", 2)), Some(("event-4", 5))] {
+        let candidate = match cut {
+            None => context.clone(),
+            Some((cursor, fact_index)) => {
+                let mut candidate = resume(&context, cursor);
+                let EventKind::ContextCompaction(fact) = &context.events[fact_index].kind else {
+                    unreachable!()
+                };
+                let saved = candidate.checkpoint.take().unwrap();
+                let mut fact = fact.clone();
+                if let (
+                    ContextCompactionResult::Completed { checkpoint, .. },
+                    ContextCompactionResult::Completed {
+                        checkpoint: saved, ..
+                    },
+                ) = (&mut fact.outcome, saved.outcome)
+                {
+                    *checkpoint = saved;
+                }
+                candidate.checkpoint = Some(fact);
+                candidate
+            }
+        };
+        let history = project_context_history(&candidate).unwrap();
+        assert_eq!(context_messages(&candidate, &history), expected, "{cut:?}");
+        assert!(history.last().unwrap().baseline.is_empty());
+    }
+    // Compaction never edits raw history or erases facts used by other plugins.
+    assert_eq!(project_history(&context.events).unwrap().len(), 6);
+}
+
+#[test]
 fn notification_preview_is_bounded_and_utf8_safe() {
     let preview = context_block::preview(&["<&🦀".repeat(8 * 1024).as_str()]);
     assert!(preview.len() <= 16 * 1024);

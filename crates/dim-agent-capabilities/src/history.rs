@@ -353,15 +353,36 @@ fn initial_state(context: &ContextHistory) -> Option<&ProjectionCheckpointState>
         })
 }
 
+/// Compression is a durable fact, not a side effect of selecting a snapshot.
+/// A newer fact in the replay suffix supersedes the snapshot's compression.
+pub(crate) fn context_compaction(context: &ContextHistory) -> Option<&ContextCompactionData> {
+    context
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data)
+                if matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
+            {
+                Some(data)
+            }
+            _ => None,
+        })
+        .or(context.checkpoint.as_ref())
+}
+
 pub fn project_context_history(context: &ContextHistory) -> Result<Vec<HistoryEntry>, String> {
     let mut history = replay(&context.events, initial_state(context))?.history;
     if let Some(ContextCompactionData {
         outcome: ContextCompactionResult::Completed { cursor, .. },
         ..
-    }) = &context.checkpoint
-        && let Some(index) = history.iter().position(|entry| &entry.id == cursor)
+    }) = context_compaction(context)
     {
-        history.drain(..=index);
+        if let Some(index) = history.iter().position(|entry| &entry.id == cursor) {
+            history.drain(..=index);
+        } else if !initial_state(context).is_some_and(|state| state.compacted_through == *cursor) {
+            return Err("Compaction cursor is outside the fixed context history.".into());
+        }
     }
     Ok(history)
 }
@@ -376,7 +397,7 @@ pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> V
                 ..
             },
         ..
-    }) = &context.checkpoint
+    }) = context_compaction(context)
     {
         messages.push(summary_message(summary));
         messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));

@@ -2938,10 +2938,12 @@
       "references": [
         "path HistoryEntry",
         "path HistoryRenderer",
+        "path context_compaction",
         "path context_messages",
         "path summary_message",
         "use crate::history::HistoryEntry",
         "use crate::history::HistoryRenderer",
+        "use crate::history::context_compaction",
         "use crate::history::context_messages",
         "use crate::history::summary_message"
       ]
@@ -3626,6 +3628,7 @@
         "path ContextCompactionData",
         "path ContextCompactionResult::Completed",
         "path EventKind::BranchStart",
+        "path EventKind::ContextCompaction",
         "path EventKind::ContextConfigured",
         "path EventKind::InputConsumed",
         "path EventKind::InputMessage",

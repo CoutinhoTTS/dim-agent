@@ -1,5 +1,7 @@
 use crate::{
-    history::{HistoryEntry, HistoryRenderer, context_messages, summary_message},
+    history::{
+        HistoryEntry, HistoryRenderer, context_compaction, context_messages, summary_message,
+    },
     host::*,
 };
 use dim_agent_runtime::{ContextHistory, Timeline};
@@ -96,22 +98,19 @@ impl ContextPolicy {
                     CompactionInput {
                         history: history.clone(),
                         checkpoint: checkpoint.or_else(|| {
-                            context
-                                .checkpoint
-                                .as_ref()
-                                .and_then(|data| match &data.outcome {
-                                    ContextCompactionResult::Completed {
-                                        cursor,
-                                        summary,
-                                        context_baseline,
-                                        ..
-                                    } => Some(CompactionCheckpoint {
-                                        cursor: cursor.clone(),
-                                        summary: summary.clone(),
-                                        context_baseline: context_baseline.clone().into(),
-                                    }),
-                                    _ => None,
-                                })
+                            context_compaction(&context).and_then(|data| match &data.outcome {
+                                ContextCompactionResult::Completed {
+                                    cursor,
+                                    summary,
+                                    context_baseline,
+                                    ..
+                                } => Some(CompactionCheckpoint {
+                                    cursor: cursor.clone(),
+                                    summary: summary.clone(),
+                                    context_baseline: context_baseline.clone().into(),
+                                }),
+                                _ => None,
+                            })
                         }),
                         estimated_input_tokens: estimate.input,
                         baseline_source: estimate.source,
