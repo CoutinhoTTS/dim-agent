@@ -171,6 +171,8 @@ pub enum Call {
     PromptRefresh(BranchRequest),
     McpCatalog(SelectionScope),
     McpSetEnabled(SetMcpEnabled),
+    McpSave(SaveMcp),
+    McpRemove(RemoveMcp),
     McpDisconnect(McpTarget),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
@@ -218,6 +220,8 @@ impl Call {
                 | Self::SkillsRefresh(_)
                 | Self::McpCatalog(_)
                 | Self::McpSetEnabled(_)
+                | Self::McpSave(_)
+                | Self::McpRemove(_)
                 | Self::McpDisconnect(_)
         )
     }
@@ -230,6 +234,8 @@ impl Call {
                 | Self::SkillsRefresh(_)
                 | Self::McpCatalog(_)
                 | Self::McpSetEnabled(_)
+                | Self::McpSave(_)
+                | Self::McpRemove(_)
                 | Self::McpDisconnect(_)
         )
     }
@@ -261,9 +267,11 @@ pub const LOCAL_EXECUTION_METHODS: [&str; 9] = [
     "session.prompt.refresh",
 ];
 
-pub const MCP_METHODS: [&str; 5] = [
+pub const MCP_METHODS: [&str; 7] = [
     "mcp.catalog",
     "mcp.set_enabled",
+    "mcp.save",
+    "mcp.remove",
     "mcp.disconnect",
     "session.mcp",
     "session.mcp.refresh",
@@ -432,6 +440,30 @@ pub struct SetMcpEnabled {
     pub source: McpScope,
     pub expected_version: String,
     pub enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    pub expected_version: String,
+    pub configuration: crate::settings::McpServerSettings,
+}
+impl std::fmt::Debug for SaveMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveMcp").finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    pub expected_version: String,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -925,6 +957,8 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
             "mcp.catalog" => Call::McpCatalog(params(raw_params)?),
             "mcp.set_enabled" => Call::McpSetEnabled(params(raw_params)?),
+            "mcp.save" => Call::McpSave(params(raw_params)?),
+            "mcp.remove" => Call::McpRemove(params(raw_params)?),
             "mcp.disconnect" => Call::McpDisconnect(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),

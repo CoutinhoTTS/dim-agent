@@ -1406,6 +1406,17 @@
       ]
     },
     {
+      "id": "dim_app_server::settings::native",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::settings",
+      "file": "crates/dim-app-server/src/settings/native.rs",
+      "unexpandedMacros": [
+        "format",
+        "params",
+        "unreachable"
+      ]
+    },
+    {
       "id": "dim_app_server::storage",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -8774,7 +8785,7 @@
       "references": [
         "mod settings",
         "path settings",
-        "path settings::SettingsPlugin::new"
+        "path settings::SettingsPlugin::native"
       ]
     },
     {
@@ -9992,6 +10003,8 @@
       "from": "dim_app_server::connection::mcp",
       "to": "dim_app_server::mcp",
       "references": [
+        "path McpChange::Put",
+        "path McpChange::Remove",
         "path McpChange::SetEnabled",
         "path McpError",
         "path McpError::Cancelled",
@@ -10027,6 +10040,8 @@
         "path Call",
         "path Call::McpCatalog",
         "path Call::McpDisconnect",
+        "path Call::McpRemove",
+        "path Call::McpSave",
         "path Call::McpSetEnabled",
         "path McpCatalogEntry",
         "path McpCatalogResult",
@@ -10960,6 +10975,13 @@
     },
     {
       "from": "dim_app_server::protocol",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path crate::settings::McpServerSettings"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
       "to": "dim_app_server::tree_protocol",
       "references": [
         "path crate::tree_protocol::ApprovalCancelled",
@@ -11512,10 +11534,10 @@
       "references": [
         "path Capability",
         "path KeysOf",
-        "path scoped",
+        "path When",
         "use dim_agent_runtime::Capability",
         "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
+        "use dim_agent_runtime::When"
       ]
     },
     {
@@ -11525,6 +11547,45 @@
         "path StateCell",
         "path StateCell::new",
         "use dim_agent_runtime::StateCell"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings",
+      "to": "dim_app_server::settings::native",
+      "references": [
+        "mod native"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path SqliteStorage",
+        "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::native",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path Result",
+        "path SettingsChange",
+        "path SettingsDocument",
+        "path SettingsDocument::Mcp",
+        "path SettingsDocument::Skills",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsError::Persistence",
+        "path SettingsService",
+        "path SettingsSnapshot",
+        "path SettingsSource",
+        "path SettingsSource::ProjectMcp",
+        "path SettingsSource::Skills",
+        "path SettingsSource::UserMcp",
+        "path decode",
+        "path validate"
       ]
     },
     {

@@ -96,6 +96,28 @@ pub(super) async fn management(rpc: &RpcService, call: Call) -> Result<Reply, Rp
                     .collect(),
             }))
         }
+        Call::McpSave(p) => {
+            let source = source(p.source, project(rpc, p.cwd).await?)?;
+            directory
+                .update(
+                    source,
+                    p.expected_version,
+                    p.id,
+                    McpChange::Put(p.configuration),
+                    cancel,
+                )
+                .await
+                .map_err(error)?;
+            Ok(Reply::empty())
+        }
+        Call::McpRemove(p) => {
+            let source = source(p.source, project(rpc, p.cwd).await?)?;
+            directory
+                .update(source, p.expected_version, p.id, McpChange::Remove, cancel)
+                .await
+                .map_err(error)?;
+            Ok(Reply::empty())
+        }
         Call::McpSetEnabled(p) => {
             let source = source(p.source, project(rpc, p.cwd).await?)?;
             directory

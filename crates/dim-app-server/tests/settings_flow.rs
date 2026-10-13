@@ -14,6 +14,213 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 struct Capture(Arc<OnceLock<(Arc<SettingsService>, Arc<FileStorage>)>>);
+
+#[tokio::test]
+async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
+    use dim_app_server::storage::SqliteStoragePlugin;
+    let home = std::env::temp_dir().join(format!("dim-native-settings-{}", uuid::Uuid::new_v4()));
+    let a = home.join("a");
+    let b = home.join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let home = home.canonicalize().unwrap();
+    let a = a.canonicalize().unwrap();
+    let b = b.canonicalize().unwrap();
+    let database = home.join("settings.sqlite");
+    let legacy = br#"{"mcpServers":{},"marker":"original"}"#;
+    fs::write(home.join("mcp.json"), legacy).unwrap();
+    fs::write(home.join("skills.json"), b"broken").unwrap();
+    fs::write(a.join(".mcp.json"), br#"{"mcpServers":{},"marker":"a"}"#).unwrap();
+    fs::write(b.join(".mcp.json"), br#"{"mcpServers":{},"marker":"b"}"#).unwrap();
+    let cancel = CancellationToken::new();
+    let mut saved = None;
+    for restarted in [false, true] {
+        let root = Ctx::root().unwrap();
+        // Swap runtime indices across process restarts: identity belongs to the
+        // authorized workspace, not an index persisted by a previous process.
+        let roots = if restarted {
+            vec![home.clone(), b.clone(), a.clone()]
+        } else {
+            vec![home.clone(), a.clone(), b.clone()]
+        };
+        let views = [
+            root.plugin(capability_plugin(FileStoragePlugin::new(roots))),
+            root.plugin(capability_plugin(SqliteStoragePlugin::new(
+                database.clone(),
+            ))),
+            root.plugin(capability_plugin(SettingsPlugin::native(0, vec![1, 2]))),
+        ];
+        wait_active(&root, &views, Duration::from_secs(5), &cancel)
+            .await
+            .unwrap();
+        let settings = root.get::<SettingsService>().unwrap();
+        let source_a = SettingsSource::ProjectMcp(settings.project_root(&a).unwrap());
+        let source_b = SettingsSource::ProjectMcp(settings.project_root(&b).unwrap());
+        let current_a = settings.read(source_a, &cancel).await.unwrap();
+        let current_b = settings.read(source_b, &cancel).await.unwrap();
+        assert!(current_a.document != current_b.document);
+        assert!(
+            matches!(&current_b.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "b")
+        );
+        if restarted {
+            let current = settings
+                .read(SettingsSource::UserMcp, &cancel)
+                .await
+                .unwrap();
+            assert!(saved.as_ref() == Some(&current));
+            let skills = root
+                .get::<SkillSettingsHost>()
+                .unwrap()
+                .0
+                .skills(cancel.clone())
+                .await
+                .unwrap();
+            assert_eq!(skills.disabled, ["review".to_owned()].into());
+            assert!(
+                matches!(&current_a.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "a-updated")
+            );
+        } else {
+            assert!(matches!(
+                settings.read(SettingsSource::Skills, &cancel).await,
+                Err(SettingsError::Invalid(_))
+            ));
+            assert_eq!(fs::read(home.join("skills.json")).unwrap(), b"broken");
+            fs::write(
+                home.join("skills.json"),
+                br#"{"disabledSkillIds":[],"custom":"retain"}"#,
+            )
+            .unwrap();
+            let skills = root.get::<SkillSettingsHost>().unwrap().0.clone();
+            let snapshot = skills.skills(cancel.clone()).await.unwrap();
+            skills
+                .clone()
+                .update_skills(snapshot.version, "review".into(), false, cancel.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read(home.join("skills.json")).unwrap(),
+                br#"{"disabledSkillIds":[],"custom":"retain"}"#
+            );
+
+            let fault = rusqlite::Connection::open(&database).unwrap();
+            fault.execute_batch("CREATE TRIGGER fail_import BEFORE INSERT ON settings_documents BEGIN SELECT RAISE(ABORT, 'secret-not-for-diagnostics'); END").unwrap();
+            let error = settings
+                .read(SettingsSource::UserMcp, &cancel)
+                .await
+                .err()
+                .unwrap();
+            assert!(matches!(error, SettingsError::Persistence));
+            assert!(!error.to_string().contains("secret-not-for-diagnostics"));
+            assert_eq!(fs::read(home.join("mcp.json")).unwrap(), legacy);
+            fault.execute_batch("DROP TRIGGER fail_import").unwrap();
+            // Failed imports must not switch authority or seed an empty row.
+            fs::write(
+                home.join("mcp.json"),
+                br#"{"mcpServers":{},"marker":"repaired"}"#,
+            )
+            .unwrap();
+            let current = settings
+                .read(SettingsSource::UserMcp, &cancel)
+                .await
+                .unwrap();
+            assert!(
+                matches!(&current.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "repaired")
+            );
+            let mut changed = settings.subscribe();
+            let mut next = current.document.clone();
+            let SettingsDocument::Mcp(doc) = &mut next else {
+                unreachable!()
+            };
+            doc.extra.insert("marker".into(), json!("native"));
+            fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON settings_documents BEGIN SELECT RAISE(ABORT, 'save failed'); END").unwrap();
+            assert!(matches!(
+                settings
+                    .update(
+                        SettingsSource::UserMcp,
+                        &current.revision,
+                        next.clone(),
+                        &cancel
+                    )
+                    .await,
+                Err(SettingsError::Persistence)
+            ));
+            assert!(
+                settings
+                    .read(SettingsSource::UserMcp, &cancel)
+                    .await
+                    .unwrap()
+                    == current
+            );
+            assert!(!changed.has_changed().unwrap());
+            fault.execute_batch("DROP TRIGGER fail_save").unwrap();
+            let (first, second) = tokio::join!(
+                settings.update(
+                    SettingsSource::UserMcp,
+                    &current.revision,
+                    next.clone(),
+                    &cancel
+                ),
+                settings.update(SettingsSource::UserMcp, &current.revision, next, &cancel),
+            );
+            let winner = match (first, second) {
+                (Ok(snapshot), Err(SettingsError::Conflict))
+                | (Err(SettingsError::Conflict), Ok(snapshot)) => snapshot,
+                _ => panic!("exactly one same-revision update must win"),
+            };
+            assert!(changed.has_changed().unwrap());
+            changed.borrow_and_update();
+            assert!(
+                settings
+                    .read(SettingsSource::UserMcp, &cancel)
+                    .await
+                    .unwrap()
+                    == winner
+            );
+            saved = Some(winner);
+            assert_eq!(
+                fs::read(home.join("mcp.json")).unwrap(),
+                br#"{"mcpServers":{},"marker":"repaired"}"#
+            );
+            // A source that has switched to SQLite no longer rereads legacy data,
+            // even when the old file becomes malformed or disappears.
+            fs::write(home.join("mcp.json"), b"ignored legacy edit").unwrap();
+            fs::remove_file(home.join("skills.json")).unwrap();
+            let mut document_a = current_a.document.clone();
+            let SettingsDocument::Mcp(doc) = &mut document_a else {
+                unreachable!()
+            };
+            doc.extra.insert("marker".into(), json!("a-updated"));
+            settings
+                .update(source_a, &current_a.revision, document_a, &cancel)
+                .await
+                .unwrap();
+            assert!(settings.read(source_b, &cancel).await.unwrap() == current_b);
+            assert!(
+                fs::read_to_string(a.join(".mcp.json"))
+                    .unwrap()
+                    .contains("a-updated")
+            );
+            fs::write(a.join(".mcp.json"), b"broken workspace").unwrap();
+            assert!(matches!(
+                settings.read(source_a, &cancel).await,
+                Err(SettingsError::Invalid(_))
+            ));
+            fs::write(
+                a.join(".mcp.json"),
+                br#"{"mcpServers":{},"marker":"a-updated"}"#,
+            )
+            .unwrap();
+            drop(fault);
+        }
+        root.shutdown().await.unwrap();
+        assert!(matches!(
+            settings.read(SettingsSource::UserMcp, &cancel).await,
+            Err(SettingsError::Closed)
+        ));
+    }
+    fs::remove_dir_all(home).unwrap();
+}
+
 impl TypedPlugin for Capture {
     type Deps = (Arc<SettingsService>, Arc<FileStorage>);
     fn name(&self) -> &str {

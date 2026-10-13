@@ -100,6 +100,22 @@ external effects; runtime convergence can precede a failed save. Notifications t
 refresh, not an assumption of durable success. Stable MCP identity survives process restarts;
 connections and leases remain generation-owned.
 
+The App Server uses source-first persistence: validate and CAS the explicitly named source, then
+publish its composed intent to the existing root loader. A host publisher outside plugin
+apply/dispose serializes publication and retains the immutable assembly layer. Configure that
+loader with no editable layer; do not switch its single editable target between workspaces or
+use its pending-edit queue as a multi-source transaction log. Failed persistence cannot change
+runtime intent; failed application retains persisted intent for an explicit refresh. A mutation
+reply certifies persistence, not loader application or business settlement. Generic loader rows
+reference private revision-bound configuration rather than embedding MCP secrets. Management
+services and leases do not own or shut down these configured rows.
+
+User MCP and Skill documents have one SQLite authority after a successful lazy import. Store
+the document and import marker atomically, leave originals intact, and permit retry after failed
+import. Workspace sources keep file authority and file CAS. The standalone Settings plugin can
+still use its file backend without SQLite. The native database format follows the existing strict
+compatibility policy; importing legacy settings files does not authorize migrating old databases.
+
 The dependency-loss refinement is Proposed for issue #6: distinguish loader state, cleanup
 completion and successful business settlement. Pending can occur before a plugin ever becomes
 active, and rutis can publish Pending after reporting cleanup errors. Capabilities must own and
@@ -134,7 +150,7 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots; native storage v12 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
-| Scoped persisted loader configuration | Not implemented | Scope isolation, save failure, trust limits, secret-free notifications |
+| Scoped persisted loader configuration | Partial: user MCP/Skills source authority and import implemented in native storage v13; composed loader publication not implemented | Scope isolation, save failure, trust limits, secret-free notifications |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
 | Loader-owned MCP instances | Not implemented | Scoped stable identities; generation drain survives reload and restart |
 

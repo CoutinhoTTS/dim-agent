@@ -1,14 +1,18 @@
 # Rust 会话存储格式
 
-当前格式为 v12。v12 从 completed 压缩事实移除内嵌 checkpoint，删除事件行 checkpoint 列及旧索引，并新增独立的可丢弃 `timeline_snapshots` 表。严格拒绝 v11 及更旧数据库，保留原文件，不自动迁移。v11 的 managed Provider `kind: "managed"` 和归一化模型/协议保持不变；managed token 只存在所属 OAuth 文件记录，不进入 SQLite。静态秘密只存在 Provider 记录，不进入目录投影、Session 或 Timeline。开发验证使用新的数据库路径。存储版本与 RPC 协议版本独立。
+当前格式为 v13。v13 新增用户配置来源表 `settings_documents`；v12 的独立可丢弃恢复快照 `timeline_snapshots` 保持不变。严格拒绝 v12 及更旧数据库，保留原文件，不自动迁移。managed token 只存在所属 OAuth 文件记录，不进入 SQLite。静态 Provider 凭据及 MCP 私有配置只能由所属服务读取，不进入目录投影、Session 或 Timeline。开发验证使用新的数据库路径。存储版本与 RPC 协议版本独立。
 
-## 当前 v12 表结构
+## 当前 v13 表结构
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | 否 | — | 主键，`CHECK(version = 12)`；数据库恰有一行是启动门禁 |
+| `agent_store_format.version` | `INTEGER` | 否 | — | 主键，`CHECK(version = 13)`；数据库恰有一行是启动门禁 |
+| `settings_documents.source` | `TEXT` | 否 | — | 主键；当前为 `user/mcp` 或 `user/skills`；工作区文件不镜像进此表 |
+| `settings_documents.version` | `INTEGER` | 否 | — | 正整数，来源独立的 CAS 修订号；RPC token 为 `native:<source>:<version>` |
+| `settings_documents.document` | `TEXT` | 否 | — | 对应 `McpSettings` 或 `SkillSettings` JSON，保留未知扩展字段；私有数据，不直接序列化到管理面 |
+| `settings_documents.imported_revision` | `TEXT` | 否 | — | 首次导入原文件的 SHA-256，原文件缺失为 `missing`；仅供来源追溯 |
 | `provider_imports.kind` | `TEXT` | 否 | — | 联合主键；`provider` 或 `selection` |
 | `provider_imports.id` | `TEXT` | 否 | — | 联合主键；来源业务 ID，删除 Provider 不删除标记 |
 | `provider_imports.source_schema` | `TEXT` | 否 | — | 已检查的来源两表结构 SHA-256 |
@@ -55,6 +59,12 @@
 v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、before 轨迹和检查点位置都是 JSON 内关系，必须在存储读取边界校验。`timeline_content` 的地址是小写十六进制 `SHA-256(kind + NUL + body)`，其中 `body` 是写入的原始 JSON 字符串字节；同一内容只在同一 Session 内共享。创建 Session、owner 和 `main` 分支是同一事务；写入轮把事件、首次出现的内容、由 `branch/create` 生成的分支目录及分支 head 放在同一事务，提交后才发布。
 
 ## 持久化 JSON 类型
+
+### 配置来源与单写者
+
+App Server 的用户 MCP 与 Skill 设置首次成功读取时导入 SQLite。导入内容和权威切换标记是同一行、同一事务；并发导入只采纳一个成功版本。源文件损坏或数据库写入失败时不创建行、不回退到空配置，保留原文件供修复后重试。导入成功后，更新只写 SQLite，旧文件不删除、不写回，也不再作为运行配置读取。工作区 `.mcp.json` 保持文件权威及文件内容 CAS；不从合成目录反写用户或工作区配置。独立宿主可显式选择原文件后端。
+
+来源写入成功才发送不含配置正文的修订通知；通知不代表 loader 已采用配置或旧代工作已结算。当前变更仅完成来源持久化，loader 配置发布及 MCP 实例管理另行接入。已采用的模型请求保留原来的工具版本及连接代际。
 
 ### 目录与内容
 
@@ -161,13 +171,14 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v12）
+## 完整记录示例（v13）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面两个 hash 可以按上文算法复核。
 
 ```json
 {
-  "agent_store_format": [{"version": 12}],
+  "agent_store_format": [{"version": 13}],
+  "settings_documents": [],
   "providers": [],
   "provider_selections": [],
   "provider_imports": [],

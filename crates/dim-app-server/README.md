@@ -23,12 +23,36 @@ cargo run --locked -p dim-app-server -- \
 ```
 
 Configured execution requires `--home` or `--database`; the CLI supplies `--home` automatically.
-Its user MCP and Skill settings and shell preference live under the native home (or next to the
-explicit database). The product profile retains its existing product-home settings location.
+Its legacy user settings and shell preference live under the native home (or next to the
+explicit database). The product profile uses product-home for these files. User MCP and Skill
+settings are imported once into the native database on their first successful read; original
+files remain intact but are no longer read or written after import. Invalid files or failed
+imports retain file authority and can be repaired before retrying. Shell preferences remain files.
 Workspace `.mcp.json` files remain independent sources. A missing account plugin does not disable
 these public capabilities. Protocol v3 advertises their management methods on local connections.
 Configured model changes validate against the supplied catalog and adopt that model's generation
 settings; model preferences requiring capability declarations are rejected rather than guessed.
+
+### MCP configuration management
+
+On protected local protocol-v3 connections, `mcp.catalog({cwd?})` returns the merged catalog,
+`userRevision` and optional `projectRevision`, without commands, URLs, credentials or environment
+values. Edits target `source: "user" | "project"`, an `id`, and that source's `expectedVersion`.
+Project edits require an authorized workspace `cwd`; they write `.mcp.json`, not the user source.
+
+- `mcp.save` additionally takes `configuration`: a complete stdio, HTTP or SSE server definition
+  in the existing `mcpServers` format. It creates or replaces that source's entry, not a merged one.
+- `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.
+- `mcp.set_enabled` additionally takes `enabled` and preserves the rest of the selected entry.
+- `mcp.disconnect` takes `source`, `id` and optional `cwd`, without a revision; it does not edit
+  persisted intent.
+
+Successful configuration mutations return `{}` after persistence, not after connection/tool
+adoption. Read the catalog for current revisions and `session.mcp` for runtime state. A conflict
+requires rereading the source; interruption may follow an already committed write, so never retry
+blindly. Use these methods rather than editing imported user files. `skills.set_enabled` likewise
+persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
+stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
 
 `--mock-model` selects the explicit deterministic test profile. It uses mock model/tool hosts. Product, configured and mock daemons identify themselves in `hello.daemonProfile`:
 
@@ -40,7 +64,7 @@ settings; model preferences requiring capability declarations are rejected rathe
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. SQLite format v12 includes normalized managed-provider records and optional recovery snapshots separate from Timeline facts. Unsupported formats are rejected and preserved; there is no automatic migration. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
+`--home` and `--database` are mutually exclusive. SQLite format v13 includes user settings, normalized managed-provider records and optional recovery snapshots separate from Timeline facts. Unsupported formats, including v12, are rejected and preserved; there is no automatic database migration. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
 Unix endpoint directories must be private (0700), sockets use 0600, and cleanup removes only the inode acquired by this listener. Named pipe ownership and local identity checks remain in the transport. Ordinary client disconnect detaches; it does not delete a session. See the [public architecture](../../docs/architecture/README.md).
 

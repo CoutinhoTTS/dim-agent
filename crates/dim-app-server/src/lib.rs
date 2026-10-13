@@ -521,7 +521,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         ));
     }
     if let Some(home_root) = execution_root.or(product_root) {
-        let settings = settings::SettingsPlugin::new(home_root, vec![]);
+        let settings = settings::SettingsPlugin::native(home_root, vec![]);
         rows.push(register_capability(&mut builtins, move || settings.clone()));
     }
     if let Some(home_root) = execution_root {

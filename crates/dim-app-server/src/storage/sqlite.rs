@@ -11,7 +11,11 @@ use std::{
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 12))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 13))",
+    ),
+    (
+        "settings_documents",
+        "CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL)",
     ),
     (
         "provider_imports",
@@ -154,7 +158,7 @@ impl SqliteStorage {
             for (_, sql) in SCHEMA {
                 tx.execute_batch(sql).map_err(storage)?;
             }
-            tx.execute("INSERT INTO agent_store_format VALUES (12)", [])
+            tx.execute("INSERT INTO agent_store_format VALUES (13)", [])
                 .map_err(storage)?;
         } else {
             if actual.len() != SCHEMA.len()
@@ -176,7 +180,7 @@ impl SqliteStorage {
                 .map_err(storage)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(storage)?;
-            if versions != [12] {
+            if versions != [13] {
                 return Err(storage(format!(
                     "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
                     path.display()

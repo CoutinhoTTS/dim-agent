@@ -238,6 +238,8 @@ impl Connection {
             call,
             Call::McpCatalog(_)
                 | Call::McpSetEnabled(_)
+                | Call::McpSave(_)
+                | Call::McpRemove(_)
                 | Call::McpDisconnect(_)
                 | Call::SessionMcp(_)
                 | Call::McpRefresh(_)
@@ -393,6 +395,8 @@ impl Connection {
                     | Call::SkillsRefresh(_)
                     | Call::McpCatalog(_)
                     | Call::McpSetEnabled(_)
+                    | Call::McpSave(_)
+                    | Call::McpRemove(_)
                     | Call::McpDisconnect(_)
             ) {
                 return Some(tokio::select! {
@@ -987,7 +991,11 @@ impl Connection {
     async fn management(&self, rpc: &RpcService, call: Call) -> Result<Reply, RpcError> {
         if matches!(
             call,
-            Call::McpCatalog(_) | Call::McpSetEnabled(_) | Call::McpDisconnect(_)
+            Call::McpCatalog(_)
+                | Call::McpSetEnabled(_)
+                | Call::McpSave(_)
+                | Call::McpRemove(_)
+                | Call::McpDisconnect(_)
         ) {
             return mcp::management(rpc, call).await;
         }

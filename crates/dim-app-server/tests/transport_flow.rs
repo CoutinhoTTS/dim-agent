@@ -1972,6 +1972,29 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         assert_ok(&catalog);
         assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
         assert!(!catalog.to_string().contains("never-run-this-test-command"));
+        let expected = catalog["result"]["userRevision"].clone();
+        if restart {
+            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http"}]));
+            assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"managed-fixture","expectedVersion":expected})).await);
+            let empty = client.rpc("mcp.catalog", json!({})).await;
+            assert_ok(&empty);
+            assert_eq!(empty["result"]["servers"], json!([]));
+        } else {
+            let invalid = client.rpc("mcp.save", json!({"source":"user","id":"invalid","expectedVersion":expected,"configuration":{"type":"http","url":"","headers":{"X-Test":"private-fixture-value"}}})).await;
+            assert_eq!(invalid["error"]["data"]["appError"], "mcp_invalid_config");
+            assert!(!invalid.to_string().contains("private-fixture-value"));
+            assert_ok(&client.rpc("mcp.save", json!({"source":"user","id":"managed-fixture","expectedVersion":expected,"configuration":{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Test":"private-fixture-value"},"enabled":false}})).await);
+            let stale = client.rpc("mcp.remove", json!({"source":"user","id":"disabled-fixture","expectedVersion":expected})).await;
+            assert_eq!(stale["error"]["data"]["appError"], "mcp_settings_conflict");
+            let saved = client.rpc("mcp.catalog", json!({})).await;
+            assert_ok(&saved);
+            assert_eq!(saved["result"]["servers"].as_array().unwrap().len(), 2);
+            assert!(!saved.to_string().contains("private-fixture-value"));
+            assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"disabled-fixture","expectedVersion":saved["result"]["userRevision"]})).await);
+            // Once imported, neither malformed legacy MCP nor Skill bytes regain authority.
+            std::fs::write(home.join("mcp.json"), "not json").unwrap();
+            std::fs::write(home.join("skills.json"), "not json").unwrap();
+        }
         let created = client.rpc("session.create", json!({"cwd":work})).await;
         assert_ok(&created);
         let sid = created["result"]["sessionId"].clone();

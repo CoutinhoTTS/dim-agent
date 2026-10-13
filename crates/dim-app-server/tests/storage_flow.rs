@@ -112,6 +112,7 @@ async fn documented_native_records_restore_their_checkpoint_and_child_branch() {
         .unwrap();
     for table in [
         "agent_store_format",
+        "settings_documents",
         "providers",
         "provider_selections",
         "provider_imports",
