@@ -26,6 +26,12 @@ enum Reply {
     Panic,
     Wait(Arc<Notify>, PromptEntry),
     IgnoreCancel(Arc<Notify>, Arc<Notify>, PromptEntry),
+    Startup(
+        Arc<Notify>,
+        CancellationToken,
+        Option<Arc<Notify>>,
+        PromptEntry,
+    ),
 }
 
 struct Prompts(Mutex<BTreeMap<String, Reply>>);
@@ -53,6 +59,17 @@ impl LoadPrompt for Prompts {
                     started.notify_one();
                     release.notified().await;
                     Ok(Some(entry))
+                }
+                Some(Reply::Startup(started, cancelled, release, entry)) => {
+                    started.notify_one();
+                    cancel.cancelled().await;
+                    cancelled.cancel();
+                    if let Some(release) = release {
+                        release.notified().await;
+                        Ok(Some(entry))
+                    } else {
+                        Err(HostError::Cancelled("startup cancelled".into()))
+                    }
                 }
                 None => Ok(None),
             }
@@ -1007,14 +1024,385 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
         Ok(_) => panic!("initial load failure unexpectedly created a session"),
         Err(error) => error,
     };
-    // The load fails while the root's `branch/start` dispatches: the
+    // The opening receipt fails after the root's `branch/start` dispatches: the
     // Session is not created, and the original cause is reported first.
-    let AgentError::Multiple(errors) = &error else {
-        panic!("expected the original initialization error: {error:?}");
+    let cause = match &error {
+        AgentError::Multiple(errors) => &errors[0],
+        cause => cause,
     };
     assert!(
-        matches!(&errors[0], AgentError::InvalidInput(message) if message == "prompt source rules failed: load failed")
+        matches!(cause, AgentError::InvalidInput(message) if message == "prompt source rules failed: load failed")
     );
+}
+
+struct OpeningObserved(BranchScope, Arc<Notify>, CancellationToken);
+impl TypedPlugin for OpeningObserved {
+    type Deps = InBranch<Dispatcher>;
+    fn name(&self) -> &str {
+        "OpeningObserved"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        InBranch(dispatcher): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let observed = self.1.clone();
+            dispatcher.subscribe(
+                ctx,
+                "OpeningObserved",
+                &["branch/start", "branch/resume"],
+                move |_| {
+                    observed.notify_one();
+                    Box::pin(async { Ok(()) })
+                },
+            )?;
+            // A close must signal the host independently of dispatch drain
+            // and capability unload, even if another handler is waiting.
+            let cancelled = self.2.clone();
+            dispatcher.subscribe(ctx, "StartupDrain", &["stop/interrupt"], move |_| {
+                let cancelled = cancelled.clone();
+                Box::pin(async move {
+                    cancelled.cancelled().await;
+                    Ok(())
+                })
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for OpeningObserved {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
+struct OpeningFailure(BranchScope);
+impl TypedPlugin for OpeningFailure {
+    type Deps = (InBranch<Dispatcher>, InBranch<BranchOpening>);
+    fn name(&self) -> &str {
+        "OpeningFailure"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (InBranch(dispatcher), InBranch(opening)): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            dispatcher.subscribe(ctx, "OpeningFailure", &["branch/start"], move |_| {
+                let opening = opening.clone();
+                Box::pin(async move {
+                    // A later failure must not wait behind an earlier receipt.
+                    opening.register(Box::pin(std::future::pending()))?;
+                    opening.register(Box::pin(async {
+                        Err(AgentError::InvalidInput("opening rejected".into()))
+                    }))?;
+                    Ok(())
+                })
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for OpeningFailure {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
+#[tokio::test]
+async fn opening_failure_is_not_hidden_by_an_earlier_pending_receipt() {
+    let mut builder = builder(Arc::new(Prompts(Mutex::new(BTreeMap::new()))));
+    builder.timeline_plugin(|scope| OpeningFailure(*scope));
+    let agent = builder.build();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        agent.create_session(SessionConfig::default()),
+    )
+    .await
+    .expect("opening failure must be prompt");
+    assert!(
+        matches!(result, Err(AgentError::InvalidInput(message)) if message == "opening rejected")
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host() {
+    for restore in [false, true] {
+        for timeout in [false, true] {
+            for cooperative in [false, true] {
+                let started = Arc::new(Notify::new());
+                let cancelled = CancellationToken::new();
+                let release = Arc::new(Notify::new());
+                let observed = Arc::new(Notify::new());
+                let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([(
+                    "rules".into(),
+                    Reply::Startup(
+                        started.clone(),
+                        cancelled.clone(),
+                        (!cooperative).then(|| release.clone()),
+                        entry("rules", "late", "must not publish"),
+                    ),
+                )]))));
+                let store = Arc::new(MemoryTimelineStore::default());
+                if restore {
+                    store
+                        .create_session("startup", &SessionConfig::default())
+                        .await
+                        .unwrap();
+                }
+                let mut builder = builder_with_initial(
+                    host,
+                    ConfigureUpdate {
+                        sources: vec![PromptSourceTarget {
+                            source: "rules".into(),
+                            scope: PromptScope::Branch {
+                                timeline: "main".into(),
+                            },
+                        }],
+                        model: Some(configuration("late-model")),
+                    },
+                );
+                builder.timeline_store(store.clone());
+                builder.startup_timeout(if timeout {
+                    Duration::from_millis(300)
+                } else {
+                    Duration::from_secs(5)
+                });
+                let signal = observed.clone();
+                let cancel_signal = cancelled.clone();
+                builder.timeline_plugin(move |scope| {
+                    OpeningObserved(*scope, signal.clone(), cancel_signal.clone())
+                });
+                let agent = builder.build();
+                let creating = agent.clone();
+                let mut creation = tokio::spawn(async move {
+                    if restore {
+                        creating.restore_session("startup".into()).await
+                    } else {
+                        creating.create_session(SessionConfig::default()).await
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(1), started.notified())
+                    .await
+                    .unwrap();
+                let dispatched =
+                    tokio::time::timeout(Duration::from_millis(100), observed.notified()).await;
+                // Release even on the old implementation so a red run is bounded.
+                if dispatched.is_err() {
+                    release.notify_one();
+                }
+                assert!(dispatched.is_ok(), "blocked host blocked opening dispatch");
+                assert!(
+                    !creation.is_finished(),
+                    "published before initial prompt was ready"
+                );
+                let closing = if timeout {
+                    None
+                } else {
+                    let agent = agent.clone();
+                    Some(tokio::spawn(async move { agent.close().await }))
+                };
+                tokio::time::timeout(Duration::from_secs(1), cancelled.cancelled())
+                    .await
+                    .expect("host must see cancellation before unload");
+                if !cooperative {
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(30), &mut creation)
+                            .await
+                            .is_err(),
+                        "startup dropped a live host"
+                    );
+                    if let Some(closing) = &closing {
+                        assert!(!closing.is_finished());
+                    }
+                    release.notify_one();
+                }
+                let result = tokio::time::timeout(Duration::from_secs(1), creation)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let error = match result {
+                    Ok(_) => panic!("cancelled startup published a session"),
+                    Err(error) => error,
+                };
+                let cause = match &error {
+                    AgentError::Multiple(errors) => &errors[0],
+                    cause => cause,
+                };
+                if timeout {
+                    assert!(
+                        matches!(cause, AgentError::Build(message) if message.contains("timed out")),
+                        "{error:?}"
+                    );
+                } else {
+                    assert!(matches!(cause, AgentError::Cancelled(_)), "{error:?}");
+                }
+                if let Some(closing) = closing {
+                    tokio::time::timeout(Duration::from_secs(1), closing)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                } else {
+                    agent.close().await.unwrap();
+                }
+                if restore {
+                    let key = TimelineKey {
+                        session_id: "startup".into(),
+                        branch_id: "main".into(),
+                    };
+                    let records = store
+                        .read(&key, 1..=store.head(&key).await.unwrap())
+                        .await
+                        .unwrap();
+                    assert!(
+                        !records.iter().any(|record| matches!(
+                            record.event.kind,
+                            EventKind::ContextConfigured(_)
+                        )),
+                        "cancelled initial result published"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn child_opening_deadline_or_close_joins_before_recording_failure() {
+    for timeout in [false, true] {
+        let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([(
+            "rules".into(),
+            Reply::Entry(entry("rules", "1", "ready")),
+        )]))));
+        let store = Arc::new(MemoryTimelineStore::default());
+        let mut builder = builder_with_initial(
+            host.clone(),
+            ConfigureUpdate {
+                sources: vec![PromptSourceTarget {
+                    source: "rules".into(),
+                    scope: PromptScope::Branch {
+                        timeline: "main".into(),
+                    },
+                }],
+                model: Some(configuration("initial")),
+            },
+        );
+        builder.timeline_store(store.clone());
+        builder.startup_timeout(if timeout {
+            Duration::from_millis(300)
+        } else {
+            Duration::from_secs(5)
+        });
+        let agent = builder.build();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let started = Arc::new(Notify::new());
+        let cancelled = CancellationToken::new();
+        let release = Arc::new(Notify::new());
+        host.0.lock().unwrap().insert(
+            "rules".into(),
+            Reply::Startup(
+                started.clone(),
+                cancelled.clone(),
+                Some(release.clone()),
+                entry("rules", "late", "late"),
+            ),
+        );
+        let caller = session.clone();
+        let at = session.sequence("main").unwrap();
+        let mut creation = tokio::spawn(async move {
+            caller
+                .branch(
+                    "main".into(),
+                    at,
+                    BranchOptions {
+                        prompt: "first input must not run".into(),
+                        source: BranchSource::Host {
+                            operation_id: "startup-child".into(),
+                        },
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
+        let closing = if timeout {
+            None
+        } else {
+            let session = session.clone();
+            Some(tokio::spawn(async move { session.close().await }))
+        };
+        tokio::time::timeout(Duration::from_secs(1), cancelled.cancelled())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut creation)
+                .await
+                .is_err()
+        );
+        if let Some(closing) = &closing {
+            assert!(!closing.is_finished());
+        }
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(1), creation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        if let Some(closing) = closing {
+            tokio::time::timeout(Duration::from_secs(1), closing)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        let key = TimelineKey {
+            session_id: session.id().into(),
+            branch_id: "main".into(),
+        };
+        let records = store
+            .read(&key, 1..=store.head(&key).await.unwrap())
+            .await
+            .unwrap();
+        let child = records
+            .iter()
+            .find_map(|record| match &record.event.kind {
+                EventKind::BranchCreate(data) => Some(data.branch.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.event.kind, EventKind::BranchCreateFailed(_)))
+                .count(),
+            1
+        );
+        let key = TimelineKey {
+            branch_id: child,
+            ..key
+        };
+        let child = store
+            .read(&key, 1..=store.head(&key).await.unwrap())
+            .await
+            .unwrap();
+        assert!(
+            child
+                .iter()
+                .any(|record| matches!(record.event.kind, EventKind::BranchStart(_)))
+        );
+        assert!(!child.iter().any(|record| matches!(
+            record.event.kind,
+            EventKind::InputMessage(_) | EventKind::ContextConfigured(_)
+        )));
+        agent.close().await.unwrap();
+    }
 }
 
 #[tokio::test]

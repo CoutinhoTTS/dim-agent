@@ -31,6 +31,7 @@ pub struct TimelineContext {
     timeline: Timeline,
     dispatcher: Dispatcher,
     lifecycle: BranchLifecycle,
+    opening: Arc<BranchOpening>,
     /// Signals a possible change of [`BranchStatus`]; the status itself is
     /// read from its owners on query.
     changed: watch::Sender<()>,
@@ -49,7 +50,67 @@ const LOOP_RETURN_POLL: std::time::Duration = std::time::Duration::from_millis(1
 /// The latest stop and the sequence of its interrupt (0 until written).
 type StopOperation = (Arc<CloseOnce<u64>>, Arc<AtomicU64>);
 
+/// Receipts registered synchronously by the unique branch opening dispatch.
+/// Work remains owned and joined by the capability, not by this collector.
+pub struct BranchOpening(Mutex<Option<Vec<BoxFuture<'static, Result<()>>>>>);
+impl BranchService for BranchOpening {}
+impl BranchOpening {
+    pub fn register(&self, receipt: BoxFuture<'static, Result<()>>) -> Result<()> {
+        let mut receipts = self.0.lock().unwrap();
+        receipts
+            .as_mut()
+            .ok_or_else(|| AgentError::Closed("branch opening".into()))?
+            .push(receipt);
+        Ok(())
+    }
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(Some(Vec::new())))
+    }
+    async fn finish(&self) -> Result<()> {
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+        let receipts = self.0.lock().unwrap().take().unwrap_or_default();
+        let mut pending: FuturesUnordered<_> = receipts.into_iter().collect();
+        while let Some(result) = pending.next().await {
+            result?;
+        }
+        Ok(())
+    }
+}
+
 impl TimelineContext {
+    /// Called after opening dispatch: seal registration, await capability work,
+    /// then dispatch a fixed committed fence before the first input.
+    pub async fn finish_opening(&self) -> Result<()> {
+        let mut dispatch = self.dispatcher.watch();
+        let receipts = self.opening.finish();
+        tokio::pin!(receipts);
+        loop {
+            if let Some(error) = dispatch.borrow_and_update().failure.clone() {
+                return Err(error);
+            }
+            tokio::select! {
+                result = &mut receipts => { result?; break; }
+                changed = dispatch.changed() => {
+                    changed.map_err(|_| AgentError::Closed("branch dispatch".into()))?;
+                }
+            }
+        }
+        let through = self.timeline.committed();
+        loop {
+            let state = dispatch.borrow_and_update().clone();
+            if let Some(error) = state.failure {
+                return Err(error);
+            }
+            if state.sequence >= through {
+                return Ok(());
+            }
+            dispatch
+                .changed()
+                .await
+                .map_err(|_| AgentError::Closed("branch dispatch".into()))?;
+        }
+    }
+
     /// Starts dispatch once every capability of the subtree is Active.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
@@ -61,6 +122,7 @@ impl TimelineContext {
         timeline: Timeline,
         dispatcher: Dispatcher,
         lifecycle: BranchLifecycle,
+        opening: Arc<BranchOpening>,
         faults: FaultReporter,
     ) -> Arc<Self> {
         let this = Arc::new(Self {
@@ -72,6 +134,7 @@ impl TimelineContext {
             timeline,
             dispatcher,
             lifecycle,
+            opening,
             changed: watch::channel(()).0,
             failure: Mutex::new(None),
             stop: CancellationToken::new(),

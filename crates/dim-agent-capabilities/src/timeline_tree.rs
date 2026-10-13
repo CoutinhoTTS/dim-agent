@@ -210,6 +210,7 @@ impl TimelineTree {
         });
         let owner = self.weak.upgrade().expect("tree owns branch creation");
         self.builds.spawn(async move {
+            let deadline = tokio::time::Instant::now() + owner.factory.startup_timeout();
             let mut acquired = None;
             let mut cleanup_failure = None;
             // The child wrote `branch/start` and its first input: by its own
@@ -223,16 +224,23 @@ impl TimelineTree {
                         _ = owner.cancel.cancelled() => {
                             return Err(AgentError::Cancelled("branch creation".into()));
                         }
+                        _ = tokio::time::sleep_until(deadline) => {
+                            return Err(AgentError::Build("branch opening timed out".into()));
+                        }
                     }
                 }
                 if let Some((timeline, through)) = validate {
-                    let context = timeline.context(through).await?;
+                    let context = tokio::select! {
+                        result = timeline.context(through) => result?,
+                        _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                        _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
+                    };
                     crate::history::validate_context_boundary(&context)
                         .map_err(AgentError::InvalidInput)?;
                 }
                 let built = owner
                     .factory
-                    .build(id.clone(), ancestors, owner.cancel.child_token())
+                    .build_until(id.clone(), ancestors, owner.cancel.child_token(), deadline)
                     .await;
                 let context = match built {
                     Err(error) => {
@@ -277,7 +285,15 @@ impl TimelineTree {
                         _ = owner.cancel.cancelled() => {
                             return Err(AgentError::Cancelled("branch creation".into()));
                         }
+                        _ = tokio::time::sleep_until(deadline) => {
+                            return Err(AgentError::Build("branch opening timed out".into()));
+                        }
                     }
+                }
+                tokio::select! {
+                    result = context.finish_opening() => result?,
+                    _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                    _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                 }
                 if let Opening::Start {
                     first: Some(first), ..

@@ -26,6 +26,8 @@ Hosts register process modules before awaiting `AgentBuilder::install`. Scoped m
 
 One startup deadline covers loader readiness, reconcile and process activation. Scoped dependencies use `InSession`, `InBranch`, gates and `Contributions`; the unused `Named` wrapper is not part of the API.
 
+Session and child-branch opening also have a single startup budget. Opening handlers register `BranchOpening` receipts and return without awaiting host I/O on the Dispatcher. Each capability owns and joins its work; the tree waits for the receipts and their committed dispatch fence before publishing readiness or the first child input. Closing signals initial prompt loading before dispatch drains. Deadlines request cancellation, not abandonment: a non-cooperative host still has to settle before cleanup completes.
+
 The public host exposes provider/account operations and leases request-local credentials. It does not implement a particular account realm, PKCE flow, token exchange, refresh policy, private catalog projection or provider-specific error classification. Those behaviors belong to the separately supplied plugin. Refresh tokens never cross the public bridge. Terminal/history projection excludes credentials, authorization codes and PKCE state.
 
 Timeline and Dispatcher deliver both business events and interrupts. Capabilities cancel their own work and emit terminal outcomes after cleanup. A stopped turn must settle before the CLI accepts another prompt. Client detach does not delete or close a persisted session. Storage rejects incompatible data explicitly; see the [storage format](../design/appserver/native-storage-format.md).

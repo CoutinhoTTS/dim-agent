@@ -849,6 +849,7 @@ struct LoadedBranch {
     timeline: Timeline,
     dispatcher: Dispatcher,
     lifecycle: BranchLifecycle,
+    opening: Arc<BranchOpening>,
 }
 struct BranchScopePlugin(Arc<BranchAssembly>, BranchScope);
 impl TypedPlugin for BranchScopePlugin {
@@ -891,6 +892,8 @@ impl TypedPlugin for BranchScopePlugin {
             ctx.provide_as(scope.key::<Diagnostics>(), Arc::new(diagnostics.clone()))?;
             let lifecycle = BranchLifecycle::new();
             ctx.provide_as(scope.key::<BranchLifecycle>(), Arc::new(lifecycle.clone()))?;
+            let opening = Arc::new(BranchOpening::new());
+            ctx.provide_as(scope.key::<BranchOpening>(), opening.clone())?;
             ctx.provide_as(
                 scope.key::<TimelineIdentity>(),
                 Arc::new(TimelineIdentity {
@@ -908,6 +911,7 @@ impl TypedPlugin for BranchScopePlugin {
                 timeline,
                 dispatcher,
                 lifecycle,
+                opening,
             }));
             Ok(Effect::Done)
         })
@@ -918,11 +922,34 @@ impl Capability for BranchScopePlugin {
 }
 
 impl TimelineFactory {
+    pub fn startup_timeout(&self) -> Duration {
+        self.0
+            .upgrade()
+            .map(|parent| parent.assembly.startup_timeout)
+            .unwrap_or_default()
+    }
+
     pub fn build(
         &self,
         id: String,
         ancestors: Vec<(String, u64)>,
         cancel: CancellationToken,
+    ) -> BoxFuture<'_, std::result::Result<Arc<TimelineContext>, TimelineBuildError>> {
+        self.build_until(
+            id,
+            ancestors,
+            cancel,
+            tokio::time::Instant::now() + self.startup_timeout(),
+        )
+    }
+
+    /// Uses the tree's complete opening budget, including parent readiness.
+    pub fn build_until(
+        &self,
+        id: String,
+        ancestors: Vec<(String, u64)>,
+        cancel: CancellationToken,
+        deadline: tokio::time::Instant,
     ) -> BoxFuture<'_, std::result::Result<Arc<TimelineContext>, TimelineBuildError>> {
         Box::pin(async move {
             let parent = self
@@ -937,7 +964,11 @@ impl TimelineFactory {
                 session_id: parent.id.clone(),
                 branch_id: id.clone(),
             };
-            let sequence = parent.assembly.store.head(&key).await?;
+            let sequence = tokio::select! {
+                result = parent.assembly.store.head(&key) => result?,
+                _ = cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into()).into()),
+                _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into()).into()),
+            };
             let owner = Arc::new(BranchAssembly {
                 session: parent.clone(),
                 instance: Mutex::new(None),
@@ -953,7 +984,7 @@ impl TimelineFactory {
                     &session.ctx,
                     BRANCH_GROUP.into(),
                     move |create| create.with(value),
-                    parent.assembly.startup_timeout,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
                     &cancel,
                     {
                         let owner = owner.clone();
@@ -979,6 +1010,7 @@ impl TimelineFactory {
                         timeline: current.timeline.clone(),
                         dispatcher: current.dispatcher.clone(),
                         lifecycle: current.lifecycle.clone(),
+                        opening: current.opening.clone(),
                     });
                     *loaded = Some(branch.clone());
                     branch
@@ -1006,6 +1038,7 @@ impl TimelineFactory {
                     branch.timeline.clone(),
                     branch.dispatcher.clone(),
                     branch.lifecycle.clone(),
+                    branch.opening.clone(),
                     parent.faults.clone(),
                 ))
             })
@@ -1236,6 +1269,7 @@ pub(crate) async fn build_session(
         loaded: Mutex::new(None),
     });
     let startup_timeout = owner.assembly.startup_timeout;
+    let deadline = tokio::time::Instant::now() + startup_timeout;
     let instance = |owner: &Arc<SessionAssembly>| {
         let owner = owner.clone();
         move || *owner.instance.lock().unwrap()
@@ -1274,10 +1308,29 @@ pub(crate) async fn build_session(
             session.scope.key::<dyn TimelineTreeControl>(),
         )?;
         // The tree provider must be Active before branch subtrees inject it.
-        let initialize = match initialization {
-            SessionInitialization::Prepared(branches)
-            | SessionInitialization::Restore(branches) => tree.restore(branches).await,
-            SessionInitialization::New => tree.create_main().await.map(|_| ()),
+        let initialize = async {
+            match initialization {
+                SessionInitialization::Prepared(branches)
+                | SessionInitialization::Restore(branches) => tree.restore(branches).await,
+                SessionInitialization::New => tree.create_main().await.map(|_| ()),
+            }
+        };
+        tokio::pin!(initialize);
+        let initialize = tokio::select! {
+            result = &mut initialize => result,
+            _ = owner.closing.cancelled() => {
+                tree.begin_close();
+                let _ = initialize.await;
+                Err(AgentError::Cancelled("session initialization".into()))
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                // Capture pending plugin dependencies before cancellation removes
+                // their rows; the Session deadline also covers branch loading.
+                let error = timed_out(host, std::slice::from_ref(&created.view));
+                tree.begin_close();
+                let _ = initialize.await;
+                Err(error)
+            }
         };
         if let Err(error) = initialize {
             return match tree.close().await {
@@ -1285,7 +1338,7 @@ pub(crate) async fn build_session(
                 Err(cleanup) => Err(error.with_cleanup(cleanup)),
             };
         }
-        Ok((created.view.clone(), tree))
+        Ok((created.view.clone(), tree.clone()))
     })
     .catch_unwind()
     .await
@@ -1363,9 +1416,12 @@ pub async fn wait_active(
     Ok(())
 }
 fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
-    let ids: HashSet<_> = views.iter().map(|view| view.id).collect();
-    let pending: Vec<_> = ctx
-        .diagnostics()
+    let snapshot = ctx.diagnostics();
+    let ids: HashSet<_> = views
+        .iter()
+        .flat_map(|view| subtree(&snapshot, view.id))
+        .collect();
+    let pending: Vec<_> = snapshot
         .plugins
         .into_iter()
         .filter(|p| ids.contains(&p.id) && p.state != FiberState::Active)

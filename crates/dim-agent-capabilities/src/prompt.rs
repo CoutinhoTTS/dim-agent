@@ -81,6 +81,9 @@ pub struct Prompt {
     faults: Arc<FaultReporter>,
     diagnostics: Arc<Diagnostics>,
     lifecycle: CancellationToken,
+    branch_phase: Arc<BranchLifecycle>,
+    opening: Arc<BranchOpening>,
+    opened: tokio::sync::watch::Sender<Option<Result<()>>>,
     tasks: TaskTracker,
     state: Mutex<PromptState>,
     adoption: tokio::sync::mpsc::UnboundedSender<Adoption>,
@@ -563,7 +566,11 @@ impl TypedPlugin for PromptPlugin {
         InBranch<ConfigurationPublisher>,
         BranchGate<TimelineIdentity>,
         InSession<FaultReporter>,
-        InBranch<Diagnostics>,
+        (
+            InBranch<Diagnostics>,
+            InBranch<BranchLifecycle>,
+            InBranch<BranchOpening>,
+        ),
     );
     fn name(&self) -> &str {
         "Prompt"
@@ -579,7 +586,7 @@ impl TypedPlugin for PromptPlugin {
             InBranch(publisher),
             _,
             InSession(faults),
-            InBranch(diagnostics),
+            (InBranch(diagnostics), InBranch(branch_phase), InBranch(opening)),
         ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -595,6 +602,9 @@ impl TypedPlugin for PromptPlugin {
                 faults,
                 diagnostics,
                 lifecycle: ctx.cancellation_token(),
+                branch_phase,
+                opening,
+                opened: tokio::sync::watch::channel(None).0,
                 tasks: TaskTracker::new(),
                 state: Mutex::new(PromptState::default()),
                 adoption,
@@ -647,6 +657,7 @@ impl TypedPlugin for PromptPlugin {
                                 .unwrap_or_else(|panic| {
                                     Err(AgentError::fault("Prompt", panic_message(panic)))
                                 });
+                            owner.opened.send_replace(Some(result.clone()));
                             let _ = reply.send(result);
                             continue;
                         }
@@ -775,6 +786,11 @@ impl TypedPlugin for PromptPlugin {
                             EventKind::BranchStart(_) | EventKind::BranchResume(_)
                         ) {
                             let (reply, opened) = oneshot::channel();
+                            prompt.opening.register(Box::pin(async move {
+                                opened
+                                    .await
+                                    .map_err(|_| AgentError::Closed("Prompt".into()))?
+                            }))?;
                             prompt
                                 .adoption
                                 .send(Adoption::Open {
@@ -782,9 +798,6 @@ impl TypedPlugin for PromptPlugin {
                                     reply,
                                 })
                                 .map_err(|_| AgentError::Closed("Prompt".into()))?;
-                            opened
-                                .await
-                                .map_err(|_| AgentError::Closed("Prompt".into()))??;
                         }
                         prompt.settle_consumed(event.sequence);
                         Ok(())
@@ -813,6 +826,20 @@ impl Capability for PromptPlugin {
 }
 
 impl Prompt {
+    pub(crate) async fn initial_completion(&self) -> Result<()> {
+        let mut opened = self.opened.subscribe();
+        loop {
+            if let Some(result) = opened.borrow_and_update().clone() {
+                return result;
+            }
+            tokio::select! {
+                _ = self.branch_phase.closing() => return Err(AgentError::Cancelled("initial prompt".into())),
+                _ = self.lifecycle.cancelled() => return Err(AgentError::Closed("Prompt".into())),
+                changed = opened.changed() => changed.map_err(|_| AgentError::Closed("Prompt".into()))?,
+            }
+        }
+    }
+
     /// Delivers what the Session's sources hold now, compared with what this
     /// branch already has. A new Session also adopts its model.
     async fn open(&self, event: &AgentEvent) -> Result<()> {
@@ -834,7 +861,25 @@ impl Prompt {
             }
         };
         Self::validate_update(&update)?;
-        let loaded = self.load(&update, self.lifecycle.child_token()).await?;
+        let cancel = self.lifecycle.child_token();
+        let load = self.load(&update, cancel.clone());
+        tokio::pin!(load);
+        let loaded = tokio::select! {
+            result = &mut load => result?,
+            _ = self.branch_phase.closing() => {
+                cancel.cancel();
+                let _ = load.await;
+                return Err(AgentError::Cancelled("initial prompt".into()));
+            }
+        };
+        if cancel.is_cancelled()
+            || matches!(
+                self.branch_phase.phase(),
+                BranchPhase::Closing | BranchPhase::Closed
+            )
+        {
+            return Err(AgentError::Cancelled("initial prompt".into()));
+        }
         let context = self.timeline.context(event.sequence).await?;
         let current = PromptSnapshot::from_context(&context);
         if update
@@ -868,7 +913,18 @@ impl Prompt {
             })
             .collect();
         self.publisher
-            .publish(changes, update.model, None, context_rules, |_| Ok(()))
+            .publish(changes, update.model.clone(), None, context_rules, |_| {
+                if cancel.is_cancelled()
+                    || matches!(
+                        self.branch_phase.phase(),
+                        BranchPhase::Closing | BranchPhase::Closed
+                    )
+                {
+                    Err(AgentError::Cancelled("initial prompt".into()))
+                } else {
+                    Ok(())
+                }
+            })
             .await?;
         Ok(())
     }

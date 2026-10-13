@@ -13,13 +13,15 @@ use crate::{
     tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet},
 };
 use dim_agent_runtime::{
-    AgentError, BranchLifecycle, BranchScope, Capability, Dispatcher, InBranch, InSession, KeysOf,
-    Timeline, scoped,
+    AgentError, BranchLifecycle, BranchOpening, BranchScope, Capability, Dispatcher, InBranch,
+    InSession, KeysOf, Timeline, scoped,
 };
 use dim_agent_types::*;
+use futures_util::FutureExt;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     collections::HashMap,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -284,6 +286,7 @@ impl TypedPlugin for ToolBindingPlugin {
         InBranch<Timeline>,
         InBranch<BranchLifecycle>,
         InBranch<Dispatcher>,
+        InBranch<BranchOpening>,
     );
     fn name(&self) -> &str {
         "ToolBinding"
@@ -297,6 +300,7 @@ impl TypedPlugin for ToolBindingPlugin {
             InBranch(timeline),
             InBranch(phase),
             InBranch(dispatcher),
+            InBranch(opening),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -305,6 +309,8 @@ impl TypedPlugin for ToolBindingPlugin {
                 state: Mutex::default(),
             });
             let lifecycle = ctx.cancellation_token();
+            let tasks = TaskTracker::new();
+            let opening_tasks = tasks.clone();
             // Subscribe before reading the registry so no change is missed.
             let mut changed = registry.changed();
             // A new or resumed branch receives its model configuration while
@@ -327,12 +333,34 @@ impl TypedPlugin for ToolBindingPlugin {
                         opening_timeline.clone(),
                         opening_cancel.clone(),
                     );
-                    Box::pin(async move { owner.reconcile(&prompt, &timeline, &cancel).await })
+                    let (reply, receipt) = tokio::sync::oneshot::channel();
+                    let registered = opening.register(Box::pin(async move {
+                        receipt
+                            .await
+                            .map_err(|_| AgentError::Closed("ToolBinding".into()))?
+                    }));
+                    if registered.is_ok() {
+                        opening_tasks.spawn(async move {
+                            let result = AssertUnwindSafe(async {
+                                prompt.initial_completion().await?;
+                                owner.reconcile(&prompt, &timeline, &cancel).await
+                            })
+                            .catch_unwind()
+                            .await
+                            .unwrap_or_else(|panic| {
+                                Err(AgentError::fault(
+                                    "ToolBinding opening",
+                                    crate::host::panic_message(panic),
+                                ))
+                            });
+                            let _ = reply.send(result);
+                        });
+                    }
+                    Box::pin(async move { registered })
                 },
             )?;
             // A reloaded ToolBinding finds the configuration already adopted.
             binding.reconcile(&prompt, &timeline, &lifecycle).await?;
-            let tasks = TaskTracker::new();
             let (watcher, cancel) = (binding.clone(), lifecycle.clone());
             tasks.spawn(async move {
                 // Background work runs while the branch is Active; a
