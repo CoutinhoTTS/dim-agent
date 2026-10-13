@@ -1,6 +1,6 @@
 # Dim Rust CLI 项目剥离与发布方案
 
-状态：待评审。本文定义实施范围与交付合同，不表示源码提取、插件桥接或发布流程已完成。
+状态：待评审。本文定义实施范围与交付合同；npm发布工作流与产物校验脚本已准备，工作流保持禁用。源码提取、插件桥接和实际发布流程尚未完成。
 
 日期：2026-10-13。
 
@@ -22,7 +22,7 @@
 | 安装后的命令 | `dim`、`dimcode`，指向同一个 Rust CLI |
 | Rust crate | 保留现有 `dim-*` 名称；新增薄入口 `dim-cli` |
 | 公共源码许可证 | MIT，实施时统一根文件、Cargo 与 npm 元数据 |
-| CI | self-hosted runners，可在受信任的发布作业中访问内网插件包 |
+| CI | self-hosted负责构建与内网插件注入；GitHub公共runner负责npm OIDC发布，发布工作流预先准备但不启用 |
 
 实施前重新检查源分支工作区、HEAD 和任务完成状态，将选定的完整提交 SHA 固定为提取基线。提取和验证使用该 SHA，不在实施中追踪移动的分支 HEAD。若包含本次核对提交以外的工作，先确认其交付状态并更新基线记录。
 
@@ -258,7 +258,7 @@ Node、rutis runtime 和保留的其他运行资源从固定、可校验的来�
 | `DIM_OAUTH_PACKAGE_URL` | 固定版本运行包的内网地址；构建时下载，不作为用户运行时地址 |
 | `DIM_OAUTH_PACKAGE_SHA256` | 已确认的包摘要，校验失败终止发布 |
 | 下载凭据（如需要） | GitHub Environment Secret，不放变量、命令回显、下载 URL 查询参数或产物清单 |
-| npm 发布凭据 | 独立发布 Secret，不与插件下载凭据共用 |
+| npm 发布身份 | GitHub公共runner通过OIDC取得临时身份；不向构建或发布作业注入长期npm token |
 
 普通源码/PR验证不依赖上述输入。包含 OAuth 的正式发布作业明确要求 URL 和摘要；缺失、下载失败、摘要/清单/兼容版本错误均终止发布，不悄悄发布缺少 OAuth 的同版本产物。
 
@@ -278,43 +278,69 @@ Node、rutis runtime 和保留的其他运行资源从固定、可校验的来�
 
 ## 8. CI、认证与发布流程
 
-公共仓库使用 GitHub格式的 `.github/workflows/ci.yml` 和 `release.yml`，发布运行在 self-hosted。GitLab用于分支和MR评审；本次文档MR不配置实际runner、发布凭据或推送GitHub。公开源码同步方式在开源交付阶段固定，源tag对应的提交需能追溯到GitHub实际checkout。
+公共仓库使用GitHub格式的工作流。`ci.yml`和`release.yml`的构建、内网插件下载及平台验收运行在self-hosted；npm发布在GitHub公共runner `ubuntu-latest`上执行，读取已生成的包，不重新构建，不访问内网。GitLab用于分支和MR评审。公开源码同步方式在开源交付阶段固定，源tag对应的提交需能追溯到GitHub实际checkout。
 
 | 工作流 | 输入与职责 | 完成条件 |
 | --- | --- | --- |
 | `ci.yml` | 公共源码、锁文件；fmt、Clippy、相关流程测试、crate边界和构建 | 不访问私有插件；单靠公共内容通过 |
-| `release.yml` | 固定tag、平台矩阵、Environment输入；构建、staging、安装验收、Release和npm | 所有平台产物满足同一清单，发布前检查完成 |
+| `release.yml` | self-hosted：固定tag、平台矩阵、Environment输入；构建、staging、安装验收，上传`npm-packages` artifact及Release产物 | 所有平台产物满足同一清单；上传包不带内网地址和凭据 |
+| `npm-publish.yml.disabled` | GitHub公共runner：读取同仓库已成功构建的artifact，验证来源/摘要/版本，使用OIDC先发布平台包再发布入口包 | 默认不被GitHub识别为工作流；后续明确启用并配置trusted publisher后才能发布 |
 | 私有插件构建 | 插件仓库、锁文件和接口版本；TS构建、账号流程检查、运行包生成 | 产生可直接加载的固定版本包，供内网制品服务接收 |
 
 ```text
-Fixed source and version checks
+Self-hosted: fixed source and version checks
           |
-Native Rust builds
+Self-hosted: native Rust builds
           |
-Download / verify private plugin and runtime
+Self-hosted: download / verify private plugin and runtime
           |
-Stage platform payloads
+Self-hosted: stage platform payloads
           |
-Archive checks and real installation smoke tests
+Self-hosted: archive checks and installation smoke tests
           |
-Publish platform npm packages
+Upload verified npm-packages artifact
           |
-Publish dimcode wrapper
+GitHub-hosted: validate artifact and publish platform packages
           |
-Complete GitHub Release
+GitHub-hosted: publish dimcode wrapper using OIDC
+          |
+Complete GitHub Release after package publication
 ```
 
-构建、打包、校验脚本可本地调用，CI只编排，不把唯一实现写进workflow shell。发布权限只授予最后的受信任作业；公共PR不得在可访问内网和私密环境的runner上执行任意构建代码。可使用隔离的self-hosted runner池，不要求转用云runner。
+构建、打包、校验脚本可本地调用，CI只编排。发布权限只授予GitHub公共runner上的受信任发布作业；self-hosted构建环境只有内网资源读取和产物上传所需权限。公共PR不得在可访问内网和私密环境的runner上执行任意构建代码，普通验证使用隔离环境。
 
 GitHub Release使用带版本的压缩包、SHA-256和清单，与npm复用同一批二进制，不另做一次构建。发布失败保留可核对的进度和产物；不覆写已发布的同版本内容。仅更新dist-tag时仍核对对应版本产物。
 
-### npm认证约束
+### npm发布工作流的禁用与启用合同
 
-截至2026-10-13，npm trusted publishing只支持指定云托管runner，不支持self-hosted。本项目不能假设GitHub OIDC可直接完成npm发布；首版使用registry当前接受的granular publish token作为Secret，并完成真实发布演练。
+发布工作流保存为`.github/workflows/npm-publish.yml.disabled`。GitHub只识别`.yml`/`.yaml`工作流，因此此文件不注册、不会自动触发，也不能被手动dispatch。当前阶段不启用或执行任何发布job。
 
-npm官方已公布2027年1月移除granular token直接发布能力。继续全部self-hosted时需要切换为stage-only token与维护者2FA晋升；批量平台包先晋升、最后晋升入口包。该认证变化是外部发布前提，不影响内网下载、构建和打包。当前不为未来机制增加第二套发布框架。
+后续明确启用时将文件改名为`npm-publish.yml`并进入公开仓库的默认分支，才成为GitHub工作流。准备文件只声明`workflow_dispatch`，不声明push、tag push、release、workflow_run或schedule触发；启用后也不因代码、tag或构建完成自动发布。dispatch时指定release构建run ID与release tag，并从该tag执行。
 
-依据：[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)、[npm access tokens](https://docs.npmjs.com/about-access-tokens/)、[rutis Rust host embedding](https://github.com/arcships/rutis/blob/main/docs/guide/rust-host.en.md)。rutis文档中的示例版本可能落后于源码，实施以固定的0.10.0 API和实际流程验证为准。
+发布前置条件为：公开仓库`arcships/dim`、同tag成功完成的`release.yml`构建、`npm-release` Environment，以及入口包和五个平台包各自的npm trusted publisher。每个publisher绑定仓库、最终工作流文件名和Environment，并允许`npm publish`；首次包创建和维护者权限在正式启用时确认。
+
+工作流使用Node 24，并确保npm满足trusted publishing最低版本要求；job获得`id-token: write`，不需要`NPM_TOKEN`或`NODE_AUTH_TOKEN`。self-hosted不承担npm发布，因此token直接发布停用或stage-only晋升不作为本项目的发布方案前提。
+
+### 构建到发布的artifact合同
+
+self-hosted在所有产物检查与安装验收通过后，将`npm-packages`上传到同一GitHub仓库的构建run。artifact含六个`.tgz`及`release-manifest.json`，不包含下载鉴权、内网地址、源码工作区或额外构建缓存。
+
+| 字段或内容 | 合同 |
+| --- | --- |
+| `release-manifest.json.version` | 与dispatch tag去掉`v`后的SemVer一致 |
+| `release-manifest.json.sourceCommit` | 与dispatch tag及构建run的完整提交SHA一致 |
+| `release-manifest.json.npmPackages` | 恰好五个平台包和一个`dimcode`入口包，每项包含`name`、`file`、`sha256` |
+| 归档文件名 | `<package-name>-<version>.tgz`，仅允许本目录内的普通文件 |
+| 归档中的`package/package.json` | 名称/版本与清单一致；平台包os/cpu正确，入口精确引用相同版本平台包，`dim`/`dimcode`使用同一wrapper |
+| `repository.url` | 所有包均为`git+https://github.com/arcships/dim.git`，符合OIDC仓库绑定 |
+
+公共runner先核对构建run来自同一仓库、预期`release.yml`、受信任的push或手动事件，已完成且成功，提交与dispatch tag一致，再下载指定artifact；下载action的摘要错误直接失败。随后`scripts/publish-npm.mjs`在任何registry写入前检查全部包的内容身份、版本和SHA-256，先发全部平台包，最后发入口包，禁用包生命周期脚本。稳定版用`latest`，预发布用`next`。
+
+本地检查使用`node scripts/publish-npm.mjs DIRECTORY VERSION SOURCE_COMMIT`，默认只校验；只有显式`--publish`才调用npm。发布失败直接中止，不覆盖现有版本；重新发布前人工核对已成功包与原产物后继续处理。
+
+当前已有的发布脚本验证使用真实tarball，只替换registry写入边界。验证入口为`node --test scripts/publish-npm.test.mjs`，不触发GitHub工作流或访问npm registry。正式启用前仍需实际构建artifact和OIDC发布演练。
+
+依据：[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)、[GitHub workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax)、[rutis Rust host embedding](https://github.com/arcships/rutis/blob/main/docs/guide/rust-host.en.md)。rutis文档中的示例版本可能落后于源码，实施以固定的0.10.0 API和实际流程验证为准。
 
 ## 9. 交付任务与依赖
 
@@ -327,10 +353,10 @@ npm官方已公布2027年1月移除granular token直接发布能力。继续全�
 | D03 | 私有TS OAuth插件及独立运行包 | D02接口确定 | 登录、刷新、退出、恢复和存储竞争满足行为合同；独立打包 |
 | D04 | rutis Node runtime与Provider真实桥接，本地插件装载 | D02、D03 | 从插件取得目录/短期凭据并由Aimux执行；取消、401和runtime故障正确结算 |
 | D05 | Rust CLI与本地服务端连接、scrollback和账号命令 | D01；账号接线依赖D04 | 输入、输出、工具、审批、中断、恢复、非交互及登录跑通 |
-| D06 | 原生平台构建、内网插件注入、npm/Release包装与发布脚本 | D04、D05 | 五平台产物检查与实际安装；失败注入阻止发布；同版本一致 |
+| D06 | self-hosted原生构建/内网注入/npm包装，GitHub公共runner OIDC发布与Release接线；发布job保持禁用直到明确启用 | D04、D05 | 五平台产物检查与实际安装；artifact交接和失败门禁；同版本一致 |
 | D07 | 使用/开发/扩展/发布文档、MIT及第三方声明、GitHub公开导出 | D01—D06 | 公开源码和正式分发物分别符合范围；版本和来源可追溯 |
 
-D02先定义接口，随后D03与D05的无账号终端部分可以独立推进。重叠的Provider/RPC装配修改串行处理；真正并行实施时使用项目既有docs-sprint组织方式，核对依赖后再决定是否拆给agent。本次只交付可供MR评审的方案。
+D02先定义接口，随后D03与D05的无账号终端部分可以独立推进。重叠的Provider/RPC装配修改串行处理；真正并行实施时使用项目既有docs-sprint组织方式，核对依赖后再决定是否拆给agent。当前交付包含可供MR评审的方案，以及默认禁用的npm发布工作流和独立产物校验脚本。
 
 ## 10. 验收与消融检查
 
@@ -347,10 +373,11 @@ D02先定义接口，随后D03与D05的无账号终端部分可以独立推进�
 | 分发 | 真正安装npm tarball与Release包，检查命令、二进制平台、版本、退出码、插件和runtime文件 |
 | 公开边界 | 检查Git跟踪内容、公开导出、npm tarball、Release压缩包；私有TS/source maps、账号文件、内网凭据和旧核心缺席 |
 | 版本与来源 | tag、Cargo、版本输出、npm平台包、入口包、插件摘要与清单一致；重试不混用输入 |
+| 发布禁用与交接 | `.yml.disabled`不注册或触发；公共runner拒绝不同提交、未成功或非release工作流的artifact；任一包不合法时零registry写入 |
 
 消融检查逐项审查是否还存在旧CLI包装、无用多品牌分支、占位共享包、重复账号writer、第二套状态机/事件总线/插件管理器、不必要的同步缓存与兜底。删去无助于首版流程的结构；runtime桥接、凭据代次、文件锁和产物校验属于真实边界，保留并说明其用途。
 
-交付完成的判定是：公共源码可独立构建和使用；私有插件可独立构建并在本地接入；self-hosted发布能够从固定内网包生成可安装的正式产物；源码范围、账号语义及发布前提都有真实验证证据。
+交付完成的判定是：公共源码可独立构建和使用；私有插件可独立构建并在本地接入；self-hosted能够从固定内网包生成可安装的正式产物；npm发布job已准备且保持禁用。实际发布仅在明确启用后，由GitHub公共runner通过OIDC执行；源码范围、账号语义及启用前提都有验证证据。
 
 ## 11. 实施前需要验证的具体事项
 
@@ -359,6 +386,6 @@ D02先定义接口，随后D03与D05的无账号终端部分可以独立推进�
 1. 固定源码提交后，核对所有跨旧目录依赖及原项目未交付任务，避免把目标合同当已实现源码。
 2. 用固定rutis版本验证Node服务注册、异步请求取消、实例代次和runtime清理；再固定账号接口的字段和错误语义。
 3. 验证选定Node/rutis运行包在五个平台的可启动性，并记录其固定版本及摘要。
-4. 确认self-hosted runner标签、隔离方式、平台工具链及发布Environment输入，验证内网制品取得和npm权限。
+4. 确认self-hosted runner标签、隔离方式、平台工具链及内网制品Environment输入；验证artifact向公共runner交接，并在明确启用时配置各npm包的trusted publisher。
 5. 确定第一版产品版本、公开tag及现有`dimcode`平台包的版本升级方式；不覆盖旧版本，不默认改写已有用户数据。
 6. 在公开导出中保留必要第三方来源和声明，排除本文等内部运维资料；公共仓库MIT文件的版权主体按项目归属填写。

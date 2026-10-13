@@ -10,6 +10,6 @@ Dim 的 Rust 命令行项目，采用 Agent v4 核心和逐步演进的 scrollba
 | 公共源码许可证 | MIT |
 | Dim OAuth | 独立的闭源 TypeScript rutis Plugin |
 
-当前仓库包含实施前的设计与交付方案。源码提取、Rust CLI、插件接线和发布工作流按方案实施。
+当前仓库包含设计与交付方案，以及默认禁用的 [npm 发布工作流](.github/workflows/npm-publish.yml.disabled)和产物校验脚本。源码提取、Rust CLI、插件接线和构建工作流按方案实施。发布工作流尚未注册或启用。
 
 完整范围、模块合同、实施任务和验收条件见[项目剥离与发布方案](docs/plan/analysis/rust-cli-extraction.md)。
