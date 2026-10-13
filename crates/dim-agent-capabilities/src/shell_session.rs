@@ -248,7 +248,7 @@ impl ShellSession {
                 inner.queue_running = false;
                 break;
             };
-            if queued.cancel.is_cancelled() {
+            if queued.cancel.is_cancelled() || self.lifecycle.is_cancelled() {
                 let _ = queued.done.send(Err("cancelled".into()));
                 continue;
             }
@@ -340,8 +340,14 @@ impl ShellSession {
     /// Spawns the shell on first use or after a death. Returns the reset
     /// note when this spawn replaces a dead shell.
     async fn ensure_shell(self: &Arc<Self>) -> Result<Option<String>, HostError> {
+        tokio::fs::create_dir_all(&self.config.output_dir)
+            .await
+            .map_err(|error| HostError::failed(format!("Shell output directory: {error}")))?;
         let previous = {
             let inner = self.inner.lock().await;
+            if self.lifecycle.is_cancelled() {
+                return Err(HostError::Cancelled("shell session closed".into()));
+            }
             if inner.pty.is_some() {
                 return Ok(None);
             }
@@ -400,6 +406,10 @@ impl ShellSession {
         let reader = pty.take_reader();
         let generation = {
             let mut inner = self.inner.lock().await;
+            if self.lifecycle.is_cancelled() {
+                let _ = pty.terminate().await;
+                return Err(HostError::Cancelled("shell session closed".into()));
+            }
             inner.generation += 1;
             inner.shell_exe = Some(exe);
             inner.dialect = dialect;
@@ -878,22 +888,27 @@ impl ShellSession {
         };
         let settled = {
             let mut inner = self.inner.lock().await;
+            if self.lifecycle.is_cancelled() {
+                return Err("shell session closed".into());
+            }
+            self.timeline
+                .append(
+                    EventKind::ExecStarted(ExecStartedData {
+                        turn_id: context.turn_id.clone(),
+                        request_id: context.request_id.clone(),
+                        call_id: context.call_id.clone(),
+                        task_id: task_id.clone(),
+                        description: description.clone(),
+                        output_path: output_path.to_string_lossy().into_owned(),
+                    })
+                    .into(),
+                )
+                .map_err(|error| error.to_string())?;
             inner.occupy_tail = None;
             inner.occupy_exit = None;
             inner.occupying = Some(task);
             advance_occupying(&mut inner)
         };
-        let _ = self.timeline.append(
-            EventKind::ExecStarted(ExecStartedData {
-                turn_id: context.turn_id.clone(),
-                request_id: context.request_id.clone(),
-                call_id: context.call_id.clone(),
-                task_id: task_id.clone(),
-                description,
-                output_path: output_path.to_string_lossy().into_owned(),
-            })
-            .into(),
-        );
         if let Some(settlement) = settled {
             self.settle(settlement.data, &settlement.description);
         }
@@ -976,9 +991,25 @@ impl ShellSession {
             } => Some((result_path.clone(), error_path.clone())),
             BackgroundKind::Posix => None,
         };
-        // Register before writing: a fast completion must not race the map.
+        // Admit durably before either dialect can execute or report completion.
         {
             let mut inner = self.inner.lock().await;
+            if self.lifecycle.is_cancelled() {
+                return Err("shell session closed".into());
+            }
+            self.timeline
+                .append(
+                    EventKind::ExecStarted(ExecStartedData {
+                        turn_id: context.turn_id.clone(),
+                        request_id: context.request_id.clone(),
+                        call_id: context.call_id.clone(),
+                        task_id: task_id.clone(),
+                        description: description.clone(),
+                        output_path: output_path.to_string_lossy().into_owned(),
+                    })
+                    .into(),
+                )
+                .map_err(|error| error.to_string())?;
             inner.background.insert(
                 task_id.clone(),
                 BackgroundTask {
@@ -991,7 +1022,20 @@ impl ShellSession {
                 },
             );
         }
-        self.write_line(&wrapped).await.map_err(|e| e.to_string())?;
+        if let Err(error) = self.write_line(&wrapped).await {
+            let task = self.inner.lock().await.background.remove(&task_id);
+            if let Some(task) = task {
+                self.settle(
+                    ExecEndedData {
+                        task_id: task_id.clone(),
+                        status: ExecStatus::Failed,
+                        result: ToolResult::error(error.to_string()),
+                    },
+                    &task.description,
+                );
+            }
+            return Err(error.to_string());
+        }
         // Read the job pid back through the pid marker.
         let pid_marker_full = pid_marker.full();
         let deadline = tokio::time::Instant::now() + PID_WAIT;
@@ -1057,17 +1101,6 @@ impl ShellSession {
                 }
             });
         }
-        let _ = self.timeline.append(
-            EventKind::ExecStarted(ExecStartedData {
-                turn_id: context.turn_id.clone(),
-                request_id: context.request_id.clone(),
-                call_id: context.call_id.clone(),
-                task_id: task_id.clone(),
-                description: description.clone(),
-                output_path: output_path.to_string_lossy().into_owned(),
-            })
-            .into(),
-        );
         let mut result = ToolResult::text(format!(
             "Background command started.\nTask ID: {task_id}\nOutput: {}",
             output_path.display()
@@ -1248,14 +1281,22 @@ fn advance_occupying(inner: &mut Inner) -> Option<Settlement> {
 /// The plugin.
 pub struct ShellSessionPlugin {
     scope: BranchScope,
-    config: ShellSessionConfig,
+    config: Option<ShellSessionConfig>,
 }
 
 impl ShellSessionPlugin {
     pub fn new(scope: &BranchScope, config: ShellSessionConfig) -> Self {
         Self {
             scope: *scope,
-            config,
+            config: Some(config),
+        }
+    }
+
+    /// Derive execution settings from the owning Session.
+    pub fn session(scope: &BranchScope) -> Self {
+        Self {
+            scope: *scope,
+            config: None,
         }
     }
 }
@@ -1266,6 +1307,8 @@ impl TypedPlugin for ShellSessionPlugin {
         InBranch<Dispatcher>,
         Arc<HostPlatform>,
         BranchGate<dim_agent_runtime::BranchLifecycle>,
+        dim_agent_runtime::InSession<dim_agent_runtime::SessionConfig>,
+        dim_agent_runtime::InBranch<dim_agent_runtime::TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "ShellSession"
@@ -1273,11 +1316,27 @@ impl TypedPlugin for ShellSessionPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), host, _): Self::Deps,
+        (
+            InBranch(timeline),
+            InBranch(dispatcher),
+            host,
+            _,
+            dim_agent_runtime::InSession(config),
+            InBranch(identity),
+        ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, rutis::CordisError>> {
         Box::pin(async move {
             let session = Arc::new(ShellSession::new(
-                self.config.clone(),
+                self.config.clone().unwrap_or_else(|| ShellSessionConfig {
+                    cwd: PathBuf::from(&config.cwd),
+                    member: config.collaboration_role
+                        == dim_agent_runtime::CollaborationRole::Member,
+                    output_dir: host
+                        .home
+                        .join(".dim/exec")
+                        .join(&identity.session_id)
+                        .join(&identity.branch_id),
+                }),
                 host,
                 timeline,
                 dispatcher,
@@ -1292,12 +1351,28 @@ impl TypedPlugin for ShellSessionPlugin {
                             if let Some(mut pty) = inner.pty.take() {
                                 let _ = pty.terminate().await;
                             }
-                            inner.occupying = None;
-                            inner.background.clear();
+                            for queued in inner.queue.drain(..) {
+                                let _ = queued.done.send(Err("shell session closed".into()));
+                            }
                         }
-                        let tasks = service.tasks.lock().await;
+                        let tasks = service.tasks.lock().await.clone();
                         tasks.close();
                         tasks.wait().await;
+                        let generation = service.inner.lock().await.generation;
+                        service.handle_shell_exit(generation, None).await;
+                        // PowerShell children survive the shell and have their
+                        // own result-file watcher, now joined above.
+                        let remaining = service
+                            .inner
+                            .lock()
+                            .await
+                            .background
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        for task in remaining {
+                            let _ = ShellSession::stop(&service, &task).await;
+                        }
                         Ok(())
                     })
                 }))

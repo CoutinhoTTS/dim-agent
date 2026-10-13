@@ -8,7 +8,9 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
     host_platform::{EXEC_SHELL_UNAVAILABLE, HostPlatform, ShellStatus, resolve_shell},
-    shell_session::{ShellSessionConfig, ShellSessionPlugin},
+    model_provider::ModelProviderPlugin,
+    skill_settings::SkillSettingsHost,
+    skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
@@ -150,8 +152,9 @@ struct Harness {
 }
 
 impl Harness {
-    async fn new(platform: HostPlatform) -> Self {
-        let (cwd, output_root) = (scratch("cwd"), scratch("output"));
+    async fn new(mut platform: HostPlatform) -> Self {
+        let cwd = scratch("cwd");
+        platform.home = scratch("home");
         let root = Ctx::root_with(tokio::runtime::Handle::current());
         let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
         wait_active(
@@ -162,28 +165,27 @@ impl Harness {
         )
         .await
         .unwrap();
+        root.provide_as(
+            TypeKey::of::<SkillSettingsHost>(),
+            Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
+        )
+        .unwrap();
+        (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+            .await
+            .unwrap();
         let model = Arc::new(Script::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder
+            .timeline_store(Arc::new(MemoryTimelineStore::default()))
             .session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_plugin(DefaultPrepareModelPlugin::new);
-        dim_agent_capabilities::defaults::install(&mut builder);
-        dim_agent_capabilities::shell_tools::install(&mut builder);
-        let cwd_clone = cwd.clone();
-        let output_root_clone = output_root.clone();
-        builder.timeline_plugin(move |scope| {
-            ShellSessionPlugin::new(
-                scope,
-                ShellSessionConfig {
-                    cwd: cwd_clone.clone(),
-                    member: false,
-                    output_dir: output_root_clone.clone(),
-                },
-            )
-        });
+        dim_agent_capabilities::defaults::install_minimal_execution(
+            &mut builder,
+            ModelProviderPlugin::new,
+        );
         let agent = builder.build_in(&root);
         Self {
             root,
@@ -347,6 +349,52 @@ fn tool_results(events: &[Arc<AgentEvent>]) -> usize {
 // ------------------------------------------------------------------ tests
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_settles_every_admitted_shell_task() {
+    let harness = Harness::new(platform(&[]).await).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[(
+                "execute",
+                json!({"command": "sleep 60", "runInBackground": true}),
+            )],
+        )
+        .await;
+    until(&session, "background admission", |events| {
+        tool_results(events) == 1
+    })
+    .await;
+    harness
+        .run(
+            &session,
+            &[("execute", json!({"command": "sleep 60", "timeoutMs": 20}))],
+        )
+        .await;
+    until(&session, "occupying admission", |events| {
+        count(events, "exec/started") == 2 && tool_results(events) == 2
+    })
+    .await;
+    session.close().await.unwrap();
+    let events = local_events(&session).await;
+    for start in events.iter().filter_map(|event| match &event.kind {
+        EventKind::ExecStarted(data) => Some(data),
+        _ => None,
+    }) {
+        assert_eq!(
+            ended(&events)
+                .iter()
+                .filter(|(_, end)| end.task_id == start.task_id)
+                .count(),
+            1,
+            "admitted task {} must settle exactly once",
+            start.task_id
+        );
+    }
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn foreground_echo_returns_output() {
     let harness = Harness::new(platform(&[]).await).await;
     let session = harness.session().await;
@@ -412,7 +460,7 @@ async fn background_task_returns_task_id_and_completes() {
             &session,
             &[(
                 "execute",
-                json!({"command": "sleep 0.1 && echo done", "runInBackground": true}),
+                json!({"command": "true", "runInBackground": true}),
             )],
         )
         .await;
@@ -434,6 +482,17 @@ async fn background_task_returns_task_id_and_completes() {
     let (end_event, end) = &ended(&events)[0];
     assert_eq!(end.status, ExecStatus::Completed);
     assert_eq!(end.task_id, task_id);
+    let start = events
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+        EventKind::ExecStarted(data) if data.task_id == task_id)
+        })
+        .unwrap();
+    assert!(
+        start.sequence < end_event.sequence,
+        "completion preceded admission"
+    );
 
     // Wake notification.
     let events = until(&session, "wake", |events| !notifications(events).is_empty()).await;

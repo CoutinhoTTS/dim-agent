@@ -105,6 +105,7 @@ pub fn install_minimal_execution(
     model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
 ) {
     install_with_prompt_capability_no_branch(builder, model);
+    builder.timeline_plugin(crate::shell_session::ShellSessionPlugin::session);
     crate::shell_tools::install(builder);
     crate::prompt_sources::install(builder);
     crate::skills::install(builder);
