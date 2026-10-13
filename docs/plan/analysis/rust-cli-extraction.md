@@ -1,6 +1,6 @@
 # Dim Rust CLI 项目剥离与发布方案
 
-状态：待评审。本文定义实施范围与交付合同；npm发布工作流与产物校验脚本已准备，工作流保持禁用。源码提取、插件桥接和实际发布流程尚未完成。
+状态：Implemented，公共与私有源码已独立构建，macOS arm64 本机验收通过。构建与发布工作流保持禁用；其他平台原生验收和实际发布在明确启用后执行。
 
 日期：2026-10-13。
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 源仓库 | `nextim/dim-agent`，分支 `feat/agent-v4` |
 | 源码 checkout | `/Users/zerob13/Documents/workspace/temp/dim-agent-temp` |
-| 本文核对提交 | `5df1149f430a427c334fc818634566bc05c5e16c` |
+| 固定提取提交 | `e79aa2257f77d2ace1041c768160f3514e839733` |
 | 公共代码开发与评审仓库 | [nextim/dimrust-cli](https://gitlab.bfbops.com/nextim/dimrust-cli) |
 | 公共代码本地 checkout | `/Users/zerob13/Documents/workspace/temp/dimrust-cli` |
 | 开源目标 | [arcships/dim](https://github.com/arcships/dim) |
@@ -21,12 +21,12 @@
 | 产品与 npm 包 | `dimcode` |
 | 安装后的命令 | `dim`、`dimcode`，指向同一个 Rust CLI |
 | Rust crate | 保留现有 `dim-*` 名称；新增薄入口 `dim-cli` |
-| 公共源码许可证 | MIT，实施时统一根文件、Cargo 与 npm 元数据 |
+| 公共源码许可证 | MIT，根文件、Cargo 与公共 npm 元数据一致；含私有插件的平台包通过 NOTICE 排除该运行产物 |
 | CI | self-hosted负责构建与内网插件注入；GitHub公共runner负责npm OIDC发布，发布工作流预先准备但不启用 |
 
-实施前重新检查源分支工作区、HEAD 和任务完成状态，将选定的完整提交 SHA 固定为提取基线。提取和验证使用该 SHA，不在实施中追踪移动的分支 HEAD。若包含本次核对提交以外的工作，先确认其交付状态并更新基线记录。
+源分支已经fast-forward更新，工作区干净；提取和验证使用固定完整SHA，不在实施中追踪移动的分支HEAD。
 
-GitLab 保存开发、评审及内部发布运维资料；GitHub 接收公共源码和适合公开的使用、开发与扩展文档。本文包含内部仓库和本地路径，作为 GitLab 的内部实施资料，不直接纳入 GitHub 公开导出。闭源源码和内网下载配置不进入公开 Git 历史。
+剥离阶段的源码提交、push和MR全部只在GitLab进行，不向GitHub提交或同步任何代码。待GitLab公共与私有仓库完成后，GitHub同步必须另行获得用户明确授权。GitLab保存开发、评审及内部发布运维资料；后续GitHub只接收公共源码和适合公开的使用、开发与扩展文档。本文包含内部仓库和本地路径，不直接纳入GitHub公开导出。闭源源码和内网下载配置不进入公开Git历史。
 
 ## 2. 范围与排除项
 
@@ -100,7 +100,7 @@ dim-oauth-plugin/
 | `rust/xtask` 和 Rust 测试 | 生成目录、架构规则和 `include_str!` 可能依赖原目录结构 | 更新输出路径和边界规则；不手工改生成图冒充当前装配 |
 | 原 CLI 构建与 `npmbin` | 多品牌、Bun、媒体、sandbox、私有静态资源链路混合 | 仅复用留下的产物校验、包装和发布流程，不迁入旧构建依赖 |
 
-当前基线使用 `rutis` / `rutis-loader` 0.10.0。Agent、Session、分支的 loader 装配已经存在；Node runtime、账号跨语言桥接以及进程插件全面迁为 loader 行尚未完成。实施不能将这些目标合同写成现有能力。
+当前基线使用`rutis` / `rutis-loader` 0.10.0，全部能力已经采用TypedPlugin，进程插件已成为loader行；保留该装配、依赖、关闭和启动期限合同。Node runtime与账号跨语言桥接在本次剥离中接入。
 
 ## 4. 模块关系、状态归属与生命周期
 
@@ -154,6 +154,8 @@ Node runtime 崩溃时撤下其提供的账号服务，使用 Dim 的请求明�
 | 凭据拒绝与释放 | 请求租约、模型错误阶段 → 恢复结果或最终拒绝 | 保留一次受控恢复及最终拒绝的现有业务含义，不盲目重试 |
 
 Rust 侧使用 rutis 的 `HostDispatch` / 命名服务能力对接 TS 插件。RPC 接入层仅承载这些供应商操作，不能通过类型断言、默认 Dim ID 或空账号状态掩盖插件缺失。秘密服务不进入客户端可调用的方法目录。
+
+模型失败的公开展示载荷使用`ProviderPresentation`，`source`、`reason`和可选`action`由供应商产生，公共边界只校验非空字符串与固定字段结构。供应商特定原因分类、文案与动作匹配规则归插件；保留既有JSON字段形状，不把供应商错误枚举放回公共核心。
 
 账号命令不在公共 wire 中依赖 `DimOAuthService`、Dim 专用错误枚举或私有 TS 类。供应商 ID 是输入数据，显示内容来自已验证的描述。已有非 Dim 供应商保持自身合同；本次不重写其认证业务。
 
@@ -356,7 +358,7 @@ self-hosted在所有产物检查与安装验收通过后，将`npm-packages`上�
 | D06 | self-hosted原生构建/内网注入/npm包装，GitHub公共runner OIDC发布与Release接线；发布job保持禁用直到明确启用 | D04、D05 | 五平台产物检查与实际安装；artifact交接和失败门禁；同版本一致 |
 | D07 | 使用/开发/扩展/发布文档、MIT及第三方声明、GitHub公开导出 | D01—D06 | 公开源码和正式分发物分别符合范围；版本和来源可追溯 |
 
-D02先定义接口，随后D03与D05的无账号终端部分可以独立推进。重叠的Provider/RPC装配修改串行处理；真正并行实施时使用项目既有docs-sprint组织方式，核对依赖后再决定是否拆给agent。当前交付包含可供MR评审的方案，以及默认禁用的npm发布工作流和独立产物校验脚本。
+D02先定义接口，随后D03与D05的无账号终端部分可以独立推进。重叠的Provider/RPC装配修改串行处理；真正并行实施时使用项目既有docs-sprint组织方式，核对依赖后再决定是否拆给agent。交付包括独立公共 Rust workspace、私有 TS 插件、本地开发入口、打包与产物校验脚本，以及默认禁用的验证、构建、npm 和 GitHub Release 工作流。
 
 ## 10. 验收与消融检查
 
@@ -379,9 +381,9 @@ D02先定义接口，随后D03与D05的无账号终端部分可以独立推进�
 
 交付完成的判定是：公共源码可独立构建和使用；私有插件可独立构建并在本地接入；self-hosted能够从固定内网包生成可安装的正式产物；npm发布job已准备且保持禁用。实际发布仅在明确启用后，由GitHub公共runner通过OIDC执行；源码范围、账号语义及启用前提都有验证证据。
 
-## 11. 实施前需要验证的具体事项
+## 11. 启用前需要验证的具体事项
 
-产品边界、命名、仓库、MIT与TS私有插件形式按本方案执行。以下是有明确验证对象的实施工作，不要求重新讨论已经确认的产品范围：
+产品边界、命名、仓库、MIT与TS私有插件形式按本方案执行。源码、接口和本机流程的证据见 [验收记录](../reviews/rust-cli-extraction-001.md)。其余平台与发布环境的检查在明确启用时完成，不要求重新讨论已经确认的产品范围：
 
 1. 固定源码提交后，核对所有跨旧目录依赖及原项目未交付任务，避免把目标合同当已实现源码。
 2. 用固定rutis版本验证Node服务注册、异步请求取消、实例代次和runtime清理；再固定账号接口的字段和错误语义。
@@ -389,3 +391,11 @@ D02先定义接口，随后D03与D05的无账号终端部分可以独立推进�
 4. 确认self-hosted runner标签、隔离方式、平台工具链及内网制品Environment输入；验证artifact向公共runner交接，并在明确启用时配置各npm包的trusted publisher。
 5. 确定第一版产品版本、公开tag及现有`dimcode`平台包的版本升级方式；不覆盖旧版本，不默认改写已有用户数据。
 6. 在公开导出中保留必要第三方来源和声明，排除本文等内部运维资料；公共仓库MIT文件的版权主体按项目归属填写。
+
+## 12. 固定接口与持久化
+
+本地协议使用 `hello.daemonProfile` 区分 product/configured/mock；configured 包含同一份模型配置 bytes 的 SHA-256，客户端缺少或不匹配身份时拒绝复用 daemon，不删除端点、不停止已有进程。
+
+原生存储格式为 v11，SQL 表列沿用 v10，managed Provider JSON 使用 `kind: "managed"` 与归一化协议。旧 v10 与未知未来格式拒绝打开并保留原文件，不自动迁移。
+
+Provider 目录提交采用版本 CAS、账号代次验证和提交后复核；跨 TS 账号文件与 Rust SQLite 不跨 IPC 持锁。迟到目录不覆盖更新的目录、不能用于当前账号、不被成功返回。

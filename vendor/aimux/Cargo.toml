@@ -1,0 +1,94 @@
+[workspace]
+members = ["aimux-core", "aimux-providers", "aimux-provider-utils", "aimux-stream"]
+resolver = "2"
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/arcships/aimux"
+description = "Rust alternative to Vercel AI SDK - unified provider interface for LLM applications"
+rust-version = "1.85"
+
+# Release profile: minimize binary size for FFI bindings.
+# - lto + codegen-units=1: cross-crate dead-code elimination across 325 providers
+# - panic="abort": drop .eh_frame unwind tables (~9% of binary)
+# - strip: remove symbol tables
+# - opt-level="z": optimize for size
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+pin-project-lite = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Streaming
+bytes = "1"
+async-stream = "0.3"
+
+# WebSocket (realtime provider APIs, RFC-0028; feature-gated per crate)
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# URL
+url = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Schema validation
+jsonschema = { version = "0.50.1", default-features = false }
+
+# Internal crates
+aimux-core = { path = "aimux-core", version = "0.5.0" }
+aimux-providers = { path = "aimux-providers", version = "0.5.0" }
+aimux-stream = { path = "aimux-stream", version = "0.5.0" }
+aimux-provider-utils = { path = "aimux-provider-utils", version = "0.5.0" }
+
+# HTTP date parsing (Retry-After header)
+httpdate = "1"
+
+# Random number generation (Full Jitter backoff in retry.rs)
+rand = "0.8"
+
+# Serial test execution (for env-var-mutating tests)
+serial_test = "3"
+
+# Web console server (RFC-0029)
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+
+# TypeScript type generation (auto-generate .d.ts from Rust types)
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
+
+# Workspace lint baseline. Member crates opt in with `[lints] workspace = true`;
+# CI additionally promotes all warnings to errors.
+[workspace.lints.clippy]
+all = "warn"
+uninlined_format_args = "warn"
+must_use_candidate = "warn"
+redundant_closure_for_method_calls = "warn"
+return_self_not_must_use = "warn"
+missing_errors_doc = "warn"

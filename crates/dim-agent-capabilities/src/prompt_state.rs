@@ -1,0 +1,162 @@
+use dim_agent_types::*;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+/// Scope origins survive revocation; only the fixed branch ancestry establishes visibility.
+pub(crate) fn scope_is_visible(scope: &PromptScope, branch: &str, ancestors: &[String]) -> bool {
+    let (PromptScope::Branch { timeline }
+    | PromptScope::Turn { timeline, .. }
+    | PromptScope::Task { timeline, .. }) = scope;
+    timeline == branch || ancestors.contains(timeline)
+}
+
+/// Rebuildable prompt state. Loading and publication belong to capabilities.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PromptSnapshot {
+    pub entries: BTreeMap<(String, PromptScope), PromptEntry>,
+    pub revision: Option<PromptReference>,
+    pub system_revision: Option<PromptReference>,
+    pub system: String,
+    turns: BTreeSet<String>,
+    tasks: BTreeSet<PromptScope>,
+}
+
+impl PromptSnapshot {
+    pub fn from_checkpoint(state: &PromptCheckpointState) -> Self {
+        Self {
+            entries: state
+                .entries
+                .iter()
+                .map(|entry| ((entry.source.clone(), entry.scope.clone()), entry.clone()))
+                .collect(),
+            revision: state.revision.clone(),
+            system_revision: state.system_revision.clone(),
+            system: state.system.clone(),
+            turns: state.turns.iter().cloned().collect(),
+            tasks: state.tasks.iter().cloned().collect(),
+        }
+    }
+
+    pub fn checkpoint(&self) -> PromptCheckpointState {
+        PromptCheckpointState {
+            entries: self.entries.values().cloned().collect(),
+            revision: self.revision.clone(),
+            system_revision: self.system_revision.clone(),
+            system: self.system.clone(),
+            turns: self.turns.iter().cloned().collect(),
+            tasks: self.tasks.iter().cloned().collect(),
+        }
+    }
+
+    pub fn from_context(context: &dim_agent_runtime::ContextHistory) -> Self {
+        let mut state = context
+            .checkpoint
+            .as_ref()
+            .and_then(|data| match &data.outcome {
+                ContextCompactionResult::Completed {
+                    checkpoint: Some(checkpoint),
+                    ..
+                } => Some(Self::from_checkpoint(&checkpoint.state.prompts)),
+                _ => None,
+            })
+            .unwrap_or_default();
+        for event in &context.events {
+            state.apply(event);
+        }
+        state
+    }
+
+    pub fn from_events(events: &[Arc<AgentEvent>]) -> Self {
+        let mut state = Self::default();
+        for event in events {
+            state.apply(event);
+        }
+        state
+    }
+
+    pub fn active(&self, scope: &PromptScope) -> bool {
+        match scope {
+            PromptScope::Branch { .. } => true,
+            PromptScope::Turn { id, .. } => self.turns.contains(id),
+            PromptScope::Task { .. } => self.tasks.contains(scope),
+        }
+    }
+
+    pub fn apply(&mut self, event: &AgentEvent) {
+        match &event.kind {
+            EventKind::PromptChanged(data) => {
+                let revision = PromptReference {
+                    timeline: data.timeline.clone(),
+                    revision: data.revision.clone(),
+                };
+                let mut system_changed = false;
+                for change in &data.changes {
+                    let (source, scope) = match change {
+                        PromptChange::Set { entry } => (&entry.source, &entry.scope),
+                        PromptChange::Revoke { source, scope } => (source, scope),
+                    };
+                    let key = (source.clone(), scope.clone());
+                    system_changed |= self
+                        .entries
+                        .get(&key)
+                        .is_some_and(|entry| entry.delivery == PromptDelivery::System);
+                    match change {
+                        PromptChange::Set { entry } if self.active(scope) => {
+                            system_changed |= entry.delivery == PromptDelivery::System;
+                            self.entries.insert(key, entry.clone());
+                        }
+                        PromptChange::Set { .. } => {}
+                        PromptChange::Revoke { .. } => {
+                            self.entries.remove(&key);
+                        }
+                    }
+                }
+                self.revision = Some(revision.clone());
+                if system_changed {
+                    self.system_revision = Some(revision);
+                    let mut entries: Vec<_> = self
+                        .entries
+                        .values()
+                        .filter(|entry| entry.delivery == PromptDelivery::System)
+                        .collect();
+                    entries.sort_by(|a, b| {
+                        a.order
+                            .cmp(&b.order)
+                            .then(a.source.cmp(&b.source))
+                            .then(a.scope.cmp(&b.scope))
+                    });
+                    self.system = entries
+                        .into_iter()
+                        .map(|entry| entry.body.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                }
+            }
+            EventKind::TurnStart(data) => {
+                self.turns.insert(data.turn_id.clone());
+            }
+            EventKind::TurnEnd(data) => {
+                self.turns.remove(&data.turn_id);
+            }
+            EventKind::BranchStart(_) => self.turns.clear(),
+            EventKind::ContextScope(data) => match data.status {
+                ContextScopeStatus::Started => {
+                    self.tasks.insert(data.scope.clone());
+                }
+                ContextScopeStatus::Ended => {
+                    self.tasks.remove(&data.scope);
+                }
+            },
+            _ => return,
+        }
+        let turns = &self.turns;
+        let tasks = &self.tasks;
+        self.entries.retain(|(_, scope), _| match scope {
+            PromptScope::Branch { .. } => true,
+            PromptScope::Turn { id, .. } => turns.contains(id),
+            PromptScope::Task { .. } => tasks.contains(scope),
+        });
+    }
+}

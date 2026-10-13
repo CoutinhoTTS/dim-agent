@@ -1,0 +1,215 @@
+//! Version 2 product views of the Session broadcast; positions are branch sequences.
+use dim_agent_runtime::{BranchStatus, ModelProgress, TimelineInfo};
+use dim_agent_types::{AgentEvent, ApprovalCallData, BranchSource, EventKind};
+use serde::Serialize;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInfo {
+    pub branch_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_branch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_point: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_event: Option<u64>,
+}
+impl From<TimelineInfo> for BranchInfo {
+    fn from(info: TimelineInfo) -> Self {
+        Self {
+            branch_id: info.id,
+            parent_branch_id: info.parent,
+            branch_point: info.branch_point,
+            create_event: info.create_anchor,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ProductEvent(Arc<AgentEvent>);
+impl ProductEvent {
+    /// `version` is the connection's protocol version (2 or 3).
+    pub fn new(event: Arc<AgentEvent>, version: u32) -> Option<Self> {
+        // Deliberately exclude model requests, diagnostic budgets, configuration
+        // commands and approval controls. None is a client business feed.
+        let visible = match &event.kind {
+            // Started calls and results closing undispatched calls are v3 facts (ADR agent-029).
+            EventKind::ToolUseStart(_) => version >= 3,
+            EventKind::ToolResult(data) => version >= 3 || data.call_event_id.is_some(),
+            EventKind::InputMessage(_)
+            | EventKind::InputApplied(_)
+            | EventKind::InputConsumed(_)
+            | EventKind::ExecStarted(_)
+            | EventKind::ExecEnded(_)
+            | EventKind::PermissionChanged(_)
+            | EventKind::StopInterrupt(_)
+            | EventKind::TurnStart(_)
+            | EventKind::TurnEnd(_)
+            | EventKind::ContextConfigured(_)
+            | EventKind::ContextScope(_)
+            | EventKind::ModelUsage(_)
+            | EventKind::ModelStart(_)
+            | EventKind::Thinking(_)
+            | EventKind::Text(_)
+            | EventKind::ToolUse(_)
+            | EventKind::ModelOutputEnd(_)
+            | EventKind::ToolCall(_)
+            | EventKind::ToolStart(_)
+            | EventKind::ToolCompleted(_)
+            | EventKind::BranchCreate(_)
+            | EventKind::BranchStart(_)
+            | EventKind::BranchCreateFailed(_)
+            | EventKind::CollaborationRequest(_)
+            | EventKind::CollaborationCancel(_)
+            | EventKind::CollaborationClose(_)
+            | EventKind::CollaborationMessage(_)
+            | EventKind::CollaborationDelivered(_)
+            | EventKind::CollaborationResult(_) => true,
+            EventKind::ModelContent(_)
+            | EventKind::ApprovalRequest(_)
+            | EventKind::ApprovalRespond(_)
+            | EventKind::ApprovalCancelled(_)
+            | EventKind::PromptChanged(_)
+            | EventKind::PromptConfigureRequest(_)
+            | EventKind::PromptConfigureResult(_)
+            | EventKind::ContextPrepare(_)
+            | EventKind::ContextCompaction(_)
+            | EventKind::ContextBudget(_)
+            | EventKind::ModelCall(_)
+            // Reloading a stored branch is not a client business fact.
+            | EventKind::BranchResume(_) => false,
+        };
+        visible.then_some(Self(event))
+    }
+}
+impl Serialize for ProductEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let EventKind::ContextConfigured(data) = &self.0.kind {
+            // Configuration adoption is public; full provider settings and
+            // composed system prompts remain inside the runtime.
+            serde_json::json!({
+                "id": self.0.id, "sequence": self.0.sequence, "create_at": self.0.create_at,
+                "type": "context", "name": "configured",
+                "data": {"timeline": data.timeline, "revision": data.revision,
+                    "previous": data.previous, "prompt": data.prompt,
+                    "provider_id": data.settings.provider_id, "model_id": data.settings.model_id}
+            })
+            .serialize(serializer)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchState {
+    pub branch_id: String,
+    pub running: bool,
+    pub stopping: bool,
+}
+impl BranchState {
+    pub fn new(branch_id: String, status: &BranchStatus) -> Self {
+        Self {
+            branch_id,
+            running: status.running,
+            stopping: status.stopping,
+        }
+    }
+}
+#[derive(Debug, Serialize)]
+pub struct CreateResult {
+    pub branch: BranchInfo,
+}
+#[derive(Debug, Serialize)]
+pub struct BarrierResult {
+    pub sequence: u64,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryResult {
+    pub events: Vec<ProductEvent>,
+    pub through: u64,
+    pub next_after: u64,
+    pub done: bool,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventNotice {
+    pub session_id: String,
+    pub branch_id: String,
+    pub event: ProductEvent,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateNotice {
+    pub session_id: String,
+    #[serde(flatten)]
+    pub state: BranchState,
+}
+/// The branch's model output not yet written to the Timeline (ADR agent-029).
+/// Display state: no sequence, never persisted, each notice replaces the last.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProgressNotice {
+    pub session_id: String,
+    pub branch_id: String,
+    pub turn_id: Option<String>,
+    pub request_id: Option<String>,
+    pub text: String,
+    /// Unicode scalar values of this request's `step/text` deltas before `text`.
+    pub text_offset: u64,
+    pub thinking: String,
+    /// Unicode scalar values of this request's `step/thinking` deltas before `thinking`.
+    pub thinking_offset: u64,
+    pub tools: Vec<ToolProgress>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolProgress {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+}
+impl ModelProgressNotice {
+    pub fn new(session_id: String, branch_id: String, progress: ModelProgress) -> Self {
+        Self {
+            session_id,
+            branch_id,
+            turn_id: progress.turn_id,
+            request_id: progress.request_id,
+            text: progress.text,
+            text_offset: progress.text_offset,
+            thinking: progress.thinking,
+            thinking_offset: progress.thinking_offset,
+            tools: progress
+                .tools
+                .into_iter()
+                .map(|tool| ToolProgress {
+                    call_id: tool.call_id,
+                    name: tool.name,
+                    arguments: tool.arguments,
+                })
+                .collect(),
+        }
+    }
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequest {
+    pub session_id: String,
+    pub branch_id: String,
+    pub request_id: String,
+    pub source: BranchSource,
+    pub call: ApprovalCallData,
+    pub reason: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalCancelled {
+    pub session_id: String,
+    pub branch_id: String,
+    pub request_id: String,
+    pub reason: String,
+}

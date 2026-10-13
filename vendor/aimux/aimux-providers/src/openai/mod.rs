@@ -1,0 +1,420 @@
+//! OpenAI-compatible provider.
+//!
+//! Works with any OpenAI-compatible API endpoint (OpenAI, Azure OpenAI,
+//! Together.ai, Groq, Fireworks, DeepSeek, etc.).
+
+pub mod convert;
+mod convert_common;
+pub mod embedding;
+pub mod files;
+pub mod image;
+pub mod model;
+pub mod responses;
+pub mod speech;
+pub mod transcription;
+mod types;
+
+pub use embedding::OpenAIEmbeddingModel;
+pub use image::OpenAIImageModel;
+pub use model::OpenAIModel;
+pub use responses::OpenAIResponsesModel;
+pub use speech::OpenAISpeechModel;
+pub use transcription::OpenAITranscriptionModel;
+
+use std::collections::HashMap;
+
+use aimux_core::error::AiMuxError;
+use aimux_core::language_model::LanguageModel;
+
+use aimux_core::provider::Provider;
+use aimux_provider_utils::{RetryConfig, load_api_key, without_trailing_slash};
+use serde_json::Value;
+
+pub(crate) fn openai_failed_response_handler() -> aimux_provider_utils::ResponseHandler<AiMuxError>
+{
+    aimux_provider_utils::create_json_error_response_handler(|data| {
+        let error = data.get("error").unwrap_or(data);
+        aimux_provider_utils::ProviderErrorParts {
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            provider_code: error
+                .get("code")
+                .or_else(|| error.get("type"))
+                .and_then(|value| match value {
+                    Value::String(value) => Some(value.clone()),
+                    Value::Number(value) => Some(value.to_string()),
+                    _ => None,
+                }),
+        }
+    })
+}
+
+pub(crate) fn openai_stream_error(
+    error: &Value,
+    url: &str,
+    request_body_values: Value,
+    response_headers: std::collections::HashMap<String, String>,
+) -> AiMuxError {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("OpenAI stream failed before any output was generated")
+        .to_owned();
+    let code = error.get("code").or_else(|| error.get("type"));
+    let provider_code = code.and_then(|value| match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    });
+    // Only a numeric HTTP status in the payload is a status; a string code
+    // ("invalid_api_key") must not be laundered into a retryable 500.
+    let status_code = code
+        .and_then(Value::as_u64)
+        .filter(|status| (400..=599).contains(status))
+        .map(|status| status as u16);
+
+    aimux_provider_utils::stream_error_api_call(
+        message,
+        provider_code,
+        status_code,
+        error,
+        url,
+        request_body_values,
+        response_headers,
+    )
+}
+
+/// 描述 OpenAI 兼容厂商的差异。
+///
+/// 薄封装填这个结构，共享的请求构造和响应解析读它决定行为。
+/// 这样既保持 `dyn LanguageModel` 能跨厂商互换，又能表达差异。
+#[derive(Debug, Clone, Default)]
+pub struct OpenAICompatProfile {
+    /// 是否支持 top_k 参数。Groq 等厂商不支持，设为 false 时请求体不发送 top_k。
+    pub supports_top_k: bool,
+    /// 是否支持 tools。少数厂商不支持，设为 false 时请求体不发送 tools/tool_choice。
+    pub supports_tools: bool,
+    /// 是否支持 response_format。
+    pub supports_response_format: bool,
+    /// 流式 usage 的特殊 key。Groq 用 "x_groq"，大多数厂商用顶层 "usage"（留 None）。
+    pub stream_usage_key: Option<&'static str>,
+    /// max-token 字段的 key（内部数据，非用户概念；RFC-0017 阶段 2）。
+    /// - `Some("max_tokens")`            → 只发 `max_tokens`
+    /// - `Some("max_completion_tokens")` → 只发 `max_completion_tokens`
+    /// - `None`                          → 按模型推断（推理模型 mct / 非推理 max_tokens）
+    pub max_tokens_key: Option<&'static str>,
+}
+
+impl OpenAICompatProfile {
+    /// 默认 profile：支持全部能力，无特殊流式 usage key。
+    /// 适用于 OpenAI 本身和大多数兼容厂商。
+    #[must_use]
+    pub fn full() -> Self {
+        Self {
+            supports_top_k: true,
+            supports_tools: true,
+            supports_response_format: true,
+            stream_usage_key: None,
+            max_tokens_key: None,
+        }
+    }
+
+    /// Groq profile：不支持 top_k，流式 usage 在 x_groq 字段；
+    /// `max_tokens` 已弃用，只发 `max_completion_tokens`（backlog B9）。
+    #[must_use]
+    pub fn groq() -> Self {
+        Self {
+            supports_top_k: false,
+            supports_tools: true,
+            supports_response_format: true,
+            stream_usage_key: Some("x_groq"),
+            max_tokens_key: Some("max_completion_tokens"),
+        }
+    }
+
+    /// 设置 `max_tokens_key`（内部数据，非用户概念）：`"max_tokens"` 或
+    /// `"max_completion_tokens"`。注册表薄封装行用此构建差异 profile。
+    #[must_use]
+    pub fn with_max_tokens_key(mut self, key: &'static str) -> Self {
+        self.max_tokens_key = Some(key);
+        self
+    }
+
+    /// DeepSeek profile：特化已退役（RFC-0017 阶段 2），回归 `full()`——
+    /// thinking / effort 映射等厂商差异由用户 bodyOverrides 定义。
+    /// 保留此薄封装以维持注册表与调用方结构不变。
+    #[must_use]
+    pub fn deepseek() -> Self {
+        Self::full()
+    }
+}
+
+/// RFC-0023:从 `OpenAIConfig` 构建 `ProviderRecord`(共享给 chat/responses 两个 model)。
+pub(crate) fn config_snapshot_from_config(
+    provider: &str,
+    model_id: &str,
+    config: &OpenAIConfig,
+) -> aimux_core::recording::ProviderRecord {
+    use aimux_core::recording::ProviderRecord;
+    ProviderRecord {
+        provider: provider.to_string(),
+        model_id: model_id.to_string(),
+        base_url: Some(config.base_url.clone()),
+        // 来源字段缺失时保守记为 explicit(显式 key 最常见;不泄露明文)。
+        api_key_source: config
+            .api_key_source
+            .clone()
+            .unwrap_or_else(|| "explicit".to_string()),
+        profile: Some(profile_to_json(&config.profile)),
+        provider_options: provider_options_to_json(config),
+    }
+}
+
+/// profile → JSON(`&'static str` 字段序列化为 String,回放重建时转回)。
+fn profile_to_json(p: &OpenAICompatProfile) -> serde_json::Value {
+    serde_json::json!({
+        "supports_top_k": p.supports_top_k,
+        "supports_tools": p.supports_tools,
+        "supports_response_format": p.supports_response_format,
+        "stream_usage_key": p.stream_usage_key,
+        "max_tokens_key": p.max_tokens_key,
+    })
+}
+
+/// 可重建的 provider_options(与 `provider::ProviderOptions` 序列化形状一致,
+/// rebuild_provider 直接反序列化)。base_url 已放 `ProviderRecord.base_url`,不重复。
+fn provider_options_to_json(config: &OpenAIConfig) -> Option<serde_json::Value> {
+    let opts = crate::provider::ProviderOptions {
+        base_url: None,
+        headers: config.headers.clone(),
+        organization: config.org_id.clone(),
+        project: config.project.clone(),
+        max_retries: Some(config.retry_config.max_retries),
+        body_overrides: config.body_overrides.clone(),
+    };
+    serde_json::to_value(opts).ok()
+}
+
+/// Configuration for the OpenAI provider.
+#[derive(Debug, Clone)]
+pub struct OpenAIConfig {
+    pub api_key: String,
+    /// api_key 来源(RFC-0023 `ProviderRecord.api_key_source` 分类):
+    /// `Some("env:VAR")` = 来自环境变量;`Some("none")` = 本地无认证占位;
+    /// `None` = 显式传 key(config_snapshot 记为 "explicit")。不存明文之外
+    /// 的信息,仅用于回放重建(S-1 建议的来源追踪字段)。
+    pub api_key_source: Option<String>,
+    pub base_url: String,
+    pub org_id: Option<String>,
+    /// OpenAI project ID sent via the `OpenAI-Project` header.
+    pub project: Option<String>,
+    /// Extra headers merged into every request.
+    pub headers: Option<HashMap<String, String>>,
+    /// Provider name — controls provider-specific behaviour in the shared
+    /// request builder (e.g. "groq" reads provider options from the "groq"
+    /// key and applies a reasoning-effort map). Defaults to "openai".
+    pub provider: String,
+    /// 厂商能力差异描述。默认 `full()`（支持全部能力）。
+    /// 薄封装用 `with_profile()` 设置差异。
+    pub profile: OpenAICompatProfile,
+    /// Retry settings used by Core model operations.
+    pub retry_config: RetryConfig,
+    /// Provider 级请求体覆盖（RFC-0017）。在标准请求体 + 内置厂商 override
+    /// 之后 deep-merge。per-call 的 `CallOptions.body_overrides` 在此之后
+    /// 再 merge（覆盖 provider 级）。
+    pub body_overrides: Option<Value>,
+}
+
+impl OpenAIConfig {
+    /// Create from an API key (uses default OpenAI base URL).
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            api_key_source: None,
+            base_url: "https://api.openai.com/v1".to_string(),
+            org_id: None,
+            project: None,
+            headers: None,
+            provider: "openai".to_string(),
+            profile: OpenAICompatProfile::full(),
+            retry_config: RetryConfig::default(),
+            body_overrides: None,
+        }
+    }
+
+    /// Use a custom base URL (for Azure, Groq, etc.).
+    #[must_use]
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = without_trailing_slash(&url.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_org_id(mut self, org_id: impl Into<String>) -> Self {
+        self.org_id = Some(org_id.into());
+        self
+    }
+
+    /// Set the OpenAI project ID (sent via the `OpenAI-Project` header).
+    #[must_use]
+    pub fn with_project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
+        self
+    }
+
+    /// Attach extra headers merged into every request.
+    #[must_use]
+    pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.headers = Some(headers);
+        self
+    }
+
+    /// Set the provider name (e.g. "groq") for provider-specific behaviour.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = provider.into();
+        self
+    }
+
+    /// 设置厂商能力差异描述。
+    #[must_use]
+    pub fn with_profile(mut self, profile: OpenAICompatProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Set the retry configuration. Pass `max_retries: 0` to disable retries.
+    #[must_use]
+    pub fn with_retry_config(mut self, config: RetryConfig) -> Self {
+        self.retry_config = config;
+        self
+    }
+
+    /// 设置 provider 级请求体覆盖（RFC-0017）。
+    #[must_use]
+    pub fn with_body_overrides(mut self, overrides: Value) -> Self {
+        self.body_overrides = Some(overrides);
+        self
+    }
+
+    /// Create from environment variable `OPENAI_API_KEY`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AiMuxError::InvalidArgument` when `OPENAI_API_KEY` is not set.
+    pub fn from_env() -> Result<Self, AiMuxError> {
+        let api_key = load_api_key(None, "OPENAI_API_KEY", "OpenAI")?;
+        Ok(Self::new(api_key).with_api_key_source(Some("env:OPENAI_API_KEY")))
+    }
+
+    /// 标注 api_key 来源(RFC-0023 回放重建用)。
+    #[must_use]
+    pub fn with_api_key_source(mut self, source: Option<&str>) -> Self {
+        self.api_key_source = source.map(std::string::ToString::to_string);
+        self
+    }
+}
+
+/// OpenAI provider — creates `OpenAIModel` instances.
+///
+/// Does **not** hold an HTTP client — the `aimux-provider-utils` API helpers use
+/// the process-wide shared `Client` internally (RFC-0009 §4.1).
+pub struct OpenAIProvider {
+    config: OpenAIConfig,
+}
+
+impl OpenAIProvider {
+    #[must_use]
+    pub fn new(config: OpenAIConfig) -> Self {
+        Self { config }
+    }
+
+    /// Create a model instance for the given model name (e.g. `"gpt-4o"`).
+    #[must_use]
+    pub fn model(&self, model_id: &str) -> model::OpenAIModel {
+        model::OpenAIModel::new(model_id.to_string(), self.config.clone())
+    }
+
+    /// Create a Responses API model instance for the given model name (e.g.
+    /// `"gpt-4o"`). Uses the `/v1/responses` endpoint instead of
+    /// `/v1/chat/completions`.
+    #[must_use]
+    pub fn responses_model(&self, model_id: &str) -> responses::OpenAIResponsesModel {
+        responses::OpenAIResponsesModel::new(model_id.to_string(), self.config.clone())
+    }
+
+    /// Create a Files interface for uploading files to OpenAI.
+    #[must_use]
+    pub fn files(&self) -> files::OpenAIFiles {
+        files::OpenAIFiles::new(self.config.clone())
+    }
+
+    /// Create an embedding model instance for the given model name (e.g.
+    /// `"text-embedding-3-large"`).
+    #[must_use]
+    pub fn embedding_model(&self, model_id: &str) -> embedding::OpenAIEmbeddingModel {
+        embedding::OpenAIEmbeddingModel::new(model_id.to_string(), self.config.clone())
+    }
+
+    /// Create a speech (TTS) model instance for the given model name (e.g.
+    /// `"tts-1"`). Uses the `/audio/speech` endpoint.
+    #[must_use]
+    pub fn speech(&self, model_id: &str) -> speech::OpenAISpeechModel {
+        speech::OpenAISpeechModel::new(model_id.to_string(), self.config.clone())
+    }
+
+    /// Create an image generation model instance for the given model name
+    /// (e.g. `"dall-e-3"` or `"gpt-image-1"`). Uses the `/images/generations`
+    /// endpoint for generation and `/images/edits` for editing.
+    #[must_use]
+    pub fn image(&self, model_id: &str) -> image::OpenAIImageModel {
+        image::OpenAIImageModel::new(model_id.to_string(), self.config.clone())
+    }
+
+    /// Create a transcription (STT) model instance for the given model name
+    /// (e.g. `"whisper-1"` or `"gpt-4o-transcribe"`). Uses the
+    /// `/audio/transcriptions` endpoint.
+    #[must_use]
+    pub fn transcription(&self, model_id: &str) -> transcription::OpenAITranscriptionModel {
+        transcription::OpenAITranscriptionModel::new(model_id.to_string(), self.config.clone())
+    }
+}
+
+impl Provider for OpenAIProvider {
+    fn name(&self) -> &str {
+        "openai"
+    }
+
+    fn language_model(&self, model_id: &str) -> Result<Box<dyn LanguageModel>, AiMuxError> {
+        Ok(Box::new(self.model(model_id)))
+    }
+
+    /// List models via `GET {base_url}/models` (OpenAI-compatible), enriched
+    /// with the community catalogue portrait when available (RFC-0027).
+    ///
+    /// The provider name used for catalogue lookup is `config.provider` (the
+    /// registry entry name, e.g. `"deepseek"`), not the hardcoded `"openai"`
+    /// returned by [`name`](Provider::name) — that lets the same shared impl
+    /// attach the right portrait per registry-backed provider.
+    fn list_models(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<aimux_core::model_catalogue::RuntimeModel>, AiMuxError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let config = self.config.clone();
+        Box::pin(async move {
+            let headers = model::build_auth_headers(&config);
+            let runtime =
+                model::execute_list_models(&config.base_url, &headers, config.retry_config).await?;
+            Ok(runtime)
+        })
+    }
+}

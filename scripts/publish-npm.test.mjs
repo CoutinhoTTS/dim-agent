@@ -44,13 +44,24 @@ function fixture(t, version = '1.2.3') {
   // Registry writes are the only substituted boundary; package archives are real.
   const bin = path.join(root, 'bin');
   mkdirSync(bin);
-  writeFileSync(path.join(bin, 'npm'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PUBLISH_LOG"\n', { mode: 0o755 });
+  writeFileSync(path.join(bin, 'npm'), `#!/bin/sh
+if [ "$1" = view ]; then
+  if [ "$REGISTRY_MODE" = fail ]; then printf '{"error":{"code":"E401"}}'; exit 1; fi
+  if [ "$REGISTRY_MODE" = mismatch ]; then printf '{"integrity":"sha512-wrong"}'; exit 0; fi
+  if [ "$REGISTRY_MODE" = existing ] && [ "$2" = dimcode-darwin-arm64@1.2.3 ]; then
+    printf '{"integrity":"%s"}' "$EXISTING_INTEGRITY"; exit 0
+  fi
+  printf '{"error":{"code":"E404"}}'; exit 1
+fi
+printf "%s\\n" "$*" >> "$PUBLISH_LOG"
+`, { mode: 0o755 });
   const log = path.join(root, 'published.log');
   writeFileSync(log, '');
-  function run({ publish = false, commit = sourceCommit } = {}) {
+  function run({ publish = false, commit = sourceCommit, registry = 'missing' } = {}) {
     writeFileSync(path.join(root, 'release-manifest.json'), JSON.stringify(manifest));
     return spawnSync(process.execPath, [script, root, version, commit, ...(publish ? ['--publish'] : [])], {
-      encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log },
+      encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log,
+        REGISTRY_MODE: registry, EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
     });
   }
   return { root, names, manifest, log, run };
@@ -102,4 +113,18 @@ test('prerelease versions publish only to next', (t) => {
   for (const call of readFileSync(release.log, 'utf8').trim().split('\n')) {
     assert(call.includes('--tag next'));
   }
+});
+
+ test('retries matching published packages and stops before writes on mismatches or registry errors', (t) => {
+  const release = fixture(t);
+  const resumed = release.run({publish:true,registry:'existing'});
+  assert.equal(resumed.status,0,resumed.stderr);
+  const calls = readFileSync(release.log,'utf8').trim().split('\n');
+  assert.equal(calls.length,5);
+  assert(calls[0].includes('dimcode-darwin-x64-1.2.3.tgz'));
+  writeFileSync(release.log,'');
+  assert.notEqual(release.run({publish:true,registry:'mismatch'}).status,0);
+  assert.equal(readFileSync(release.log,'utf8'),'');
+  assert.notEqual(release.run({publish:true,registry:'fail'}).status,0);
+  assert.equal(readFileSync(release.log,'utf8'),'');
 });

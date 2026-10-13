@@ -1,0 +1,43 @@
+[package]
+name = "dim-agent-aimux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dim-agent-capabilities.workspace = true
+dim-agent-runtime.workspace = true
+dim-agent-types.workspace = true
+rutis.workspace = true
+aimux-core.workspace = true
+aimux-provider-utils.workspace = true
+aimux-providers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+sha2 = "0.10"
+async-stream = "0.3"
+url = "2"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["json"] }
+futures = "0.3"
+wiremock = "0.6"
+
+[[test]]
+name = "aimux_native_contract"
+path = "../../vendor/aimux/aimux-providers/tests/openai_native_contract_test.rs"
+
+[[test]]
+name = "aimux_native_protocol_metadata"
+path = "../../vendor/aimux/aimux-providers/tests/native_protocol_metadata_test.rs"
+
+[[test]]
+name = "aimux_bedrock_native_flow"
+path = "../../vendor/aimux/aimux-providers/tests/bedrock_native_flow_test.rs"

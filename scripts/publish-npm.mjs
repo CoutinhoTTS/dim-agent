@@ -67,7 +67,25 @@ for (const name of names) {
 console.log(`Validated ${archives.length} npm packages for ${version} (${sourceCommit}).`);
 if (mode === '--publish') {
   const tag = version.includes('-') ? 'next' : 'latest';
-  for (const archive of archives) {
+  const pending = [];
+  for (const [index, archive] of archives.entries()) {
+    const name = names[index];
+    const existing = spawnSync('npm', ['view', `${name}@${version}`, 'dist', '--json',
+      '--registry', 'https://registry.npmjs.org'], { encoding: 'utf8' });
+    assert.ifError(existing.error);
+    let metadata;
+    try { metadata = JSON.parse(existing.stdout); }
+    catch { assert.fail(`Cannot verify registry state: ${name}`); }
+    if (existing.status === 0) {
+      const integrity = `sha512-${createHash('sha512').update(readFileSync(archive)).digest('base64')}`;
+      assert.equal(metadata.integrity, integrity, `Existing version has different content: ${name}`);
+      console.log(`Already published with matching integrity: ${name}@${version}`);
+    } else {
+      assert.equal(metadata.error?.code, 'E404', `Cannot verify registry state: ${name}`);
+      pending.push(archive);
+    }
+  }
+  for (const archive of pending) {
     const published = spawnSync('npm', ['publish', archive, '--access', 'public', '--tag', tag,
       '--ignore-scripts', '--registry', 'https://registry.npmjs.org'], { stdio: 'inherit' });
     assert.ifError(published.error);

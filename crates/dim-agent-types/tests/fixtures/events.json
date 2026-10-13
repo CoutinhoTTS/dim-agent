@@ -1,0 +1,1864 @@
+[
+  {
+    "type": "input",
+    "name": "message",
+    "data": {
+      "text": "legacy default mode"
+    },
+    "id": "event-1",
+    "sequence": 1,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "input",
+    "name": "message",
+    "tags": [],
+    "data": {
+      "text": "queue",
+      "mode": "queue"
+    },
+    "id": "event-2",
+    "sequence": 2,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "input",
+    "name": "message",
+    "tags": [
+      "external",
+      "中文"
+    ],
+    "data": {
+      "text": "steer",
+      "mode": "steer"
+    },
+    "id": "event-3",
+    "sequence": 3,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "input",
+    "name": "message",
+    "data": {
+      "text": "append",
+      "mode": "append"
+    },
+    "id": "event-4",
+    "sequence": 4,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "input",
+    "name": "applied",
+    "data": {
+      "input_id": "event-1"
+    },
+    "id": "event-5",
+    "sequence": 5,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "turn",
+    "name": "start",
+    "data": {
+      "turn_id": "turn-1"
+    },
+    "id": "event-6",
+    "sequence": 6,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "model-start",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1"
+    },
+    "id": "event-7",
+    "sequence": 7,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "prepare",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "through": 7,
+      "request": {
+        "providerId": "fixture-provider",
+        "modelId": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello 中文"
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply",
+                "startTime": "2026-09-20T01:02:03.004Z",
+                "endTime": "2026-09-20T01:02:04Z"
+              },
+              {
+                "type": "thinking",
+                "thinking": "Reasoning",
+                "startTime": "2026-09-20T01:02:00+00:00",
+                "endTime": "2026-09-20T01:02:02Z"
+              },
+              {
+                "type": "tool_use",
+                "id": "call-1",
+                "name": "read",
+                "input": {
+                  "nested": {
+                    "enabled": true,
+                    "amount": 2.5,
+                    "absent": null
+                  },
+                  "values": [
+                    1,
+                    "二",
+                    false
+                  ]
+                },
+                "startTime": "2026-09-20T01:02:05Z"
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "url",
+                  "mediaType": "image/png",
+                  "url": "https://example.test/image.png"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool_result",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call-1",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "工具输出\nUnicode: 中文 🦀"
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "url",
+                      "mediaType": "image/png",
+                      "url": "https://example.test/image.png"
+                    }
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "mediaType": "image/png",
+                      "data": "AA=="
+                    }
+                  }
+                ],
+                "structuredContent": {
+                  "nested": {
+                    "enabled": true,
+                    "amount": 2.5,
+                    "absent": null
+                  },
+                  "values": [
+                    1,
+                    "二",
+                    false
+                  ]
+                },
+                "is_error": false
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "call-2",
+                "content": "plain result",
+                "is_error": true
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "no optional times"
+              },
+              {
+                "type": "thinking",
+                "thinking": "no times"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "tool-static",
+            "description": "Description",
+            "source": "static",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          },
+          {
+            "name": "tool-builtin",
+            "description": "Description",
+            "source": "builtin",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          },
+          {
+            "name": "tool-extension",
+            "description": "Description",
+            "source": "extension",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          },
+          {
+            "name": "tool-dynamic",
+            "description": "Description",
+            "source": "dynamic",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          }
+        ],
+        "system": [
+          {
+            "type": "text",
+            "text": "System",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Uncached"
+          }
+        ],
+        "config": {
+          "temperature": 0.7,
+          "maxTokens": 1000,
+          "topP": 0.95,
+          "topK": 20,
+          "stopSequences": [
+            "STOP"
+          ],
+          "reasoning": {
+            "enabled": true,
+            "effort": "future-effort",
+            "budgetTokens": 50,
+            "summary": "auto",
+            "includeThoughts": true,
+            "interleavedThinking": false
+          },
+          "providerOptions": {
+            "openai": {
+              "reasoningEffort": "xhigh",
+              "serviceTier": "future-tier",
+              "summary": "detailed",
+              "interleavedThinking": true
+            },
+            "openai-compatible": {
+              "reasoningEffort": "low",
+              "serviceTier": "flex",
+              "interleavedThinking": false,
+              "thinking": {
+                "type": "disabled"
+              },
+              "enable_thinking": false
+            },
+            "anthropic": {
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive",
+                "budgetTokens": 32
+              },
+              "sendReasoning": true,
+              "interleavedThinking": true
+            },
+            "gemini": {
+              "thinkingConfig": {
+                "thinkingBudget": 24,
+                "includeThoughts": true
+              }
+            },
+            "deepseek": {
+              "reasoningEffort": "max",
+              "interleavedThinking": true
+            },
+            "moonshotai": {
+              "reasoningEffort": "medium",
+              "interleavedThinking": false
+            },
+            "xai": {
+              "reasoningEffort": "low",
+              "interleavedThinking": true
+            },
+            "zenmux": {
+              "reasoningEffort": "high",
+              "interleavedThinking": true
+            },
+            "aihubmix": {
+              "reasoningEffort": "none",
+              "interleavedThinking": false
+            }
+          }
+        },
+        "metadata": {
+          "sessionId": "session-1",
+          "runId": "run-1",
+          "traceId": "trace-1",
+          "turnId": "turn-1",
+          "vendor": {
+            "nested": {
+              "enabled": true,
+              "amount": 2.5,
+              "absent": null
+            },
+            "values": [
+              1,
+              "二",
+              false
+            ]
+          }
+        }
+      },
+      "recovery": {
+        "inputTokens": 32768,
+        "contextWindow": 32768,
+        "requestedMaxTokens": 4096,
+        "allowedMaxTokens": -0.25,
+        "ratio": 0.9
+      }
+    },
+    "id": "event-8",
+    "sequence": 8,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "prepare",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "through": 7,
+      "request": {
+        "providerId": "p",
+        "modelId": "m",
+        "messages": []
+      }
+    },
+    "id": "event-9",
+    "sequence": 9,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "compaction",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "through": 7,
+      "status": "completed",
+      "cursor": "event-7",
+      "summary": "summary",
+      "diagnostics": {
+        "reason": "auto",
+        "trigger": "provider_output_budget_exhausted",
+        "sourceRunId": "run-1",
+        "sourceTurnId": 1,
+        "baselineSource": "provider_baseline",
+        "baselinePromptTokens": 100,
+        "deltaTokens": -3.5,
+        "coverage": "partial_recent",
+        "candidateMessageCount": 8,
+        "inputMessageCount": 7,
+        "retainedMessageCount": 2,
+        "retainedTokenBudget": 256,
+        "retainedTokens": 200,
+        "serializedChars": 1024,
+        "estimatedInputTokens": 300.5,
+        "plannedOutputTokens": 128,
+        "minVisibleOutputTokens": 64,
+        "requestedThinkingBudgetTokens": 64,
+        "adjustedThinkingBudgetTokens": 32,
+        "thinkingBudgetClamped": true,
+        "reasoningEffortBudgetEstimateTokens": 12,
+        "effectivePlannedOutputTokens": 96,
+        "systemPromptTokens": 20,
+        "estimatedCompressedTokens": 40,
+        "estimatedPostCompactionTokens": 240,
+        "summaryInputBudget": 400,
+        "chunkTargetInputBudget": 300,
+        "maxChunkInputTokens": 250,
+        "summaryRequestContextRatio": 0.75,
+        "requestEnvelopeMargin": 16,
+        "budgetEstimateSource": "actual",
+        "compactionReasoningEffort": "custom-effort",
+        "preflightInputTokens": 200,
+        "preflightOutputTokens": 96,
+        "compactedToolPayloadCount": 1,
+        "droppedMessageCount": 3,
+        "tailTruncatedMessageId": "message-1",
+        "chunkCount": 2,
+        "recursiveDepth": 1,
+        "summaryChars": 80,
+        "estimatedSummaryTokens": 20,
+        "modelCallCount": 2,
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 30
+        },
+        "failureCode": "budget",
+        "fallbackReason": "chunk_overflow",
+        "omittedTokenEstimate": 15,
+        "durationMs": 1.25
+      }
+    },
+    "id": "event-10",
+    "sequence": 10,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "compaction",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "through": 7,
+      "status": "skipped",
+      "reason": "small",
+      "diagnostics": {
+        "reason": "manual",
+        "trigger": "manual",
+        "sourceRunId": "run-1",
+        "sourceTurnId": 1,
+        "baselineSource": "provider_baseline",
+        "baselinePromptTokens": 100,
+        "deltaTokens": -3.5,
+        "coverage": "full",
+        "candidateMessageCount": 8,
+        "inputMessageCount": 7,
+        "retainedMessageCount": 2,
+        "retainedTokenBudget": 256,
+        "retainedTokens": 200,
+        "serializedChars": 1024,
+        "estimatedInputTokens": 300.5,
+        "plannedOutputTokens": 128,
+        "minVisibleOutputTokens": 64,
+        "requestedThinkingBudgetTokens": 64,
+        "adjustedThinkingBudgetTokens": 32,
+        "thinkingBudgetClamped": true,
+        "reasoningEffortBudgetEstimateTokens": 12,
+        "effectivePlannedOutputTokens": 96,
+        "systemPromptTokens": 20,
+        "estimatedCompressedTokens": 40,
+        "estimatedPostCompactionTokens": 240,
+        "summaryInputBudget": 400,
+        "chunkTargetInputBudget": 300,
+        "maxChunkInputTokens": 250,
+        "summaryRequestContextRatio": 0.75,
+        "requestEnvelopeMargin": 16,
+        "budgetEstimateSource": "estimated",
+        "compactionReasoningEffort": "custom-effort",
+        "preflightInputTokens": 200,
+        "preflightOutputTokens": 96,
+        "compactedToolPayloadCount": 1,
+        "droppedMessageCount": 3,
+        "tailTruncatedMessageId": "message-1",
+        "chunkCount": 2,
+        "recursiveDepth": 1,
+        "summaryChars": 80,
+        "estimatedSummaryTokens": 20,
+        "modelCallCount": 2,
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 30
+        },
+        "failureCode": "budget",
+        "fallbackReason": "empty_summary",
+        "omittedTokenEstimate": 15,
+        "durationMs": 1.25
+      }
+    },
+    "id": "event-11",
+    "sequence": 11,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "compaction",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "through": 7,
+      "status": "failed",
+      "error": "network"
+    },
+    "id": "event-12",
+    "sequence": 12,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "compaction",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "through": 7,
+      "status": "failed",
+      "error": "empty",
+      "diagnostics": {
+        "reason": "auto",
+        "trigger": "threshold",
+        "sourceRunId": "run-1",
+        "sourceTurnId": 1,
+        "baselineSource": "provider_baseline",
+        "baselinePromptTokens": 100,
+        "deltaTokens": -3.5,
+        "coverage": "partial_recent",
+        "candidateMessageCount": 8,
+        "inputMessageCount": 7,
+        "retainedMessageCount": 2,
+        "retainedTokenBudget": 256,
+        "retainedTokens": 200,
+        "serializedChars": 1024,
+        "estimatedInputTokens": 300.5,
+        "plannedOutputTokens": 128,
+        "minVisibleOutputTokens": 64,
+        "requestedThinkingBudgetTokens": 64,
+        "adjustedThinkingBudgetTokens": 32,
+        "thinkingBudgetClamped": true,
+        "reasoningEffortBudgetEstimateTokens": 12,
+        "effectivePlannedOutputTokens": 96,
+        "systemPromptTokens": 20,
+        "estimatedCompressedTokens": 40,
+        "estimatedPostCompactionTokens": 240,
+        "summaryInputBudget": 400,
+        "chunkTargetInputBudget": 300,
+        "maxChunkInputTokens": 250,
+        "summaryRequestContextRatio": 0.75,
+        "requestEnvelopeMargin": 16,
+        "budgetEstimateSource": "actual",
+        "compactionReasoningEffort": "custom-effort",
+        "preflightInputTokens": 200,
+        "preflightOutputTokens": 96,
+        "compactedToolPayloadCount": 1,
+        "droppedMessageCount": 3,
+        "tailTruncatedMessageId": "message-1",
+        "chunkCount": 2,
+        "recursiveDepth": 1,
+        "summaryChars": 80,
+        "estimatedSummaryTokens": 20,
+        "modelCallCount": 2,
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 30
+        },
+        "failureCode": "budget",
+        "fallbackReason": "budget_preflight_empty",
+        "omittedTokenEstimate": 15,
+        "durationMs": 1.25
+      }
+    },
+    "id": "event-13",
+    "sequence": 13,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "budget",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "boundary": "event-7",
+      "estimatedInputTokens": 20.5,
+      "baselineSource": "provider_baseline",
+      "baselinePromptTokens": 20,
+      "deltaTokens": 0.5,
+      "contextWindow": 1000,
+      "outputTokens": 100
+    },
+    "id": "event-14",
+    "sequence": 14,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "context",
+    "name": "budget",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "estimatedInputTokens": 20,
+      "baselineSource": "full_estimate",
+      "contextWindow": 1000,
+      "outputTokens": 100
+    },
+    "id": "event-15",
+    "sequence": 15,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "model",
+    "name": "call",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "request": {
+        "providerId": "fixture-provider",
+        "modelId": "fixture-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello 中文"
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Reply",
+                "startTime": "2026-09-20T01:02:03.004Z",
+                "endTime": "2026-09-20T01:02:04Z"
+              },
+              {
+                "type": "thinking",
+                "thinking": "Reasoning",
+                "startTime": "2026-09-20T01:02:00+00:00",
+                "endTime": "2026-09-20T01:02:02Z"
+              },
+              {
+                "type": "tool_use",
+                "id": "call-1",
+                "name": "read",
+                "input": {
+                  "nested": {
+                    "enabled": true,
+                    "amount": 2.5,
+                    "absent": null
+                  },
+                  "values": [
+                    1,
+                    "二",
+                    false
+                  ]
+                },
+                "startTime": "2026-09-20T01:02:05Z"
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "url",
+                  "mediaType": "image/png",
+                  "url": "https://example.test/image.png"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool_result",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call-1",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "工具输出\nUnicode: 中文 🦀"
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "url",
+                      "mediaType": "image/png",
+                      "url": "https://example.test/image.png"
+                    }
+                  },
+                  {
+                    "type": "image",
+                    "source": {
+                      "type": "base64",
+                      "mediaType": "image/png",
+                      "data": "AA=="
+                    }
+                  }
+                ],
+                "structuredContent": {
+                  "nested": {
+                    "enabled": true,
+                    "amount": 2.5,
+                    "absent": null
+                  },
+                  "values": [
+                    1,
+                    "二",
+                    false
+                  ]
+                },
+                "is_error": false
+              },
+              {
+                "type": "tool_result",
+                "tool_use_id": "call-2",
+                "content": "plain result",
+                "is_error": true
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "no optional times"
+              },
+              {
+                "type": "thinking",
+                "thinking": "no times"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "tool-static",
+            "description": "Description",
+            "source": "static",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          },
+          {
+            "name": "tool-builtin",
+            "description": "Description",
+            "source": "builtin",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          },
+          {
+            "name": "tool-extension",
+            "description": "Description",
+            "source": "extension",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          },
+          {
+            "name": "tool-dynamic",
+            "description": "Description",
+            "source": "dynamic",
+            "risk": "low",
+            "metadata": {
+              "version": "1",
+              "author": "author",
+              "docsUrl": "https://example.test/docs",
+              "sourcePluginId": "plugin",
+              "mcpServerId": "mcp",
+              "mcpOriginalToolName": "original",
+              "custom": {
+                "vendor": true
+              }
+            },
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "path"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "nil": {
+                  "type": "null"
+                },
+                "list": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "fileChanges": {
+              "preExecutePaths": {
+                "selector": "path"
+              },
+              "postExecutePaths": "affectedPaths"
+            }
+          }
+        ],
+        "system": [
+          {
+            "type": "text",
+            "text": "System",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Uncached"
+          }
+        ],
+        "config": {
+          "temperature": 0.7,
+          "maxTokens": 1000,
+          "topP": 0.95,
+          "topK": 20,
+          "stopSequences": [
+            "STOP"
+          ],
+          "reasoning": {
+            "enabled": true,
+            "effort": "future-effort",
+            "budgetTokens": 50,
+            "summary": "auto",
+            "includeThoughts": true,
+            "interleavedThinking": false
+          },
+          "providerOptions": {
+            "openai": {
+              "reasoningEffort": "xhigh",
+              "serviceTier": "future-tier",
+              "summary": "detailed",
+              "interleavedThinking": true
+            },
+            "openai-compatible": {
+              "reasoningEffort": "low",
+              "serviceTier": "flex",
+              "interleavedThinking": false,
+              "thinking": {
+                "type": "disabled"
+              },
+              "enable_thinking": false
+            },
+            "anthropic": {
+              "effort": "high",
+              "thinking": {
+                "type": "adaptive",
+                "budgetTokens": 32
+              },
+              "sendReasoning": true,
+              "interleavedThinking": true
+            },
+            "gemini": {
+              "thinkingConfig": {
+                "thinkingBudget": 24,
+                "includeThoughts": true
+              }
+            },
+            "deepseek": {
+              "reasoningEffort": "max",
+              "interleavedThinking": true
+            },
+            "moonshotai": {
+              "reasoningEffort": "medium",
+              "interleavedThinking": false
+            },
+            "xai": {
+              "reasoningEffort": "low",
+              "interleavedThinking": true
+            },
+            "zenmux": {
+              "reasoningEffort": "high",
+              "interleavedThinking": true
+            },
+            "aihubmix": {
+              "reasoningEffort": "none",
+              "interleavedThinking": false
+            }
+          }
+        },
+        "metadata": {
+          "sessionId": "session-1",
+          "runId": "run-1",
+          "traceId": "trace-1",
+          "turnId": "turn-1",
+          "vendor": {
+            "nested": {
+              "enabled": true,
+              "amount": 2.5,
+              "absent": null
+            },
+            "values": [
+              1,
+              "二",
+              false
+            ]
+          }
+        }
+      }
+    },
+    "id": "event-16",
+    "sequence": 16,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "model",
+    "name": "call",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "request": {
+        "providerId": "p",
+        "modelId": "m",
+        "messages": [],
+        "system": "plain",
+        "tools": [],
+        "config": {},
+        "metadata": {}
+      }
+    },
+    "id": "event-17",
+    "sequence": 17,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "model",
+    "name": "usage",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "usage": {
+        "promptTokens": 100,
+        "completionTokens": 20,
+        "totalTokens": 120,
+        "cacheReadTokens": 30,
+        "cacheWriteTokens": 10,
+        "cost": 0.001,
+        "currency": "USD"
+      }
+    },
+    "id": "event-18",
+    "sequence": 18,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "model",
+    "name": "usage",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "usage": {
+        "promptTokens": 0,
+        "completionTokens": 0,
+        "totalTokens": 0
+      }
+    },
+    "id": "event-19",
+    "sequence": 19,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "thinking",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "delta": "Think"
+    },
+    "id": "event-20",
+    "sequence": 20,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "text",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "delta": "Hello 🦀"
+    },
+    "id": "event-21",
+    "sequence": 21,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "tool-use",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "call": {
+        "id": "call-1",
+        "name": "read",
+        "input": {
+          "nested": {
+            "enabled": true,
+            "amount": 2.5,
+            "absent": null
+          },
+          "values": [
+            1,
+            "二",
+            false
+          ]
+        }
+      }
+    },
+    "id": "event-22",
+    "sequence": 22,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "model-output-end",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "status": "completed",
+      "finish_reason": "end_turn"
+    },
+    "id": "event-23",
+    "sequence": 23,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "model-output-end",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "status": "completed",
+      "finish_reason": "tool_use"
+    },
+    "id": "event-24",
+    "sequence": 24,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "model-output-end",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "status": "completed",
+      "finish_reason": "stop_sequence"
+    },
+    "id": "event-25",
+    "sequence": 25,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "model-output-end",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "status": "failed",
+      "error": "budget",
+      "budget": {
+        "inputTokens": 32768,
+        "contextWindow": 32768,
+        "requestedMaxTokens": 4096,
+        "allowedMaxTokens": -0.25,
+        "ratio": 0.9
+      }
+    },
+    "id": "event-26",
+    "sequence": 26,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "model-output-end",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "status": "failed",
+      "error": "other"
+    },
+    "id": "event-27",
+    "sequence": 27,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "model-output-end",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "status": "cancelled",
+      "reason": "user"
+    },
+    "id": "event-28",
+    "sequence": 28,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "tool-call",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "calls": [
+        {
+          "id": "call-1",
+          "name": "read",
+          "input": {
+            "nested": {
+              "enabled": true,
+              "amount": 2.5,
+              "absent": null
+            },
+            "values": [
+              1,
+              "二",
+              false
+            ]
+          }
+        },
+        {
+          "id": "call-2",
+          "name": "write",
+          "input": {}
+        }
+      ]
+    },
+    "id": "event-29",
+    "sequence": 29,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "tool-start",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "call_event_id": "batch-1",
+      "call_id": "call-1"
+    },
+    "id": "event-30",
+    "sequence": 30,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "tool-completed",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "call_event_id": "batch-1",
+      "call_id": "call-1",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "工具输出\nUnicode: 中文 🦀"
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "url",
+              "mediaType": "image/png",
+              "url": "https://example.test/image.png"
+            }
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "mediaType": "image/png",
+              "data": "AA=="
+            }
+          }
+        ],
+        "structuredContent": {
+          "nested": {
+            "enabled": true,
+            "amount": 2.5,
+            "absent": null
+          },
+          "values": [
+            1,
+            "二",
+            false
+          ]
+        },
+        "isError": false,
+        "blobRefs": [
+          {
+            "blobId": "blob-text",
+            "sessionId": "session-1",
+            "kind": "text",
+            "path": "/tmp/text",
+            "ref": "opaque-ref",
+            "mimeType": "text/plain",
+            "sizeBytes": 23
+          },
+          {
+            "blobId": "blob-binary",
+            "sessionId": "session-1",
+            "kind": "binary",
+            "path": "/tmp/binary",
+            "ref": "opaque-ref",
+            "mimeType": "text/plain",
+            "sizeBytes": 23
+          },
+          {
+            "blobId": "blob-file",
+            "sessionId": "session-1",
+            "kind": "file",
+            "path": "/tmp/file",
+            "ref": "opaque-ref",
+            "mimeType": "text/plain",
+            "sizeBytes": 23
+          },
+          {
+            "blobId": "blob-stream",
+            "sessionId": "session-1",
+            "kind": "stream",
+            "path": "/tmp/stream",
+            "ref": "opaque-ref",
+            "mimeType": "text/plain",
+            "sizeBytes": 23
+          },
+          {
+            "blobId": "blob-remote",
+            "sessionId": "session-1",
+            "kind": "remote",
+            "path": "/tmp/remote",
+            "ref": "opaque-ref",
+            "mimeType": "text/plain",
+            "sizeBytes": 23
+          }
+        ],
+        "backgroundTask": {
+          "taskId": "task-1",
+          "wakePolicy": "auto",
+          "outputPath": "/tmp/output",
+          "description": "working"
+        },
+        "contextMessages": [
+          {
+            "role": "user",
+            "content": "Context retained"
+          }
+        ]
+      }
+    },
+    "id": "event-31",
+    "sequence": 31,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "step",
+    "name": "tool-result",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "call_event_id": "batch-1",
+      "results": [
+        {
+          "call_id": "call-1",
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "工具输出\nUnicode: 中文 🦀"
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "url",
+                  "mediaType": "image/png",
+                  "url": "https://example.test/image.png"
+                }
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "mediaType": "image/png",
+                  "data": "AA=="
+                }
+              }
+            ],
+            "structuredContent": {
+              "nested": {
+                "enabled": true,
+                "amount": 2.5,
+                "absent": null
+              },
+              "values": [
+                1,
+                "二",
+                false
+              ]
+            },
+            "isError": false,
+            "blobRefs": [
+              {
+                "blobId": "blob-text",
+                "sessionId": "session-1",
+                "kind": "text",
+                "path": "/tmp/text",
+                "ref": "opaque-ref",
+                "mimeType": "text/plain",
+                "sizeBytes": 23
+              },
+              {
+                "blobId": "blob-binary",
+                "sessionId": "session-1",
+                "kind": "binary",
+                "path": "/tmp/binary",
+                "ref": "opaque-ref",
+                "mimeType": "text/plain",
+                "sizeBytes": 23
+              },
+              {
+                "blobId": "blob-file",
+                "sessionId": "session-1",
+                "kind": "file",
+                "path": "/tmp/file",
+                "ref": "opaque-ref",
+                "mimeType": "text/plain",
+                "sizeBytes": 23
+              },
+              {
+                "blobId": "blob-stream",
+                "sessionId": "session-1",
+                "kind": "stream",
+                "path": "/tmp/stream",
+                "ref": "opaque-ref",
+                "mimeType": "text/plain",
+                "sizeBytes": 23
+              },
+              {
+                "blobId": "blob-remote",
+                "sessionId": "session-1",
+                "kind": "remote",
+                "path": "/tmp/remote",
+                "ref": "opaque-ref",
+                "mimeType": "text/plain",
+                "sizeBytes": 23
+              }
+            ],
+            "backgroundTask": {
+              "taskId": "task-1",
+              "wakePolicy": "auto",
+              "outputPath": "/tmp/output",
+              "description": "working"
+            },
+            "contextMessages": [
+              {
+                "role": "user",
+                "content": "Context retained"
+              }
+            ]
+          }
+        },
+        {
+          "call_id": "call-2",
+          "result": {
+            "content": "Error",
+            "isError": true
+          }
+        }
+      ]
+    },
+    "id": "event-32",
+    "sequence": 32,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "turn",
+    "name": "end",
+    "data": {
+      "turn_id": "turn-1",
+      "status": "completed",
+      "reason": "done"
+    },
+    "id": "event-33",
+    "sequence": 33,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "turn",
+    "name": "end",
+    "data": {
+      "turn_id": "turn-1",
+      "status": "failed",
+      "error": "failure"
+    },
+    "id": "event-34",
+    "sequence": 34,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "turn",
+    "name": "end",
+    "data": {
+      "turn_id": "turn-1",
+      "status": "cancelled",
+      "reason": "stop"
+    },
+    "id": "event-35",
+    "sequence": 35,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "task",
+    "name": "started",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "task_id": "task-1",
+      "call_id": "call-1",
+      "tool": "exec",
+      "wake": "auto",
+      "description": "work",
+      "outputPath": "/tmp/output"
+    },
+    "id": "event-36",
+    "sequence": 36,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "task",
+    "name": "started",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "task_id": "task-2",
+      "call_id": "call-2",
+      "tool": "exec",
+      "wake": "manual"
+    },
+    "id": "event-37",
+    "sequence": 37,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "task",
+    "name": "ended",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "task_id": "task-1",
+      "status": "completed",
+      "result": {
+        "content": "done"
+      }
+    },
+    "id": "event-38",
+    "sequence": 38,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "task",
+    "name": "ended",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "task_id": "task-2",
+      "status": "failed",
+      "result": {
+        "content": [],
+        "isError": true
+      }
+    },
+    "id": "event-39",
+    "sequence": 39,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "task",
+    "name": "ended",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "task_id": "task-3",
+      "status": "cancelled",
+      "result": {
+        "content": "stopped",
+        "backgroundTask": {
+          "taskId": "task-3",
+          "wakePolicy": "manual"
+        }
+      }
+    },
+    "id": "event-40",
+    "sequence": 40,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "branch",
+    "name": "create",
+    "data": {
+      "turn_id": "turn-1",
+      "request_id": "request-1",
+      "branch": "child",
+      "prompt": "Investigate",
+      "call_id": "call-1"
+    },
+    "id": "event-41",
+    "sequence": 41,
+    "create_at": 1790000000123
+  },
+  {
+    "type": "branch",
+    "name": "start",
+    "data": {
+      "parent": "main",
+      "createEvent": 41
+    },
+    "id": "event-42",
+    "sequence": 42,
+    "create_at": 1790000000123
+  }
+]

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-app-server", "crates/dim-cli", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
+exclude = ["vendor/aimux"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.98"
+repository = "https://github.com/arcships/dim"
+
+[workspace.dependencies]
+rutis = "0.10.0"
+rutis-loader = { version = "0.10.0", features = ["node"] }
+rutis-bridge = "0.10.0"
+schemars = "1"
+dim-agent-types = { path = "crates/dim-agent-types" }
+dim-agent-runtime = { path = "crates/dim-agent-runtime" }
+dim-agent-capabilities = { path = "crates/dim-agent-capabilities" }
+dim-agent-aimux = { path = "crates/dim-agent-aimux" }
+aimux-core = { path = "vendor/aimux/aimux-core" }
+aimux-provider-utils = { path = "vendor/aimux/aimux-provider-utils" }
+aimux-providers = { path = "vendor/aimux/aimux-providers", default-features = false }
+dim-app-server = { path = "crates/dim-app-server" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "process", "io-util", "signal", "fs"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+thiserror = "2.0.20"
+futures-util = { version = "0.3", features = ["sink"] }
+uuid = { version = "1", features = ["v4"] }
+axum = { version = "0.8", default-features = false, features = ["ws", "http1", "tokio"] }
+tokio-tungstenite = "0.29"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

@@ -1,0 +1,191 @@
+//! Workspace tools, see `docs/architecture/rust-agent/plugins/WorkspaceTools.md`.
+//!
+//! `WorkspaceToolsPlugin` (Session) provides `S:ToolHost` executing `read`
+//! `write` `edit` `glob` `grep` `exec`. Branch parts are looked up per call on
+//! the calling branch: `FileReads` for file tools and `BackgroundExec` for a
+//! command that moves to the background. Admission happened before a call
+//! reaches this host; nothing here knows permissions, approvals or sandboxes.
+pub mod background;
+pub mod exec;
+pub mod file_reads;
+pub mod files;
+
+use crate::{
+    host::{HostError, HostFuture, ToolDriver, ToolExecutionContext, ToolHost},
+    host_platform::HostPlatform,
+    timeline_tree::TreeCommands,
+};
+use background::BackgroundExecPlugin;
+use dim_agent_runtime::{
+    AgentBuilder, AgentError, CAPABILITY_RELOADING, Capability, CollaborationRole, InSession,
+    KeysOf, SessionConfig, SessionIdentity, SessionScope, scoped,
+};
+use dim_agent_types::*;
+use file_reads::{FileReads, FileReadsPlugin};
+use files::FileTools;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use std::{path::PathBuf, sync::Arc};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+/// Host tools this capability provides.
+pub const TOOL_NAMES: [&str; 6] = ["read", "write", "edit", "glob", "grep", "exec"];
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceToolsConfig {
+    /// Absolute root of command output files, `<output_root>/<session_id>/`.
+    pub output_root: PathBuf,
+}
+
+/// Registers the host tool names, WorkspaceTools and its branch parts.
+pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
+    builder
+        .host_tools(TOOL_NAMES.map(String::from))
+        .session_plugin(move |scope| WorkspaceToolsPlugin::new(scope, config.clone()))
+        .timeline_plugin(FileReadsPlugin::new)
+        .timeline_plugin(BackgroundExecPlugin::new);
+}
+
+pub(crate) struct WorkspaceTools {
+    platform: Arc<HostPlatform>,
+    cwd: PathBuf,
+    output_dir: PathBuf,
+    /// Collaboration members keep commands in the foreground: the leader
+    /// treats member idle as the end of a request, so a backgrounded command
+    /// would finish after its result. Member asynchronous execution is a
+    /// separate design.
+    member: bool,
+    tree: Arc<TreeCommands>,
+    files: FileTools,
+    /// Cancelled on unload: new calls settle as reloading, running ones stop.
+    lifecycle: CancellationToken,
+    /// Calls in flight, including a command being handed to BackgroundExec.
+    calls: TaskTracker,
+}
+
+fn host_error(error: AgentError) -> HostError {
+    match error {
+        AgentError::Reloading(_) => HostError::Cancelled(CAPABILITY_RELOADING.into()),
+        error => HostError::failed(error.to_string()),
+    }
+}
+
+impl WorkspaceTools {
+    async fn run(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, HostError> {
+        let _call = self.calls.token();
+        if self.lifecycle.is_cancelled() {
+            return Err(HostError::Cancelled(CAPABILITY_RELOADING.into()));
+        }
+        let branch = self.tree.get(&context.branch_id).map_err(host_error)?;
+        // One token for the call and the unload of this instance.
+        let combined = self.lifecycle.child_token();
+        let link = async {
+            cancel.cancelled().await;
+            combined.cancel();
+            std::future::pending::<()>().await
+        };
+        let work = async {
+            if call.name == "exec" {
+                exec::execute(self, &branch, &call, &context, combined.clone()).await
+            } else if FileTools::handles(&call.name) {
+                let reads = branch.service::<FileReads>().map_err(host_error)?;
+                self.files.execute(&call, &reads, combined.clone()).await
+            } else {
+                Ok(ToolResult::error(format!("Unknown tool: {}", call.name)))
+            }
+        };
+        let result = tokio::select! {
+            result = work => result,
+            _ = link => unreachable!("the link never completes"),
+        };
+        match result {
+            Err(HostError::Cancelled(_)) if self.lifecycle.is_cancelled() => {
+                Err(HostError::Cancelled(CAPABILITY_RELOADING.into()))
+            }
+            result => result,
+        }
+    }
+}
+
+impl ToolDriver for WorkspaceTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = FileTools::definitions();
+        definitions.push(exec::definition_for(&self.platform));
+        definitions
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(self.run(call, context, cancel))
+    }
+}
+
+struct WorkspaceToolsPlugin {
+    scope: SessionScope,
+    config: WorkspaceToolsConfig,
+}
+impl WorkspaceToolsPlugin {
+    fn new(scope: &SessionScope, config: WorkspaceToolsConfig) -> Self {
+        Self {
+            scope: *scope,
+            config,
+        }
+    }
+}
+impl TypedPlugin for WorkspaceToolsPlugin {
+    type Deps = (
+        Arc<HostPlatform>,
+        InSession<SessionConfig>,
+        InSession<SessionIdentity>,
+        InSession<TreeCommands>,
+    );
+    fn name(&self) -> &str {
+        "WorkspaceTools"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (platform, InSession(config), InSession(identity), InSession(tree)): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            // `session.create` validated and canonicalized the cwd.
+            let cwd = PathBuf::from(&config.cwd);
+            let output_dir = self.config.output_root.join(&identity.session_id);
+            let tools = Arc::new(WorkspaceTools {
+                files: FileTools::new(cwd.clone(), platform.home.clone(), output_dir.clone()),
+                output_dir,
+                member: config.collaboration_role == CollaborationRole::Member,
+                cwd,
+                platform,
+                tree,
+                lifecycle: CancellationToken::new(),
+                calls: TaskTracker::new(),
+            });
+            let owner = tools.clone();
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        owner.lifecycle.cancel();
+                        owner.calls.close();
+                        owner.calls.wait().await;
+                        Ok(())
+                    })
+                }))
+            })?;
+            ctx.provide_as(self.scope.key::<ToolHost>(), Arc::new(ToolHost(tools)))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for WorkspaceToolsPlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}

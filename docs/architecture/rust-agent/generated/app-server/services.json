@@ -1,0 +1,972 @@
+{
+  "process": {
+    "shuttingDown": false,
+    "plugins": [
+      {
+        "id": 1,
+        "parent": null,
+        "name": "root",
+        "state": "Active",
+        "generation": 0,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 2,
+        "parent": 1,
+        "name": "rutis-loader",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 22,
+        "parent": 2,
+        "name": "Transport",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::connection::ConnectionHub",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::connection::ConnectionHub",
+            "scope": null,
+            "provider": 20,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "scope": null,
+            "provider": 3,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::connection::ConnectionHub",
+            "provider": 20,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "provider": 3,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 21,
+        "parent": 2,
+        "name": "Rpc",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::agents::AgentIndex",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::collaboration::Collaboration",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::connection::ConnectionHub",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::grok_oauth::GrokOAuthService",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::managed_provider::ManagedProviders",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::mcp::McpService",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::provider::ProviderService",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "scope": null,
+            "provider": 15,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::agents::AgentIndex",
+            "scope": null,
+            "provider": 18,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::collaboration::Collaboration",
+            "scope": null,
+            "provider": 19,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::connection::ConnectionHub",
+            "scope": null,
+            "provider": 20,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "scope": null,
+            "provider": 3,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::grok_oauth::GrokOAuthService",
+            "scope": null,
+            "provider": 11,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::managed_provider::ManagedProviders",
+            "scope": null,
+            "provider": 9,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::mcp::McpService",
+            "scope": null,
+            "provider": 13,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::provider::ProviderService",
+            "scope": null,
+            "provider": 12,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "provider": 8,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "provider": 15,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::agents::AgentIndex",
+            "provider": 18,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::connection::ConnectionHub",
+            "provider": 20,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "provider": 3,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::grok_oauth::GrokOAuthService",
+            "provider": 11,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::managed_provider::ManagedProviders",
+            "provider": 9,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::mcp::McpService",
+            "provider": 13,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::provider::ProviderService",
+            "provider": 12,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 8,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 20,
+        "parent": 2,
+        "name": "Connection",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "scope": null,
+            "provider": 3,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::control::ServerControl",
+            "provider": 3,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 19,
+        "parent": 2,
+        "name": "Collaboration",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::agents::AgentIndex",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::collaboration::CollaborationDirectory",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::agents::AgentIndex",
+            "scope": null,
+            "provider": 18,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::collaboration::CollaborationDirectory",
+            "scope": null,
+            "provider": 17,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::agents::AgentIndex",
+            "provider": 18,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::collaboration::CollaborationDirectory",
+            "provider": 17,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 18,
+        "parent": 2,
+        "name": "Agents",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::agents::AgentDirectory",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::storage::timeline::SessionStore",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "rutis_loader::loader::Loader",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::agents::AgentDirectory",
+            "scope": null,
+            "provider": 16,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "provider": 8,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::storage::timeline::SessionStore",
+            "scope": null,
+            "provider": 7,
+            "generation": 1
+          },
+          {
+            "service": "rutis_loader::loader::Loader",
+            "scope": null,
+            "provider": 2,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::agents::AgentDirectory",
+            "provider": 16,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 8,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "provider": 6,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::storage::timeline::SessionStore",
+            "provider": 7,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "rutis_loader::loader::Loader",
+            "provider": 2,
+            "declared": true,
+            "external": false
+          }
+        ]
+      },
+      {
+        "id": 17,
+        "parent": 2,
+        "name": "CollaborationDirectory",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 16,
+        "parent": 2,
+        "name": "AgentDirectory",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 15,
+        "parent": 2,
+        "name": "SkillsCatalog",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_agent_capabilities::skill_settings::SkillSettingsHost",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "scope": null,
+            "provider": 14,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::skill_settings::SkillSettingsHost",
+            "scope": null,
+            "provider": 8,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::host_platform::HostPlatform",
+            "provider": 14,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::skill_settings::SkillSettingsHost",
+            "provider": 8,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "parent": 2,
+        "name": "HostPlatform",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "provider": 4,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "provider": 4,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "parent": 2,
+        "name": "Mcp",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "provider": 8,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 8,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "parent": 2,
+        "name": "Provider",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::grok_oauth::GrokOAuthService",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::managed_provider::ManagedProviders",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::grok_oauth::GrokOAuthService",
+            "scope": null,
+            "provider": 11,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::managed_provider::ManagedProviders",
+            "scope": null,
+            "provider": 9,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::grok_oauth::GrokOAuthService",
+            "provider": 11,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::managed_provider::ManagedProviders",
+            "provider": 9,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "provider": 6,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "parent": 2,
+        "name": "GrokOAuth",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "provider": 4,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "provider": 4,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "parent": 2,
+        "name": "OpenAICodexOAuth",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "provider": 4,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "provider": 4,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "parent": 2,
+        "name": "ManagedProviders",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 8,
+        "parent": 2,
+        "name": "Settings",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "provider": 4,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "provider": 4,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "parent": 2,
+        "name": "SessionStore",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::storage::sqlite::SqliteStorage",
+            "provider": 6,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "parent": 2,
+        "name": "SqliteStorage",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 5,
+        "parent": 2,
+        "name": "Aimux",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 4,
+        "parent": 2,
+        "name": "FileStorage",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      },
+      {
+        "id": 3,
+        "parent": 2,
+        "name": "ServerControl",
+        "state": "Active",
+        "generation": 1,
+        "injects": [],
+        "resolved": [],
+        "reads": []
+      }
+    ],
+    "bindings": [
+      {
+        "service": "dim_agent_capabilities::file_storage::FileStorage",
+        "provider": 4,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::host::ModelHost",
+        "provider": 5,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::host::ModelSelectionHost",
+        "provider": 12,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::host::ProviderConnectionResolver",
+        "provider": 12,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::host_platform::HostPlatform",
+        "provider": 14,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::skill_settings::SkillSettingsHost",
+        "provider": 8,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+        "provider": 15,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::agents::AgentDirectory",
+        "provider": 16,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::agents::AgentIndex",
+        "provider": 18,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
+        "provider": 10,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::collaboration::Collaboration",
+        "provider": 19,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::collaboration::CollaborationDirectory",
+        "provider": 17,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::connection::ConnectionHub",
+        "provider": 20,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::control::ServerControl",
+        "provider": 3,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::grok_oauth::GrokOAuthService",
+        "provider": 11,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::managed_provider::ManagedProviders",
+        "provider": 9,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::mcp::McpService",
+        "provider": 13,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::provider::ProviderService",
+        "provider": 12,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::settings::SettingsService",
+        "provider": 8,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::storage::sqlite::SqliteStorage",
+        "provider": 6,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::storage::timeline::SessionStore",
+        "provider": 7,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::transport::ListenAddresses",
+        "provider": 22,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "rutis_loader::loader::Loader",
+        "provider": 2,
+        "generation": 1,
+        "removing": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "defaultModel": { "providerId": "local", "modelId": "diagram-model" },
+  "providers": [
+    {
+      "id": "local",
+      "kind": "openai-compatible",
+      "baseUrl": "http://127.0.0.1:1/v1",
+      "models": [
+        { "id": "diagram-model", "config": { "maxTokens": 4096 } }
+      ]
+    }
+  ]
+}

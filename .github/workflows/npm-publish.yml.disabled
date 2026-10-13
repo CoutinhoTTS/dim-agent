@@ -75,3 +75,17 @@ jobs:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org
         shell: bash
         run: node scripts/publish-npm.mjs staging/npm "${RELEASE_TAG#v}" "$GITHUB_SHA" --publish
+
+      - name: Record published artifact provenance
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: >-
+          node --input-type=module -e
+          'import{readFileSync,writeFileSync}from"node:fs";const manifest=JSON.parse(readFileSync("staging/npm/release-manifest.json"));manifest.buildRunId=process.env.BUILD_RUN_ID;writeFileSync("npm-publication.json",JSON.stringify(manifest));'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-publication
+          path: npm-publication.json
+          if-no-files-found: error
+          retention-days: 14
