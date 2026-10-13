@@ -4,24 +4,75 @@ Dim is a Rust coding agent with a simple terminal scrollback interface. The nati
 
 This workspace contains Agent v4 and the native CLI. It builds independently of the original TypeScript agent, OpenTUI, Desktop and web applications. Public source is licensed under [MIT](LICENSE). An optional private account plugin is supplied separately and is not required to build or use API-key providers.
 
-## Build and run
+## Local OAuth setup
 
-Run commands at the repository root. The Rust toolchain is pinned in `rust-toolchain.toml`.
+The examples use Bash. Install Rust through rustup; Cargo selects Rust 1.98.1 from `rust-toolchain.toml`. Local OAuth development also requires Node 24.21.0 (see `.node-version`), npm, pnpm 12.3.4 and tar. If pnpm is missing, install the pinned version with `npm install --global pnpm@12.3.4`. Native build prerequisites are described in [build setup](docs/architecture/build.md).
 
-For local development with the sibling private OAuth source repository, use `./dev`. It builds and packages the private source, verifies its runtime archive, incrementally builds both Rust executables and normally restarts only the isolated development daemon. Dependencies are installed when their lockfiles change; account and session files survive restart. Private source and credentials are never committed here.
+Keep the private source checkout beside this repository:
 
-```sh
-cp .env.example .env.dev                 # optional local defaults
-./dev setup                            # optional preparation without compiling Rust
-./dev login PROVIDER --directory URL --device
-./dev models PROVIDER --refresh
-./dev --provider PROVIDER --model MODEL_ID
-./dev stop
+```text
+workspace/
+├── dimrust-cli/
+└── dim-oauth-plugin/
 ```
 
-Set the paired `DIMCODE_PROVIDER`/`DIMCODE_MODEL` defaults in `.env.dev` to start subsequent chats with just `./dev`. `DIM_OAUTH_SOURCE_DIR` overrides the sibling source location. API-key development uses `./dev --model-config /absolute/path/to/model.json` and does not require the private source or Node. See the [development contract](docs/architecture/development.md) for restart, configuration and runtime boundaries. `./dev check` runs explicit basic checks; startup does not run tests or produce release/npm distributions.
+Run this once from `dimrust-cli`:
 
-The direct Cargo path remains available without a launcher:
+```sh
+cp .env.example .env.dev
+./dev setup
+```
+
+For another source location, set `DIM_OAUTH_SOURCE_DIR=/absolute/path/to/dim-oauth-plugin` in `.env.dev`. Setup installs frozen JS dependencies when needed, builds the local plugin, packages it and verifies/extracts its three runtime files. It does not compile Rust, start a daemon or download a remote plugin. The first run compiles both Rust executables; later runs compile incrementally.
+
+Log in, refresh the directory, then use a model ID from its output:
+
+```sh
+./dev login dimcode-api-oauth --directory https://dimagent.cn --device
+./dev models dimcode-api-oauth --refresh
+./dev --provider dimcode-api-oauth --model MODEL_ID
+```
+
+Open the printed verification URL and enter its device code. Replace `MODEL_ID` with an available ID printed by `models`. For a custom account directory, replace the login URL. The private plugin supplies this provider; public API-key users do not need its source.
+
+## Daily development
+
+Set the selected model in the ignored `.env.dev` file:
+
+```sh
+DIMCODE_PROVIDER=dimcode-api-oauth
+DIMCODE_MODEL=MODEL_ID
+```
+
+Then start with `./dev`. It rebuilds and verifies the local source package, reuses matching dependency installations, incrementally builds Rust, normally stops only the isolated development daemon and loads the new server/plugin. Login and session files are retained. The default development home is a short stable path under `~/.dimcode-dev`; `DIMCODE_HOME` selects a custom home. No production home is migrated.
+
+```sh
+./dev --prompt "Explain this project"       # one turn, then detach
+./dev --resume SESSION_ID                   # continue the printed session
+./dev restart                              # explicitly rebuild and restart
+./dev stop                                 # normal shutdown, no build
+./dev check                                # explicit formatting/compilation checks
+```
+
+The working directory remains the caller's workspace. To work on another project, run `/absolute/path/to/dimrust-cli/dev --cwd /absolute/path/to/project`. Startup does not run tests or produce release/npm distributions. From the private checkout, `./scripts/dev.sh` delegates to the same entry. See the [development contract](docs/architecture/development.md) for configuration precedence and runtime boundaries.
+
+## API-key setup
+
+API-key development needs Rust only; Node, pnpm and the private checkout are optional. Prepare a local model configuration:
+
+```sh
+mkdir -p .dev
+cp crates/dim-agent-aimux/examples/openai.json .dev/model.json
+export OPENAI_API_KEY=your-key
+```
+
+Edit `.dev/model.json` for your provider's base URL and credential environment-variable name. Set both `defaultModel.modelId` and the corresponding model entry `id` to an ID available to your account. Remove OAuth `DIMCODE_PROVIDER`/`DIMCODE_MODEL` defaults from `.env.dev` to use this JSON file's default model, or explicitly choose a provider/model from the configured catalog.
+
+```sh
+./dev --model-config "$PWD/.dev/model.json"
+```
+
+For subsequent `./dev` runs, set `DIMCODE_MODEL_CONFIG=/absolute/path/to/model.json` in `.env.dev`. The launcher bypasses the private source and JS setup in this mode. Clear that setting when returning to OAuth development. The direct Cargo path remains available without a launcher:
 
 ```sh
 cargo build --locked -p dim-cli -p dim-app-server

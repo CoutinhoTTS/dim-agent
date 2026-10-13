@@ -12,7 +12,7 @@
 | --- | --- |
 | 源仓库 | `nextim/dim-agent`，分支 `feat/agent-v4` |
 | 源码 checkout | `/Users/zerob13/Documents/workspace/temp/dim-agent-temp` |
-| 固定提取提交 | `e79aa2257f77d2ace1041c768160f3514e839733` |
+| 固定源提交 | `3bc0cace829a144c2c9b4baae3fbddf0f5dd3ccb` |
 | 公共代码开发与评审仓库 | [nextim/dimrust-cli](https://gitlab.bfbops.com/nextim/dimrust-cli) |
 | 公共代码本地 checkout | `/Users/zerob13/Documents/workspace/temp/dimrust-cli` |
 | 开源目标 | [arcships/dim](https://github.com/arcships/dim) |

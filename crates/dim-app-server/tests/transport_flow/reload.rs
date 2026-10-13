@@ -211,6 +211,60 @@ async fn process_plugin_reloads_keep_sessions() {
     assert_eq!(server.join().await.unwrap(), ShutdownReason::Graceful);
 }
 
+#[test]
+fn process_initialization_is_covered_by_the_startup_deadline() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (release, held) = std::sync::mpsc::channel();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let worker = tokio::task::spawn_blocking(move || {
+                entered.send(()).unwrap();
+                held.recv().unwrap();
+            });
+            ready.await.unwrap();
+            let config = ServerConfig {
+                session_execution: false,
+                startup_timeout: Duration::from_millis(50),
+                ..Default::default()
+            };
+            // FileStorage cannot open its roots until the only file worker is
+            // released. Rollback may wait for it, but startup must not succeed.
+            let (result, ()) = tokio::join!(
+                serve(AgentBuilder::new(AgentConfig::default()), config),
+                async {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    release.send(()).unwrap();
+                    worker.await.unwrap();
+                }
+            );
+            let error = match result {
+                Err(error) => error.to_string(),
+                Ok(server) => {
+                    server.shutdown();
+                    server.join().await.unwrap();
+                    panic!("process initialization exceeded the deadline without failing");
+                }
+            };
+            assert!(error.contains("timed out"), "{error}");
+            assert!(error.contains("FileStorage"), "{error}");
+            let server = serve(
+                AgentBuilder::new(AgentConfig::default()),
+                ServerConfig {
+                    session_execution: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            server.shutdown();
+            server.join().await.unwrap();
+        });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_serve_during_startup_releases_the_listener() {
     let path = std::path::PathBuf::from("/tmp")

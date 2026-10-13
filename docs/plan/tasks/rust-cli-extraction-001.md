@@ -15,7 +15,7 @@ depends-on: []
 ## context
 
 - [项目剥离与发布方案](../analysis/rust-cli-extraction.md)。用户已授权按方案实施。
-- 固定源提交：`e79aa2257f77d2ace1041c768160f3514e839733`，`feat/agent-v4`，2026-10-13 更新。
+- 固定源提交：`3bc0cace829a144c2c9b4baae3fbddf0f5dd3ccb`，`feat/agent-v4`，2026-10-13 更新。
 - 源码只有按该提交导出的 tracked Rust 文件；不导入构建缓存、用户目录或旧 Git 历史。
 - 最新源实现采用 TypedPlugin 和进程 loader 行，沿用其装配、关闭与启动超时合同。
 - 用户限定剥离阶段只向GitLab提交代码和MR；不提交、push或同步GitHub，后续同步需单独授权。
@@ -49,6 +49,8 @@ depends-on: []
 ## 交付结果
 
 公共与私有实现、默认禁用的 CI/发布模板、本机打包和独立验收已完成，具体证据与未执行项见 [验收记录](../reviews/rust-cli-extraction-001.md)。
+
+固定 Agent v4 源增量、宿主装配合同与 setup/run 文档的验证见 [源同步验收](../reviews/upstream-sync-001.md)。
 
 - 公共 MR：https://gitlab.bfbops.com/nextim/dimrust-cli/-/merge_requests/2
 - 私有 MR：https://gitlab.bfbops.com/nextim/dim-oauth-plugin/-/merge_requests/1

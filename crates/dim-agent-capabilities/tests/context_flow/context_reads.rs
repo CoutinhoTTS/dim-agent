@@ -1141,10 +1141,12 @@ async fn progress_keeps_committed_output_until_it_is_published() {
         );
         end.notify_one();
         session.idle("main").await.unwrap();
-        assert_eq!(
-            session.get::<ModelProgress>("main").unwrap(),
-            Some(ModelProgress::default())
-        );
+        // Idle settles Loop, not the ModelProvider task that clears progress
+        // after publication. Observe the owning capability's state directly.
+        progress
+            .wait_for(|progress| *progress == ModelProgress::default())
+            .await
+            .unwrap();
         agent.close().await.unwrap();
         publication_task.abort();
     })

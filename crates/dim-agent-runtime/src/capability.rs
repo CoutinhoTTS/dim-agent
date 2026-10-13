@@ -146,25 +146,6 @@ impl<T: ?Sized + BranchService> Deps for BranchGate<T> {
     }
 }
 
-/// One named service of the capability's Session.
-pub struct Named<T: ?Sized>(pub Arc<T>);
-impl<T: ?Sized> Deref for Named<T> {
-    type Target = Arc<T>;
-    fn deref(&self) -> &Arc<T> {
-        &self.0
-    }
-}
-impl<T: ?Sized + SessionService> Deps for Named<T> {
-    type Keys = (SessionScope, Arc<str>);
-    fn injects((scope, name): &Self::Keys, out: &mut Vec<TypeKey>) {
-        out.push(scope.named_key::<T>(name));
-    }
-    fn resolve((scope, name): &Self::Keys, ctx: &Ctx) -> std::result::Result<Self, CordisError> {
-        let key = DepKey::<T>::dynamic(name.clone()).instance(scope.instance);
-        Keyed::<T>::resolve(&key, ctx).map(|service| Self(service.0))
-    }
-}
-
 /// Every named service of a list in the capability's Session, in order.
 pub struct Contributions<T: ?Sized>(pub Vec<(String, Arc<T>)>);
 impl<T: ?Sized> Deref for Contributions<T> {
