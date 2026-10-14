@@ -14,7 +14,7 @@
 | 多模态 | 只设计图片。功能清单中“仅限特定 Desktop 构建”的命令不在范围内 |
 | 不做 | 功能清单中的 Todo 状态与 `plan` Skill |
 | 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 已完成为前提：插件在运行时注册自己的事件类型（类型名、数据格式），注册随插件生命周期，Timeline 按注册校验写入。新插件不向内核事件枚举增加类型，也不设过渡方案 |
-| 模型上下文 | 按 [ADR 001](../adr/001-harness-foundation.md) 的提议：插件事件不直接投影进模型上下文；给模型看的内容经采用的输入或工具结果进入。#2 中“由注册的投影规则决定”的方案与此不同，见第 12 节 |
+| 模型上下文 | 按 [ADR 001](../adr/001-harness-foundation.md) 的提议：插件事件不直接投影进模型上下文；给模型看的内容经采用的输入或工具结果进入。#2 中“由注册的投影规则决定”的方案与此不同，见第 13 节 |
 | 配置与插件管理 | 依赖 [#3](https://github.com/arcships/dim/issues/3) 的部分按 ADR 001 的“按来源写入、再发布到根 loader”方案设计，并逐处标注 |
 | 现有设计 | [时间总线](../architecture/rust-agent/time-bus.md)、[设计规则](../architecture/rust-agent/principles.md)、[单树装配](../architecture/rust-agent/single-tree.md)、[生命周期](../architecture/rust-agent/lifecycle.md)、[事件驱动流程](../architecture/rust-agent/event-driven-flows.md) 与 ADR 001 的信任合同对所有新插件同样适用 |
 
@@ -64,6 +64,9 @@ rutis 节点之间经 link 连接，可以导出与导入服务、在对端运�
 | 资源服务 | 访问宿主资源一律经 Session 绑定的资源服务（FileStorage、HostPlatform、WorkspaceTools 的宿主侧）。资源节点不是控制节点时，这些服务由对端导出、按 Session 导入；使用方不区分本机与导入的服务 |
 | 绑定节点的数据 | 宿主本地批准、隔离配置、外部 Agent 目录、附件存放位置都以“节点 + 路径”标识 |
 | 管理面 | 见共同约束 8：是否能管理由 Management 挂载与导出决定 |
+| 离线 | 按生命周期依赖处理：依赖资源服务的插件随依赖进入 Pending，节点恢复后重新装载；在途工作按现有生命周期合同结算，不另设离线状态 |
+| 认证 | 沿用 rutis link 的 token，不另设计；Management 只在显式配置时导出 |
+| 未来扩展 | 跨控制节点协作：Collaboration 的 member 可以是另一个 App Server 上的 Session，本文不设计 |
 
 ### 3.2 Capability 与进程插件
 
@@ -498,7 +501,7 @@ flowchart LR
 | 接入 | E：订阅 Session 广播，主分支第一个正常结束的 turn 之后，用 Provider 按“辅助”用途选出的模型生成标题，写入 SessionStore 元数据 |
 | 事件 | 无。标题是 Session 目录元数据，带来源字段 `auto` 或 `manual` |
 | 接口 | RPC `session.rename` 直接写元数据，Session 未装载时也可改名；Session 列表读取元数据 |
-| 关系 | 元数据只有一个写入方。自动标题只在来源不是 `manual` 时写入，以修订检查保证手动标题不被覆盖。生成失败不影响 Session；已有标题的 Session 不再生成。依赖进程级订阅 Session 广播，见第 12 节 |
+| 关系 | 元数据只有一个写入方。自动标题只在来源不是 `manual` 时写入，以修订检查保证手动标题不被覆盖。生成失败不影响 Session；已有标题的 Session 不再生成。依赖进程级订阅 Session 广播，见第 13 节 |
 
 ### 5.7 Hooks
 
@@ -546,7 +549,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 接入 | E：作为 Provider 目录中的一类连接（每个外部 Agent 一项）；Aimux（ModelHost）按连接类型把请求分派给本插件。Agent profile 选择外部 Agent 为模型时不装配工具，外部 Agent 使用自己的工具 |
 | 事件 | 无。委派沿用 Collaboration 的事实；member Session 内是普通的 turn 与模型输出事件 |
 | 接口 | 管理方法 `external_agents.list/set_enabled/configure`，贡献给 Management |
-| 关系 | 模型请求中只把上次外部调用之后新消费的输入发给外部 Agent，外部会话身份按 dim Session 保存在进程存储中，用于续接。中断取消外部调用。外部 Agent 目录按节点区分，连接身份包含节点；桥接以 `peer:<节点>/<插件>` 行在外部 Agent 所在节点运行，经该节点的 HostPlatform 启动进程并套用隔离配置。外部 Agent 自身的权限请求如何处理见第 12 节 |
+| 关系 | 模型请求中只把上次外部调用之后新消费的输入发给外部 Agent，外部会话身份按 dim Session 保存在进程存储中，用于续接。中断取消外部调用。外部 Agent 目录按节点区分，连接身份包含节点；桥接以 `peer:<节点>/<插件>` 行在外部 Agent 所在节点运行，经该节点的 HostPlatform 启动进程并套用隔离配置。外部 Agent 自身的权限请求如何处理见第 13 节 |
 
 ### 5.11 Notifications
 
@@ -711,7 +714,59 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 8. 安全：准入、信任、隔离、敏感数据
 9. 验收：需要的流程测试
 
-## 11. 实施阶段
+## 11. 开发语言与迁移路径
+
+### 11.1 前提
+
+| 项 | 现状与约束 |
+| --- | --- |
+| TS 进程服务插件 | 已可运行：Node 运行时与 `definePlugin` 插件作为 loader 行装载，插件提供异步服务，Rust 侧按服务合同使用；未配置时不启动 Node（[App Server](../../crates/dim-app-server/README.md) 的 managed provider 先例） |
+| TS 能力插件 | 读写 Timeline、贡献工具、订阅分支事件需要 [#4](https://github.com/arcships/dim/issues/4) 的语言中立能力端口，并依赖 #2 |
+| Node 依赖 | API-key 基础流程不依赖 Node。TS 先行只用于可选功能；Node 不可用时这些功能明确不可用 |
+
+### 11.2 判断标准
+
+| TS 先行 | Rust |
+| --- | --- |
+| 业务规则仍需验证 | 安全边界与准入：执行命令、批准、隔离、远程入口、管理面 |
+| 主要工作是外部 I/O 或协议：HTTP API、ACP、第三方 SDK | 输入与提交边界 |
+| 不在 turn 的热路径上 | 内核热路径与在途工具调用的结算 |
+| 失败只影响该功能 | loader 与插件管理骨干；被其他插件依赖的基础服务 |
+
+### 11.3 划分
+
+| 插件 | 语言 | 理由 | 前置条件 |
+| --- | --- | --- | --- |
+| ExternalAgent | TS 先行 | ACP 有 TS SDK；各外部 CLI 行为差异大，需要验证 | Aimux 分派到桥接的服务合同 |
+| Modality | TS 先行 | 各服务商图片 API 变化快 | Provider 非对话模型的服务合同 |
+| Notifications（订阅与发送） | TS 先行 | Slack、飞书 SDK | 进程级订阅 Session 广播 |
+| SessionTitle | TS 先行 | 生成策略需要验证 | 进程级订阅；SessionStore 元数据与模型选择的服务合同 |
+| Scheduler（作业与触发） | TS 先行 | 调度规则需要验证 | Agents 新建或复用 Session 的服务合同 |
+| AcpGateway | TS 先行 | 只是本地 RPC 客户端，可先以独立程序验证 ACP 映射，再并入 Rust CLI | 无 |
+| Web | TS 先行 | #4 已把 `web` 列为首个迁移对象 | #4 能力端口 |
+| Workflow | TS 先行 | 编排规则需要验证 | #4 能力端口 |
+| Goal | TS 先行 | 继续策略需要验证 | #4 能力端口 |
+| Notifications、Scheduler 的工具部分 | TS 先行 | 随进程部分一起 | #4 能力端口 |
+| Management | Rust | 管理面骨干 | — |
+| Questions | Rust | 与在途工具调用的结算紧密相关，逻辑简单 | — |
+| ShellInput | Rust | 执行命令，属于安全边界 | — |
+| Attachments | Rust | 提交边界 | — |
+| Hooks | Rust | 准入路径与命令执行，属于安全边界 | — |
+| RemoteGateway | Rust | 远程入口 | — |
+| PluginManager | Rust | loader 与插件管理骨干 | #3 |
+| 现有插件的补充与变更 | Rust | 现有插件为 Rust | — |
+
+### 11.4 从 TS 转为 Rust
+
+| 约束 | 内容 |
+| --- | --- |
+| 先定合同 | 服务合同、事件类型名与数据格式、工具名与参数、Session 方法与管理方法在需求文档中与语言无关地定义，TS 与 Rust 实现遵守同一份 |
+| 稳定身份 | 插件声明身份、事件类型与进程存储格式不随实现语言改变；替换只换 loader 行，历史事件与已存数据照常可读 |
+| 同一套验收 | 流程测试只经公开接口（Session 方法、管理方法、工具、事件），不依赖实现语言，迁移后原样通过 |
+| 转换时机 | 合同稳定且验收覆盖后；或出现性能、资源、分发（去掉 Node 依赖）、安全上的要求时 |
+| 不并存 | 同一插件同一时刻只装载一种实现 |
+
+## 12. 实施阶段
 
 | 阶段 | 内容 |
 | --- | --- |
@@ -720,7 +775,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | P2 能力扩展 | Goal、Web、HostPlatform 隔离、Hooks（用户与项目来源）、Scheduler、Workflow、Notifications；Mcp OAuth；生产用压缩宿主 |
 | P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway、Modality；PluginManager（依赖 #3、#4）；资源节点导入（依赖 #5） |
 
-## 12. 待对齐问题
+## 13. 待对齐问题
 
 | 问题 | 说明 |
 | --- | --- |
@@ -731,7 +786,4 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | FullAccess 与新风险类别 | 外发消息与持久配置是否在 FullAccess 下仍需询问 |
 | 进程级订阅 | Notifications 与 SessionTitle 所需的跨 Session 订阅是否复用 Session 广播 |
 | 外部 Agent 的权限 | 外部 Agent 自身的权限请求（如 ACP 的权限请求）映射为 dim 审批，还是按配置的权限模式自动应答 |
-| 资源节点离线 | 用到资源服务的工具与命令明确失败，还是等待重连（rutis 对端行默认等待）；依赖 #5 的断线处理 |
-| 节点认证 | 节点 token 与产品身份的对应，以及向哪些节点导出 Management；依赖 #5 |
-| 跨控制节点协作 | Collaboration 的 member 是否可以是另一个 App Server 上的 Session；本文暂不做 |
 | 外部会话续接 | 外部 Agent 不支持续接或续接失败时，是新开外部会话并附带历史摘要，还是明确失败 |
