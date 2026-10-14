@@ -1,6 +1,135 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_management_preserves_live_intent_and_separates_save_acknowledgement() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::path::PathBuf::from("/tmp").join(format!("dc-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let native = home.join("rust");
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(native.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut observer = Client::new_version(&server, false, 3).await;
+    let mut legacy = Client::new_version(&server, false, 2).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("configuration.update"))
+    );
+    assert!(
+        !remote
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("configuration.update"))
+    );
+    assert_eq!(
+        legacy.rpc("configuration.catalog", json!({})).await["error"]["code"],
+        -32601
+    );
+    assert_eq!(
+        remote.rpc("configuration.catalog", json!({})).await["error"]["data"]["appError"],
+        "local_transport_required"
+    );
+    let before = client
+        .rpc("configuration.get", json!({"source":"userMcp"}))
+        .await;
+    assert_ok(&before);
+    for source in ["SqliteStorage", "project", "approvals"] {
+        assert_eq!(
+            client
+                .rpc("configuration.get", json!({"source":source}))
+                .await["error"]["code"],
+            -32602
+        );
+    }
+    let edit = json!({"source":"userMcp", "expectedRevision":before["result"]["revision"],
+        "document":{"kind":"mcp", "document":{"mcpServers":{"private":{"command":"never-start-this-fixture","enabled":false,"env":{"TOKEN":"secret-never-return"}}}}}});
+    let fault = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+    fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON user_configuration BEGIN SELECT RAISE(ABORT, 'secret-never-return'); END").unwrap();
+    let applied = client.rpc("configuration.update", edit.clone()).await;
+    assert_ok(&applied);
+    assert_eq!(applied["result"]["saved"], false);
+    assert_eq!(applied["result"]["persistence"]["pendingSaves"], 1);
+    assert_ne!(
+        applied["result"]["current"]["revision"],
+        before["result"]["revision"]
+    );
+    assert!(!applied.to_string().contains("secret-never-return"));
+    assert_eq!(
+        observer.notice("configuration.changed").await["params"],
+        json!({})
+    );
+    let catalog = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&catalog);
+    assert_eq!(catalog["result"]["servers"][0]["id"], "private");
+    assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
+    assert!(!catalog.to_string().contains("secret-never-return"));
+    assert_eq!(
+        client.rpc("configuration.update", edit).await["error"]["data"]["appError"],
+        "configuration_conflict"
+    );
+    assert_eq!(
+        client.rpc("configuration.flush", json!({})).await["error"]["data"]["appError"],
+        "configuration_unsaved"
+    );
+    fault.execute_batch("DROP TRIGGER fail_save").unwrap();
+    let flushed = client.rpc("configuration.flush", json!({})).await;
+    assert_ok(&flushed);
+    assert_eq!(flushed["result"]["pendingSaves"], 0);
+    let all = client.rpc("configuration.catalog", json!({})).await;
+    assert_ok(&all);
+    assert_eq!(all["result"]["entries"].as_array().unwrap().len(), 2);
+    assert!(!all.to_string().contains("secret-never-return"));
+    let skills = client
+        .rpc("configuration.get", json!({"source":"skills"}))
+        .await;
+    let changed = client
+        .rpc(
+            "configuration.update",
+            json!({"source":"skills", "expectedRevision":skills["result"]["revision"],
+        "document":{"kind":"skills", "document":{"disabledSkillIds":["user:missing"]}}}),
+        )
+        .await;
+    assert_ok(&changed);
+    assert_eq!(changed["result"]["saved"], true);
+    assert_eq!(client.rpc("configuration.update", json!({"source":"skills", "expectedRevision":changed["result"]["current"]["revision"],
+        "document":{"kind":"mcp", "document":{"mcpServers":{}}}})).await["error"]["code"], -32602);
+    // Framework-only lifecycle changes also invalidate; not just settings writes.
+    observer.notices.clear();
+    server.restart("Rpc").await.unwrap();
+    assert_ok(&client.rpc("configuration.catalog", json!({})).await);
+    assert_eq!(
+        observer.notice("configuration.changed").await["params"],
+        json!({})
+    );
+    for excluded in [&mut legacy, &mut remote] {
+        assert_ok(&excluded.rpc("daemon.ping", json!({})).await);
+        assert!(
+            excluded
+                .notices
+                .iter()
+                .all(|n| n["method"] != "configuration.changed")
+        );
+    }
+    drop(fault);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconnect_locates_a_published_submission_without_resubmitting() {
     for ws in [false, true] {
         let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;

@@ -178,6 +178,10 @@ pub enum Call {
     McpRevoke(RevokeMcp),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
+    ConfigurationCatalog,
+    ConfigurationGet(ConfigurationTarget),
+    ConfigurationUpdate(ConfigurationUpdate),
+    ConfigurationFlush,
 }
 
 impl Call {
@@ -227,6 +231,10 @@ impl Call {
                 | Self::McpDisconnect(_)
                 | Self::McpApprove(_)
                 | Self::McpRevoke(_)
+                | Self::ConfigurationCatalog
+                | Self::ConfigurationGet(_)
+                | Self::ConfigurationUpdate(_)
+                | Self::ConfigurationFlush
         )
     }
 
@@ -243,6 +251,10 @@ impl Call {
                 | Self::McpDisconnect(_)
                 | Self::McpApprove(_)
                 | Self::McpRevoke(_)
+                | Self::ConfigurationCatalog
+                | Self::ConfigurationGet(_)
+                | Self::ConfigurationUpdate(_)
+                | Self::ConfigurationFlush
         )
     }
 
@@ -284,6 +296,62 @@ pub const MCP_METHODS: [&str; 9] = [
     "session.mcp",
     "session.mcp.refresh",
 ];
+
+pub const CONFIGURATION_METHODS: [&str; 5] = [
+    "configuration.catalog",
+    "configuration.get",
+    "configuration.update",
+    "configuration.flush",
+    "configuration.changed",
+];
+
+/// This boundary cannot name infrastructure, project grants or arbitrary plugins.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigurationSource {
+    UserMcp,
+    Skills,
+}
+impl From<ConfigurationSource> for crate::settings::SettingsSource {
+    fn from(source: ConfigurationSource) -> Self {
+        match source {
+            ConfigurationSource::UserMcp => Self::UserMcp,
+            ConfigurationSource::Skills => Self::Skills,
+        }
+    }
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationTarget {
+    pub source: ConfigurationSource,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationUpdate {
+    pub source: ConfigurationSource,
+    pub expected_revision: String,
+    pub document: crate::settings::SettingsDocument,
+}
+impl std::fmt::Debug for ConfigurationUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigurationUpdate")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Serialize)]
+pub struct ConfigurationCatalog {
+    pub entries: Vec<crate::user_configuration::UserConfigurationInfo>,
+    pub persistence: crate::user_configuration::UserPersistenceStatus,
+}
+#[derive(Debug, Serialize)]
+pub struct ConfigurationMutation {
+    /// Whether this edit's save completed, not a guarantee about concurrent edits.
+    pub saved: bool,
+    /// Sampled after the edit; another writer may already have replaced it.
+    pub current: crate::user_configuration::UserConfigurationInfo,
+    pub persistence: crate::user_configuration::UserPersistenceStatus,
+}
 
 pub const MANAGEMENT_METHODS: [&str; 33] = [
     "account.providers",
@@ -991,6 +1059,16 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "mcp.revoke" => Call::McpRevoke(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
+            "configuration.catalog" => {
+                let _: Empty = params(raw_params)?;
+                Call::ConfigurationCatalog
+            }
+            "configuration.get" => Call::ConfigurationGet(params(raw_params)?),
+            "configuration.update" => Call::ConfigurationUpdate(params(raw_params)?),
+            "configuration.flush" => {
+                let _: Empty = params(raw_params)?;
+                Call::ConfigurationFlush
+            }
             _ => return Err(RpcError::app(-32601, "unknown_method", "Unknown method")),
         })
     })();
@@ -1126,6 +1204,10 @@ pub enum Reply {
     Configuration(ConfigurationResult),
     McpCatalog(McpCatalogResult),
     McpState(McpStateResult),
+    ConfigurationCatalog(ConfigurationCatalog),
+    ConfigurationInfo(crate::user_configuration::UserConfigurationInfo),
+    ConfigurationMutation(ConfigurationMutation),
+    ConfigurationPersistence(crate::user_configuration::UserPersistenceStatus),
     Empty(Empty),
 }
 impl Reply {
@@ -1177,6 +1259,8 @@ pub struct ClosedNotice {
 #[derive(Debug, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Notification {
+    #[serde(rename = "configuration.changed")]
+    ConfigurationChanged(Empty),
     #[serde(rename = "session.mcp.state")]
     McpState(McpStateResult),
     #[serde(rename = "session.event")]

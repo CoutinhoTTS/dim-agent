@@ -50,6 +50,7 @@ flowchart LR
   p16 -->|"dim_app_server::mcp::McpService"| p24
   p13 -->|"dim_app_server::provider::ProviderService"| p24
   p14 -->|"dim_app_server::settings::SettingsService"| p24
+  p5 -->|"dim_app_server::user_configuration::UserConfiguration"| p24
   p6 -->|"dim_app_server::control::ServerControl"| p23
   p21 -->|"dim_app_server::agents::AgentIndex"| p22
   p20 -->|"dim_app_server::collaboration::CollaborationDirectory"| p22

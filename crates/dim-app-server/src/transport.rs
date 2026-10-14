@@ -679,10 +679,6 @@ async fn run_connection(
                             continue;
                         }
                     };
-                    connection
-                        .version
-                        .set(params.protocol_version)
-                        .expect("first handshake");
                     let _ = connection.sender.send(
                         Outbound::result(
                             request.id,
@@ -714,6 +710,7 @@ async fn run_connection(
                                     if local && hub.config().local_execution() {
                                         features.extend(LOCAL_EXECUTION_METHODS);
                                         features.extend(MCP_METHODS);
+                                        features.extend(CONFIGURATION_METHODS);
                                     }
                                     features
                                 }),
@@ -721,6 +718,12 @@ async fn run_connection(
                         ),
                         false,
                     );
+                    // Publish notification eligibility only after the hello reply
+                    // has entered this connection's ordered outbound queue.
+                    connection
+                        .version
+                        .set(params.protocol_version)
+                        .expect("first handshake");
                     hello = true;
                 }
                 Call::Hello(_) => {

@@ -12,6 +12,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{AgentError, Capability, KeysOf, Session, When, scoped};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
+mod configuration;
 mod mcp;
 mod subscription;
 mod tree;
@@ -1000,6 +1001,15 @@ impl Connection {
     async fn management(&self, rpc: &RpcService, call: Call) -> Result<Reply, RpcError> {
         if matches!(
             call,
+            Call::ConfigurationCatalog
+                | Call::ConfigurationGet(_)
+                | Call::ConfigurationUpdate(_)
+                | Call::ConfigurationFlush
+        ) {
+            return configuration::management(rpc, call).await;
+        }
+        if matches!(
+            call,
             Call::McpCatalog(_)
                 | Call::McpSetEnabled(_)
                 | Call::McpSave(_)
@@ -1677,6 +1687,7 @@ pub(crate) struct RpcService {
     pub skills: Option<Arc<SkillsCatalog>>,
     pub mcp: Option<Arc<crate::mcp::McpService>>,
     pub settings: Option<Arc<crate::settings::SettingsService>>,
+    pub configuration: Option<Arc<crate::user_configuration::UserConfiguration>>,
     pub commands: TaskTracker,
     /// Cancelled when this generation unloads: commands waiting on client
     /// input end so that draining cannot wait for requests it rejects.
@@ -1730,6 +1741,7 @@ type ExecutionServices = (
     Arc<SkillsCatalog>,
     Arc<crate::mcp::McpService>,
     Arc<crate::settings::SettingsService>,
+    Arc<crate::user_configuration::UserConfiguration>,
 );
 impl TypedPlugin for RpcPlugin {
     type Deps = (
@@ -1756,9 +1768,11 @@ impl TypedPlugin for RpcPlugin {
                 }
                 None => (None, None, None, None),
             };
-            let (skills, mcp, settings) = match execution {
-                Some((skills, mcp, settings)) => (Some(skills), Some(mcp), Some(settings)),
-                None => (None, None, None),
+            let (skills, mcp, settings, configuration) = match execution {
+                Some((skills, mcp, settings, configuration)) => {
+                    (Some(skills), Some(mcp), Some(settings), Some(configuration))
+                }
+                None => (None, None, None, None),
             };
             let service = Arc::new(RpcService {
                 index,
@@ -1771,6 +1785,7 @@ impl TypedPlugin for RpcPlugin {
                 skills,
                 mcp,
                 settings,
+                configuration,
                 commands: TaskTracker::new(),
                 unloading: CancellationToken::new(),
             });
@@ -1795,6 +1810,7 @@ impl TypedPlugin for RpcPlugin {
                     })
                 }))
             })?;
+            configuration::subscribe(ctx, &handler, &registered)?;
             // Registered only after its cleanup is owned by this generation.
             handler.register(registered);
             Ok(Effect::Done)
@@ -1810,7 +1826,7 @@ impl Capability for RpcPlugin {
             (),
             (),
             product.then_some(((), (), (), ())),
-            self.config.local_execution().then_some(((), (), ())),
+            self.config.local_execution().then_some(((), (), (), ())),
         )
     }
 }

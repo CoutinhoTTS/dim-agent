@@ -7,7 +7,7 @@ use crate::{
 };
 use dim_agent_runtime::{
     BranchLifecycle, BranchScope, Capability, ConfigureControl, ConfigureUpdate, InBranch,
-    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionScope, scoped,
+    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionLoader, SessionScope, scoped,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -124,28 +124,72 @@ impl SkillsPlugin {
     }
 }
 impl TypedPlugin for SkillsPlugin {
-    type Deps = (Arc<SkillsCatalog>, InSession<SessionConfig>);
+    type Deps = (
+        Arc<SkillsCatalog>,
+        InSession<SessionConfig>,
+        InSession<SessionLoader>,
+        InSession<super::content::Contributions>,
+    );
     fn name(&self) -> &str {
         "Skills"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (catalog, InSession(config)): Self::Deps,
+        (catalog, InSession(config), InSession(loader), InSession(contributions)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let cwd = PathBuf::from(&config.cwd);
             let lifecycle = ctx.cancellation_token();
             let failed = |error: super::SkillsError| CordisError::PluginFailed(Box::new(error));
             let mut changes = catalog.subscribe().map_err(failed)?;
-            let initial = catalog
-                .query(Some(&cwd))
-                .await
-                .map(|view| Arc::new(SkillView::from_catalog(&view)));
-            let skills = Arc::new(SessionSkills::new(initial));
+            let contents = Arc::new(tokio::sync::Mutex::new(super::content::Contents::new(
+                self.scope,
+                contributions,
+            )));
             let tasks = TaskTracker::new();
+            let cleanup = contents.clone();
+            let joined = tasks.clone();
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        joined.close();
+                        joined.wait().await;
+                        cleanup
+                            .lock()
+                            .await
+                            .close()
+                            .await
+                            .map_err(|error| CordisError::PluginFailed(Box::new(error)))
+                    })
+                }))
+            })?;
+            // Apply can be dropped on cancellation. The tracked task still settles
+            // creation and rolls it back before the disposer finishes joining.
+            let initial = tasks
+                .spawn({
+                    let (contents, catalog, cwd, context, loader, stopped) = (
+                        contents.clone(),
+                        catalog.clone(),
+                        cwd.clone(),
+                        ctx.clone(),
+                        loader.clone(),
+                        lifecycle.clone(),
+                    );
+                    async move {
+                        contents
+                            .lock()
+                            .await
+                            .update(catalog.query(Some(&cwd)).await, &context, &loader, &stopped)
+                            .await
+                    }
+                })
+                .await
+                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+            let skills = Arc::new(SessionSkills::new(initial));
             let owner = skills.clone();
             let stopped = lifecycle.clone();
+            let context = ctx.clone();
             tasks.spawn(async move {
                 loop {
                     tokio::select! {
@@ -153,22 +197,14 @@ impl TypedPlugin for SkillsPlugin {
                         changed = changes.changed() => if changed.is_err() { return },
                     }
                     owner.replace(
-                        catalog
-                            .query(Some(&cwd))
+                        contents
+                            .lock()
                             .await
-                            .map(|view| Arc::new(SkillView::from_catalog(&view))),
+                            .update(catalog.query(Some(&cwd)).await, &context, &loader, &stopped)
+                            .await,
                     );
                 }
             });
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        tasks.close();
-                        tasks.wait().await;
-                        Ok(())
-                    })
-                }))
-            })?;
             ctx.provide_as(
                 self.scope.named_key::<ToolContribution>("skill"),
                 Arc::new(ToolContribution {

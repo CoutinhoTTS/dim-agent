@@ -318,12 +318,13 @@ pub struct UserConfiguration {
     updates: TaskTracker,
 }
 /// Sanitized management projection: no document fields or framework handles.
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UserConfigurationInfo {
     pub id: &'static str,
     pub revision: String,
 }
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserPersistenceStatus {
     pub base_version: Option<String>,
     pub pending_saves: usize,

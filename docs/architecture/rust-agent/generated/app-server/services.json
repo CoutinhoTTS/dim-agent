@@ -201,6 +201,11 @@
             "service": "dim_app_server::settings::SettingsService",
             "scope": null,
             "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::user_configuration::UserConfiguration",
+            "scope": null,
+            "status": "Ready"
           }
         ],
         "resolved": [
@@ -269,6 +274,12 @@
             "scope": null,
             "provider": 14,
             "generation": 1
+          },
+          {
+            "service": "dim_app_server::user_configuration::UserConfiguration",
+            "scope": null,
+            "provider": 5,
+            "generation": 1
           }
         ],
         "reads": [
@@ -329,6 +340,12 @@
           {
             "service": "dim_app_server::settings::SettingsService",
             "provider": 14,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::user_configuration::UserConfiguration",
+            "provider": 5,
             "declared": true,
             "external": true
           }

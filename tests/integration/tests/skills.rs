@@ -695,6 +695,18 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
     .unwrap();
     assert!(skills.list().unwrap().iter().any(|skill| skill.name == "b"));
     assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-1"));
+    assert_eq!(
+        env.agent
+            .diagnostics()
+            .unwrap()
+            .plugins
+            .iter()
+            .filter(
+                |plugin| plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+            )
+            .count(),
+        3
+    );
 
     // A later source failure also blocks the previously consumed Skill body.
     settings.failing.store(usize::MAX, Ordering::SeqCst);
@@ -716,6 +728,11 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
     let result = load(&env, &session, "b").await;
     assert_eq!(result.is_error, Some(true));
     assert!(!result_text(&result).contains("BODY-B-1"));
+    assert!(
+        env.agent.diagnostics().unwrap().plugins.iter().all(
+            |plugin| plugin.name != "SkillContent" || plugin.state != rutis::FiberState::Active
+        )
+    );
     env.agent.close().await.unwrap();
 }
 
@@ -772,4 +789,91 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
         .unwrap();
     assert!(!entry.enabled);
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn content_instances_are_session_owned_and_only_changed_content_is_replaced() {
+    let dirs = Dirs::new();
+    let layout = layout(&dirs);
+    let env = env(&dirs, Options::default()).await;
+    let first = env.session(&layout.cwd, "").await.unwrap();
+    let second = env.session(&layout.cwd, "").await.unwrap();
+    let content_ids = || {
+        let snapshot = env.agent.diagnostics().unwrap();
+        let ids: std::collections::HashSet<_> = snapshot
+            .plugins
+            .iter()
+            .filter(|plugin| {
+                plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+            })
+            .map(|plugin| plugin.id)
+            .collect();
+        // Every actual content leaf has its own live contributed service binding.
+        assert_eq!(
+            snapshot
+                .bindings
+                .iter()
+                .filter(|binding| ids.contains(&binding.provider))
+                .count(),
+            ids.len()
+        );
+        ids
+    };
+    let original = content_ids();
+    assert_eq!(original.len(), 6); // a, b, d in each Session; shadowed/invalid files excluded.
+    let second_before = view_version(&second);
+    dirs.write(
+        &layout.project.join("b/SKILL.md"),
+        &skill_file("b", "project b", "BODY-B-2"),
+    );
+    refresh(&env, &first, &layout.cwd).await;
+    wait_view_change(&second, &second_before).await;
+    let refreshed = content_ids();
+    assert_eq!(refreshed.len(), 6);
+    assert_eq!(original.intersection(&refreshed).count(), 4);
+    assert!(result_text(&load(&env, &second, "b").await).contains("BODY-B-2"));
+
+    // An identical rescan must not recreate any content instance.
+    env.catalog()
+        .refresh(RefreshTarget {
+            user: true,
+            project: Some(layout.cwd.clone()),
+        })
+        .await
+        .unwrap();
+    run(&second, "unchanged").await;
+    assert_eq!(content_ids(), refreshed);
+
+    first.close().await.unwrap();
+    let surviving = content_ids();
+    assert_eq!(surviving.len(), 3);
+    assert!(surviving.is_subset(&refreshed));
+    assert!(result_text(&load(&env, &second, "b").await).contains("BODY-B-2"));
+    let b = format!("workspace:{}:b", layout.project.to_string_lossy());
+    let before = view_version(&second);
+    env.catalog()
+        .set_enabled(&b, false, Some(&layout.cwd))
+        .await
+        .unwrap();
+    wait_view_change(&second, &before).await;
+    let disabled = content_ids();
+    assert_eq!(disabled.len(), 2);
+    assert!(disabled.is_subset(&surviving));
+    assert_eq!(
+        result_text(&load(&env, &second, "b").await),
+        "Skill is disabled: b"
+    );
+    let before = view_version(&second);
+    env.catalog()
+        .set_enabled(&b, true, Some(&layout.cwd))
+        .await
+        .unwrap();
+    wait_view_change(&second, &before).await;
+    let enabled = content_ids();
+    assert_eq!(enabled.len(), 3);
+    assert_eq!(enabled.intersection(&surviving).count(), 2);
+    assert!(result_text(&load(&env, &second, "b").await).contains("BODY-B-2"));
+    second.close().await.unwrap();
+    assert!(content_ids().is_empty());
+    env.agent.close().await.unwrap();
 }

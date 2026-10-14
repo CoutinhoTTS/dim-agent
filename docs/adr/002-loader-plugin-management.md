@@ -68,8 +68,8 @@ this batch. Update the delivery status as each complete unit lands.
 | Unit | Status |
 | --- | --- |
 | Session-owned MCP instances | Implemented; independent connections, Session close, retained bindings, cross-Session revocation and cleanup failures covered by public flows |
-| Editable user persistence and management | v14 editable user document persistence implemented; management RPC integration remains separate |
-| Skill content rows | Not implemented |
+| Editable user persistence and management | Implemented for the two typed user documents: v14 SQLite Persist, protected-local configuration RPC, save retry and sanitized loader invalidations |
+| Skill content rows | Implemented as Session-owned content instances; views consume their ready contributions, with selective replacement and independent Session closure |
 
 Public-flow checks cover two Sessions using one configured server, closing only
 one Session, automatic replacement with a retained old binding, cancellation
@@ -112,3 +112,43 @@ files remain unchanged. Startup rejects v13; the explicit offline
 SqliteStorage::migrate_v13_to_v14 API checks exact old schema under the maintenance
 lock and replaces only format/settings tables in one transaction. Native v13
 settings beat stale files. See the native storage format for the exact contract.
+
+## Management and installation boundaries
+
+The protected-local v3 `configuration.catalog/get/update/flush` methods manage
+only user MCP and Skill documents. SettingsService validates source-specific
+edits and submits them to the editable layer; it does not persist a second copy
+of plugin intent. Read projections contain fixed row IDs and opaque revisions,
+never document bodies. An update reports whether its save completed separately
+from the current, independently sampled intent and persistence status.
+`configuration.changed` coalesces framework LoaderChanged events and save-result
+invalidations. Rpc owns and drains the notification task. Listeners neither
+mutate the loader nor feed loader events back into business configuration watches.
+
+This is not the complete generic management surface in issue #3. Arbitrary row
+creation, infrastructure disablement, package installation, marketplace sources,
+Hook content and cross-language capabilities remain outside this batch.
+The PluginManager responsibility proposed by PR #13 remains package acquisition,
+manifest admission and installation/removal. Installation records, editable
+enablement/configuration, host-local execution grants and Session runtime
+instances are distinct. Acquiring a package never grants execution permission.
+MCP source selection and authorization remain process services; connections are
+Session-owned. SkillsCatalog owns discovery/precedence; Skills consumes actual
+Session content contributions, not a second installed-package catalog.
+
+For integration with PR #13, retain its feature ownership but align its
+source-first configuration premise with issue #3's editable-layer authority.
+ADR 002 records this branch's approved direction, not acceptance of changes to
+another contributor's PR. Production compression, the marketplace and dynamic
+events are not introduced by this implementation.
+
+PR #13's revised management design introduces a process-level `Management`
+plugin: owners contribute named methods, and entrypoint mounting/link exports
+control access. This branch does not implement that aggregate or claim to finish
+the corresponding Rpc migration. Its configuration methods use the existing
+protected-local Rpc boundary as a compatibility adapter; configuration ownership
+remains in Settings/UserConfiguration. Integrating Management must move this
+adapter along with existing MCP, Skill, provider and account management methods,
+preserving their wire contracts and accepted-work draining. It must not add a
+second configuration authority or infer execution permission from installation.
+Session-owned MCP instances are independent of that entrypoint migration.
