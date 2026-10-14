@@ -1,162 +1,125 @@
 //! Managed provider account wire boundary.
 use super::{AccountSnapshot, ManagedProviders};
 use crate::{
-    methods::{Interruption, MethodDecl, Methods, params, reply},
+    methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
     protocol::*,
 };
-use dim_agent_runtime::{Capability, KeysOf, scoped};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{CordisError, Ctx};
 use std::sync::Arc;
 
-pub struct AccountManagement;
-impl TypedPlugin for AccountManagement {
-    type Deps = (Arc<Methods>, Arc<ManagedProviders>);
-    fn name(&self) -> &str {
-        "AccountManagement"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (management, oauth): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let registration = management
-                .register(
-                    "account",
-                    [
-                        "account.providers",
-                        "account.status",
-                        "account.recover",
-                        "account.login.begin",
-                        "account.login.browser.begin",
-                        "account.login.browser.complete",
-                        "account.login.status",
-                        "account.login.cancel",
-                        "account.logout",
-                    ]
-                    .into_iter()
-                    .map(|name| {
-                        MethodDecl::management(
-                            name,
-                            !matches!(
-                                name,
-                                "account.providers" | "account.status" | "account.login.status"
-                            ),
-                            Interruption::Drain,
-                        )
-                    })
-                    .collect(),
-                    vec![],
-                    Arc::new(move |method, value, stopping| {
-                        let oauth = oauth.clone();
-                        Box::pin(async move {
-                            let cancel = &stopping;
-                            match method.as_str() {
-                                "account.providers" => {
-                                    let _: Empty = params(value)?;
-                                    reply(oauth.providers(cancel).await.map_err(error)?)
-                                }
-                                "account.status" => {
-                                    let p: ProviderTarget = params(value)?;
-                                    reply(
-                                        oauth
-                                            .status(&p.provider_id, cancel)
-                                            .await
-                                            .map_err(error)?,
-                                    )
-                                }
-                                "account.recover" => {
-                                    let p: ProviderTarget = params(value)?;
-                                    reply(
-                                        oauth
-                                            .call::<AccountSnapshot>("recover", reply(p)?, cancel)
-                                            .await
-                                            .map_err(error)?,
-                                    )
-                                }
-                                "account.login.begin" => {
-                                    let p: LoginBegin = params(value)?;
-                                    reply(
-                                        oauth
-                                            .call::<DeviceLogin>("beginDevice", reply(p)?, cancel)
-                                            .await
-                                            .map_err(error)?,
-                                    )
-                                }
-                                "account.login.browser.begin" => {
-                                    let p: BrowserLoginBegin = params(value)?;
-                                    reply(
-                                        oauth
-                                            .call::<BrowserLogin>("beginBrowser", reply(p)?, cancel)
-                                            .await
-                                            .map_err(error)?,
-                                    )
-                                }
-                                "account.login.browser.complete" => {
-                                    let p: ManagedBrowserLoginComplete = params(value)?;
-                                    reply(
-                                        oauth
-                                            .call::<AccountSnapshot>(
-                                                "completeBrowser",
-                                                reply(p)?,
-                                                cancel,
-                                            )
-                                            .await
-                                            .map_err(error)?,
-                                    )
-                                }
-                                "account.login.status" => {
-                                    let p: ManagedLoginAttempt = params(value)?;
-                                    let status: LoginState = oauth
-                                        .call("attemptStatus", reply(p)?, cancel)
-                                        .await
-                                        .map_err(error)?;
-                                    reply(match status {
-                                        LoginState::Failed { .. } => LoginState::Failed {
-                                            error: "Login failed".into(),
-                                        },
-                                        status => status,
-                                    })
-                                }
-                                "account.login.cancel" => {
-                                    let p: ManagedLoginAttempt = params(value)?;
-                                    let _: serde_json::Value = oauth
-                                        .call("cancelAttempt", reply(p)?, cancel)
-                                        .await
-                                        .map_err(error)?;
-                                    reply(Empty {})
-                                }
-                                "account.logout" => {
-                                    let p: ProviderTarget = params(value)?;
-                                    reply(
-                                        oauth
-                                            .call::<AccountSnapshot>("logout", reply(p)?, cancel)
-                                            .await
-                                            .map_err(error)?,
-                                    )
-                                }
-                                _ => unreachable!("registered account method"),
-                            }
-                        })
-                    }),
-                )
-                .map_err(|error| CordisError::PluginFailed(error.message.into()))?;
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        registration.unregister_and_drain().await;
-                        Ok(())
-                    })
-                }))
-            })?;
-            Ok(Effect::Done)
+pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), CordisError> {
+    ManagementMethods::provide(
+        ctx,
+        "account",
+        [
+            "account.providers",
+            "account.status",
+            "account.recover",
+            "account.login.begin",
+            "account.login.browser.begin",
+            "account.login.browser.complete",
+            "account.login.status",
+            "account.login.cancel",
+            "account.logout",
+        ]
+        .into_iter()
+        .map(|name| {
+            MethodDecl::management(
+                name,
+                !matches!(
+                    name,
+                    "account.providers" | "account.status" | "account.login.status"
+                ),
+                Interruption::Drain,
+            )
         })
-    }
-}
-impl Capability for AccountManagement {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
-    }
+        .collect(),
+        vec![],
+        Arc::new(move |method, value, stopping| {
+            let oauth = oauth.clone();
+            Box::pin(async move {
+                let cancel = &stopping;
+                match method.as_str() {
+                    "account.providers" => {
+                        let _: Empty = params(value)?;
+                        reply(oauth.providers(cancel).await.map_err(error)?)
+                    }
+                    "account.status" => {
+                        let p: ProviderTarget = params(value)?;
+                        reply(oauth.status(&p.provider_id, cancel).await.map_err(error)?)
+                    }
+                    "account.recover" => {
+                        let p: ProviderTarget = params(value)?;
+                        reply(
+                            oauth
+                                .call::<AccountSnapshot>("recover", reply(p)?, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "account.login.begin" => {
+                        let p: LoginBegin = params(value)?;
+                        reply(
+                            oauth
+                                .call::<DeviceLogin>("beginDevice", reply(p)?, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "account.login.browser.begin" => {
+                        let p: BrowserLoginBegin = params(value)?;
+                        reply(
+                            oauth
+                                .call::<BrowserLogin>("beginBrowser", reply(p)?, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "account.login.browser.complete" => {
+                        let p: ManagedBrowserLoginComplete = params(value)?;
+                        reply(
+                            oauth
+                                .call::<AccountSnapshot>("completeBrowser", reply(p)?, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "account.login.status" => {
+                        let p: ManagedLoginAttempt = params(value)?;
+                        let status: LoginState = oauth
+                            .call("attemptStatus", reply(p)?, cancel)
+                            .await
+                            .map_err(error)?;
+                        reply(match status {
+                            LoginState::Failed { .. } => LoginState::Failed {
+                                error: "Login failed".into(),
+                            },
+                            status => status,
+                        })
+                    }
+                    "account.login.cancel" => {
+                        let p: ManagedLoginAttempt = params(value)?;
+                        let _: serde_json::Value = oauth
+                            .call("cancelAttempt", reply(p)?, cancel)
+                            .await
+                            .map_err(error)?;
+                        reply(Empty {})
+                    }
+                    "account.logout" => {
+                        let p: ProviderTarget = params(value)?;
+                        reply(
+                            oauth
+                                .call::<AccountSnapshot>("logout", reply(p)?, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    _ => unreachable!("registered account method"),
+                }
+            })
+        }),
+    )?;
+    Ok(())
 }
 
 fn error(error: super::ManagedProviderError) -> RpcError {

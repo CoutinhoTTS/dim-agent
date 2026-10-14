@@ -668,9 +668,12 @@ async fn run_connection(
                             .instance
                             .set(instance.clone())
                             .expect("first handshake");
-                        instance
+                        let mut methods =
+                            rpc.methods.methods(crate::methods::MethodLevel::Management);
+                        methods.extend(rpc.methods.notification_names());
+                        (instance, methods)
                     });
-                    let instance_id = match instance {
+                    let (instance_id, methods) = match instance {
                         Ok(instance) => instance,
                         Err(error) => {
                             let _ = connection
@@ -710,11 +713,7 @@ async fn run_connection(
                                     let mut features: Vec<String> =
                                         features.into_iter().map(str::to_owned).collect();
                                     if local {
-                                        features.extend(
-                                            hub.methods
-                                                .methods(crate::methods::MethodLevel::Management),
-                                        );
-                                        features.extend(hub.methods.notification_names());
+                                        features.extend(methods);
                                     }
                                     features
                                 }),

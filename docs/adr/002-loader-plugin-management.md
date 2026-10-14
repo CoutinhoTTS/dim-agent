@@ -122,8 +122,8 @@ of plugin intent. Read projections contain fixed row IDs and opaque revisions,
 never document bodies. An update reports whether its save completed separately
 from the current, independently sampled intent and persistence status.
 `configuration.changed` coalesces framework LoaderChanged events and save-result
-invalidations. The configuration adapter owns and drains the notification task.
-Connection supplies generic generation-fenced delivery. Listeners neither
+invalidations. Settings owns and drains the notification task.
+Rpc supplies generic generation-fenced delivery. Listeners neither
 mutate the loader nor feed loader events back into business configuration watches.
 
 This is not the complete generic management surface in issue #3. Arbitrary row
@@ -143,18 +143,19 @@ ADR 002 records this branch's approved direction, not acceptance of changes to
 another contributor's PR. Production compression, the marketplace and dynamic
 events are not introduced by this implementation.
 
-PR #15's revised dependency direction replaces the proposed extension registry
-with consumer-owned stable ports. The RPC-side Methods port, Management view,
-local v3 dispatch and all existing account/provider/MCP/Skills/configuration
-management adapters are implemented; see [Management](../design/plugins/management.md).
-Each adapter owns its declarations, validation and accepted tasks. Hello and
-management discovery use those registrations, not a second feature table.
-Configuration authority remains in Settings/UserConfiguration. Non-serving
-entries return `unknown_method` for contributed methods.
+PR #15's plugin-scope revision withdraws both the proposed extension registry
+and its successor stable ports. Process owners now provide named
+`ManagementMethods`, collected by Rpc through `Contributions<T>`; see
+[Management methods](../design/plugins/management.md). There is no Methods or
+Management plugin and no management adapter row. Owners keep declarations and
+wire validation; Rpc owns accepted command tasks. Hello advertises the methods
+of its collected table. Configuration authority remains in
+Settings/UserConfiguration. Non-serving entries return `unknown_method`.
 
-Execution dependency inversion remains separate: Rpc still reaches Provider for
-model preferences, Agents depends on Settings/model selection, and Session MCP
-contributions feed ToolRegistry. The method migration alone does not isolate
-those business-owner reloads. Link export, RemoteGateway, contributed Session
-calls and CallChannel remain outside this delivered subset. Session-owned MCP
-instances and host-local execution approval are unchanged.
+Structural owner reloads propagate through ordinary rutis dependencies, including
+Rpc, and may fail affected turns; business configuration changes do not reload
+plugins. Rpc's Provider dependency for model preferences, Agents' Settings/model
+selection dependencies and ToolRegistry's Session MCP contributions remain
+explicit. No model-source port is introduced to mask those edges. Link export,
+RemoteGateway, contributed Session calls and CallChannel remain outside this
+delivered subset. Session-owned MCP instances and execution approval are unchanged.

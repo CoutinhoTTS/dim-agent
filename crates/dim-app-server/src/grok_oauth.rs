@@ -102,10 +102,9 @@ impl TypedPlugin for GrokOAuthPlugin {
                 service.close().await;
                 return Err(error);
             }
-            ctx.provide_as(
-                TypeKey::of::<GrokOAuthService>(),
-                Arc::new(GrokOAuthService(service)),
-            )?;
+            let service = Arc::new(GrokOAuthService(service));
+            management::provide(ctx, service.clone())?;
+            ctx.provide_as(TypeKey::of::<GrokOAuthService>(), service)?;
             Ok(Effect::Done)
         })
     }

@@ -6,9 +6,11 @@ optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses the root editable layer; MCP connections and Skill content instances belong
 to Sessions. Project MCP execution requires host-local approval. See
 [ADR 002](../../adr/002-loader-plugin-management.md) for implemented configuration
-scope. The stable Methods port and [Management](../../design/plugins/management.md)
-view route account, provider, MCP, Skills and configuration management methods
-to owner adapters. Execution-side dependency inversion remains outstanding.
+scope. Rpc collects [management methods](../../design/plugins/management.md)
+as named services from account, provider, MCP, Skills and Settings owners.
+Structural reloads propagate through normal rutis dependencies; business
+configuration changes do not reload those plugins. No Methods or Management
+plugin, registration port or separate management adapter row is required.
 Product assembly preflight and typed capability event declarations remain
 incomplete; proposals are recorded in [ADR 001](../../adr/001-harness-foundation.md).
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
@@ -131,12 +133,10 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `AgentScope`（`agent` 实例中的行） | 一个 `Agent`（Session 建在同一 Agent 实例里）与承载监听的子插件 `Sessions`；`AgentHost`（agent、agentId、default、trace 归档）；apply 登记进目录 | 经 `AgentDirectory` 登记 | `AgentDirectory`、`Loader`；`TimelineStore` 由已配置的 AgentBuilder 传入 |
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |
-| `ConnectionPlugin` | Connection index, admission limits, transport tasks and local management notification delivery | `ConnectionHub` | `ServerControl`, `Methods` |
-| `RpcPlugin` | Accepted command tasks | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`; product profile also uses Provider for model selection |
-| `MethodsPlugin` | RPC-side contribution catalog | Stable process port; atomic admission/removal and per-registration accepted-task drainage | None |
-| `ManagementPlugin` | Management-level view and discovery method | `Management` | `Methods` |
-| Management adapters | Owner-specific wire validation and business calls | Register with effect-owned unregister/drain | `Methods` and each owner's business services |
-| `ConfigurationManagement` | Configuration wire adapter and coalesced invalidations | Publishes through a generic generation-fenced notification port | `Methods`, `SettingsService`, `UserConfiguration` |
+| `ConnectionPlugin` | Connection index, admission limits and transport tasks | `ConnectionHub` | `ServerControl` |
+| `RpcPlugin` | Built-in and contributed commands, accepted task drainage and local management notification delivery | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`, `Contributions<ManagementMethods>`; product profile also uses Provider for model selection |
+| Management contributions | Owner-specific declarations, wire validation and business calls, provided by the business plugin itself | Named `ManagementMethods` services; structural reload propagates to Rpc | Each owner's existing business dependencies |
+| Configuration methods | Settings publishes methods and owns coalesced invalidations when native user configuration is available | `ManagementMethods[configuration]` | Settings' existing FileStorage/UserConfiguration dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
 `AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算，最后排空 trace 归档。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算并排空归档，再关闭 Agent 实例；effect 幂等重复这两步。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。

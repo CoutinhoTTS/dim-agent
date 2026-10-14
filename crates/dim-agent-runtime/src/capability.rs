@@ -146,7 +146,8 @@ impl<T: ?Sized + BranchService> Deps for BranchGate<T> {
     }
 }
 
-/// Every named service of a list in the capability's Session, in order.
+/// Every named service of a list, in order. An instance scopes the list to
+/// a Session or branch; `None` selects process services.
 pub struct Contributions<T: ?Sized>(pub Vec<(String, Arc<T>)>);
 impl<T: ?Sized> Deref for Contributions<T> {
     type Target = Vec<(String, Arc<T>)>;
@@ -154,16 +155,29 @@ impl<T: ?Sized> Deref for Contributions<T> {
         &self.0
     }
 }
-impl<T: ?Sized + SessionService> Deps for Contributions<T> {
-    type Keys = (SessionScope, Arc<[String]>);
-    fn injects((scope, names): &Self::Keys, out: &mut Vec<TypeKey>) {
-        out.extend(names.iter().map(|name| scope.named_key::<T>(name)));
+impl<T: ?Sized + Send + Sync + 'static> Deps for Contributions<T> {
+    type Keys = (Option<rutis::InstanceId>, Arc<[String]>);
+    fn injects((instance, names): &Self::Keys, out: &mut Vec<TypeKey>) {
+        out.extend(names.iter().map(|name| {
+            let key = TypeKey::keyed_dynamic::<T>(name.as_str());
+            match instance {
+                Some(instance) => key.with_instance(*instance),
+                None => key,
+            }
+        }));
     }
-    fn resolve((scope, names): &Self::Keys, ctx: &Ctx) -> std::result::Result<Self, CordisError> {
+    fn resolve(
+        (instance, names): &Self::Keys,
+        ctx: &Ctx,
+    ) -> std::result::Result<Self, CordisError> {
         names
             .iter()
             .map(|name| {
-                let key = DepKey::<T>::dynamic(name.as_str()).instance(scope.instance);
+                let key = DepKey::<T>::dynamic(name.as_str());
+                let key = match instance {
+                    Some(instance) => key.instance(*instance),
+                    None => key,
+                };
                 Keyed::<T>::resolve(&key, ctx).map(|service| (name.clone(), service.0))
             })
             .collect::<std::result::Result<_, _>>()

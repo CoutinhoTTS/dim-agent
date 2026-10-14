@@ -527,6 +527,7 @@ impl TypedPlugin for ManagedProvidersPlugin {
                     Ok(())
                 }))
             })?;
+            management::provide(ctx, service.clone())?;
             ctx.provide_as(rutis::TypeKey::of::<ManagedProviders>(), service)?;
             Ok(Effect::Done)
         })

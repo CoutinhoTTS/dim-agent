@@ -639,6 +639,13 @@ impl TypedPlugin for SettingsPlugin {
             // Optional files are read by their consumers; a corrupt source must
             // not prevent the settings authority from registering.
             ctx.provide(SkillSettingsHost(service.clone()))?;
+            if let Some(configuration) = configuration {
+                crate::user_configuration::management::provide(
+                    ctx,
+                    service.clone(),
+                    configuration,
+                )?;
+            }
             ctx.provide_as(TypeKey::of::<SettingsService>(), service)?;
             Ok(Effect::Done)
         })

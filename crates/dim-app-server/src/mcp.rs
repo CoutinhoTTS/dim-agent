@@ -413,6 +413,7 @@ impl TypedPlugin for McpPlugin {
                     })
                 }))
             })?;
+            management::provide(ctx, service.clone(), service.settings.clone())?;
             ctx.provide_as(TypeKey::of::<McpService>(), service)?;
             Ok(Effect::Done)
         })

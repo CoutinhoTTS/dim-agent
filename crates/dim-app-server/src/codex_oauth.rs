@@ -114,10 +114,9 @@ impl TypedPlugin for OpenAICodexOAuthPlugin {
                 service.close().await;
                 return Err(error);
             }
-            ctx.provide_as(
-                TypeKey::of::<OpenAICodexOAuthService>(),
-                Arc::new(OpenAICodexOAuthService(service)),
-            )?;
+            let service = Arc::new(OpenAICodexOAuthService(service));
+            management::provide(ctx, service.clone())?;
+            ctx.provide_as(TypeKey::of::<OpenAICodexOAuthService>(), service)?;
             Ok(Effect::Done)
         })
     }

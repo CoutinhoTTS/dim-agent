@@ -1248,15 +1248,6 @@
       ]
     },
     {
-      "id": "dim_app_server::management",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server",
-      "file": "crates/dim-app-server/src/management.rs",
-      "unexpandedMacros": [
-        "vec"
-      ]
-    },
-    {
       "id": "dim_app_server::mcp",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1355,9 +1346,20 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/methods.rs",
       "unexpandedMacros": [
-        "serde_json::json",
         "tokio::pin",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::methods::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::methods",
+      "file": "crates/dim-app-server/src/methods/tests.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "json",
+        "vec"
       ]
     },
     {
@@ -8768,13 +8770,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_agent_capabilities::skills::catalog",
-      "references": [
-        "path dim_agent_capabilities::skills::SkillsCatalogPlugin::new"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_agent_capabilities::workspace_tools",
       "references": [
         "path dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default"
@@ -8867,13 +8862,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::codex_oauth::management",
-      "references": [
-        "path codex_oauth::management::CodexAccountManagement"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::collaboration",
       "references": [
         "mod collaboration",
@@ -8917,13 +8905,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::grok_oauth::management",
-      "references": [
-        "path grok_oauth::management::GrokAccountManagement"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::managed_oauth",
       "references": [
         "mod managed_oauth"
@@ -8942,32 +8923,10 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::managed_provider::management",
-      "references": [
-        "path managed_provider::management::AccountManagement"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::management",
-      "references": [
-        "mod management",
-        "path management::ManagementPlugin"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::mcp",
       "references": [
         "mod mcp",
         "path mcp::McpPlugin"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::mcp::management",
-      "references": [
-        "path mcp::management::McpManagement"
       ]
     },
     {
@@ -8989,7 +8948,7 @@
       "to": "dim_app_server::methods",
       "references": [
         "mod methods",
-        "path methods::MethodsPlugin"
+        "path methods"
       ]
     },
     {
@@ -9034,13 +8993,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::provider::management",
-      "references": [
-        "path provider::management::ProviderManagement"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::settings",
       "references": [
         "mod settings",
@@ -9054,7 +9006,7 @@
       "to": "dim_app_server::skills_management",
       "references": [
         "mod skills_management",
-        "path skills_management::SkillsManagement"
+        "path skills_management::SkillsCatalogPlugin"
       ]
     },
     {
@@ -9112,13 +9064,6 @@
         "path user_configuration::UserConfigurationPlugin",
         "path user_configuration::UserPersist::default",
         "path user_configuration::register_documents"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::user_configuration::management",
-      "references": [
-        "path user_configuration::management::ConfigurationManagement"
       ]
     },
     {
@@ -9550,7 +9495,8 @@
       "from": "dim_app_server::codex_oauth",
       "to": "dim_app_server::codex_oauth::management",
       "references": [
-        "mod management"
+        "mod management",
+        "path management::provide"
       ]
     },
     {
@@ -9573,18 +9519,6 @@
         "use managed_oauth::Config",
         "use managed_oauth::CredentialLease",
         "use managed_oauth::OAuthError"
-      ]
-    },
-    {
-      "from": "dim_app_server::codex_oauth::management",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -9612,13 +9546,13 @@
       "to": "dim_app_server::methods",
       "references": [
         "path Interruption::Drain",
+        "path ManagementMethods::provide",
         "path MethodDecl::management",
-        "path Methods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
-        "use crate::methods::Methods",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -9959,10 +9893,12 @@
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
+        "path Contributions",
         "path KeysOf",
         "path When",
         "path scoped",
         "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::Contributions",
         "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::When",
         "use dim_agent_runtime::scoped"
@@ -10095,10 +10031,13 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::methods",
       "references": [
+        "path ManagementMethods",
         "path MethodLevel::Management",
-        "path Methods",
+        "path MethodTable",
+        "path MethodTable::new",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodLevel",
-        "use crate::methods::Methods"
+        "use crate::methods::MethodTable"
       ]
     },
     {
@@ -10554,7 +10493,8 @@
       "from": "dim_app_server::grok_oauth",
       "to": "dim_app_server::grok_oauth::management",
       "references": [
-        "mod management"
+        "mod management",
+        "path management::provide"
       ]
     },
     {
@@ -10577,18 +10517,6 @@
         "use managed_oauth::CredentialLease",
         "use managed_oauth::DeviceBegin",
         "use managed_oauth::OAuthError"
-      ]
-    },
-    {
-      "from": "dim_app_server::grok_oauth::management",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -10616,13 +10544,13 @@
       "to": "dim_app_server::methods",
       "references": [
         "path Interruption::Drain",
+        "path ManagementMethods::provide",
         "path MethodDecl::management",
-        "path Methods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
-        "use crate::methods::Methods",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -10672,7 +10600,8 @@
       "from": "dim_app_server::managed_provider",
       "to": "dim_app_server::managed_provider::management",
       "references": [
-        "mod management"
+        "mod management",
+        "path management::provide"
       ]
     },
     {
@@ -10683,18 +10612,6 @@
         "path ModelEntry",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEntry"
-      ]
-    },
-    {
-      "from": "dim_app_server::managed_provider::management",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
       ]
     },
     {
@@ -10721,13 +10638,13 @@
       "to": "dim_app_server::methods",
       "references": [
         "path Interruption::Drain",
+        "path ManagementMethods::provide",
         "path MethodDecl::management",
-        "path Methods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
-        "use crate::methods::Methods",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -10759,38 +10676,6 @@
       ]
     },
     {
-      "from": "dim_app_server::management",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf"
-      ]
-    },
-    {
-      "from": "dim_app_server::management",
-      "to": "dim_app_server::methods",
-      "references": [
-        "path MethodLevel::Management",
-        "path Methods",
-        "path params",
-        "use crate::methods::Interruption",
-        "use crate::methods::MethodDecl",
-        "use crate::methods::MethodLevel",
-        "use crate::methods::Methods",
-        "use crate::methods::params"
-      ]
-    },
-    {
-      "from": "dim_app_server::management",
-      "to": "dim_app_server::protocol",
-      "references": [
-        "path Empty",
-        "use crate::protocol::Empty"
-      ]
-    },
-    {
       "from": "dim_app_server::mcp",
       "to": "dim_agent_runtime::capability",
       "references": [
@@ -10818,7 +10703,8 @@
       "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::management",
       "references": [
-        "mod management"
+        "mod management",
+        "path management::provide"
       ]
     },
     {
@@ -10888,18 +10774,6 @@
     },
     {
       "from": "dim_app_server::mcp::management",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::management",
       "to": "dim_app_server::mcp",
       "references": [
         "path McpChange::Put",
@@ -10925,13 +10799,13 @@
       "to": "dim_app_server::methods",
       "references": [
         "path Interruption::Report",
+        "path ManagementMethods::provide",
         "path MethodDecl::management",
-        "path Methods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
-        "use crate::methods::Methods",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -11414,12 +11288,15 @@
       "from": "dim_app_server::methods",
       "to": "dim_agent_runtime::capability",
       "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
+        "path Contributions",
+        "use dim_agent_runtime::Contributions"
+      ]
+    },
+    {
+      "from": "dim_app_server::methods",
+      "to": "dim_app_server::methods::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -11429,10 +11306,42 @@
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
-        "path RpcError::reloading",
         "path RpcError::wire",
         "path crate::protocol::is_builtin_method",
         "use crate::protocol::RpcError"
+      ]
+    },
+    {
+      "from": "dim_app_server::methods::tests",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path wait_active",
+        "use dim_agent_runtime::wait_active"
+      ]
+    },
+    {
+      "from": "dim_app_server::methods::tests",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path Contributions",
+        "path KeysOf",
+        "path capability_plugin",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::capability_plugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::methods::tests",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Handler",
+        "path ManagementMethods",
+        "path ManagementMethods::provide",
+        "path MethodLevel::Management",
+        "path MethodTable",
+        "path MethodTable::new"
       ]
     },
     {
@@ -11833,7 +11742,8 @@
       "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::management",
       "references": [
-        "mod management"
+        "mod management",
+        "path management::provide"
       ]
     },
     {
@@ -11999,18 +11909,6 @@
     },
     {
       "from": "dim_app_server::provider::management",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider::management",
       "to": "dim_agent_types::profile",
       "references": [
         "path dim_agent_types::ModelId"
@@ -12021,13 +11919,13 @@
       "to": "dim_app_server::methods",
       "references": [
         "path Interruption::Drain",
+        "path ManagementMethods::provide",
         "path MethodDecl::management",
-        "path Methods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
-        "use crate::methods::Methods",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -12300,6 +12198,13 @@
       ]
     },
     {
+      "from": "dim_app_server::settings",
+      "to": "dim_app_server::user_configuration::management",
+      "references": [
+        "path crate::user_configuration::management::provide"
+      ]
+    },
+    {
       "from": "dim_app_server::settings::mcp_approval",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -12348,6 +12253,8 @@
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "path SkillsCatalog",
+        "path dim_agent_capabilities::skills::SkillsCatalogPlugin",
+        "path dim_agent_capabilities::skills::SkillsCatalogPlugin::mount",
         "use dim_agent_capabilities::skills::SkillsCatalog"
       ]
     },
@@ -12368,13 +12275,13 @@
       "to": "dim_app_server::methods",
       "references": [
         "path Interruption::Report",
+        "path ManagementMethods::provide",
         "path MethodDecl::management",
-        "path Methods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
-        "use crate::methods::Methods",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -12959,28 +12866,16 @@
     },
     {
       "from": "dim_app_server::user_configuration::management",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "path scoped",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::scoped"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration::management",
       "to": "dim_app_server::methods",
       "references": [
         "path Interruption::Drain",
+        "path ManagementMethods::provide",
         "path MethodDecl::management",
-        "path Methods",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
+        "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
-        "use crate::methods::Methods",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]

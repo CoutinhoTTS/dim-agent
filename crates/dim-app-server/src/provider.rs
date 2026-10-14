@@ -2173,6 +2173,7 @@ impl TypedPlugin for ProviderPlugin {
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver))?;
+            management::provide(ctx, service.clone())?;
             ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
             Ok(Effect::Done)
         })

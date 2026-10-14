@@ -2,7 +2,7 @@ use crate::{
     ServerConfig,
     agents::AgentIndex,
     control::ServerControl,
-    methods::{MethodLevel, Methods},
+    methods::{ManagementMethods, MethodLevel, MethodTable},
     outbound::{Frame, Sender},
     protocol::*,
 };
@@ -11,7 +11,7 @@ use dim_agent_capabilities::{
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{AgentError, Capability, KeysOf, Session, When, scoped};
+use dim_agent_runtime::{AgentError, Capability, Contributions, KeysOf, Session, When, scoped};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
@@ -129,12 +129,13 @@ impl Connection {
                         "Management method is unavailable",
                     ));
                 }
-                let accepted = self.hub.methods.dispatch(
+                let accepted = rpc.methods.dispatch(
                     method.clone(),
                     params.clone(),
                     MethodLevel::Management,
                     self.closed.clone(),
                     rpc.unloading.clone(),
+                    &rpc.commands,
                 )?;
                 rpc.commands.spawn(async move {
                     let _guard = guard;
@@ -1026,7 +1027,6 @@ fn provider_error(error: dim_agent_capabilities::host::HostError) -> RpcError {
 /// Connection index, admission permits and connection tasks of the process.
 pub(crate) struct ConnectionHub {
     config: Arc<ServerConfig>,
-    pub methods: Arc<Methods>,
     pub control: Arc<ServerControl>,
     connections: Mutex<HashMap<String, Weak<Connection>>>,
     pub tasks: TaskTracker,
@@ -1035,7 +1035,7 @@ pub(crate) struct ConnectionHub {
     rpc: RwLock<Option<Arc<RpcService>>>,
 }
 impl ConnectionHub {
-    fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>, methods: Arc<Methods>) -> Self {
+    fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>) -> Self {
         Self {
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
@@ -1044,7 +1044,6 @@ impl ConnectionHub {
             rpc: RwLock::new(None),
             control,
             config,
-            methods,
         }
     }
     pub fn config(&self) -> &ServerConfig {
@@ -1112,17 +1111,17 @@ impl ConnectionPlugin {
     }
 }
 impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Arc<ServerControl>, Arc<Methods>);
+    type Deps = (Arc<ServerControl>,);
     fn name(&self) -> &str {
         "Connection"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (control, methods): Self::Deps,
+        (control,): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, methods));
+            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control));
             let owner = hub.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
@@ -1132,48 +1131,6 @@ impl TypedPlugin for ConnectionPlugin {
                     })
                 }))
             })?;
-            let mut notices = hub.methods.subscribe();
-            let delivery = hub.clone();
-            hub.tasks.spawn(async move {
-                loop {
-                    let notice = tokio::select! {
-                        biased;
-                        _ = delivery.closing.cancelled() => break,
-                        notice = notices.recv() => match notice {
-                            Ok(notice) => notice,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(_) => break,
-                        },
-                    };
-                    let _ = delivery.with_rpc(|rpc| {
-                        delivery.methods.with_current(&notice, || {
-                            for connection in delivery
-                                .connections
-                                .lock()
-                                .expect("connection index")
-                                .values()
-                                .filter_map(Weak::upgrade)
-                            {
-                                if connection.local
-                                    && connection.version.get() == Some(&3)
-                                    && connection.instance.get().map(String::as_str)
-                                        == Some(rpc.index.server_instance_id())
-                                    && !connection.closed.is_cancelled()
-                                {
-                                    let _ = connection.sender.send(
-                                        Outbound::ManagementNotice {
-                                            jsonrpc: "2.0",
-                                            method: notice.method.clone(),
-                                            params: notice.params.clone(),
-                                        },
-                                        false,
-                                    );
-                                }
-                            }
-                        });
-                    });
-                }
-            });
             ctx.provide_as(TypeKey::of::<ConnectionHub>(), hub)?;
             Ok(Effect::Done)
         })
@@ -1188,6 +1145,7 @@ impl Capability for ConnectionPlugin {
 /// Typed services behind protocol handlers; accepted commands belong to it.
 pub(crate) struct RpcService {
     pub index: Arc<AgentIndex>,
+    pub methods: MethodTable,
     pub control: Arc<ServerControl>,
     pub config: Arc<ServerConfig>,
     pub provider: Option<Arc<crate::provider::ProviderService>>,
@@ -1229,10 +1187,11 @@ impl RpcService {
 
 pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
+    methods: Arc<[String]>,
 }
 impl RpcPlugin {
-    pub fn new(config: Arc<ServerConfig>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<ServerConfig>, methods: Arc<[String]>) -> Self {
+        Self { config, methods }
     }
 }
 impl TypedPlugin for RpcPlugin {
@@ -1244,6 +1203,7 @@ impl TypedPlugin for RpcPlugin {
         Arc<ServerControl>,
         // Session create/model.update resolve product models through Provider.
         When<Arc<crate::provider::ProviderService>>,
+        Contributions<ManagementMethods>,
     );
     fn name(&self) -> &str {
         "Rpc"
@@ -1251,11 +1211,12 @@ impl TypedPlugin for RpcPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, _, hub, control, When(provider)): Self::Deps,
+        (index, _, hub, control, When(provider), methods): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(RpcService {
                 index,
+                methods: MethodTable::new(methods)?,
                 control,
                 config: self.config.clone(),
                 provider,
@@ -1284,6 +1245,36 @@ impl TypedPlugin for RpcPlugin {
                     })
                 }))
             })?;
+            for mut notices in registered.methods.subscriptions() {
+                let rpc = registered.clone();
+                let delivery = handler.clone();
+                registered.commands.spawn(async move {
+                    loop {
+                        let notice = tokio::select! {
+                            biased;
+                            _ = rpc.unloading.cancelled() => break,
+                            notice = notices.recv() => match notice {
+                                Ok(notice) => notice,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(_) => break,
+                            },
+                        };
+                        let _ = delivery.with_rpc(|current| {
+                            if !Arc::ptr_eq(current, &rpc) { return; }
+                            for connection in delivery.connections.lock().expect("connection index")
+                                .values().filter_map(Weak::upgrade) {
+                                if connection.local && connection.version.get() == Some(&3)
+                                    && connection.instance.get().map(String::as_str) == Some(rpc.index.server_instance_id())
+                                    && !connection.closed.is_cancelled() {
+                                    let _ = connection.sender.send(Outbound::ManagementNotice {
+                                        jsonrpc: "2.0", method: notice.method.clone(), params: notice.params.clone(),
+                                    }, false);
+                                }
+                            }
+                        });
+                    }
+                });
+            }
             // Registered only after its cleanup is owned by this generation.
             handler.register(registered);
             Ok(Effect::Done)
@@ -1293,6 +1284,13 @@ impl TypedPlugin for RpcPlugin {
 impl Capability for RpcPlugin {
     fn keys(&self) -> KeysOf<Self> {
         let product = self.config.product_home.is_some();
-        ((), (), (), (), product.then_some(()))
+        (
+            (),
+            (),
+            (),
+            (),
+            product.then_some(()),
+            (None, self.methods.clone()),
+        )
     }
 }

@@ -1,14 +1,11 @@
-//! Stable consumer-owned method port. Contributors depend on this port, never
-//! the other way round. Registration and admission share one lifecycle lock.
+//! Named management contributions, collected by Rpc through ordinary rutis
+//! dependencies. The method table and accepted calls belong to one Rpc load.
 use crate::protocol::RpcError;
-use dim_agent_runtime::{Capability, KeysOf, scoped};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use dim_agent_runtime::Contributions;
+use rutis::{BoxFuture, CordisError, Ctx, TypeKey};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex, Weak},
-};
+use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) fn params<T: DeserializeOwned>(value: Value) -> Result<T, RpcError> {
@@ -58,150 +55,36 @@ impl MethodDecl {
     }
 }
 
-struct Generation {
+/// A process owner's wire methods. Providing this named service creates the
+/// ordinary contributor -> collector reload relationship, not a second lifecycle.
+pub struct ManagementMethods {
     namespace: String,
     declarations: Vec<MethodDecl>,
     notifications: Vec<String>,
     handler: Handler,
-    tasks: TaskTracker,
-    stopping: CancellationToken,
-}
-
-/// A stable process service; it never depends on contributors.
-pub struct Methods {
-    methods: Mutex<BTreeMap<String, Arc<Generation>>>,
-    revision: std::sync::atomic::AtomicU64,
     notices: tokio::sync::broadcast::Sender<ManagementNotice>,
 }
-impl Default for Methods {
-    fn default() -> Self {
-        Self {
-            methods: Mutex::new(BTreeMap::new()),
-            revision: std::sync::atomic::AtomicU64::new(0),
-            notices: tokio::sync::broadcast::channel(64).0,
-        }
-    }
-}
+
 #[derive(Clone)]
 pub(crate) struct ManagementNotice {
     pub method: String,
     pub params: Value,
-    generation: Weak<Generation>,
-}
-/// Generic owner notification port. It knows neither connections nor versions.
-#[derive(Clone)]
-pub struct NotificationPort {
-    service: Arc<Methods>,
-    generation: Weak<Generation>,
-}
-impl NotificationPort {
-    pub fn notify(&self, method: impl Into<String>, params: Value) {
-        let method = method.into();
-        if !self
-            .generation
-            .upgrade()
-            .is_some_and(|generation| generation.notifications.contains(&method))
-        {
-            return;
-        }
-        let notice = ManagementNotice {
-            method,
-            params,
-            generation: self.generation.clone(),
-        };
-        self.service.with_current(&notice, || {
-            let _ = self.service.notices.send(notice.clone());
-        });
-    }
 }
 
-/// Own this handle in the contributor's immediately registered async effect.
-/// Removing the catalog entries fences admission before draining accepted work.
-pub struct Registration {
-    service: Arc<Methods>,
-    generation: Arc<Generation>,
-}
-
-impl Methods {
-    fn lookup<'a>(
-        methods: &'a BTreeMap<String, Arc<Generation>>,
-        method: &str,
-    ) -> Option<&'a Arc<Generation>> {
-        methods
-            .values()
-            .filter(|owner| within(method, &owner.namespace))
-            .max_by_key(|owner| owner.namespace.len())
-    }
-    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ManagementNotice> {
-        self.notices.subscribe()
-    }
-    pub(crate) fn with_current(&self, notice: &ManagementNotice, deliver: impl FnOnce()) {
-        let methods = self.methods.lock().expect("management catalog");
-        if notice.generation.upgrade().is_some_and(|generation| {
-            methods
-                .values()
-                .any(|current| Arc::ptr_eq(current, &generation))
-        }) {
-            deliver();
-        }
-    }
-    pub fn methods(&self, level: MethodLevel) -> Vec<String> {
-        let methods = self.methods.lock().expect("method catalog");
-        let mut names: Vec<_> = methods
-            .values()
-            .flat_map(|owner| &owner.declarations)
-            .filter(|decl| decl.level == level)
-            .map(|decl| decl.name.clone())
-            .collect();
-        names.sort();
-        names
-    }
-
-    pub fn catalog(&self, level: MethodLevel) -> Value {
-        let methods = self.methods.lock().expect("method catalog");
-        let mut declarations: Vec<_> = methods.values().flat_map(|owner| {
-            owner.declarations.iter().filter(move |decl| decl.level == level).map(move |decl| {
-                serde_json::json!({"name":decl.name,"namespace":owner.namespace,"mutating":decl.mutating,"progress":false,"notifications":[]})
-            })
-        }).collect();
-        declarations.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        serde_json::json!({"revision":self.revision.load(std::sync::atomic::Ordering::Relaxed),"methods":declarations})
-    }
-
-    pub fn notification_names(&self) -> Vec<String> {
-        self.methods
-            .lock()
-            .expect("method catalog")
-            .values()
-            .filter(|owner| !owner.stopping.is_cancelled())
-            .flat_map(|owner| owner.notifications.iter().cloned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
-    pub fn register(
-        self: &Arc<Self>,
+impl ManagementMethods {
+    pub fn provide(
+        ctx: &Ctx,
         namespace: &str,
         declarations: Vec<MethodDecl>,
         notifications: Vec<String>,
         handler: Handler,
-    ) -> Result<Registration, RpcError> {
-        let mut methods = self.methods.lock().expect("management catalog");
+    ) -> Result<Arc<Self>, CordisError> {
         let mut unique = std::collections::HashSet::new();
-        let valid_name = |name: &str| {
-            name.len() <= 128
-                && name.split('.').all(|part| {
-                    part.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-                        && part
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                })
-        };
         if !valid_name(namespace)
             || namespace == "session"
             || [
                 "hello",
+                "daemon",
                 "agent",
                 "approval",
                 "session.state",
@@ -225,56 +108,106 @@ impl Methods {
                     Some(crate::protocol::is_builtin_method(prefix))
                 })
                 .any(|reserved| reserved)
-            || methods.contains_key(namespace)
             || declarations.is_empty()
             || declarations.iter().any(|decl| {
                 !valid_name(&decl.name)
                     || !within(&decl.name, namespace)
+                    || decl.level != MethodLevel::Management
                     || crate::protocol::is_builtin_method(&decl.name)
                     || !unique.insert(&decl.name)
-                    || methods.values().any(|owner| {
-                        owner
-                            .declarations
-                            .iter()
-                            .any(|current| current.name == decl.name)
-                            || within(&decl.name, &owner.namespace)
-                                && owner.namespace.len() > namespace.len()
-                    })
-            })
-            || methods.values().any(|owner| {
-                owner.namespace.len() < namespace.len()
-                    && owner
-                        .declarations
-                        .iter()
-                        .any(|decl| within(&decl.name, namespace))
             })
             || notifications
                 .iter()
                 .any(|name| !valid_name(name) || !within(name, namespace))
         {
-            return Err(RpcError::invalid(
-                "Duplicate or invalid management method registration",
+            return Err(CordisError::PluginFailed(
+                "Invalid management contribution".into(),
             ));
         }
-        let generation = Arc::new(Generation {
+        let service = Arc::new(Self {
             namespace: namespace.into(),
             declarations,
             notifications,
             handler,
-            tasks: TaskTracker::new(),
-            stopping: CancellationToken::new(),
+            notices: tokio::sync::broadcast::channel(64).0,
         });
-        methods.insert(namespace.into(), generation.clone());
-        self.revision
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(Registration {
-            service: self.clone(),
-            generation,
-        })
+        ctx.provide_as(TypeKey::keyed_dynamic::<Self>(namespace), service.clone())?;
+        Ok(service)
     }
 
-    /// The returned receiver owns delivery only, not the accepted operation.
-    /// Dropping it (client disconnect) never cancels a mutation.
+    pub(crate) fn notify(&self, method: &str, params: Value) {
+        if self.notifications.iter().any(|declared| declared == method) {
+            let _ = self.notices.send(ManagementNotice {
+                method: method.into(),
+                params,
+            });
+        }
+    }
+}
+
+pub(crate) struct MethodTable {
+    owners: BTreeMap<String, Arc<ManagementMethods>>,
+}
+impl MethodTable {
+    pub fn new(
+        Contributions(owners): Contributions<ManagementMethods>,
+    ) -> Result<Self, CordisError> {
+        let mut table = BTreeMap::new();
+        for (name, owner) in owners {
+            if name != owner.namespace || table.insert(name, owner).is_some() {
+                return Err(CordisError::PluginFailed(
+                    "Duplicate or misnamed management contribution".into(),
+                ));
+            }
+        }
+        // A nested namespace may coexist with its parent, but must never capture
+        // a method that the parent declares, in either assembly order.
+        for owner in table.values() {
+            for declaration in &owner.declarations {
+                if table.values().any(|other| {
+                    other.namespace.len() > owner.namespace.len()
+                        && within(&declaration.name, &other.namespace)
+                }) {
+                    return Err(CordisError::PluginFailed(
+                        "Overlapping management contributions".into(),
+                    ));
+                }
+            }
+        }
+        Ok(Self { owners: table })
+    }
+
+    pub fn methods(&self, level: MethodLevel) -> Vec<String> {
+        let mut names: Vec<_> = self
+            .owners
+            .values()
+            .flat_map(|owner| &owner.declarations)
+            .filter(|decl| decl.level == level)
+            .map(|decl| decl.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    pub fn notification_names(&self) -> Vec<String> {
+        self.owners
+            .values()
+            .flat_map(|owner| owner.notifications.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn subscriptions(&self) -> Vec<tokio::sync::broadcast::Receiver<ManagementNotice>> {
+        self.owners
+            .values()
+            .filter(|owner| !owner.notifications.is_empty())
+            .map(|owner| owner.notices.subscribe())
+            .collect()
+    }
+
+    /// Called under ConnectionHub's Rpc admission lock. Its disposer removes
+    /// that handler before draining its commands, so no accepted call is missed.
     pub fn dispatch(
         &self,
         method: String,
@@ -282,30 +215,23 @@ impl Methods {
         level: MethodLevel,
         caller_gone: CancellationToken,
         entry_stopping: CancellationToken,
+        commands: &TaskTracker,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<Value, RpcError>>, RpcError> {
-        let (send, receive) = tokio::sync::oneshot::channel();
-        let methods = self.methods.lock().expect("management catalog");
-        let generation = Self::lookup(&methods, &method)
-            .filter(|owner| {
-                owner
-                    .declarations
-                    .iter()
-                    .any(|d| d.name == method && d.level == level)
-            })
-            .ok_or_else(|| RpcError::app(-32601, "unknown_method", "Unknown method"))?
-            .clone();
-        if generation.stopping.is_cancelled() {
-            return Err(RpcError::reloading());
-        }
-        let interruption = generation
+        let owner = self
+            .owners
+            .values()
+            .filter(|owner| within(&method, &owner.namespace))
+            .max_by_key(|owner| owner.namespace.len())
+            .ok_or_else(|| RpcError::app(-32601, "unknown_method", "Unknown method"))?;
+        let interruption = owner
             .declarations
             .iter()
-            .find(|d| d.name == method)
-            .expect("registered declaration")
+            .find(|decl| decl.name == method && decl.level == level)
+            .ok_or_else(|| RpcError::app(-32601, "unknown_method", "Unknown method"))?
             .interruption;
-        let owner = generation.clone();
-        // Spawn under the admission lock; unregister cannot miss this task.
-        generation.tasks.spawn(async move {
+        let owner = owner.clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        commands.spawn(async move {
             let cancel = if interruption == Interruption::Report { caller_gone.child_token() } else { CancellationToken::new() };
             let operation = (owner.handler)(method, params, cancel.clone());
             tokio::pin!(operation);
@@ -313,12 +239,6 @@ impl Methods {
                 tokio::select! {
                     biased;
                     result = &mut operation => { let _ = send.send(result); },
-                    _ = owner.stopping.cancelled() => {
-                        cancel.cancel();
-                        let _ = send.send(Err(RpcError::app(-32000, "operation_interrupted", "Method contributor unloaded")));
-                        // Reporting interruption does not abandon an accepted mutation.
-                        let _ = operation.await;
-                    },
                     _ = entry_stopping.cancelled() => {
                         cancel.cancel();
                         let _ = send.send(Err(RpcError::app(-32000, "operation_interrupted", "Method entry unloaded")));
@@ -337,41 +257,14 @@ impl Methods {
     }
 }
 
-impl Registration {
-    pub fn notifications(&self) -> NotificationPort {
-        NotificationPort {
-            service: self.service.clone(),
-            generation: Arc::downgrade(&self.generation),
-        }
-    }
-    fn fence(&self) {
-        let mut methods = self.service.methods.lock().expect("management catalog");
-        self.generation.stopping.cancel();
-        if methods
-            .get(&self.generation.namespace)
-            .is_some_and(|current| Arc::ptr_eq(current, &self.generation))
-        {
-            methods.remove(&self.generation.namespace);
-            self.service
-                .revision
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    pub async fn unregister_and_drain(self) {
-        self.fence();
-        self.generation.tasks.close();
-        self.generation.tasks.wait().await;
-    }
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        // A failed apply/effect registration must not leave callable handlers.
-        // Normal disposal uses unregister_and_drain before releasing dependencies.
-        self.fence();
-        self.generation.tasks.close();
-    }
+fn valid_name(name: &str) -> bool {
+    name.len() <= 128
+        && name.split('.').all(|part| {
+            part.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
 }
 
 fn within(name: &str, namespace: &str) -> bool {
@@ -381,25 +274,5 @@ fn within(name: &str, namespace: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
-pub struct MethodsPlugin;
-impl TypedPlugin for MethodsPlugin {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "Methods"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(TypeKey::of::<Methods>(), Arc::new(Methods::default()))?;
-            Ok(Effect::Done)
-        })
-    }
-}
-impl Capability for MethodsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
-    }
-}
+#[cfg(test)]
+mod tests;

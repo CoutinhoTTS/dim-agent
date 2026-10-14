@@ -8,7 +8,6 @@ mod control;
 pub mod grok_oauth;
 mod managed_oauth;
 pub mod managed_provider;
-pub mod management;
 pub mod mcp;
 pub mod methods;
 pub mod model_catalog;
@@ -537,18 +536,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &mut builtins,
             provider::ProviderPlugin::default,
         ));
-        rows.push(register_capability(&mut builtins, || {
-            provider::management::ProviderManagement
-        }));
-        rows.push(register_capability(&mut builtins, || {
-            managed_provider::management::AccountManagement
-        }));
-        rows.push(register_capability(&mut builtins, || {
-            codex_oauth::management::CodexAccountManagement
-        }));
-        rows.push(register_capability(&mut builtins, || {
-            grok_oauth::management::GrokAccountManagement
-        }));
     }
     if let Some(home_root) = execution_root.or(product_root) {
         let settings = if native_home.is_some() {
@@ -562,12 +549,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         mcp::install(&mut builder);
         rows.push(mcp::McpPublication::register(&mut builtins));
         rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
-        rows.push(register_capability(&mut builtins, || {
-            mcp::management::McpManagement
-        }));
-        rows.push(register_capability(&mut builtins, || {
-            skills_management::SkillsManagement
-        }));
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                 dim_agent_capabilities::host_platform::HostPlatformConfig {
@@ -575,10 +556,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 },
             )
         }));
-        rows.push(register_capability(
-            &mut builtins,
-            dim_agent_capabilities::skills::SkillsCatalogPlugin::new,
-        ));
+        rows.push(register_capability(&mut builtins, || {
+            skills_management::SkillsCatalogPlugin
+        }));
     }
     agents::register(&mut builtins);
     rows.push(register_capability(&mut builtins, || {
@@ -594,17 +574,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }));
     }
     rows.push(register_capability(&mut builtins, CollaborationPlugin::new));
-    rows.push(register_capability(&mut builtins, || {
-        methods::MethodsPlugin
-    }));
-    rows.push(register_capability(&mut builtins, || {
-        management::ManagementPlugin
-    }));
-    if config.local_execution() {
-        rows.push(register_capability(&mut builtins, || {
-            user_configuration::management::ConfigurationManagement
-        }));
-    }
     {
         let config = config.clone();
         rows.push(register_capability(&mut builtins, move || {
@@ -613,8 +582,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     {
         let config = config.clone();
+        let mut methods = Vec::new();
+        if product_root.is_some() {
+            methods.extend(["account", "account.codex", "account.grok", "provider"]);
+        }
+        if execution_root.is_some() {
+            methods.extend(["mcp", "skills"]);
+        }
+        if native_home.is_some() {
+            methods.push("configuration");
+        }
+        let methods: Arc<[String]> = methods.into_iter().map(str::to_owned).collect();
         rows.push(register_capability(&mut builtins, move || {
-            RpcPlugin::new(config.clone())
+            RpcPlugin::new(config.clone(), methods.clone())
         }));
     }
     {

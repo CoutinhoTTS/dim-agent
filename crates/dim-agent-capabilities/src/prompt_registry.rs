@@ -97,6 +97,6 @@ impl TypedPlugin for PromptRegistryPlugin {
 }
 impl Capability for PromptRegistryPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        (self.scope, (self.scope, self.names.clone()))
+        (self.scope, (Some(self.scope.instance), self.names.clone()))
     }
 }
