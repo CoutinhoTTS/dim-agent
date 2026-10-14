@@ -110,3 +110,9 @@ payload compatibility, source-local CAS/import failure, two Sessions sharing
 configuration without sharing connections, replacement with retained bindings,
 revocation and cleanup failures. Documentation describes implementation scope,
 not a substitute for those tests or proof of completing the linked proposals.
+
+`xtask check` guards the source dependency boundary: Settings may use its own
+modules, native storage and FileStorage, but not business owners or wire methods;
+shared protocol must not import management modules. Built-in Session contracts
+and Connection's Session-specific MCP calls remain allowed. This source analysis
+resolves aliases and re-exports but does not expand macros or infer receiver types.

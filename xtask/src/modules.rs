@@ -528,6 +528,28 @@ impl SourceGraph {
             {
                 return Err(format!("types reverse dependency: {from} -> {to}").into());
             }
+            // D4: Settings is persistence infrastructure, not a business or RPC owner.
+            let within = |module: &str, root: &str| {
+                module == root || module.starts_with(&format!("{root}::"))
+            };
+            if within(from, "dim_app_server::settings")
+                && ((within(to, "dim_app_server")
+                    && !within(to, "dim_app_server::settings")
+                    && !within(to, "dim_app_server::storage"))
+                    || (within(to, "dim_agent_capabilities")
+                        && !within(to, "dim_agent_capabilities::file_storage")))
+            {
+                return Err(format!("settings business dependency: {from} -> {to}").into());
+            }
+            // Built-in Session contracts remain in protocol; contributed management
+            // wire types do not. In particular, do not ban Connection -> MCP.
+            if within(from, "dim_app_server::protocol")
+                && within(to, "dim_app_server")
+                && (within(to, "dim_app_server::skills_management")
+                    || to.split("::").any(|part| part == "management"))
+            {
+                return Err(format!("protocol management dependency: {from} -> {to}").into());
+            }
         }
         Ok(())
     }
@@ -624,4 +646,67 @@ fn escape(label: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn business_boundaries_follow_source_aliases_and_preserve_builtin_contracts() {
+        let workspace = std::env::temp_dir().join(format!(
+            "dim-module-boundaries-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"dim-app-server\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n").unwrap();
+        let definitions = r#"
+            mod mcp { pub struct Config; pub mod management { pub struct Request; } }
+            mod storage { pub struct Database; }
+            mod provider { pub struct ModelPreferences; }
+            mod aliases { pub use crate::mcp::{Config as Document, management::Request}; }
+        "#;
+        for (source, expected) in [
+            (
+                "mod settings { pub type Db = crate::storage::Database; }
+                 mod protocol { pub type Model = crate::provider::ModelPreferences; }
+                 mod connection { pub type Mcp = crate::mcp::Config; }",
+                None,
+            ),
+            (
+                "mod settings { mod native { pub type Document = crate::aliases::Document; } }",
+                Some("settings business dependency"),
+            ),
+            (
+                "mod hooks { pub struct Rule; }
+                 mod settings { pub type Document = crate::hooks::Rule; }",
+                Some("settings business dependency"),
+            ),
+            (
+                "mod protocol { use crate::aliases::*; pub fn decode(_: Request) {} }",
+                Some("protocol management dependency"),
+            ),
+            (
+                "mod skills_management { pub struct Request; }
+                 mod protocol { pub type Request = crate::skills_management::Request; }",
+                Some("protocol management dependency"),
+            ),
+        ] {
+            fs::write(
+                workspace.join("src/lib.rs"),
+                format!("{definitions}\n{source}"),
+            )
+            .unwrap();
+            let result = generate(&workspace, &workspace.join("graph"));
+            match expected {
+                None => result.unwrap(),
+                Some(expected) => assert!(result.unwrap_err().to_string().contains(expected)),
+            }
+        }
+        fs::remove_dir_all(workspace).unwrap();
+    }
 }
