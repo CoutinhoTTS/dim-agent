@@ -4,7 +4,7 @@ Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog). 
 
 Requirement ([feature list](../../feature-list.md), BranchScope Agent behavior): `/goal` sets, edits, pauses, resumes and clears a goal ("switch Goal mode"), and Goal continuation keeps working toward an explicit goal and records its completion or blockage.
 
-Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses, clears or interrupts, or a continuation limit is reached. Goal is an event-driven state machine on the branch. **Every change is one `input/message`** on the branch whose raw blocks carry one of two keys: `goal:objective` holds the objective and is written by `set` and `edit`; `goal:status` holds the status and is written by `set`, `pause` and `resume` from the user, `completed` or `blocked` from the model's `goal_update` tool, and Goal's own automatic pause; `clear` retires both keys. Continuations carry no key and are not changes. The tool and the methods only write that event; they never read Goal's state and never decide whether the change is allowed. **Goal's state is the fold of the events Goal has consumed**, in sequence order, under fixed rules ([§2](#2-data-and-state)). The **branch part** owns that fold and decides continuation itself when its Dispatcher handler consumes `turn/end`, `stop/interrupt` or `input/deleted`, after the whole batch and from consumed state only; when a decision needs a write (a continuation or an automatic pause), the handler registers the write as owned work and returns. The **Session part** provides the `goal_update` tool as a `toolContribution` service (Session scope, key `goal_update`) and the `session.goal.*` methods through a `sessionMethods` service (Session scope, key `session.goal`) ([session-boundary](../contracts/session-boundary.md)); each call resolves the calling or named branch and writes through the branch's public input entry `Branch::input`, and only `session.goal.get` asks the branch part for its fold. Goal writes no events of its own type and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal blocks, cover the feature-list wording "switch Goal mode". Every contract here is language-neutral (service name, scope, key, methods with data shapes), so a TypeScript implementation satisfies it without a hand-written Rust binding; the Rust form is [Appendix G](#appendix-g-rust-binding). Goal also uses the runtime's typed services (`S:TreeCommands`, `B:Timeline`, `B:Dispatcher`); exposing them by name to non-Rust capability parts is the work of [#4](https://github.com/arcships/dim/issues/4) (requirement stated in [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)), and Goal starts in Rust until then.
+Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses, clears or interrupts, or a continuation limit is reached. Goal is an event-driven state machine on the branch. **Every change is one `input/message`** on the branch whose raw blocks carry one of two keys: `goal:objective` holds the objective and is written by `set` and `edit`; `goal:status` holds the status and is written by `set`, `pause` and `resume` from the user, `completed` or `blocked` from the model's `goal_update` tool, and Goal's own automatic pause; `clear` retires both keys. **A goal belongs to exactly one branch**: Goal's fold for branch `B` uses only the events written on `B` itself (its local suffix, from `B`'s `branch/start`), never the inherited prefix, so a child branch and the `main` branch of a forked Session start with no goal; a new branch whose inherited prefix still has a live goal key retires both keys with one `clear` of its own ([§3.4](#34-a-new-branch-clears-the-inherited-goal)). Continuations carry no key and are not changes. The tool and the methods only write that event; they never read Goal's state and never decide whether the change is allowed. **Goal's state is the fold of the events Goal has consumed**, in sequence order, under fixed rules ([§2](#2-data-and-state)). The **branch part** owns that fold and decides continuation itself when its Dispatcher handler consumes `turn/end`, `stop/interrupt` or `input/deleted`, after the whole batch and from consumed state only; when a decision needs a write (a continuation or an automatic pause), the handler registers the write as owned work and returns. The **Session part** provides the `goal_update` tool as a `toolContribution` service (Session scope, key `goal_update`) and the `session.goal.*` methods through a `sessionMethods` service (Session scope, key `session.goal`) ([session-boundary](../contracts/session-boundary.md)); each call resolves the calling or named branch and writes through the branch's public input entry `Branch::input`, and only `session.goal.get` asks the branch part for its fold. Goal writes no events of its own type and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal blocks, cover the feature-list wording "switch Goal mode". Every contract here is language-neutral (service name, scope, key, methods with data shapes), so a TypeScript implementation satisfies it without a hand-written Rust binding; the Rust form is [Appendix G](#appendix-g-rust-binding). Goal also uses the runtime's typed services (`S:TreeCommands`, `B:Timeline`, `B:Dispatcher`); exposing them by name to non-Rust capability parts is the work of [#4](https://github.com/arcships/dim/issues/4) (requirement stated in [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)), and Goal starts in Rust until then.
 
 ## 1. Structure
 
@@ -29,8 +29,8 @@ flowchart LR
   GS -- "per call: calling or named branch" --> TC
   TC -- "Branch::input: change input (goal:objective, goal:status)" --> TL
   TC -- "get only" --> GB
-  TL -- "input/*, turn/*, stop/interrupt in order" --> GB
-  GB -- "owned write task: continuation or automatic pause" --> TL
+  TL -- "branch/start, input/*, turn/*, stop/interrupt in order" --> GB
+  GB -- "owned write task: continuation, automatic pause or start clear" --> TL
   GB -- "goal.maxContinuations per decision" --> Settings
   TL --> IQ
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
@@ -43,18 +43,18 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 | `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal`; writes change inputs through `Branch::input` |
 | `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, Settings business source (enclosing scope) | `goal` (branch scope; `get` only), used only by the Session part; the fold, the continuation decision and Goal's own writes |
 
-Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
+Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
 
 ## 2. Data and state
 
 ```mermaid
 flowchart TB
-  subgraph TLB["Branch Timeline (ancestor prefix + local)"]
+  subgraph TLB["Branch Timeline: local events from branch/start (the inherited prefix is not folded)"]
     GBK["change input/message, raw blocks keyed goal:objective or goal:status"]
     CI["Goal's own input/message: continuation (no key) or automatic pause (goal:status)"]
     OI["operator input/message (user content, no source marker)"]
     IC["input/consumed, input/deleted"]
-    TE["turn/start, turn/end, stop/interrupt"]
+    TE["branch/start, turn/start, turn/end, stop/interrupt"]
   end
   CFG["Settings: goal.maxContinuations"]
   VIEW["Fold: built at load, advanced by each Dispatcher delivery"]:::new
@@ -67,18 +67,19 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-Goal owns no persistent state. The goal of branch `B` is a pure function of the events of `B` consumed so far: the branch part folds the prefix at load and advances the fold on each Dispatcher delivery. Compaction does not change it because the fold is built from events, not model context.
+Goal owns no persistent state. The goal of branch `B` is a pure function of the local events of `B` consumed so far, from `B`'s own `branch/start` on; the inherited ancestor prefix (a child branch) or the copied facts (a forked Session's `main`, A11) precede that `branch/start` and never contribute a goal. The branch part folds the local events at load and advances the fold on each Dispatcher delivery. Compaction does not change it because the fold is built from events, not model context.
 
-A change takes effect at the sequence of its `input/message`. A change that InputQueue later deletes (`input/deleted`) is removed and the fold is recomputed without it, because a deleted input never takes effect ([session access](../contracts/session-access.md#a2-source-input-conventions)). Fixed fold rules, applied in sequence order, with no exceptions: the current objective is the latest live `goal:objective` block and the current status is the latest live `goal:status` block, exactly the blocks compaction replays ([§5](#5-context-mapping)), so the replay always equals the fold (A16). A goal exists only while `goal:objective` is live. A status block written while no objective is live still becomes the current status, but `session.goal.get` reports no goal and C1 fails until an objective is live again:
+A change takes effect at the sequence of its `input/message`. A change that InputQueue later deletes (`input/deleted`) is removed and the fold is recomputed without it, because a deleted input never takes effect ([session access](../contracts/session-access.md#a2-source-input-conventions)). Fixed fold rules, applied in sequence order to `B`'s local events, with no exceptions: the current objective is the latest live local `goal:objective` block and the current status is the latest live local `goal:status` block, exactly the blocks compaction replays ([§5](#5-context-mapping)) once a new branch's inherited keys are retired by its start `clear` (§3.4), so the replay equals the fold (A16). A goal exists only while `goal:objective` is live. A status block written while no objective is live still becomes the current status, but `session.goal.get` reports no goal and C1 fails until an objective is live again:
 
 | Change (`op` in the marker) | Written by | Keys | Effect on the fold |
 | --- | --- | --- | --- |
-| `set {objective}` | `session.goal.set` | `goal:objective`, `goal:status` (active) | Objective and status live: `objective`, `owner` = the branch written on, `status = active`; count restarts |
-| `edit {objective}` | `session.goal.edit` | `goal:objective` | Objective live: `objective` replaced, `owner` = the branch written on; status stays the latest live `goal:status` block (`none` if no status is live, for example after `clear`) |
+| `set {objective}` | `session.goal.set` | `goal:objective`, `goal:status` (active) | Objective and status live: `objective`, `status = active`; count restarts |
+| `edit {objective}` | `session.goal.edit` | `goal:objective` | Objective live: `objective` replaced; status stays the latest live `goal:status` block (`none` if no status is live, for example after `clear`) |
 | `pause` (reason `user`) | `session.goal.pause` | `goal:status` | `status = paused (user)`, whatever it was |
 | `resume` | `session.goal.resume` | `goal:status` | `status = active`, whatever it was (a `completed` or `blocked` goal reopens); count restarts; the Queue input drives a turn |
 | `clear` | `session.goal.clear` | Both retired | No goal and no status |
-| `completed` / `blocked {summary}` | `goal_update` | `goal:status` | `status = completed` / `blocked` with `summary`, whatever it was; a repeated report restates it. Written on a branch that does not own the objective, it changes only that branch's fold (`owner` unchanged, so C1 still fails there) |
+| `clear` (reason `new_branch`) | Goal itself, on a new branch (§3.4) | Both retired | No goal and no status; retires the inherited keys in the model context |
+| `completed` / `blocked {summary}` | `goal_update` | `goal:status` | `status = completed` / `blocked` with `summary`, whatever it was; a repeated report restates it. It changes only the fold of the branch written on |
 | `pause` (reason `interrupted`, `limit`, `turn_failed`) | Goal itself | `goal:status` | `status = paused (reason)`; Goal writes it only after C1 held (A.4) |
 | continuation (not a change) | Goal itself | None | Counted only: count + 1 |
 
@@ -86,12 +87,13 @@ Derived values over the consumed events:
 
 | Field | Derivation |
 | --- | --- |
-| `goal` | `{objective, owner, status, reason?, summary?}` while `goal:objective` is live, or none; `owner` is the branch named in the latest live `goal:objective` block; `status` is `none` when no `goal:status` block is live |
+| `goal` | `{objective, status, reason?, summary?}` while a local `goal:objective` block is live, or none; `status` is `none` when no local `goal:status` block is live |
 | `A` | Sequence of the latest change that set `status = active` (`set` or `resume`) |
 | `interrupted` | A `stop/interrupt {scope: turn}` in `B`'s local events with sequence greater than `A` |
+| `inherited_live` | No local goal block exists yet and the prefix before `B`'s `branch/start` has a live `goal:objective` or `goal:status` block (§3.4) |
 | `last_operator` | Latest operator input: `input/message` with `user` content not marked by a source (A5) |
 | `count` | Goal continuation inputs (marker `kind="continuation"`, no key) with sequence greater than `max(A, last_operator)` |
-| `decided` | For each `turn/end` sequence `N`, whether a Goal write marked `after="N"` exists (continuation or automatic pause) |
+| `decided` | For each `turn/end` sequence `N`, whether a Goal write marked `after="N"` exists (continuation or automatic pause); for `B`'s `branch/start` at `S`, whether the start `clear` marked `after="S"` exists |
 | `pending_driving` | Local `input/message` with effective mode Queue or Steer that has neither `input/consumed` nor `input/deleted` (session access §2 pending rule). Goal does not interpret `input/withdraw`, InputQueue's command; only InputQueue's result `input/deleted` removes an input |
 | `turn_open` | A `turn/start` after the latest `turn/end` |
 
@@ -152,12 +154,30 @@ sequenceDiagram
   participant G as goal (branch)
   User->>TL: stop/interrupt scope turn at M
   TL-->>G: Dispatcher delivers stop/interrupt M
-  Note over G: after the whole batch: goal active, owner B, A before M
+  Note over G: after the whole batch: goal active, A before M
   G->>G: register write task, handler returns
   G->>TL: task rechecks, Branch::input pause block reason interrupted (Append)
 ```
 
 `scope: branch` interrupts are ignored: the branch is closing.
+
+### 3.4 A new branch clears the inherited goal
+
+```mermaid
+sequenceDiagram
+  participant TT as TimelineTree
+  participant TL as New branch Timeline
+  participant G as goal (new branch)
+  participant IQ as InputQueue and Loop
+  TT->>TL: branch/start at S (child branch, or forked Session's main)
+  TL-->>G: Dispatcher delivers branch/start S
+  Note over G: after the whole batch: inherited_live and S not decided
+  G->>G: register write task, handler returns
+  G->>TL: task rechecks, Branch::input clear reason new_branch after S (Append)
+  TL-->>IQ: consumed with the next request
+```
+
+The runtime fact is `branch/start`, the first local event of every new branch: a child branch's Timeline starts with it ([event-driven flows](../../architecture/rust-agent/event-driven-flows.md)), and a new Session's root branch, including a forked Session's `main`, starts with it after any copied facts (A11). Goal reacts to it like any other decision: after the whole batch, from consumed state, it registers one owned write task and returns. The task rechecks `inherited_live` and writes nothing if a local goal block already exists (a local `set`, any other change, or this `clear` itself). The write is one `clear` input (both keys retired, Append, `reason="new_branch" after="S"`), so compaction no longer replays the parent's goal and the model on the new branch does not take it as its own. The load path takes the same decision when `S` is consumed and not `decided`, so a reload or restart writes it at most once. Because the task does not block the creation, the branch's initial Queue input may commit before the `clear`; the parent's blocks already tell delegated work not to call `goal_update`, and the fold has no goal there either way, so the branch never continues.
 
 ## 4. Timing and conflicts
 
@@ -192,7 +212,7 @@ A reload of either part follows a rare structural operation. A Session part relo
 | Two `goal_update` calls in one batch | both blocks before `step/tool-result` | Both written, both results confirm the write; the fold applies both in order and the second is the current status | Goal |
 | `resume` after `completed` or `blocked` | terminal block < resume | The goal reopens: `active`, count restarts, the Queue input drives a turn | Goal |
 | Change withdrawn while held | change < `input/deleted` | Removed from the fold; the latest undecided or stopped decision is taken again | InputQueue; Goal |
-| Child cut after the goal block | consumed < cut | Child sees the parent's goal as background; no continuation (`owner` is the parent); a `goal_update` there changes only the child's fold | Goal |
+| Child cut after the goal block | consumed < cut < `branch/start` | Child's fold has no goal; Goal writes the start `clear` (§3.4); no continuation; a `goal_update` or any change there affects only the child | Goal |
 
 Full table: [Appendix B](#appendix-b-full-conflict-table).
 
@@ -207,7 +227,7 @@ Full table: [Appendix B](#appendix-b-full-conflict-table).
 | Aspect | Rule |
 | --- | --- |
 | Compaction | The baseline replays the latest live block of each key verbatim, so the model sees the current objective (`goal:objective`) and the current status (`goal:status`); retired keys are not replayed; continuations and earlier blocks survive only through the summary |
-| Child branches | Inherit blocks consumed before the cut; the blocks name their branch and tell delegated work not to call `goal_update` (A3) |
+| Child branches and forked Sessions | Inherit the blocks before the cut, which name their branch and tell delegated work not to call `goal_update`; Goal retires the inherited keys with one `clear` (reason `new_branch`) when it consumes the new branch's `branch/start` (§3.4), so the new branch starts with no goal (A3) |
 | Non-interactive Sessions | Same mapping; continuations drive turns without a user present |
 | Never visible | `submissionId`, mode, count of operator inputs, the fold, diagnostics, other plugins' events |
 
@@ -239,9 +259,9 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.2 No recall after handoff | Goal never withdraws its continuation; a continuation applied after an interrupt runs one extra turn and the later pause block ends the goal. |
 | §4.3 Only before callbacks, never block | Not applicable: Goal registers no before callback, and its tool and methods add no entry check (they write without deciding). |
 | §4.4 No business meaning in core | Goal needs no change to Timeline, Dispatcher, InputQueue or Loop; its markers are ordinary raw blocks under two ordinary keys. |
-| §4.5 Read the whole batch | The fold advances over every event, and decisions on `turn/end`, `stop/interrupt` and `input/deleted` are taken after the whole batch, from consumed state only, with the recheck before writing using consumed state only. |
+| §4.5 Read the whole batch | The fold advances over every event, and decisions on `branch/start`, `turn/end`, `stop/interrupt` and `input/deleted` are taken after the whole batch, from consumed state only, with the recheck before writing using consumed state only. |
 | §4.6 Context only from handed-off events | Goal blocks and continuations reach the model only after adoption; deleted inputs never do and leave the fold. |
-| §4.7 Public events and services only | Goal reads only public `input/*`, `turn/*` and `stop/interrupt` contracts and writes through `Branch::input`. |
+| §4.7 Public events and services only | Goal reads only public `branch/start`, `input/*`, `turn/*` and `stop/interrupt` contracts and writes through `Branch::input`. |
 | §4.8 Requirements to mechanism owners | The only requirement, #4, is stated in [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
 | §4.9 Only facts later decisions use enter the Timeline | Each change input is both model context and an input to the fold, and Goal's own writes drive turns or end continuation; the fold is the latest live block of each key, which compaction replays (A16); the fold, in-flight tasks and diagnostics stay out of the Timeline. |
 | §1 Capability and App Server boundary | Both parts are Capabilities in their own package; Rpc only dispatches `sessionMethods`. |
@@ -284,7 +304,7 @@ Service `sessionMethods`, Session scope, key `session.goal`. `describe()` return
 | `session.goal.clear` | `{sessionId, branchId?}` | `{sequence}` | `clear` (key retired), Append |
 | `session.goal.get` | `{sessionId, branchId?}` | `{goal: GoalView \| null, through}` | None (A8) |
 
-`branchId` defaults to `main` (A13). `GoalView = {status, objective, reason?, summary?, owner, count, limit, sequence}`; `through` is the last sequence the fold has consumed, so a client sees the effect of its write once `through >= sequence`. The writing methods validate only their own parameters; what a change does is decided by the fold rules of §2 (each block becomes the current value of its key), never by the method. Rpc resolves the Session (restoring it if unloaded) and sends the call; the handler resolves the named branch through `S:TreeCommands`.
+`branchId` defaults to `main` (A13). `GoalView = {status, objective, reason?, summary?, count, limit, sequence}`; `through` is the last sequence the fold has consumed, so a client sees the effect of its write once `through >= sequence`. The writing methods validate only their own parameters; what a change does is decided by the fold rules of §2 (each block becomes the current value of its key), never by the method. Rpc resolves the Session (restoring it if unloaded) and sends the call; the handler resolves the named branch through `S:TreeCommands`.
 
 ### A.3 Branch service `goal`
 
@@ -302,7 +322,7 @@ After the whole atomic batch containing `turn/end` at sequence `N` on branch `B`
 
 | # | Condition | If false |
 | --- | --- | --- |
-| C1 | A goal exists (`goal:objective` live), `status = active`, `owner = B` | Stop |
+| C1 | A goal exists (a local `goal:objective` block live), `status = active` | Stop |
 | C2 | `!interrupted` | Write pause (`interrupted`) and stop |
 | C3 | The `turn/end` at `N` is `completed` | `failed`: write pause (`turn_failed`) (A6); `cancelled`: handled by C2 |
 | C4 | `N` is the latest `turn/end`, `!turn_open` and `N` is not `decided` | Stop (a newer turn's end will trigger) |
@@ -316,6 +336,8 @@ Delivery of `input/deleted`, after its whole batch: refold without the deleted i
 
 Every write is owned work: the handler registers a task keyed by the deciding sequence and returns. If a task for the same sequence is already in flight, nothing more is registered. Before writing, the task rechecks the same conditions over the fold as consumed at that moment ([time-bus](../../architecture/rust-agent/time-bus.md) §4) and writes nothing if they no longer hold; facts committed but not yet consumed are not read, and their consumers resolve them in sequence (§4.1). Goal's writes carry `after="N"` (or `after="M"`), so the fold records the decision and a reload does not repeat it.
 
+Delivery of `branch/start` at `S`, after its whole batch: if `inherited_live` and `S` is not `decided`, write the start `clear` (reason `new_branch`, `after="S"`); the task rechecks `inherited_live` before writing (§3.4).
+
 ### A.5 Model-visible texts
 
 Each write is one `input/message` with no `user` content. Its first raw block is the marker `<dim-goal kind="..." ...>`, newline, escaped body, newline, `</dim-goal>` (A2); `set` and `clear` add a second block of the same form. One `InputWrite` carries any number of `RawBlock`s, each with its own key ([session access A.1](../contracts/session-access.md#a1-the-sessions-service)), so every change stays one input. A key-less continuation is not a change.
@@ -328,6 +350,7 @@ Each write is one `input/message` with no `user` content. Its first raw block is
 | `resume` | `goal:status` live | Queue | `op="resume"`; `The user set the goal status for branch B to active. If branch B has a goal objective, keep working toward it across turns; when it is completed or blocked, call goal_update.` |
 | `completed` / `blocked` | `goal:status` live | Append | `op="completed"` or `op="blocked"`; `Result:` or `Blocker:` / `<summary>` / blank / `goal_update set the goal status for branch B to completed.` or `... to blocked.` + ` Do not continue working toward a goal for branch B on your own.` |
 | `clear` | 1: `goal:objective` retire; 2: `goal:status` retire | Append | 1: `op="clear"`; `The previous goal was cleared by the user. Disregard it.`; 2: `<dim-goal kind="status" status="cleared" branch="B">` / `The goal for branch B has no status.` / `</dim-goal>` |
+| `clear` (Goal, new branch) | Same as `clear` | Append | 1: `op="clear" reason="new_branch" after="S"`; `Any goal above belongs to another branch, not to branch B. Disregard it; branch B has no goal.`; 2: same as `clear` |
 | pause (Goal) | `goal:status` live | Append | `op="pause" reason="interrupted\|limit\|turn_failed" after="N"`; `The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
 | continuation | none | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are working on a delegated sub-task started from branch B, do not call goal_update.` |
 
@@ -337,8 +360,8 @@ Status blocks state only the status and the objective is a separate block, so a 
 
 | Step | Path |
 | --- | --- |
-| Load | Subscribe to the Dispatcher (`"Goal"`), fix `S = committed()` under the gate, fold the prefix through `S`, set `rebuilt = S`, provide `goal`. If the latest `turn/end` is not `decided` and the goal is active, take its decision once |
-| Consume | The Dispatcher handler skips `sequence <= rebuilt`, advances the fold, and after each whole batch decides on `turn/end`, `stop/interrupt` and `input/deleted` (A.4); it registers a write task when needed and returns without awaiting |
+| Load | Subscribe to the Dispatcher (`"Goal"`), fix `S = committed()` under the gate, fold the local events through `S`, set `rebuilt = S`, provide `goal`. If the latest `turn/end` is not `decided` and the goal is active, take its decision once; if `branch/start` is consumed, not `decided` and `inherited_live`, take the start `clear` decision once |
+| Consume | The Dispatcher handler skips `sequence <= rebuilt`, advances the fold, and after each whole batch decides on `branch/start`, `turn/end`, `stop/interrupt` and `input/deleted` (A.4); it registers a write task when needed and returns without awaiting |
 | Write | `input/message` with source `goal`, `submissionId: "goal:<uuid>"`, marker and mode, written through `Branch::input`, the branch's public input entry, which validates at the boundary and appends the `input/message` ([interrupt](../../architecture/rust-agent/interrupt.md)). The Session part's calls write the same way and never consult the fold |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed`. Goal never writes Steer |
 | Recheck | The write task rechecks over consumed state only ([time-bus](../../architecture/rust-agent/time-bus.md) §4); later facts precede the write in sequence and are resolved by InputQueue, Loop and the fold |
@@ -374,17 +397,17 @@ Status blocks state only the status and the objective is a separate block, so a 
 | `goal_update` while the goal is not active | — | Written; the block becomes the current status (a `paused` goal becomes `completed` or `blocked`); with no live objective `get` reports no goal; the result confirms the write | Goal |
 | `completed` after `blocked`, the reverse, or `pause` after either | first < second | Latest wins; a repeated report restates the status with its new summary | Goal |
 | `resume` after `completed` or `blocked` | terminal block < resume | Reopens: `active`, count restarts, the Queue input drives a turn; compaction replays the resume block | Goal |
-| `goal_update` block committed after Goal's recheck, before Goal's own pause (an interrupt racing the handler's append) | interrupt < block < pause | Latest wins: `paused (interrupted)`; the terminal block stays in history; `resume` reopens | Goal |
 | `goal_update` vs `edit`/`clear`/`pause` | sequence order | The fold applies them in sequence; a later change overrides an earlier one | Goal |
 | `pause` or `resume` without a goal | — | Written; the status key goes live and compaction replays it, but `get` reports no goal and C1 fails; `resume` still drives one turn, with no continuation | Goal |
 | `edit` without a goal | — | The objective goes live, so a goal exists with the latest live status (`none` after `clear`); continuation follows only if that status is `active` | Goal |
 | Compaction between a goal write and its consumption | write < compaction < consumed | Block delivered at its consumed position after the summary; later baselines replay it | History projection |
 | Compaction after several goal blocks | — | Only the latest `goal:objective` block and the latest `goal:status` block replayed; continuations are not; the fold reads events | History projection; Goal |
-| Child cut between a goal write and its consumption | write < cut < consumed | Child does not adopt it; `owner ≠ child`: no continuation | InputQueue (child); Goal |
-| Child cut after consumption | consumed < cut | Child sees the parent goal as background; a `goal_update` there changes only the child's fold; `owner` stays the parent, so no continuation (A3) | Goal |
-| Goal set on a child branch | — | Independent keys on the child's Timeline | Goal |
-| `edit` on a child branch | — | The new objective block names the child, so the child owns the objective with the status its fold holds; it continues only if that status is `active` (A3) | Goal |
-| Session fork | facts copied | Fork's `main` owns the copied goal (A11) | Goal |
+| Child cut between a goal write and its consumption | write < cut < consumed | Child does not adopt it; the child's fold has no goal; if a goal key is live in its prefix, Goal writes the start `clear` (§3.4) | InputQueue (child); Goal |
+| Child cut after consumption | consumed < cut < `branch/start` | Child's fold has no goal; Goal writes the start `clear`; no continuation; a `goal_update` there affects only the child (A3) | Goal |
+| Goal set on a child branch | — | The child's own keys and fold; the parent is unaffected; if the `set` commits before the start `clear` task writes, the recheck finds a local goal block and writes nothing | Goal |
+| Any change on a child branch (`edit`, `pause`, `goal_update`) | — | Affects only the child's fold, which starts with no goal; the parent is unaffected (A3) | Goal |
+| Session fork | facts copied < `branch/start` | Fork's `main` starts with no goal; Goal writes the start `clear` if a copied goal key is live (A11) | Goal |
+| Branch part reload or restart after `branch/start` | — | The start `clear` is written at most once: `decided` and the `inherited_live` recheck deduplicate | Goal |
 | Branch part reload or restart after an undecided `turn/end` | — | Load takes the decision once; `decided`, C4 and C5 deduplicate | Goal |
 | Branch part unload with a write task in flight | — | Task ends; if it had not appended, the new generation decides again at load | Goal |
 | Session part reload during `goal_update` or a goal turn | — | Propagates like any contribution reload; in-flight turn may fail (pause `turn_failed` at its end); committed change stands (D3) | ToolRegistry; Goal |
@@ -418,7 +441,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 4. Pending Queue/Steer input suppresses continuation; Append does not; a deleted input does not suppress it; an input deleted after the `turn/end` it suppressed triggers that decision again; a withdrawn `pause` is removed from the fold.
 5. Branch part reload and restart after an undecided `turn/end`: exactly one decision; a reload with a write task in flight yields exactly one write.
 6. Compaction after `completed`: the baseline contains `completed`, not `active`, and `get` reports `completed`. After compaction the baseline contains the latest `goal:objective` block and the latest `goal:status` block; a continuation is not replayed.
-7. Child branch: inherits the blocks, no continuation; a `goal_update` there changes the child's `get` only, not the parent's; a goal set on the child is independent.
+7. Child branch created after a goal is set on the parent: the child's `get` reports no goal from its first event, Goal writes exactly one start `clear` and the child's context after it shows no parent goal as its own, and there is no continuation; a reload or restart of the child writes no second `clear`; a `goal_update` or `set` on the child changes the child's `get` only, never the parent's. A forked Session's `main`: the same, with no goal and one start `clear`.
 8. Unloaded Session: `session.goal.pause` restores it and writes. Goal not enabled: `unknown_method`. Changing `goal.maxContinuations` takes effect at the next decision without reloading Goal.
 9. Two `goal_update` calls in one batch both return the confirmation and the fold shows the second status; `pause` and `resume` without a goal write a block that compaction replays while `get` reports no goal; `edit` without a goal makes a goal exist with the latest live status; the tool and the methods never read the fold (tested by writing while the branch part is reloading).
 10. `edit` (only `goal:objective` changes), `clear` (both retired keys not replayed), forged `</dim-goal>` in an objective or summary is escaped; `session.goal.get` reflects every status and `through` reaches each write's `sequence`.
@@ -431,7 +454,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | --- | --- | --- | --- |
 | A1 | `set`, `resume` and the continuation use Queue; `edit`, `pause`, `clear`, `goal_update` and Goal's pauses use Append | Judgment (overview fixes Queue only for continuation); a method cannot know the status, so `edit` never starts a turn | Set would not start work on an idle branch, or pause would start a turn |
 | A2 | Exact block formats and texts in Appendix A.5; the objective and the status are separate keys (`goal:objective`, `goal:status`), `set` and `clear` write both in one input, and continuations carry no key | Judgment; [session access A.1](../contracts/session-access.md#a1-the-sessions-service) lets one input carry several keyed raw blocks | Text and parsing change together; with one key, compaction would replay only the latest change and lose the objective after a status change |
-| A3 | A goal belongs to the branch named in its latest live `goal:objective` block; other branches never continue it, and a `goal_update` there changes only that branch's fold | Judgment from child-branch inheritance | Child branches would continue or complete the parent's goal |
+| A3 | A goal belongs to exactly one branch: the fold uses only the branch's local events, and a new branch retires live inherited goal keys with one start `clear` | User decision | Child branches would continue or complete the parent's goal, or the model there would take the parent's goal as its own |
 | A4 | `goal.maxContinuations` default 20, range 1..=1000 | Judgment | Different default |
 | A5 | Count restarts on `set`, `resume` and operator input only: `user` content and no source marker as first raw block | Judgment | Another plugin's automatic input would reset the limit |
 | A6 | A failed turn pauses the goal (`turn_failed`) | Judgment (avoid retry loops on provider errors) | Failed turns would continue and consume the limit |
@@ -439,12 +462,12 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | A8 | `session.goal.get` is the status query that replaces a "Goal mode" | Decision E18; decisions §3 (no Goal mode) | CLI derives status by parsing Goal's blocks |
 | A9 | `goal_update` risk `session`, offered to all roles | Judgment | Tool hidden for some roles or admitted under another category |
 | A10 | Objective ≤ 4000 characters, summary ≤ 2000 | Judgment | Other limits |
-| A11 | A forked Session's `main` continues a copied goal | Judgment | Fork would need to retire the copied keys |
+| A11 | A forked Session's `main` starts with no goal; its `branch/start` follows the copied facts, as for any new Session's root branch ([prompt](../../architecture/rust-agent/prompt.md)) | User decision; the position of `branch/start` after the copied facts is a judgment, since the fork copy is not yet specified | If a forked `main` has no local `branch/start`, Goal takes the start `clear` decision at its first load on the new Session, with the same `inherited_live` recheck |
 | A12 | `resume` always drives one turn (reopening a completed or blocked goal, or restarting an active idle one); duplicate `set` and `resume` are not deduplicated | Judgment; a method cannot see `turn_open` or pending inputs | Restarted goals need `set` again, or duplicate resumes would need state reads |
-| A13 | `branchId` defaults to `main`; any branch may hold a goal | Judgment | Goal limited to `main` |
+| A13 | `branchId` defaults to `main`; any branch may hold its own goal | Judgment | Goal limited to `main` |
 | A14 | A change takes effect at its `input/message` sequence and is removed from the fold when InputQueue deletes it | Judgment: a pause written during a turn must stop that turn's continuation before the Append is applied | Changes would take effect at `input/applied`, and a pause written during a turn would not stop its continuation |
 | A15 | A second `goal_update`, or one without an active goal, returns the write confirmation, not an error, and its block becomes the current status (A16) | Decision G1 (behaviour change; answers the PR review "Goal calls observe earlier committed writes" by removing caller-side decisions) | The tool would have to read the fold and wait for it, which reintroduces caller-side decisions |
-| A16 | The fold has no exceptions: the latest live block of each key is the current objective and status, and a goal exists only while `goal:objective` is live | User decision (answers the PR review "Keep replayed Goal status consistent with the fold") | A status replayed after compaction could disagree with `get` |
+| A16 | The fold has no exceptions: the latest live local block of each key is the current objective and status, and a goal exists only while a local `goal:objective` block is live | User decision (answers the PR review "Keep replayed Goal status consistent with the fold") | A status replayed after compaction could disagree with `get` |
 
 ## Appendix F. Open questions
 
