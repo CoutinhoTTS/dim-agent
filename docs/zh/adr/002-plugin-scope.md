@@ -5,7 +5,7 @@
 ## 背景
 
 Dim 在三个作用域装配插件：进程、Session 和分支
-（[单树装配](../../architecture/rust-agent/single-tree.md)）。插件的作用域决定它能依赖哪些服务、
+（[single-tree](../../architecture/rust-agent/single-tree.md)）。插件的作用域决定它能依赖哪些服务、
 能观察哪些事件、能写哪些事实，以及生命周期多长。
 
 插件设计的早期版本为了减少 Capability 数量，把大部分新功能放到了进程作用域。这些功能仍需向
@@ -36,15 +36,16 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 
 | 需求 | 机制 |
 | --- | --- |
-| 向 Session 提供工具 | Session 级 `ToolContribution` 或 `SessionToolSource` |
+| 向 Session 提供工具 | Session 级 `toolContribution`（具名工具服务）或 `SessionToolSource` |
 | 提供指令 | PromptRegistry 提示词来源 |
 | 观察 Session 的事件 | 现有的 Session 广播，由 Session 级插件监听 |
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 |
 | 把内容放入模型上下文 | Session 或分支输入（被采纳的输入）、工具结果 |
-| 在执行前检查工具调用 | 向 Approval 贡献的分支级准入检查 |
-| 暴露关于某个 Session 的客户端方法 | Session 级方法贡献，由 Rpc 经该 Session 分发 |
-| 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的方法，标记为管理级；每个入口服务其配置的级别 |
-| 访问其他 Session | Agents（AgentIndex）和 Session 公共接口，与 Collaboration 的做法相同 |
+| 在执行前检查工具调用 | 由 Approval 收集的分支级 `toolAdmissionCheck` |
+| 在写入前检查输入 | 由 Session 输入边界运行的 Session 级 `inputAdmissionCheck` |
+| 暴露关于某个 Session 的客户端方法 | Session 级 `sessionMethods` 服务，由 Rpc 经该 Session 分发 |
+| 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的 `managementMethods` 服务，标记为管理级；每个入口服务其配置的级别 |
+| 访问其他 Session | Agents 的 `sessions` 服务（AgentIndex 和 Session 公共接口），与 Collaboration 的做法相同 |
 | 响应另一个进程插件的结果 | 事件通知，而非依赖 |
 
 ### D3. 依赖跟随作用域；接受罕见的重启
@@ -60,6 +61,29 @@ rutis（issue #6），而不属于应用层接线。
 | 结构性插件配置 | 启用或禁用、运行时与包路径、节点绑定、监听地址 | loader 行（issue #3 可编辑层） | 可能重载该行 |
 | 业务配置 | 搜索服务、通知渠道、Hook 规则、定时任务、工作流定义、模型用途策略、MCP 服务器与 Skill 文档、外部 Agent 条目、exec shell | 所属插件的业务来源（Settings 来源或插件自有存储） | 数据更新并通知；使用时读取；不重载 |
 
+### D5. 合同语言中立
+
+rutis 按名称跨语言调用插件与服务（rutis-bridge 运行时、配合 `dyn HostDispatch` 的 `host_key(name)`、
+`TypeKey::named` 与 `TypeKey::dynamic`），且 Rust 绑定可以从具名合同生成。只写成以
+`TypeKey::of<T>()` 为 key 的 Rust trait 的合同，若没有手写的 Rust 绑定，TypeScript 或 Python
+插件就无法满足它。因此，插件设计定义或使用的每个合同都以语言中立的形式规定：
+
+| 要素 | 形式 |
+| --- | --- |
+| 标识 | 服务名（camelCase 字符串）、作用域（进程、Session 或分支）和实例 key（命名空间、检查名、工具名） |
+| 方法 | 名称、`sync` 或 `async`、请求与回复为可序列化数据（字段表或 JSON 结构） |
+| 错误 | 数据：`{code, message}`，错误码有文档说明 |
+| 取消 | 一个协议动作：取消请求，或消费方丢弃该调用 |
+| 注册 | 由插件声明（其 `provides` 与 loader 行），而非宿主侧的 `AgentBuilder` 调用；消费方按服务名和作用域收集 |
+| Rust 细节 | trait 签名、`TypeKey`、`Contributions<T>` 与 `AgentBuilder` 调用属于一种绑定，列在“Rust 绑定”附录中 |
+
+规范服务：`sessionMethods`（Session，按命名空间）、`managementMethods`（进程，按命名空间）、
+`toolAdmissionCheck`（分支，按检查名）、`inputAdmissionCheck`（Session，按检查名）、
+`toolContribution`（Session，按工具名）、`sessions`（进程）和 `modelKind`（进程，按种类）。它们
+定义在[合同](../design/contracts/session-boundary.md)和所属插件文档中。运行时现有的类型化服务
+（Timeline、Dispatcher、ToolHost 等）保持不变；把它们按名称暴露给非 Rust 的 Capability 部分是
+issue #4 的工作。
+
 ## 新插件的作用域划分
 
 | 插件 | 作用域 | 理由 |
@@ -71,7 +95,7 @@ rutis（issue #6），而不属于应用层接线。
 | Web | Session | 没有跨 Session 共享的状态；只提供工具 |
 | SessionTitle | Session | 观察 Session 的首条输入；标题由 SessionStore 保存 |
 | Notifications | Session | 观察 Session 的事件并提供 `notify` |
-| Hooks | Session（规则、Session 启动 Hook）+ 分支（工具前、工具后与 turn 结束 Hook；向 Approval 贡献准入检查） | 规则作用于 Session；执行发生在分支 |
+| Hooks | Session（规则、Session 启动 Hook）+ 分支（工具前、工具后与 turn 结束 Hook；向 Approval 提供准入检查） | 规则作用于 Session；执行发生在分支 |
 | Scheduler | 进程（任务、触发器）+ Session（`schedule` 工具） | 调度跨越多个 Session |
 | Workflow | 进程（运行）+ Session（`workflow` 工具） | 一次运行跨越多个 Session |
 | ExternalAgent | 进程 | 外部 Agent 连接是共享的 |
@@ -80,7 +104,7 @@ rutis（issue #6），而不属于应用层接线。
 | RemoteGateway | 进程 | 一个外部入口 |
 | AcpGateway | CLI 进程 | 一个客户端 |
 
-管理不是插件：管理方法以带级别的行存在于 Rpc 的方法表中，由各入口按级别提供服务。
+管理不是插件：管理方法带级别存在于 Rpc 的方法表中，由各入口按级别提供服务。
 
 ## 撤回
 
@@ -94,6 +118,6 @@ rutis（issue #6），而不属于应用层接线。
 
 ## 影响
 
-- 设计文档按此划分修订：总览、合同（仅保留描述现有插件补充的合同）以及每个插件文档。
+- 设计文档按此划分及语言中立的合同形式（D5）修订：总览、合同（仅保留描述现有插件补充的合同）以及每个插件文档。
 - 可选的 Session 与分支插件只在启用时安装；它们不是每次装配中的占位。
 - 罕见的结构性操作可能使在途 turn 失败；这一点被记录，而不被阻止。

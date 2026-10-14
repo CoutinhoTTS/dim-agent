@@ -2,21 +2,21 @@
 
 状态：草案。总体设计：[overview B.12](../overview.md)，[Settings、Mcp、SkillsCatalog 变更](../overview.md)，[约定](../overview.md)，[多节点](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（依赖 [#3](https://github.com/arcships/dim/issues/3)；非 Rust Capability 插件依赖 [#4](https://github.com/arcships/dim/issues/4)；对端节点依赖 [#5](https://github.com/arcships/dim/issues/5)）。语言：Rust。
 
-PluginManager 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：安装按宿主进行）。它从 Git marketplace、本地路径或 Git URL 将插件包安装到目标节点上；通过类型化的 Settings 操作将插件意图（安装、启用、节点绑定、包路径）记录到 loader 行中；将每个插件的业务配置路由到该插件的业务来源；并将已启用包的类型化内容发布为 `PluginContents` 进程服务。内容所有者（SkillsCatalog、Mcp、Hooks、Workflow）依赖 `PluginContents`，定义各自的内容类型 key，并读取它们能理解的内容；PluginManager 对它们一无所知。包代码只有在经 Settings 宿主本地批准服务批准后才加载，批准绑定到节点和包指纹。包从不自动升级。
+PluginManager 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：安装按宿主进行）。它从 Git marketplace、本地路径或 Git URL 将插件包安装到目标节点上；通过类型化的 Settings 操作将插件意图（安装、启用、节点绑定、包路径）记录到 loader 行中；将每个插件的业务配置路由到该插件的业务来源；并将已启用包的类型化内容发布为命名进程服务 `pluginContents`。内容所有者（SkillsCatalog、Mcp、Hooks、Workflow，任意语言）按名称依赖 `pluginContents`，定义各自的内容类型 key，并读取它们能理解的内容；PluginManager 对它们一无所知。包代码只有在经 Settings 宿主本地批准服务批准后才加载，批准绑定到节点和包指纹。包从不自动升级。
 
 ## 1. 结构
 
 ```mermaid
 flowchart LR
   subgraph CN["App Server 进程，控制节点"]
-    PM["PluginManagerPlugin<br/>plugin.* 方法、包存储、<br/>PluginContents"]:::new
+    PM["PluginManagerPlugin<br/>plugin.* 方法、包存储、<br/>pluginContents"]:::new
     SET["Settings<br/>类型化操作、插件业务来源、<br/>宿主本地批准、凭据解析器"]
     LOADER["rutis Loader"]
-    RPC["Rpc 方法表<br/>收集 ManagementMethods"]
+    RPC["Rpc 方法表<br/>收集 managementMethods"]
     CONS["内容所有者<br/>SkillsCatalog、Mcp、Hooks、Workflow"]
   end
   subgraph NODE["每个已配置节点，本地或对端"]
-    SVC["该节点的 FileStorage、HostPlatform"]
+    SVC["该节点的<br/>FileStorage、HostPlatform"]
     CODE["包代码行<br/>仅在批准匹配时加载"]:::new
   end
   PM --> SET
@@ -29,15 +29,15 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。内容所有者依赖 `PluginContents`，按 D3 予以接受：安装、启用或移除包会以数据更新（`changed()`）的方式改变已发布的来源，从不触发重载；而 PluginManager 重载（升级、崩溃）会重载内容所有者。Rpc 收集 PluginManager 的 `ManagementMethods`，因此 PluginManager 重载也会重载 Rpc。两者都是少见的结构性事件，其传播被记录在案，而非被阻止。包代码行是普通的 loader 行：它们通过自身作用域的机制提供其代码所声明的内容；当某一行卸载时，其依赖方按同一规则重载。
+所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。内容所有者依赖 `pluginContents`，按 D3 予以接受：安装、启用或移除包会以数据更新（`changed`）的方式改变已发布的来源，从不触发重载；而 PluginManager 重载（升级、崩溃）会重载内容所有者。Rpc 收集 PluginManager 的 `managementMethods` 服务（key `plugin`），因此 PluginManager 重载也会重载 Rpc。两者都是少见的结构性事件，其传播被记录在案，而非被阻止。包代码行是普通的 loader 行：它们提供其代码在 `provides` 中声明的命名服务（例如 `toolContribution`、`sessionMethods`、`modalityAdapter`），消费方按服务名和作用域收集它们；当某一行卸载时，其依赖方按同一规则重载。离线对端节点上的代码行不会卸载：其导入的服务保持注册并以 `node_unavailable` 使调用失败，其依赖方既不重载也不变为 Pending（对 [#5](https://github.com/arcships/dim/issues/5) 的要求）。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `PluginManagerPlugin` | 进程，控制节点 | `SettingsService`（类型化操作、插件业务来源、宿主本地批准）、`Arc<Loader>`、每个已配置节点的 `FileStorage` 与 `HostPlatform` | `PluginContents` 进程服务；`ManagementMethods`（`plugin.*`），由 Rpc 收集 |
-| 包代码行 | 进程，位于包所在节点 | 该节点的 `FileStorage`、宿主本地批准服务、代码所声明的依赖 | 代码所声明的内容；在使用时读取其业务配置 |
-| 内容所有者 | 进程 | `PluginContents` | —（各自定义自己的类型 key） |
+| `PluginManagerPlugin` | 进程，控制节点 | Settings（类型化操作、插件业务来源、宿主本地批准）、rutis Loader、每个已配置节点的 `FileStorage` 与 `HostPlatform` | `pluginContents` 进程服务；`managementMethods` key `plugin`（`plugin.*`），由 Rpc 收集 |
+| 包代码行 | 进程，位于包所在节点 | 该节点的 `FileStorage`、宿主本地批准服务、代码所声明的依赖 | 在其 `provides` 中声明的命名服务；在使用时读取其业务配置 |
+| 内容所有者 | 进程 | `pluginContents` | —（各自定义自己的类型 key） |
 
-此处定义的契约：包清单 `dim-plugin.json` schema 2、marketplace 索引 `dim-marketplace.json`、`PluginContents` 服务（`ContentSource`）、包目录布局、代码行批准检查、`plugin.*` 方法。依赖的契约：loader 可编辑层上的类型化 Settings 操作（#3），用于插件意图；用于每插件配置的 Settings 业务来源（[ADR 002 D4](../../adr/002-plugin-scope.md)）；Settings 宿主本地批准服务（R11）与凭据引用解析器（R10）；控制节点上的进程存储；rutis-loader `Loader`（`entries`、`reload`、`restart`、`LoaderChanged`）；包所在节点的 `FileStorage` 与 `HostPlatform`（对端节点：经 rutis 链路导入）；[方法](../contracts/session-boundary.md)契约。PluginManager 从不调用内容所有者，也从不在代码中写出任何内容类型 key。
+此处定义的契约：包清单 `dim-plugin.json` schema 2、marketplace 索引 `dim-marketplace.json`、`pluginContents` 服务及其 `ContentSource` 形态（[语言中立](../../adr/002-plugin-scope.md)，A.3；Rust 绑定见附录 G）、包目录布局、代码行批准检查、`plugin.*` 方法。依赖的契约：loader 可编辑层上的类型化 Settings 操作（#3），用于插件意图；用于每插件配置的 Settings 业务来源（[ADR 002 D4](../../adr/002-plugin-scope.md)）；Settings 宿主本地批准服务（R11）与凭据引用解析器（R10）；控制节点上的进程存储；rutis-loader `Loader`（`entries`、`reload`、`restart`、`LoaderChanged`）；包所在节点的 `FileStorage` 与 `HostPlatform`（对端节点：经 rutis 链路导入）；[方法](../contracts/session-boundary.md)契约。这些被依赖的服务是现有的类型化 Rust 服务，PluginManager 作为 Rust 插件直接使用它们；将它们按名称暴露给非 Rust 代码行是 [#4](https://github.com/arcships/dim/issues/4) 的工作。PluginManager 从不调用内容所有者，也从不在代码中写出任何内容类型 key。
 
 ## 2. 数据与状态
 
@@ -56,7 +56,7 @@ flowchart TB
     STG["暂存区"]
   end
   CACHE["Marketplace 克隆与索引<br/>控制节点进程存储"]
-  MEM["PluginContents 来源与 revision<br/>内存"]:::new
+  MEM["pluginContents 来源与 revision<br/>内存"]:::new
   PR -->|"apply 及每次变更：校验"| PKG
   PKG -->|"发布"| MEM
   AP -->|"把关代码行"| PR
@@ -155,7 +155,7 @@ sequenceDiagram
 | --- | --- | --- |
 | 代码行在其提供的内容正被使用时被撤销或禁用 | 该行卸载；依赖方重载（D3）；受影响的在途轮次可能失败 | Loader、代码行 |
 | 已授予批准，随后包被更新 | 新指纹不匹配；代码行以 `approval_required` 失败，直至重新批准 | 代码行 |
-| 安装后节点不可用 | 该节点上的操作 `node_unavailable`；其来源被撤回；其他节点不受影响 | PluginManager |
+| 安装后节点离线 | 该节点上的操作 `node_unavailable`；其来源被撤回；其代码行的服务以 `node_unavailable` 使调用失败；不发生重载，也没有任何东西变为 Pending；其他节点不受影响 | PluginManager |
 | 插件运行时 `plugin.configure` | 业务数据更新与通知；不重载；下次使用读取新值 | 插件 |
 | 同一 id 的两次安装 | 第二次等待锁，然后 `plugin_exists` | PluginManager |
 | 分支使用某包的 Skill 时该包被禁用 | 分支保留其已采纳的提示词，直至重新采纳 | Skills 所有者 |
@@ -173,7 +173,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `plugin.marketplace.list/add/remove/update/search/view` | 方法，管理级 | Marketplace；`update` 仅刷新索引 |
 | `plugin.install/update/list/set_enabled/configure/reload/approve/revoke/remove` | 方法，管理级 | 包生命周期 |
-| `PluginContents::sources(type_key)`、`changed()` | 进程服务 | 通用内容发布 |
+| `pluginContents`（`sources`、`changed`） | 进程服务，无 key | 通用内容发布 |
 | 代码行批准检查 | Loader 行规则 | 代码行仅在授权匹配时加载 |
 | `dim-plugin.json` v2、`dim-marketplace.json` v1 | 文件格式 | 包与 marketplace 描述 |
 | 类型化 Settings 操作 `plugins.*`、`marketplaces.*` | 依赖（#3、ADR 002 D4） | 持久化意图；路由业务配置 |
@@ -222,25 +222,26 @@ sequenceDiagram
 
 位于仓库根目录：`{schemaVersion: 1, name, plugins: [{id, version, description, keywords?, source: {path} | {git, ref?}, fingerprint?}]}`。`source.path` 位于 marketplace 仓库内；`fingerprint` 若存在，必须等于所拉取包的指纹。
 
-### A.3 `PluginContents`
+### A.3 `pluginContents`
 
-```rust
-/// Process service provided by PluginManagerPlugin; content owners depend on it.
-impl PluginContents {
-    /// Sources of enabled, integrity-verified packages on available nodes.
-    pub fn sources(&self, type_key: &str) -> Vec<Arc<ContentSource>>;
-    pub fn changed(&self) -> tokio::sync::watch::Receiver<u64>; // revision
-}
-pub struct ContentSource {
-    pub package: String,
-    pub version: String,
-    pub fingerprint: String,             // consumers bind their own approvals to it
-    pub node: Option<String>,            // None = control node
-    pub root: PathBuf,                   // package directory on `node`
-    pub path: PathBuf,                   // declared path, relative to root
-    pub options: serde_json::Value,       // from the manifest
-}
-```
+服务 `pluginContents`，作用域为进程，无 key，由 PluginManagerPlugin 提供；内容所有者按名称依赖它。错误是数据 `{ code, message }`。
+
+| 方法 | 类型 | 请求 | 回复 |
+| --- | --- | --- | --- |
+| `sources` | 同步 | `{ type }` | `{ revision, sources: ContentSource[] }`：可用节点上已启用且通过完整性校验的包 |
+| `changed` | 异步 | `{ after_revision }` | 一旦已发布的 revision 超过 `after_revision` 即返回 `{ revision }`；消费方通过丢弃该调用来取消 |
+
+`ContentSource`：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `package` | string | 包 id |
+| `version` | string | 包版本 |
+| `fingerprint` | string | 消费方将各自的批准绑定到它 |
+| `node` | string 或 null | null = 控制节点 |
+| `root` | string | `node` 上的包目录 |
+| `path` | string | 声明的路径，相对于 `root` |
+| `options` | object | 来自清单 |
 
 消费方拥有自己的类型 key 与格式，通过对 `node` 有效的服务读取文件，并将其自身的宿主本地批准绑定到 `node + package + fingerprint`（[overview 约定](../overview.md)）。节点规则（A6）：节点 N 上的来源是节点 N 的内容。针对 Session 执行内容的消费方（例如 Hooks）只使用节点等于该 Session 资源节点（`SessionConfig.resource_node`）的来源；只在控制节点上读取内容的消费方忽略它无法触达的来源，并在自己的目录中报告它们。
 
@@ -250,7 +251,7 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 
 包存放在其所在节点上 PluginManager 的包根目录下，通过该节点的 `FileStorage` 写入（A13）。Git 通过该节点的 `HostPlatform` 运行，禁用 hooks 和子模块，仅限 `https://` 和 `ssh://`（A7）。本地路径被复制，从不被引用（A8）。目录按指纹内容寻址，因此更新从不改写运行中行正在使用的文件。
 
-### A.5 方法（`ManagementMethods`，命名空间 `plugin`，管理级）
+### A.5 方法（`managementMethods`，key `plugin`，管理级）
 
 | 方法 | 参数 | 结果 | 中断 |
 | --- | --- | --- | --- |
@@ -270,7 +271,7 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 | `plugin.revoke` | `{id, node?}` | 代码行 dispose 后返回 `{}` | Report |
 | `plugin.remove` | `{id, node?}` | `{cleanupError?}` | Report |
 
-`status`：`active`、`pending`（节点不可用或等待批准）、`failed`（原因）、`disabled`。`approval`：`notRequired`、`required`、`approved`；`approvalToken` 即指纹（一个摘要，而非凭据）。`install`、`update` 和 `marketplace.update` 通过该调用的进度接收器报告阶段（`fetch`、`verify`、`commit`）（[方法](../contracts/session-boundary.md)，A14）。相对 overview B.12 新增：`configure`、`approve`、`revoke`、`update`、`marketplace.search/view`（A9）。
+`status`：`active`、`pending`（等待批准或运行时）、`unavailable`（节点离线；其服务使调用失败）、`failed`（原因）、`disabled`。`approval`：`notRequired`、`required`、`approved`；`approvalToken` 即指纹（一个摘要，而非凭据）。`install`、`update` 和 `marketplace.update` 通过该调用的进度接收器报告阶段（`fetch`、`verify`、`commit`）（[方法](../contracts/session-boundary.md)，A14）。相对 overview B.12 新增：`configure`、`approve`、`revoke`、`update`、`marketplace.search/view`（A9）。
 
 ### A.6 使用的类型化 Settings 操作（#3，拟议的 Settings 补充）
 
@@ -313,7 +314,7 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 | 重复或迟到的 `plugin.install` | — | `plugin_exists` | PluginManager |
 | Marketplace 更新发现更新的版本 | — | 仅 `updateAvailable`；不做任何改变 | PluginManager |
 | 安装前目标节点不可用 | — | `node_unavailable`；不写入任何内容 | PluginManager |
-| 安装后节点不可用 | — | 其来源被撤回；其代码行不运行；其他节点不受影响 | PluginManager、Loader |
+| 安装后节点离线 | — | 其来源被撤回；其代码行导入的服务保持注册并以 `node_unavailable` 使调用失败；没有依赖方重载或变为 Pending（对 #5 的要求）；其他节点不受影响 | PluginManager、rutis 链路 |
 | 包所在节点与 Session 的资源节点不同 | — | 执行型消费方对该 Session 忽略此来源 | 内容所有者 |
 | 磁盘上的文件被修改 | 下次校验 | `integrity_failed`；来源被撤回；代码行失败 | PluginManager、代码行 |
 | 操作中途 PluginManager 重载或重启 | — | 按 A.7；从不重新执行拉取 | PluginManager |
@@ -348,14 +349,14 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 4. 含 Node 代码的包在 `plugin.approve` 之前以 `approval_required` 失败；`plugin.update` 需要重新批准；撤销会 dispose 代码行。
 5. 撤销一个提供测试工具的代码行会重载其依赖方；测试将失败的在途轮次记录为已记录在案的结果。
 6. 并发安装；过期的 `expectedRevision`；在提交后和 Settings 写入后中断。
-7. 对端测试节点：安装以其为目标；其不可用时只有它的操作失败且其来源被撤回；恢复后来源复原。
+7. 对端测试节点：安装以其为目标；使其离线时只有它的操作及其代码行的服务以 `node_unavailable` 失败，其来源被撤回，且不发生任何重载；恢复后复原。
 8. 重启：各行恢复，完整性已校验，暂存区移除，孤立目录被回收。
 
 ## 附录 E. 假设
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
-| A1 | 在 #4 之前包代码是 Node 运行时行；无动态 Rust 代码 | Overview §5.12、§11.1 | 更多 `code.runtime` 取值 |
+| A1 | 包代码是提供和消费命名服务的 Node 运行时行（rutis-bridge）；无动态 Rust 代码；按名称访问运行时的类型化服务需等待 #4 | Overview §5.12、§11.1；ADR 002 D5 | 更多 `code.runtime` 取值 |
 | A2 | 代码批准使用所有者为 `plugin` 的 Settings 宿主本地批准服务 | 决策 R11；overview 约定 | 插件自有的批准文件 |
 | A3 | 清单 schema 2 扩展现有格式；v1 仅用于 `--plugin-dir` | App Server README；判断 | 兼容映射 |
 | A4 | 每个 `(node, id)` 只安装一个版本 | 判断 | 并存多版本 |
@@ -366,7 +367,7 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 | A9 | 新增方法 `configure`、`approve`、`revoke`、`update`、`marketplace.search/view` | 功能清单；overview B.12 | 并入其他方法 |
 | A10 | 操作按 `(node, id)` 串行化 | 判断 | 仅依赖 Settings revision |
 | A11 | 未被引用的目录在 loader 稳定后被垃圾回收 | 判断 | 显式清理命令 |
-| A12 | 内容所有者依赖 `PluginContents`；PluginManager 重载会重载它们 | ADR 002 D3 | 单独托管的发布服务 |
+| A12 | 内容所有者依赖 `pluginContents`；PluginManager 重载会重载它们 | ADR 002 D3 | 单独托管的发布服务 |
 | A13 | 包目录通过节点的 `FileStorage` 写入 PluginManager 包根目录下（该处可用原子 rename） | 判断 | 需要每节点存储服务 |
 | A14 | 安装与更新报告进度阶段 | 方法契约进度接收器；判断 | 仅返回结果 |
 | A15 | 无自动升级，包括纯内容包 | 决策 E22 | 可选启用的自动升级设置 |
@@ -379,4 +380,28 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 | #3 类型化操作 | A.6 中的 Settings 操作在此提出；其最终形态属于 Settings 补充与 #3（仅意图；`plugins.configure` 写入业务配置，ADR 002 D4） |
 | Overview SkillsCatalog 变更 | “安装与移除由 PluginManager 发起”理解为：PluginManager 发布和撤回来源，SkillsCatalog 读取它们；PluginManager 不调用 SkillsCatalog |
 | 对端节点内容 | 控制节点上的消费方是否应通过导入的资源服务读取对端节点上的内容（#5） |
-| 对端节点离线（[#5](https://github.com/arcships/dim/issues/5)） | 对端节点导入的服务离线时，是只让调用失败（`node_unavailable`），还是使导入变为 Pending 并重载 PluginManager（D3）；本设计假设前者 |
+
+对 [#5](https://github.com/arcships/dim/issues/5) 的要求：从对端节点导入的服务（其 `FileStorage`、`HostPlatform` 以及在那里运行的代码行的服务）在链路断开期间保持注册，并以 `node_unavailable` 使调用失败，因此离线节点从不重载 PluginManager，也不使任何依赖方变为 Pending。
+
+## 附录 G. Rust 绑定
+
+Rust 内容所有者可以使用生成的绑定；A.3 中的中立形式是规范性的。
+
+```rust
+/// Binding for service `pluginContents` (process, no key).
+impl PluginContents {
+    pub fn sources(&self, type_key: &str) -> Vec<Arc<ContentSource>>;
+    pub fn changed(&self) -> tokio::sync::watch::Receiver<u64>; // revision; maps `changed`
+}
+pub struct ContentSource {
+    pub package: String,
+    pub version: String,
+    pub fingerprint: String,
+    pub node: Option<String>,
+    pub root: PathBuf,
+    pub path: PathBuf,
+    pub options: serde_json::Value,
+}
+```
+
+PluginManager 将其注册在 `TypeKey::named("pluginContents")` 下；其 `plugin.*` 方法使用[方法](../contracts/session-boundary.md)契约的 `managementMethods` 绑定。

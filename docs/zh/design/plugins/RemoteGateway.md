@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview B.13](../overview.md)，[Transport、Connection 变更](../overview.md)，[多节点](../overview.md)，[通用约束](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（认证、断连与 TLS 的取舍与 [#5](https://github.com/arcships/dim/issues/5) 一起决定）。语言：Rust。
 
-RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一个经认证的入口：通过二维码或配对码配对，每设备令牌及其轮换与吊销，以及 Web 工作区的静态资源。已配对设备使用现有的 App Server 协议；该入口只提供[方法](../contracts/session-boundary.md)契约中的 Session 级（Rpc 的 Session 内置方法和每个 `SessionMethodContribution`），因此设备可以调用每个 Session 方法，包括 `session.permission.update`（决策 E3），但不能调用任何管理级方法。该入口是产品 UI 面，从不承载节点之间的 rutis 链路面。
+RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一个经认证的入口：通过二维码或配对码配对，每设备令牌及其轮换与吊销，以及 Web 工作区的静态资源。已配对设备使用现有的 App Server 协议；该入口只提供[方法](../contracts/session-boundary.md)契约中的 Session 级（Rpc 的 Session 内置方法和每个 `sessionMethods` 服务），因此设备可以调用每个 Session 方法，包括 `session.permission.update`（决策 E3），但不能调用任何管理级方法。该入口是产品 UI 面，从不承载节点之间的 rutis 链路面。
 
 ## 1. 结构
 
@@ -10,10 +10,10 @@ RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一
 flowchart LR
   subgraph P["App Server 进程，控制节点"]
     RG["RemoteGatewayPlugin<br/>配对、设备、令牌、资源"]:::new
-    EH["EntryHost<br/>Transport 契约"]:::contract
+    EH["entryHost<br/>Transport 契约"]:::contract
     TR["Transport"]
     CONN["Connection<br/>ConnectionEntry 记录"]
-    RPC["Rpc<br/>内置方法、Session 方法贡献、<br/>ManagementMethods 方法表"]
+    RPC["Rpc<br/>内置方法、sessionMethods 服务、<br/>managementMethods 方法表"]
     SET["Settings<br/>enabled 行字段、remote 设置来源"]
     PST["进程存储<br/>remote-devices.json"]:::contract
   end
@@ -23,22 +23,22 @@ flowchart LR
   TR -->|"提供"| EH
   EH --> CONN
   CONN --> RPC
-  RPC -->|"将 remote.* 作为 ManagementMethods 收集"| RG
+  RPC -->|"将 remote.* 作为 managementMethods 收集"| RG
   RG --> SET
   RG --> PST
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-RemoteGateway 只认证升级请求，并在连接上记录设备；此后的每次调用都是由其所有者提供的普通 Session 级方法。它自己的 `remote.*` 方法是一个 `ManagementMethods` 进程服务，由 Rpc 以管理级收集进其方法表，因此可从为该级别配置的入口（本地入口）访问，从不能从已配对设备访问。Rpc 依赖该服务，因此 RemoteGateway 重载会重载 Rpc；重载是少见的结构性事件，该代价被接受（[ADR 002 D3](../../adr/002-plugin-scope.md)）。
+RemoteGateway 只认证升级请求，并在连接上记录设备；此后的每次调用都是由其所有者提供的普通 Session 级方法。它自己的 `remote.*` 方法是一个 `managementMethods` 进程服务（key `remote`），由 Rpc 按名称以管理级收集进其方法表，因此可从为该级别配置的入口（本地入口）访问，从不能从已配对设备访问。Rpc 依赖该服务，因此 RemoteGateway 重载会重载 Rpc；重载是少见的结构性事件，该代价被接受（[ADR 002 D3](../../adr/002-plugin-scope.md)）。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `RemoteGatewayPlugin` | 进程，控制节点 | `EntryHost`（Transport）、进程存储、`SettingsService` | `ManagementMethods`（`remote.*`），由 Rpc 收集 |
-| `TransportPlugin`（变更） | 进程 | 现有 | 现有 `ListenAddresses`；新增 `EntryHost` |
+| `RemoteGatewayPlugin` | 进程，控制节点 | `entryHost`（Transport）、进程存储、Settings | `managementMethods` key `remote`（`remote.*`），由 Rpc 收集；以入口名 `remote` 为 key 的 `upgradeAuthenticator` 与 `httpRoutes` |
+| `TransportPlugin`（变更） | 进程 | 现有；每入口的 `upgradeAuthenticator`、`httpRoutes` | 现有 `ListenAddresses`；新增 `entryHost` |
 | `ConnectionPlugin` / `RpcPlugin`（变更） | 进程 | 现有 | `ConnectionEntry {name, levels, device_id}`；Rpc 只分派入口被配置提供的级别 |
 
-此处定义的契约：设备记录与令牌、配对与轮换 HTTP 端点、`remote.*` 方法、`remote-devices.json` 格式。依赖的契约：Transport 的 `EntryHost` 与 `UpgradeAuthenticator`（拟议的 Transport 变更；Transport 作为其消费方拥有它们）、Connection 的入口记录、[方法](../contracts/session-boundary.md)契约（Rpc 方法表中的管理级条目，每入口提供的级别）、[进程存储](../overview.md)、用于结构性 `enabled` 字段的类型化 Settings 操作（`x-volatile`、`VolatileUpdate`，rutis-loader 0.10），以及用于运行时设置的 Settings 业务来源（ADR 002 D4）。RemoteGateway 不了解任何 Session 方法的含义，也不了解任何其他插件。
+此处定义的契约：设备记录与令牌、配对与轮换 HTTP 端点、`remote.*` 方法、`remote-devices.json` 格式。依赖的契约：Transport 的 `entryHost`、`upgradeAuthenticator` 与 `httpRoutes` 服务（拟议的 Transport 变更，[语言中立](../../adr/002-plugin-scope.md)形式见 A.1，Rust 绑定见附录 G；Transport 作为其消费方拥有它们）、Connection 的入口记录、[方法](../contracts/session-boundary.md)契约（Rpc 方法表中的管理级条目，每入口提供的级别）、[进程存储](../overview.md)、用于结构性 `enabled` 字段的类型化 Settings 操作（`x-volatile`、`VolatileUpdate`，rutis-loader 0.10），以及用于运行时设置的 Settings 业务来源（ADR 002 D4）。RemoteGateway 不了解任何 Session 方法的含义，也不了解任何其他插件。
 
 ## 2. 数据与状态
 
@@ -55,7 +55,7 @@ flowchart TB
   end
   subgraph MEM["内存"]
     OFF["配对邀约<br/>code_hash、expires_at、attempts"]:::new
-    LIVE["每设备的活动连接<br/>吊销令牌"]:::new
+    LIVE["每设备的活动连接"]:::new
   end
   TL["Timeline<br/>仅含 Session 所有者写入的事实"]
   CFG --> RG["RemoteGateway"]:::new
@@ -88,7 +88,7 @@ sequenceDiagram
   RG-->>D: deviceId、令牌或 HttpOnly cookie
   D->>T: GET /ws 携带令牌
   T->>RG: 认证升级请求
-  RG-->>T: device_id、吊销令牌
+  RG-->>T: allow、device_id
   T->>R: 连接，ConnectionEntry 级别为 session
   D->>R: hello v3、session.list、session.attach
 ```
@@ -128,7 +128,7 @@ sequenceDiagram
   participant C as Device connections
   U->>RG: remote.revoke deviceId
   RG->>PS: 删除记录
-  RG->>C: 触发吊销令牌，连接关闭
+  RG->>C: entryHost closeDevice，连接关闭
   RG-->>U: 完成
   U->>RG: remote.rotate_token
   RG->>PS: 设置 rotation_required
@@ -176,7 +176,7 @@ sequenceDiagram
 | `POST /api/pair`、`POST /api/token/rotate` | HTTP | 配对、设备令牌轮换 |
 | `GET /ws` | WebSocket | 面向已配对设备的 App Server 协议 v3：全部 Session 方法 |
 | `remote.start/stop/status/pair/devices/revoke/rotate_token` | 方法，管理级 | 入口与设备的本地管理 |
-| `EntryHost`、`UpgradeAuthenticator`、`ConnectionEntry` | Transport/Connection 变更 | 带装配定义级别的经认证入口 |
+| `entryHost`、`upgradeAuthenticator`、`httpRoutes`、`ConnectionEntry` | Transport/Connection 变更（进程服务、数据记录） | 带装配定义级别的经认证入口 |
 | CLI | `/remote`、`/web`、`dimcode remote`、`dimcode web` | 用户入口 |
 
 详见：[附录 A](#附录-a-接口细节)。
@@ -189,28 +189,19 @@ sequenceDiagram
 
 ### A.1 Transport 变更（拟议，由 Transport 拥有）
 
-```rust
-impl EntryHost {
-    /// Binds a listener served by Transport's HTTP/WebSocket stack; dropping the
-    /// handle closes the listener and every connection it accepted (detach).
-    pub async fn open(&self, spec: EntrySpec) -> Result<EntryHandle, EntryError>;
-}
-pub struct EntrySpec {
-    pub name: String,                              // "remote"
-    pub bind: SocketAddr,
-    pub tls: Option<TlsFiles>,                     // cert and key paths on the control node
-    pub authenticate: Arc<dyn UpgradeAuthenticator>,
-    pub routes: Arc<dyn HttpRoutes>,               // non-WebSocket paths
-    pub levels: MethodLevels,                      // assembly data; RemoteGateway passes {Session} (A1)
-}
-pub trait UpgradeAuthenticator: Send + Sync {
-    fn authenticate(&self, request: &UpgradeRequest) -> HostFuture<'_, Result<Authenticated, Rejected>>;
-}
-pub struct Authenticated { pub device_id: String, pub revoked: CancellationToken }
-pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub device_id: Option<String> }
-```
+三个进程服务。`entryHost`（无 key）由 Transport 提供。`upgradeAuthenticator` 与 `httpRoutes` 由入口的所有者提供，以入口名（`remote`）为 key，在其 `provides` 中声明；Transport 在入口打开时按名称收集它们。错误是数据 `{ code, message }`。
 
-`revoked` 触发时连接关闭。没有 RemoteGateway 时，裸 WebSocket 保持现有规则（受保护 profile：只允许 `hello` 和 `daemon.ping`）。
+| 服务 | 方法 | 类型 | 请求 | 回复 |
+| --- | --- | --- | --- | --- |
+| `entryHost` | `open` | 异步 | `{ name, bind: "<ip>:<port>", tls?: { cert_path, key_path }, levels: ["session"] }` | `{ entry_id, address }`；在 Transport 的 HTTP/WebSocket 栈上绑定一个监听器 |
+| `entryHost` | `close` | 异步 | `{ entry_id }` | 监听器及其接受的每个连接关闭（脱离）后返回 `{}` |
+| `entryHost` | `closeDevice` | 异步 | `{ entry_id, device_id }` | 该设备的连接关闭后返回 `{}` |
+| `upgradeAuthenticator` | `authenticate` | 异步 | `{ headers, origin?, remote_addr }`（令牌只在 headers 或 cookie 中） | `{ verdict: "allow", device_id } \| { verdict: "deny" }` |
+| `httpRoutes` | `handle` | 异步 | `{ method, path, headers, body_base64? }` | `{ status, headers, body_base64? }` |
+
+`levels` 是装配数据；RemoteGateway 传入 `["session"]`（A1）。每个被接受的连接都携带数据记录 `ConnectionEntry { name, levels, device_id? }`。吊销调用 `closeDevice`；丢弃入口调用 `close`。Transport 与 RemoteGateway 是 Rust 实现，使用附录 G 中的绑定。
+
+没有 RemoteGateway 时，裸 WebSocket 保持现有规则（受保护 profile：只允许 `hello` 和 `daemon.ping`）。
 
 ### A.2 HTTP 接口面
 
@@ -228,7 +219,7 @@ pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub dev
 | 项目 | 规则 |
 | --- | --- |
 | 版本 | 仅 `hello` v3；v1/v2 以 `protocol_version` 拒绝（A11） |
-| 方法 | Rpc Session 内置方法和每个 `SessionMethodContribution`，作用于宿主上的每个 Session（E3、A12）；Rpc 方法表中的管理级名称，包括 `daemon.shutdown` → `-32601 unknown_method` |
+| 方法 | Rpc Session 内置方法和每个 `sessionMethods` 服务，作用于宿主上的每个 Session（E3、A12）；Rpc 方法表中的管理级名称，包括 `daemon.shutdown` → `-32601 unknown_method` |
 | `hello.features` | 仅 Session 功能 |
 | 身份 | `ConnectionEntry.device_id` 用于诊断与吊销；不授予超出入口方法集的任何权限 |
 | 反向请求 | 无：客户端发请求，服务端发通知（[#5](https://github.com/arcships/dim/issues/5)） |
@@ -241,7 +232,7 @@ pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub dev
 | v3 裸 WebSocket，受保护 profile，无 RemoteGateway | 除 `hello`/`daemon.ping` 外均为 `local_transport_required` | 不变 |
 | 远程入口上的 v1、v2 | 不存在 | `protocol_version`（A11） |
 
-### A.4 方法（命名空间 `remote`，管理级）
+### A.4 方法（`managementMethods`，key `remote`，管理级）
 
 | 方法 | 参数 | 结果 | 中断 |
 | --- | --- | --- | --- |
@@ -253,7 +244,7 @@ pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub dev
 | `remote.revoke` | `{deviceId}` | 记录删除且连接关闭后返回 `{}` | Report |
 | `remote.rotate_token` | `{deviceId?}`（缺省：全部） | 标记持久化且连接关闭后返回 `{}` | Report |
 
-`remote.start`/`stop` 通过类型化 Settings 操作写入结构性 `enabled` 字段；loader 投递 `VolatileUpdate` 而不重载插件，RemoteGateway 随之打开或丢弃其 `EntryHandle`。`remote.start` 的参数 `bind`、`tls`、`plaintext` 先保存到业务来源。入口运行期间业务来源变更时，以新设置重新打开 `EntryHandle`（连接脱离），而不重载插件（A16）。
+`remote.start`/`stop` 通过类型化 Settings 操作写入结构性 `enabled` 字段；loader 投递 `VolatileUpdate` 而不重载插件，RemoteGateway 随之调用 `entryHost.open` 或 `close`。`remote.start` 的参数 `bind`、`tls`、`plaintext` 先保存到业务来源。入口运行期间业务来源变更时，以新设置关闭并重新打开入口（连接脱离），而不重载插件（A16）。
 
 ### A.5 Capability 机制
 
@@ -262,7 +253,7 @@ pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub dev
 | 写入 | RemoteGateway 不写入。远程调用与本地调用一样经 Rpc 到达所有者：`session.submit` → Session 输入边界（`Timeline::append`），`approval.respond` → 分支 Approval（`approval/respond`），`session.stop` → `stop/interrupt`，`session.permission.update` → Permission（`permission/changed`），`session.input.withdraw` → InputQueue（`input/withdrawn`） |
 | Dispatcher | 不订阅；设备通过其每连接的 Session 附着接收事件 |
 | 并发附着方 | 无独占所有者（A13）；全部以每分支顺序收到相同事件 |
-| 重载 | 丢弃 `EntryHandle`：监听器与远程连接关闭（脱离）；记录保留；邀约丢失；Rpc 因收集 `ManagementMethods` 而随之重载（ADR 002 D3，已接受）；在途调用遵循 Rpc 的重载规则。Transport 重载会重载 RemoteGateway（它注入 `EntryHost`）；运行时设置变更从不重载它 |
+| 重载 | 关闭入口：监听器与远程连接关闭（脱离）；记录保留；邀约丢失；Rpc 因收集 `managementMethods` 而随之重载（ADR 002 D3，已接受）；在途调用遵循 Rpc 的重载规则。Transport 重载会重载 RemoteGateway（它依赖 `entryHost`）；运行时设置变更从不重载它 |
 | 进程重启 | 若 `enabled` 则重新打开入口；设备重连并重新附着；已提交的输入与待处理审批在附着时重放 |
 
 ## 附录 B. 完整冲突表
@@ -294,7 +285,7 @@ pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub dev
 | 设备已连接时运行时设置变更 | 业务来源 revision | 入口以新设置重新打开；连接脱离并重连 | RemoteGateway |
 | Session 被另一个客户端关闭 | `session.closed` | 远程附着方收到它 | Connection |
 | 只有远程附着方的 Session 空闲卸载 | — | 附着会钉住 Session；脱离时释放 | AgentIndex |
-| Session 的资源节点离线 | — | 与本地客户端相同的可重试错误 | Session 所有者 |
+| Session 的资源节点离线 | — | 到达该节点的调用以 `node_unavailable` 失败，与本地客户端相同；不发生重载，也没有任何东西变为 Pending（[overview 多节点](../overview.md)） | Session 所有者 |
 | 存在未完成邀约时进程重启 | — | 邀约丢失；设备保留 | RemoteGateway |
 
 ## 附录 C. 错误与恢复
@@ -349,4 +340,32 @@ pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub dev
 | --- | --- |
 | [#5](https://github.com/arcships/dim/issues/5) 与 overview 待对齐问题“Remote access” | 产品设备身份与对端令牌的关系、链路断连、TLS 部署 |
 | 每设备作用域 | 之后是否可将设备限制到特定工作区或 Session（E3 不要求） |
-| Transport/Connection 变更 | `EntryHost` 与认证器契约在此提出，需要 Transport 变更文档 |
+| Transport/Connection 变更 | `entryHost`、`upgradeAuthenticator` 与 `httpRoutes` 在此提出，需要 Transport 变更文档 |
+
+## 附录 G. Rust 绑定
+
+Transport 与 RemoteGateway 是 Rust 实现；它们使用 A.1 的这一绑定，A.1 的中立形式是规范性的。
+
+```rust
+/// Binding for service `entryHost` (process, no key).
+impl EntryHost {
+    /// Maps `open`; dropping the handle maps `close`.
+    pub async fn open(&self, spec: EntrySpec) -> Result<EntryHandle, EntryError>;
+}
+pub struct EntrySpec {
+    pub name: String,                                // "remote"
+    pub bind: SocketAddr,
+    pub tls: Option<TlsFiles>,
+    pub authenticate: Arc<dyn UpgradeAuthenticator>, // service `upgradeAuthenticator`
+    pub routes: Arc<dyn HttpRoutes>,                 // service `httpRoutes`
+    pub levels: MethodLevels,
+}
+pub trait UpgradeAuthenticator: Send + Sync {
+    fn authenticate(&self, request: &UpgradeRequest) -> HostFuture<'_, Result<Authenticated, Rejected>>;
+}
+/// `revoked` maps `closeDevice`: the connection closes when it fires.
+pub struct Authenticated { pub device_id: String, pub revoked: CancellationToken }
+pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub device_id: Option<String> }
+```
+
+`remote.*` 使用[方法](../contracts/session-boundary.md)契约的 `managementMethods` 绑定。
