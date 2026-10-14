@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview](../overview.md) (Web). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-Web is a Session plugin that gives the model `web_search` and `web_fetch` as two Session-scoped `ToolContribution`s ([tool contributions](../../architecture/rust-agent/tool-contributions.md)). Search goes to a configured built-in search adapter; fetch downloads one public page and returns bounded text. Web holds no state shared across Sessions, writes no Timeline event (every call and result is already a tool call fact) and reads its `web.*` business configuration from a Settings business source at use time, so editing it never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
+Web is a Session plugin that gives the model `web_search` and `web_fetch` as two Session-scoped `toolContribution` services keyed by tool name ([tool contributions](../../architecture/rust-agent/tool-contributions.md); ToolRegistry accepts named tool services as a supplement, [ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)). Search goes to a configured built-in search adapter; fetch downloads one public page and returns bounded text. Web holds no state shared across Sessions, writes no Timeline event (every call and result is already a tool call fact) and reads its `web.*` business configuration from a Settings business source at use time, so editing it never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
 ## 1. Structure
 
@@ -12,26 +12,26 @@ flowchart LR
     Settings["Settings: web business source, credential-reference resolver"]
   end
   subgraph SESS["Session"]
-    Web["Web: ToolContribution web_search, web_fetch"]:::new
+    Web["Web: toolContribution web_search, web_fetch"]:::new
     ToolRegistry["ToolRegistry"]
   end
   subgraph BR["Branch"]
     Exec["ToolBinding, ToolExecutor, Approval, Permission"]
   end
   Web -->|"read web section at use, resolve secretRef"| Settings
-  ToolRegistry -->|"Contributions of ToolContribution"| Web
+  ToolRegistry -->|"collects toolContribution by name"| Web
   Exec --> ToolRegistry
-  Exec -->|"handler call with cancel token"| Web
+  Exec -->|"execute(ToolCall), cancel request"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Web` | Session (installed only when enabled) | Settings business source (section `web`) and credential-reference resolver; diagnostics channel | `ToolContribution` `web_search` and `web_fetch` (names registered with `AgentBuilder::session_tool`) |
+| `Web` | Session (installed only when enabled) | Settings business source (section `web`) and credential-reference resolver; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
 
-**Contracts depended on:** Session `ToolContribution` (existing); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web.*` business configuration.
+**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web.*` business configuration. Settings and the diagnostics channel are existing typed services; exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work.
 
-**Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web and, through `Contributions<ToolContribution>`, ToolRegistry and its dependents; in-flight calls are settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
+**Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web and, through the collected `toolContribution` services, ToolRegistry and its dependents; in-flight calls are settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
 
 **Node.** Requests leave from the App Server process that hosts the Session, not from the Session's resource node (A2).
 
@@ -55,7 +55,7 @@ flowchart TB
   Inflight -->|"one ToolResult per call, written by ToolExecutor"| Calls
 ```
 
-Web owns no Timeline state and no `StateCell`. The cache starts empty on `apply`; nothing is rebuilt from the Timeline.
+Web owns no Timeline state and no `StateCell`. The cache starts empty when Web is applied; nothing is rebuilt from the Timeline.
 
 ## 3. Flows
 
@@ -74,7 +74,7 @@ sequenceDiagram
   X->>TL: append step/tool-start
   X->>A: admit risk network
   A-->>X: allow (or ask, deny)
-  X->>W: execute(args, cancel)
+  X->>W: execute(ToolCall)
   W->>W: validate URL, resolve host, check every address
   W->>N: GET pinned to the validated address
   N-->>W: body up to 5 MiB
@@ -92,7 +92,7 @@ sequenceDiagram
   participant W as Web handler
   participant S as Settings
   participant Q as Search service
-  X->>W: execute(query, filters, cancel)
+  X->>W: execute(ToolCall: query, filters)
   W->>S: read web.search.service
   alt no usable service
     W-->>X: error search_unavailable
@@ -117,7 +117,7 @@ sequenceDiagram
   TL->>X: step/tool-start
   X->>W: execute
   TL-->>X: stop/interrupt (seq after tool-start)
-  X->>W: cancel token
+  X->>W: cancel request
   W-->>X: error result cancelled (socket closed)
   X->>TL: step/tool-result for the batch
 ```
@@ -149,8 +149,8 @@ Full table in Appendix B.
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `web_search` | `ToolContribution`, risk `network` | Query the configured service; numbered result list |
-| `web_fetch` | `ToolContribution`, risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
+| `web_search` | `toolContribution` (Session, key `web_search`), risk `network` | Query the configured service; numbered result list |
+| `web_fetch` | `toolContribution` (Session, key `web_fetch`), risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
 | `web.*` configuration | Business configuration in a Settings source, read at use | Search service, private-host exceptions, proxy |
 
 No methods and no CLI subcommand: configuration goes through Settings' typed operations and `/settings`. Details in Appendix A.
@@ -168,7 +168,14 @@ No methods and no CLI subcommand: configuration goes through Settings' typed ope
 
 ### A.1 Tools
 
-Both tools: `risk: "network"`, `requires: { interactive: false, roles: None }`. Parameters are validated by the handler; a violation returns an error result without network access.
+Each tool is one `toolContribution` service (Session scope, key = tool name):
+
+| Method | Kind | Request | Reply |
+| --- | --- | --- | --- |
+| `declaration` | sync | — | `ToolDeclaration {name, description, input_schema, risk: "network", requires: {interactive: false, roles: null}}` |
+| `execute` | async | `ToolCall {session_id, branch_id, call_id, arguments}` | `ToolResult {content: [{type: "text", text}], is_error, structured_content?}` |
+
+Cancellation is a cancel request for the call or the consumer dropping it; Web aborts the request and replies `cancelled` if it still replies. Errors are `ToolResult`s with `is_error: true` (Appendix C), never call failures. Parameters are validated by the handler; a violation returns an error result without network access.
 
 ### A.2 `web_search`
 
@@ -254,12 +261,12 @@ Read at each call; a change is a data update with notification, never a reload. 
 
 | Step | Path |
 | --- | --- |
-| Provide | Web's `apply` provides `ToolContribution` `web_search` and `web_fetch`; ToolRegistry registers those listed in `SessionConfig.tools`; ToolBinding adopts them. Web writes nothing |
+| Provide | Web's `provides` declares `toolContribution` `web_search` and `web_fetch`; ToolRegistry registers those listed in `SessionConfig.tools`; ToolBinding adopts them. Web writes nothing |
 | Call | ToolExecutor consumes `step/tool-call` on the Dispatcher, registers the batch task and returns; per call `step/tool-start`, admission, handler on the executor's task, `step/tool-completed`, then one `step/tool-result` per batch |
 | Dispatcher | Web has no subscription |
 | State and recheck | No `StateCell`; no consumed facts; decisions use arguments and configuration read at call start |
 | Terminal facts | Written by ToolExecutor; Web returns exactly one `ToolResult` per call |
-| Reload | Disposer aborts in-flight requests; ToolExecutor settles them as reloaded ([tool contributions §4](../../architecture/rust-agent/tool-contributions.md)) |
+| Reload | Unload aborts in-flight requests; ToolExecutor settles them as reloaded ([tool contributions §4](../../architecture/rust-agent/tool-contributions.md)) |
 | Process restart | Committed calls without results are settled by ToolExecutor's rebuild; Web never repeats a request |
 
 ## Appendix B. Full conflict table
@@ -268,7 +275,7 @@ Read at each call; a change is a data update with notification, never a reload. 
 | --- | --- | --- | --- |
 | Turn `stop/interrupt` before dispatch | interrupt < `step/tool-call` consumption | Not executed | ToolExecutor |
 | Turn `stop/interrupt` during approval | `approval/request` < interrupt | `approval/cancelled`; no request sent | Approval |
-| Turn `stop/interrupt` during the request | `step/tool-start` < interrupt | Token cancelled; socket aborted; error `cancelled`; a response fully converted before the abort is returned as is | ToolExecutor, Web |
+| Turn `stop/interrupt` during the request | `step/tool-start` < interrupt | Call cancelled; socket aborted; error `cancelled`; a response fully converted before the abort is returned as is | ToolExecutor, Web |
 | Branch-scoped interrupt or branch close | branch interrupt | As turn interrupt | ToolExecutor |
 | Batch with another long call | Web returned, other call running | Result held until the batch's `step/tool-result` | ToolExecutor |
 | Concurrent Steer/Queue/Append | any | No effect on the call; Steer consumed after the batch result | Loop |
@@ -281,7 +288,7 @@ Read at each call; a change is a data update with notification, never a reload. 
 | Process restart mid-call | committed, no result | Settled as not surviving recovery; not repeated | ToolExecutor |
 | Session unload and restore | `branch/resume` | Web applied again; cache empty | Lifecycle |
 | Session resource node offline | — | No effect; Web uses no node services | — |
-| Late handler call after cancellation | token already cancelled | Returns `cancelled` without network access | Web |
+| Late handler call after cancellation | cancel request already received | Returns `cancelled` without network access | Web |
 | Two branches fetch the same URL | — | Independent requests; cache filled by the first to finish | Web |
 | Client detach | — | No effect | — |
 
@@ -300,7 +307,7 @@ Every error is an error `ToolResult` (`is_error: true`) with content `web_fetch 
 | `unsupported_content_type` | Type not in A.3 |
 | `search_unavailable` | No service configured, adapter unusable, or credential unresolvable |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
-| `cancelled` | Token cancelled |
+| `cancelled` | Call cancelled |
 
 Recovery: Web holds no durable work; reload and restart lose only the cache.
 
@@ -343,4 +350,13 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | Question | Description |
 | --- | --- |
-| Cross-language migration | The TypeScript implementation needs a Session `ToolContribution` binding and the Settings business source |
+| Settings by name | The TypeScript implementation needs the Settings business source, credential-reference resolver and diagnostics channel exposed by name ([#4](https://github.com/arcships/dim/issues/4)); `toolContribution` itself is neutral |
+
+## Appendix G. Rust binding
+
+Used when Web moves to Rust; the tool names, data shapes and loader row stay unchanged.
+
+| Neutral | Rust |
+| --- | --- |
+| `toolContribution` keys `web_search`, `web_fetch` | Session `ToolContribution` registered with `AgentBuilder::session_tool("web_search")` and `("web_fetch")`; ToolRegistry collects `Contributions<ToolContribution>` |
+| `declaration` / `execute` | `ToolDefinition` / handler with `CancellationToken`; the disposer aborts in-flight requests ([tool contributions §4](../../architecture/rust-agent/tool-contributions.md)) |

@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first user input on `main` is written, it generates a title from that input's text alone through the Provider `AuxiliaryModel` under the purpose key `session-title`. It serves `session.rename` as a `SessionMethodContribution` ([session-boundary](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect.
+SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first user input on `main` is written, it generates a title from that input's text alone through the Provider `AuxiliaryModel` under the purpose key `session-title`. It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and admission checks](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 1. Structure
 
@@ -16,7 +16,7 @@ flowchart LR
   end
   subgraph SESS["Session"]
     ST["SessionTitle"]:::new
-    SB["Session broadcast (session_channel)"]
+    SB["Session broadcast"]
     TT["TimelineTree: main fixed prefix"]
     CFG["SessionConfig"]
   end
@@ -24,7 +24,7 @@ flowchart LR
   ST -->|"read prefix up to N"| TT
   ST --> CFG
   ST -->|"complete purpose session-title"| AUX
-  ST -->|"set_title with revision"| META
+  ST -->|"setTitle with revision"| META
   ST -->|"read at use"| Settings
   Rpc -->|"session.rename dispatched through the Session"| ST
   Rpc -->|"session.list reads title fields"| META
@@ -33,9 +33,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel`, Settings business source | `S:SessionMethodContribution[session.rename]` registered with `AgentBuilder::session_methods("session.rename")`, level `session`; purpose key `session-title`; business keys `sessionTitle.enabled`, `sessionTitle.maxLength` |
+| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel`, Settings business source | `sessionMethods` key `session.rename` (declared in its `provides`), level `session`; purpose key `session-title`; business keys `sessionTitle.enabled`, `sessionTitle.maxLength` |
 
-Every dependency is at the Session scope or the enclosing process scope. A reload of SessionStore, Provider or Settings reloads SessionTitle, which cancels an in-flight generation; this is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Business configuration changes never reload ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
+Every dependency is at the Session scope or the enclosing process scope. All of them are existing typed services (shapes in A.2); exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work. A reload of SessionStore, Provider or Settings reloads SessionTitle, which cancels an in-flight generation; this is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Business configuration changes never reload ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
 ## 2. Data and state
 
@@ -55,7 +55,7 @@ flowchart TB
   CC -->|"inherit hint"| MEM
   CONF --> MEM
   CFG --> MEM
-  MEM -->|"set_title, expected revision"| MD
+  MEM -->|"setTitle, expected revision"| MD
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
@@ -79,7 +79,7 @@ sequenceDiagram
   ST->>TL: prefix(main, N): first operator input text
   ST->>Aux: complete(session-title, text)
   Aux-->>ST: title text
-  ST->>Meta: set_title(expected r, auto)
+  ST->>Meta: setTitle(expected r, auto)
 ```
 
 Generation starts when the input is written, not after the turn. Only the text of the first operator input on `main` is sent.
@@ -93,14 +93,14 @@ sequenceDiagram
   participant ST as SessionTitle (in the Session)
   participant Meta as SessionStore metadata
   CLI->>Rpc: session.rename sessionId, title
-  Rpc->>ST: resolve Session, dispatch contribution
+  Rpc->>ST: resolve Session, sessionMethods call
   ST->>Meta: metadata, revision r
-  ST->>Meta: set_title(expected r, manual)
+  ST->>Meta: setTitle(expected r, manual)
   Meta-->>ST: revision r+1
   ST-->>Rpc: title, titleSource manual, revision
 ```
 
-Rpc resolves the Session as for any Session method, loading it if needed. On `Conflict` SessionTitle rereads and retries up to 3 times.
+Rpc resolves the Session as for any Session method, loading it if needed. On `conflict` SessionTitle rereads and retries up to 3 times.
 
 ## 4. Timing and conflicts
 
@@ -110,10 +110,10 @@ sequenceDiagram
   participant R as rename
   participant Meta as SessionStore metadata
   G->>Meta: metadata, revision r, no title
-  R->>Meta: set_title(expected r, manual)
+  R->>Meta: setTitle(expected r, manual)
   Meta-->>R: r+1
-  G->>Meta: set_title(expected r, auto)
-  Meta-->>G: Conflict
+  G->>Meta: setTitle(expected r, auto)
+  Meta-->>G: conflict
   Note over G: automatic title discarded
 ```
 
@@ -144,7 +144,7 @@ Never sent: images, raw input blocks, later inputs, assistant output, system pro
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `session.rename {sessionId, title \| null}` | `SessionMethodContribution`, level `session` | Set or clear a manual title |
+| `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename`, level `session` | Set or clear a manual title |
 | `session-title` | Provider purpose key | Model policy for title generation; unconfigured inherits |
 | `sessionTitle.enabled`, `sessionTitle.maxLength` | Business configuration (Settings source) | Turn generation off; title length |
 | `title`, `titleSource` in `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore | Display |
@@ -157,6 +157,8 @@ The first input's text is sent to the model chosen for `session-title`; with the
 
 ### A.1 `session.rename`
 
+Served through `sessionMethods` (Session, key `session.rename`): `describe(): async -> MethodDecl[]` returns one declaration `{name: "session.rename", level: "session", mutating: true}`; `call(MethodCall): async -> MethodReply` handles it. A dropped call is cancelled before `setTitle` or completes atomically after it.
+
 | Params | Result | Errors |
 | --- | --- | --- |
 | `{sessionId, title: string \| null}` | `{title: string \| null, titleSource: "auto" \| "manual" \| null, revision}` | `invalid_params`, `session_not_found`, `service_reloading`, `storage_failed`; dispatch errors per [session-boundary](../contracts/session-boundary.md) |
@@ -165,17 +167,11 @@ The first input's text is sent to the model chosen for `session-title`; with the
 
 ### A.2 Depended-on shapes (owners define them)
 
-```rust
-// SessionStore metadata supplement
-async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
-async fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
-    -> Result<u64, MetadataError>;                       // Conflict | NotFound | Storage
-pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
-pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
-// Provider AuxiliaryModel; the inherit hint is SessionTitle's assumption (A1)
-async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
-    request: AuxiliaryRequest, cancel: CancellationToken) -> Result<String, AuxiliaryError>;
-```
+| Service | Method | Kind | Request | Reply and errors |
+| --- | --- | --- | --- | --- |
+| SessionStore metadata (supplement) | `metadata` | async | `{session_id}` | `{revision, title?: {text, source: "auto" \| "manual"}}`; errors `not_found`, `storage` |
+| SessionStore metadata (supplement) | `setTitle` | async | `{session_id, expected_revision, title: {text, source} \| null}` | New `revision`; errors `conflict`, `not_found`, `storage` |
+| Provider `AuxiliaryModel` | `complete` | async | `{purpose: "session-title", inherit?: model selection, request: {system, user}}` | Text; errors as data. The inherit hint is SessionTitle's assumption (A1). Cancelled by a cancel request or by dropping the call |
 
 ### A.3 Configuration
 
@@ -185,15 +181,15 @@ async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
 
 | Step | Path |
 | --- | --- |
-| Listen | In `apply`: listener on `session_channel(session_id)` for `Event` records of `input/message` on `main`, removed by `ctx.effect` |
+| Listen | On apply: Session broadcast listener for `input/message` events on `main`, removed on unload |
 | Eligibility | `SessionConfig.interactive && collaboration_role = leader` |
-| Trigger | On `input/message` at `N` with `user` content: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise spawn a generation task under `ctx.effect` |
+| Trigger | On `input/message` at `N` with `user` content: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `metadata(session)`: skip if any title exists; keep revision `r` |
 | Read | Fixed prefix of `main` up to `N`; the first operator input (user content, no source marker; A10) and its text. No text: no title (A8) |
-| Generate | `complete("session-title", inherit = model of the latest context/configured in the prefix, request, cancel)`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
-| Write | `set_title(session, r, Some({text, auto}))`; `Conflict` or `NotFound` discards |
+| Generate | `complete({purpose: "session-title", inherit: model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
+| Write | `setTitle({session_id, expected_revision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
-| Reload / unload | Generation cancelled by `ctx.effect`; nothing written; events in the gap are not replayed |
+| Reload / unload | Generation cancelled with the plugin; nothing written; events in the gap are not replayed |
 
 ## Appendix B. Full conflict table
 
@@ -203,7 +199,7 @@ async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
 | Inputs without `user` content (Goal blocks, source markers) | — | Never trigger, never used | SessionTitle |
 | First user input carries only images | — | No automatic title (A8) | SessionTitle |
 | Rename before the check | rename < check | Title present: skip | SessionTitle |
-| Rename during generation | check (r) < rename (r+1) < write | `Conflict`: automatic title discarded | SessionStore revision |
+| Rename during generation | check (r) < rename (r+1) < write | `conflict`: automatic title discarded | SessionStore revision |
 | Concurrent renames | revision order | Last committed rename wins | SessionStore |
 | Duplicate `session.rename` | — | Rewrites the same text | SessionTitle |
 | Steer/Queue/Append inputs after the first | — | Never in the excerpt | SessionTitle |
@@ -222,8 +218,8 @@ async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
 | Case | Result |
 | --- | --- |
 | Model error, timeout, empty output, unavailable policy | No write; diagnostic; failure counted |
-| `set_title` `Conflict` on automatic write | Discarded (diagnostic) |
-| `set_title` `Storage` | Automatic: failure counted; rename: `storage_failed` |
+| `setTitle` `conflict` on automatic write | Discarded (diagnostic) |
+| `setTitle` `storage` | Automatic: failure counted; rename: `storage_failed` |
 | Unknown Session on rename | `session_not_found` |
 | SessionTitle reloading | `service_reloading`; the rename did not happen |
 | Cancellation | Auxiliary call aborted before any write |
@@ -262,3 +258,24 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | Question | Description |
 | --- | --- |
 | Session list fields | `title`/`titleSource` in `SessionSummary` are an Rpc protocol change to record in the overview |
+| Services by name | The TypeScript implementation needs the Session broadcast, fixed-prefix read, SessionStore metadata, `AuxiliaryModel` and Settings exposed by name ([#4](https://github.com/arcships/dim/issues/4)) |
+
+## Appendix G. Rust binding
+
+| Neutral | Rust |
+| --- | --- |
+| `sessionMethods` key `session.rename` | `SessionMethodContribution(Arc<dyn MethodProvider>)` at `SessionScope::named_key::<SessionMethodContribution>("session.rename")`, registered with `AgentBuilder::session_methods("session.rename")` |
+| Session broadcast listener | Listener on `session_channel(session_id)` for `Event` records, removed by `ctx.effect` |
+| Generation task | Spawned under `ctx.effect` |
+
+```rust
+// SessionStore metadata supplement
+async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
+async fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
+    -> Result<u64, MetadataError>;                       // Conflict | NotFound | Storage
+pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
+pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
+// Provider AuxiliaryModel
+async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
+    request: AuxiliaryRequest, cancel: CancellationToken) -> Result<String, AuxiliaryError>;
+```

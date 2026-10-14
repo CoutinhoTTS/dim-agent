@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview](../overview.md) (Notifications). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-Notifications is a Session plugin. It delivers messages to configured external channels (Slack, Feishu) when a task on its interactive leader Session completes or fails, an approval is pending or a question awaits an answer; it reports a scheduled run that ended in its Session from Scheduler's run-outcome event notice; and it offers the model the `notify` tool as a Session-scoped `ToolContribution`. It observes its Session only through the existing Session broadcast, confirms each trigger against the fixed prefix of the branch, and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI.
+Notifications is a Session plugin. It delivers messages to configured external channels (Slack, Feishu) when a task on its interactive leader Session completes or fails, an approval is pending or a question awaits an answer; it reports a scheduled run that ended in its Session from Scheduler's run-outcome event notice; and it offers the model the `notify` tool as a Session-scoped `toolContribution` service keyed `notify`. It observes its Session only through the existing Session broadcast, confirms each trigger against the fixed prefix of the branch, and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 1. Structure
 
@@ -16,14 +16,14 @@ flowchart LR
   end
   subgraph SESS["Session"]
     NP["Notifications"]:::new
-    SB["Session broadcast (session_channel)"]
+    SB["Session broadcast"]
     TT["TimelineTree: fixed prefix per branch"]
     TR["ToolRegistry"]
   end
   EXT["Slack / Feishu HTTPS endpoints"]
   NP -->|"listen: turn/end, approval/request, question/asked"| SB
   NP -->|"prefix read at check time"| TT
-  TR -->|"Contributions of ToolContribution: notify"| NP
+  TR -->|"collects toolContribution notify by name"| NP
   NP -.->|"listen, no dependency edge"| RO
   NP -->|"resolve refs at send time"| CRED
   NP -->|"read at use"| Settings
@@ -34,9 +34,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Notifications` | Session (installed only when enabled) | Session broadcast of its Session, TimelineTree, `SessionConfig`; process services Settings business source and credential resolver, SessionStore title metadata; listens (no dependency) to Scheduler's `scheduled_run_outcomes()` event key | `ToolContribution` `notify` (risk `outbound_message`); trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business document `notifications` |
+| `Notifications` | Session (installed only when enabled) | Session broadcast of its Session, TimelineTree, `SessionConfig`; process services Settings business source and credential resolver, SessionStore title metadata; listens (no dependency) to Scheduler's `scheduled_run_outcomes` event | `toolContribution` key `notify` (risk `outbound_message`), declared in its `provides`; trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business document `notifications` |
 
-Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
+All dependencies are existing typed services; exposing them and Scheduler's event by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work. Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
 
 ## 2. Data and state
 
@@ -120,7 +120,7 @@ sequenceDiagram
   participant CH as Channel endpoint
   TE->>AP: admit, risk outbound_message
   AP-->>TE: allowed (FullAccess) or asked
-  TE->>NP: execute(message, channel, cancel)
+  TE->>NP: execute(ToolCall: message, channel)
   NP->>CH: HTTPS POST
   NP-->>TE: Notification sent to channel.
 ```
@@ -167,8 +167,8 @@ Event-triggered notifications have no model-visible effect.
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `notify {message, channel?}` | `ToolContribution`, risk `outbound_message` | Model-initiated message to a configured channel |
-| `scheduled_run_outcomes()` | Event key listened to (Scheduler's contract; no dependency) | `schedule.ended` trigger |
+| `notify {message, channel?}` | `toolContribution` (Session, key `notify`), risk `outbound_message` | Model-initiated message to a configured channel |
+| `scheduled_run_outcomes` | Process event listened to (Scheduler's contract; no dependency) | `schedule.ended` trigger |
 | `notifications` document | Business configuration, Settings user scope, read at use | Channels, triggers, delays |
 
 No methods. Channels are tested by sending through `notify` or a real trigger (A9).
@@ -201,6 +201,8 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 
 ### A.2 Tool `notify`
 
+One `toolContribution` service (Session, key `notify`): `declaration(): sync -> ToolDeclaration` and `execute(ToolCall): async -> ToolResult` with text content. Cancellation is a cancel request or the consumer dropping the call; outstanding HTTP requests are aborted. Errors are error `ToolResult`s with the texts below.
+
 | Item | Value |
 | --- | --- |
 | Parameters | `{message: string (1..=4000), channel?: string}`; `channel` names a channel with `allowTool && enabled` (A6) |
@@ -217,7 +219,7 @@ Messages sent by the tool are prefixed `[dim <session label>] ` (A7).
 | `turn/end` on `main` | `turn.completed` / `turn.failed` | `completed` / `failed`; `cancelled` none (A3). Fires only if `N` is the latest `turn/end`, no `turn/start` after it, and no Queue/Steer `input/message` lacks both `input/consumed` and `input/withdrawn` |
 | `approval/request` (any branch) | `approval.pending` | No `approval/respond` or `approval/cancelled` with the same `approval_id` after the delay |
 | `question/asked` (any branch) | `question.pending` | No `question/answered` or `question/cancelled` with the same `call_id` after the delay |
-| `RunOutcome` with `session_id` = this Session | `schedule.ended` | Every such notice (A17) |
+| Run outcome `{job_id, job_name, run_id, session_id?, state, reason?, ended_at}` with `session_id` = this Session | `schedule.ended` | Every such notice (A17) |
 | `step/text` | Content | Optional excerpt of the turn's last request (`includeContent`) |
 
 Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Task failed.`, `[dim <label>] Approval needed: <tool name>.`, `[dim <label>] The agent is waiting for your answer.`, `[dim schedule <job name>] Run <state>.` With `includeContent`: turn triggers append up to 500 characters of the last request's `step/text`; `approval.pending` the request `reason`; `question.pending` the question texts up to 500 characters (A5).
@@ -226,13 +228,13 @@ Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Ta
 
 | Step | Path |
 | --- | --- |
-| Listen | In `apply`: listener on `session_channel(session_id)` for `turn/end`, `approval/request`, `question/asked`; listener on `scheduled_run_outcomes()` filtered to this Session; both removed by `ctx.effect` |
-| Trigger | For a matching enabled channel trigger not in the dedup set: spawn a delayed check under `ctx.effect` |
+| Listen | On apply: Session broadcast listener for `turn/end`, `approval/request`, `question/asked`; listener on `scheduled_run_outcomes` filtered to this Session; both removed on unload |
+| Trigger | For a matching enabled channel trigger not in the dedup set: start a delayed check owned by the plugin's lifetime |
 | Check | After the delay, read the branch's fixed prefix (`at_least` the event sequence); branch gone → nothing |
 | Format | Label = metadata title when available, else Session id (A7) |
 | Deliver | Resolve references at send time; HTTPS POST; retry on network error, 429, 5xx with 1 s, 4 s, 16 s; no retry on other 4xx; 20 messages per minute per channel per Session, excess dropped with a diagnostic (A10) |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
-| Reload / Session unload | Delayed checks and deliveries cancelled by `ctx.effect`; a request already sent is never resent ([time bus](../../architecture/rust-agent/time-bus.md)); events missed while down are not replayed |
+| Reload / Session unload | Delayed checks and deliveries cancelled with the plugin; a request already sent is never resent ([time bus](../../architecture/rust-agent/time-bus.md)); events missed while down are not replayed |
 
 ## Appendix B. Full conflict table
 
@@ -314,3 +316,13 @@ Flow tests with fake HTTP endpoints and a fake model:
 | --- | --- |
 | Inbound actions | Answering approvals or questions from Slack/Feishu is out of scope |
 | Runs without a Session | Runs that fail before launching a Session are not reported (A12) |
+| Services by name | The TypeScript implementation needs the Session broadcast, fixed-prefix read, SessionStore metadata, Settings and Scheduler's event exposed by name ([#4](https://github.com/arcships/dim/issues/4)) |
+
+## Appendix G. Rust binding
+
+| Neutral | Rust |
+| --- | --- |
+| `toolContribution` key `notify` | Session `ToolContribution` registered with `AgentBuilder::session_tool("notify")`; ToolRegistry collects `Contributions<ToolContribution>`; cancellation through `CancellationToken` |
+| Session broadcast listener | Listener on `session_channel(session_id)`, removed by `ctx.effect` |
+| `scheduled_run_outcomes` | `on(host_ctx, &scheduled_run_outcomes(), listener)` with `EventKey<RunOutcome>` ([Scheduler](Scheduler.md)) |
+| Delayed checks, deliveries | Tasks under `ctx.effect` |
