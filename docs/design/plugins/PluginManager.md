@@ -1,8 +1,8 @@
 # PluginManager
 
-Status: Draft. Overall design: [overview B.12](../overview.md#b12-pluginmanager), [Settings, Mcp, SkillsCatalog changes](../overview.md#c2-app-server-process-plugins), [conventions](../overview.md#64-conventions), [multiple nodes](../overview.md#63-multiple-nodes). Phase: P3 (depends on [#3](https://github.com/arcships/dim/issues/3); non-Rust capability plugins on [#4](https://github.com/arcships/dim/issues/4); peer nodes on [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
+Status: Draft. Overall design: [overview B.12](../overview.md#b12-pluginmanager), [Settings, Mcp, SkillsCatalog changes](../overview.md#c2-app-server-process-plugins), [conventions](../overview.md#64-conventions), [multiple nodes](../overview.md#63-multiple-nodes), [ADR 002](../../adr/002-dependency-direction.md). Phase: P3 (depends on [#3](https://github.com/arcships/dim/issues/3); non-Rust capability plugins on [#4](https://github.com/arcships/dim/issues/4); peer nodes on [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
-PluginManager installs plugin packages from Git marketplaces, local paths or Git URLs onto a target node, records plugin intent and configuration through typed Settings operations into the loader editable layer, and publishes the typed content of enabled packages through `PluginContents`. Content owners (Skills, Hooks, MCP, workflows) define their own content type keys and discover the content they understand; PluginManager knows none of them. Package code runs only after approval through the Settings host-local approval service bound to node and package fingerprint. Packages are never upgraded automatically.
+PluginManager installs plugin packages from Git marketplaces, local paths or Git URLs onto a target node, records plugin intent (install, enable, node binding, package paths) through typed Settings operations into loader rows, routes each plugin's business configuration to that plugin's own business source, and publishes the typed content of enabled packages through `PluginContents`. Content owners (Skills, Hooks, MCP, workflows) define their own content type keys and discover the content they understand; PluginManager knows none of them. Package code runs only after approval through the Settings host-local approval service bound to node and package fingerprint. Packages are never upgraded automatically.
 
 ## 1. Structure
 
@@ -10,12 +10,12 @@ PluginManager installs plugin packages from Git marketplaces, local paths or Git
 flowchart LR
   subgraph CN["App Server process, control node"]
     PM["PluginManagerPlugin<br/>plugin.* methods, package store"]:::new
-    PC["PluginContents registry<br/>no dependencies"]:::new
+    PC["PluginContents<br/>stable port, no dependencies"]:::new
     ROW["PluginPackage row<br/>one per installed package"]:::new
-    SET["Settings<br/>typed operations, host-local approvals,<br/>credential resolver"]
+    SET["Settings<br/>typed operations, plugin business source,<br/>host-local approvals, credential resolver"]
     LOADER["rutis Loader"]
-    MR["Methods registry<br/>level management"]:::contract
-    NS["node-services point<br/>lookup by node id"]:::contract
+    MR["Method port<br/>level management"]:::contract
+    NS["Node-services port<br/>lookup by node id"]:::contract
     CONS["Content owners<br/>SkillsCatalog, Mcp, Hooks, Workflow"]
   end
   subgraph NODE["Each node, local or peer"]
@@ -24,28 +24,28 @@ flowchart LR
   end
   PM --> SET
   PM --> LOADER
-  PM -->|"MethodContribution plugin"| MR
+  PM -->|"registers plugin.*"| MR
   PM -->|"per call"| NS
   ROW -->|"verify per load"| NS
   NS --> SVC
   ROW -->|"register sources"| PC
   ROW -->|"PluginApproval when approved"| CODE
-  CONS -->|"inject, read sources by own type key"| PC
+  CONS -->|"read and watch sources by own type key"| PC
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-`PluginContents` is a stable registry with no dependency on PluginManager or package rows, so a PluginManager reload or a package row change never reloads a content owner. Node services are resolved per call by node id through the `node-services` point ([extension registry](../contracts/extension-registry.md#5-rules-every-point-follows)); an offline node fails only operations on that node with `node_unavailable`. Package code rows that contribute tools, management methods or other extensions register through each owner's registry like any contributor ([extension registry](../contracts/extension-registry.md)).
+`PluginContents` is a stable port (ADR 002 D2) hosted in its own plugin with no dependency on PluginManager or package rows: package rows register into it, content owners read and watch it, so a PluginManager reload or a package row change never reloads a content owner. Node services are resolved per call by node id through the node-services port; an offline node fails only operations on that node with `node_unavailable`. Package code rows that contribute tools, methods or other extensions register into each consumer's port like any contributor; when one unloads, its registrations disappear and only its own in-flight calls fail.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `PluginManagerPlugin` | Process, control node | `SettingsService` (typed operations, host-local approvals), `Arc<Loader>`, `node-services` lookup | `MethodContribution` (`plugin`, level management) |
-| `PluginContentsPlugin` | Process, control node | — | `PluginContents` (stable registry) |
-| `PluginPackage` row | Process, one per installed package | `PluginContents`, `node-services` lookup, host-local approval service | Content sources; `PluginApproval` keyed `<node>/<id>` |
-| Package code rows | Process, on the package's node | what the code declares, plus `PluginApproval` | what the code declares |
-| Content owners | Process | `When<PluginContents>` | — (each defines its own type key) |
+| `PluginManagerPlugin` | Process, control node | `SettingsService` (typed operations, plugin business source, host-local approvals), `Arc<Loader>`, node-services port, method port | `plugin.*` methods (level management) |
+| `PluginContentsPlugin` | Process, control node | — | `PluginContents` (stable port; empty without PluginManager) |
+| `PluginPackage` row | Process, one per installed package | `PluginContents`, node-services port, host-local approval service | Content sources; `PluginApproval` keyed `<node>/<id>` |
+| Package code rows | Process, on the package's node | what the code declares, plus `PluginApproval` | what the code declares; reads its business configuration at use time |
+| Content owners | Process | `PluginContents` | — (each defines its own type key) |
 
-Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace index `dim-marketplace.json`, the `PluginContents` publication contract (`ContentSource`), the package directory layout, the `PluginApproval` gate key, `plugin.*` methods. Contracts depended on: typed Settings operations on the loader editable layer (#3), the Settings host-local approval service (R11) and credential-reference resolver (R10), process storage on the control node, the rutis-loader `Loader` (`entries`, `reload`, `restart`, `LoaderChanged`), `NodeServices` (`FileStorage`, `HostPlatform`) of the package's node through `node-services`, the [method contribution](../contracts/session-boundary.md#a1-method-contribution) contract, [extension registry](../contracts/extension-registry.md). PluginManager never calls a consumer and never names a content type key in code.
+Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace index `dim-marketplace.json`, the `PluginContents` publication contract (`ContentSource`), the package directory layout, the `PluginApproval` gate key, `plugin.*` methods. Contracts depended on: typed Settings operations on the loader editable layer (#3) for plugin intent, the Settings business source for per-plugin configuration (ADR 002 D5), the Settings host-local approval service (R11) and credential-reference resolver (R10), process storage on the control node, the rutis-loader `Loader` (`entries`, `reload`, `restart`, `LoaderChanged`), `NodeServices` (`FileStorage`, `HostPlatform`) of the package's node through the node-services port, the [method contribution](../contracts/session-boundary.md#a1-method-contribution) contract. PluginManager never calls a consumer and never names a content type key in code.
 
 ## 2. Data and state
 
@@ -53,8 +53,9 @@ Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace
 flowchart TB
   subgraph LEL["Loader editable layer, via Settings"]
     MK["Marketplace registrations"]
-    PR["Package rows plugin id per node<br/>version, source, commit, fingerprint,<br/>contents, enabled, configuration"]
+    PR["Package rows plugin id per node<br/>version, source, commit, fingerprint,<br/>contents, enabled"]
   end
+  BC["Plugin business configuration<br/>Settings business source, per node and id"]
   subgraph HLA["Settings host-local approval service"]
     AP["owner plugin, node, source, id, fingerprint"]
   end
@@ -68,11 +69,12 @@ flowchart TB
   PR -->|"row apply verifies"| PKG
   PR -->|"publishes"| MEM
   AP -->|"gates code rows"| PR
+  BC -.->|"read at use time by code rows"| PR
   TL -.-|"never written"| MEM
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-The package row is the persisted intent; `plugin.list` is projected from loader entries, never from a separate store. Published sources are rebuilt by row `apply` on every load; package bytes live under the package root of their node, marketplace caches in control-node process storage; approvals live only in the host-local approval service. Nothing is a Session fact.
+The package row is the persisted intent; `plugin.list` is projected from loader entries, never from a separate store. Per-plugin business configuration is not in rows: `plugin.configure` writes it to the business source with a revision and a change notification, and the plugin reads it at use time, so configuring never reloads a row (A16). Published sources are rebuilt by row `apply` on every load; package bytes live under the package root of their node, marketplace caches in control-node process storage; approvals live only in the host-local approval service. Nothing is a Session fact.
 
 ## 3. Flows
 
@@ -113,11 +115,11 @@ sequenceDiagram
   participant A as Host-local approval service
   participant R as PluginPackage row
   participant K as Code row
-  participant TR as Owner registry e.g. ToolRegistry
+  participant TR as Consumer port e.g. tool source port
   C->>PM: plugin.approve id, approvalToken
   PM->>A: grant owner plugin, node, id, fingerprint
   R->>R: matching grant, provide PluginApproval
-  K->>TR: mount registers contributions
+  K->>TR: apply registers contributions
   C->>PM: plugin.revoke
   PM->>A: revoke
   R->>K: withdraw PluginApproval
@@ -167,9 +169,10 @@ Install is ordered stage, commit, Settings write; the Settings revision is the c
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Code row contributing tools revoked or disabled while a call runs | That call gets "tool provider unavailable"; batch and turn continue | ToolRegistry registry, code row |
+| Code row contributing tools revoked or disabled while a call runs | That call gets "tool provider unavailable"; batch and turn continue | Tool source port, code row |
 | Approval granted, then package updated | New fingerprint does not match; code rows Pending until re-approved | `PluginPackage` row |
-| Node goes offline after install | Only that node's mount and rows Pending; its sources withdrawn | rutis lifecycle |
+| Node goes offline after install | Only that node's rows Pending; its sources withdrawn | rutis lifecycle |
+| `plugin.configure` while the plugin runs | Business data update and notification; no row reload; next use reads the new value | Plugin |
 | Two installs of one id | Second waits on the lock, then `plugin_exists` | PluginManager |
 | Package disabled while a branch uses its Skill | Branch keeps its adopted prompt until it re-adopts | Skills owner |
 
@@ -185,17 +188,17 @@ No direct model-visible effect. PluginManager writes no input, contributes no to
 | --- | --- | --- |
 | `plugin.marketplace.list/add/remove/update/search/view` | Methods, level management | Marketplaces; `update` refreshes indexes only |
 | `plugin.install/update/list/set_enabled/configure/reload/approve/revoke/remove` | Methods, level management | Package lifecycle |
-| `PluginContents::sources(type_key)`, `changed()` | Process service | Generic content publication |
+| `PluginContents::sources(type_key)`, `changed()` | Stable port | Generic content publication |
 | `PluginApproval` keyed `<node>/<id>` | Gate key | Code rows load only when approved |
 | `dim-plugin.json` v2, `dim-marketplace.json` v1 | File formats | Package and marketplace descriptions |
-| Typed Settings operations `plugins.*`, `marketplaces.*` | Depended on (#3) | Persist intent |
+| Typed Settings operations `plugins.*`, `marketplaces.*` | Depended on (#3, ADR 002 D5) | Persist intent; route business configuration |
 | CLI | `/plugins`, `/plugin`, `/reload-plugins`, `dimcode plugin …` | User entries |
 
 Details: [Appendix A](#appendix-a-interface-details).
 
 ## 7. Security
 
-Installing, approving and removing are `level: management` methods, available only on entries that mount that level. Package code is trusted native-process code once loaded (AGENTS rule 11), so loading requires a host-local approval of the exact fingerprint on that node; replay, fork, FullAccess, project files and installation itself never grant it. Git fetch runs no repository hooks or submodules; package files are never executed at install time; integrity is rechecked on every load. Content owners apply their own host-local approval to executable content they interpret (Hooks, MCP, workflows). Plugin configuration holds credential references only, resolved by the plugin through the Settings credential resolver; resolved secrets never enter rows, `plugin.list`, diagnostics or content sources. A package that contributes `level: management` methods extends the host administration surface only after approval.
+Installing, approving and removing are `level: management` methods, available only on entries that serve that level. Package code is trusted native-process code once loaded (AGENTS rule 11), so loading requires a host-local approval of the exact fingerprint on that node; replay, fork, FullAccess, project files and installation itself never grant it. Git fetch runs no repository hooks or submodules; package files are never executed at install time; integrity is rechecked on every load. Content owners apply their own host-local approval to executable content they interpret (Hooks, MCP, workflows). Plugin business configuration holds credential references only, resolved by the plugin through the Settings credential resolver; resolved secrets never enter rows, the business source, `plugin.list`, diagnostics or content sources. A package that contributes `level: management` methods extends the host administration surface only after approval.
 
 ## Appendix A. Interface details
 
@@ -237,7 +240,7 @@ At the repository root: `{schemaVersion: 1, name, plugins: [{id, version, descri
 ### A.3 Plugin content sources
 
 ```rust
-/// Process service, stable registry; key TypeKey::of::<PluginContents>().
+/// Stable port in PluginContentsPlugin; key TypeKey::of::<PluginContents>().
 impl PluginContents {
     /// Sources of enabled, integrity-verified packages whose node store is Active.
     pub fn sources(&self, type_key: &str) -> Vec<Arc<ContentSource>>;
@@ -251,8 +254,7 @@ pub struct ContentSource {
     pub node: Option<String>,            // None = control node
     pub root: PathBuf,                   // package directory on `node`
     pub path: PathBuf,                   // declared path, relative to root
-    pub options: serde_json::Value,
-    pub configuration: serde_json::Value, // credential references only
+    pub options: serde_json::Value,       // from the manifest
 }
 ```
 
@@ -278,7 +280,7 @@ Packages live under PluginManager's package root on their node, written through 
 | `plugin.update` | `{id, node?, version?, expectedRevision}` | `{version, fingerprint, approval}` | Report |
 | `plugin.list` | `{node?}` | `[{id, version, node, enabled, status, approval, approvalToken?, contents, source, updateAvailable, error?}]` | Drain |
 | `plugin.set_enabled` | `{id, node?, enabled, expectedRevision}` | `{}` | Report |
-| `plugin.configure` | `{id, node?, configuration, expectedRevision}` | `{}` | Report |
+| `plugin.configure` | `{id, node?, configuration, expectedRevision}`; `expectedRevision` of the plugin's business configuration | `{}` | Report |
 | `plugin.reload` | `{id?, node?}` | `[{id, node, status, error?}]` | Report |
 | `plugin.approve` | `{id, node?, approvalToken}` | `{}` | Report |
 | `plugin.revoke` | `{id, node?}` | `{}` after code rows are disposed | Report |
@@ -293,7 +295,7 @@ Packages live under PluginManager's package root on their node, written through 
 | `plugins.install(entry, expected_revision)` | Creates package row and code rows on the editable layer |
 | `plugins.update(id, node, version, fingerprint, expected_revision)` | Updates the package row; code rows follow |
 | `plugins.set_enabled(id, node, enabled, expected_revision)` | `set_disabled` on the package row (code rows follow by dependency) |
-| `plugins.configure(id, node, configuration, expected_revision)` | Row configuration update (volatile where the plugin declares it) |
+| `plugins.configure(id, node, configuration, expected_revision)` | Writes the plugin's business configuration to the Settings business source keyed `<node>/<id>` and notifies; never edits rows (A16) |
 | `plugins.remove(id, node, expected_revision)` | Removes all rows of the package |
 | `marketplaces.save/remove` | Marketplace registrations |
 | Host-local approval service `grant/revoke {owner: "plugin", node, source, id, fingerprint}` | Outside loader and Timeline (R11) |
@@ -307,8 +309,8 @@ Packages live under PluginManager's package root on their node, written through 
 | Timeline | No writes, no Dispatcher subscription, no `StateCell`; rechecks are Settings revisions and approval-record matches |
 | Install | Lock `(node, id)` (A10), `stage`, compare with intent, `commit`, `plugins.install`, rows created, reply; a failed Settings write leaves an unreferenced directory collected later (A11) |
 | Row load | `PluginPackage::apply` looks up the node's services by node id, `verify`, registers sources, provides `PluginApproval` when a matching grant exists; its `ctx.effect` withdraws both |
-| Code rows | Pending until approved; disposed on revoke or disable; Pending while the node is offline (`peer:<node>/…` rows); contributions go through owner registries |
-| PluginManager reload | Only management methods reload (`plugin.*` `service_reloading`); registries, rows, code rows and content owners are unaffected; in-flight install/remove return `operation_interrupted` |
+| Code rows | Pending until approved; disposed on revoke or disable; Pending while the node is offline (`peer:<node>/…` rows); contributions go through consumer ports; business configuration read at use time |
+| PluginManager reload | Only its methods leave the method port (`plugin.*` `unknown_method` until re-registered); `PluginContents`, rows, code rows and content owners are unaffected; in-flight install/remove return `operation_interrupted` |
 | Process restart | Loader restores rows; rows re-verify; staging deleted; orphans collected after the loader settled |
 
 ## Appendix B. Full conflict table
@@ -317,16 +319,16 @@ Packages live under PluginManager's package root on their node, written through 
 | --- | --- | --- | --- |
 | Turn or branch interrupt, branch close, concurrent inputs, `input/withdrawn`, unsettled batch, compaction, child cut | — | No effect on PluginManager; owners' adoption rules apply | Content owners, ToolBinding |
 | Package disabled while a Session uses its Skill | revision bump < next adoption | Branch keeps its adopted prompt until it re-adopts | Skills / PromptSourcesBranch |
-| Code row contributing tools revoked or disabled mid-call | — | That call "tool provider unavailable"; batch and turn continue; branches adopt without it | ToolRegistry registry |
+| Code row contributing tools revoked or disabled mid-call | — | That call "tool provider unavailable"; batch and turn continue; branches adopt without it | Tool source port |
 | Two installs of one id on one node | lock, then Settings revision | Second `plugin_exists` (or `plugin_settings_conflict` across processes) | PluginManager, Settings |
-| `set_enabled` races `configure` | Settings revision | Stale `expectedRevision` fails | Settings |
+| Two `configure` calls race | business source revision | Stale `expectedRevision` fails; `set_enabled` uses the row revision and does not conflict with `configure` | Settings |
 | Approval granted, then package updated | new fingerprint | Code rows Pending until re-approved | `PluginPackage` row |
 | Revoke while code runs | revoke persisted < gate withdrawn | Code rows disposed after settling their work; reply after disposal | Loader, code rows |
 | Install interrupted after commit, before Settings | — | `operation_interrupted`; no row; directory collected | PluginManager |
 | Install interrupted after Settings write | — | `operation_interrupted`; row exists; retry `plugin_exists` | Client reads state |
 | Duplicate or late `plugin.install` | — | `plugin_exists` | PluginManager |
 | Marketplace update finds a newer version | — | `updateAvailable` only; nothing changes | PluginManager |
-| Target node offline before install | — | `node_unavailable`; nothing written | PluginManager (node-services lookup) |
+| Target node offline before install | — | `node_unavailable`; nothing written | PluginManager (node-services port) |
 | Node offline after install | peer rows Pending | Its rows Pending; its sources withdrawn; other nodes unaffected | rutis lifecycle |
 | Package node differs from a Session's resource node | — | Executing consumers ignore the source for that Session | Content owner |
 | Files modified on disk | next load | `integrity_failed`; row failed; sources withdrawn | `PluginPackage` row |
@@ -379,15 +381,16 @@ Flow tests through `plugin.*` methods with a local test marketplace and a test c
 | A9 | Additional methods `configure`, `approve`, `revoke`, `update`, `marketplace.search/view` | Feature list; overview B.12 | Folded into other methods |
 | A10 | Operations serialize per `(node, id)` | Judgment | Settings revisions alone |
 | A11 | Unreferenced directories garbage-collected after the loader settled | Judgment | Explicit cleanup command |
-| A12 | Content sources use a stable registry; node services are looked up per call | Extension registry | Offline peers or reloads propagate to owners |
+| A12 | Content sources use a stable port; node services are looked up per call | ADR 002 D2 | Offline peers or reloads propagate to owners |
 | A13 | Package directories are written through the node's `FileStorage` under a PluginManager package root (atomic rename available there) | Judgment | A per-node storage service is needed |
 | A14 | Install and update report progress phases | Method contribution progress sink; judgment | Result only |
 | A15 | No automatic upgrade, including content-only packages | Decision E22 | Opt-in auto-upgrade setting |
+| A16 | Per-plugin business configuration lives in a Settings business source keyed `<node>/<id>`, read by the plugin at use time | ADR 002 D5; judgment | Each plugin keeps its own store and contributes its own configure method |
 
 ## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| #3 typed operations | The Settings operations in A.6 are proposed here; their final shape belongs to the Settings supplement and #3 |
+| #3 typed operations | The Settings operations in A.6 are proposed here; their final shape belongs to the Settings supplement and #3 (intent only; `plugins.configure` writes business configuration, ADR 002 D5) |
 | Overview SkillsCatalog change | "Installation and removal are initiated by PluginManager" is read as: PluginManager publishes and withdraws sources, SkillsCatalog discovers them; PluginManager makes no SkillsCatalog call |
 | Peer-node content | Whether control-node consumers should read content on peer nodes through imported resource services (#5) |
