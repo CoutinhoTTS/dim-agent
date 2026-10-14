@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.14](../overview.md#4-plugin-catalog), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3. Language: TypeScript first for provider-executed categories; OCR depends on the OCR runtime component ([overview F.3](../overview.md#appendix-c-implementation-language)).
 
-Modality is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): tasks and provider connections are shared across Sessions) and the single entry for non-conversational multimodal work in nine categories: image, video, speech, music, audio, 3D asset, motion, realtime and OCR. It reports availability per category with reasons, resolves the default model by a Modality-owned purpose key, runs asynchronous tasks (submit, status, wait, cancel) stored through the process storage contract, and holds realtime connections bound to the opening client connection. Provider adapters are built into Modality or contributed by adapter plugins at process scope; OCR runs through the HostPlatform of the control node or of a configured node. Its methods are management-level entries in Rpc's method table. Modality's settings are business configuration read at use time. It has no Session or branch part: it writes no Timeline events and offers no model-visible tool.
+Modality is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): tasks and provider connections are shared across Sessions) and the single entry for non-conversational multimodal work in nine categories: image, video, speech, music, audio, 3D asset, motion, realtime and OCR. It reports availability per category with reasons, resolves the default model by a Modality-owned purpose key, runs asynchronous tasks (submit, status, wait, cancel) stored through the process storage contract, and holds realtime connections bound to the opening client connection. Provider adapters are built into Modality or provided by adapter plugins, in any language, as named process services `modalityAdapter`; OCR runs through the HostPlatform of the control node or of a configured node. Its methods are a `managementMethods` service (key `modality`), entries of level management in Rpc's method table. Modality's settings are business configuration read at use time. It has no Session or branch part: it writes no Timeline events and offers no model-visible tool.
 
 ## 1. Structure
 
@@ -10,8 +10,8 @@ Modality is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): tasks an
 flowchart LR
   subgraph PROC["Process (control node)"]
     Mod["Modality: catalog, tasks, realtime,<br/>built-in adapters"]:::new
-    AdPlug["Adapter plugins<br/>ModalityAdapter contributions"]
-    Rpc["Rpc method table<br/>collects ManagementMethods"]
+    AdPlug["Adapter plugins<br/>modalityAdapter services"]
+    Rpc["Rpc method table<br/>collects managementMethods"]
     Prov["Provider: purpose policy,<br/>connection resolution"]
     Set["Settings business source modality"]
     Store["Process storage incl. binary"]
@@ -32,15 +32,15 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Modality collects `Contributions<ModalityAdapter>` from adapter plugins, so an adapter reload reloads Modality, and Rpc collects Modality's `ManagementMethods`, so a Modality reload reloads Rpc. Both are rare structural events; their propagation is an accepted cost, and task recovery (§4) keeps it bounded: provider tasks with a stored handle resume by polling, others become `interrupted`. No Session or branch plugin depends on Modality.
+All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Modality collects every process-scoped `modalityAdapter` service by name, so an adapter reload reloads Modality, and Rpc collects Modality's `managementMethods` service, so a Modality reload reloads Rpc. Both are rare structural events; their propagation is an accepted cost, and task recovery (§4) keeps it bounded: provider tasks with a stored handle resume by polling, others become `interrupted`. No Session or branch plugin depends on Modality.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Modality` | Process (control node) | Provider purpose selection, purpose-policy write path and non-conversational connection resolution; process storage (UTF-8 and binary); Settings business source `modality`; `Contributions<ModalityAdapter>`; HostPlatform of the control node and of each configured OCR node; diagnostics | `ModalityTasks` process service; `ManagementMethods` (`modality.*`), collected by Rpc |
-| Adapter plugins | Process | their own provider dependencies | `ModalityAdapter` contribution |
+| `Modality` | Process (control node) | Provider purpose selection, purpose-policy write path and non-conversational connection resolution; process storage (UTF-8 and binary); Settings business source `modality`; all `modalityAdapter` services; HostPlatform of the control node and of each configured OCR node; diagnostics | `modalityTasks` process service; `managementMethods` key `modality` (`modality.*`), collected by Rpc |
+| Adapter plugins | Process | their own provider dependencies | `modalityAdapter` service, key adapter name, declared in the plugin's `provides` |
 
 **Contracts depended on:** the [methods](../contracts/session-boundary.md) contract (management-level entries in Rpc's method table, per-call progress sink, connection-bound notifications); Provider's per-purpose policy storage with its single write path and non-conversational connection resolution ([overview C.2](../overview.md#b2-app-server-process-plugins)); the App Server process storage contract with binary atomic replace; HostPlatform spawn with isolation ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md), isolation supplement in [overview C.1](../overview.md#b1-session-and-branch-capabilities)).
-**Contracts defined here:** category and operation identifiers; purpose keys `modality.<category>` and `modality.<category>.<operation>` (opaque to Provider); `ModalityAdapter`; the `modality` settings document; the `ModalityTasks` service; task record and result formats (format version 1); the `modality.*` methods and the `modality.realtime.event` notification. Provider knows nothing about modalities; Modality knows no provider-specific semantics outside its built-in adapters.
+**Contracts defined here:** category and operation identifiers; purpose keys `modality.<category>` and `modality.<category>.<operation>` (opaque to Provider); the `modalityAdapter` and `modalityTasks` services ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.2 and A.3; Rust binding in Appendix G); the `modality` settings document; task record and result formats (format version 1); the `modality.*` methods and the `modality.realtime.event` notification. Provider knows nothing about modalities; Modality knows no provider-specific semantics outside its built-in adapters.
 
 ## 2. Data and state
 
@@ -121,7 +121,7 @@ sequenceDiagram
   end
 ```
 
-Modality has no Session, so OCR runs on the control node unless the caller names a configured node (A15). A peer node's HostPlatform is the one imported over the rutis link ([overview multiple nodes](../overview.md#63-multiple-nodes)).
+Modality has no Session, so OCR runs on the control node unless the caller names a configured node (A15). A peer node's HostPlatform is the one imported over the rutis link ([overview multiple nodes](../overview.md#63-multiple-nodes)). When that node is offline, OCR tasks for it fail `node_unavailable`; Modality does not reload and no import goes Pending. This requires the imported HostPlatform to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5)).
 
 ### 3.3 Realtime connection
 
@@ -194,8 +194,8 @@ No model-visible effect. Modality offers no tool, prompt source, input or Timeli
 | `modality.configure` | Method, level management | Validate, then set or clear the default through Provider's purpose-policy write path |
 | `modality.task.submit/status/list/wait/cancel/result` | Methods, level management | Task lifecycle; chunked binary result retrieval |
 | `modality.realtime.open/send/close`, `modality.realtime.event` | Methods, level management, and connection-bound notification | Realtime connection |
-| `ModalityTasks` | Process service | Same operations, typed, for other process plugins |
-| `ModalityAdapter` | Process contribution collected by Modality | Provider-executed categories |
+| `modalityTasks` | Process service, no key | Same operations as the task methods, for other process plugins |
+| `modalityAdapter` | Process service, key adapter name, collected by Modality | Provider-executed categories |
 | `modality` settings document | Business configuration (Settings source) | OCR component path per node, limits |
 | `dimcode modality`, `image`, `video`, `speech`, `music`, `audio`, `asset`, `motion`, `ocr`, `realtime` | CLI | Thin clients of the methods |
 
@@ -229,29 +229,27 @@ Image understanding is not Modality (vision models through `read`). Per-operatio
 
 ### A.2 Adapters and OCR nodes
 
-```rust
-/// Process contribution from an adapter plugin, keyed by adapter name;
-/// Modality collects Contributions<ModalityAdapter>. Built-in adapters implement the same trait.
-pub trait ModalityAdapter: Send + Sync + 'static {
-    fn available(&self) -> watch::Receiver<bool>;
-    fn connection_kinds(&self) -> Vec<String>;
-    fn operations(&self, model: &ModelRef) -> Vec<OperationSpec>;   // category, operation, params schema
-    fn submit(&self, job: Job, conn: ResolvedConnection, cancel: CancellationToken)
-        -> HostFuture<'_, Submitted>;                               // Submitted { remote_handle: Option<String> }
-    fn wait(&self, handle: Option<&str>, conn: ResolvedConnection, progress: ProgressSink,
-        cancel: CancellationToken) -> HostFuture<'_, AdapterOutput>;
-    fn cancel_remote(&self, handle: &str, conn: ResolvedConnection) -> HostFuture<'_, RemoteCancel>;
-    fn realtime(&self, conn: ResolvedConnection, params: JsonObject, cancel: CancellationToken)
-        -> HostFuture<'_, Option<RealtimeChannel>>;
-}
-pub enum RemoteCancel { Cancelled, Unsupported, AlreadyFinished }
-```
+Service `modalityAdapter`, scope process, key adapter name, declared in the adapter plugin's `provides`; built-in adapters register the same service. Modality collects all of them by name and scope. Cancellation is a protocol action: Modality drops the call (or sends the binding's cancel request); the adapter stops local work. Errors are data `{ code, message }` with `code` one of `invalid_input`, `unavailable`, `provider_error`.
 
-`available()` reports runtime availability without a reload (for example, a provider endpoint unreachable). A purpose policy (or explicit model) whose Provider connection kind no collected adapter serves is reported as "no adapter for the configured model", and its submits fail `unavailable`. OCR is not an adapter: per task, Modality uses the HostPlatform of the target node (absent or unavailable: `node_unavailable`), probes the OCR component path the `modality` settings document gives for that node, and spawns it there. `wait` with a stored `remote_handle` must work in a new generation; an adapter that returns no handle cannot be resumed.
+| Method | Kind | Request | Reply |
+| --- | --- | --- | --- |
+| `available` | sync | `{}` | `{ available: bool, reason? }`; read at each use, no reload on change |
+| `connectionKinds` | sync | `{}` | `string[]` (Provider connection kinds served) |
+| `operations` | sync | `{ model: "<provider>/<model>" }` | `[{ category, operation, params_schema }]` |
+| `submit` | async | `{ job: Job, connection: ResolvedConnection }` | `{ remote_handle? }` |
+| `wait` | async | `{ remote_handle?, connection }`; progress as `{ fraction?, message? }` notifications on the call | `{ files: [{ name, media_type, path }], data? }`; `path` inside the job's work directory |
+| `cancelRemote` | async | `{ remote_handle, connection }` | `{ outcome: "cancelled" \| "unsupported" \| "already_finished" }` |
+| `realtimeOpen` | async | `{ connection, params }`; provider events as `{ channel_id, event }` notifications on the call until closed | `{ channel_id } \| null` (unsupported) |
+| `realtimeSend` | async | `{ channel_id, frame }` | `{}` |
+| `realtimeClose` | async | `{ channel_id }` | `{}` |
+
+`Job` is `{ task_id, category, operation, model, params, files: [{ name, media_type, path }], work_dir }`. `ResolvedConnection` is the data shape Provider's non-conversational connection resolution returns (`kind`, `provider_id`, `model`, endpoint and credential material), passed per call and never stored or logged.
+
+`available` reports runtime availability without a reload (for example, a provider endpoint unreachable). A purpose policy (or explicit model) whose Provider connection kind no collected adapter serves is reported as "no adapter for the configured model", and its submits fail `unavailable`. OCR is not an adapter: per task, Modality uses the HostPlatform of the target node (absent or unavailable: `node_unavailable`), probes the OCR component path the `modality` settings document gives for that node, and spawns it there; an offline peer node fails the call with `node_unavailable` and nothing reloads (§3.2). `wait` with a stored `remote_handle` must work in a new generation; an adapter that returns no handle cannot be resumed.
 
 ### A.3 Methods
 
-`ManagementMethods` in namespace `modality`, every method management level. `wait` uses the per-call progress sink; realtime uses connection-bound notifications ([methods](../contracts/session-boundary.md)).
+Service `managementMethods`, scope process, key `modality` (`describe` and `call` per the [methods](../contracts/session-boundary.md) contract), every method management level. `modalityTasks` (process, no key) offers `submit`, `status`, `list`, `wait`, `cancel` and `result` with the same requests and replies as the `modality.task.*` methods below. `wait` uses the per-call progress sink; realtime uses connection-bound notifications ([methods](../contracts/session-boundary.md)).
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -333,7 +331,7 @@ Invoking an unavailable category prints the same reason as the listing. The firs
 | Process restart mid-task | `running` record | Startup rule; never resubmitted | Modality |
 | Retention deletes a task a client still references | — | Terminal tasks only; `result` fails `not_found` | Modality |
 | OCR node unavailable before start | — | Task `failed` `node_unavailable`; other nodes unaffected | Modality |
-| OCR node lost mid-run | process lost | Task `interrupted` | Modality |
+| OCR node lost mid-run | process lost | Task `interrupted`; Modality does not reload (requirement on [#5](https://github.com/arcships/dim/issues/5)) | Modality |
 | Client detach while waiting | — | Task continues; that client's realtime connections close | Modality |
 | Provider credentials removed mid-task | — | Adapter call fails; `failed` `provider_error` | Modality |
 | Default model changed after submission | — | Task keeps its recorded model | Modality |
@@ -367,7 +365,7 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 6. Duplicate `client_task_id` returns the same task.
 7. Restart: host task `interrupted`; provider task with handle resumes without a second `submit`; without handle `interrupted`; `queued` `interrupted`.
 8. Reloading the adapter plugin reloads Modality; its handle-bearing task resumes by polling; with the adapter removed and a purpose policy naming its model, `modality.capabilities` reports "no adapter for the configured model".
-9. OCR on the control node and on a second node; that node unavailable fails only its tasks.
+9. OCR on the control node and on a second node; that node offline fails only its tasks with `node_unavailable` and does not reload Modality or Rpc.
 10. Realtime: events reach only the opening connection; close on disconnect and idle timeout.
 11. No Timeline event, tool declaration or input appears in any Session.
 12. Changing the `modality` settings document (OCR path, limits) applies at the next use without reloading Modality.
@@ -391,7 +389,7 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 | A14 | OCR component runs with input read access and no network | Judgment; overview isolation supplement | Weaker isolation |
 | A15 | OCR runs on the control node unless the caller names a configured node | Modality has no Session | A Session-derived default node needs a Session parameter |
 | A16 | Modality settings (OCR component path per node, concurrency and retention limits) are business configuration in a Settings business source `modality` | ADR 002 D4 | The OCR path, as a runtime path, becomes a structural loader field |
-| A17 | Adapters are process contributions collected by Modality; an adapter reload reloads Modality and, through the method table, Rpc | ADR 002 D2, D3 | Adapters built into Modality only |
+| A17 | Adapters are named process services `modalityAdapter` collected by Modality; an adapter reload reloads Modality and, through the method table, Rpc | ADR 002 D2, D3, D5 | Adapters built into Modality only |
 
 ## Appendix F. Open questions
 
@@ -399,4 +397,28 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 | --- | --- |
 | Provider catalog by category | Whether Provider tags non-conversational models by category, or adapters stay the only source of which model serves which operation |
 | Build vs feature list | Feature list places seven categories outside the standalone CLI's default scope; this design keeps them in scope and reports them unavailable by build |
-| Peer node offline ([#5](https://github.com/arcships/dim/issues/5)) | Whether a peer node's imported HostPlatform going offline only fails calls (`node_unavailable`) or makes the import Pending and reloads Modality (D3); this design assumes the former |
+
+Requirement on [#5](https://github.com/arcships/dim/issues/5): a HostPlatform imported from a peer node stays registered while the link is down and fails calls with `node_unavailable`, so an offline node never makes Modality Pending or reloads it.
+
+## Appendix G. Rust binding
+
+A Rust adapter plugin may implement the generated binding instead of handling the named service directly; the neutral form in A.2 is normative.
+
+```rust
+/// Binding for service `modalityAdapter` (process, key adapter name).
+pub trait ModalityAdapter: Send + Sync + 'static {
+    fn available(&self) -> Availability;
+    fn connection_kinds(&self) -> Vec<String>;
+    fn operations(&self, model: &ModelRef) -> Vec<OperationSpec>;
+    fn submit(&self, job: Job, conn: ResolvedConnection, cancel: CancellationToken)
+        -> HostFuture<'_, Result<Submitted, AdapterError>>;
+    fn wait(&self, handle: Option<&str>, conn: ResolvedConnection, progress: ProgressSink,
+        cancel: CancellationToken) -> HostFuture<'_, Result<AdapterOutput, AdapterError>>;
+    fn cancel_remote(&self, handle: &str, conn: ResolvedConnection) -> HostFuture<'_, RemoteCancel>;
+    fn realtime(&self, conn: ResolvedConnection, params: JsonObject, cancel: CancellationToken)
+        -> HostFuture<'_, Option<RealtimeChannel>>;   // maps realtimeOpen/Send/Close
+}
+pub enum RemoteCancel { Cancelled, Unsupported, AlreadyFinished }
+```
+
+Registration in Rust uses `TypeKey::named("modalityAdapter")` with the adapter name as instance key; Modality's own `managementMethods` and `modalityTasks` use the bindings of the [methods](../contracts/session-boundary.md) contract and a `ModalityTasks` handle with the same operations.

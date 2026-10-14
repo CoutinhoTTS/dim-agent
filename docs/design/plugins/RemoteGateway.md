@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.13](../overview.md#4-plugin-catalog), [Transport, Connection changes](../overview.md#b2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
-RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only the Session level of the [methods](../contracts/session-boundary.md) contract (Rpc's Session built-ins and every `SessionMethodContribution`), so devices may call every Session method, including `session.permission.update` (decision E3), and no management-level method. The entry is the product UI plane and never carries the rutis link plane between nodes.
+RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only the Session level of the [methods](../contracts/session-boundary.md) contract (Rpc's Session built-ins and every `sessionMethods` service), so devices may call every Session method, including `session.permission.update` (decision E3), and no management-level method. The entry is the product UI plane and never carries the rutis link plane between nodes.
 
 ## 1. Structure
 
@@ -10,10 +10,10 @@ RemoteGateway opens an authenticated entry on Transport's WebSocket for phones a
 flowchart LR
   subgraph P["App Server process, control node"]
     RG["RemoteGatewayPlugin<br/>pairing, devices, tokens, assets"]:::new
-    EH["EntryHost<br/>Transport contract"]:::contract
+    EH["entryHost<br/>Transport contract"]:::contract
     TR["Transport"]
     CONN["Connection<br/>ConnectionEntry record"]
-    RPC["Rpc<br/>built-ins, Session method contributions,<br/>method table of ManagementMethods"]
+    RPC["Rpc<br/>built-ins, sessionMethods services,<br/>method table of managementMethods"]
     SET["Settings<br/>enabled row field, remote settings source"]
     PST["Process storage<br/>remote-devices.json"]:::contract
   end
@@ -23,22 +23,22 @@ flowchart LR
   TR -->|"provides"| EH
   EH --> CONN
   CONN --> RPC
-  RPC -->|"collects remote.* as ManagementMethods"| RG
+  RPC -->|"collects remote.* as managementMethods"| RG
   RG --> SET
   RG --> PST
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-RemoteGateway only authenticates upgrades and records the device on the connection; every call afterwards is an ordinary Session-level method served by its owner. Its own `remote.*` methods are a `ManagementMethods` process service that Rpc collects into its method table at the management level, so they are reachable from entries configured for that level (the local entry), never from paired devices. Rpc depends on that service, so a RemoteGateway reload reloads Rpc; reloads are rare structural events and that cost is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md)).
+RemoteGateway only authenticates upgrades and records the device on the connection; every call afterwards is an ordinary Session-level method served by its owner. Its own `remote.*` methods are a `managementMethods` process service (key `remote`) that Rpc collects by name into its method table at the management level, so they are reachable from entries configured for that level (the local entry), never from paired devices. Rpc depends on that service, so a RemoteGateway reload reloads Rpc; reloads are rare structural events and that cost is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md)).
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `RemoteGatewayPlugin` | Process, control node | `EntryHost` (Transport), process storage, `SettingsService` | `ManagementMethods` (`remote.*`), collected by Rpc |
-| `TransportPlugin` (change) | Process | existing | existing `ListenAddresses`; added `EntryHost` |
+| `RemoteGatewayPlugin` | Process, control node | `entryHost` (Transport), process storage, Settings | `managementMethods` key `remote` (`remote.*`), collected by Rpc; `upgradeAuthenticator` and `httpRoutes` keyed by entry name `remote` |
+| `TransportPlugin` (change) | Process | existing; `upgradeAuthenticator`, `httpRoutes` per entry | existing `ListenAddresses`; added `entryHost` |
 | `ConnectionPlugin` / `RpcPlugin` (change) | Process | existing | `ConnectionEntry {name, levels, device_id}`; Rpc dispatches only the levels the entry is configured to serve |
 
-Contracts defined here: device records and tokens, pairing and rotation HTTP endpoints, `remote.*` methods, the `remote-devices.json` format. Contracts depended on: Transport's `EntryHost` and `UpgradeAuthenticator` (proposed Transport change; Transport owns them as their consumer), Connection's entry record, the [methods](../contracts/session-boundary.md) contract (management-level entries in Rpc's method table, levels served per entry), [process storage](../overview.md#b2-app-server-process-plugins), a typed Settings operation for the structural `enabled` field (`x-volatile`, `VolatileUpdate`, rutis-loader 0.10), and the Settings business source for runtime settings (ADR 002 D4). RemoteGateway knows no Session method's meaning and no other plugin.
+Contracts defined here: device records and tokens, pairing and rotation HTTP endpoints, `remote.*` methods, the `remote-devices.json` format. Contracts depended on: Transport's `entryHost`, `upgradeAuthenticator` and `httpRoutes` services (proposed Transport change, [language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral) in A.1, Rust binding in Appendix G; Transport owns them as their consumer), Connection's entry record, the [methods](../contracts/session-boundary.md) contract (management-level entries in Rpc's method table, levels served per entry), [process storage](../overview.md#b2-app-server-process-plugins), a typed Settings operation for the structural `enabled` field (`x-volatile`, `VolatileUpdate`, rutis-loader 0.10), and the Settings business source for runtime settings (ADR 002 D4). RemoteGateway knows no Session method's meaning and no other plugin.
 
 ## 2. Data and state
 
@@ -55,7 +55,7 @@ flowchart TB
   end
   subgraph MEM["Memory"]
     OFF["Pairing offers<br/>code_hash, expires_at, attempts"]:::new
-    LIVE["Live connections per device<br/>revocation tokens"]:::new
+    LIVE["Live connections per device"]:::new
   end
   TL["Timeline<br/>only facts written by Session owners"]
   CFG --> RG["RemoteGateway"]:::new
@@ -88,7 +88,7 @@ sequenceDiagram
   RG-->>D: deviceId, token or HttpOnly cookie
   D->>T: GET /ws with token
   T->>RG: authenticate upgrade
-  RG-->>T: device_id, revoked token
+  RG-->>T: allow, device_id
   T->>R: connection with ConnectionEntry levels session
   D->>R: hello v3, session.list, session.attach
 ```
@@ -128,7 +128,7 @@ sequenceDiagram
   participant C as Device connections
   U->>RG: remote.revoke deviceId
   RG->>PS: remove record
-  RG->>C: fire revoked tokens, connections close
+  RG->>C: entryHost closeDevice, connections close
   RG-->>U: done
   U->>RG: remote.rotate_token
   RG->>PS: set rotation_required
@@ -176,7 +176,7 @@ No model-visible effect of its own. Content from remote clients enters the model
 | `POST /api/pair`, `POST /api/token/rotate` | HTTP | Pairing, device token rotation |
 | `GET /ws` | WebSocket | App Server protocol v3 for paired devices: all Session methods |
 | `remote.start/stop/status/pair/devices/revoke/rotate_token` | Methods, level management | Local administration of the entry and devices |
-| `EntryHost`, `UpgradeAuthenticator`, `ConnectionEntry` | Transport/Connection change | Authenticated entries with assembly-defined levels |
+| `entryHost`, `upgradeAuthenticator`, `httpRoutes`, `ConnectionEntry` | Transport/Connection change (process services, data record) | Authenticated entries with assembly-defined levels |
 | CLI | `/remote`, `/web`, `dimcode remote`, `dimcode web` | User entries |
 
 Details: [Appendix A](#appendix-a-interface-details).
@@ -189,28 +189,19 @@ Every paired device has full Session-level control of every Session on the host:
 
 ### A.1 Transport change (proposed, owned by Transport)
 
-```rust
-impl EntryHost {
-    /// Binds a listener served by Transport's HTTP/WebSocket stack; dropping the
-    /// handle closes the listener and every connection it accepted (detach).
-    pub async fn open(&self, spec: EntrySpec) -> Result<EntryHandle, EntryError>;
-}
-pub struct EntrySpec {
-    pub name: String,                              // "remote"
-    pub bind: SocketAddr,
-    pub tls: Option<TlsFiles>,                     // cert and key paths on the control node
-    pub authenticate: Arc<dyn UpgradeAuthenticator>,
-    pub routes: Arc<dyn HttpRoutes>,               // non-WebSocket paths
-    pub levels: MethodLevels,                      // assembly data; RemoteGateway passes {Session} (A1)
-}
-pub trait UpgradeAuthenticator: Send + Sync {
-    fn authenticate(&self, request: &UpgradeRequest) -> HostFuture<'_, Result<Authenticated, Rejected>>;
-}
-pub struct Authenticated { pub device_id: String, pub revoked: CancellationToken }
-pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub device_id: Option<String> }
-```
+Three process services. `entryHost` (no key) is provided by Transport. `upgradeAuthenticator` and `httpRoutes` are provided by the entry's owner, keyed by entry name (`remote`), declared in its `provides`; Transport collects them by name when the entry opens. Errors are data `{ code, message }`.
 
-The connection closes when `revoked` fires. Without RemoteGateway, the bare WebSocket keeps today's rules (protected profiles: `hello` and `daemon.ping` only).
+| Service | Method | Kind | Request | Reply |
+| --- | --- | --- | --- | --- |
+| `entryHost` | `open` | async | `{ name, bind: "<ip>:<port>", tls?: { cert_path, key_path }, levels: ["session"] }` | `{ entry_id, address }`; binds a listener on Transport's HTTP/WebSocket stack |
+| `entryHost` | `close` | async | `{ entry_id }` | `{}` after the listener and every connection it accepted closed (detach) |
+| `entryHost` | `closeDevice` | async | `{ entry_id, device_id }` | `{}` after that device's connections closed |
+| `upgradeAuthenticator` | `authenticate` | async | `{ headers, origin?, remote_addr }` (tokens only in headers or cookie) | `{ verdict: "allow", device_id } \| { verdict: "deny" }` |
+| `httpRoutes` | `handle` | async | `{ method, path, headers, body_base64? }` | `{ status, headers, body_base64? }` |
+
+`levels` is assembly data; RemoteGateway passes `["session"]` (A1). Every accepted connection carries the data record `ConnectionEntry { name, levels, device_id? }`. Revocation calls `closeDevice`; dropping the entry calls `close`. Transport and RemoteGateway are Rust and use the binding in Appendix G.
+
+Without RemoteGateway, the bare WebSocket keeps today's rules (protected profiles: `hello` and `daemon.ping` only).
 
 ### A.2 HTTP surface
 
@@ -228,7 +219,7 @@ Tokens: 32 random bytes, base64url; SHA-256 hashes compared in constant time. Pa
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 only; v1/v2 rejected with `protocol_version` (A11) |
-| Methods | Rpc Session built-ins and every `SessionMethodContribution`, on every Session of the host (E3, A12); management-level names in Rpc's method table, including `daemon.shutdown` → `-32601 unknown_method` |
+| Methods | Rpc Session built-ins and every `sessionMethods` service, on every Session of the host (E3, A12); management-level names in Rpc's method table, including `daemon.shutdown` → `-32601 unknown_method` |
 | `hello.features` | Session features only |
 | Identity | `ConnectionEntry.device_id` for diagnostics and revocation; grants nothing beyond the entry's method set |
 | Reverse requests | None: client requests, server notifies ([#5](https://github.com/arcships/dim/issues/5)) |
@@ -241,7 +232,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 | v3 bare WebSocket, protected profile, without RemoteGateway | All but `hello`/`daemon.ping` `local_transport_required` | Same |
 | v1, v2 on the remote entry | Did not exist | `protocol_version` (A11) |
 
-### A.4 Methods (namespace `remote`, level management)
+### A.4 Methods (`managementMethods`, key `remote`, level management)
 
 | Method | Params | Result | Interruption |
 | --- | --- | --- | --- |
@@ -253,7 +244,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 | `remote.revoke` | `{deviceId}` | `{}` after record removed and connections closed | Report |
 | `remote.rotate_token` | `{deviceId?}` (absent: all) | `{}` after flag persisted and connections closed | Report |
 
-`remote.start`/`stop` write the structural `enabled` field through the typed Settings operation; the loader delivers a `VolatileUpdate` without reloading the plugin, and RemoteGateway opens or drops its `EntryHandle`. `remote.start` parameters `bind`, `tls`, `plaintext` are saved to the business source first. A business-source change while the entry runs reopens the `EntryHandle` with the new settings (connections detach) without reloading the plugin (A16).
+`remote.start`/`stop` write the structural `enabled` field through the typed Settings operation; the loader delivers a `VolatileUpdate` without reloading the plugin, and RemoteGateway calls `entryHost.open` or `close`. `remote.start` parameters `bind`, `tls`, `plaintext` are saved to the business source first. A business-source change while the entry runs closes and reopens the entry with the new settings (connections detach) without reloading the plugin (A16).
 
 ### A.5 Capability mechanics
 
@@ -262,7 +253,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 | Writes | None by RemoteGateway. Remote calls reach owners through Rpc like local calls: `session.submit` → Session input boundary (`Timeline::append`), `approval.respond` → branch Approval (`approval/respond`), `session.stop` → `stop/interrupt`, `session.permission.update` → Permission (`permission/changed`), `session.input.withdraw` → InputQueue (`input/withdrawn`) |
 | Dispatcher | Not subscribed; devices receive events through their per-connection Session attachment |
 | Concurrent attachers | No exclusive owner (A13); all receive the same events in per-branch order |
-| Reload | Drops the `EntryHandle`: listener and remote connections close (detach); records persist; offers lost; Rpc reloads with it because it collects `ManagementMethods` (ADR 002 D3, accepted); in-flight calls follow Rpc's reload rules. Transport reload reloads RemoteGateway (it injects `EntryHost`); runtime-settings changes never reload it |
+| Reload | Closes the entry: listener and remote connections close (detach); records persist; offers lost; Rpc reloads with it because it collects `managementMethods` (ADR 002 D3, accepted); in-flight calls follow Rpc's reload rules. Transport reload reloads RemoteGateway (it depends on `entryHost`); runtime-settings changes never reload it |
 | Process restart | Entry reopens if `enabled`; devices reconnect and re-attach; committed inputs and pending approvals replay on attach |
 
 ## Appendix B. Full conflict table
@@ -294,7 +285,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 | Runtime settings change while devices are connected | business source revision | Entry reopens with the new settings; connections detach and reconnect | RemoteGateway |
 | Session closed by another client | `session.closed` | Remote attachers receive it | Connection |
 | Session idle unload with only remote attachers | — | Attachment pins the Session; detach releases | AgentIndex |
-| Resource node of a Session offline | — | Same retryable errors as local clients | Session owners |
+| Resource node of a Session offline | — | Calls that reach that node fail `node_unavailable`, as for local clients; nothing reloads or goes Pending ([overview multiple nodes](../overview.md#63-multiple-nodes)) | Session owners |
 | Process restart with offers outstanding | — | Offers lost; devices persist | RemoteGateway |
 
 ## Appendix C. Errors and recovery
@@ -349,4 +340,32 @@ Flow tests in the App Server suite over a real WebSocket entry:
 | --- | --- |
 | [#5](https://github.com/arcships/dim/issues/5) and overview open questions "Remote access" | Relation of product device identity to peer tokens, link disconnection, TLS deployment |
 | Per-device scope | Whether devices may later be limited to workspaces or Sessions (not required by E3) |
-| Transport/Connection change | `EntryHost` and authenticator contracts are proposed here and need the Transport change document |
+| Transport/Connection change | `entryHost`, `upgradeAuthenticator` and `httpRoutes` are proposed here and need the Transport change document |
+
+## Appendix G. Rust binding
+
+Transport and RemoteGateway are Rust; they use this binding of A.1, which is normative in its neutral form.
+
+```rust
+/// Binding for service `entryHost` (process, no key).
+impl EntryHost {
+    /// Maps `open`; dropping the handle maps `close`.
+    pub async fn open(&self, spec: EntrySpec) -> Result<EntryHandle, EntryError>;
+}
+pub struct EntrySpec {
+    pub name: String,                                // "remote"
+    pub bind: SocketAddr,
+    pub tls: Option<TlsFiles>,
+    pub authenticate: Arc<dyn UpgradeAuthenticator>, // service `upgradeAuthenticator`
+    pub routes: Arc<dyn HttpRoutes>,                 // service `httpRoutes`
+    pub levels: MethodLevels,
+}
+pub trait UpgradeAuthenticator: Send + Sync {
+    fn authenticate(&self, request: &UpgradeRequest) -> HostFuture<'_, Result<Authenticated, Rejected>>;
+}
+/// `revoked` maps `closeDevice`: the connection closes when it fires.
+pub struct Authenticated { pub device_id: String, pub revoked: CancellationToken }
+pub struct ConnectionEntry { pub name: String, pub levels: MethodLevels, pub device_id: Option<String> }
+```
+
+`remote.*` use the `managementMethods` binding of the [methods](../contracts/session-boundary.md) contract.
