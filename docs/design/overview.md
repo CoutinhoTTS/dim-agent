@@ -50,10 +50,22 @@
 5. **作用域可见性**：进程插件不读取 Session 或分支状态，所需的值由调用方作为参数传入。
 6. **中断**：插件取消自己的在途工作、释放资源后再写终态（[中断](../architecture/rust-agent/interrupt.md)）。
 7. **准入**：新工具声明风险类别，由 Permission 与 Approval 准入；新类别登记在第 7 节。
-8. **管理面**：管理级 RPC 只对受保护的本地连接开放，WebSocket 远程调用方不可用。可以执行命令或改变宿主配置的方法一律是管理级。
+8. **管理面**：执行命令或改变宿主配置的方法是管理方法，由插件贡献给 Management 插件（5.16），不直接加入 Rpc。入口挂载了 Management 才能调用管理方法：本机 RPC 入口默认挂载，RemoteGateway 默认不挂载，其他节点经 rutis link 导出 Management 服务后才能使用。授权由装配与 link 配置决定，不另设身份分级。
 9. **在途工作**：不建立共享的在途工作登记。每个所有者提供自己的查询与停止，汇总只在 CLI 层显示（[事件驱动流程](../architecture/rust-agent/event-driven-flows.md) §3 “在途工作识别”暂不设计）。
 
-### 3.1 Capability 与进程插件
+### 3.1 多节点
+
+rutis 节点之间经 link 连接，可以导出与导入服务、在对端运行插件（`peer:<节点>/<插件>`）、转发事件（[rutis 节点](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md)，[#5](https://github.com/arcships/dim/issues/5)）。本文不预设资源在本机或远程，按以下规则设计：
+
+| 规则 | 内容 |
+| --- | --- |
+| 控制节点 | App Server 所在节点承载 Timeline、Session、Capability、配置来源、Provider 与调度 |
+| 资源节点 | 文件、进程、shell、隔离、本机安装的 CLI、浏览器等宿主资源所在的节点。每个 Session 在创建配置中绑定一个资源节点，创建后不变；未指定时为控制节点自身，单机时行为与现在相同 |
+| 资源服务 | 访问宿主资源一律经 Session 绑定的资源服务（FileStorage、HostPlatform、WorkspaceTools 的宿主侧）。资源节点不是控制节点时，这些服务由对端导出、按 Session 导入；使用方不区分本机与导入的服务 |
+| 绑定节点的数据 | 宿主本地批准、隔离配置、外部 Agent 目录、附件存放位置都以“节点 + 路径”标识 |
+| 管理面 | 见共同约束 8：是否能管理由 Management 挂载与导出决定 |
+
+### 3.2 Capability 与进程插件
 
 Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实例，以 `SessionScope`/`BranchScope` 实例键提供服务，经 Timeline 事件与声明的服务协作（[设计规则](../architecture/rust-agent/principles.md) §1）。不经这两种工厂注册的 rutis 插件是进程插件，如 App Server 进程插件与 FileStorage、HostPlatform、SkillsCatalog。Session 级能力不注册分支实例事件（[单树装配](../architecture/rust-agent/single-tree.md)），需要写事件或持有在途工作的部分放在分支级。
 
@@ -71,12 +83,12 @@ Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实�
 | --- | --- |
 | Capability | Questions（Session：工具；分支：待答问题）、Goal（Session：工具；分支：目标状态与继续） |
 | 进程插件 + Capability | Web（进程：搜索服务配置；Session：工具）、Hooks（进程：目录、批准与边界 Hook；分支：订阅与执行）、Scheduler（进程：作业与触发；Session：`schedule` 工具）、Workflow（进程：定义；Session：工具；分支：运行）、Notifications（进程：订阅与发送；Session：`notify` 工具） |
-| 进程插件 | ShellInput、Attachments、SessionTitle、ExternalAgent、PluginManager、RemoteGateway、Modality |
+| 进程插件 | Management、ShellInput、Attachments、SessionTitle、ExternalAgent、PluginManager、RemoteGateway、Modality |
 | 非 daemon 插件 | AcpGateway（CLI 进程中的协议适配） |
 
 拆分后的命名在各插件需求文档中确定。
 
-### 3.2 插件架构图
+### 3.3 插件架构图
 
 以下是目标结构，手绘，只用于说明新插件的位置。当前装配以 [生成图](../architecture/rust-agent/generated/) 为准。绿色为新插件（同一插件拆分的各部分用同一名称加括号说明），橙色边框为第 7 节中有“变更”的现有插件，虚线框为按配置启用的现有插件。
 
@@ -98,9 +110,10 @@ flowchart TB
     subgraph PC["连接与协议"]
       ServerControl["ServerControl"]
       Connection["Connection"]:::changed
-      Rpc["Rpc"]
+      Rpc["Rpc"]:::changed
       Transport["Transport"]:::changed
       RemoteGateway["RemoteGateway"]:::new
+      Management["Management"]:::new
     end
     subgraph PS["存储与 Session 管理"]
       FileStorage["FileStorage"]
@@ -204,7 +217,9 @@ flowchart TB
     end
   end
 
+  RN["资源节点（默认即控制节点；可经 rutis link 导入）"]
   CLIP -->|本地 RPC| PROC
+  RN -.->|资源服务按 Session 导入| SES
   PROC -->|Agents 装载| SES
   SES -->|TimelineTree 装载| BR
 ```
@@ -235,6 +250,7 @@ flowchart LR
     RemoteGateway["RemoteGateway"]:::new
     AcpGateway["AcpGateway"]:::new
     Modality["Modality"]:::new
+    Management["Management"]:::new
   end
 
   subgraph E["现有插件"]
@@ -257,7 +273,7 @@ flowchart LR
     Aimux["Aimux（ModelHost）"]
     SessionBroadcast["Session 广播"]
     Transport["Transport"]:::changed
-    Rpc["Rpc"]
+    Rpc["Rpc"]:::changed
   end
 
   Questions & Goal & Web & Workflow & Scheduler & Notifications -->|A 贡献工具| ToolRegistry
@@ -286,6 +302,8 @@ flowchart LR
   RemoteGateway -->|认证连接| Transport
   RemoteGateway --> Rpc
   AcpGateway -->|本地 RPC| Rpc
+  ShellInput & HooksP & Scheduler & Workflow & ExternalAgent & PluginManager & RemoteGateway -->|贡献管理方法| Management
+  Management -->|挂载到本机入口| Rpc
 ```
 
 #### 新插件位置
@@ -294,7 +312,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` 工具 | 待答问题 | ToolRegistry、ToolExecutor |
 | Goal | — | `goal_update` 工具 | 目标状态与继续 | ToolRegistry、InputQueue |
-| ShellInput | RPC 边界执行命令 | — | — | HostPlatform、InputQueue |
+| ShellInput | RPC 边界执行命令 | — | — | HostPlatform（Session 绑定）、InputQueue、Management |
 | Attachments | 提交边界转换与文本附件 | — | — | FileStorage |
 | Web | 搜索服务配置 | `web_search`、`web_fetch` 工具 | — | Settings、ToolRegistry、Permission |
 | SessionTitle | 订阅与标题生成 | — | — | Session 广播、Provider、SessionStore |
@@ -307,6 +325,7 @@ flowchart LR
 | RemoteGateway | 远程访问 | — | — | Transport、Rpc |
 | Modality | 多模态任务 | — | — | Provider |
 | AcpGateway | CLI 进程 | — | — | Rpc（本地 RPC） |
+| Management | 管理方法的汇集与挂载 | — | — | Rpc、各插件的管理贡献 |
 
 ## 4. 功能归属
 
@@ -445,8 +464,8 @@ flowchart LR
 | 职责 | 执行用户在输入框发起的 `!command` 与 `!!command` |
 | 接入 | E：在 RPC 边界执行命令，与 Hooks 的用户提交 Hook 相同；B：`!command` 结束后把命令与有界输出写成 Append 模式输入，在下一次模型请求时进入上下文，不单独开始 turn |
 | 事件 | 无。`!command` 的结果即输入；`!!command` 的输出只返回给发起的客户端并写入诊断通道 |
-| 接口 | RPC `session.shell.run`、`session.shell.stop`：管理级，只对本地连接开放 |
-| 关系 | 经 HostPlatform 启动进程并套用隔离配置；用户在本地直接发起，不经 Approval。命令不属于分支的在途工作，不受分支中断影响，由 `session.shell.stop` 停止；daemon 退出时终止 |
+| 接口 | 管理方法 `session.shell.run`、`session.shell.stop`，贡献给 Management |
+| 关系 | 在 Session 的资源节点上执行：经 Session 绑定的 HostPlatform 启动进程并套用该节点的隔离配置；用户直接发起，不经 Approval。命令不属于分支的在途工作，不受分支中断影响，由 `session.shell.stop` 停止；daemon 退出时终止 |
 
 ### 5.4 Attachments
 
@@ -454,10 +473,10 @@ flowchart LR
 | --- | --- |
 | 作用域 | 进程（提交边界） |
 | 职责 | 在提交边界把附件转为最终内容；保存文本附件 |
-| 接入 | B：图片在提交边界转为 `user` 内容中的图片块（最终内容）；文本附件保存到 Session 附件目录，输入中以文件路径出现，由模型按需 `read` |
+| 接入 | B：图片在提交边界转为 `user` 内容中的图片块（最终内容）；文本附件保存到 Session 资源节点上的附件目录（经 Session 绑定的 FileStorage），输入中以该节点上的文件路径出现，由模型按需 `read` |
 | 事件 | 无 |
 | 接口 | RPC `attachment.put` 保存文本附件并返回路径 |
-| 关系 | 经 FileStorage 写入。分叉时附件文件随 Session 复制，只随 Session 删除，保证历史引用完整。模型不支持图片时在提交边界拒绝。终端创建的临时图片缓存由 CLI 清理 |
+| 关系 | 附件与模型的 `read` 位于同一资源节点。分叉时附件文件随 Session 复制，只随 Session 删除，保证历史引用完整。模型不支持图片时在提交边界拒绝。终端创建的临时图片缓存由 CLI 清理 |
 
 ### 5.5 Web
 
@@ -489,10 +508,10 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | --- | --- |
 | 作用域 | 进程（目录、批准、Session 开始与用户提交 Hook）+ 分支（工具调用前后、turn 结束、通知 Hook） |
 | 职责 | 在生命周期节点执行用户、项目、插件来源的命令 Hook |
-| 接入 | 命令 Hook 会启动外部进程，不能放进同步 before（before 在提交锁内运行，不执行 I/O）。各时机的映射：Session 开始与用户提交在 RPC 边界执行，用户提交 Hook 可以拒绝提交或以 raw 块附加内容；工具调用前的 Hook 经 Approval 的准入扩展点异步执行，由业务所有者管理（[单树装配](../architecture/rust-agent/single-tree.md) 同步 before）；工具调用后、turn 结束与通知 Hook 由分支 Capability 订阅对应事件后异步执行；需要注入的输出经 B 写入 |
+| 接入 | 命令 Hook 会启动外部进程，不能放进同步 before（before 在提交锁内运行，不执行 I/O）。各时机的映射：Session 开始与用户提交在 RPC 边界执行，用户提交 Hook 可以拒绝提交或以 raw 块附加内容；工具调用前的 Hook 经 Approval 的准入扩展点异步执行，由业务所有者管理（[单树装配](../architecture/rust-agent/single-tree.md) 同步 before）；工具调用后、turn 结束与通知 Hook 由分支 Capability 订阅对应事件后异步执行；需要注入的输出经 B 写入。命令一律在 Session 的资源节点上经 Session 绑定的 HostPlatform 执行 |
 | 事件 | 无。拦截决定记录在所有者的事实中（输入是否写入、工具结果为拒绝）；注入的输出本身是输入；执行记录走诊断通道 |
-| 接口 | RPC `hooks.catalog`、`hooks.approve`、`hooks.set_enabled`、`hooks.disable_all`：管理级 |
-| 关系 | Session 开始 Hook 只在创建 Session 时执行，恢复与重载不重新执行。观察类 Hook 只由实时分发触发，重载后的新一代从明确位置接手，不补跑。项目与插件来源的 Hook 需要宿主本地批准才能执行，批准绑定配置指纹。准入扩展点上的 Hook 在中断时取消，对应调用以取消结算。插件来源依赖 #3 |
+| 接口 | 管理方法 `hooks.catalog`、`hooks.approve`、`hooks.set_enabled`、`hooks.disable_all`，贡献给 Management |
+| 关系 | Session 开始 Hook 只在创建 Session 时执行，恢复与重载不重新执行。观察类 Hook 只由实时分发触发，重载后的新一代从明确位置接手，不补跑。项目与插件来源的 Hook 需要宿主本地批准才能执行，批准绑定节点、工作区与配置指纹。准入扩展点上的 Hook 在中断时取消，对应调用以取消结算。插件来源依赖 #3 |
 
 ### 5.8 Scheduler
 
@@ -502,8 +521,8 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 职责 | 定时任务的创建、编辑、暂停、恢复、删除、立即运行与执行历史 |
 | 接入 | E：到点时经 Agents 新建或复用 Session，提交作业提示词，raw 块标明来自定时作业；A：工具 `schedule` 供模型管理作业 |
 | 事件 | 无。作业与执行历史存于进程存储 |
-| 接口 | RPC `schedule.list/save/delete/set_enabled/run_now/history`：管理级 |
-| 关系 | 作业字段：周期、提示词、工作目录、模型、新建或复用 Session；作业创建的 Session 为非交互 Session。触发要求 daemon 存活；错过的时间窗跳过，不补跑。工具 `schedule` 的风险类别为“持久配置” |
+| 接口 | 管理方法 `schedule.list/save/delete/set_enabled/run_now/history`，贡献给 Management |
+| 关系 | 作业字段：周期、提示词、资源节点与工作目录、模型、新建或复用 Session；作业创建的 Session 为非交互 Session。触发要求 daemon 存活；错过的时间窗跳过，不补跑。工具 `schedule` 的风险类别为“持久配置” |
 
 ### 5.9 Workflow
 
@@ -513,7 +532,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 职责 | 查看工作流、提供参数并启动；查看阶段、日志、状态与结果；停止；保存工作流供复用 |
 | 接入 | D：一次运行是发起分支上 Workflow 的脱离工作，各阶段在子分支（TimelineTree）或协作成员（Collaboration，含外部 Agent）中执行；完成时以 Steer 输入唤醒发起分支；A：工具 `workflow` 提供启动、状态与停止 |
 | 事件 | `workflow/started {run_id, workflow, params}`、`workflow/ended {run_id, outcome, summary}`。阶段进度从子分支与协作成员的事实读取，日志走诊断通道 |
-| 接口 | RPC `workflow.list/save/start/status/stop` |
+| 接口 | Session 方法 `workflow.status/stop`；管理方法 `workflow.list/save/start`，贡献给 Management |
 | 关系 | 定义文件经 Settings 的用户与项目来源保存；项目来源的定义需要宿主本地批准才能运行。阶段模型经 Provider 按用途选择。运行不跨重载恢复，按共同约束 4 结算 |
 
 ### 5.10 ExternalAgent
@@ -523,11 +542,11 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 项 | 设计 |
 | --- | --- |
 | 作用域 | 进程 |
-| 职责 | 探测本机已安装的 Claude Code、Codex、Cursor、OpenCode 等；启用、停用与配置；把模型调用桥接到外部 Agent：支持 ACP 的经 ACP 客户端连接，其余以非交互 CLI 调用 |
+| 职责 | 按节点探测已安装的 Claude Code、Codex、Cursor、OpenCode 等；启用、停用与配置；把模型调用桥接到外部 Agent：支持 ACP 的经 ACP 客户端连接，其余以非交互 CLI 调用 |
 | 接入 | E：作为 Provider 目录中的一类连接（每个外部 Agent 一项）；Aimux（ModelHost）按连接类型把请求分派给本插件。Agent profile 选择外部 Agent 为模型时不装配工具，外部 Agent 使用自己的工具 |
 | 事件 | 无。委派沿用 Collaboration 的事实；member Session 内是普通的 turn 与模型输出事件 |
-| 接口 | RPC `external_agents.list/set_enabled/configure`：管理级 |
-| 关系 | 模型请求中只把上次外部调用之后新消费的输入发给外部 Agent，外部会话身份按 dim Session 保存在进程存储中，用于续接。中断取消外部调用。外部进程经 HostPlatform 启动并套用隔离配置。外部 Agent 自身的权限请求如何处理见第 12 节 |
+| 接口 | 管理方法 `external_agents.list/set_enabled/configure`，贡献给 Management |
+| 关系 | 模型请求中只把上次外部调用之后新消费的输入发给外部 Agent，外部会话身份按 dim Session 保存在进程存储中，用于续接。中断取消外部调用。外部 Agent 目录按节点区分，连接身份包含节点；桥接以 `peer:<节点>/<插件>` 行在外部 Agent 所在节点运行，经该节点的 HostPlatform 启动进程并套用隔离配置。外部 Agent 自身的权限请求如何处理见第 12 节 |
 
 ### 5.11 Notifications
 
@@ -546,9 +565,9 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | --- | --- |
 | 作用域 | 进程 |
 | 职责 | 插件市场（Git 来源）的增删与更新；搜索、查看、安装（市场、本地路径、Git URL）、启用、停用、重载、移除插件 |
-| 接入 | E：插件清单声明其内容：Skill、Hook、MCP 配置、工作流、能力插件；安装即写入来源并发布 loader 行，管理操作对应 loader 操作 |
+| 接入 | E：插件清单声明其内容：Skill、Hook、MCP 配置、工作流、能力插件；安装即写入来源并发布 loader 行，管理操作对应 loader 操作；安装指定目标节点，对端节点上的插件以 `peer:<节点>/<插件>` 行加载 |
 | 事件 | 无 Timeline 事件；状态来自 loader 条目 |
-| 接口 | RPC `plugin.marketplace.*`、`plugin.install/remove/set_enabled/reload/list`：管理级 |
+| 接口 | 管理方法 `plugin.marketplace.*`、`plugin.install/remove/set_enabled/reload/list`，贡献给 Management |
 | 关系 | 依赖 #3（loader 管理）；Rust 以外语言的能力插件依赖 #4。插件内容按来源接入 SkillsCatalog、Hooks、Mcp、Workflow。插件内的可执行内容需要宿主本地批准 |
 
 ### 5.13 RemoteGateway
@@ -559,8 +578,8 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 职责 | Web 工作区与远程访问：启动与停止服务、认证、访问令牌轮换、手机配对（二维码或配对码）、设备授权与撤销、远程访问 Session |
 | 接入 | E：建在 Transport 的 WebSocket 之上，增加认证、配对与设备授权；提供 Web 工作区静态资源 |
 | 事件 | 无 Timeline 事件；设备与令牌存于进程存储 |
-| 接口 | RPC `remote.start/stop/status/pair/devices/revoke/rotate_token`：管理级 |
-| 关系 | 远程客户端只能使用 Session 级方法。认证、断线与 TLS 部署的取舍与 [#5](https://github.com/arcships/dim/issues/5) 的待定问题一并决定 |
+| 接口 | 管理方法 `remote.start/stop/status/pair/devices/revoke/rotate_token`，贡献给 Management |
+| 关系 | 默认不挂载 Management，远程客户端只能使用 Session 方法。认证、断线与 TLS 部署的取舍与 [#5](https://github.com/arcships/dim/issues/5) 的待定问题一并决定 |
 
 ### 5.14 Modality
 
@@ -583,6 +602,17 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 事件 | 无 |
 | 接口 | ACP 协议 |
 | 关系 | 与 CLI 一样经本地 RPC 连接 daemon，不在 daemon 中另开执行路径。ACP 协议的编解码与 ExternalAgent 的 ACP 客户端共用 |
+
+### 5.16 Management
+
+| 项 | 设计 |
+| --- | --- |
+| 作用域 | 进程 |
+| 职责 | 汇集各插件贡献的管理方法，并把它们挂载到指定入口 |
+| 接入 | E：插件以命名贡献登记管理方法（同 ToolRegistry 的工具贡献）；入口是否挂载 Management 由装配决定：本机 RPC 入口默认挂载，RemoteGateway 默认不挂载；其他节点经 rutis link `export` Management 服务后使用 |
+| 事件 | 无 |
+| 接口 | 各插件贡献的管理方法；`management.methods` 列出当前入口可用的方法 |
+| 关系 | 不做身份分级或逐方法授权：能否管理只取决于入口是否挂载、link 是否导出。现有的 `mcp.*`、`provider.*`、`skills.*`、`account.*` 等管理方法迁入 Management，见第 7 节 Rpc 的变更 |
 
 ## 6. 新增 Timeline 事件
 
@@ -627,18 +657,19 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | Prompt | 补充 | 在 Session 内切换 Agent 配置（提示词、模型、工具集）作为一次配置采用 | `/agent` |
 | PromptSources | 补充 | 提示词语言来源 | `/language` |
 | ContextPreparation | 补充 | 查询当前上下文用量与预算；手动压缩入口；接入生产用压缩宿主（`ContextModelHost` 的提供者，模型经 Provider 按“辅助”用途选择） | `/usage`、`/compact`、自动压缩 |
-| HostPlatform | 补充 | 操作系统级隔离：启动进程时套用调用方传入的隔离配置（文件、网络、进程）；平台后端 macOS seatbelt、Linux landlock 或 bubblewrap，Windows 无后端时明确不可用。隔离配置来自 Settings 的宿主本地来源，不来自 Timeline；Permission 的权限预设是准入，不放宽隔离 | 沙箱；ShellInput、Hooks、ExternalAgent |
+| FileStorage、HostPlatform、WorkspaceTools | 补充 | 宿主侧服务可由资源节点导出、按 Session 导入；Session 内的使用方经 Session 绑定的服务访问，不直接使用控制节点的进程服务 | 多节点（3.1）；依赖 #5 |
+| HostPlatform | 补充 | 操作系统级隔离：启动进程时套用调用方传入的隔离配置（文件、网络、进程）；平台后端 macOS seatbelt、Linux landlock 或 bubblewrap，Windows 无后端时明确不可用。隔离在启动进程的节点上生效，配置按节点区分，来自 Settings 的宿主本地来源，不来自 Timeline；Permission 的权限预设是准入，不放宽隔离 | 沙箱；ShellInput、Hooks、ExternalAgent |
 
 ### 7.2 App Server 进程插件
 
 | 插件 | 类型 | 内容 | 原因 |
 | --- | --- | --- | --- |
 | Settings | 补充 | 新的配置来源：权限规则、Hook 定义与批准、工作流定义与批准、Web 搜索服务、通知渠道、按用途的模型策略、沙箱配置、外部 Agent、插件市场；统一的凭据引用 | Hooks、Workflow、Web、Notifications、Provider、HostPlatform、ExternalAgent、PluginManager、Permission 规则 |
-| Rpc | 补充 | 第 5 节各插件的方法；方法分为 Session 级与管理级，供网关判断可用范围 | 全部新插件；RemoteGateway |
+| Rpc | 变更 | 只承载 Session 方法；管理方法改由 Management 贡献与挂载，现有管理方法迁入 Management | Management；RemoteGateway |
 | Transport、Connection | 变更 | 远程连接携带认证后的设备身份；按身份限制可用方法 | RemoteGateway |
 | Provider | 补充 | `ModelSelectionHost` 按用途（子代理、辅助任务、默认多模态）选择模型：继承调用方传入的模型、固定模型与推理强度、由 Agent 选择（仅子代理）；外部 Agent 连接类型；非对话类模型 | 子代理与辅助模型；ExternalAgent；Modality |
 | Aimux | 补充 | 按连接类型把模型请求分派给 ExternalAgent 桥接 | ExternalAgent |
-| Agents | 补充 | 以非交互配置新建或复用 Session 并提交首条输入；从另一 Session 的截点创建 Session；以外部 Agent 为模型、不装配工具的 profile | Scheduler；Session 分叉；ExternalAgent |
+| Agents | 补充 | Session 创建配置包含资源节点，创建后不变；以非交互配置新建或复用 Session 并提交首条输入；从另一 Session 的截点创建 Session；以外部 Agent 为模型、不装配工具的 profile | Scheduler；Session 分叉；ExternalAgent |
 | SessionStore | 补充 | Session 元数据（标题及其来源、分叉来源）与修订检查；删除（先关闭 Session，Loop 未空闲时拒绝）与按时间或数量清理（含预览）；分叉复制来源截点之前的事实及其引用闭包（附件、事件声明），不复制宿主安全设置；附件随 Session 复制与删除 | SessionTitle、Session 分叉与清理、Attachments |
 | Collaboration | 变更 | 子代理模型改由 Provider 按“子代理”用途选择，调用方传入主 Session 已采用的模型 | 子代理模型 |
 | Collaboration | 补充 | 外部 Agent 可作为 member 目标，在 `list`、`inspect` 中列出 | ExternalAgent |
@@ -659,10 +690,11 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 事件 | 每个插件在需求文档中列出声明的事件、数据格式与消费规则（哪些状态机必须消费、消费后达到什么效果），并说明为什么不能由已有事实推出 |
 | 上下文 | 只经 A 或 B 进入模型上下文；持续生效的规则经 C 或带 key 的 raw 输入块 |
 | 配置 | 每项配置有明确来源（用户、工作区、Session）和唯一写入路径；凭据只以引用形式出现在配置中 |
-| 信任 | 来自项目文件或插件的可执行内容（Hook、MCP、工作流、能力插件）需要宿主本地批准，批准绑定配置指纹；读取配置不产生执行权限 |
+| 信任 | 来自项目文件或插件的可执行内容（Hook、MCP、工作流、能力插件）需要宿主本地批准，批准绑定节点、工作区与配置指纹；读取配置不产生执行权限 |
 | 安全设置 | 宿主安全设置（隔离、批准）不写入 Timeline；回放与分叉不恢复或放宽权限 |
 | 持久化 | 进程级存储变更遵循现有存储兼容策略；不跨不兼容格式复用版本号 |
-| 协议 | 新 RPC 方法区分 Session 级与管理级；管理级只对受保护的本地连接开放 |
+| 协议 | Session 方法进入 Rpc；管理方法贡献给 Management，由挂载与导出决定可用范围 |
+| 节点 | 访问宿主资源只经 Session 绑定的资源服务；不假设资源节点就是控制节点 |
 | 国际化 | 用户可见文案由 CLI 负责；模型可见文案由提示词来源负责 |
 
 ## 10. 插件需求文档模板
@@ -674,7 +706,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 3. 作用域与依赖：拆分、作用域、注入的服务、提供的服务
 4. 事件：类型名、数据格式、写入方、消费规则，以及不能由已有事实推出的理由
 5. 状态：拥有的状态及如何由 Timeline 或进程存储重建
-6. 接口：工具（含风险类别）、RPC（Session 级或管理级）、CLI 入口
+6. 接口：工具（含风险类别）、Session 方法、管理方法、CLI 入口；涉及宿主资源时说明使用哪个节点的服务
 7. 错误与恢复：取消、中断、重载、进程退出时的结算
 8. 安全：准入、信任、隔离、敏感数据
 9. 验收：需要的流程测试
@@ -683,10 +715,10 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 
 | 阶段 | 内容 |
 | --- | --- |
-| P0 地基 | #2 动态事件；RPC 方法分级约定；Permission 新风险类别 |
+| P0 地基 | #2 动态事件；Management 与现有管理方法迁入；Permission 新风险类别 |
 | P1 核心交互 | Questions、ShellInput、Attachments、SessionTitle；InputQueue 撤回、Permission 规则、模型参数、Provider 按用途选择模型、SessionStore 删除清理与分叉；CLI 子命令、`/export` 与 `exec --json` |
 | P2 能力扩展 | Goal、Web、HostPlatform 隔离、Hooks（用户与项目来源）、Scheduler、Workflow、Notifications；Mcp OAuth；生产用压缩宿主 |
-| P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway、Modality；PluginManager（依赖 #3、#4） |
+| P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway、Modality；PluginManager（依赖 #3、#4）；资源节点导入（依赖 #5） |
 
 ## 12. 待对齐问题
 
@@ -699,4 +731,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | FullAccess 与新风险类别 | 外发消息与持久配置是否在 FullAccess 下仍需询问 |
 | 进程级订阅 | Notifications 与 SessionTitle 所需的跨 Session 订阅是否复用 Session 广播 |
 | 外部 Agent 的权限 | 外部 Agent 自身的权限请求（如 ACP 的权限请求）映射为 dim 审批，还是按配置的权限模式自动应答 |
+| 资源节点离线 | 用到资源服务的工具与命令明确失败，还是等待重连（rutis 对端行默认等待）；依赖 #5 的断线处理 |
+| 节点认证 | 节点 token 与产品身份的对应，以及向哪些节点导出 Management；依赖 #5 |
+| 跨控制节点协作 | Collaboration 的 member 是否可以是另一个 App Server 上的 Session；本文暂不做 |
 | 外部会话续接 | 外部 Agent 不支持续接或续接失败时，是新开外部会话并附带历史摘要，还是明确失败 |
