@@ -756,7 +756,20 @@ async fn coordinate(
         tokio::spawn(publisher.run(root.clone(), loader, assembly, control.shutdown().clone()))
     });
     control.shutdown().cancelled().await;
+    let hub = root.get::<ConnectionHub>();
+    // Taking RPC admission fences the shutdown-request tracker. Every accepted
+    // graceful request installs its reply ID, and every force acknowledgement
+    // settles, before we choose a mode or close the connection writers.
+    let rpc = hub.as_ref().and_then(|hub| hub.take_rpc());
+    if let Some(hub) = &hub {
+        hub.shutdown_requests.close();
+        hub.shutdown_requests.wait().await;
+    }
     if control.forced() {
+        if let Some(hub) = hub {
+            hub.close().await;
+        }
+        control.complete_shutdown(false).await;
         return Ok(ShutdownReason::Forced);
     }
     let mut errors = vec![];
@@ -770,8 +783,7 @@ async fn coordinate(
             errors.push(error);
         }
     }
-    let hub = root.get::<ConnectionHub>();
-    if let Some(rpc) = hub.as_ref().and_then(|hub| hub.take_rpc()) {
+    if let Some(rpc) = rpc {
         rpc.unloading.cancel();
         rpc.commands.close();
         rpc.commands.wait().await;

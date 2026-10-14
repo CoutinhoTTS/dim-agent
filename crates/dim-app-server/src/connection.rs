@@ -121,8 +121,13 @@ impl Connection {
             let guard = self.admit(&request)?;
             let this = self.clone();
             let rpc = rpc.clone();
+            // Shutdown must join its control requests without waiting for
+            // business commands that a forced exit deliberately abandons.
+            let shutdown = matches!(request.call, Call::Shutdown(_))
+                .then(|| self.hub.shutdown_requests.token());
             rpc.commands.clone().spawn(async move {
                 let _guard = guard;
+                let _shutdown = shutdown;
                 let id = request.id;
                 let result = this.handle(&rpc, id.clone(), request.call).await;
                 if let Some(result) = result {
@@ -1548,6 +1553,7 @@ pub(crate) struct ConnectionHub {
     pub control: Arc<ServerControl>,
     connections: Mutex<HashMap<String, Weak<Connection>>>,
     pub tasks: TaskTracker,
+    pub shutdown_requests: TaskTracker,
     closing: CancellationToken,
     rpc: RwLock<Option<Arc<RpcService>>>,
 }
@@ -1556,6 +1562,7 @@ impl ConnectionHub {
         Self {
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
+            shutdown_requests: TaskTracker::new(),
             closing: CancellationToken::new(),
             rpc: RwLock::new(None),
             control,

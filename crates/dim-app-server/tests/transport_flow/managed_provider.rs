@@ -2,6 +2,7 @@ use super::*;
 use axum::{Router, body::Body, http::StatusCode, routing::post};
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    file_storage::{FileStorage, FileStorageError, FileStoragePlugin},
     history::HistoryRenderer,
     host::{ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
@@ -220,21 +221,62 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     .await
     .unwrap();
     assert_ok(&client.rpc("provider.save",json!({"provider":{"providerId":"static-fixture","displayName":"Static fixture","driverKind":"openai-compatible","baseUrl":base,"auth":{"type":"bearer"},"credential":{"action":"set","value":"static-fixture-secret"},"models":[entry],"enabled":true}})).await);
-    let lost = client
-        .rpc("account.status", json!({"providerId":"terminate-runtime"}))
+    // A separate storage owner probes physical contention, not a lock filename
+    // or the server's in-memory lease registry.
+    let probe = rutis::Ctx::root().unwrap();
+    (&probe.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ]))))
+        .await
+        .unwrap();
+    let storage = probe.get::<FileStorage>().unwrap();
+    let path = storage.path(0, "fixture-state").unwrap();
+    let cancel = CancellationToken::new();
+    let mut crash = Client::new_version(&server, false, 3).await;
+    let pending = client
+        .send("account.status", json!({"providerId":"terminate-runtime"}))
         .await;
-    assert!(lost.get("error").is_some());
-    assert!(!lost.to_string().contains("fixture-secret"));
     tokio::time::timeout(Duration::from_secs(5), async {
-        while home.join("fixture-state.lock").exists() {
+        while storage.read(&path, &cancel).await.unwrap() != b"before-crash" {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
+    .expect("runtime entered the protected transaction");
+    assert!(matches!(
+        storage.lock(&path, &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    let crashed = crash
+        .rpc("account.status", json!({"providerId":"crash-runtime"}))
+        .await;
+    assert!(crashed.get("error").is_some());
+    let lost = client.response(pending).await;
+    assert!(lost.get("error").is_some());
+    assert!(!lost.to_string().contains("fixture-secret"));
+    let mut lease = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match storage.lock(&path, &cancel).await {
+                Ok(lease) => break lease,
+                Err(FileStorageError::Locked) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("lock probe failed: {error}"),
+            }
+        }
+    })
+    .await
     .expect("runtime loss must release the native transaction");
+    assert_eq!(lease.read(&cancel).await.unwrap(), b"before-crash");
+    lease
+        .replace(b"after-crash".to_vec(), None, &cancel)
+        .await
+        .unwrap();
+    drop(lease);
+    probe.shutdown().await.unwrap();
     assert_eq!(
         std::fs::read_to_string(home.join("fixture-state")).unwrap(),
-        "before-crash"
+        "after-crash"
     );
     assert!(
         prompt(&mut client, &server, &home, "static-fixture")

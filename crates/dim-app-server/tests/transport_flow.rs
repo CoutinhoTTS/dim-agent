@@ -953,6 +953,39 @@ async fn daemon_shutdown_reports_completion_after_cleanup_and_preserves_failures
     }
 }
 
+#[tokio::test]
+async fn forced_shutdown_settles_an_already_admitted_graceful_reply() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let path = server.unix_path.clone().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let Transport::Unix(stream) = &mut client.transport else {
+        unreachable!()
+    };
+    // Pipeline both requests in one frame batch on a single-thread runtime:
+    // both are admitted before either handler starts shutdown. The graceful
+    // writer may reach the coordinator before or after it observes force.
+    stream
+        .get_mut()
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"daemon.shutdown\",\"params\":{}}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"daemon.shutdown\",\"params\":{\"force\":true}}\n",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .expect("force does not await business cleanup")
+            .unwrap(),
+        ShutdownReason::Forced
+    );
+    let response = tokio::time::timeout(Duration::from_secs(1), client.response(100))
+        .await
+        .expect("accepted graceful shutdown must receive a terminal reply");
+    assert_eq!(response["error"]["data"]["appError"], "shutdown_failed");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
 struct ConfirmTool {
     calls: Arc<AtomicUsize>,
     seen: Arc<Mutex<Vec<String>>>,

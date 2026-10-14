@@ -115,7 +115,7 @@ Unix endpoint directories must be private (0700), sockets use 0600, and cleanup 
 
 For authorized transports, v3 `hello.features` includes `daemon.shutdown.completed`. A successful `daemon.shutdown` response with `force: false` (the default) certifies that Agent work, trace writers, connections and the Rutis process tree have settled, including storage and plugin disposal. Cleanup failure returns `shutdown_failed` without exposing disposer error details. EOF alone is not success. `force: true` retains its early acknowledgement and does not promise cleanup.
 
-The requesting connection hands only its final-response writer to the existing process coordinator before leaving the plugin graph. The coordinator sends the result after `root.shutdown()`; no graph-owned RPC task waits on its own disposal. Reply writes are bounded by the transport write deadline. Client disconnect does not cancel accepted cleanup. Clients must check the feature before relying on this completion contract from an older daemon.
+The requesting connection hands only its final-response writer to the existing process coordinator before leaving the plugin graph. The coordinator sends successful completion after `root.shutdown()`; no graph-owned RPC task waits on its own disposal. Shutdown first stops RPC admission and joins admitted shutdown handlers, including force acknowledgement writes. If an admitted force request wins, the coordinator joins connection handoffs and returns `shutdown_failed` to pending graceful callers without waiting for business cleanup. Reply writes are bounded by the transport write deadline. Client disconnect does not cancel accepted cleanup. Clients must check the feature before relying on this completion contract from an older daemon.
 
 ## Optional managed provider
 
@@ -169,7 +169,7 @@ A plugin declares `inject: ['pluginFiles']` and opens a fresh scope during each 
 
 ```ts
 type FileResult<T> = { ok: true; value: T } |
-  { ok: false; error: 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'io' }
+  { ok: false; error: 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'internal' | 'io' }
 interface FileLease {
   read(): Promise<FileResult<string | null>>
   replace(text: string): Promise<FileResult<null>>
@@ -185,9 +185,11 @@ interface PluginFiles { open(): Promise<FileScope> }
 
 `withLock` holds the native FileStorage lease through the complete callback, including asynchronous work. Reads require UTF-8; a missing file returns null. Replacement is atomic and flushed, with Unix mode 0600 and native Windows DACL handling. `backup` creates a flushed, exclusive sibling copy with an alphanumeric/hyphen suffix. A failed partial backup is retained; an existing backup is never overwritten. Storage errors expose only fixed codes, never file contents or exception text. An error after replacement does not imply rollback or authorize replaying remote side effects.
 
+Use a fresh suffix for each backup attempt, such as `before-reset-<UUID>`. An `exists` result does not prove the earlier backup completed. After a failed backup, stop the destructive operation, address the storage failure, and create a successful backup with a new suffix before proceeding. Retained partial backups require explicit operator inspection and cleanup; the lease has no deletion API. Host worker failures return `internal`, distinct from invalid arguments or paths. Callback exceptions retain Rutis rejection semantics and still revoke the lease.
+
 Quiesce rejects new transactions and cancels acquisition, but permits an acquired transaction to persist before close joins it. The optional Promise cancels acquisition when it settles; Node must settle it on ordinary completion too so a pending exported Promise cannot hold runtime drain open. Rutis 0.10 does not encode Node AbortSignal arguments; do not pass one. Escaped file callbacks are revoked before releasing the lease. Abandoning the caller does not abandon issued I/O. Runtime loss revokes the lease after admitted native I/O settles; it cannot guarantee persistence of an external side effect whose result died with the runtime.
 
-Credential bytes, including refresh tokens, may pass through this trusted local bridge. They must never be forwarded to terminal RPC, model requests, history, diagnostics or logs. OAuth policy and file schema remain in the private package. Startup follows current loader row identities: Rutis may replace an offline JS row when it discovers its declared injections, so a disposed provisional fiber is not itself a startup failure.
+Credential bytes, including refresh tokens, may pass through this trusted local bridge. They must never be forwarded to terminal RPC, model requests, history, diagnostics or logs. OAuth policy and file schema remain in the private package. Startup follows current loader row identities: Rutis may replace an offline JS row when it discovers its declared injections, so a disposed provisional fiber is not itself a startup failure. A row that remains disposed consumes the remaining startup deadline before reporting its terminal state; an explicit failed state still fails immediately.
 
 ## Service contract
 

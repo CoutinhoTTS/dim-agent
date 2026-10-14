@@ -10945,6 +10945,7 @@
         "path FileStorageError::InvalidPath",
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
+        "path FileStorageError::Worker",
         "use dim_agent_capabilities::file_storage::FileLease",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
