@@ -4,7 +4,7 @@
 
 本文以 [CLI 功能清单](../feature-list.md) 为目标，找出现有插件职责尚未覆盖的功能，把它们设计成插件，并说明这些插件如何接入现有体系。每个新插件的详细需求另写在 `docs/design/plugins/<名称>.md`，按第 9 节的模板编写。
 
-现有插件及其内容不在本文修改范围内。确需扩展现有插件的功能登记在第 6 节，由对应插件另行设计。
+现有插件及其内容不在本文修改范围内。现有插件需要的补充与变更登记在第 6 节，由对应插件另行设计。
 
 ## 1. 范围与前提
 
@@ -360,23 +360,50 @@
 | 接口 | RPC `modality.capabilities`、`modality.task.*`；CLI `image`、`modality` 子命令 |
 | 关系 | 需要 Provider 支持非对话类模型，见第 6 节；默认模型经 ModelPolicy |
 
-## 6. 现有插件的扩展登记
+## 6. 现有插件的补充与变更
 
-以下功能属于现有插件职责但现有设计未覆盖，由对应插件另行设计：
+现有插件需要两类改动：一类是功能清单中属于其职责、但现有设计未覆盖的功能；另一类是新插件接入时需要现有插件提供的配合。本文只登记，具体设计写入对应插件的需求文档。
 
-| 现有插件 | 扩展内容 | 来源功能或新插件 |
-| --- | --- | --- |
-| InputQueue | 删除排队消息；把排队消息转为 Steer | `Ctrl+S`、`/queue`、取回编辑 |
-| 输入数据类型 | 输入内容引用附件 | Attachments |
-| Permission | “网络”风险类别；跨 Session 的规则来源；允许命令清单 | Web、`/approvals`、命令规则 |
-| Approval | 工具调用前的准入扩展点 | Hooks |
-| Prompt、ModelProvider | 推理强度、快速模式等模型参数 | `/effort`、`/fast` |
-| Agents、Prompt | Session 内切换 Agent 配置 | `/agent` |
-| PromptSources | 提示词语言 | `/language` |
-| ContextPreparation、ManagedProviders | 上下文用量与套餐用量查询 | `/usage` |
-| BackgroundExec、Collaboration | 统一查看与全部停止在途工作 | 后台任务 |
-| Mcp | HTTP/SSE 连接的 OAuth 授权 | MCP 连接 |
-| Provider | 非对话类模型 | Modality |
+- **补充**：新增服务、方法或配置项，原有行为不变。
+- **变更**：原有行为或合同改变，需要说明兼容与迁移。
+
+所有现有事件类型改为经 #2 的注册机制声明，属于 #2 本身的工作，不在下表重复。
+
+### 6.1 分支与 Session 能力
+
+| 插件 | 类型 | 内容 | 原因 |
+| --- | --- | --- | --- |
+| 输入数据类型（`input/message`） | 补充 | 内容可引用附件 ID；输入携带来源标记（用户、定时作业、目标继续、Shell、Hook、通知） | Attachments；Scheduler、Goal、ShellInput、Hooks 需要区分来源，CLI 据此显示 |
+| InputQueue | 补充 | 删除尚未采用的排队消息；把排队消息转为 Steer；队列状态包含可删除性 | `Ctrl+S`、`/queue`、取回编辑、删除排队消息 |
+| Permission | 补充 | “网络”风险类别；来自 Settings 的跨 Session 规则来源；允许命令清单 | Web；`/approvals`、命令规则 |
+| Permission | 变更 | 三档预设除准入外还决定 Sandbox 隔离配置 | Sandbox |
+| Approval | 补充 | 工具调用前的准入扩展点：已登记的准入方（如 Hooks）在策略判定后、执行前给出允许或拒绝 | Hooks |
+| Prompt、ModelProvider | 补充 | 模型参数（推理强度、快速模式）随模型配置采用，并传入模型请求 | `/effort`、`/fast` |
+| Prompt | 补充 | 在 Session 内切换 Agent 配置（提示词、模型、工具集）作为一次配置采用 | `/agent` |
+| PromptSources | 补充 | 提示词语言来源 | `/language` |
+| ContextPreparation | 补充 | 查询当前上下文用量与预算 | `/usage` |
+| ContextPreparation | 变更 | 生产用压缩宿主经 ModelPolicy 的辅助模型执行 | ModelPolicy |
+| BackgroundExec | 补充 | 列出本 Session 在途工作并支持全部停止的查询与停止接口；Workflow、ExternalAgent 以同一形式登记 | 后台任务 |
+| HostPlatform | 变更 | 启动进程时按调用方作用域套用 Sandbox 隔离配置；平台不支持时明确报告 | Sandbox |
+
+### 6.2 App Server 进程插件
+
+| 插件 | 类型 | 内容 | 原因 |
+| --- | --- | --- | --- |
+| Settings | 补充 | 新的配置来源：权限规则、Hook 定义与 Hook 批准、工作流定义、Web 搜索服务、通知渠道、模型策略、沙箱配置、插件市场；统一的凭据引用 | Hooks、Workflow、Web、Notifications、ModelPolicy、Sandbox、PluginManager、Permission 规则 |
+| Rpc | 补充 | 第 5 节各插件的 Session 级与管理级方法；方法按级别分组，供网关判断可用范围 | 全部新插件；RemoteGateway |
+| Transport、Connection | 变更 | 远程连接携带认证后的设备身份；按身份限制可用方法 | RemoteGateway |
+| Agents | 补充 | 以指定来源新建或复用 Session 并提交首条输入；从另一 Session 的截点创建 Session | Scheduler；SessionArchive 分叉 |
+| SessionStore | 补充 | Session 删除与按时间或数量清理（含预览）；Session 列表投影标题；记录分叉来源；删除时清理附件 | SessionArchive、SessionTitle、Attachments |
+| Collaboration | 变更 | 子代理模型改由 ModelPolicy 选择 | ModelPolicy |
+| Collaboration | 补充 | 在途成员纳入统一的在途工作查询与停止 | 后台任务 |
+| Provider | 补充 | 非对话类模型（图片） | Modality |
+| Provider | 补充 | 按用途解析模型连接，供 ModelPolicy 使用 | ModelPolicy |
+| ManagedProviders | 补充 | 查询套餐用量；未提供时明确不可用 | `/usage` |
+| Mcp | 补充 | HTTP/SSE 连接的 OAuth 授权；接受插件来源的配置 | MCP 连接；PluginManager |
+| SkillsCatalog | 补充 | 接受插件来源的 Skill 根；安装与移除由 PluginManager 发起 | PluginManager |
+| Trace | 补充 | 导出指定步骤的模型请求快照，可过滤推理、工具记录与压缩内容 | 请求快照导出 |
+| Session 广播 | 待确认 | 进程级订阅所有 Session 的结束、待审批、待回答等事件 | Notifications |
 
 ## 7. CLI 层
 
