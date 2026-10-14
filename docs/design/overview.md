@@ -47,6 +47,29 @@
 - 进程级状态（配置、作业存储、凭据引用）不写入 Timeline；影响分支后续行为的结果才写入。
 - 管理类 RPC 只对受保护的本地连接开放，WebSocket 远程调用方不可用，与 ADR 001 的 MCP 管理方法一致。
 
+### 3.1 Capability 与进程插件
+
+Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实例，以 `SessionScope`/`BranchScope` 实例键提供服务，经 Timeline 事件与声明的服务协作（[设计规则](../architecture/rust-agent/principles.md) §1）。不经这两种工厂注册的 rutis 插件是进程插件，如 App Server 进程插件与 FileStorage、HostPlatform、SkillsCatalog。
+
+| 判断项 | Capability | 进程插件 |
+| --- | --- | --- |
+| 状态归属 | 属于某个 Session 或分支，可由 Timeline 重建 | 跨 Session 共享，存于进程存储或配置 |
+| Timeline | 写入或消费事件 | 不写 Timeline；或管理 Session 本身（创建、删除、调度） |
+| 对 Agent 实例的贡献 | 工具、输入、提示词来源 | 无，或经服务供 Capability 使用 |
+| 资源 | 自己发起的在途工作 | 宿主资源：存储、隔离、网络服务、外部协议端口 |
+| 生命周期 | 随 Session 或分支：中断、重载、关闭 | 随进程或 loader |
+
+功能同时具备两侧特征时，拆为进程插件与 Capability，沿用 SkillsCatalog（进程）、Skills（Session）、SkillsBranch（分支）的分法：进程插件持有共享配置与资源，Capability 持有 Session 或分支内的状态与事件。
+
+| 类别 | 新插件 |
+| --- | --- |
+| Capability | Questions、Todo、Goal、ShellInput、SessionTitle |
+| 进程插件 + Capability | Web（进程：搜索服务配置；Session：工具）、Hooks（进程：目录与批准；分支：执行）、Scheduler（进程：作业与触发；Session：`schedule` 工具）、Workflow（进程：定义；Session：运行）、ExternalAgent（进程：探测与配置；Session：委派运行）、Notifications（进程：订阅与发送；Session：`notify` 工具） |
+| 进程插件 | Attachments、ModelPolicy、PluginManager、Sandbox、SessionArchive、RemoteGateway、Modality |
+| 非 daemon 插件 | AcpGateway（CLI 进程中的协议适配） |
+
+拆分后的命名在各插件需求文档中确定。
+
 ## 4. 功能归属
 
 “现有”表示由现有插件职责覆盖；“扩展”表示属于现有插件职责但现有设计未写到，见第 6 节；“新”表示第 5 节的新插件；“CLI”表示只在 CLI 层实现，见第 7 节；“范围外”见第 1 节。
