@@ -1,0 +1,389 @@
+# Questions
+
+状态：草案。总体设计：[overview B.1](../overview.md)。阶段：P1。语言：Rust。作用域：Session + 分支（[ADR 002](../../adr/002-plugin-scope.md)）。
+
+模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 Session 级 `ToolContribution` 提供 `ask_user`，并以 `SessionMethodContribution` 贡献 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。它只安装在交互 Session 中。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并按序号判定回答与中断的先后，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
+
+## 1. 结构
+
+```mermaid
+flowchart LR
+  subgraph S["Session 作用域（仅交互 Session）"]
+    QS["QuestionsPlugin：ToolContribution ask_user，SessionMethodContribution session.question"]:::new
+    TR["ToolRegistry"]
+    TC["TreeCommands"]
+  end
+  subgraph P["进程作用域"]
+    RPC["Rpc"]
+  end
+  subgraph B["分支作用域"]
+    QB["QuestionsBranchPlugin（B:Questions）"]:::new
+    TE["ToolExecutor"]
+    TL["Timeline + Dispatcher"]
+  end
+  TR -- "ToolContribution 的 Contributions" --> QS
+  RPC -- "解析 Session，分派 session.question.respond" --> QS
+  QS -- "每次调用：调用方分支或指定分支" --> TC
+  TC --> QB
+  TE -- "handler 调用 + 批次 token" --> QS
+  QB -- "append_registered / append" --> TL
+  TL -- "question/answered（Dispatcher）" --> QB
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+```
+
+两个 Session 贡献都不持有状态；它们在每次调用时通过 `S:TreeCommands` 解析调用方分支（工具）或指定分支（方法）的 `B:Questions`，与 [Wait](../../../architecture/rust-agent/plugins/Wait.md) 相同。所有等待和排序都在分支部分。
+
+| 部分 | 作用域 | 依赖 | 提供 |
+| --- | --- | --- | --- |
+| `QuestionsPlugin` | Session | `S:TreeCommands` | `S:ToolContribution[ask_user]`；`S:SessionMethodContribution[session.question]`（`session.question.respond`，级别 `session`） |
+| `QuestionsBranchPlugin` | 分支 | `B:Timeline`、`B:Dispatcher` | `B:Questions`（`ask`、`respond`） |
+
+安装：仅当 `SessionConfig.interactive` 为 true 时（由 `session.create` 设置；ACP、`exec`、Scheduler 和 Workflow 的 Session 都是非交互的），Agents 才装配 Session 部分并在 `SessionConfig.tools` 中列出 `ask_user`。分支部分随之安装。
+
+依赖的契约：[工具贡献](../../../architecture/rust-agent/tool-contributions.md)机制；ToolExecutor 的批次 token 与结算；[single-tree](../../../architecture/rust-agent/single-tree.md) 的 `Timeline` 追加契约与 Dispatcher 协议；`SessionConfig.interactive`（[session-access](../contracts/session-access.md)）；`SessionMethodContribution`（[session-boundary](../contracts/session-boundary.md)）；客户端可见的动态事件（#2，A10）；Permission 风险类别 `session`。
+
+本文定义的契约：`ask_user` 工具、`question/*` 的数据与消费契约、`B:Questions`、`session.question.respond` 及其错误。`question/answered` 的唯一写入路径是 `Questions::respond`。
+
+## 2. 数据与状态
+
+```mermaid
+classDiagram
+  class question_asked {
+    call_id
+    turn_id
+    request_id
+    questions
+  }
+  class question_answered {
+    call_id
+    answers
+    declined
+  }
+  class question_cancelled {
+    call_id
+    reason
+  }
+  class PendingRegistry {
+    按提问顺序排列的条目
+    每个条目的批次 token
+    answering 标记
+    closed
+    rebuilt 序号
+  }
+  question_asked --> PendingRegistry : 重建时折叠本地事件
+  question_answered --> PendingRegistry : 由 Dispatcher 消费
+  question_cancelled --> PendingRegistry : 重建时折叠本地事件
+```
+
+三个事件都是只由 `B:Questions` 写入的分支 Timeline 事实；待回答注册表是 `Mutex` 下的内存（与 Approval 一样不使用 `StateCell`），从不跨代延续。
+
+结果规则（供重建和读取历史的客户端使用）：问题有 `asked` 且既无 `answered` 也无 `cancelled` 时为**待回答**；存在 `answered` 且无 `cancelled` 时为**已回答**；否则为**已取消**。`cancelled` 优先，因为它恰好在回答未交付给 handler 时写入。
+
+加载时的重建只折叠本分支的本地事件（子分支从不拥有父分支的问题），并为每个未解决的 `asked` 写入 `question/cancelled`（"did not survive recovery"）。
+
+为何需要这些事件：从 handler 开始到 `step/tool-result` 之间，调用没有任何事实，且结果在整个批次完成后才发布，因此"等待中"和"已回答"无法推导；回答是用户内容，必须成为事实才能与 `stop/interrupt` 排序。`turn_id`、`request_id` 和 `declined` 扩展了 overview 中的载荷（A3，F1）。
+
+## 3. 流程
+
+### 3.1 提问与回答
+
+```mermaid
+sequenceDiagram
+  participant M as 模型（Loop）
+  participant TE as ToolExecutor
+  participant Q as B:Questions
+  participant TL as Timeline
+  participant D as Dispatcher
+  participant C as 客户端
+  M->>TE: step/tool-call ask_user
+  TE->>Q: 经 ToolContribution 调用 ask(call_id, questions, 批次 token)
+  Q->>TL: append_registered question/asked（回调注册条目）
+  TL-->>C: session.event question/asked
+  C->>Q: session.question.respond（Rpc 分派 SessionMethodContribution）
+  Q->>TL: append_registered question/answered（回调标记 answering）
+  TL->>D: 投递 question/answered
+  D->>Q: 消费：token 未取消，发送回答，返回
+  Q-->>C: {}
+  Q-->>TE: 回答（ToolResult）
+  TE->>TL: 整个批次结算后写 step/tool-result
+```
+
+`respond` 只在 Dispatcher 消费回答之后才返回，因此 `{}` 表示回答已到达等待中的调用。Dispatcher handler 只负责解析通道；结果由 ask future 构建。
+
+### 3.2 断开与重新连接
+
+```mermaid
+sequenceDiagram
+  participant C as 客户端
+  participant R as Rpc
+  participant TL as Timeline
+  C->>R: session.attach（先注册监听器）
+  C->>R: 按分支 session.history 直到 head
+  R-->>C: 事件，含尚无回答的 question/asked
+  TL-->>C: 实时 question/* 通知
+  Note over C: 按 call_id 合并，显示待回答提示
+  C->>R: session.question.respond
+```
+
+监听器注册之前分派的内容都在历史中，之后的内容实时到达，重复项按 `call_id` 合并。Rpc 不增加 Questions 专用的重放。
+
+### 3.3 非交互 Session
+
+不安装 Session 部分：没有声明，`session.question.respond` 得到 `unknown_method`。模型按名称调用 `ask_user` 得到 `Unknown tool`。
+
+## 4. 时序与冲突
+
+### 4.1 回答与中断
+
+```mermaid
+sequenceDiagram
+  participant TL as Timeline
+  participant D as Dispatcher（串行）
+  participant TE as ToolExecutor
+  participant Q as B:Questions
+  Note over TL: Q = asked，I = stop/interrupt，A = answered，C = cancelled
+  TL->>D: I（序号 n）
+  D->>TE: 同步取消批次 token
+  TL->>D: A（序号 n+1）
+  D->>Q: 消费 A：token 已取消
+  Q->>TL: 追加 C
+  Q-->>Q: respond 返回 Cancelled
+```
+
+Dispatcher 把每个事件投递给所有订阅方后才投递下一个，因此消费 `A` 时 token 已取消，意味着序号更小的中断已被消费。若 `A` 先于 `I`，回答作为已完成结果保留；turn 仍在 `step/tool-result` 之后以取消结束。
+
+### 4.2 重载与重启
+
+```mermaid
+sequenceDiagram
+  participant G1 as B:Questions 第 1 代
+  participant TL as Timeline
+  participant G2 as B:Questions 第 2 代
+  participant TE as ToolExecutor
+  G1->>TL: 卸载：为每个待回答写 C（capability reloading）
+  G1-->>TE: 丢弃 sender，handler 返回 Cancelled（reload-settled）
+  G2->>TL: 订阅，固定 S = committed，折叠本地事件直到 S
+  G2->>TL: 为每个未解决的 asked 写 C did not survive recovery
+  Note over G2: rebuilt = S，提供 B:Questions
+```
+
+不会重新提问。Session 部分的重载与任何贡献重载一样传播到 ToolRegistry 及其依赖方；在途调用以 reload-settled 结束，turn 失败。这发生在罕见的结构性操作之后，是可接受的代价（[ADR 002](../../adr/002-plugin-scope.md) D3）。
+
+| 场景 | 结果 |
+| --- | --- |
+| 两个客户端回答 | 第二次注册失败 `AlreadyAnswered` |
+| 客户端无法回答（`-p` 连接到交互 Session） | CLI 停止 turn，退出码 3（A8） |
+| 远程配对设备回答 | 允许：配对设备可以调用 Session 方法 |
+| 待回答期间的 `input/withdrawn` | 对问题无影响 |
+| 提问中途进程重启 | 加载时写 `C`；批次按未执行结算；turn Failed |
+
+完整表格：附录 B。
+
+## 5. 上下文映射
+
+| 模型看到什么 | 形式 | 位置 |
+| --- | --- | --- |
+| `ask_user` 名称、描述、schema | 固定工具声明 | 已采用的 `context/configured`，仅交互 Session |
+| 回答、拒绝回答 | `ToolResult.content`（附录 A.1） | 工具结果位置，批次中每个调用都结算之后 |
+| 取消 | 来自 ToolExecutor 的错误文本 | 同一位置 |
+
+始终不可见：`question/*` 事件、`structured_content`、CLI 渲染。压缩保留声明，回答只通过摘要保留。子分支继承 `step/tool-result` 在切点之前的回答；切在 `asked` 与其结果之间的调用投影为未执行。
+
+## 6. 接口（摘要）
+
+| 接口 | 类型 | 用途 |
+| --- | --- | --- |
+| `ask_user` | Session `ToolContribution`，风险 `session` | 提出 1–4 个问题并等待回答 |
+| `session.question.respond` | `SessionMethodContribution`，级别 `session` | 回答或拒绝一个待回答的调用 |
+| `B:Questions::ask` / `respond` | 分支服务 | 注册并等待；回答的边界写入 |
+| `question/asked`、`question/answered`、`question/cancelled` | 事件 | 待回答状态与回答排序 |
+| CLI 提示契约 | 客户端 | 渲染、延后、`Ctrl+C`、attach |
+
+## 7. 安全
+
+`ask_user` 不使用任何宿主资源，属于 `session` 风险（在所有预设下都允许；`disallowed_tools` 仍然生效）。回答是作为事实写入并重放给模型的用户内容；客户端不得在其中放入机密。`session.question.respond` 对任何具有 Session 访问权的客户端可用，包括远程配对设备（[RemoteGateway](RemoteGateway.md)）；它不授予回答之外的任何权限。Questions 从不放宽权限；重放从不重新提问。
+
+## 附录 A. 接口细节
+
+### A.1 工具 `ask_user`
+
+Session `ToolContribution`，风险 `session`，仅在交互 Session 中列出。
+
+| 参数 | 类型 | 规则 |
+| --- | --- | --- |
+| `questions` | 数组，1..=4（A4） | 必填 |
+| `questions[].id` | 字符串 | 可选；默认按位置为 `"1"`、`"2"`……；调用内唯一 |
+| `questions[].header` | 字符串，至多 40 个字符 | 可选的短标签 |
+| `questions[].question` | 非空字符串 | 必填 |
+| `questions[].options` | `{label, description?}` 数组，2..=6，标签唯一 | 必填（A4） |
+| `questions[].multiSelect` | 布尔，默认 false | 多选 |
+| `questions[].allowCustom` | 布尔，默认 true | "Other" 自由文本（A5） |
+
+校验在 handler 中进行；无效输入返回错误 `ToolResult` 且不写入任何内容。结果 `content`：
+
+```
+User answered:
+1. <question>
+   -> <label>, <label>
+2. <question>
+   -> (custom) <text>
+```
+
+拒绝回答的调用得到 `User declined to answer the question(s).`（A6）。`structured_content` 携带 `{answers, declined}`，仅供客户端使用。取消由 ToolExecutor 根据 handler 的 `HostError::Cancelled` 报告。
+
+### A.2 事件载荷
+
+| 类型 | 载荷 | 写入路径 | 消费方 |
+| --- | --- | --- | --- |
+| `question/asked` | `call_id, turn_id, request_id: String`，`questions: Vec<Question>` | `Questions::ask`，`append_registered`；回调在锁内注册条目（已 closed 或 `call_id` 已待回答时失败） | 重建；客户端显示提示 |
+| `question/answered` | `call_id: String`，`answers: Vec<Answer>`，`declined: bool` | `Questions::respond`，`append_registered`；回调以 `Closed`/`Cancelled`/`AlreadyAnswered` 失败，否则设置 `answering` 并按事件 id 保存等待方 | Dispatcher 订阅 `"Questions"`，在重建闸门之下，跳过 `sequence <= rebuilt`；仅当条目待回答且其 token 未取消时接受。客户端关闭提示 |
+| `question/cancelled` | `call_id, reason: String` | 仅 `Questions`，`append`：取消时的 ask future、消费方、`close()`、重建 | 重建；客户端关闭提示 |
+
+三者都通过 #2 注册声明为客户端可见，且从不渲染进模型历史。
+
+```rust
+pub struct Question { pub id: String, pub header: Option<String>, pub question: String,
+    pub options: Vec<QuestionOption>, pub multi_select: bool, pub allow_custom: bool }
+pub struct QuestionOption { pub label: String, pub description: Option<String> }
+pub struct Answer { pub question_id: String, pub selected: Vec<String>, pub custom: Option<String> }
+```
+
+### A.3 分支服务
+
+```rust
+impl Questions {   // key BranchScope::key::<Questions>()
+    /// Registers and waits. `cancel` is the batch token from ToolExecutor.
+    pub async fn ask(&self, call_id: &str, ctx: &ToolExecutionContext, questions: Vec<Question>,
+        cancel: CancellationToken) -> Result<Answered, HostError>;
+    /// `Ok` means the answer was dispatched and delivered to the waiting call.
+    pub async fn respond(&self, call_id: &str, answers: Vec<Answer>, declined: bool)
+        -> Result<(), QuestionRespondError>;
+}
+pub enum QuestionRespondError { Unknown, AlreadyAnswered, Cancelled, Invalid(String), Closed }
+```
+
+### A.4 机制
+
+| 步骤 | 机制 |
+| --- | --- |
+| 工具解析 | handler 通过 `S:TreeCommands` 解析调用方分支的 `B:Questions`；查找失败（分支已关闭或分支部分正在重载）→ 错误结果或带 `capability reloading` 的 Cancelled，与 Wait 相同 |
+| 提问 | token 已取消：返回 Cancelled，不写入。否则 `append_registered(question/asked)`；提交失败时移除条目并返回 Cancelled 或错误 |
+| 等待 | `select! biased { response, cancel.cancelled() }`。取消时：在锁内取走条目；若取到，释放锁后写 `question/cancelled {reason: "Tool execution cancelled"}`；返回 Cancelled。sender 被丢弃：带 `capability reloading` 的 Cancelled |
+| 回答 | 预先检查待回答状态并按条目的 `asked` 数据校验；`append_registered(question/answered)`；等待分派结果 |
+| 消费 | 取走条目；token 已取消：发送 `None`，回复 `Cancelled`，写 `question/cancelled`；否则发送回答，回复 `Ok`。条目缺失：`Unknown` |
+| 复查 | 只看批次 token，它反映 ToolExecutor 已消费的中断（[time-bus](../../../architecture/rust-agent/time-bus.md) §4） |
+| 终态事实 | `asked`/`cancelled` 由 Questions 写入，`answered` 是边界事实；调用的终态事实是 ToolExecutor 的 `step/tool-result` |
+| 卸载 | `ctx.effect` disposer：设置 `closed`，丢弃回答等待方（`Closed`），取走所有条目，写 `question/cancelled {reason: "capability reloading"}`，丢弃 sender。正在关闭的 Timeline 可能拒绝写入；该分支不会恢复 |
+| 加载 / 重启 | 订阅，在闸门下固定 `S = committed()`，折叠 `local(..=S)`，取消未解决的问题，设置 `rebuilt`，提供 `B:Questions` |
+
+### A.5 Session 方法 `session.question.respond`
+
+属于 `QuestionsPlugin` 的 `SessionMethodContribution`（命名空间 `session.question`，级别 `session`）。Rpc 解析 Session 并分派；handler 通过 `S:TreeCommands` 解析指定分支的 `B:Questions`。
+
+`{sessionId, branchId?: "main", callId, answers: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`。
+
+| 错误 | 条件 |
+| --- | --- |
+| `invalid_params` `Question is absent or already resolved` | `Unknown` |
+| `invalid_params` `Question already answered` | `AlreadyAnswered` |
+| `invalid_params` `Question was cancelled` | `Cancelled` |
+| `invalid_params` `<reason>` | `Invalid`：未知问题 id、未提供的标签、没有 `multiSelect` 却选了多个标签、没有 `allowCustom` 却给出 `custom`、未 `declined` 却既未选择也无 `custom` |
+| `service_reloading` | 存活分支上的 `Closed`，或贡献正在重载 |
+| `unknown_method` | Session 非交互（无该贡献） |
+| `session_closed` | Session 已关闭 |
+
+已接受的命令属于 Session，断开连接后继续执行。
+
+### A.6 CLI 契约
+
+CLI 处理所连接 Session 每个分支的 `question/*` 通知（A9），与审批相同：
+
+| 情况 | CLI 行为 |
+| --- | --- |
+| `question/asked`，没有打开的提示 | 入队；按到达顺序一次处理一个调用。打印 `[question] <header>`，每个问题带编号选项，`allowCustom` 时另加 `0. Other (type your answer)`。提示 `Choose 1-N` 或 `Choose numbers, comma separated`。在第一个问题上输入空行即拒绝该调用（A6） |
+| 提示已打开 | 其他通知延后到提示关闭 |
+| 所有问题收集完毕 | `session.question.respond`；打印错误回复；`Cancelled`/`Unknown` 静默关闭提示 |
+| 当前显示调用的 `answered`/`cancelled` | 关闭提示；打印 `[question answered elsewhere]` 或 `[question cancelled]` |
+| 提示期间 `Ctrl+C` | `session.stop`（turn）；中断取消问题 |
+| EOF | `session.stop`；退出码 130 |
+| 无交互输入（`-p`）且问题到达 | `Interactive answer required; stopping`，`session.stop`，退出码 3（A8） |
+| Attach 或 resume | 先注册监听器，再按分支 `session.history`；推导待回答项；按 `call_id` 合并 |
+
+## 附录 B. 完整冲突表
+
+`A` = `question/answered`，`I` = turn `stop/interrupt`，`Q` = `question/asked`，`C` = `question/cancelled`，`R` = `step/tool-result`。
+
+| 场景 | 序号顺序 | 结果 | 决定方 |
+| --- | --- | --- | --- |
+| 批次分派前中断 | I < `step/tool-call` 被消费 | 无 `Q`；调用未执行 | ToolExecutor |
+| 问题注册前中断 | I 已消费，然后 `ask` | token 已取消；不写入 | Questions（token 检查） |
+| 先回答后中断 | Q < A < I | 接受回答；结果作为已完成保留；turn 在 R 之后以取消结束 | Questions；ToolExecutor |
+| 中断后、取消前提交了回答 | Q < I < A < C | `respond` → `Cancelled`；写入 `C` | Questions |
+| 中断、已写取消，然后回答 | Q < I < C | 注册失败 `Cancelled`；不写入 | Questions |
+| 两个客户端并发回答 | Q < A1（A2 被拒） | `AlreadyAnswered`；先到者决定 | Questions（注册锁） |
+| 重复或迟到的 RPC | 解决之后 | `Unknown` 或 `Cancelled`；不写入 | Questions |
+| 分支级中断、分支关闭 | Q < 分支 I | token 取消 → C；关闭以 C 结算其余 | Questions；ToolExecutor |
+| 已回答，批次其他调用仍在运行 | Q < A < R | 回答保存在 handler 结果中直到 R | ToolExecutor |
+| 已回答，R 之前重载 | Q < A < 重载 | 批次 reload-settled，turn Failed；问题结果为已回答 | ToolExecutor |
+| 回答已提交，分支部分在消费前卸载 | Q < A，卸载 | `close()` 写 C：已取消；`respond` → `service_reloading` | Questions |
+| 待回答期间 Session 部分重载 | — | 传播到 ToolRegistry；批次 reload-settled，turn Failed；若分支部分也重载则写 C（D3） | ToolExecutor；Questions |
+| 待回答期间 Steer/Queue/Append | Q < 输入 | 只在 R（Steer/Append）或 `turn/end`（Queue）之后消费；问题继续（A11） | Loop、InputQueue |
+| 待回答期间 `input/withdrawn` | Q < withdrawn | 无影响；撤回只涉及未消费的输入 | InputQueue |
+| 一个批次中多个 `ask_user` | Q1 < Q2 | 各自独立回答；结果一起发布 | Questions；ToolExecutor |
+| 同一 `call_id` 提问两次 | — | 第二次注册失败；错误结果 | Questions |
+| Q 与 R 之间压缩 | — | 不会发生：压缩在请求准备时运行，不在批次期间 | ContextPreparation |
+| 子分支切在 Q 与 A 之间 | Q < 切点 < A | 子分支没有待回答项；继承的调用投影为未执行 | Questions（子分支） |
+| Session 卸载 | Q 待回答 | turn 正在运行，Session 非空闲，不卸载 | AgentIndex |
+| 提问中途进程重启 | Q，无 A/C | 加载时写 C；批次结算；turn Failed | Questions；ToolExecutor；Loop |
+| 客户端断开，或从未有客户端连接 | Q 待回答 | 保持待回答，无超时（A7） | 用户 |
+| `-p` CLI 连接交互 Session | Q < I | CLI 停止 turn；C 来自中断 | CLI；Questions |
+| 远程配对设备回答 | Q < A | 与任何客户端一样接受 | Questions |
+| 非交互 Session | — | 不安装；按名称调用 → `Unknown tool`；方法 → `unknown_method` | Agents；ToolBinding；Rpc |
+
+## 附录 C. 错误与恢复
+
+| 情况 | 结果 |
+| --- | --- |
+| 工具输入无效 | 错误 `ToolResult`；不写入 |
+| 分支服务查找失败（重载中） | 带 `capability reloading` 的 Cancelled；ToolExecutor 以 reload-settled 结算 |
+| `asked` 提交失败 | 移除条目；Cancelled 或错误结果 |
+| 中断、分支关闭 | `question/cancelled`；handler `HostError::Cancelled` |
+| 重载、重启 | 每个未解决问题写 `question/cancelled`；从不重新提问 |
+| 重载期间 `respond` | `service_reloading`；重试返回 `Unknown`，因为问题已被取消 |
+
+## 附录 D. 验收
+
+通过 RPC、工具调用和事件进行流程测试：
+
+1. 单选、多选、多问题和自定义回答产生规定的 `content`；无效回答在 `respond` 处被拒绝，不产生事实。
+2. 以 `interactive: false` 创建的 Session（含 `exec` 和 ACP）：没有 `ask_user`，`session.question.respond` → `unknown_method`；其他情况以及省略 `interactive` 时存在。
+3. 先回答后停止：结果包含回答。先停止后回答：`Cancelled`、`question/cancelled`、已取消的结果。两种顺序都通过在 Dispatcher 被挂起时先提交 `I` 再提交 `A` 来强制构造。
+4. 两个并发 `respond`：恰好接受一个。
+5. 一个批次中两个 `ask_user` 加一个慢工具：回答保留到唯一的 `step/tool-result`。
+6. 分支关闭和分支部分重载会结算待回答问题；重启写入 "did not survive recovery" 且 turn 失败；不重新提问。
+7. 断开与重新连接：历史显示待回答问题；重新连接后回答有效；从远程配对设备回答有效。
+8. 问题待回答期间撤回排队输入不影响问题。
+9. CLI：渲染、延后、`Ctrl+C`、EOF、`-p` 退出码 3。
+
+## 附录 E. 假设
+
+| # | 假设 | 依据 | 若被否决的影响 |
+| --- | --- | --- | --- |
+| A1 | Session 部分只安装在交互 Session 中 | [ADR 002](../../adr/002-plugin-scope.md) 后果；决策 §3（ACP/自动化为非交互） | 工具处处列出；非交互 Session 会阻塞 |
+| A2 | `session.create` 省略 `interactive` 即为交互 | 判断（现有客户端） | 现有 Session 失去该工具 |
+| A3 | 载荷增加 `turn_id`、`request_id`、`declined` | 判断 | 通过 `step/tool-call` 关联；拒绝回答建模为一种回答 |
+| A4 | 1..=4 个问题，2..=6 个选项 | 边界情况参考；判断 | schema 限制改变 |
+| A5 | 默认允许自定义回答 | 功能列表"自定义回答"；默认值为判断 | 模型须显式开启 |
+| A6 | 用户可以拒绝整个调用 | 维护者决定 | 用户必须回答或停止 |
+| A7 | 无超时 | 维护者决定 | 超时写入 `question/cancelled {timeout}` |
+| A8 | 无输入的 CLI 以退出码 3 停止 | CLI 审批先例 | 不同的退出策略 |
+| A9 | 展示每个分支的问题 | 审批先例 | 子分支的问题需要其他客户端 |
+| A10 | #2 注册把事件标记为客户端可见，Connection 将其作为 `session.event` 转发 | Overview §1（#2）；判断 | Rpc 需要类似 `approval.request` 的专用通知 |
+| A11 | Steer 不结束待回答的问题 | 判断 | Steer 以原因 `user steer` 取消 |
+
+## 附录 F. 待对齐问题
+
+| # | 问题 | 说明 |
+| --- | --- | --- |
+| F1 | Overview §7 载荷 | `turn_id`、`request_id`、`declined` 不在 overview 的 `question/*` 字段中（A3） |
+| F2 | 动态事件的客户端可见性 | #2 是否按声明标志把插件事件投影给客户端（A10） |
