@@ -2,38 +2,193 @@
 
 Status: Draft. Overall design: [overview §5.13](../overview.md#513-remotegateway), [§7.2 Transport, Connection](../overview.md#72-app-server-process-plugins), [§3.1 Multiple nodes](../overview.md#31-multiple-nodes), [common constraint 8](../overview.md#3-integration-methods). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
-RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Remote clients speak the existing App Server protocol and get Session methods only; Management is not mounted on this entry. The entry is the product UI plane; it never carries the rutis link plane between nodes.
+RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol and may call every Session method, including `session.permission.update` (decision E3); Management is not mounted on this entry. The entry is the product UI plane and never carries the rutis link plane between nodes.
 
-## 1. User flows
+## 1. Structure
 
-1. `/remote` → start: RemoteGateway persists `enabled` and opens its entry (loopback by default). `remote.status` shows the address.
-2. `/remote` → pair: the CLI calls `remote.pair` and renders the returned URL as a QR code with the pairing code. The phone opens the URL, submits the code with a device name, and receives its device token. `remote.devices` lists the phone.
-3. The phone opens the Web workspace, connects with its token, lists Sessions, attaches to the Session the terminal is attached to, and sees the same live events. Either side submits input, answers approvals or stops the turn.
-4. The phone locks and the socket drops. The Session keeps running; a pending approval stays pending. On reconnect the phone attaches again and receives the pending approval by replay; the terminal may answer it first.
-5. The user revokes the phone (`remote.revoke`): its connections close at once; its token no longer authenticates.
-6. The user forces token rotation (`remote.rotate_token`): devices are disconnected and must rotate their token before reconnecting; a copied old token stops working once rotated.
+```mermaid
+flowchart LR
+  subgraph P["App Server process, control node"]
+    RG["RemoteGatewayPlugin<br/>pairing, devices, tokens, assets"]:::new
+    EH["EntryHost<br/>Transport contract"]:::contract
+    TR["Transport"]
+    CONN["Connection<br/>ConnectionEntry record"]
+    RPC["Rpc<br/>Session methods"]
+    SB["Session-method contributions"]:::contract
+    MG["Management<br/>not mounted here"]
+    MC["ManagementContribution remote"]:::contract
+    SET["Settings<br/>typed config, volatile"]
+    PST["Process storage<br/>remote-devices.json"]:::contract
+  end
+  DEV["Phone or Web workspace"]
+  DEV -->|"HTTPS and WebSocket"| EH
+  RG -->|"open entry, authenticator"| EH
+  TR -->|"provides"| EH
+  EH --> CONN
+  CONN --> RPC
+  RPC --> SB
+  RPC -.->|"mounts_management false"| MG
+  RG -->|"provides"| MC
+  RG --> SET
+  RG --> PST
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef contract stroke-dasharray:4 3
+```
 
-## 2. Scope
+RemoteGateway only authenticates upgrades and records the device on the connection; every call afterwards is an ordinary Rpc Session method served by the existing owners. Its own `remote.*` methods are management methods, so they are reachable from the local entry, not from paired devices.
 
-| Responsible | Not responsible |
-| --- | --- |
-| Entry lifecycle (start, stop, status) and its persisted intent | Session behavior, events, approvals (existing owners through Rpc Session methods) |
-| Pairing offers, device records, device tokens, rotation, revocation | Node-to-node authentication and service export (rutis link, #5) |
-| Authenticating WebSocket upgrades and attaching device identity to connections | Management authorization (mounting only; see [Management](Management.md)) |
-| Serving Web workspace static assets | Building the Web workspace; rendering QR codes (CLI) |
-| Management methods `remote.*` | TLS certificate issuance; reverse proxies and tunnels |
+| Part | Scope | Depends on | Provides |
+| --- | --- | --- | --- |
+| `RemoteGatewayPlugin` | Process, control node | `EntryHost` (Transport), process storage, `SettingsService` | `ManagementContribution` (`remote`) |
+| `TransportPlugin` (change) | Process | existing | existing `ListenAddresses`; added `EntryHost` |
+| `ConnectionPlugin` / `RpcPlugin` (change) | Process | existing | `ConnectionEntry {name, mounts_management, device_id}`; Rpc gates Management by `mounts_management` |
 
-## 3. Scope and dependencies
+Contracts defined here: device records and tokens, pairing and rotation HTTP endpoints, `remote.*` management methods, the `remote-devices.json` format. Contracts depended on: Transport's `EntryHost` and `UpgradeAuthenticator` (proposed Transport change; Transport owns them as their consumer), Connection's entry record, Rpc's Session-method table and entry mount rule ([Management A.5](Management.md#a5-rpc-change-and-mounting)), [process storage](../overview.md#72-app-server-process-plugins) (R8), typed Settings operations with volatile configuration (`x-volatile`, `VolatileUpdate`, rutis-loader 0.10), [Management contribution](Management.md#a1-contribution-contract). RemoteGateway knows no Session method's meaning and no other plugin.
 
-**Contracts defined here** (owner: RemoteGateway): device records and tokens, the pairing and rotation HTTP endpoints, `remote.*` management methods, the `remote-devices.json` host-local format. **Contracts depended on**: Transport's entry port and upgrade-authenticator contract (Transport change, proposed below; Transport is the consumer of authenticators and defines that contract), Connection's per-connection entry record (Connection change), Rpc's Session-method table and its entry mount rule ([Management §6.4](Management.md#64-rpc-change-and-mounting)), `FileStorage` leases, typed Settings operations for its own configuration (#3), rutis-loader volatile configuration updates (`x-volatile`, `VolatileUpdate`, verified in rutis-loader 0.10), the [Management contribution contract](Management.md#61-contribution-contract). RemoteGateway knows no Session method's meaning and no other plugin.
+## 2. Data and state
 
-| Part | Scope | Injects | Provides | Status |
-| --- | --- | --- | --- | --- |
-| `RemoteGatewayPlugin` | Process (control node) | `EntryHost` (Transport), `FileStorage`, `SettingsService` | `ManagementContribution` (`remote`) | Proposed |
-| `TransportPlugin` | Process | existing | existing `ListenAddresses`; added `EntryHost` | Change |
-| `ConnectionPlugin` / `RpcPlugin` | Process | existing | Connection records `ConnectionEntry`; Rpc gates Management and `daemon.shutdown` by `mounts_management` | Change |
+```mermaid
+flowchart TB
+  subgraph LEL["Loader editable layer, via Settings"]
+    CFG["Entry intent: enabled, bind, tls, assets<br/>enabled, bind, tls volatile"]
+  end
+  subgraph PS["Process storage, RemoteGateway root"]
+    DEVS["remote-devices.json v1<br/>device_id, name, token_hash,<br/>previous_hash, rotation_required, timestamps"]
+  end
+  subgraph MEM["Memory"]
+    OFF["Pairing offers<br/>code_hash, expires_at, attempts"]:::new
+    LIVE["Live connections per device<br/>revocation tokens"]:::new
+  end
+  TL["Timeline<br/>only facts written by Session owners"]
+  CFG --> RG["RemoteGateway"]:::new
+  DEVS --> RG
+  RG --> OFF
+  RG --> LIVE
+  RG -.-|"never writes"| TL
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+```
 
-Transport change (proposed contract, owned by Transport):
+Device records are host-local security material in process storage (atomic replace, lock, format version, owner-only file); a corrupt or unreadable file fails closed. Offers and live connections are in memory and lost on reload or restart. The Timeline holds only facts that Session owners write for remote calls, without device attribution (A2).
+
+## 3. Flows
+
+### 3.1 Pairing and connect
+
+```mermaid
+sequenceDiagram
+  participant U as Terminal CLI
+  participant RG as RemoteGateway
+  participant PS as Process storage
+  participant D as Phone
+  participant T as Transport
+  participant R as Rpc
+  U->>RG: remote.pair
+  RG-->>U: code, url, expiresAt
+  D->>RG: POST /api/pair code, deviceName
+  RG->>PS: atomic replace with new device record
+  RG-->>D: deviceId, token or HttpOnly cookie
+  D->>T: GET /ws with token
+  T->>RG: authenticate upgrade
+  RG-->>T: device_id, revoked token
+  T->>R: connection with ConnectionEntry mounts_management false
+  D->>R: hello v3, session.list, session.attach
+```
+
+The offer is single use and consumed before the record is written; tokens are stored only as hashes.
+
+### 3.2 Remote control of a Session
+
+```mermaid
+sequenceDiagram
+  participant D as Phone
+  participant T as Terminal
+  participant R as Rpc
+  participant O as Session owners
+  participant TL as Timeline
+  D->>R: session.permission.update
+  R->>O: Permission owner validates
+  O->>TL: append permission/changed
+  T->>R: approval.respond
+  D->>R: approval.respond same request
+  R->>O: Approval
+  O->>TL: append first approval/respond
+  O-->>D: invalid_params already resolved
+  TL-->>D: dispatched events via attachment
+  TL-->>T: dispatched events via attachment
+```
+
+Remote and local clients are equal Session clients; owners validate at their boundary and Timeline sequence decides between them. Both attachers see the same events in per-branch order.
+
+### 3.3 Revocation and rotation
+
+```mermaid
+sequenceDiagram
+  participant U as Terminal CLI
+  participant RG as RemoteGateway
+  participant PS as Process storage
+  participant C as Device connections
+  U->>RG: remote.revoke deviceId
+  RG->>PS: remove record
+  RG->>C: fire revoked tokens, connections close
+  RG-->>U: done
+  U->>RG: remote.rotate_token
+  RG->>PS: set rotation_required
+  RG->>C: close affected connections
+  C->>RG: POST /api/token/rotate with current token
+  RG->>PS: new hash, previous kept for grace window
+```
+
+Revocation is persisted before connections close, so a racing upgrade with the old token is rejected. Admitted commands of a revoked device continue; their replies are lost.
+
+## 4. Timing and conflicts
+
+```mermaid
+sequenceDiagram
+  participant D as Phone
+  participant T as Terminal
+  participant TL as Timeline
+  T->>TL: stop/interrupt, seq n
+  D->>TL: approval.respond arrives, Approval checks consumed facts
+  Note over TL: request already approval/cancelled at n
+  TL-->>D: response fails, absent or already resolved
+```
+
+Every race between remote and local clients is decided by Timeline sequence inside the owning plugin; RemoteGateway decides only its own pairing, revocation and rotation order.
+
+| Scenario | Outcome | Owner |
+| --- | --- | --- |
+| Phone and terminal answer the same approval or question | First consumed fact decides; second fails | Approval, Questions |
+| Phone `session.permission.update` races terminal | Two `permission/changed` facts; later sequence wins | Permission |
+| Phone withdraws an input (`session.input.withdraw`) while it is consumed | `input/consumed` first: withdraw fails; `input/withdrawn` first: never consumed | InputQueue |
+| Disconnect with a pending approval | Stays pending; replayed on re-attach; no timeout (A14) | Approval |
+| Revocation while that device's request runs | Connection closed; command continues; reply lost | Rpc |
+
+Full table: [Appendix B](#appendix-b-full-conflict-table).
+
+## 5. Context mapping
+
+No model-visible effect of its own. Content from remote clients enters the model exactly as local client content: `session.submit` user content (text, images) becomes one user message at the input's consumed position, with no source marker because the user is its author; approvals, stops, withdrawals and permission changes are not model content. Compaction, child-branch inheritance and non-interactive Sessions follow the Session input rules ([session access](../contracts/session-access.md)). The model never sees device ids, device names, tokens, entry names or diagnostics.
+
+## 6. Interfaces (summary)
+
+| Interface | Kind | Purpose |
+| --- | --- | --- |
+| `GET /`, `/assets/*` | HTTP | Web workspace static assets |
+| `POST /api/pair`, `POST /api/token/rotate` | HTTP | Pairing, device token rotation |
+| `GET /ws` | WebSocket | App Server protocol v3 for paired devices: all Session methods |
+| `remote.start/stop/status/pair/devices/revoke/rotate_token` | Management methods | Local administration of the entry and devices |
+| `EntryHost`, `UpgradeAuthenticator`, `ConnectionEntry` | Transport/Connection change | Authenticated entries with assembly mount flag |
+| CLI | `/remote`, `/web`, `dimcode remote`, `dimcode web` | User entries |
+
+Details: [Appendix A](#appendix-a-interface-details).
+
+## 7. Security
+
+Every paired device has full Session-level control of every Session on the host: submitting input, answering approvals and questions, stopping turns, `session.permission.update`, `session.exec.stop`, `session.model.update`, `session.mcp*` and creating Sessions in any authorized directory (decision E3, A12). This widens today's local-only execution Session methods and is recorded in [Management's compatibility table](Management.md#a6-classification-migration-and-compatibility). The permission preset changed remotely is Session configuration (decision E4): a Timeline fact inherited by child branches and reset to the default on fork. The entry never grants management: pairing, revocation, configuration, host-local approvals and `daemon.shutdown` require an entry that mounts Management; mounting it here is an assembly option equal to giving every paired device host administrator rights. Authentication stays minimal (overview §3.1): one bearer token per device, hashed at rest, rotated by the device, revoked locally; pairing codes are short-lived, single-use and rate-limited. Cookies are `HttpOnly`, `Secure`, `SameSite=Strict` with a same-origin `Origin` check. Tokens never appear in URLs, logs, diagnostics or Timeline. The entry never accepts rutis link frames or exports services.
+
+## Appendix A. Interface details
+
+### A.1 Transport change (proposed, owned by Transport)
 
 ```rust
 impl EntryHost {
@@ -46,111 +201,94 @@ pub struct EntrySpec {
     pub bind: SocketAddr,
     pub tls: Option<TlsFiles>,                     // cert and key paths on the control node
     pub authenticate: Arc<dyn UpgradeAuthenticator>,
-    pub routes: Arc<dyn HttpRoutes>,               // non-WebSocket paths (assets, pairing)
+    pub routes: Arc<dyn HttpRoutes>,               // non-WebSocket paths
     pub mounts_management: bool,                   // assembly data; RemoteGateway passes false (A1)
 }
 pub trait UpgradeAuthenticator: Send + Sync {
-    /// Called once per WebSocket upgrade with the request headers.
     fn authenticate(&self, request: &UpgradeRequest) -> HostFuture<'_, Result<Authenticated, Rejected>>;
 }
 pub struct Authenticated { pub device_id: String, pub revoked: CancellationToken }
 pub struct ConnectionEntry { pub name: String, pub mounts_management: bool, pub device_id: Option<String> }
 ```
 
-The connection closes when `revoked` fires. Without RemoteGateway, Transport's existing bare WebSocket keeps today's rules (protected profiles: `hello` and `daemon.ping` only).
+The connection closes when `revoked` fires. Without RemoteGateway, the bare WebSocket keeps today's rules (protected profiles: `hello` and `daemon.ping` only).
 
-## 4. Events
-
-None. Devices, tokens and offers are host-local security material and never enter Timeline (overview §9). Remote clients produce Session facts only through existing Session methods (`session.submit` → `input/message`, `approval.respond` → `approval/respond`, `session.stop` → `stop/interrupt`), written by those owners after their boundary validation; the device that caused them is not recorded in Timeline (A2).
-
-## 5. State
-
-| State | Owner, storage | Rebuild |
-| --- | --- | --- |
-| Entry intent: `enabled`, `bind`, `tls`, `assets` | RemoteGateway configuration in the loader editable layer through Settings; `enabled`, `bind`, `tls` are `x-volatile` | Persisted (#3) |
-| Device records `{device_id, name, token_hash, previous_hash?, previous_until?, rotation_required, paired_at, last_seen_at}` | `remote-devices.json`, version 1, private file through `FileStorage` atomic replacement (A3) | Persisted; corrupt or unreadable file fails closed (no device authenticates) |
-| Pairing offers `{code_hash, expires_at, attempts}` | RemoteGateway memory | Not persisted; lost on restart (A4) |
-| Live connections per device and their revocation tokens | RemoteGateway memory | Empty after reload or restart |
-| Session attachments, pending approval replay | Connection, Approval (existing) | Existing |
-
-## 6. Interfaces
-
-### 6.1 Entry and HTTP surface
+### A.2 HTTP surface
 
 | Path | Auth | Behavior |
 | --- | --- | --- |
-| `GET /`, `GET /assets/*` | None | Web workspace static files from the distribution's assets directory; confined to that directory; immutable cache headers; restrictive Content-Security-Policy (A5) |
-| `POST /api/pair` | Pairing code | Body `{code, deviceName, web?}`. Valid unexpired offer → new device record; returns `{deviceId, token}`; with `web: true` sets the token as an `HttpOnly; Secure; SameSite=Strict` cookie instead of returning it (A6). Offers are single use |
-| `POST /api/token/rotate` | Current or previous token | Returns a new token; the previous one stays valid for this endpoint and upgrades until the new token is first used or 10 minutes pass (A7) |
-| `GET /ws` | `Authorization: Bearer <token>` or the cookie with a same-origin `Origin` header | Upgrade to the App Server protocol; rejected with 401 when the token is unknown, revoked or `rotation_required` |
+| `GET /`, `GET /assets/*` | None | Static files confined to the distribution's assets directory; immutable cache headers; restrictive Content-Security-Policy (A5) |
+| `POST /api/pair` | Pairing code | `{code, deviceName, web?}` → `{deviceId, token}`; `web: true` sets an `HttpOnly; Secure; SameSite=Strict` cookie instead (A6); offers single use |
+| `POST /api/token/rotate` | Current or previous token | New token; previous valid for this endpoint and upgrades until the new one is used or 10 minutes pass (A7) |
+| `GET /ws` | Bearer token, or cookie with same-origin `Origin` | Upgrade; 401 when unknown, revoked or `rotation_required` |
 
-Tokens are 32 random bytes, base64url; only SHA-256 hashes are stored and compared in constant time. Pairing codes are 8 characters of Crockford base32 (A8). Failed pairing attempts are limited to 5 per offer and 20 per minute per entry; exceeding the limit invalidates the offer (A9). Loopback is the default bind; a non-loopback bind requires `tls` or an explicit `plaintext: true` (A10).
+Tokens: 32 random bytes, base64url; SHA-256 hashes compared in constant time. Pairing codes: 8 Crockford base32 characters (A8). Attempts: 5 per offer, 20 per minute per entry; exceeding invalidates the offer (A9). Loopback by default; non-loopback requires `tls` or explicit `plaintext: true` (A10).
 
-### 6.2 Protocol on the remote entry
+### A.3 Protocol on the remote entry
 
 | Item | Rule |
 | --- | --- |
-| Version | `hello` with protocol v3 only; v1/v2 are rejected with `protocol_version` (A11) |
-| Methods | Rpc Session methods ([Management §6.5](Management.md#65-classification-and-migration-of-existing-methods)) on every Session of this host (A12); management names and `daemon.shutdown` → `-32601 unknown_method` |
-| `hello.features` | Session features only; no management names, no `management.methods` |
-| Identity | `ConnectionEntry.device_id` is attached to the connection; Rpc uses it for diagnostics and for closing on revocation; it grants nothing beyond the entry's method set |
+| Version | `hello` v3 only; v1/v2 rejected with `protocol_version` (A11) |
+| Methods | All Rpc Session methods, built-in and contributed ([session boundary](../contracts/session-boundary.md)), on every Session of the host (E3, A12); management names, `management.methods` and `daemon.shutdown` → `-32601 unknown_method` |
+| `hello.features` | Session features only |
+| Identity | `ConnectionEntry.device_id` for diagnostics and revocation; grants nothing beyond the entry's method set |
 | Reverse requests | None: client requests, server notifies ([#5](https://github.com/arcships/dim/issues/5)) |
 
-### 6.3 Management methods (namespace `remote`)
+### A.4 Management methods (namespace `remote`)
 
 | Method | Params | Result | Interruption |
 | --- | --- | --- | --- |
-| `remote.start` | `{bind?, tls?, plaintext?}` | `{address}` after the listener is bound | Report |
-| `remote.stop` | `{}` | `{}` after the listener and its connections closed | Report |
+| `remote.start` | `{bind?, tls?, plaintext?}` | `{address}` after bind | Report |
+| `remote.stop` | `{}` | `{}` after listener and connections closed | Report |
 | `remote.status` | `{}` | `{enabled, running, address?, tls, error?, devices, connections}` | Drain |
 | `remote.pair` | `{ttlSeconds?}` (default 300, max 900) | `{code, url, expiresAt}`; `url` is `<origin>/pair#code=<code>` | Drain |
 | `remote.devices` | `{}` | `[{deviceId, name, pairedAt, lastSeenAt, connections, rotationRequired}]` | Drain |
-| `remote.revoke` | `{deviceId}` | `{}` after the record is removed and its connections closed | Report |
-| `remote.rotate_token` | `{deviceId?}` (absent: all devices) | `{}` after the flag is persisted and affected connections closed | Report |
+| `remote.revoke` | `{deviceId}` | `{}` after record removed and connections closed | Report |
+| `remote.rotate_token` | `{deviceId?}` (absent: all) | `{}` after flag persisted and connections closed | Report |
 
-`remote.start` and `remote.stop` write `enabled` (and `bind`/`tls`) through the typed Settings operation for this plugin's configuration; the loader delivers the volatile change as `VolatileUpdate` without reloading the plugin, and RemoteGateway opens or drops its `EntryHandle`. Restart is `stop` then `start` (CLI). CLI entries: `/remote`, `/web`, `dimcode remote`, `dimcode web`; running the daemon in the foreground or background is the CLI's concern.
+`remote.start`/`stop` write `enabled` (and `bind`/`tls`) through the typed Settings operation; the loader delivers a `VolatileUpdate` without reloading the plugin, and RemoteGateway opens or drops its `EntryHandle`.
 
-## 7. Timeline and capability mechanics
+### A.5 Capability mechanics
 
 | Step | Path |
 | --- | --- |
-| Writes | None by RemoteGateway. Remote calls reach Session owners through Rpc exactly like local calls: `session.submit` → `Session::input` (boundary validation, `Timeline::append`); `approval.respond` → branch Approval service, which appends `approval/respond`; `session.stop` → turn `stop/interrupt` |
-| Dispatcher | Not subscribed. Remote clients receive events through their per-connection Session attachment (existing `session_channel` listener), not through the process broadcast subscription |
-| Concurrent attachers | Each connection holds its own attachment; all attachers receive the same dispatched events in per-branch order; there is no exclusive owner of a Session (A13) |
-| Recheck | Decisions belong to the Session owners and are made by sequence: the first `approval/respond` consumed by Approval decides; later responses fail `invalid_params` ("absent or already resolved") |
-| Reload | RemoteGateway reload drops its `EntryHandle`: listener and remote connections close (detach); device records persist; offers are lost. Transport reload reloads RemoteGateway (it injects `EntryHost`) |
-| Process restart | The entry reopens if `enabled`; devices reconnect and re-attach; committed inputs and pending approvals are unaffected and replayed on attach |
+| Writes | None by RemoteGateway. Remote calls reach owners through Rpc like local calls: `session.submit` → Session input boundary (`Timeline::append`), `approval.respond` → branch Approval (`approval/respond`), `session.stop` → `stop/interrupt`, `session.permission.update` → Permission (`permission/changed`), `session.input.withdraw` → InputQueue (`input/withdrawn`) |
+| Dispatcher | Not subscribed; devices receive events through their per-connection Session attachment |
+| Concurrent attachers | No exclusive owner (A13); all receive the same events in per-branch order |
+| Reload | Drops the `EntryHandle`: listener and remote connections close (detach); records persist; offers lost. Transport reload reloads RemoteGateway (it injects `EntryHost`) |
+| Process restart | Entry reopens if `enabled`; devices reconnect and re-attach; committed inputs and pending approvals replay on attach |
 
-## 8. Timing and conflicts
+## Appendix B. Full conflict table
 
 | Scenario | Sequence order | Outcome | Owner of the decision |
 | --- | --- | --- | --- |
-| Phone and terminal answer the same approval | first `approval/respond` < second | First decides; second gets `invalid_params`; v2/v3 attachers see the deciding event | Approval |
-| Remote answer after a turn `stop/interrupt` | interrupt < response | Request already `approval/cancelled`; response fails | Approval |
-| Remote answer before the interrupt | response < interrupt | Decision accepted; tool may still be stopped before start | Approval, ToolExecutor |
-| Branch-scoped interrupt or branch close while a remote client is attached | — | Client receives the events; later calls on that branch fail `session_invalid_input`/closed | Session owners |
+| Phone and terminal answer the same approval | first `approval/respond` | First decides; second `invalid_params` | Approval |
+| Remote answer after turn `stop/interrupt` | interrupt < response | Request already `approval/cancelled`; response fails | Approval |
+| Remote answer before the interrupt | response < interrupt | Accepted; tool may still be stopped before start | Approval, ToolExecutor |
+| Branch-scoped interrupt or branch close while attached | — | Events delivered; later calls on that branch fail | Session owners |
 | Phone Steer while terminal Queue input pending | Timeline order | Applied per mode in sequence order | InputQueue, Loop |
+| Remote withdraw vs consumption of the input | `input/consumed` vs `input/withdrawn` | Earlier fact wins; the other is rejected | InputQueue |
 | Remote submit during an unsettled tool batch | input < `step/tool-result` | Steer/Append after the batch result; Queue after `turn/end` | Loop |
-| Compaction or child branch cut around a remote input | — | Same as any input ([session access §8](../contracts/session-access.md#8-timing-and-conflicts)) | ContextPreparation, InputQueue |
-| Question answered from two devices | first `question/answered` | First accepted by sequence (overview §5.1) | Questions |
-| Disconnect while an approval is pending | — | Stays pending; replayed on re-attach; no timeout (A14) | Approval |
+| Remote `session.permission.update` vs terminal update | sequence | Later `permission/changed` is current; tool admissions use the policy consumed at admission | Permission, Approval |
+| Remote `session.exec.stop` vs exec completion | sequence | Earlier terminal fact wins | WorkspaceTools exec owner |
+| Compaction or child cut around a remote input | — | As any input ([session access](../contracts/session-access.md)) | ContextPreparation, InputQueue |
+| Fork after a remote permission change | — | Fork resets the preset to default (E4) | SessionStore |
+| Question answered from two devices | first `question/answered` | First accepted | Questions |
+| Disconnect while an approval is pending | — | Stays pending; replayed on re-attach (A14) | Approval |
 | Disconnect after `session.submit` admitted, reply lost | input committed | Reconnect, `session.input_lookup` by `submissionId` | Client |
-| Revocation while a request of that device runs | admitted < revoke | Connection closed; admitted command continues; reply lost | Rpc |
-| Two phones use one pairing code | first `POST /api/pair` | First pairs; second fails, counts as an attempt | RemoteGateway |
-| Rotation response lost | — | Previous token still accepted during the grace window; device retries rotation | RemoteGateway |
-| `remote.rotate_token` while a device rotates | persisted flag order | A rotation committed before the flag is also flagged; device rotates again | RemoteGateway |
+| Revocation while a device's request runs | admitted < revoke | Connection closed; command continues; reply lost | Rpc |
+| Upgrade racing revocation | record removed < connections closed | Upgrade with the old token rejected | RemoteGateway |
+| Two phones use one pairing code | first `POST /api/pair` | Second fails, counts as an attempt | RemoteGateway |
+| Rotation response lost | — | Previous token valid in the grace window; device retries | RemoteGateway |
+| `remote.rotate_token` while a device rotates | persisted flag order | Rotation before the flag is also flagged | RemoteGateway |
 | `remote.stop` with attached devices | — | Connections close (detach); Sessions continue | RemoteGateway, Transport |
-| Rpc reload | — | Remote calls get `service_reloading`; connections stay unless the protocol instance changes | Rpc |
-| Session closed by another client | `session.closed` | Remote attachers receive `session.closed` | Connection |
-| Session idle unload while only remote attachers exist | — | Attachment pins the Session as today; detach releases | AgentIndex |
-| Resource node of a Session offline | capabilities Pending | Remote requests get the same retryable errors as local ones | rutis lifecycle |
+| Rpc reload, or a Session-method namespace reloading | — | `service_reloading` for affected calls; connections stay unless the protocol instance changes | Rpc |
+| Session closed by another client | `session.closed` | Remote attachers receive it | Connection |
+| Session idle unload with only remote attachers | — | Attachment pins the Session; detach releases | AgentIndex |
+| Resource node of a Session offline | — | Same retryable errors as local clients | Session owners |
 | Process restart with offers outstanding | — | Offers lost; devices persist | RemoteGateway |
 
-## 9. Context mapping
-
-No model-visible effect of its own. Content from remote clients enters the model exactly as local client content: `session.submit` user content (text, images) becomes one user message at the input's consumed position; it carries no source marker because the user is its author; approvals and stops are not model content. Compaction, child-branch inheritance and non-interactive Sessions follow the Session input rules ([session access §9](../contracts/session-access.md#9-context-mapping)). The model never sees device ids, device names, tokens, entry names or diagnostics.
-
-## 10. Errors and recovery
+## Appendix C. Errors and recovery
 
 | Case | Result |
 | --- | --- |
@@ -158,51 +296,47 @@ No model-visible effect of its own. Content from remote clients enters the model
 | TLS files unreadable | `-32000 remote_tls_invalid`; not started |
 | Non-loopback bind without TLS or `plaintext` | `-32602 invalid_params` |
 | Device file corrupt or unreadable | `remote.status.error`; all upgrades rejected; `remote.devices` fails `remote_storage_failed`; file kept for repair |
+| Process storage lock or write failure on pair/revoke/rotate | `-32000 remote_storage_failed`; in-memory state unchanged; revocation not reported done |
 | Unknown device id | `-32602 invalid_params` |
 | Upgrade with bad token | HTTP 401, no detail; counted in diagnostics without the token |
-| Listener fails while running | Entry closed, `remote.status.error` set, `enabled` unchanged; the daemon keeps running (A15) |
+| Listener fails while running | Entry closed, `remote.status.error` set, `enabled` unchanged; daemon keeps running (A15) |
 
-## 11. Security
-
-The remote entry grants full Session-level control of every Session on the host to every paired device, including answering approvals, `session.permission.update` and creating Sessions in any authorized directory (A12); it never grants management: pairing, revocation, configuration, approvals of host-local content and shutdown require an entry that mounts Management. Mounting Management on the remote entry is an assembly option and equals giving every paired device host administrator rights; it is not a management method. Authentication stays minimal (overview §3.1): one bearer token per device, hashed at rest, rotated by the device, revoked locally; pairing codes are short-lived, single-use and rate-limited. Cookies are `HttpOnly`, `Secure`, `SameSite=Strict` and require a same-origin `Origin`. Tokens never appear in URLs, logs, diagnostics or Timeline. Static assets are public and contain no data. The entry never accepts rutis link frames or exports services; node-to-node authority uses rutis link tokens on its own plane (#5).
-
-## 12. Acceptance
+## Appendix D. Acceptance
 
 Flow tests in the App Server suite over a real WebSocket entry:
 
 1. `remote.start`/`status`/`stop`; non-loopback without TLS rejected; restart reopens when `enabled`.
-2. Pairing with a valid code, an expired code, a reused code and too many attempts; `remote.devices` lists the device.
-3. A paired device calls Session methods; every management method, `management.methods` and `daemon.shutdown` return `unknown_method`; `hello.features` contains no management names; v1 is rejected.
-4. Two attached clients: both receive events; competing `approval.respond` — one success, one `invalid_params`; interrupt before and after a remote response.
-5. Disconnect with a pending approval and with a submitted input; reconnect, re-attach receives the replay; `session.input_lookup` finds the input.
-6. Revoke closes the device's connections and rejects its token; rotation keeps the old token through the grace window and then rejects it; `remote.rotate_token` forces rotation.
+2. Pairing with valid, expired, reused code and too many attempts; `remote.devices` lists the device.
+3. A paired device calls Session methods including `session.permission.update`, `session.exec.stop`, `session.model.update` and `session.input.withdraw`; every management name, `management.methods` and `daemon.shutdown` return `unknown_method`; v1 is rejected.
+4. Two attached clients: both receive events; competing `approval.respond`; interrupt before and after a remote response; remote withdraw racing consumption.
+5. Disconnect with a pending approval and with a submitted input; re-attach replays; `session.input_lookup` finds the input.
+6. Revoke closes connections and rejects the token; rotation grace window; `remote.rotate_token` forces rotation.
 7. A corrupt device file rejects all upgrades without resetting the file.
 
-## 13. Assumptions
+## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | The mount flag is entry assembly data; default false for RemoteGateway | Overview common constraint 8 | — |
-| A2 | Device identity is not written to Timeline | Overview §9 (security settings); judgment | Inputs would carry a device attribution field or marker |
-| A3 | Devices stored in a private host-local JSON file via FileStorage | Precedent `mcp-approvals.json`; judgment | SQLite table with a format version change |
-| A4 | Pairing offers are in memory only | Judgment | Persisted offers survive restart |
-| A5 | Web workspace assets ship with the distribution and are served unauthenticated | Feature list `/web`; judgment | Assets require authentication |
-| A6 | Browser pairing uses an HttpOnly cookie; native clients receive the token | Judgment | Token in browser storage |
-| A7 | Device-initiated rotation with a 10-minute grace window; local forced rotation by flag | Feature list "rotate access tokens"; judgment | Different rotation model |
+| A1 | The mount flag is entry assembly data; default false here | Overview common constraint 8 | — |
+| A2 | Device identity is not written to Timeline | Overview §9; judgment | Inputs carry device attribution |
+| A3 | Devices stored in `remote-devices.json` in RemoteGateway's process storage | Decision R8 | Another store with a format change |
+| A4 | Pairing offers in memory only | Judgment | Persisted offers |
+| A5 | Web workspace assets ship with the distribution, unauthenticated | Feature list `/web`; judgment | Assets require authentication |
+| A6 | Browser pairing uses an HttpOnly cookie; native clients get the token | Judgment | Token in browser storage |
+| A7 | Device-initiated rotation with a 10-minute grace window; forced rotation by flag | Feature list "rotate access tokens"; judgment | Different rotation model |
 | A8 | Pairing code format and 32-byte tokens | Judgment | — |
-| A9 | Attempt limits 5 per offer and 20 per minute | Judgment | Different limits |
-| A10 | Loopback default; non-loopback needs TLS or explicit plaintext | Overview §5.13 (TLS with #5); judgment | Deployment policy decided in #5 |
-| A11 | Remote entry accepts protocol v3 only | Judgment (new clients) | v1/v2 compatibility on the entry |
-| A12 | A paired device can access every Session of the host | Feature list "access projects and Sessions"; overview §7.2 | Per-device workspace scoping |
+| A9 | Attempt limits 5 per offer, 20 per minute | Judgment | Different limits |
+| A10 | Loopback default; non-loopback needs TLS or explicit plaintext | Overview §5.13; judgment | Policy decided in #5 |
+| A11 | Remote entry accepts protocol v3 only | Judgment | v1/v2 on the entry |
+| A12 | A paired device can access every Session and every Session method | Decision E3; feature list "access projects and Sessions" | Per-entry method filter or per-device scoping |
 | A13 | No exclusive Session ownership; "take over" means attaching and acting | Feature list "collaborate with or take over" | A control-lock protocol |
-| A14 | Pending approvals have no timeout when no client is attached | Existing Approval behavior | Timeout policy in Approval |
-| A15 | A listener failure stops only the remote entry | Judgment; today a listener failure stops the daemon | Daemon shutdown on remote failure |
+| A14 | Pending approvals have no timeout with no client attached | Existing Approval behavior | Timeout in Approval |
+| A15 | A listener failure stops only the remote entry | Judgment | Daemon shutdown on remote failure |
 
-## 14. Open questions
+## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
 | [#5](https://github.com/arcships/dim/issues/5) and overview §13 "Remote access" | Relation of product device identity to peer tokens, link disconnection, TLS deployment |
-| Session methods with authority | Whether `session.permission.update` and `session.create` with arbitrary `cwd` should be excluded from the remote entry; this would be the first per-entry method filter beyond mounting |
-| Per-device scope | Whether devices may be limited to workspaces or Sessions |
-| Overview §7.2 Transport/Connection | The `EntryHost` and authenticator contracts are proposed here and need the Transport change document |
+| Per-device scope | Whether devices may later be limited to workspaces or Sessions (not required by E3) |
+| Overview §7.2 Transport/Connection | `EntryHost` and authenticator contracts are proposed here and need the Transport change document |

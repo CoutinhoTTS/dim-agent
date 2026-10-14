@@ -2,62 +2,214 @@
 
 Status: Draft. Overall design: [overview §5.16](../overview.md#516-management), [common constraint 8](../overview.md#3-integration-methods), [§3.1 Multiple nodes](../overview.md#31-multiple-nodes), [§7.2 Rpc change](../overview.md#72-app-server-process-plugins). Phase: P0. Language: Rust.
 
-Management is the management plane of the App Server process. It collects management methods that process plugins contribute as named contributions, serves them as one dispatchable service, and is mounted on entries chosen by assembly: the local RPC entry by default, never the RemoteGateway entry by default, and other nodes only when the service is exported over a rutis link. Whether management is possible depends only on mounting and export; there are no identity tiers and no per-method authorization.
+Management is the management plane of the App Server process: a stable registry of management methods that process plugins contribute under their own namespaces, served as one dispatchable service and mounted on entries chosen by assembly (local RPC entry by default, never the RemoteGateway entry by default, other nodes only by explicit rutis link export). Mounting is the only authority; there are no identity tiers and no per-method authorization. Contributions follow the shared [extension registry](../contracts/extension-registry.md) pattern; this document defines what is specific to management methods: naming, interruption, the per-call progress sink, connection-bound notifications, reply handoff and the migration out of Rpc.
 
-## 1. User flows
+## 1. Structure
 
-1. The CLI connects over the local socket with protocol v3. `hello.features` lists the management methods currently mounted, as today. The CLI calls `mcp.save`; Rpc does not know the method, finds Management mounted on the local entry, and Management routes the call to the `mcp` contribution, which validates and executes it.
-2. A client calls `management.methods` and receives the methods available on its entry with a revision; after a contributor reload it calls again and sees the same set with a new revision.
-3. The Mcp plugin is restarted. While its contribution is not active, `mcp.*` calls return `service_reloading`; Session methods and every other management namespace keep working.
-4. A user installs a plugin package that contributes `schedule.*`. Management discovers the new contribution from the loader and mounts it; `management.methods` now lists it.
-5. A phone connected through RemoteGateway calls `provider.save`: the remote entry does not mount Management, so the call fails with `unknown_method`.
-6. Another node is given host administration: the operator exports Management over the rutis link to that node; the peer calls `ManagementService::call` through the link with the same methods and results as the local entry.
+```mermaid
+flowchart LR
+  subgraph P["App Server process, control node"]
+    LOADER["rutis Loader<br/>row declarations"]
+    MS["ManagementPlugin<br/>ManagementService registry"]:::new
+    MOUNT["management-mount<br/>one instance per namespace"]:::new
+    MC["ManagementContribution<br/>keyed by namespace"]:::contract
+    EXT["Extension registry pattern"]:::contract
+    CONTRIB["Contributors<br/>mcp, provider, account, skills,<br/>plugin, remote, shell, hooks ..."]
+    DAEMON["daemon contribution<br/>process coordinator"]:::new
+    RPC["Rpc"]
+    SB["Session-method contributions<br/>session boundary contract"]:::contract
+  end
+  PEER["Peer node<br/>via rutis link export"]
+  LOADER -->|"configured set"| MS
+  MOUNT -->|"register in apply"| MS
+  MOUNT -->|"injects one"| MC
+  CONTRIB -->|"provides"| MC
+  DAEMON -->|"provides"| MC
+  MS -.->|"follows"| EXT
+  SB -.->|"follows"| EXT
+  RPC -->|"When, dispatch if entry mounts"| MS
+  RPC -->|"Session methods"| SB
+  PEER -->|"dispatch, CallOrigin Link"| MS
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef contract stroke-dasharray:4 3
+```
 
-## 2. Scope
+Management depends on no contributor: each mount instance injects the service and exactly one keyed contribution, so a contributor's reload or Pending state affects only its own namespace. Rpc injects Management optionally and routes non-Rpc names to it only on entries whose mount flag is set; Session-method contributions are a separate Rpc registry with the same pattern.
 
-| Responsible | Not responsible |
-| --- | --- |
-| The management contribution contract and its mounting per contributor | Business logic, parameter formats and errors of each method (the contributor) |
-| Method naming and namespace ownership rules | Session methods (Rpc) |
-| Dispatch, admission accounting, interruption mapping, `management.methods` | Authentication of entries or links (Transport, RemoteGateway, rutis link) |
-| Protocol compatibility of migrated methods for v1–v3 clients | Choosing which entries mount it (assembly and link configuration) |
-| Migration plan of `account.*`, `provider.*`, `skills.*`, `mcp.*` out of Rpc | Notifications and push channels (none are added) |
+| Part | Scope | Depends on | Provides |
+| --- | --- | --- | --- |
+| `ManagementPlugin` | Process | `Arc<Loader>` | `ManagementService` (registry, dispatch, `management.methods`) |
+| `management-mount` (instanced group) | Process, one per configured namespace | `ManagementService`, keyed `ManagementContribution` | Registration (no service) |
+| Contributors | Process | their own dependencies | `ManagementContribution` keyed by namespace |
+| `daemon` contribution | Process (process coordinator) | shutdown coordinator | `daemon.shutdown` (moved from Rpc, decision E21) |
+| `RpcPlugin` (change) | Process | existing minus management services, `When<ManagementService>` | Session methods, entry mount gating |
 
-## 3. Scope and dependencies
+Contracts defined here: `ManagementContribution`, `ManagementProvider`, `MethodDecl`, `Interruption`, `ManagementCall`, `CallChannel` (progress sink, connection notifier, reply handoff), `CallOrigin`, `ManagementError`, `ManagementService`, management naming rules. Contracts depended on: [extension registry](../contracts/extension-registry.md) (mount, discovery, configured vs active), rutis-loader `Loader`, Rpc entry mount flag and the [session boundary](../contracts/session-boundary.md) contract (Rpc's `SessionMethodContribution`, which shares these naming rules), rutis service export over links ([rutis nodes](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md)). Contributors depend only on this contract; Management never knows a contributor or a method's meaning.
 
-**Contracts defined here** (owner: Management, the consumer of contributions): `ManagementContribution`, `ManagementProvider`, `MethodDecl`, `Interruption`, `ManagementCall`, `CallOrigin`, `ManagementError`, `ManagementService`, and the method naming rules of §6. **Contracts depended on**: the rutis-loader `Loader` (entries, row declarations, instanced group instances, `LoaderChanged`), the Rpc mount point (Rpc change, §6.4), rutis service export over links ([rutis nodes](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md)). Contributors depend only on this contract and never on Management internals; Management never knows a contributor or a method's meaning. Any plugin providing `ManagementService` with these rules can replace Management.
+## 2. Data and state
 
-| Part | Scope | Injects | Provides | Status |
-| --- | --- | --- | --- | --- |
-| `ManagementPlugin` | Process | `Arc<Loader>` | `ManagementService` | Proposed |
-| `ManagementMount` (instanced group `management-mount`, one instance per contribution name) | Process | `Arc<ManagementService>`, the keyed `ManagementContribution` of its name | — (registers into the service) | Proposed |
-| Contributors | Process | their own dependencies | `ManagementContribution` under key `TypeKey::keyed_dynamic::<ManagementContribution>(name)` | Proposed per plugin |
-| `RpcPlugin` | Process | existing minus management services; added `When<Arc<ManagementService>>` | `RpcService` | Change |
+```mermaid
+flowchart TB
+  DECL["Loader row declarations<br/>provides ManagementContribution n"]
+  CFG["Configured namespaces"]:::new
+  ACT["Active registrations<br/>namespace, MethodDecls, mount generation"]:::new
+  REV["Method-set revision<br/>generation uuid and counter"]:::new
+  INF["In-flight calls per mount generation"]:::new
+  BIZ["Business state<br/>owned by each contributor"]
+  TL["Timeline"]
+  DECL -->|"recomputed on LoaderChanged"| CFG
+  CFG -->|"mount instances"| ACT
+  ACT -->|"bump on change"| REV
+  ACT --> INF
+  ACT -.->|"calls"| BIZ
+  TL -.-|"no reads, no writes"| ACT
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+```
 
-**Why per-contributor mount instances instead of one aggregated `Contributions` injection** (A1). ToolRegistry injects all named contributions in its own `Deps`. Doing the same here would make Management (and through it Rpc) Pending or reloading whenever any contributor is: a broken Mcp row would also disable `plugin.*`, the methods needed to repair it, and every contributor restart would reload Rpc. Each `ManagementMount` instance instead injects exactly one named contribution and the service, so a contributor's lifecycle affects only its own methods, and Management itself depends on no contributor. Contributors still follow the ToolRegistry pattern: they provide a named contribution and know nothing about who consumes it.
+All Management state is in memory and rebuilt on every load from loader entries and mount `apply`; nothing is persisted and nothing enters the Timeline. The configured set (from declarations) versus the active set (registered mounts) decides `service_reloading` versus `unknown_method`.
 
-**Discovery.** Management reads loader entries and their declarations (`Resolved::declares`: what a row waits for and provides) and creates one `management-mount` instance for every name `n` such that an enabled row declares it provides `ManagementContribution` keyed `n`; it removes the instance when no enabled row declares it. It re-evaluates on `LoaderChanged`. Built-in plugins and packaged plugins (installed by PluginManager) are discovered the same way; neither writes Management configuration (A2). Mount instances are created after `ManagementService` is provided; the host's ready latch additionally waits until the mounts discovered from the initial entries are Active or failed, so the first `hello` sees the complete set (A3).
+## 3. Flows
 
-## 4. Events
+### 3.1 Call on a mounting entry, with progress
 
-None. Management writes and consumes no Timeline event. Management calls are host configuration and command operations; any Session-visible consequence (for example a newly approved MCP server being discovered by an active Session) is produced by the owning plugin through its own facts. Call records go to the diagnostics channel.
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant R as Rpc
+  participant M as ManagementService
+  participant N as Mount generation
+  participant P as Contributor
+  C->>R: request shell.run
+  R->>R: entry mounts Management, name not Rpc or Session method
+  R->>M: dispatch(call, channel, caller_gone)
+  M->>N: longest-namespace owner, take admission slot
+  N->>P: call(ManagementCall, channel, cancel)
+  P-->>R: channel.progress(data)
+  R-->>C: notification management.progress with request id
+  P-->>N: result
+  N-->>R: result, slot released
+  R-->>C: response
+```
 
-## 5. State
+Progress notifications are written through the same connection writer before the response, so the client sees them in order. A method that declares no progress sink gets a channel whose `progress` is a no-op.
 
-| State | Owner | Rebuild |
+### 3.2 Contributor reload
+
+```mermaid
+sequenceDiagram
+  participant L as rutis lifecycle
+  participant N as Mount generation g1
+  participant P as Contributor g1
+  participant M as ManagementService
+  participant C as Client
+  L->>N: dispose (contributor reloading)
+  N->>N: refuse new admissions
+  alt Interruption Report
+    N-->>C: operation_interrupted for admitted calls
+  else Interruption Drain
+    N->>P: wait for admitted calls
+  end
+  N->>M: unregister namespace, revision bump
+  C->>M: call in window
+  M-->>C: service_reloading (configured, not active)
+  L->>M: mount g2 apply, register, revision bump
+```
+
+Only the reloading namespace is affected; other namespaces, Session methods and Rpc stay up. Unload never uses the capability-reloading reason (extension registry rule).
+
+### 3.3 Connection-bound notifications
+
+```mermaid
+sequenceDiagram
+  participant C as Client connection
+  participant R as Rpc
+  participant P as Contributor
+  C->>R: modality.realtime.open
+  R->>P: call with channel bound to connection
+  P->>P: keep channel.notifier()
+  P-->>C: response connection_id
+  P-->>R: notifier.send modality.realtime.event
+  R-->>C: notification
+  C->>R: disconnect
+  R->>P: notifier closed signal
+  P->>P: release resources bound to the connection
+```
+
+A notifier outlives the call but not the connection; its `closed()` future fires on disconnect, Rpc reload or entry close, and the contributor releases its resources. Notification names must lie in the contributor's namespace.
+
+### 3.4 daemon.shutdown through reply handoff
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant R as Rpc
+  participant D as daemon contribution
+  participant K as Process coordinator
+  C->>R: daemon.shutdown
+  R->>D: call with channel, reply mode Handoff
+  D->>K: hand over channel.final_reply writer
+  D-->>R: Handoff taken
+  K->>K: stop admission, root shutdown
+  K-->>C: completion response
+```
+
+`daemon.shutdown` keeps today's completion contract ([App Server shutdown completion](../../../crates/dim-app-server/README.md#shutdown-completion)); the only change is that it is a management method, so entries without the mount answer `unknown_method`.
+
+## 4. Timing and conflicts
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant M as ManagementService
+  participant N as Mount generation
+  C->>M: call A, admitted
+  Note over N: unload starts after A admitted
+  C->>M: call B
+  M-->>C: B service_reloading, not executed
+  N-->>C: A per Interruption, Report interrupted or Drain completes
+```
+
+Admission order on the mount generation decides: calls admitted before unload follow their `Interruption`; calls after unload never execute. Management has no Timeline facts, so Timeline-sequence scenarios (interrupts, inputs, compaction, branch cuts) do not apply.
+
+| Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Registry: name → registered contribution, its `MethodDecl`s and mount generation | `ManagementService` | Rebuilt by the mount instances' `apply` on every load; not persisted |
-| Configured namespaces (rows declaring a contribution, enabled) | `ManagementService` | Recomputed from `Loader::entries` and declarations |
-| Revision of the method set | `ManagementService` | `"<generation uuid>:<counter>"`, new per Management generation, never reused (A4) |
-| In-flight call accounting per mount generation | `ManagementMount` | Runtime only; drained or reported on unload |
-| Business state behind each method | Contributor | Contributor's document |
+| Two clients mutate the same configuration | Contributor's revision conflict (e.g. `mcp_settings_conflict`) | Contributor |
+| Client disconnects mid-call | Call continues (detach is not cancel); progress dropped; notifier closed; `Report` cancel token fires | Contributor |
+| Duplicate call after a lost reply | Executed twice unless the contributor is idempotent; clients read state before retrying a `mutating` method | Contributor, client |
+| Namespace collision | Later registration rejected as a whole; first owner keeps names | Management |
+| Contributor's resource node offline | That namespace `service_reloading`, or `node_unavailable` per call when it resolves nodes per call | Contributor |
 
-## 6. Interfaces
+Full table: [Appendix B](#appendix-b-full-conflict-table).
 
-### 6.1 Contribution contract
+## 5. Context mapping
+
+No model-visible effect. Management adds no tool, input, prompt source or Timeline event; management calls, progress, notifications and diagnostics are never projected into model context, in any Session, child branch or after compaction. A plugin that also offers the model an operation does so through a process-level tool with its own risk category ([process tool contribution](../contracts/process-tool-contribution.md)); management methods are never model tools.
+
+## 6. Interfaces (summary)
+
+| Interface | Kind | Purpose |
+| --- | --- | --- |
+| `ManagementContribution` / `ManagementProvider` | Service contract | A contributor's method list and `call` |
+| `CallChannel` | Per-call port | Progress sink, connection notifier, final-reply handoff (R13) |
+| `ManagementService::dispatch/methods` | Service | Rpc and link callers dispatch; list the active set |
+| `management.methods` | Management method | Active methods and revision on this entry |
+| `management.progress` | Notification | Per-call progress to the calling connection |
+| `daemon.shutdown` | Management method | Moved from Rpc; `daemon` namespace |
+| Rpc mount gating, `hello.features` | Rpc change | Route non-Rpc names to Management on mounting entries |
+| Migration of `account.*`, `provider.*`, `skills.*`, `mcp.*` | Rpc change | Moved into contributions; wire-compatible |
+
+Details: [Appendix A](#appendix-a-interface-details).
+
+## 7. Security
+
+Mounting is authority: an entry that mounts Management, or a peer to which it is exported, has host administrator rights, including changing approvals and configuration and running commands without Approval (overview §3.1). Defaults: the local protected transport mounts; the bare WebSocket entry and RemoteGateway do not; nothing is exported over links unless explicitly configured in host-local link configuration. `CallOrigin` is diagnostics only. Host-local approvals (`mcp.approve`, `hooks.approve`, `plugin.approve`, `workflow.approve`) are management methods that call the Settings host-local approval service, so they are unavailable on non-mounting entries. Credentials never appear in diagnostics, `management.methods`, progress, notifications or error messages; contributors keep today's redaction rules. Session methods are not gated by mounting: every entry that serves Session methods serves all of them (decision E3, [Appendix A.6](#a6-classification-migration-and-compatibility)).
+
+## Appendix A. Interface details
+
+### A.1 Contribution contract
 
 ```rust
-/// Process service; key TypeKey::keyed_dynamic::<ManagementContribution>(name), no instance.
+/// Process service; key TypeKey::keyed_dynamic::<ManagementContribution>(namespace).
 pub struct ManagementContribution(pub Arc<dyn ManagementProvider>);
 
 pub trait ManagementProvider: Send + Sync + 'static {
@@ -65,200 +217,215 @@ pub trait ManagementProvider: Send + Sync + 'static {
     fn methods(&self) -> Vec<MethodDecl>;
     /// Validates `params` at this boundary and executes. `cancel` fires only when
     /// the caller is gone AND the method is `Interruption::Report`; the provider
-    /// may ignore it and keep its admitted work (it owns that work).
-    fn call(&self, call: ManagementCall, cancel: CancellationToken)
-        -> HostFuture<'_, Result<serde_json::Value, ManagementError>>;
+    /// may keep its admitted work (it owns that work).
+    fn call(&self, call: ManagementCall, channel: CallChannel, cancel: CancellationToken)
+        -> HostFuture<'_, Result<CallReply, ManagementError>>;
 }
 pub struct MethodDecl {
-    pub name: String,              // full wire name, e.g. "mcp.save"
-    pub mutating: bool,            // changes host configuration or runs a command
+    pub name: String,                 // full wire name, e.g. "mcp.save"
+    pub mutating: bool,               // changes host configuration or runs a command
     pub interruption: Interruption,
+    pub progress: bool,               // emits management.progress (R13)
+    pub notifications: Vec<String>,   // connection-bound notification names, inside the namespace
+    pub reply: ReplyMode,             // Direct, or Handoff (daemon.shutdown only today)
 }
 pub enum Interruption {
-    /// On Rpc or mount unload the caller receives `operation_interrupted`;
-    /// the operation may already have committed (today's mcp/skills behavior).
-    Report,
-    /// Unload waits for the call to finish (today's account/provider behavior).
-    Drain,
+    Report, // on Rpc or mount unload the caller receives operation_interrupted; may have committed
+    Drain,  // unload waits for the call to finish
 }
+pub enum ReplyMode { Direct, Handoff }
+pub enum CallReply { Value(serde_json::Value), HandedOff }
 pub struct ManagementCall {
     pub method: String,
-    pub params: serde_json::Value, // raw JSON-RPC params, `{}` when absent
-    pub origin: CallOrigin,        // diagnostics only, never authorization
+    pub params: serde_json::Value,    // raw JSON-RPC params, {} when absent
+    pub origin: CallOrigin,           // diagnostics only, never authorization
 }
-pub enum CallOrigin { Local { connection_id: String }, Entry { entry: String, connection_id: String },
-    Link { peer: String } }
+pub enum CallOrigin {
+    Local { connection_id: String },
+    Entry { entry: String, connection_id: String },
+    Link { peer: String },
+}
 pub struct ManagementError {
-    pub code: i32,                     // -32602, -32601 or -32000
-    pub app_error: Cow<'static, str>,  // [a-z][a-z0-9_]*, e.g. "mcp_settings_conflict"
-    pub message: String,               // public text; never secrets or private configuration
+    pub code: i32,                    // -32602, -32601 or -32000
+    pub app_error: Cow<'static, str>, // [a-z][a-z0-9_]*
+    pub message: String,              // public text; never secrets
 }
 ```
 
-A contributor implemented in another language provides the same service through a rutis runtime row (precedent: the managed provider in the [App Server contract](../../../crates/dim-app-server/README.md#optional-managed-provider)): `methods()` and `call({method, params, origin})` are `async` and return the envelope `{ok: true, value} | {ok: false, error: {code, appError, message}}`. Rutis 0.10 does not carry cancellation to Node, so `Report` callers are released while the Node call continues (A6).
+### A.2 Call channel (R13)
 
-### 6.2 Method naming
+```rust
+impl CallChannel {
+    /// No-op unless the method declared `progress` and the caller has a connection.
+    pub fn progress(&self, data: serde_json::Value);
+    /// Connection-bound notifier; Err(Unsupported) for link callers without a sink
+    /// or when the method declared no notifications.
+    pub fn notifier(&self) -> Result<ConnectionNotifier, ChannelError>;
+    /// Only for ReplyMode::Handoff: takes the connection's final-response writer.
+    pub fn take_final_reply(&self) -> Result<FinalReply, ChannelError>;
+}
+impl ConnectionNotifier {
+    pub fn send(&self, method: &str, params: serde_json::Value) -> Result<(), ChannelError>; // Gone after close
+    pub fn closed(&self) -> impl Future<Output = ()>; // disconnect, Rpc reload, entry close
+}
+```
 
 | Rule | Content |
 | --- | --- |
-| Namespace | The contribution's registered name, `[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*`; chosen and owned by the contributor (overview common constraint 10) |
-| Method name | `<namespace>.<segment>(.<segment>)*`, segments `[a-z][a-z0-9_]*`, at most 128 bytes |
-| Ownership | A name belongs to the longest registered namespace that prefixes it. Sub-namespaces are allowed (`account` and `account.codex`); the shorter owner must not declare names inside a registered longer one |
-| Reserved | `management` (Management's own methods); every name Rpc serves and its namespaces (`hello`, `daemon`, `session`, `approval`, `agent`) |
-| Rejection | A contribution whose list violates a rule, or collides with another active contribution, is rejected as a whole: its mount instance reports the error in diagnostics and is not registered; the earlier active owner keeps its names (A7) |
-| Stability | Wire names are stable across releases and implementation languages ([overview §11.4](../overview.md#114-moving-from-ts-to-rust)) |
+| Progress wire form | Notification `management.progress {id: <request id>, method, data}`; ordered before the response on the same connection; dropped after disconnect (A13) |
+| Progress rate | Rpc coalesces to the transport write budget; a slow client drops intermediate progress, never the response (A13) |
+| Notification names | Must be declared in `MethodDecl.notifications` and lie in the contributor's namespace; others return `ChannelError::Undeclared` |
+| Notifier lifetime | Valid after the call returns until the connection closes; `send` after close returns `Gone`; contributors release connection-bound resources on `closed()` |
+| Link callers | `ManagementService::dispatch` takes an optional caller sink; without one, progress is dropped and `notifier()` returns `Unsupported` |
+| Cross-language | Node contributors receive progress and notifier as host calls on the same rutis runtime row; envelope `{ok: true, value} \| {ok: false, error: {code, appError, message}}`; rutis 0.10 does not carry cancellation to Node, so `Report` callers are released while the Node call continues (A6) |
 
-### 6.3 Management's own methods
+### A.3 Method naming
 
-| Method | Params | Result | Notes |
-| --- | --- | --- | --- |
-| `management.methods` | `{}` | `{revision: string, methods: [{name: string, namespace: string, mutating: bool}]}` | The methods registered and active now, sorted by name; available wherever Management is mounted |
-
-No push notification is added; a client re-reads `management.methods` after `unknown_method` or `service_reloading` (A8).
-
-### 6.4 Rpc change and mounting
-
-| Item | Content |
+| Rule | Content |
 | --- | --- |
-| Rpc table | Rpc decodes the envelope and serves only its own methods (§6.5). For any other method on a v3 connection whose entry mounts Management, it admits the call as an ordinary command (request id, per-connection limit, command tracker) and calls `ManagementService::dispatch` |
-| Entry mount flag | Each connection records its entry at accept time: the local transport entry has `mounts_management = true` when Management is configured; the bare WebSocket entry and RemoteGateway's entry have `false` unless their assembly says otherwise ([RemoteGateway](RemoteGateway.md)). The flag is assembly data, never derived from identity |
-| `hello.features` (v3) | Today's protocol and Session features, plus, on mounting entries, `management.methods` and the names of `ManagementService::methods()` at hello time |
-| Not mounted or v1/v2 | `-32601`, `appError: "unknown_method"`, "Management method is unavailable", exactly as v1/v2 and unavailable methods behave today |
-| Namespace configured but inactive | `-32000`, `service_reloading` (retryable) |
-| Unknown name | `-32601`, `unknown_method` |
-| Link export | `ManagementService` is exported through the rutis node configuration of a link; its `dispatch` takes `CallOrigin::Link`. Export configuration is host-local link configuration, not a management method of the exported plane (A9) |
+| Namespace | The contribution key, `[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*`, owned by the contributor (overview common constraint 10) |
+| Method name | `<namespace>.<segment>(.<segment>)*`, segments `[a-z][a-z0-9_]*`, at most 128 bytes |
+| Ownership | Longest registered namespace prefix owns a name; sub-namespaces allowed (`account`, `account.codex`) |
+| Reserved for Rpc | Exact names `hello`, `daemon.ping`; namespaces `session`, `approval`, `agent`; and every namespace Rpc reserves for Session-method contributions in the [session boundary](../contracts/session-boundary.md) contract |
+| Reserved for Management | `management` |
+| One wire name space | Rpc resolves built-ins first, then Session-method contributions, then Management; a management name shadowed by a Session-method namespace is unreachable and reported in diagnostics (A14) |
+| Rejection | A list violating a rule or colliding with an active contribution is rejected as a whole; the earlier owner keeps its names (A7) |
+| Stability | Wire names are stable across releases and languages ([overview §11.4](../overview.md#114-moving-from-ts-to-rust)) |
+
+### A.4 Service and Management's own method
 
 ```rust
 impl ManagementService {
-    pub fn methods(&self) -> MethodSet;                         // revision + active decls
-    pub async fn dispatch(&self, call: ManagementCall, caller_gone: CancellationToken)
-        -> Result<serde_json::Value, ManagementError>;
-    pub fn register(&self, ctx: &Ctx, name: &str, provider: Arc<dyn ManagementProvider>)
-        -> Result<(), ManagementError>;                         // used only by ManagementMount
+    pub fn methods(&self) -> MethodSet;   // revision + active decls
+    pub async fn dispatch(&self, call: ManagementCall, sink: Option<CallerSink>,
+        caller_gone: CancellationToken) -> Result<CallReply, ManagementError>;
+    pub fn register(&self, ctx: &Ctx, namespace: &str, provider: Arc<dyn ManagementProvider>)
+        -> Result<(), ManagementError>;   // used only by management-mount
 }
 ```
 
-### 6.5 Classification and migration of existing methods
+| Method | Params | Result |
+| --- | --- | --- |
+| `management.methods` | `{}` | `{revision: string, methods: [{name, namespace, mutating, progress, notifications}]}`, active methods sorted by name |
 
-Source of the current lists: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS` and `Call::is_management` in [protocol.rs](../../../crates/dim-app-server/src/protocol.rs); gating in `validate_call` in [connection.rs](../../../crates/dim-app-server/src/connection.rs); the Rpc row of [single-tree assembly](../../architecture/rust-agent/single-tree.md).
+No change notification for the method set; a client re-reads `management.methods` after `unknown_method` or `service_reloading` (A8).
+
+### A.5 Rpc change and mounting
+
+| Item | Content |
+| --- | --- |
+| Routing | Rpc serves its built-ins and Session-method contributions; any other name on a v3 connection whose entry mounts Management is admitted as an ordinary command (request id, per-connection limit, command tracker) and dispatched with a `CallerSink` bound to the connection |
+| Entry mount flag | Recorded per connection at accept time from entry assembly data: local transport `true` when Management is configured; bare WebSocket and RemoteGateway `false` unless assembly says otherwise ([RemoteGateway](RemoteGateway.md)); never derived from identity |
+| `hello.features` (v3) | Protocol and Session features; on mounting entries also `management.methods`, the active management names and `daemon.shutdown.completed` when the `daemon` contribution is active |
+| Not mounted, or v1/v2 | `-32601 unknown_method` |
+| Configured but inactive namespace | `-32000 service_reloading` (retryable) |
+| Link export | `ManagementService` exported through host-local link configuration; `CallOrigin::Link`; export is never a management method of the exported plane (A9) |
+| Discovery and ready latch | Per [extension registry](../contracts/extension-registry.md): configured set from row declarations; the ready latch waits until initial mounts are Active or failed so the first `hello` sees the complete set (A3) |
+
+### A.6 Classification, migration and compatibility
+
+Sources: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [protocol.rs](../../../crates/dim-app-server/src/protocol.rs); `validate_call` in [connection.rs](../../../crates/dim-app-server/src/connection.rs).
 
 | Methods | Destination | Contributor (namespace) |
 | --- | --- | --- |
-| `account.providers/status/recover/logout`, `account.login.begin`, `account.login.browser.begin/complete`, `account.login.status/cancel` (9) | Management | `ManagedProvidersPlugin` (`account`) |
-| `account.codex.*` (7) | Management | `OpenAICodexOAuthPlugin` (`account.codex`) |
-| `account.grok.*` (6) | Management | `GrokOAuthPlugin` (`account.grok`) |
-| `provider.*` (11) | Management | `ProviderPlugin` (`provider`) |
-| `skills.catalog`, `skills.set_enabled`, `skills.refresh` | Management | `SkillsCatalogPlugin` (`skills`) |
+| `account.providers/status/recover/logout`, `account.login.begin`, `account.login.browser.begin/complete`, `account.login.status/cancel` | Management | `ManagedProvidersPlugin` (`account`) |
+| `account.codex.*`, `account.grok.*` | Management | `OpenAICodexOAuthPlugin` (`account.codex`), `GrokOAuthPlugin` (`account.grok`) |
+| `provider.*` | Management | `ProviderPlugin` (`provider`) |
+| `skills.catalog/set_enabled/refresh` | Management | `SkillsCatalogPlugin` (`skills`) |
 | `mcp.catalog/set_enabled/save/remove/disconnect/approve/revoke` | Management | `McpPlugin` (`mcp`) |
-| `session.create/list/summaries/attach/detach/submit/input_lookup/history/stop/idle/close/branch_create`, `approval.respond`, `session.permission.get/update`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp`, `session.mcp.refresh`, `agent.create/list/close` | Rpc (Session methods) | — |
-| `hello`, `daemon.ping` | Rpc (protocol) | — |
-| `daemon.shutdown` | Rpc, available only on entries that mount Management (A10) | — |
+| `daemon.shutdown` | Management | process coordinator (`daemon`), reply handoff (E21) |
+| `session.create/list/summaries/attach/detach/submit/input_lookup/history/stop/idle/close/branch_create`, `approval.respond`, `session.permission.get/update`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp`, `session.mcp.refresh` | Rpc Session methods | — |
+| `agent.create/list/close` | Rpc (Session-plane directory) | — (E21) |
+| `hello`, `daemon.ping` | Rpc protocol | — |
+| New plugin Session methods (`session.goal.*`, `session.input.withdraw`, `session.question.respond`, `session.rename`, `attachment.put`) | Rpc `SessionMethodContribution` ([session boundary](../contracts/session-boundary.md)) | each owner |
 
-Interruption declarations reproduce today's behavior: `mcp.*` and `skills.*` are `Report` (today they race `rpc.unloading` and return `operation_interrupted`); `account.*`, `provider.*` are `Drain`. Mutating flags follow each method's contract. After migration Rpc no longer injects `ProductServices` or the management part of `ExecutionServices`; it keeps only what Session methods use. A Provider or Mcp restart therefore no longer reloads Rpc.
-
-Compatibility for existing clients:
+Interruption reproduces today: `mcp.*`, `skills.*` are `Report`; `account.*`, `provider.*` are `Drain`. After migration Rpc no longer injects `ProductServices` or the management part of `ExecutionServices`; a Provider or Mcp restart no longer reloads Rpc.
 
 | Client | Before | After |
 | --- | --- | --- |
-| v1, v2 | Management methods → `-32601 unknown_method` | Same |
-| v3 local, product profile | `hello.features` contains the 33 product names; calls succeed | Same names (from contributions active at hello) plus `management.methods`; same params, results, codes and `appError` values |
-| v3 local, execution | `LOCAL_EXECUTION_METHODS` + `MCP_METHODS` in features | Same names; `session.*` entries now come from Rpc's own feature list |
-| v3 over WebSocket, protected profile | Everything except `hello`/`ping` → `local_transport_required` | Same for the bare WebSocket entry |
-| v3, MCP absent | `mcp.*` → `-32601 unknown_method` ("MCP integration is unavailable") | `-32601 unknown_method` with Management's message (A11) |
+| v1, v2 | Management methods `unknown_method` | Same |
+| v3 local, product profile | `hello.features` has the 33 product names | Same names (active at hello) plus `management.methods`; params, results, codes and `appError` unchanged |
+| v3 local, execution | `LOCAL_EXECUTION_METHODS` + `MCP_METHODS` in features | Same names; `session.*` from Rpc's list, `skills.*`/`mcp.*` from Management |
+| v3 bare WebSocket, protected profile | All but `hello`/`daemon.ping` `local_transport_required` | Same |
+| v3 RemoteGateway entry (new) | Did not exist; execution Session methods (`session.permission.get/update`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp`, `session.mcp.refresh`) were local-only | **Compatibility change (E3):** these become available to paired remote devices together with all other Session methods; management names and `daemon.shutdown` are `unknown_method` |
+| v3, MCP absent | `mcp.*` `unknown_method` ("MCP integration is unavailable") | `unknown_method` with Management's message (A11) |
+| v3 calling `daemon.shutdown` on a non-mounting entry | Gated as a protected method | `unknown_method` |
 
-No protocol version is added. Persistence formats are unchanged; the move is internal routing.
+No protocol version is added; persistence formats are unchanged.
 
-## 7. Timeline and capability mechanics
-
-| Step | Path |
-| --- | --- |
-| Writes | None. Management and mount instances never append to any Timeline; contributors that change Session-visible state do so through their owners' public ports |
-| Dispatcher | Not subscribed. Management has no `StateCell` and no branch or Session instance |
-| Registration | `ManagementMount::apply` resolves its two `Deps`, reads `methods()`, validates names (§6.2) and calls `register`; the registration's removal is its `ctx.effect` disposer, which first applies the interruption rule to its admitted calls (§8) and then unregisters. The registry bumps its revision on every change |
-| Dispatch | `dispatch` looks up the owner by longest namespace, takes an admission slot from the owner's mount generation (refused once that generation started unloading) and awaits `ManagementProvider::call`. Rpc tracks the request as a command, so Rpc unload drains or reports it per `Interruption` |
-| Recheck | Management decides nothing from Session facts; contributors recheck their own authority per call (for example Mcp's approval recheck) |
-| Contributor reload | rutis reloads the dependent mount instance only: methods of that namespace return `service_reloading` until the new generation registers; nothing else reloads |
-| Management reload | Every mount instance reloads (it depends on the service) and Rpc reloads (`When<ManagementService>`), as today's Rpc reload table describes; contributors are unaffected |
-| Process restart | Nothing persisted; discovery and mounts rebuild from loader entries before the ready latch opens |
-
-## 8. Timing and conflicts
-
-Management has no Timeline facts; rows decide by admission order on the service and by each contributor's own persistence revision checks.
+## Appendix B. Full conflict table
 
 | Scenario | Sequence order | Outcome | Owner of the decision |
 | --- | --- | --- | --- |
-| Turn `stop/interrupt`, branch interrupt or branch close during a management call | — | No effect; management calls are not branch work | — |
-| Concurrent Steer/Queue/Append, unsettled tool batch, compaction, child branch cut | — | Not applicable: Management reads and writes no Timeline | — |
-| Two clients mutate the same configuration concurrently | storage revision order | Second gets the contributor's conflict (e.g. `mcp_settings_conflict`) | Contributor |
-| Contributor reload while its `Report` call runs | admitted < unload | Caller gets `operation_interrupted`; the operation may have committed; the contributor's disposer settles it | Mount, contributor |
-| Contributor reload while its `Drain` call runs | admitted < unload | Unload waits for the call; then reloads | Mount |
-| Call arrives during contributor reload | unload < call | `service_reloading`; not executed | Management |
-| Rpc reload with calls in flight | admitted < unload | `Report` → `operation_interrupted`; `Drain` drained; new calls `service_reloading` | Rpc |
-| Management reload | — | Mounts and Rpc reload; window calls `service_reloading` | rutis lifecycle |
-| Duplicate or late call (client retries after a lost reply) | two admissions | Executed twice; idempotence is the contributor's contract; callers read state before retrying a `mutating` method | Contributor, client |
-| Client detaches or disconnects mid-call | — | Call continues; reply discarded; `Report` cancel token fires, contributor may keep its work (detach is not cancel) | Contributor |
-| Namespace collision on install | second registration | Rejected; first owner keeps names | Management |
-| Method set changes between `hello` and a call | — | Call uses the current set; features are a hint | Management |
-| Contributor depends on a resource node that is offline | contributor Pending | Its namespace returns `service_reloading` | rutis lifecycle |
-| Link to an exporting peer drops mid-call | — | Peer sees a link error; the call on this node continues (detach semantics) | rutis link, contributor |
-| Process restart mid-call | — | Reply lost; outcome per contributor's persistence; not replayed | Contributor |
+| Turn or branch interrupt, branch close, Steer/Queue/Append, unsettled tool batch, compaction, child branch cut, `input/withdrawn` | — | No effect: Management reads and writes no Timeline; contributors writing Session input do so through their owners' ports and own those rows | Contributor |
+| Two clients mutate the same configuration | storage revision | Second gets the contributor's conflict | Contributor |
+| Contributor reload with a `Report` call | admitted < unload | `operation_interrupted`; may have committed | Mount, contributor |
+| Contributor reload with a `Drain` call | admitted < unload | Unload waits | Mount |
+| Call during contributor reload | unload < call | `service_reloading`; not executed | Management |
+| Contributor reload with live notifiers | — | Its disposer closes its notifiers and releases connection-bound resources | Contributor |
+| Rpc reload with calls in flight | admitted < unload | `Report` interrupted, `Drain` drained, new calls `service_reloading`; all notifiers `closed()` | Rpc |
+| Management reload | — | Mounts and Rpc's Management routing reload; window calls `service_reloading`; contributors unaffected | rutis lifecycle |
+| Duplicate or late call | two admissions | Executed twice unless idempotent | Contributor, client |
+| Client detaches or disconnects mid-call | — | Call continues; reply and progress dropped; notifiers closed; `Report` cancel fires | Contributor |
+| Namespace collision | second registration | Rejected | Management |
+| Management name shadowed by a Session-method namespace | — | Unreachable; diagnostic | Rpc |
+| Method set changes between `hello` and a call | — | Current set decides | Management |
+| Contributor's resource node offline | — | Per-call `node_unavailable` (node resolved per call) or namespace `service_reloading` | Contributor |
+| Link drops mid-call | — | Peer sees a link error; call continues | rutis link, contributor |
+| `daemon.shutdown` concurrent with another management call | admission | Coordinator stops admission, then settles admitted calls per `Interruption` | Process coordinator |
+| Process restart mid-call | — | Reply lost; outcome per contributor persistence; not replayed | Contributor |
 | Session unload/restore | — | No effect | — |
 
-## 9. Context mapping
-
-No model-visible effect. Management adds no tool, input, prompt source or Timeline event, and management calls are never projected into model context. Management methods are not model tools; a plugin that also offers the model an operation (for example `schedule`) does so through a process-level tool contribution with its own risk category ([process tool contribution](../contracts/process-tool-contribution.md)). Diagnostics of Management never reach the model.
-
-## 10. Errors and recovery
+## Appendix C. Errors and recovery
 
 | Case | Result |
 | --- | --- |
-| Invalid params | Contributor returns `-32602 invalid_params` ("Invalid request parameters"), as Rpc does today |
-| Method not served on this entry, or v1/v2 | `-32601 unknown_method` |
-| Namespace configured but its mount not Active | `-32000 service_reloading` |
-| Contributor generation unloading with a `Report` call | `-32000 operation_interrupted`, "the operation may already have committed. Read the current state before retrying" |
-| Contribution rejected (names) | Not registered; diagnostics name the row and conflicting names |
-| Contributor panics in `call` | `-32000 management_failed`; mount stays registered; diagnostics only (A12) |
+| Invalid params | Contributor returns `-32602 invalid_params` |
+| Not served on this entry, v1/v2, unknown name | `-32601 unknown_method` |
+| Namespace configured, mount not Active | `-32000 service_reloading` |
+| Mount unloading with a `Report` call | `-32000 operation_interrupted`, "the operation may already have committed. Read the current state before retrying" |
+| Contribution rejected | Not registered; diagnostics name the row and names |
+| Contributor panics in `call` | `-32000 management_failed`; mount stays registered (A12) |
 | Malformed cross-language envelope | `-32000 management_failed`; reply text not forwarded |
+| Process restart | Nothing persisted; discovery and mounts rebuild before the ready latch opens |
 
-## 11. Security
-
-Mounting is authority: an entry that mounts Management, and a peer to which it is exported, has host administrator rights, including changing approvals and configuration and running commands without Approval (overview §3.1). Management performs no authentication and no per-method authorization; `CallOrigin` is recorded in diagnostics only. Defaults: local protected transport mounts; the bare WebSocket entry and RemoteGateway do not; nothing is exported over links unless explicitly configured. Contributors are trusted in-process or trusted runtime code (AGENTS rule 11). Credentials never appear in params echoed to diagnostics, in `management.methods`, or in error messages; contributors keep today's redaction rules. Host-local approvals (`mcp.approve`, `hooks.approve`, `plugin.approve`) remain management methods and are therefore unavailable on non-mounting entries.
-
-## 12. Acceptance
+## Appendix D. Acceptance
 
 Flow tests in the App Server suite, through the wire protocol only:
 
-1. v3 local product and execution profiles: `hello.features` equals today's sets plus `management.methods`; a recorded transcript of every migrated method (params, results, error code and `appError`) matches the pre-migration transcript.
-2. v1 and v2 connections receive `unknown_method` for every management name; the bare WebSocket entry of a protected profile receives `local_transport_required`.
-3. `management.methods` lists active methods; restarting Mcp yields `service_reloading` for `mcp.*` while `provider.*`, `skills.*` and Session methods succeed; afterwards the revision changed.
-4. A test contributor with a `Report` method blocked mid-call is reloaded: caller gets `operation_interrupted`; a `Drain` method delays the reload until it returns.
-5. A second contribution claiming `mcp.save` is rejected; a sub-namespace `account.codex` coexists with `account`.
-6. An entry configured without the mount returns `unknown_method` for all management names and `daemon.shutdown`.
-7. With Management exported over a test rutis link, the peer calls `mcp.catalog` successfully; without export the service is not reachable.
-8. Disconnecting during a mutating call does not roll it back; reconnecting and reading state shows the committed result.
+1. v3 local product and execution profiles: `hello.features` equals today's sets plus `management.methods`; a recorded transcript of every migrated method matches the pre-migration transcript.
+2. v1 and v2 receive `unknown_method` for management names; the bare WebSocket entry of a protected profile receives `local_transport_required`.
+3. Restarting Mcp yields `service_reloading` for `mcp.*` while `provider.*`, `skills.*` and Session methods succeed; the revision changes.
+4. A test contributor with a blocked `Report` method is reloaded: `operation_interrupted`; a `Drain` method delays the reload.
+5. A second contribution claiming `mcp.save` is rejected; `account.codex` coexists with `account`; a contribution under `session` is rejected.
+6. A progress-declaring test method emits `management.progress` before its response; after disconnect the call completes and later progress is dropped.
+7. A notifier-holding test method sends notifications after its response; disconnect fires `closed()`; `send` then returns `Gone`.
+8. `daemon.shutdown` on the local entry keeps the completion contract; on a non-mounting entry returns `unknown_method`.
+9. On a RemoteGateway test entry, `session.permission.update` and `session.exec.stop` succeed; management names fail `unknown_method`.
+10. With Management exported over a test rutis link, the peer calls `mcp.catalog`; without export it is unreachable.
 
-## 13. Assumptions
+## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | One mount instance per contribution rather than aggregated `Contributions` injection | Judgment (lockout and reload blast radius); overview §5.16 says "like ToolRegistry" | One Pending contributor disables the whole management plane and contributor reloads reload Rpc |
-| A2 | Contributors are discovered from loader row declarations; no contributor list is configured | Judgment; [single-tree](../../architecture/rust-agent/single-tree.md) "dynamic sources through a declared management service" | The host or PluginManager maintains Management's list explicitly |
-| A3 | The ready latch waits for initial mounts | Judgment (preserve today's `hello.features`) | Early clients may miss features and must call `management.methods` |
-| A4 | Revision format `"<generation uuid>:<counter>"` | Judgment | Any never-reused scheme |
-| A5 | A contribution's method list is fixed per generation | Judgment | Dynamic lists need a change signal like `ProcessToolProvider::changed` |
-| A6 | Node contributors are not cancelled; callers are released | Rutis 0.10 limitation in the App Server README | — |
-| A7 | Collisions reject the newcomer, first owner keeps names | Judgment | Ownership could flap with load order |
-| A8 | No management change notification | Judgment; overview adds none | A `management.changed` notification would be added |
-| A9 | Export is configured host-locally, not through a management method of the exported plane | Overview §3.1 "exported only when explicitly configured" | Exported peers could widen their own exports |
-| A10 | `daemon.shutdown` stays in Rpc but only on mounting entries | Judgment; it needs the requesting connection's reply writer ([App Server shutdown](../../../crates/dim-app-server/README.md#shutdown-completion)) | Moved into a `daemon` contribution with a connection handoff port |
-| A11 | Error messages may change; codes and `appError` do not | Judgment | Contributors reproduce exact message texts |
-| A12 | `management_failed` as the generic failure code | Judgment | Another code name |
+| A1 | Per-namespace mount instances instead of aggregated injection | [Extension registry](../contracts/extension-registry.md) (decision R2) | One Pending contributor disables the whole plane |
+| A2 | Contributors are discovered from loader row declarations | Extension registry; [single-tree](../../architecture/rust-agent/single-tree.md) "dynamic sources through a declared management service" | An explicit contributor list |
+| A3 | The ready latch waits for initial mounts | Judgment (preserve `hello.features`) | Clients call `management.methods` |
+| A4 | Revision `"<generation uuid>:<counter>"` | Judgment | Any never-reused scheme |
+| A5 | A contribution's method list is fixed per generation | Judgment | A change signal on the contribution |
+| A6 | Node contributors are not cancelled; callers released | rutis 0.10 limitation, App Server README | — |
+| A7 | Collisions reject the newcomer | Judgment | Ownership could flap with load order |
+| A8 | No method-set change notification | Judgment | A `management.changed` notification |
+| A9 | Export configured host-locally only | Overview §3.1 | Peers could widen their exports |
+| A10 | `daemon.shutdown` uses a reply handoff mode | Decision E21; App Server shutdown completion | A coordinator-specific Rpc path |
+| A11 | Messages may change; codes and `appError` do not | Judgment | Contributors reproduce exact texts |
+| A12 | `management_failed` as generic failure code | Judgment | Another name |
+| A13 | Progress is a `management.progress` notification keyed by request id, coalesced, dropped on disconnect | Decision R13; judgment on wire form | Another wire form or a Session-method stream |
+| A14 | Cross-plane name precedence: Rpc built-ins, Session methods, then Management | Judgment | A shared reservation service checked by both registries |
 
-## 14. Open questions
+## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| Rpc "only Session methods" (overview §7.2) | `hello`, `daemon.ping`, `daemon.shutdown` and `agent.*` stay in Rpc; this document treats `agent.*` as Session-plane directory methods and gates `daemon.shutdown` by the mount flag. Maintainers confirm |
-| `session.shell.*` naming (overview §5.3) | ShellInput's management methods use the `session.` prefix, which this contract reserves for Rpc; suggest `shell.run`/`shell.stop` |
-| Session methods that change authority | `session.permission.update` is a Session method and therefore reachable from every entry that serves Session methods, including RemoteGateway; see RemoteGateway open questions |
-| Loader declaration read API | Reading row declarations through the `Loader` handle needs confirming against rutis-loader 0.10; otherwise rows carry an explicit meta field |
+| Loader declaration read API | Reading row declarations through the `Loader` handle needs confirming against rutis-loader 0.10; tracked in the [extension registry](../contracts/extension-registry.md) |
+| Overview §7.2 Rpc row | Records only "carries only Session methods"; it should also record `hello`, `daemon.ping` and `agent.*` staying in Rpc, `daemon.shutdown` moving to Management, the Session-method registry and the E3 compatibility change |
