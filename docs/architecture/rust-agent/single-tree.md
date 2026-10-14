@@ -1,6 +1,15 @@
 # Rust Agent 与 App Server 单树装配
 
-状态：单树、能力重载结算、原生 Timeline 存储与重启恢复已实现；FileStorage、进程 Aimux 请求服务、产品 Provider 与可选 managed provider 绑定已接线；MCP 与用户 Skill 配置的来源优先发布、项目 MCP 宿主本地批准已实现（配置模型仍待 issue #3 对齐）；产品装配预检与类型化能力事件声明尚未接线（动态事件为 Proposed）。实现状态与待对齐提案以 [ADR 001](../../adr/001-harness-foundation.md) 为准。外部协议包括 v1/v2/v3，见 [dim-app-server](../../../crates/dim-app-server/README.md)。
+Status: single-tree assembly, capability reload settlement, native Timeline storage
+and recovery are implemented. FileStorage, process Aimux, product Provider and
+optional managed-provider bindings are connected. Native user MCP/Skill intent
+uses the root editable layer; MCP connections and Skill content instances belong
+to Sessions. Project MCP execution requires host-local approval. See
+[ADR 002](../../adr/002-loader-plugin-management.md) for implemented configuration
+scope and the outstanding generic management/Management entrypoint work.
+Product assembly preflight and typed capability event declarations remain
+incomplete; proposals are recorded in [ADR 001](../../adr/001-harness-foundation.md).
+External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
 本文统一按 rutis 0.10.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
 
@@ -52,7 +61,20 @@ rutis root
                    ToolExecutor、TreeTimeline …
 ```
 
-分组只是 loader 配置行上的标注（实例化方式与配置位置），插件之间平级，顺序只来自 `Deps`。App Server 的配置行只由 `serve` 写入：`serve` 以 `register_capability` 把每个进程插件登记为模块（工厂每次装载构造新插件，跨代状态由工厂共享），一次 `reconcile` 写入全部进程行与 `agent` 分组行，再以 `wait_active` 等各行 Active；`RunningServer::restart` 经 `Loader::restart(行 id)` 重启。`AgentBuilder::install` 把作用域插件、各能力与 Session 扩展登记为 loader 模块（模块名即插件名，fiber 以此显示）并返回 `session` 行；App Server 把它放进 `agent` 行。独立使用的 `Agent`（`AgentBuilder::build`）自建 root 与 loader，`build_in(ctx)` 在宿主节点下自建一个隔离 `Loader` 键的 loader，两者都以 `AgentAnchor` 行建立 Agent 实例；`build_at(loader, ctx)` 使用宿主的 loader。
+Groups annotate loader configuration rows; dependency order comes from `Deps`.
+`serve` registers process factories with `register_capability` and owns the static
+assembly rows. Native execution first reconciles the storage/configuration
+bootstrap, loads or imports user intent outside plugin apply, then reconciles the
+full assembly plus the editable user layer and waits for readiness. Other profiles
+reconcile their full assembly directly. Subsequent typed user edits belong to
+UserConfiguration, not a second whole-tree publisher. `RunningServer::restart`
+uses `Loader::restart(row_id)`.
+
+`AgentBuilder::install` registers scope plugins, capabilities and Session extension
+templates and returns the `session` row, nested under `agent` by App Server.
+Standalone `AgentBuilder::build` owns a root and loader; `build_in(ctx)` owns an
+isolated loader key under the host; both create an `AgentAnchor` instance.
+`build_at(loader, ctx)` uses the host's existing loader.
 
 登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建必须检查 loader 的逐行失败报告，没有 fiber 的失败行也不能忽略；报告成功后仍须等待全部能力 Active，失败则回滚整个候选实例。
 

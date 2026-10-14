@@ -1,11 +1,11 @@
 # 001: Extensible harness foundation
 
 Superseded in part by [ADR 002](002-loader-plugin-management.md): MCP now uses
-Session-owned instanced groups; user configuration is moving to the editable
+Session-owned instanced groups; user configuration uses the editable
 loader layer. Historical source-first rationale below is not the current target.
 
-Decision status: Recovery design adopted for this branch. Configuration is implemented on
-this branch but remains Proposed for maintainer alignment with issue #3. Dynamic-event
+Decision status: Recovery design adopted for this branch. ADR 002 records the approved
+configuration scope and its remaining integration work for issue #3. Dynamic-event
 registration, its model-context boundary and dependency-loss refinements remain Proposed
 for issues #2 and #6. This ADR does not supersede those issues' decisions.
 
@@ -265,15 +265,15 @@ never overwrite a user's existing store to make a test pass.
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
 | #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
-| #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | ADR 002 adopts this direction for user settings. Session instanced groups are implemented; editable persistence and management remain in progress. Project files and host-local approvals remain separate authorities |
+| #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | ADR 002 implements Session instanced groups, editable persistence and protected-local management for typed user MCP/Skill documents. Generic plugin management and PR #13's unified Management entrypoint remain unimplemented. Project files and host-local approvals remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
-The source-first recommendation preserves shared workspace files and explicit edit targets.
+The superseded source-first recommendation preserved shared workspace files and explicit edit targets.
 In rutis 0.10.0, a loader has at most one editable target and applies edits before persistence;
 `Edited` can be emitted after a save failure. A group instance does not pin the old template's
-resources. These constraints motivate this branch's alternative, not permission to replace
-the issue decision without agreement. Revisit the integration if rutis supplies the required
-source and generation semantics; do not introduce another plugin lifecycle manager.
+resources. ADR 002 addresses those constraints with explicit applied-unsaved status and
+private immutable instance configuration. Project files retain their own source authority;
+user intent uses the root editable layer. No second plugin lifecycle manager is introduced.
 
 Recovery facts/snapshots and common API-key assembly are additional work, not completion of those
 issues. The configuration implementation is available for review without settling dynamic
