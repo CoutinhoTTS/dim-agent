@@ -1,12 +1,11 @@
 //! Business-owned documents with source-local persistence and CAS.
-mod approvals;
 mod native;
 
 use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
 use dim_agent_runtime::{Capability, KeysOf, StateCell, When};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,

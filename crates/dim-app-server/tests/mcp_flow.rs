@@ -76,7 +76,7 @@ impl Fixture {
     }
     async fn open(home: PathBuf, reversed: bool) -> Self {
         let root = Ctx::root().unwrap();
-        let (publication, loader) = mcp_host::Host::start(&root).await;
+        let (publication, loader) = mcp_host::Host::start(&root, usize::from(reversed)).await;
         let capture = Arc::new(OnceLock::new());
         let plugin = root.plugin(dim_agent_runtime::capability_plugin(McpPlugin));
         let mut roots = vec![home.clone(), home.join("project")];

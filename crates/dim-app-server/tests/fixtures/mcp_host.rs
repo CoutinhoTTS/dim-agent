@@ -42,9 +42,9 @@ pub struct Host {
     view: rutis::FiberView,
 }
 impl Host {
-    pub async fn start(root: &Ctx) -> (Self, Loader) {
+    pub async fn start(root: &Ctx, home_root: usize) -> (Self, Loader) {
         let mut builtins = Builtins::new();
-        let row = McpPublication::register(&mut builtins);
+        let row = McpPublication::register(&mut builtins, home_root);
         let template = McpPublication::standalone_template(&mut builtins);
         let plugin = LoaderPlugin::new(builtins, Default::default());
         let loader = plugin.handle();

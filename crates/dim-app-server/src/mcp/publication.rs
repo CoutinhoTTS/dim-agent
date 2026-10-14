@@ -1,11 +1,13 @@
 //! Serialized host authority for source selection and cross-Session retirement.
 //! Connection resources and disposal belong exclusively to loader instances.
+use super::approval::Approvals;
 use super::config::{self, McpServerSettings, McpSettings};
 use super::{
     McpConnection, McpError, Result,
     server::{McpServer, McpServerError, McpServerPlugin, McpServerState},
 };
 use crate::settings::{SettingsScope, SettingsService};
+use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::{Capability, KeysOf, SessionLoader, StateCell, register_capability};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use rutis_loader::{Builtins, InstanceResult, Loader};
@@ -124,6 +126,7 @@ pub struct Publication {
     commands: mpsc::Sender<Command>,
     released: watch::Sender<()>,
     applications: StateCell<BTreeMap<SettingsScope, McpApplication>>,
+    pub(super) approvals: Approvals,
 }
 impl Publication {
     pub(super) fn application(&self, source: SettingsScope) -> McpApplication {
@@ -204,15 +207,19 @@ impl Publication {
     }
 }
 
-pub struct McpPublication;
+/// Owns project execution grants in the home root's private approval record.
+#[derive(Clone)]
+pub struct McpPublication {
+    home_root: usize,
+}
 struct Worker {
     port: Arc<Publication>,
     commands: mpsc::Receiver<Command>,
     released: watch::Receiver<()>,
 }
 impl McpPublication {
-    pub fn register(builtins: &mut Builtins) -> String {
-        register_capability(builtins, || Self)
+    pub fn register(builtins: &mut Builtins, home_root: usize) -> String {
+        register_capability(builtins, move || Self { home_root })
     }
     /// Explicit standalone hosts register and install this top-level template.
     /// Agents instead register the template nested in their Session assembly.
@@ -332,14 +339,14 @@ impl rutis::TypedPluginFactory<serde_json::Value> for InstanceFactory {
     }
 }
 impl TypedPlugin for McpPublication {
-    type Deps = (Arc<SettingsService>,);
+    type Deps = (Arc<SettingsService>, Arc<FileStorage>);
     fn name(&self) -> &str {
         "McpPublication"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings,): Self::Deps,
+        (settings, files): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let (commands, receiver) = mpsc::channel(64);
@@ -348,6 +355,7 @@ impl TypedPlugin for McpPublication {
                 commands,
                 released,
                 applications: StateCell::new(BTreeMap::new()),
+                approvals: Approvals::new(files, self.home_root, ctx.cancellation_token()),
             });
             let worker = Worker {
                 port: port.clone(),
@@ -378,7 +386,7 @@ impl TypedPlugin for McpPublication {
 }
 impl Capability for McpPublication {
     fn keys(&self) -> KeysOf<Self> {
-        ((),)
+        ((), ())
     }
 }
 
@@ -454,7 +462,7 @@ impl Projection {
                         config::grant_key(settings, source, &id),
                     ) {
                         (Ok(token), Ok(key)) => {
-                            match settings.approved("mcp", &key, &token, cancel).await {
+                            match self.port.approvals.approved(&key, &token, cancel).await {
                                 Ok(value) => value,
                                 Err(_) => {
                                     error = Some("MCP approval store could not be read");
@@ -719,13 +727,9 @@ impl Projection {
             McpServerPlugin::new(config, TypeKey::of::<McpServer>())?;
         }
         let revoking = token.is_none();
-        settings
-            .set_approval(
-                "mcp",
-                config::grant_key(settings, source, &id)?,
-                token,
-                cancel,
-            )
+        self.port
+            .approvals
+            .set(config::grant_key(settings, source, &id)?, token, cancel)
             .await?;
         let result = if revoking {
             self.disconnect(source, id).await
@@ -884,7 +888,7 @@ mod tests {
             let root = Ctx::root().unwrap();
             let faults = Arc::new(Faults::default());
             let mut builtins = Builtins::new();
-            let name = McpPublication::register(&mut builtins);
+            let name = McpPublication::register(&mut builtins, 0);
             let mut template = McpPublication::standalone_template(&mut builtins);
             if let Some(extra) = extra {
                 let name = if extra == "waiting" {

@@ -599,7 +599,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
 }
 
 #[tokio::test]
-async fn approval_namespaces_preserve_v1_digests_and_reject_invalid_boundaries() {
+async fn business_documents_reject_escaping_filenames() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
@@ -613,58 +613,6 @@ async fn approval_namespaces_preserve_v1_digests_and_reject_invalid_boundaries()
         .await
         .unwrap();
     let settings = root.get::<SettingsService>().unwrap();
-    let key = "a".repeat(64);
-    let fingerprint = "b".repeat(64);
-    fs::write(
-        home.join("mcp-approvals.json"),
-        serde_json::to_vec(&serde_json::json!({"version":1,"approved":{&key:&fingerprint}}))
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(
-        settings
-            .approved("mcp", &key, &fingerprint, &cancel)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !settings
-            .approved("other", &key, &fingerprint, &cancel)
-            .await
-            .unwrap()
-    );
-    settings
-        .set_approval("other", key.clone(), Some(fingerprint.clone()), &cancel)
-        .await
-        .unwrap();
-    settings
-        .set_approval("mcp", key.clone(), None, &cancel)
-        .await
-        .unwrap();
-    assert!(
-        !settings
-            .approved("mcp", &key, &fingerprint, &cancel)
-            .await
-            .unwrap()
-    );
-    assert!(
-        settings
-            .approved("other", &key, &fingerprint, &cancel)
-            .await
-            .unwrap()
-    );
-    assert!(matches!(
-        settings
-            .set_approval("../escape", key.clone(), None, &cancel)
-            .await,
-        Err(SettingsError::Invalid(_))
-    ));
-    assert!(matches!(
-        settings
-            .set_approval("other", "bad".into(), None, &cancel)
-            .await,
-        Err(SettingsError::Invalid(_))
-    ));
     #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
     struct BadPath;
     impl BusinessDocument for BadPath {

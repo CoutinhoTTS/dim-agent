@@ -158,8 +158,7 @@ selecting FullAccess tool permissions or restoring a Session never grants projec
 Reading configuration is inert: unapproved project entries shadow user entries but cannot start
 stdio processes or connect HTTP/SSE transports, including during automatic tool discovery.
 
-The Settings owner provides generic namespaced host-local grants; MCP supplies
-scoped identity and configuration fingerprints. MCP grants retain `mcp-approvals.json`, format version 1, using
+MCP owns its host-local grants in `mcp-approvals.json`, format version 1, using
 FileStorage leases and atomic replacement (0600 on Unix). Native and standalone hosts use the
 same file contract; no native database version change or Session migration is required. The file
 contains only hashed workspace/server identities and configuration fingerprints. Project files,
@@ -225,7 +224,7 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
-| Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance and generic host-local grants. See ADR 003. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
+| Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance. See ADR 003. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
 | Loader-owned MCP instances | Implemented: Session-owned nested instanced groups with private immutable configuration, automatic replacement, explicit disconnect and cleanup receipts. Session closure stops only its connections; revocation drains all affected Sessions | Bound user-source tools survive replacement; project tools obey current approval; all generations drain; logical identities survive restart and root reordering |
 | Project MCP execution approval | Implemented: host-local scoped configuration grants, protected-local approval/revocation, per-operation checks and generation disposal. General workspace sandboxing and constrained plugins are not implemented | Unapproved project MCP cannot execute or connect; stale configuration, restart, retained tool bindings and revocation respect the grant |

@@ -245,7 +245,7 @@ impl Env {
         )
         .unwrap();
         let root = Ctx::root().unwrap();
-        let (publication, _) = mcp_host::Host::start(&root).await;
+        let (publication, _) = mcp_host::Host::start(&root, 0).await;
         let views = vec![
             root.plugin(capability_plugin(
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),

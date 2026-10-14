@@ -150,6 +150,7 @@ impl TypedPlugin for McpSessionPlugin {
             let project = directory.settings.project_root(Path::new(&config.cwd));
             // Subscribe before any file reads, including the first discovery.
             let settings = directory.settings.subscribe();
+            let approvals = directory.publication.approvals.subscribe();
             let stopped = ctx.cancellation_token();
             let owner = Arc::new(McpSession {
                 connections: super::McpOwner::in_session(ctx.clone(), loader, self.scope),
@@ -191,7 +192,7 @@ impl TypedPlugin for McpSessionPlugin {
             // No network await in apply, and all owned resources have a disposer.
             let workers = tasks.clone();
             tasks.spawn(reconcile(
-                directory, owner, project, settings, refresh, workers,
+                directory, owner, project, settings, approvals, refresh, workers,
             ));
             Ok(Effect::Done)
         })
@@ -208,6 +209,7 @@ async fn reconcile(
     owner: Arc<McpSession>,
     project: Option<usize>,
     mut settings: watch::Receiver<u64>,
+    mut approvals: watch::Receiver<u64>,
     mut refresh: watch::Receiver<()>,
     tasks: TaskTracker,
 ) {
@@ -278,6 +280,7 @@ async fn reconcile(
             _ = owner.stopped.cancelled() => break,
             result = refresh.changed() => { if result.is_err() { break; } true },
             result = settings.changed() => { if result.is_err() { break; } false },
+            result = approvals.changed() => { if result.is_err() { break; } false },
         };
     }
     for (_, (_, cancel)) in active {

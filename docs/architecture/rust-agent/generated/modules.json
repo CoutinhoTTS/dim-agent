@@ -1258,6 +1258,15 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::approval",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/approval.rs",
+      "unexpandedMacros": [
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_app_server::mcp::config",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -1508,15 +1517,6 @@
       "unexpandedMacros": [
         "format",
         "tokio::select"
-      ]
-    },
-    {
-      "id": "dim_app_server::settings::approvals",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::settings",
-      "file": "crates/dim-app-server/src/settings/approvals.rs",
-      "unexpandedMacros": [
-        "format"
       ]
     },
     {
@@ -10651,6 +10651,14 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::approval",
+      "references": [
+        "mod approval",
+        "path approval"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::config",
       "references": [
         "mod config",
@@ -10729,6 +10737,39 @@
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsScope",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::approval",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileLease",
+        "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Io",
+        "path FileStorageError::Locked",
+        "use dim_agent_capabilities::file_storage::FileLease",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::approval",
+      "to": "dim_agent_runtime::state",
+      "references": [
+        "path StateCell",
+        "path StateCell::new",
+        "use dim_agent_runtime::StateCell"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::approval",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path Result",
+        "path SettingsError::Invalid",
+        "use crate::settings::Result",
+        "use crate::settings::SettingsError"
       ]
     },
     {
@@ -10842,6 +10883,14 @@
     },
     {
       "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
@@ -10886,6 +10935,15 @@
         "use super::McpConnection",
         "use super::McpError",
         "use super::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_app_server::mcp::approval",
+      "references": [
+        "path Approvals",
+        "path Approvals::new",
+        "use super::approval::Approvals"
       ]
     },
     {
@@ -12106,13 +12164,6 @@
     },
     {
       "from": "dim_app_server::settings",
-      "to": "dim_app_server::settings::approvals",
-      "references": [
-        "mod approvals"
-      ]
-    },
-    {
-      "from": "dim_app_server::settings",
       "to": "dim_app_server::settings::native",
       "references": [
         "mod native"
@@ -12124,25 +12175,6 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
-      ]
-    },
-    {
-      "from": "dim_app_server::settings::approvals",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileStorageError",
-        "path FileStorageError::Io"
-      ]
-    },
-    {
-      "from": "dim_app_server::settings::approvals",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path Result",
-        "path SettingsError::Invalid",
-        "path SettingsService",
-        "path private_permissions",
-        "path validate_namespace"
       ]
     },
     {

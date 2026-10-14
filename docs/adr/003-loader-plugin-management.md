@@ -1,7 +1,7 @@
 # 003: Session-owned MCP and business configuration
 
 Status: implementation direction approved by the repository owner for this branch,
-corrected to the authoritative D4 in PR #15 (`origin/pr-15-design`, `34af2f1`).
+corrected to the authoritative D4 in PR #15 (`origin/pr-15-design`, `e4184b4`).
 PR #15 owns ADR 002, Plugin scope assignment and configuration placement; this
 branch record is numbered 003 to avoid that collision. This record supersedes
 ADR 001's process-shared MCP ownership, not issue #3's structural editable layer.
@@ -63,13 +63,14 @@ API or two-stage bootstrap. Full process assembly is reconciled once. Unsupporte
 databases are rejected and preserved, never reinterpreted as v13. See the
 [native storage contract](../design/appserver/native-storage-format.md).
 
-Settings also provides generic namespaced host-local grants in
-`<namespace>-approvals.json`, retaining MCP's existing version-1
-`mcp-approvals.json` format. Business owners supply scoped identity and effective
-configuration fingerprints; Settings validates/persists digests. Grants are not
-business documents, loader intent or replayable authority. Missing grants deny
-execution and damaged stores fail closed. Package acquisition, file-root access,
-tool permission presets and Session replay never confer execution approval.
+Settings provides no approval service: PR #15 limits Approval and Permission to
+agent-initiated tool calls and removes host-local approval. Its separate follow-up
+deletes `mcp.approve`/`mcp.revoke` and their records, after which enabled stdio
+servers launch without approval. Until then AGENTS.md rule 11 applies, and MCP owns
+its existing project execution grants in the unchanged version-1 `mcp-approvals.json`.
+Grants are not business documents, loader intent or replayable authority. Missing
+grants deny execution and damaged stores fail closed. Package acquisition, file-root
+access, tool permission presets and Session replay never confer execution approval.
 
 ## Management and installation boundaries
 
@@ -94,7 +95,7 @@ editable layer. This branch's approval does not accept another contributor's PR.
 | Unit | Implementation scope |
 | --- | --- |
 | Session-owned MCP instances | Independent connections, retained user bindings, Session close, cross-Session project revocation and cleanup reporting |
-| Business settings persistence | Generic source-local CAS, lazy atomic import, unchanged v13 payloads and host-local namespaced grants |
+| Business settings persistence | Generic source-local CAS, lazy atomic import and unchanged v13 payloads; MCP owns its existing execution grants |
 | Skill content | Session-owned content instances with selective replacement; Skills owner supplies SkillSettingsHost |
 | Management | Rust owner contributions for existing business methods, not generic plugin installation or structural configuration management |
 

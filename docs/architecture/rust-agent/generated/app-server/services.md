@@ -59,6 +59,7 @@ flowchart LR
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p16
   p14 -->|"dim_app_server::mcp::publication::Publication"| p15
   p13 -->|"dim_app_server::settings::SettingsService"| p15
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p14
   p13 -->|"dim_app_server::settings::SettingsService"| p14
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p13
   p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p13

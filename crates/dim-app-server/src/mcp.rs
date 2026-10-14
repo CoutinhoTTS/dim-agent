@@ -1,4 +1,5 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
+mod approval;
 pub mod config;
 pub(crate) mod management;
 mod publication;
@@ -230,6 +231,7 @@ impl McpService {
         // Explicit reads also request convergence of externally edited workspace
         // files. This is coalesced and is not an application acknowledgement.
         self.publication.refresh();
+        let publication = self.publication.clone();
         self.run(cancel, move |settings, cancel| async move {
             let mut catalog = McpCatalog {
                 user_revision: String::new(),
@@ -252,13 +254,9 @@ impl McpService {
                     let (approval, approval_token) = if matches!(source, SettingsScope::Project(_))
                     {
                         let token = config::fingerprint(&settings, source, &id, &configuration)?;
-                        let approved = settings
-                            .approved(
-                                "mcp",
-                                &config::grant_key(&settings, source, &id)?,
-                                &token,
-                                &cancel,
-                            )
+                        let approved = publication
+                            .approvals
+                            .approved(&config::grant_key(&settings, source, &id)?, &token, &cancel)
                             .await?;
                         (
                             if approved {

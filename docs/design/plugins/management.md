@@ -2,7 +2,7 @@
 
 Status: process-owner contributions implemented. This page describes the implemented
 subset of [PR #15](https://github.com/arcships/dim/pull/15)'s revised plugin-scope
-ADR and method contract (latest inspected branch `34af2f1`, including D4/D5).
+ADR and method contract (latest inspected branch `e4184b4`, including D4/D5).
 Management methods belong to process owners, not a Management plugin. There is
 no per-method level; entry admission determines whether this table is served.
 The earlier stable-port and Management-plugin proposals are withdrawn.
@@ -25,8 +25,8 @@ Adding a method changes its owner's declaration, parsing and implementation.
 Adding an owner also registers its namespace in assembly, as Session tools do.
 
 Account, Codex, Grok, Provider and Mcp provide their methods directly, without
-adapter rows. Settings supplies generic BusinessDocument persistence and
-namespaced host-local grants, not a method contribution or configuration namespace.
+adapter rows. Settings supplies generic BusinessDocument persistence, not
+approvals, a method contribution or a configuration namespace.
 MCP owns its configuration types in `mcp/config.rs`; the Skills owner supplies
 the existing `SkillSettingsHost`. App Server's SkillsCatalog mounts the reusable catalog
 and publishes both catalog and management interfaces in one plugin, with the
@@ -68,7 +68,8 @@ execution dependencies may also reload affected consumers and fail in-flight
 turns; this is the accepted cost of rare structural changes, not hidden by
 registration ports. Business configuration edits update the owner's source and
 publish invalidation without reloading the owner or Rpc. MCP connections remain
-Session-owned and retain the host-local execution approval boundary.
+Session-owned. MCP keeps its project execution approval until the follow-up that
+PR #15 schedules to remove host-local approval; see ADR 003.
 
 ## Notifications
 

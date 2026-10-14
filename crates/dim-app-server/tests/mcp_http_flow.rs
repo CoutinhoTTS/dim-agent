@@ -86,7 +86,7 @@ impl Fixture {
         file.write_all(&serde_json::to_vec(&json!({"mcpServers":{"docs":configuration}})).unwrap())
             .unwrap();
         let root = Ctx::root().unwrap();
-        let (publication, loader) = mcp_host::Host::start(&root).await;
+        let (publication, loader) = mcp_host::Host::start(&root, 0).await;
         let capture = Arc::new(OnceLock::new());
         let views = vec![
             root.plugin(capability_plugin(FileStoragePlugin::new(vec![

@@ -618,12 +618,23 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_app_server::settings::SettingsService",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "provider": 4,
+            "generation": 1
+          },
           {
             "service": "dim_app_server::settings::SettingsService",
             "scope": null,
@@ -632,6 +643,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "provider": 4,
+            "declared": true,
+            "external": true
+          },
           {
             "service": "dim_app_server::settings::SettingsService",
             "provider": 13,

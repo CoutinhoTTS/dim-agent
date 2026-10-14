@@ -113,13 +113,13 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `SqliteStoragePlugin` | 共享数据库连接、事务、原生 schema 门禁、文件维护锁与关停 | `SqliteStorage` | —；启动参数固定数据库路径 |
 | `SessionStorePlugin` | 原生会话目录、Timeline 落盘/恢复及写入任务 | `SessionStore`、`TimelineStore` 持久化端口 | `SqliteStorage` |
 | `FileWriteCoordinatorPlugin` | 跨 Session 的逐路径写入 FIFO 准入域；跨代共享 | `FileWriteCoordinator` | — |
-| `SettingsPlugin` | Generic BusinessDocument sources, per-source CAS and namespaced host-local grants; no domain interpretation, connections or discovery | `SettingsService` | `FileStorage`, `When<SqliteStorage>` |
+| `SettingsPlugin` | Generic BusinessDocument sources and per-source CAS; no domain interpretation, approvals, connections or discovery | `SettingsService` | `FileStorage`, `When<SqliteStorage>` |
 | `OpenAICodexOAuthPlugin` / `GrokOAuthPlugin` | 各自账号字段、登录、刷新与终态 | `OpenAICodexOAuthService` / `GrokOAuthService` | `FileStorage` |
 | `ManagedProvidersPlugin` | 可选 managed provider 的当前绑定代次与在途操作；未绑定时请求明确失败 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
 | `AimuxPlugin`（进程级） | 共享 HTTP 资源、请求/流转换及取消桥接 | `ModelHost`：接收最终请求、已解析连接与取消信号的 request 对象 | 无业务服务依赖；不注入 Provider、ToolRegistry 或 Session |
 | `ConfiguredModelsPlugin` | `--model-config` 的开发模型目录与 resolver | 开发目录与 resolver | — |
-| `McpPublication` | Source selection, approval and retirement across Session-owned instances; no root reconciliation | `Publication` | — |
+| `McpPublication` | Source selection, the project execution grant record (`mcp-approvals.json`) and retirement across Session-owned instances; no root reconciliation | `Publication` | `SettingsService`, `FileStorage` |
 | `McpPlugin` | MCP 目录、连接租约与准入复查；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
 | `HostPlatformPlugin` | 平台与 exec shell 设置 | `HostPlatform` | `When<FileStorage>` |
 | `SkillsCatalogPlugin` | Skill discovery/catalog and business settings; privately supplies the reusable catalog's SkillSettingsHost | `SkillsCatalog`, Skills management contribution | `HostPlatform`, `SettingsService` |
@@ -146,7 +146,7 @@ source-local CAS and lazy atomic import, as described by
 persists BusinessDocument values; MCP owns its types in `mcp/config.rs`, and
 Skills owns its SkillSettingsHost implementation. Successful persistence precedes
 invalidation; no unsaved loader intent, configuration namespace or flush exists.
-Project files and host-local namespaced approval files retain separate authority.
+Project files and MCP's host-local approval record retain separate authority.
 Business updates do not reload owners or Rpc. Structural editable configuration
 remains separate issue #3 work.
 

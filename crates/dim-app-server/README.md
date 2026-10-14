@@ -38,8 +38,8 @@ settings; model preferences requiring capability declarations are rejected rathe
 SettingsService reads and updates generic `BusinessDocument` values with per-source
 CAS. Business owners define and validate their payloads: MCP types live in
 `mcp/config.rs`, and the Skills owner supplies the existing `SkillSettingsHost`.
-Settings owns source persistence and generic namespaced host-local grants, not
-business management methods. There is no `configuration.*` RPC namespace.
+Settings owns source persistence, not approvals or business management methods.
+There is no `configuration.*` RPC namespace.
 
 Native v13 retains `settings_documents` with `user/mcp` and `user/skills` keys,
 plain payload JSON (not `{kind, document}`), source-local versions and opaque
@@ -75,9 +75,9 @@ file-root authorization, session restoration and same-name user entries never ap
 Approval may immediately start discovery in active sessions. Only protected-local v3 management
 can grant or revoke; these operations are not model tools.
 
-Grants use the host's `mcp-approvals.json` (version 1, private file permissions on Unix), outside
-project configuration and Session history. Native and standalone Settings hosts share this format;
-the SQLite format is unchanged. Corrupt or inaccessible grant storage fails closed. Approval
+MCP owns its grants in the host's `mcp-approvals.json` (version 1, private file permissions on
+Unix), outside project configuration and Session history. Native and standalone hosts share this
+format; the SQLite format is unchanged. Corrupt or inaccessible grant storage fails closed. Approval
 compares current configuration with the caller's digest before persistence; stale tokens return
 `mcp_settings_conflict`. Commands, arguments, environment overrides, resolved cwd, URLs, headers
 and authentication are bound by the digest, but changes to referenced scripts/binaries or inherited
