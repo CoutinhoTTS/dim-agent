@@ -5,6 +5,13 @@ subset of [PR #15](https://github.com/arcships/dim/pull/15)'s revised plugin-sco
 ADR and method contract (revision `384b3d4`). Management is a method level, not a
 plugin. The earlier stable-port and Management-plugin proposals are withdrawn.
 
+The subsequent [language-neutral contract revision](https://github.com/arcships/dim/commit/165174a94b16af0f0fb89b67d43b3b104a5deb00)
+adds ADR D5. This implementation provides the Rust-only subset, not the named
+cross-language `managementMethods` contract. Its namespace keys use
+`TypeKey::keyed_dynamic::<ManagementMethods>` and still identify a Rust type;
+they are not rutis-bridge service names. A non-Rust plugin cannot supply this
+contribution merely by declaring `provides` in a loader row.
+
 ## Responsibility and assembly
 
 Each process owner provides `ManagementMethods` under its namespace during
@@ -68,6 +75,13 @@ coalesced loader/persistence invalidation task and publishes
 RemoteGateway, rutis-link export, contributed Session methods, per-call progress,
 connection-bound CallChannel and shutdown reply handoff are not implemented in
 this subset. There is no new settings authority, loader or authorization system.
+
+Completing D5 requires binding the named `managementMethods[namespace]` service
+and its serializable `describe`/`call` contract to provider declarations and Rpc
+collection. That binding must retain the same owner, entry restrictions and
+reload/drain guarantees, without adding an adapter plugin or a second registry.
+The revision's input admission checks and peer-node offline behavior belong to
+the Session input boundary and rutis link work; neither is implemented here.
 
 Transport flows cover actual owner methods, hello features, owner/Rpc reloads,
 local/remote and protocol-version boundaries, configuration CAS, persistence
