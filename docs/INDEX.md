@@ -3,6 +3,7 @@
 - [CLI feature list](feature-list.md)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
+- [Rust agent design documents](architecture/README.md#design-documents)
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
