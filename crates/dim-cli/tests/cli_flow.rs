@@ -875,16 +875,20 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             let mut bytes = vec![0; length];
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
-            let names: Vec<_> = request["tools"]
+            let mut names: Vec<_> = request["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(|tool| tool["function"]["name"].as_str().unwrap())
                 .collect();
-            assert_eq!(names.len(), 8);
-            assert!(names.contains(&"read"));
-            assert!(names.contains(&"exec"));
-            assert!(!names.contains(&"echo"));
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                [
+                    "agent", "branch", "edit", "exec", "glob", "grep", "read", "skill", "wait",
+                    "write"
+                ]
+            );
             let frame = |delta, finish| {
                 format!(
                     "data: {}\n\n",
