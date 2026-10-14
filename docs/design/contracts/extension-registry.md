@@ -1,10 +1,10 @@
 # Extension registry
 
-Status: Draft. Overall design: [overview §3 integration methods](../overview.md#3-integration-methods), [§7 supplements](../overview.md#7-supplements-and-changes-to-existing-plugins). Phase: P0. Language: Rust (registry and mounts); a contributor may be implemented in any language that provides its keyed service.
+Status: Draft. Overall design: [overview §3 extension registries](../overview.md#3-extension-registries), [Appendix C supplements](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins). Phase: P0. Language: Rust (registry and mounts); a contributor may be implemented in any language that provides its keyed service.
 
 Every process-level extension point used by a Session, branch or Rpc consumer follows one pattern: a stable registry owned by the consumer contract, filled by one mount instance per configured contributor, with the configured set discovered from loader row declarations. A contributor's reload, failure or removal therefore never reloads the consumer; it only makes that contributor's contribution unavailable, with an outcome the consumer contract defines per call. This document defines the pattern once; each consumer contract states only its point-specific rules (the table in §4).
 
-The pattern implements the rule that dynamic sources are obtained through a declared management service that owns legitimacy and generation ([single-tree](../../architecture/rust-agent/single-tree.md), product assembly constraints), reuses the per-contributor mounts of [Management §3](../plugins/Management.md#3-scope-and-dependencies), and keeps the implemented dynamic tool source contract ([tool contributions §7](../../architecture/rust-agent/tool-contributions.md)) unchanged for Sessions.
+The pattern implements the rule that dynamic sources are obtained through a declared management service that owns legitimacy and generation ([single-tree](../../architecture/rust-agent/single-tree.md), product assembly constraints), reuses the per-contributor mounts of [Management](../plugins/Management.md#1-structure), and keeps the implemented dynamic tool source contract ([tool contributions §7](../../architecture/rust-agent/tool-contributions.md)) unchanged for Sessions.
 
 ## 1. Structure
 
@@ -30,7 +30,7 @@ flowchart LR
   M2 -->|"injects"| C2
   M1 -->|"register in apply, unregister in ctx.effect"| Reg
   M2 -->|"register in apply, unregister in ctx.effect"| Reg
-  Consumer -->|"injects only the registry; snapshot, admit per call"| Reg
+  Consumer -->|"injects only the registry: snapshot, admit per call"| Reg
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
@@ -45,7 +45,7 @@ The consumer's `Deps` contain only the registry, which depends on no contributor
 | Contributor | Process (or a peer row) | its own dependencies | Keyed service `TypeKey::keyed_dynamic::<P::Service>(name)` |
 | Consumer | Session, branch or process | `Arc<ExtensionRegistry<P>>` (or a point-specific facade over it) | Its own services, unchanged |
 
-Contracts defined here: `ExtensionPoint`, `Stance`, `ExtensionRegistry<P>`, `RegistrySnapshot<P>`, `Configured`, `Active<P>`, `Lookup<P>`, `CallGuard`, `Unavailable`, `RegistryError`, the mount and discovery rules, the volatile-configuration rule and the facade rule. Contracts depended on: rutis-loader 0.10 `Loader::entries`, `Loader::resolve`, `Resolved::declares` (`Declared { requires, provides }`), `Loader::create_instance`/`remove_instance`, `LoaderChanged`, and `volatile_key`/`VolatileUpdate`; rutis `ctx.effect` disposers. Management keeps its own registry implementation ([Management §6](../plugins/Management.md#6-interfaces)); it satisfies the same rules and may later be ported onto the shared one.
+Contracts defined here: `ExtensionPoint`, `Stance`, `ExtensionRegistry<P>`, `RegistrySnapshot<P>`, `Configured`, `Active<P>`, `Lookup<P>`, `CallGuard`, `Unavailable`, `RegistryError`, the mount and discovery rules, the volatile-configuration rule and the facade rule. Contracts depended on: rutis-loader 0.10 `Loader::entries`, `Loader::resolve`, `Resolved::declares` (`Declared { requires, provides }`), `Loader::create_instance`/`remove_instance`, `LoaderChanged`, and `volatile_key`/`VolatileUpdate`; rutis `ctx.effect` disposers. Management's method registry ([Management](../plugins/Management.md#a1-contribution-contract)) follows the same rules, including discovery and the ready latch.
 
 ## 2. Data and state
 
@@ -143,7 +143,7 @@ sequenceDiagram
   TR-->>TE: error ToolResult: tool provider web unavailable (no reload settlement)
   M->>R: guard dropped, unregister
   TE->>TL: step/tool-completed, then step/tool-result after the whole batch
-  Note over TE,TL: batch and turn continue; Loop sends the result to the model
+  Note over TE,TL: batch and turn continue, Loop sends the result to the model
   C-->>M: new generation Active
   M->>R: register(web) with new set versions
   R-->>TR: changed: branches adopt the new versions via context/configured
@@ -317,7 +317,7 @@ pub enum RegistryError {
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A1 | An enabled row whose declarations are unknown counts as possibly providing any name: fail-closed points refuse while it is undetermined, other points ignore it | Judgment; rutis-loader reports unknown declarations as `Err(why)` | Fail-closed points would admit while a security contributor's row cannot be described |
-| A2 | One shared generic registry implementation serves all points except Management, which keeps its own | Judgment | Each owner implements the same rules separately |
+| A2 | One shared generic registry implementation serves all points, Management included | Judgment | Each owner implements the same rules separately |
 
 ## Appendix F. Open questions
 
