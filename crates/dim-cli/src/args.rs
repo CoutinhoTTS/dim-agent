@@ -28,6 +28,7 @@ Options:\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
+  --no-tui                         Scrollback client instead of the full terminal UI\n\
   --server PATH                    App Server binary (default: sibling binary)\n\
   --model-config PATH              Explicit API-key model configuration\n\
   --plugin-dir PATH                Managed account plugin package\n\
@@ -97,6 +98,8 @@ pub struct Options {
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
+    /// Use the scrollback client instead of the full terminal UI.
+    pub no_tui: bool,
     pub refresh: bool,
     pub redirect_uri: String,
     pub no_browser: bool,
@@ -129,6 +132,7 @@ impl Options {
             permission: None,
             directory: None,
             device: false,
+            no_tui: false,
             refresh: false,
             redirect_uri: "http://localhost:1455/auth/callback".into(),
             no_browser: false,
@@ -198,6 +202,7 @@ impl Options {
                 "--directory" => options.directory = Some(value(&mut args)?),
                 "--redirect-uri" => options.redirect_uri = value(&mut args)?,
                 "--device" => options.device = true,
+                "--no-tui" => options.no_tui = true,
                 "--refresh" => options.refresh = true,
                 "--no-browser" => options.no_browser = true,
                 "--client-secret" => options.client_secret = true,
@@ -365,4 +370,15 @@ impl Options {
         }
         Ok(options)
     }
+}
+
+/// The product home: `DIMCODE_HOME`, else `~/.dimcode`.
+pub fn default_home() -> PathBuf {
+    std::env::var_os("DIMCODE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| PathBuf::from(home).join(".dimcode"))
+                .unwrap_or_default()
+        })
 }
