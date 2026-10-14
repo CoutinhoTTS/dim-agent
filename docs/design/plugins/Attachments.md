@@ -145,8 +145,8 @@ Limits (A2): at most 20 images per submission, 5 MiB decoded each, 8000 px per s
 | --- | --- |
 | `name` | `[A-Za-z0-9._-]{1,64}`, no leading dot; default `paste.txt` |
 | `text` | UTF-8, at most 10 MiB (A2); empty rejected |
-| Storage | SessionStore writes `attachments/<attachmentId>/<name>` in the Session directory atomically |
-| `path` | Absolute path as `read` resolves it for the Session (F1) |
+| Storage | SessionStore writes `attachments/<attachmentId>/<name>` atomically under the Session's attachments root on its resource node, through that node's `node-services` FileStorage (A1); an offline node returns `node_unavailable` |
+| `path` | Absolute path on the Session's resource node, as `read` resolves it for the Session |
 | Errors | `session_closed`, `attachment_invalid`, `attachment_too_large`, `service_reloading` |
 
 Rpc acquires the Session as for any Session method; Attachments holds no lease. An in-flight call checks cancellation before SessionStore commits.
@@ -202,7 +202,7 @@ A rejected submission leaves no fact. A file stored without a later submit is re
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Text attachments live under `attachments/` in the Session directory owned by SessionStore | Judgment | Other layout |
+| A1 | Text attachments are Session files owned by SessionStore and stored on the Session's resource node under a per-Session attachments root, written and removed through that node's `node-services` FileStorage; SessionStore keeps the ownership record on the control node. For a Session on the control node this is the Session directory | Judgment; `read` runs on the resource node | Other layout or inline text content |
 | A2 | Limits: 20 images, 5 MiB, 8000 px, 10 MiB text; reject rather than resize | Edge-case reference; judgment | Different limits or resizing |
 | A3 | URL image sources rejected | Overview "final content"; judgment | Provider fetches URLs |
 | A4 | Unknown model capability accepts images | Judgment | Unknown rejected |
@@ -216,5 +216,4 @@ A rejected submission leaves no fact. A file stored without a later submit is re
 
 | # | Question | Description |
 | --- | --- | --- |
-| F1 | Session directory versus resource node | SessionStore's directory is on the control node; `read` runs on the Session's resource node. For a Session whose resource node is not the control node, SessionStore must place or expose the attachment area where `read` resolves it |
-| F2 | Image capability at the boundary | Rpc needs the Session's adopted model image capability (published `context/configured` plus the Provider catalog); without it every image is accepted (A4) |
+| F1 | Image capability at the boundary | Rpc needs the Session's adopted model image capability (published `context/configured` plus the Provider catalog); without it every image is accepted (A4) |
