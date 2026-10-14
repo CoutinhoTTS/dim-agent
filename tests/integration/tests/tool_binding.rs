@@ -1,4 +1,4 @@
-//! ToolBinding with a dynamic tool source (`tool-contributions.md` §7.8):
+//! ToolBinding with a dynamic tool source (`tool-contributions.md` §7.7):
 //! adoption, request snapshots, version pinning and release.
 
 mod local_support;
