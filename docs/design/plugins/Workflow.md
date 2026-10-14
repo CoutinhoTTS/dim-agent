@@ -2,71 +2,229 @@
 
 Status: Draft. Overall design: [overview §5.9](../overview.md#59-workflow). Phase: P2. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
 
-Workflow is a process plugin that owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own Session, either a new non-interactive Session launched through Agents or a Collaboration member of the Session that started the run. The model starts, queries and stops runs with the process-level `workflow` tool; operators use the `workflow.*` management methods. When a run ends, its result is reported to the starting branch as Steer input through [session-access](../contracts/session-access.md). Workflow writes no Timeline event.
+Workflow is a process plugin that owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own Session, either a new non-interactive Session launched through Agents or a Collaboration member of the starting Session created with Collaboration's `establish`. The model starts, queries and stops runs with the process-level `workflow` tool; operators use `workflow.*` management methods. When a run ends, its result is reported once to the starting branch as Steer input through [session-access](../contracts/session-access.md). Workflow writes no Timeline event.
 
-## 1. User flows
+## 1. Structure
 
-1. The user runs `/workflow`, picks `review-and-fix`, supplies `target=src/parser`, and starts it. The CLI calls `workflow.start` with the current Session and branch as report target. Stage `analyze` runs in a new non-interactive Session; then `fix-a` and `fix-b` run in parallel with `analyze`'s result in their prompts; then `summarize`. `workflow.status` shows stages, their Session ids, logs and results. When the run completes, a report input arrives on the user's branch and the model answers from it.
-2. The model calls `workflow {action: "start", name: "review-and-fix", params: {...}}`. The tool result returns `run_id` at once; the model continues or calls `wait`. The report Steer input ends the `wait`.
-3. The user runs `/workflow:save` to store a definition in the user or project source.
-4. A project definition was edited after approval. `start` fails with `approval_required`; the user reviews it and calls `workflow.approve`; `start` succeeds.
-5. The user stops a run. Running stage Sessions receive a turn-scoped stop, pending stages never start, the run ends `stopped`, and no report input is written.
-6. The daemon restarts during a run. The run is settled `interrupted`; the stage that was running is recorded `lost`; nothing is re-executed. A report saying so is delivered to the report target.
-
-## 2. Scope
-
-| Responsible | Not responsible |
-| --- | --- |
-| Definition format, validation, sources and host-local approval checks | Session creation and non-interactive configuration (Agents supplement) |
-| Runs: state machine, stage advancement, parameters and stage inputs, logs, results, stop | Member creation and Team rules (Collaboration) |
-| `workflow` tool, `workflow.*` management methods | Turn execution, approvals and tools inside stage Sessions (their own capabilities) |
-| Report input to the report target | Model selection policy (Provider), external Agent bridging (ExternalAgent) |
-
-## 3. Scope and dependencies
-
-**Contracts depended on**: [process-level tool contribution](../contracts/process-tool-contribution.md) (`ProcessToolSource`); [session-access](../contracts/session-access.md) (`SessionAccess`, `SourceAccess`, `SessionLease`, `SourceInput`, `Lookup`); the Agents launch contract (overview §7.2 Agents supplement; same shape as [Scheduler §6.4](Scheduler.md#64-session-launch-depended-on-agents-supplement)); a Collaboration member-establishment contract (proposed here, §14); Provider model selection by purpose (`ModelSelectionHost`, overview §7.2 Provider supplement); Settings document sources and host-local approvals (overview §7.2 Settings supplement); the [Management](Management.md) contribution contract (`ManagementContribution`); PluginManager's typed plugin-content sources (overview §5.12, optional). **Contracts defined here**: the definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, the source name `workflow` with marker kinds `stage` and `report`, the purpose key `workflow.stage`, and the run record. Workflow names no other plugin's internal type; any provider of these contracts can replace another.
-
-| Part | Scope | Injects | Provides | Status |
-| --- | --- | --- | --- | --- |
-| `WorkflowPlugin` | Process (control node) | `Arc<SessionAccess>`; Agents launch service; `When<CollaborationMembers>`; `ModelSelectionHost`; Settings workflow sources and approvals; process storage; `When<PluginContentSources>` | `ProcessToolSource` named `workflow`; `ManagementContribution` named `workflow` | Proposed |
-
-Only one part exists: runs belong to the process, not to the starting branch ([overview §5.9](../overview.md#59-workflow)), so no Session or branch part is created ([overview §3.2](../overview.md#32-capabilities-and-process-plugins)). Without `CollaborationMembers` the `member` runner is rejected at validation; without plugin-content sources only user and project definitions exist.
-
-## 4. Events
-
-None. A run's start is the tool result (or the management reply); its outcome reaches the model as the report input, which is an existing `input/message`. Stage work is ordinary input and turns inside stage Sessions. Run, stage and log state are process storage ([overview §6](../overview.md#6-new-timeline-events), `workflow/*` row). No later branch behavior depends on a fact that these existing events do not already carry.
-
-## 5. State
-
-| State | Owner | Rebuild |
-| --- | --- | --- |
-| Definitions | Settings sources (files); plugin-content sources | Read on every `list`/`start`; never cached across calls (A1) |
-| Approvals | Settings host-local approval store | Read per check (§11) |
-| Run records: definition snapshot and fingerprint, params, report target, run state, steps, stage records, logs, pending report | `WorkflowPlugin`, process storage | Loaded at `apply`; non-terminal runs are settled `interrupted` (§7) |
-| Stage Session facts | Each stage Session's Timeline | Read through session-access; never copied except the bounded result text |
-
-Run record (persisted on every transition, before the external effect it guards):
-
-```text
-Run { run_id, name, source: user|project|plugin, fingerprint, definition (snapshot),
-      params, cwd, resource_node, report_to: Option<{session_id, branch_id}>,
-      started_by: tool{session_id, branch_id, call_id} | management,
-      state: running | stopping | completed | failed | stopped | interrupted,
-      stages: [Stage], log: [LogEntry] (bounded, A9), report: none | pending{submission_id} | delivered | undeliverable{reason} }
-Stage { id, step, state: waiting | launching | running | completed | failed | stopped | skipped | lost,
-        session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
+```mermaid
+flowchart LR
+  subgraph WF["WorkflowPlugin (process, control node)"]
+    Defs["Definition loader and validator"]
+    Runner["Run engine and stage runners"]
+    Tool["workflow tool handler"]
+    Mgmt["workflow.* methods"]
+  end
+  ToolReg["Process tool registry (ToolRegistry)"]
+  MgmtReg["ManagementContribution (Management)"]
+  Launch["Agents launch (non-interactive, policy cap)"]
+  Estab["Collaboration establish"]
+  Access["SessionAccess facade"]
+  Purpose["Provider model selection, purpose workflow.stage"]
+  Store["Process storage (App Server)"]
+  Approvals["Host-local approval service (Settings)"]
+  Sources["Settings user and project sources"]
+  Contents["PluginContents type workflows"]
+  Tool --> ToolReg
+  Mgmt --> MgmtReg
+  Runner --> Launch
+  Runner -.->|When| Estab
+  Runner --> Access
+  Runner --> Purpose
+  Runner --> Store
+  Defs --> Sources
+  Defs --> Approvals
+  Defs -.->|When| Contents
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef contract stroke-dasharray:4 3
+  class Defs,Runner,Tool,Mgmt new
+  class ToolReg,MgmtReg,Launch,Estab,Access,Purpose,Store,Approvals,Sources,Contents contract
 ```
 
-## 6. Interfaces
+Runs belong to the process, not to the starting branch, so there is no Session or branch part. Workflow drives every stage Session, member or not, only through the `SessionAccess` facade, so an Agents or Collaboration reload returns `Reloading` to Workflow instead of interrupting runs.
 
-### 6.1 Definition format `dim.workflow/v1`
+| Part | Scope | Depends on | Provides |
+| --- | --- | --- | --- |
+| `WorkflowPlugin` | Process (control node) | `SessionAccess` (facts, acquire, input, `withdraw`, idle, stop, lookup, pages), Agents launch, `When<Collaboration establish>`, Provider purpose selection, App Server process storage, Settings sources and host-local approval service, `When<PluginContents>` (type key `workflows`) | Mount instances: process tool set `workflow` ([process-tool-contribution](../contracts/process-tool-contribution.md)), management contribution `workflow` ([Management](Management.md)) |
 
-YAML (A2). Files: `<home>/workflows/<name>.yaml` (user source), `<workspace>/.dimcode/workflows/<name>.yaml` (project source) (A3); plugin packages declare the same documents as plugin content.
+**Contracts depended on**: [extension-registry](../contracts/extension-registry.md) (mount pattern), process-tool-contribution, [session-access](../contracts/session-access.md), Agents launch (overview §7.2; shape in [Scheduler A.5](Scheduler.md#a5-agents-launch-depended-on)), Collaboration `establish(leader, agent)` (Collaboration supplement), Provider purpose policy (overview §7.2), App Server process storage (R8), Settings sources and host-local approval service (R11), [Management](Management.md), `PluginContents` (optional). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
+
+## 2. Data and state
+
+```mermaid
+classDiagram
+  class Definition {
+    schema dim.workflow/v1
+    name, description, parameters
+    steps: stage or parallel group
+    policy optional
+  }
+  class Run {
+    run_id, name, source, fingerprint, snapshot
+    params, cwd, resource_node, policy_cap
+    report_to, started_by, state
+    report: none, pending, delivered, undeliverable
+  }
+  class Stage {
+    id, step, state, runner
+    session_id, agent_id, submission_id
+    input_event_id, result_text, reason
+  }
+  class ProcessStorage {
+    workflow root, format version 1
+  }
+  class StageSessionTimeline {
+    stage input, input/consumed, input/withdrawn
+    turn/end, stop/interrupt
+  }
+  class StarterTimeline {
+    workflow tool call and result
+    report Steer input
+  }
+  Definition <.. Run : snapshot at start
+  Run "1" *-- "1..*" Stage
+  ProcessStorage *-- Run
+  Stage ..> StageSessionTimeline : decided from fixed reads
+  Run ..> StarterTimeline : report written once
+```
+
+Definitions are read from their sources per call (A1) and approvals per check; runs live in process storage and are persisted on every transition before the effect they guard. Stage progress is derived from existing facts in each stage Session; only a bounded result text is copied. Nothing is rebuilt from Timeline and Workflow owns no `StateCell`.
+
+## 3. Flows
+
+### 3.1 Start from the tool and run a stage
+
+```mermaid
+sequenceDiagram
+  participant M as Model (starter branch)
+  participant WF as Workflow
+  participant ST as Process storage
+  participant AG as Agents launch or Collaboration establish
+  participant SA as SessionAccess
+  participant SS as Stage Session
+  M->>WF: workflow start (tool handler)
+  WF->>WF: validate, approval check, policy cap from starter
+  WF->>ST: persist Run running
+  WF-->>M: ToolResult run_id (batch result)
+  WF->>ST: persist stage launching
+  WF->>AG: launch(non-interactive, capped policy) or establish(leader, agent)
+  AG-->>WF: SessionLease
+  WF->>SA: input main Queue, marker stage, rendered prompt
+  SA->>SS: Session::input then Timeline::append
+  WF->>ST: persist stage running with input_event_id
+  SS->>SS: Dispatcher: input/applied, input/consumed, turn
+  WF->>SA: idle(main) then local pages up to cutoff
+  WF->>ST: stage completed or failed, next step
+```
+
+The handler persists the run and returns at once; stage advancement runs on the plugin's task tracker. Completion is decided only from the stage Session's facts up to the `idle` cutoff.
+
+### 3.2 Report and stop
+
+```mermaid
+sequenceDiagram
+  participant WF as Workflow
+  participant ST as Process storage
+  participant SA as SessionAccess
+  participant STB as Starter branch
+  alt run completed, failed or interrupted, with report_to
+    WF->>ST: report pending(submission_id)
+    WF->>SA: acquire(starter) then input Steer, marker report
+    SA->>STB: Timeline::append
+    WF->>ST: delivered, or undeliverable on BranchMissing or SessionClosed
+  else workflow stop
+    WF->>ST: stopping
+    WF->>SA: withdraw unconsumed stage inputs, stop(main) for running stages
+    WF->>ST: stopped, no report
+  end
+```
+
+An explicit owner stop never wakes the starter ([event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md)). `lookup(submission_id)` before any retry guarantees at most one report.
+
+### 3.3 Policy of a stage
+
+```mermaid
+flowchart LR
+  Start{"started_by"}
+  ToolStart["tool: cap = starter Session policy (resolved by Agents)"]
+  MgmtStart["management: cap = host configuration maximum"]
+  D1["default = cap"]
+  D2["default = read-only"]
+  Decl["definition policy (optional, narrowing)"]
+  Eff["stage policy = min(declared or default, cap)"]
+  Member["member runner: Collaboration leader-policy rule, also capped"]
+  Start --> ToolStart --> D1 --> Eff
+  Start --> MgmtStart --> D2 --> Eff
+  Decl --> Eff
+  Eff --> Member
+```
+
+A run never widens authority (E2): the `workflow` tool is admitted with the same risk category as Collaboration's `agent` tool, and stage Sessions never exceed the starter's policy.
+
+## 4. Timing and conflicts
+
+```mermaid
+sequenceDiagram
+  participant WF as Workflow
+  participant SA as SessionAccess
+  participant AG as Agents
+  WF->>SA: idle(main) for a running stage
+  AG->>AG: Agents reload window begins
+  SA-->>WF: Reloading
+  WF->>WF: keep run and stage state, retry after the window
+  AG->>AG: new generation takes over
+  WF->>SA: idle(main) again, read up to cutoff
+  WF->>WF: stage outcome from facts, run continues
+```
+
+Agents and Collaboration reloads no longer interrupt runs; only Workflow's own reload or a restart settles runs `interrupted`.
+
+| Scenario | Sequence order | Outcome | Owner |
+| --- | --- | --- | --- |
+| Starter turn interrupt after the tool result | result < interrupt | Run continues | Workflow |
+| Tool batch not settled when the run ends quickly | report < `step/tool-result` | Steer consumed after the batch result; model sees `run_id` first | Loop |
+| `workflow.stop` races a stage's own `turn/end` | `turn/end` < `stop/interrupt` | Stage `completed` with result; run `stopped` | Stage Session order |
+| Stage input withdrawn (user or stop) before consumption | input < `input/withdrawn` | Stage `stopped`; never consumed | InputQueue, Workflow |
+| Workflow reload or restart mid-run | — | Runs `interrupted`, active stages `lost`, nothing relaunched; one report each (E15) | Workflow |
+| Leader branch closed with a member stage running | close < report | Member stage continues; report `undeliverable` | Workflow |
+
+Full table: Appendix B.
+
+## 5. Context mapping
+
+| What the model sees | Form | Placement |
+| --- | --- | --- |
+| `workflow` declaration | Tool declaration in adopted configuration (interactive Sessions only) | Requests whose prefix holds that configuration |
+| Start, status, stop | `ToolResult.content` (text incl. `run_id`) | Tool result position of its batch |
+| Report | One raw block `<dim-workflow kind="report" run="..." status="...">`; body: per-stage status, bounded preview of the last step's results (A16), how to get full results (`status`) | Consumed position of the Steer input; unkeyed |
+| Stage task (stage Session) | Marker `<dim-workflow kind="stage" run="..." stage="...">` then the rendered prompt as user content | First input of a launched Session, or a new input of a member Session |
+
+Report and stage inputs are unkeyed: after compaction they survive only through the summary; child branches inherit them only if consumed before the cut. Stage Sessions are non-interactive (no `ask_user`, no `workflow` tool), so runs never nest. The model never sees unlisted definitions, run records, logs, approvals, fingerprints, other plugins' events or diagnostics.
+
+## 6. Interfaces (summary)
+
+| Interface | Kind | Purpose |
+| --- | --- | --- |
+| `workflow` (`list`, `start`, `status`, `stop`) | Process tool, risk category of Collaboration's `agent` tool, interactive Sessions | Model runs workflows |
+| `workflow.list/save/start/status/stop/approve/revoke` | Management methods | Operators manage definitions and runs |
+| `/workflow`, `/workflow:save` | CLI | Call the management methods |
+| Agents `launch`, Collaboration `establish` | Depended on | Create stage Sessions |
+| `dim.workflow/v1` | Defined here | Definition format (Appendix A) |
+
+## 7. Security
+
+Project and plugin definitions are executable content: `start` and every stage launch require a grant in the Settings host-local approval service, record `{owner: workflow, node, workspace, source, id: name, fingerprint}`, fingerprint = SHA-256 over the canonical definition document (R11). Grants come only from `workflow.approve` on a Management-mounted entry; the tool, Timeline facts, replay and fork never grant. User definitions need no approval. Stage policy follows 3.3 and a definition can only narrow it. Approvals raised inside a member stage are forwarded to the leader by Collaboration (E6), not by Workflow. Stage Sessions use only their resource node's Session-bound services. Params and results become Timeline content of stage and report Sessions; definitions must not carry credentials.
+
+## Appendix A. Interface details
+
+### A.1 Definition format `dim.workflow/v1`
+
+YAML (A2). Files: user source `<dim home>/workflows/<name>.yaml`, project source `<workspace>/.dimcode/workflows/<name>.yaml` (E11, A3); packages publish the same documents as `PluginContents` type `workflows`.
 
 ```yaml
 schema: dim.workflow/v1
 name: review-and-fix                 # [a-z0-9-]{1,64}; unique per source
 description: Analyze, fix in parallel, summarize
+policy: workspace_write              # optional; narrowing only
 parameters:
   - { name: target, description: Path to review, required: true }
   - { name: style, default: concise }
@@ -80,170 +238,169 @@ steps:
 
 | Field | Rule |
 | --- | --- |
-| `steps` | 1–32 steps executed in order; a step is one `stage` or one `parallel` group of 2–8 stages (A4) |
+| `steps` | 1–32 steps in order; a step is one `stage` or a `parallel` group of 2–8 stages (A4) |
 | `stage.id` | `[a-z0-9-]{1,32}`, unique in the definition |
-| `stage.agent` | Optional Agent id (a native profile or an external Agent profile); default: the Agents default Agent |
-| `stage.runner` | `session` (default) or `member`; `member` requires `report_to` and `CollaborationMembers` (§6.4) |
-| `stage.model` | Optional explicit model; else the Agent profile's model; else Provider's selection for purpose `workflow.stage` (A5) |
-| `stage.prompt` | Text template, ≤ 32 KiB after rendering (A6). Placeholders: `{{params.<name>}}` and `{{stages.<id>.result}}` |
-| References | A `stages.<id>` reference must name a stage of an earlier step; same-step and forward references are rejected at validation. Rendering is plain substitution, no expressions or code (A7) |
-| Parameters | Supplied values are strings; missing required parameters and unknown names are `invalid_parameters`; defaults fill the rest |
+| `stage.agent` | Optional Agent id (native or external profile); default: the Agents default Agent |
+| `stage.runner` | `session` (default) or `member`; `member` requires `report_to` and Collaboration `establish` |
+| `stage.model` | Optional; else the profile's model; else Provider's selection for purpose `workflow.stage` (A5) |
+| `stage.prompt` | Template ≤ 32 KiB after rendering (A6); placeholders `{{params.<name>}}`, `{{stages.<id>.result}}` |
+| `policy` | `read_only` \| `workspace_write` \| `full_access`; capped (3.3) |
+| References | `stages.<id>` must name a stage of an earlier step; plain substitution only (A7) |
+| Parameters | Strings; missing required or unknown names → `invalid_parameters`; defaults fill the rest |
 
 Validation happens at the external boundary (file read, `workflow.save`, `start` params); runs use the validated snapshot.
 
-### 6.2 Tool `workflow`
+### A.2 Tool `workflow`
 
-Process-level contribution `workflow`, `requires: { interactive: true, roles: None }` (A8), risk `session` (existing category, A10).
+Process tool set `workflow`, `requires: { interactive: true, roles: None }` (A8); risk: the category Collaboration's `agent` tool declares (today none, so unclassified: ReadOnly denies, WorkspaceWrite asks, FullAccess allows; E2).
 
 | Action | Parameters | `ToolResult.content` |
 | --- | --- | --- |
-| `list` | — | Definitions visible for the Session cwd: name, source, description, parameters, approval state |
-| `start` | `name`, `source?` (`project` first, then `user`, then `plugin`), `params` | `{"run_id", "status": "running", "stages": [...]}` and a sentence that the result arrives as a report input |
-| `status` | `run_id` | State, per stage state, Session id, bounded result preview, last log entries |
-| `stop` | `run_id` | Final state after propagation (§7) |
+| `list` | — | Definitions visible for the caller's cwd: name, source, description, parameters, approval state |
+| `start` | `name`, `source?` (`project`, then `user`, then `plugin`), `params` | `{"run_id", "status": "running", "stages": [...]}` and a sentence that the result arrives as a report input |
+| `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
+| `stop` | `run_id` | Final state after propagation |
 
-`start` from the tool sets `report_to = {session_id, branch_id}` from `ProcessToolSession` and `ToolExecutionContext`, `cwd` and `resource_node` from `ProcessToolSession`. The handler persists the run, schedules it and returns; it does not wait for stages. Errors are error results with a code: `definition_not_found`, `invalid_definition`, `invalid_parameters`, `approval_required`, `run_not_found`, `limit_exceeded` (A11).
+`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the caller's `SessionFacts` and tool execution context, and `policy_cap` from the starter (Agents launch contract). Errors: `definition_not_found`, `invalid_definition`, `invalid_parameters`, `approval_required`, `run_not_found`, `limit_exceeded` (A11).
 
-### 6.3 Management methods (contribution `workflow`)
+### A.3 Management methods
 
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
-| `workflow.list` | `cwd` | Definitions with source, fingerprint, approval state, validation issues | no |
-| `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name, fingerprint}`; written through Settings' source (file authority) | yes |
-| `workflow.start` | `name`, `source?`, `cwd`, `resource_node?`, `params`, `report_to?: {session_id, branch_id}` | `{run_id}` | yes |
-| `workflow.status` | `run_id?` | One run, or recent runs | no |
+| `workflow.list` | `cwd` | Definitions with source, fingerprint, approval state, issues | no |
+| `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name, fingerprint}`, written through Settings' source (file authority) | yes |
+| `workflow.start` | `name`, `source?`, `cwd`, `resource_node?`, `params`, `report_to?` | `{run_id}`; `policy_cap` = host configuration maximum, default read-only | yes |
+| `workflow.status` | `run_id?` | One run or recent runs | no |
 | `workflow.stop` | `run_id` | Final run state | yes |
 | `workflow.approve`, `workflow.revoke` | `name`, `source`, `cwd` | Approval state bound to node + workspace + fingerprint | yes |
 
-`approve`/`revoke` extend the overview's method list (§14). All use `Interruption::Report`: a run already admitted continues if the caller disconnects.
+All use `Interruption::Report`: an admitted run continues if the caller disconnects.
 
-### 6.4 Depended-on contracts (proposed)
+### A.4 Run record
 
-```rust
-// Agents supplement (overview §7.2), shape shared with Scheduler §6.4:
-async fn launch(&self, config: LaunchConfig) -> Result<SessionLease, LaunchError>;
-// LaunchConfig { agent_id, cwd, resource_node, model, interactive: false }
-
-// Collaboration supplement proposed here (§14): establish a member of `leader` without branch facts.
-async fn establish(&self, leader_session_id: &str, agent_id: Option<&str>)
-    -> Result<MemberRef /* agent_id, session_id */, MemberError>;
+```text
+Run { run_id, name, source: user|project|plugin, fingerprint, definition (snapshot),
+      params, cwd, resource_node, policy_cap, report_to: Option<{session_id, branch_id}>,
+      started_by: tool{session_id, branch_id, call_id} | management,
+      state: running | stopping | completed | failed | stopped | interrupted,
+      stages: [Stage], log: [LogEntry] (bounded, A9),
+      report: none | pending{submission_id} | delivered | undeliverable{reason} }
+Stage { id, step, runner, state: waiting | launching | running | completed | failed | stopped | skipped | lost,
+        session_id?, agent_id?, submission_id?, input_event_id?, result_text?, reason? }
 ```
 
-Workflow drives a member Session exactly like a launched one, through session-access; Collaboration keeps Team rules (single leader, `Busy` when the member already works) and applies its own member configuration (leader cwd and policy).
+### A.5 Depended-on contracts
 
-## 7. Timeline and capability mechanics
+| Contract | Owner | Use |
+| --- | --- | --- |
+| `launch(LaunchConfig) -> SessionLease` with `interactive: false`, `policy`, `created_by: workflow` | Agents supplement | Launched stages; Workflow writes the first input itself |
+| `establish(leader_session_id, agent_id) -> MemberRef` | Collaboration supplement | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
+| `SessionAccess::withdraw(branch, input_id)` | session-access (InputQueue contract) | Withdraw own unconsumed stage inputs on stop |
+
+### A.6 Timeline and capability mechanics
 
 | Step | Path |
 | --- | --- |
-| Start | Tool handler or management call validates, checks approval, persists `Run{state: running}` and spawns the run task on the plugin's `TaskTracker` (registered with `ctx.effect`), then returns. No Timeline write |
-| Stage launch | Recheck in storage: run still `running`, approval still valid for project/plugin sources (A12). Persist `launching`; `launch(...)` or `establish(...)`; persist `session_id`; persist `submission_id = "workflow:<uuid>"` |
-| Stage input | `lease.input("main", SourceInput { submission_id, marker: { kind: "stage", attrs: [run, stage], body: definition name }, blocks: [], user: Some(rendered prompt), mode: Queue })` → `Session::input` → `TimelineContext::input` → `Timeline::append`. Persist `running` with `input_event_id` |
-| Consumption | The stage Session's InputQueue and Loop consume on their Dispatchers (`input/applied`, `input/consumed`) and run turns. Workflow holds no Dispatcher subscription and no `StateCell` |
-| Completion | `lease.idle("main")` returns cutoff `C`; Workflow reads local pages of `main` up to `C` and decides from those facts only: before `input/consumed{input_event_id}` the stage is not started: if a `stop/interrupt` follows the input it is `stopped`, else Workflow waits for `idle` again. After consumption, the last `turn/end` in `(consumed, C]` decides `completed`/`failed`/`stopped`, and the text of that turn's last request is the result (Collaboration's `outcome` rule) |
-| Advance | Persist the stage result; when every stage of a step is terminal, either start the next step or end the run. A failed stage stops its running siblings (§7 stop path) and fails the run (A4) |
-| Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `report: pending{submission_id}`, then `acquire(session_id)` (restores an unloaded Session) and `lease.input(branch_id, SourceInput { marker: { kind: "report", attrs: [run, status] }, blocks: [summary], mode: Steer })`. Persist `delivered`, or `undeliverable` on `BranchMissing`/`SessionClosed` |
-| Stop | Persist `stopping`; cancel launch of waiting stages (`skipped`); for each `running` stage `lease.stop("main", "workflow stopped")` (turn-scoped `stop/interrupt`, waits for settlement); then the completion rule reads the outcome; the run ends `stopped`. No report (explicit owner stop never wakes, [event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md)) |
-| Recheck | Every decision is taken from storage plus a fixed prefix read; sequence order inside each stage Session decides races (§8) |
-| Reload, restart | `apply` of a new generation loads run records first. Every `running`/`stopping` run becomes `interrupted`; `launching`/`running` stages become `lost`; nothing is relaunched or re-input ([overview common constraint 4](../overview.md#3-integration-methods)). A `pending` report is looked up by `submission_id` (`Accepted` → `delivered`; `Unknown` → delivered now); interrupted runs with `report_to` get a report. On unload, the old generation stops running stage turns (bounded wait, A13) before its disposer returns |
+| Start | Handler or management call validates, checks approval, resolves the policy cap, persists `Run{running}`, spawns the run task on the plugin's `TaskTracker` (`ctx.effect`) and returns. No Timeline write |
+| Stage launch | Recheck in storage (run `running`; approval still valid for the snapshot fingerprint, A12). Persist `launching`; `launch` or `establish`; persist `session_id` and `submission_id = workflow:<uuid>` |
+| Stage input | `lease.input("main", SourceInput { submission_id, marker: { kind: "stage", attrs: [run, stage], body: definition name }, user: rendered prompt, mode: Queue })` → `Session::input` → `TimelineContext::input` → `Timeline::append`; persist `running` with `input_event_id` |
+| Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
+| Completion | `lease.idle("main")` returns cutoff `C`; read local pages up to `C`. Before `input/consumed{input_event_id}`: `input/withdrawn` or a following `stop/interrupt` → `stopped`, else wait again. After consumption: the first `turn/end` after it in `(consumed, C]` decides `completed`/`failed`/`stopped`; that turn's last response text is the result (Collaboration's outcome rule) |
+| Advance | Persist the stage result; when all stages of a step are terminal, start the next step or end the run; a failed stage stops running siblings and fails the run (A4) |
+| Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `acquire`, `lease.input(branch_id, Steer, marker report)`; persist `delivered` or `undeliverable` |
+| Stop | Persist `stopping`; waiting stages `skipped`; unconsumed stage inputs withdrawn; running stages `lease.stop("main", "workflow stopped")`; completion rule reads the outcome; run `stopped`, no report |
+| Agents or Collaboration reload | Facade calls return `Reloading`; the run task keeps state and retries after the window; `establish` unavailable during the window retries until the startup deadline, then the stage `failed` |
+| Own reload, restart | Mounts unregister (in-flight tool call → "tool provider unavailable"; `workflow.*` → `service_reloading`). On unload the old generation stops running stage turns (bounded wait, A13). The new generation loads runs: `running`/`stopping` → `interrupted`; `launching`/`running` stages → `lost`; nothing relaunched. A `pending` report is looked up (`Accepted` → `delivered`, `Unknown` → written now); interrupted runs with `report_to` and `report: none` get one report (E15) |
 
-## 8. Timing and conflicts
+## Appendix B. Full conflict table
 
-| Scenario | Sequence order | Outcome | Owner of the decision |
+| Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Starter turn `stop/interrupt` before the `workflow` call is dispatched | interrupt < `step/tool-call` | Call not executed; no run | ToolExecutor |
-| Starter turn interrupt while the handler runs | `step/tool-start` < interrupt | Run persisted before return continues; if cancelled before persistence, no run | Workflow (persistence point) |
-| Starter turn interrupt after the tool result | result < interrupt | Run continues (not branch detached work) | Workflow |
-| Starter branch-scoped interrupt or branch close | close < report write | Run continues; report `undeliverable` (`BranchMissing`) | session-access, Workflow |
-| Tool batch not settled when the run ends quickly | report `input/message` < `step/tool-result` | Report is Steer: consumed after the batch result, so the model sees `run_id` first | Loop |
-| Concurrent user Steer/Queue on the report branch | Timeline order | Each applied by mode; report is an ordinary Steer | InputQueue |
-| Report arrives while the starter branch is idle | — | Steer starts a turn | InputQueue, Loop |
-| Compaction between report write and consumption | input < compaction < consumed | Report placed at its consumed position after the summary | ContextPreparation |
-| Child branch cut between report write and consumption | input < cut < consumed | Child does not see the report; parent does | InputQueue (child) |
-| Stage input written, then a user stops the stage Session before consumption | input < interrupt, no consumed | Stage `stopped`; the input stays pending in that Session (A14) | Workflow (reads prefix) |
-| `workflow.stop` races the stage's own `turn/end` | `turn/end` < stop's `stop/interrupt` | Stage `completed` with its result; run still `stopped` | Stage Session order |
-| `workflow.stop` twice / after the run ended | — | Idempotent: returns the current state | Workflow (storage) |
-| Duplicate `start` calls | — | Two runs; no deduplication (A15) | Workflow |
-| Member stage, leader also `request`s that member | member running | Collaboration answers `Busy` to one of them | Collaboration |
-| Stage Session's resource node offline | capabilities Pending | `launch` fails at the startup deadline → stage `failed: node_unavailable`; a running stage waits in `idle` until reload settles its turn | Agents, rutis lifecycle |
-| Stage Session reloads mid-turn | turn ends `Failed` (reload) | Stage `failed` | Stage Session's Loop |
-| Starter Session unloaded at report time | — | `acquire` restores it, then writes | AgentIndex |
-| Workflow or Agents reload mid-run | — | Runs `interrupted`, stages `lost`, report delivered by the new generation | Workflow |
-| Process restart mid-run | — | Same as reload; stage inputs committed but unconsumed stay in their Sessions | Workflow |
-| Report write with uncertain outcome (`Reloading`, `PublicationUnknown`) | — | `lookup(submission_id)` before retry; never two reports | Workflow |
-| Project definition edited after start | — | Running run keeps its snapshot; next stage launch rechecks the approval of the snapshot's fingerprint | Workflow |
-| Client detach (CLI that started the run) | — | No effect; detach is not a close | — |
+| Starter interrupt before the call is dispatched | interrupt < `step/tool-call` | Not executed; no run | ToolExecutor |
+| Starter interrupt while the handler runs | `step/tool-start` < interrupt | Persisted run continues; cancelled before persistence → no run | Workflow |
+| Starter interrupt after the tool result | result < interrupt | Run continues | Workflow |
+| Starter branch-scoped interrupt or branch close | close < report | Run continues; report `undeliverable` | session-access, Workflow |
+| Tool batch not settled when the run ends | report < `step/tool-result` | Steer consumed after the batch result | Loop |
+| Concurrent Steer/Queue on the report branch | Timeline order | Applied by mode; report is an ordinary Steer | InputQueue |
+| Report arrives while the starter is idle | — | Steer starts a turn | InputQueue, Loop |
+| User withdraws the report input | report < `input/withdrawn` | Report counted `delivered`; not rewritten | InputQueue |
+| Compaction between report write and consumption | input < compaction < consumed | Placed after the summary | ContextPreparation |
+| Child branch cut between report write and consumption | input < cut < consumed | Child does not see it | InputQueue (child) |
+| User stops the stage Session before consumption | input < interrupt | Stage `stopped`; input pending in that Session unless withdrawn | Workflow |
+| Stage input withdrawn | input < `input/withdrawn` | Stage `stopped` | InputQueue, Workflow |
+| `workflow.stop` races the stage's `turn/end` | `turn/end` < `stop/interrupt` | Stage `completed`; run `stopped` | Stage Session order |
+| `workflow.stop` races consumption | consumed < withdraw request | Withdraw rejected; `stop` path | InputQueue, Workflow |
+| `workflow.stop` twice or after the end | — | Idempotent | Workflow |
+| Duplicate `start` | — | Two runs (A15) | Workflow |
+| Member stage, leader `request`s the same member | stage input queued, not started | Both inputs queue in the member Session; `Busy` only once a turn runs; the stage result is the first `turn/end` after its own input's consumption | Collaboration, Workflow |
+| Leader branch closed with a member stage | close < stage end | Member stage continues (member belongs to the Session); report `undeliverable` | Workflow |
+| Leader Session closed with a member stage | — | Member closed by Collaboration → stage `failed: session_closed`; run `failed` | Collaboration, Workflow |
+| Collaboration reload | — | Running member stages unaffected (driven through SessionAccess); `establish` retried until deadline | Workflow |
+| Agents reload | — | `Reloading`; runs kept; tracking resumes | Workflow |
+| Stage resource node offline | capabilities Pending | `launch` fails at deadline → `failed: node_unavailable`; a running stage waits in `idle` | Agents, rutis lifecycle |
+| Stage Session capability reload mid-turn | turn ends `Failed` | Stage `failed` | Stage Loop |
+| Starter Session unloaded at report time | — | `acquire` restores, then writes | AgentIndex |
+| Workflow reload mid-run | — | `interrupted`/`lost`; one report | Workflow |
+| Process restart mid-run | — | Same; committed unconsumed stage inputs stay in their Sessions | Workflow |
+| Report write uncertain (`Reloading`, `PublicationUnknown`) | — | `lookup` before retry; never two reports | Workflow |
+| Project definition edited after start | — | Run keeps its snapshot; next stage launch rechecks the snapshot's fingerprint → `failed: approval_revoked` | Workflow |
+| Client detach | — | No effect | — |
 
-## 9. Context mapping
-
-| What the model sees | Form | Placement |
-| --- | --- | --- |
-| `workflow` declaration | Tool declaration in adopted `context/configured` (interactive Sessions only) | Requests whose prefix holds that configuration |
-| Start, status, stop | `ToolResult.content` (text incl. `run_id`) | Tool result position of its batch |
-| Report | One raw block, first line `<dim-workflow kind="report" run="..." status="...">`, body: per-stage status, bounded preview of the last step's results (A16), and how to get full results (`workflow` action `status`) | Consumed position of the Steer input; not keyed |
-| Stage task (in the stage Session) | Marker raw block `<dim-workflow kind="stage" run="..." stage="...">` then the rendered prompt as user content | First input of the stage Session (or a new input of a member Session) |
-
-The report and stage inputs are unkeyed: after compaction they survive only through the summary. Child branches inherit them only when consumed before the cut. Stage Sessions are non-interactive: no `ask_user`, no `workflow` tool, so runs never nest. The model never sees definitions it did not list, run records, logs, approvals, fingerprints, other plugins' events or diagnostics.
-
-## 10. Errors and recovery
+## Appendix C. Errors and recovery
 
 | Case | Result |
 | --- | --- |
 | Invalid definition file | Listed with issues; `start` → `invalid_definition` |
-| Approval missing or stale | `approval_required` at start; `failed: approval_revoked` at a later stage launch |
-| `launch`/`establish` fails | Stage `failed` with the reason; run `failed` |
+| Approval missing or stale | `approval_required` at start; `failed: approval_revoked` at a later launch |
+| Declared policy above the cap | `invalid_definition` at start |
+| `launch`/`establish` fails | Stage `failed`; run `failed` |
 | Stage turn `Failed`/`Cancelled` | Stage `failed`/`stopped`; run `failed` (A4) |
-| Session access error while waiting (`SessionClosed`, `BranchMissing`) | Stage `failed: session_closed` |
-| Storage write failure | Run task stops before the guarded effect; run left in its last persisted state and settled `interrupted` on next load |
-| Unload | Stops stage turns, settles runs `interrupted` (§7) |
+| `SessionClosed`, `BranchMissing` while waiting | Stage `failed: session_closed` |
+| Storage write failure | Run task stops before the guarded effect; settled `interrupted` on next load |
 
-Codes are the tool error codes of §6.2; management methods return them as `app_error`.
+Codes are the tool error codes of A.2; management methods return them as `app_error`.
 
-## 11. Security
+## Appendix D. Acceptance
 
-Project and plugin definitions are executable content: `start` and every stage launch require a host-local approval bound to node + workspace + fingerprint (SHA-256 of the definition document) ([overview §9](../overview.md#9-cross-cutting-conventions)). Approval is granted only by `workflow.approve` on a Management-mounted entry; the tool, Timeline facts, replay and fork never grant it. User-source definitions need no approval. Stage Sessions run with the Agents non-interactive default policy (A17) or, for members, Collaboration's leader-policy rule; a definition cannot widen either. Stage Sessions run on the run's resource node through that node's resource services. Params and results are Timeline content of stage and report Sessions; definitions must not carry credentials.
+Through the tool, management methods and session-access reads:
 
-## 12. Acceptance
-
-Flow tests through the tool, management methods and session-access reads:
-
-1. Sequential and parallel steps; `{{stages.x.result}}` substitution; forward reference rejected at save.
-2. Tool start returns `run_id`; the report Steer ends a `wait` and arrives after the tool batch result.
-3. Stop: waiting stages `skipped`, running stage interrupted, run `stopped`, no report; repeated stop idempotent.
+1. Sequential and parallel steps; result substitution; forward reference rejected at save.
+2. Tool start returns `run_id`; the report Steer ends a `wait` and arrives after the batch result.
+3. Stop: waiting stages `skipped`, unconsumed input withdrawn, running stage interrupted, run `stopped`, no report; repeated stop idempotent.
 4. Stop racing a stage `turn/end` keeps the completed result.
 5. Starter turn interrupt does not stop the run; starter branch closed → `undeliverable`.
-6. Project definition: unapproved → `approval_required`; approve; edit → next stage `approval_revoked`.
-7. Restart and plugin reload mid-run: `interrupted`/`lost`, no relaunch, one report (lookup prevents duplicates).
-8. `member` runner: member appears in the leader's Team; `Busy` from a concurrent leader request.
-9. Non-interactive stage Sessions have no `workflow` tool.
+6. Project definition in `.dimcode/workflows/`: unapproved → `approval_required`; approve; edit → next stage `approval_revoked`.
+7. Restart and Workflow reload: `interrupted`/`lost`, no relaunch, exactly one report.
+8. Agents reload and Collaboration reload mid-run: run completes normally.
+9. Policy: tool start under WorkspaceWrite → stages at most WorkspaceWrite; management start → ReadOnly by default; `workflow` denied under ReadOnly.
+10. `member` runner: member appears in the leader's Team; leader request racing a queued stage input handled per Appendix B.
+11. Non-interactive stage Sessions have no `workflow` tool.
 
-## 13. Assumptions
+## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Definitions are read per call, not cached | Judgment (file authority, overview §1) | A cache with change detection |
-| A2 | Definition format is YAML with `schema: dim.workflow/v1` | Judgment | Another syntax; same model |
-| A3 | File locations `<home>/workflows/` and `<workspace>/.dimcode/workflows/` | Judgment; overview §5.9 names user and project sources | Paths decided by Settings |
-| A4 | Steps are stages or parallel groups (≤ 32 steps, ≤ 8 per group); fail-fast on any stage failure | Feature list ("stages"); limits and policy are judgment | Per-stage failure policies, other limits |
-| A5 | Model precedence: stage model > profile model > purpose `workflow.stage` | Overview §5.9 (purpose); precedence is judgment | Other precedence |
-| A6 | Rendered prompt ≤ 32 KiB; stage result stored ≤ 64 KiB | Judgment | Other bounds |
-| A7 | Templates are plain substitution of params and earlier stage results | Judgment | Expressions would need a sandbox |
-| A8 | Tool offered only to interactive Sessions | Overview §5.1 non-interactive rule; prevents nested runs (judgment) | Nested runs need a depth limit |
-| A9 | Run log bounded to 500 entries; last 100 runs retained | Judgment | Other retention |
-| A10 | Tool risk is the existing `session` category | Judgment | A new category registered with Permission |
-| A11 | Concurrency limits: 4 running runs, 4 concurrent stages per run → `limit_exceeded` | Judgment | Other limits |
-| A12 | Approval is rechecked before each stage launch | Overview §9; per-step timing follows the MCP precedent (judgment) | Check only at start |
+| A1 | Definitions read per call, not cached | Judgment (file authority) | Cache with change detection |
+| A2 | YAML with `schema: dim.workflow/v1` | Judgment | Other syntax |
+| A3 | User directory `<dim home>/workflows/` | Judgment; overview §5.9 user source | Path decided by Settings |
+| A4 | Stages or parallel groups (≤ 32 steps, ≤ 8 per group); fail-fast | Feature list ("stages"); limits judgment | Per-stage failure policies |
+| A5 | Model precedence: stage > profile > purpose `workflow.stage` | Overview §5.9; precedence judgment | Other precedence |
+| A6 | Rendered prompt ≤ 32 KiB; stored result ≤ 64 KiB | Judgment | Other bounds |
+| A7 | Plain substitution templates | Judgment | Expressions need a sandbox |
+| A8 | Tool only for interactive Sessions | Overview §5.1; prevents nesting | Depth limit needed |
+| A9 | Log ≤ 500 entries; last 100 runs kept | Judgment | Other retention |
+| A11 | 4 running runs, 4 concurrent stages per run | Judgment | Other limits |
+| A12 | Approval rechecked before each stage launch | Overview §9; MCP precedent | Check only at start |
 | A13 | Unload waits up to 10 s for stage stops | Judgment | Other bound |
-| A14 | A stage stopped before consumption leaves its input pending in the stage Session | Interrupt contract (inputs applied before an interrupt stay pending); judgment not to withdraw | Withdrawal through InputQueue (overview §7.1) |
 | A15 | `start` does not deduplicate | Judgment | Idempotency keys |
-| A16 | Report preview ≤ 4 KiB | Judgment; precedent `dim-agent-report` preview | Other bound |
-| A17 | Launched stage Sessions use the Agents non-interactive default policy | Scheduler A15 alignment; judgment | A per-definition policy field (narrowing only) |
+| A16 | Report preview ≤ 4 KiB | Judgment; `dim-agent-report` precedent | Other bound |
 
-## 14. Open questions
+Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once after restart (E15), member approval forwarding by Collaboration (E6), `establish` (decisions §2), process storage (R8), withdrawal contract (R7), host-local approval service (R11).
+
+## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| Collaboration member contract | Overview §7.2 registers only a model-selection change for Collaboration; "stage members" (overview §3.3) need a public `establish(leader, agent)` service without branch facts. Not yet registered in §7 |
-| Management method list | Overview §5.9 lists `workflow.list/save/start/status/stop`; approval of project definitions needs `workflow.approve/revoke` (precedent `hooks.approve`) |
-| Agents launch contract | Shape shared with Scheduler; owned by the Agents supplement |
-| Report on restart | Whether an `interrupted` run should report at all, or only be visible in `status` |
-| Reload blast radius | A Workflow or Agents reload interrupts every running run; a stable run store that resumes observation (not execution) would need an exception to overview common constraint 4 |
+| Overview method list | Overview §5.9 lists `workflow.list/save/start/status/stop`; this design adds `workflow.approve/revoke` (D11) |
+| Launch contract | Agents supplement must define `launch` with `policy` and the starter-policy resolution; overview §7.2 still says Agents submits the first input (D17) |
+| Collaboration `establish` | Must be registered in overview §7.2 Collaboration row |

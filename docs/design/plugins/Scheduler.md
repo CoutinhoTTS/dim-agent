@@ -2,224 +2,363 @@
 
 Status: Draft. Overall design: [overview §5.8](../overview.md#58-scheduler). Phase: P2. Language: TypeScript first (overview §11.3).
 
-Scheduler is a process plugin that keeps scheduled jobs and their run history in process storage, and, when a window is due while the daemon is alive, creates or reuses a non-interactive Session and submits the job prompt as a Queue input marked with its own source block. It contributes the process-level `schedule` tool (risk `persistent_configuration`) and the `schedule.*` management methods. It writes no Timeline event: a run's prompt is ordinary input, and its outcome is read from the run Session's fixed prefix.
+Scheduler keeps scheduled jobs and their run history in App Server process storage. While the daemon is alive and a window is due, it creates (through the Agents launch contract) or reuses a non-interactive Session and writes the job prompt as a Queue input with its own source marker through [session-access](../contracts/session-access.md). It contributes the process-level `schedule` tool (risk `persistent_configuration`) and the `schedule.*` management methods, and writes no Timeline event: a run's outcome is read from the run Session's fixed prefix.
 
-## 1. User flows
+## 1. Structure
 
-1. The user runs `/scheduled` (alias `/schedule`) and saves a job: cron `0 9 * * 1-5`, prompt, working directory, resource node, model, mode `create`. At 09:00 Scheduler creates a non-interactive Session through Agents and submits the prompt; the history shows `running`, then `completed` with the Session id.
-2. The model, in an interactive Session, calls `schedule` with `action: "create"`; Approval asks because the category is `persistent_configuration`; once allowed, the job is saved with the calling Session's cwd and resource node as defaults.
-3. A job in mode `reuse` runs in the same Session each time; the user opens that Session to read accumulated results.
-4. The laptop sleeps over three windows; on wake they are recorded as `missed` and nothing runs until the next window (feature list: no catch-up).
-5. `schedule.run_now` runs a job immediately, subject to the same overlap rule.
-6. A job's previous run is still running when its next window comes; the window is recorded `skipped: overlap`.
+```mermaid
+flowchart LR
+  subgraph Sched["SchedulerPlugin (process, control node)"]
+    Timer["Timer and window evaluation"]
+    Runs["Run tracker"]
+    Tool["schedule tool handler"]
+    Mgmt["schedule.* methods"]
+  end
+  ToolReg["Process tool registry (ToolRegistry)"]
+  MgmtReg["ManagementContribution (Management)"]
+  Launch["Agents launch (non-interactive, policy cap)"]
+  Access["SessionAccess and SessionFacts"]
+  Events["SessionEvents"]
+  Store["Process storage (App Server)"]
+  Perm["Permission category persistent_configuration"]
+  Tool --> ToolReg
+  Mgmt --> MgmtReg
+  Timer --> Launch
+  Timer --> Access
+  Runs --> Access
+  Runs --> Events
+  Timer --> Store
+  Runs --> Store
+  Tool --> Store
+  Mgmt --> Store
+  ToolReg -.-> Perm
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef contract stroke-dasharray:4 3
+  class Timer,Runs,Tool,Mgmt new
+  class ToolReg,MgmtReg,Launch,Access,Events,Store,Perm contract
+```
 
-## 2. Scope
+Scheduler contributes to registries owned by their consumers ([extension-registry](../contracts/extension-registry.md)), so its reload never reloads a Session. It reaches Sessions only through `SessionAccess`, a facade that returns `Reloading` during an Agents reload instead of reloading Scheduler.
 
-| Responsible | Not responsible |
-| --- | --- |
-| Job definitions, validation, schedule evaluation, timers | Session creation mechanics and non-interactive configuration (Agents) |
-| Run records and history; overlap, busy, offline and missed-window policy | Executing the prompt (the run Session's Loop) |
-| The `schedule` tool and `schedule.*` management methods | Approvals inside run Sessions (Approval) |
-| Writing the prompt through session-access; reading run outcomes from the prefix | Notifications on run end (Notifications observes Sessions; A16) |
-| — | Catch-up of missed windows (never) |
-
-## 3. Scope and dependencies
-
-Single process plugin `SchedulerPlugin`; no Session or branch part (overview §3.2).
-
-**Contracts depended on** (none names Scheduler):
-
-| Contract | Owner | Status | Use |
+| Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ProcessToolSource` | ToolRegistry ([process-tool-contribution](../contracts/process-tool-contribution.md)) | P0 contract | `schedule` tool |
-| `SessionAccess` | Agents ([session-access](../contracts/session-access.md)) | P0 contract | Acquire reused Session, write prompt, lookup, read prefix, stop |
-| Session launch with creation configuration (resource node, non-interactive, model, cwd), returning a `SessionLease` | Agents | Overview §7.2 Agents supplement; proposed, shape in §6.4 | `create` mode and first run of `reuse` |
-| `SessionEvents` | [session-broadcast-subscription](../contracts/session-broadcast-subscription.md) | P0 contract | `turn/end` hints for run completion |
-| Risk category `persistent_configuration` | Permission | Overview §7.1 Permission supplement | Admission of `schedule` |
-| Management method contribution | Management | Overview §5.16 | `schedule.*` |
-| Plugin configuration via typed Settings operations | Settings (#3) | Overview §7.2 | Scheduler settings (A13) |
-| Process storage | Scheduler-owned file on the control node via FileStorage (A12) | Proposed | Jobs and runs |
+| `SchedulerPlugin` | Process (control node) | `SessionAccess` (facts, acquire, prefix, input, `withdraw`, `stop`, lookup), Agents launch contract, `SessionEvents`, App Server process storage, typed Settings operations | Mount instances: process tool set `scheduler` ([process-tool-contribution](../contracts/process-tool-contribution.md)), management contribution `schedule` ([Management](Management.md)) |
 
-**Contracts defined here**: the job and run data formats (§5), the `schedule` tool (§6.1), the `schedule.*` methods (§6.2), source marker `dim-scheduler` and submission ids `scheduler:<run id>` (session-access conventions).
+**Contracts depended on** (none names Scheduler): process-tool-contribution, [session-access](../contracts/session-access.md) (`SessionAccess`, `SessionFacts`, `SessionAccess::withdraw`), Agents launch (overview §7.2 Agents supplement), [session-broadcast-subscription](../contracts/session-broadcast-subscription.md), Permission category `persistent_configuration` (overview §7.1; FullAccess allows it, E1), Management contribution, App Server process storage (overview §7.2; per-plugin root, atomic replace, lock, format version, R8). **Contracts defined here**: job and run formats, the `schedule` tool, the `schedule.*` methods, source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
 
-| Part | Scope | Injects | Provides |
+## 2. Data and state
+
+```mermaid
+classDiagram
+  class Job {
+    id, name, schedule, prompt
+    cwd, resource_node, model, agent_id
+    mode create or reuse, session_id
+    policy, policy_cap
+    enabled, max_run_minutes, revision, created_by
+  }
+  class Run {
+    run_id, job_id, window, state
+    session_id, branch_id, input_event_id, submission_id
+    outcome, detail, timestamps
+  }
+  class ProcessStorage {
+    scheduler root, format version 1
+    atomic replace, lock
+  }
+  class RunSessionTimeline {
+    input/message with dim-scheduler marker
+    input/applied, input/consumed, input/withdrawn
+    turn/start, turn/end, stop/interrupt
+  }
+  Job "1" --> "0..100" Run
+  ProcessStorage *-- Job
+  ProcessStorage *-- Run
+  Run ..> RunSessionTimeline : decided from fixed prefix
+```
+
+Jobs and runs live only in process storage; nothing is rebuilt from Timeline and Scheduler owns no `StateCell`. A run's progress is derived from existing facts on the run Session's `main` branch, read through `SessionAccess::prefix`; Settings holds only plugin settings (A13).
+
+## 3. Flows
+
+### 3.1 A due window
+
+```mermaid
+sequenceDiagram
+  participant T as Scheduler timer
+  participant ST as Process storage
+  participant AG as Agents launch
+  participant SA as SessionAccess
+  participant TL as Run Session Timeline
+  participant IQ as InputQueue and Loop
+  T->>ST: recheck job, persist run launching
+  alt mode create, or reuse first run
+    T->>AG: launch(cwd, node, model, interactive false, policy)
+    AG-->>T: SessionLease
+  else reuse
+    T->>SA: acquire(session_id)
+  end
+  T->>SA: input main Queue, marker scheduled-run, user prompt
+  SA->>TL: Session::input then Timeline::append
+  T->>ST: persist submitted with input_event_id
+  TL->>IQ: Dispatcher: input/applied, then input/consumed, turn
+```
+
+The run is persisted `launching` before any external effect, so a restart can settle it by `lookup` instead of resubmitting. Scheduler holds no Dispatcher subscription.
+
+### 3.2 Completion and timeout
+
+```mermaid
+sequenceDiagram
+  participant SB as SessionEvents
+  participant R as Run tracker
+  participant SA as SessionAccess
+  participant ST as Process storage
+  SB->>R: turn/end notice (or Gap, or minute sweep)
+  R->>SA: prefix(main, at_least)
+  R->>R: consumed? first turn/end after consumption?
+  R->>ST: running or terminal outcome
+  Note over R: max_run_minutes elapsed
+  alt input not consumed
+    R->>SA: withdraw(main, input_event_id)
+    R->>ST: timed_out after input/withdrawn
+  else consumed
+    R->>SA: stop(main, scheduled run timed out)
+    R->>ST: timed_out once turn/end is read
+  end
+```
+
+The withdrawal is limited to Scheduler's own input; if InputQueue rejects it because the input was consumed first, the tracker falls back to `stop`.
+
+### 3.3 Permission of a run
+
+```mermaid
+flowchart LR
+  Created{"created_by"}
+  Tool["tool: cap = policy of the creating Session at save, resolved by Agents"]
+  User["management: cap = host configuration maximum"]
+  Default1["default = cap"]
+  Default2["default = read-only"]
+  Declared["job policy (optional, narrowing)"]
+  Eff["effective = min(declared or default, cap)"]
+  Created --> Tool --> Default1 --> Eff
+  Created --> User --> Default2 --> Eff
+  Declared --> Eff
+```
+
+Automation never widens authority: the starter's policy is an upper bound, a job may only narrow it, and jobs saved by management default to read-only (E2). The effective policy is passed to `launch` as creation configuration; reused Sessions keep their own policy, which a reuse job must not exceed (otherwise the run is `skipped: policy`).
+
+## 4. Timing and conflicts
+
+```mermaid
+sequenceDiagram
+  participant S as Scheduler
+  participant U as User
+  participant IQ as InputQueue
+  S->>IQ: run input (Queue) at seq n
+  U->>IQ: session.input.withdraw at seq n+1
+  IQ->>IQ: input/withdrawn
+  S->>S: next prefix read: withdrawn, never consumed
+  S->>S: run cancelled (withdrawn)
+```
+
+Every pending-input decision excludes withdrawn inputs, so a withdrawn run input never leaves the run `submitted` forever.
+
+| Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
-| `SchedulerPlugin` | Process (control node) | `SessionAccess`, Agents launch service, `SessionEvents`, `FileStorage`, Settings | `ProcessToolSource` under `scheduler`; management contribution `schedule` |
+| Previous run still active when a window fires | — (storage) | `skipped: overlap` (A4) | Scheduler |
+| User interrupts the run's turn | consumed < `stop/interrupt` < `turn/end` | Run `cancelled` | Loop; Scheduler records |
+| Timeout withdraw vs consumption | consumed < withdraw | Withdraw rejected; `stop` path | InputQueue, Scheduler |
+| Agents reload mid-run | — | Facades return `Reloading`; runs kept; tracking resumes from the prefix after the window | Scheduler |
+| Scheduler reload or restart | — | `launching` → `lookup`: `Accepted` → `submitted`, `Unknown` → `lost`; never resubmitted | Scheduler |
+| Daemon down over a window | — | `missed`; no catch-up (E5) | Scheduler |
 
-## 4. Events
+Full table: Appendix B.
 
-None (overview §5.8). The prompt is an `input/message` written through session-access; its consumption (`input/applied`, `input/consumed`), the turn it drives (`turn/start`, `turn/end`) and any interrupt are existing facts on the run Session's branch. The tool call and its result are existing facts on the calling branch. Job and run state is process storage: it does not affect any branch's later behavior.
+## 5. Context mapping
 
-## 5. State
+| Where | What the model sees | Form | Placement and survival |
+| --- | --- | --- | --- |
+| Calling Session | `schedule` declaration | Tool declaration in adopted configuration (interactive leaders only) | Configuration; survives compaction |
+| Calling Session | `schedule` result | `ToolResult.content` | Batch result position; summary only after compaction |
+| Run Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`, then the prompt as user content | Raw marker block + user text of one Queue input | At its `input/consumed` position; unkeyed, so only via summary after compaction; child branches inherit it if consumed before the cut |
 
-All in Scheduler's process storage, format version 1 (A12); nothing is rebuilt from Timeline.
+Run Sessions are non-interactive: no `ask_user`, no `schedule` tool. Prior runs in a `reuse` Session remain history like any input. The model never sees job records, run history, timers, other runs or diagnostics.
+
+## 6. Interfaces (summary)
+
+| Interface | Kind | Purpose |
+| --- | --- | --- |
+| `schedule` | Process tool, risk `persistent_configuration`, interactive leaders only | Model manages jobs |
+| `schedule.list/save/delete/set_enabled/run_now/history` | Management methods | Operators manage jobs |
+| `/scheduled`, `/schedule`, `dimcode schedule` | CLI | Call the management methods |
+| Agents `launch` | Depended on (Agents supplement) | Create a non-interactive run Session with node, model and policy |
+| Job and run formats | Defined here | Appendix A |
+
+## 7. Security
+
+`schedule` is admitted by Approval and Permission as `persistent_configuration`; FullAccess allows it (E1), other presets ask or deny. A run only writes input; its tools are admitted under the run Session's policy, which is capped as in 3.3, and approvals are not pre-granted. Tool-created jobs record `created_by` and are visible for review. Jobs store no credentials. The run Session uses only its resource node's Session-bound services; Scheduler touches none. Anyone with Management access can read job prompts.
+
+## Appendix A. Interface details
+
+### A.1 Records
 
 | Record | Fields |
 | --- | --- |
-| Job | `id`, `name`, `schedule` (§6.3), `prompt` (text, ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (optional; `None` = Agents default), `agent_id` (optional profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool:<session_id>`) |
-| Run | `run_id`, `job_id`, `window` (scheduled instant or `manual`), `state`, `session_id`, `branch_id` (`main`), `input_event_id`, `submission_id`, timestamps, `outcome` (`completed` \| `failed` \| `cancelled` with reason), `detail` |
+| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = Agents default), `agent_id` (optional profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool:<session_id>`) |
+| Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `branch_id` (`main`), `input_event_id`, `submission_id`, timestamps, `outcome` (`completed` \| `failed` \| `cancelled` with reason), `detail` |
 
-Run states: `skipped` (overlap, capacity, disabled, node unavailable), `missed`, `launching` (decided, before the input write), `submitted` (input committed), `running` (input consumed), terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 runs per job (A8). Writes use storage-level atomic replacement and `revision` checks so `save` from the tool and from management cannot overwrite each other silently.
+Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 runs per job (A8). Writes use process storage atomic replace under its lock and `revision` checks, so saves from the tool and from management never overwrite each other silently.
 
-## 6. Interfaces
+### A.2 Tool `schedule`
 
-### 6.1 Tool `schedule`
-
-Process-level contribution, key `scheduler`, `requires: { interactive: true, roles: Some({leader}) }` (A9): non-interactive run Sessions and collaboration members never see it, so a run cannot schedule further runs. Risk `persistent_configuration` for all actions (A10).
+Process tool set key `scheduler`, `requires: { interactive: true, roles: {leader} }` (A9), so run Sessions and members never see it and a run cannot schedule further runs. Risk `persistent_configuration` for all actions (A10).
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
 | `action` | `list` \| `get` \| `create` \| `update` \| `delete` \| `set_enabled` \| `run_now` \| `history` | Required |
 | `job_id` | string | All but `list`, `create` |
-| `job` | object: `name`, `schedule`, `prompt`, `cwd?`, `model?`, `mode?`, `max_run_minutes?` | `create`, `update` (partial for update) |
+| `job` | object: `name`, `schedule`, `prompt`, `cwd?`, `model?`, `mode?`, `policy?`, `max_run_minutes?` | `create`, `update` (partial) |
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`cwd` and `resource_node` default to the calling `ProcessToolSession`; the tool cannot set a resource node other than the caller's (A11). Result `content`: a short text summary with `job_id`, next window, or the requested list; `structured_content` holds the records. Validation errors return an error result.
+`cwd` and `resource_node` default to the caller's `SessionFacts`; the tool cannot target another resource node (A11). On `create`/`update`, `policy_cap` is the calling Session's policy, resolved through the Agents launch contract at the call (A15). Result `content`: a short text with `job_id`, next window, or the list; `structured_content` holds records. Validation errors are error results.
 
-### 6.2 Management methods (contributed to Management)
+### A.3 Management methods
 
 | Method | Parameters | Result |
 | --- | --- | --- |
 | `schedule.list` | `{}` | Jobs with `next_window`, last run |
-| `schedule.save` | `{job, revision?}` | Saved job; stale `revision` → `schedule_conflict` |
-| `schedule.delete` | `{job_id}` | Removes the job and history; an active run is not stopped (A14) |
+| `schedule.save` | `{job, revision?}` | Saved job (`policy_cap` = host configuration maximum); stale `revision` → `schedule_conflict` |
+| `schedule.delete` | `{job_id}` | Removes job and history; an active run is not stopped (A14) |
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume |
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
 
-CLI: `/scheduled`, `/schedule` and a `dimcode schedule` subcommand call these methods.
-
-### 6.3 Schedule formats
+### A.4 Schedule formats
 
 | Kind | Form | Rule |
 | --- | --- | --- |
-| `cron` | `{cron: "m h dom mon dow", tz?: IANA}` | Five fields, standard ranges, lists, ranges, steps; `tz` defaults to the control node's time zone; nonexistent local times (DST gap) are skipped, repeated times fire once |
-| `every` | `{every_minutes: n}` | `n` ≥ 1; windows at `anchor + k·n`, anchor = time the job was last enabled |
-| `at` | `{at: RFC 3339 instant}` | One window; after it fires or is missed, the job is disabled |
+| `cron` | `{cron: "m h dom mon dow", tz?: IANA}` | Five fields with lists, ranges, steps; `tz` defaults to the control node's zone; DST-gap times skipped, repeated times fire once |
+| `every` | `{every_minutes: n}` | `n` ≥ 1; windows at `anchor + k·n`, anchor = last enable time |
+| `at` | `{at: RFC 3339 instant}` | One window; after it fires or is missed the job is disabled |
 
-Granularity is one minute (A1). A window fires only if the timer observes it within 60 s of its instant (A2); otherwise it is recorded `missed` (one record per job collapsing all windows missed in a stretch) and skipped. The timer is evaluated against wall clock on every tick and on wake, so suspended time is never caught up.
+Granularity one minute (A1). A window fires only if observed within 60 s of its instant (A2); otherwise one `missed` record collapses the stretch. The timer evaluates wall clock on every tick and on wake, so suspended time is never caught up.
 
-### 6.4 Session launch (depended on; Agents supplement)
+### A.5 Agents launch (depended on)
 
 ```rust
-// Proposed by the Agents supplement (overview §7.2); Scheduler depends on this shape.
+// Agents supplement (overview §7.2); shape owned by Agents.
 async fn launch(&self, config: LaunchConfig) -> Result<SessionLease, LaunchError>;
 struct LaunchConfig { agent_id: Option<String>, cwd: String, resource_node: Option<String>,
-    model: Option<ModelSelection>, interactive: bool /* false */ }
+    model: Option<ModelSelection>, interactive: bool /* false */, policy: PermissionPolicy,
+    created_by: String /* "scheduler" */ }
 ```
 
-Permission policy of the run Session is the Agents default for non-interactive Sessions; Scheduler passes none (A15).
+The resulting `SessionFacts` carries `interactive: false` and `created_by: scheduler`. Scheduler writes the first input itself through the lease (overview §7.2 says Agents submits it; see Appendix F).
 
-## 7. Timeline and capability mechanics
+### A.6 Timeline and capability mechanics
 
 | Step | Path |
 | --- | --- |
-| Trigger | A timer task registered with `ctx.effect` computes the next window per enabled job. At a window: apply overlap, capacity and enablement rules (§8); persist the run as `launching` with a fresh `run_id` before any external effect |
-| Session | `create`: `launch(...)` returns a lease. `reuse`: `SessionAccess::source("scheduler").acquire(session_id)` (restores if unloaded); on first run, `launch` and bind `session_id` to the job |
-| Write | `lease.input("main", SourceInput { submission_id: "scheduler:<run_id>", marker: { kind: "scheduled-run", attrs: [job, run], body: job name }, blocks: [], user: Some(prompt text), mode: Queue })` → `Session::input` → `TimelineContext::input` → `Timeline::append`. Persist `submitted` with the committed event id |
-| Consumption | InputQueue (Dispatcher subscription) appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn. Scheduler holds no Dispatcher subscription |
-| Completion | Scheduler subscribes to `turn/end` filtered to Sessions of active runs. On a notice, a `Gap`, or a once-per-minute sweep (A3), it reads `lease.prefix("main", at_least)` and decides from consumed facts only: the run is `running` once `input/consumed { input_id = input_event_id }` exists; it ends at the first `turn/end` after that consumption, with that turn's outcome |
-| Timeout | When `max_run_minutes` elapses with the run unfinished: if consumed, `lease.stop("main", "scheduled run timed out")` (turn-scoped `stop/interrupt`) and the run ends `timed_out` once the `turn/end` is read; if not consumed, the run ends `timed_out` and the input stays queued (§14) |
-| State | Process storage only; no `StateCell`. The Session's InputQueue and Loop state remain theirs |
-| Recheck | Before writing, Scheduler re-reads the job and run from storage (job still enabled, revision unchanged, run still `launching`). It never reads the Session's capability state; whether the Session is busy is not consulted (§8) |
-| Reload / restart | Timers and the subscription end in the disposer; leases drop. The new generation loads storage and settles: `launching` → acquire the Session if known and `lookup(submission_id)`: `Accepted` → `submitted` (resume tracking; reading is not a side effect), `Unknown` → `lost` ("did not survive recovery"; never resubmitted); `submitted`/`running` → resume tracking from the prefix. Windows that passed meanwhile are `missed` |
+| Trigger | Timer task (`ctx.effect`) computes the next window per enabled job; at a window applies overlap, capacity, enablement and policy rules; persists `launching` with a fresh `run_id` before any external effect |
+| Session | `create`: `launch`. `reuse`: `SessionAccess::source("scheduler").acquire(session_id)` (restores if unloaded); first run launches and binds `session_id` |
+| Write | `lease.input("main", SourceInput { submission_id: "scheduler:<run_id>", marker: { kind: "scheduled-run", attrs: [job, run], body: job name }, user: prompt, mode: Queue })` → `Session::input` → `TimelineContext::input` → `Timeline::append`; persist `submitted` |
+| Consumption | InputQueue's Dispatcher subscription appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn |
+| Completion | `turn/end` notices filtered to active run Sessions, `Gap`, or a minute sweep (A3) trigger `lease.prefix("main", at_least)`; `running` once `input/consumed { input_id = input_event_id }` exists; ends at the first `turn/end` after it with that outcome; `input/withdrawn` of the input before consumption → `cancelled: withdrawn` |
+| Timeout | Not consumed: `SessionAccess::withdraw` (own source) → `timed_out`; consumed: `lease.stop("main", ...)` (turn-scoped `stop/interrupt`), `timed_out` when `turn/end` is read |
+| Recheck | Before writing, re-read job and run from storage (enabled, revision unchanged, run still `launching`); never reads capability state; busy state is not consulted |
+| Own reload / restart | Mounts unregister (in-flight tool call gets "tool provider unavailable"; `schedule.*` returns `service_reloading`); timers and subscription end; leases drop. The new generation settles: `launching` → `lookup(submission_id)`: `Accepted` → `submitted`, `Unknown` → `lost` (never resubmitted); `submitted`/`running` resume tracking; passed windows `missed` |
+| Agents reload | `SessionAccess`/`SessionEvents` return `Reloading`; Scheduler stays loaded; a write in the window does `lookup` before one retry within the 60 s grace |
 
-## 8. Timing and conflicts
+## Appendix B. Full conflict table
 
-| Scenario | Sequence order | Outcome | Owner of the decision |
+| Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Previous run of the job still active when a window fires | — (process storage) | Window `skipped: overlap`; no input (A4) | Scheduler |
-| `run_now` while a run is active | — | Rejected with `skipped: overlap` | Scheduler |
-| Reused Session busy (turn running or inputs pending) | prior facts < run input | Input is written anyway as Queue; consumed after the running turn ends; history notes the wait (A5) | InputQueue, Loop |
-| Reused Session: user Steer/Queue/Append concurrently | Timeline order | Each applied by mode in sequence order; the run is tracked by its own `input_id` | InputQueue |
-| User interrupts the run's turn | consumed < `stop/interrupt` < `turn/end` | Run `cancelled` (from `turn/end` outcome) | Loop; Scheduler records |
-| Interrupt before the run input | interrupt < input | Input starts a turn normally | Loop |
-| Input applied but not consumed, then interrupt | applied < interrupt | Stays pending, consumed by the next turn; run still `submitted` | Loop |
-| Branch close or Session closed/deleted before the write | — | `SessionClosed`/`BranchMissing`; run `failed: session_missing`; `reuse` job keeps the binding (A6) | Scheduler |
-| Session closed while the run is active | — | Prefix read returns `BranchMissing`/`SessionClosed`; run `failed` | Scheduler |
+| Previous run active when a window fires | — | `skipped: overlap`; no input (A4) | Scheduler |
+| `run_now` while a run is active | — | Rejected `skipped: overlap` | Scheduler |
+| Reused Session busy | prior facts < run input | Written as Queue; consumed after the running turn (A5) | InputQueue, Loop |
+| Reused Session: concurrent user Steer/Queue/Append | Timeline order | Applied by mode in sequence order; run tracked by its own `input_id` | InputQueue |
+| User interrupts the run's turn | consumed < interrupt < `turn/end` | `cancelled` | Loop |
+| Interrupt before the run input | interrupt < input | Input starts a turn | Loop |
+| Input applied, interrupt before consumption | applied < interrupt | Stays pending; consumed by the next turn; run `submitted` | Loop |
+| User withdraws the run input | input < `input/withdrawn` | Run `cancelled: withdrawn` | InputQueue, Scheduler |
+| Timeout withdraw races consumption | consumed < withdraw request | Withdraw rejected; `stop` then `timed_out` | InputQueue, Scheduler |
+| Branch close or Session closed before the write | — | `SessionClosed`/`BranchMissing`; `failed: session_missing`; reuse binding kept (A6) | Scheduler |
+| Session closed while the run is active | — | Prefix read fails; `failed` | Scheduler |
 | Tool batch in the run turn not settled | — | Nothing observed until `turn/end` | Loop |
-| Compaction during the run | — | No effect on tracking: `input/consumed` and `turn/end` stay in the local history read by `prefix` | — |
-| Child branch created in the run Session | — | Ignored; runs use branch `main` only | Scheduler |
-| Run Session idle-unloaded with the input pending | — | Committed input restored and adopted on load; Scheduler's `acquire` for tracking restores it | AgentIndex |
-| `turn/end` notice lost (`Gap`, reload) | — | Minute sweep reads the prefix | Scheduler |
-| Scheduler reload or daemon restart mid-run | — | §7 settlement; never resubmitted | Scheduler |
-| Daemon down over a window | — | `missed`; no catch-up (feature list, overview §5.8) | Scheduler |
+| Compaction during the run | — | No effect: `input/consumed` and `turn/end` stay in local history | — |
+| Child branch created in the run Session | — | Ignored; runs use `main` only | Scheduler |
+| Run Session idle-unloaded with input pending | — | Restored and adopted on load; `acquire` restores it | AgentIndex |
+| `turn/end` notice lost (`Gap`) | — | Minute sweep reads the prefix | Scheduler |
+| Agents reload mid-run | — | `Reloading` from the facades; runs kept; tracking resumes | Scheduler |
+| Scheduler reload or restart mid-run | — | A.6 settlement; never resubmitted | Scheduler |
+| Daemon down over a window | — | `missed`; no catch-up | Scheduler |
 | Resource node offline at trigger, `create` | — | `launch` fails at the startup deadline → `skipped: node_unavailable`; not retried (A6) | Agents, Scheduler |
-| Resource node offline, `reuse` | — | Input commits; capabilities Pending; turn starts after recovery; `max_run_minutes` applies | rutis lifecycle, Scheduler |
-| Pending approval in a run Session | `approval/request` | Waits for `approval.respond` from any client or until timeout | Approval; Scheduler (timeout) |
+| Resource node offline, `reuse` | — | Input commits; capabilities Pending; turn starts after recovery; timeout applies | rutis lifecycle, Scheduler |
+| Reuse Session policy above the job's effective policy | — | `skipped: policy` | Scheduler |
+| Pending approval in a run Session | `approval/request` | Waits for `approval.respond` from any client or the timeout | Approval; Scheduler |
 | Duplicate/late `schedule.save` | revision | Stale revision rejected | Scheduler |
-| Duplicate `run_now` | — | Second call sees the active run: skipped | Scheduler |
-| `schedule` tool call interrupted after save | save < interrupt | Saved job stays (persistent configuration is the effect); tool result cancelled | ToolExecutor; Scheduler |
+| Duplicate `run_now` | — | Second sees the active run: skipped | Scheduler |
+| `schedule` call interrupted after save | save < interrupt | Saved job stays; tool result cancelled | ToolExecutor; Scheduler |
+| Scheduler inactive during a `schedule` call | — | That call gets "tool provider unavailable"; batch and turn continue | ToolRegistry |
 | Client detach | — | No effect | — |
 
-## 9. Context mapping
-
-| Where | What the model sees | Form | Placement and survival |
-| --- | --- | --- | --- |
-| Calling Session | `schedule` declaration | Tool declaration in adopted configuration (interactive leaders only) | Configuration; survives compaction |
-| Calling Session | Result of `schedule` | `ToolResult.content` | Batch result position; summary only after compaction |
-| Run Session | Marker `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`, then the prompt as user content | Raw block + user text of one Queue input | At its `input/consumed` position; unkeyed, so only via summary after compaction; child branches inherit it if consumed before the cut |
-
-Run Sessions are non-interactive: no `ask_user`, no `schedule` tool. Prior runs in a `reuse` Session remain history like any input. The model never sees job records, run history, timers, other runs, or diagnostics.
-
-## 10. Errors and recovery
+## Appendix C. Errors and recovery
 
 | Case | Result |
 | --- | --- |
-| Invalid job (schedule, prompt size, unknown node) | `schedule_invalid` (management) or error tool result |
-| Launch failure | Run `failed` with reason; window not retried |
-| Write `Reloading` | `lookup` then at most one retry within the window's 60 s grace |
+| Invalid job (schedule, prompt size, unknown node, policy above cap) | `schedule_invalid` or error tool result |
+| Launch failure | Run `failed`; window not retried |
+| Write `Reloading` | `lookup`, then at most one retry within the 60 s grace |
 | `PublicationUnknown` | Run stays `launching`; settled by `lookup` after recovery |
-| Storage unreadable | Scheduler fails to apply (no silent reset) |
-| Process exit | Timers stop; no settlement written until the next start (§7) |
+| Storage unreadable or unknown format version | Scheduler fails to apply (no silent reset) |
+| Process exit | Timers stop; settlement at next start |
 
 Error codes: `schedule_invalid`, `schedule_conflict`, `schedule_not_found`, `service_reloading`.
 
-## 11. Security
+## Appendix D. Acceptance
 
-`schedule` is admitted by Approval and Permission as `persistent_configuration` (whether FullAccess allows it is overview §13). A run writes input only; its tools are admitted under the run Session's policy, and approvals are not pre-granted. A job created by a tool is marked `created_by` for review. Jobs store no credentials. The run Session uses only the resources of its configured resource node through Session-bound services; Scheduler itself touches none. Job prompts can be read by anyone with Management access.
+With a controllable clock, through management methods, the `schedule` tool and events:
 
-## 12. Acceptance
-
-Through management methods, the `schedule` tool and events, with a controllable clock:
-
-1. Each schedule kind computes the expected windows, including DST gap/overlap and `at` disabling itself.
-2. A due `create` job yields a non-interactive Session whose first input carries the marker and the prompt; the run ends `completed`.
+1. Each schedule kind yields the expected windows, including DST gap/overlap and `at` disabling itself.
+2. A due `create` job yields a non-interactive Session whose first input carries the marker and prompt; run `completed`.
 3. Overlap: a window during an active run is `skipped: overlap`.
-4. `reuse` with a busy Session: input queued behind the running turn; run starts after it.
-5. User interrupt yields `cancelled`; timeout yields `timed_out` with a `stop/interrupt`.
-6. Clock jump over windows yields one `missed` record and no runs.
-7. Restart with a `launching` run: `Accepted` resumes tracking, `Unknown` becomes `lost`; no duplicate input.
-8. `schedule` absent in non-interactive Sessions; asked under the default policy.
-9. Node unavailable at trigger: `skipped: node_unavailable`.
+4. `reuse` with a busy Session: input queued behind the running turn.
+5. User interrupt → `cancelled`; timeout before consumption → `input/withdrawn` and `timed_out`; after consumption → `stop/interrupt` and `timed_out`.
+6. User withdraws the run input → `cancelled: withdrawn`.
+7. Clock jump → one `missed` record, no runs.
+8. Restart with a `launching` run: `Accepted` resumes, `Unknown` → `lost`; no duplicate input.
+9. Agents reload mid-run: run continues and completes; no Scheduler reload.
+10. Policy: tool-created job under WorkspaceWrite runs with at most WorkspaceWrite; management job defaults to ReadOnly.
+11. `schedule` absent in non-interactive Sessions; asked under WorkspaceWrite, allowed under FullAccess.
+12. Node unavailable at trigger: `skipped: node_unavailable`.
 
-## 13. Assumptions
+## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A1 | Formats `cron`, `every`, `at`; one-minute granularity | Feature list ("recurrence"); judgment | Formats change |
-| A2 | 60 s grace for a window to count as on time | Judgment | Tighter or looser missed detection |
-| A3 | Once-per-minute prefix sweep for active runs | Subscription is lossy (contract); judgment | Missed completions until next notice |
-| A4 | Overlap policy: skip the new window | Judgment ("missed windows skipped") | Queue or parallel runs |
-| A5 | Reused busy Session: enqueue rather than skip | Judgment | Busy windows skipped |
-| A6 | Failures (session missing, node unavailable) never retry or fall back to `create` | Judgment; overview §3 constraint 4 | Fallback policy |
-| A7 | `max_run_minutes` default 60 | Judgment | Long runs unbounded |
-| A8 | Keep the last 100 runs per job | Judgment | Retention setting |
-| A9 | Tool only for interactive leader Sessions | Overview §5.1 non-interactive rule; judgment | Runs could create jobs |
-| A10 | One risk category for all actions, including reads | Overview §5.8 | Split read-only tool |
-| A11 | Tool-created jobs use the caller's resource node | Judgment (overview §3.1) | Tool may target other nodes |
-| A12 | Scheduler-owned versioned storage file via FileStorage on the control node | Overview §5.8 "process storage"; no generic process store exists | Storage service changes |
-| A13 | Settings hold only plugin settings (enablement, max concurrent runs = 4), not jobs | Judgment | Jobs in Settings |
+| A2 | 60 s grace for a window | Judgment | Other missed detection |
+| A3 | Once-per-minute prefix sweep | Subscription is lossy; judgment | Late completions |
+| A4 | Overlap: skip the new window | Judgment | Queue or parallel runs |
+| A5 | Reused busy Session: enqueue | Judgment | Busy windows skipped |
+| A6 | Failures never retry or fall back to `create` | Judgment; overview §3 constraint 4 | Fallback policy |
+| A7 | `max_run_minutes` default 60 | Judgment | Unbounded runs |
+| A8 | Last 100 runs per job | Judgment | Retention setting |
+| A9 | Tool only for interactive leader Sessions | Overview §5.1; judgment | Runs could create jobs |
+| A10 | One risk category for all actions | Overview §5.8 | Split read-only tool |
+| A11 | Tool-created jobs use the caller's resource node | Judgment (overview §3.1) | Other nodes allowed |
+| A13 | Settings hold only plugin settings (enablement, max concurrent runs = 4) | Judgment | Jobs in Settings |
 | A14 | Deleting a job does not stop its active run | Judgment | Delete stops the run |
-| A15 | Run permission policy is Agents' non-interactive default | Overview §7.2 Agents; judgment | Per-job policy field |
-| A16 | Run-end notifications are Notifications' business, from its own subscription | Overview §5.11 | Scheduler would call Notifications |
+| A15 | The cap of a tool-created job is captured at save, not re-evaluated per run | Judgment within E2 | Re-resolve the creator's policy per run |
+| A16 | Run-end notifications are Notifications' business | Overview §5.11 | Scheduler calls Notifications |
 
-## 14. Open questions
+Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), process storage contract (R8), withdrawal contract (R7).
+
+## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| Liveness | Overview §13: feature list says interactive terminal alive; this design requires the daemon alive |
-| Unconsumed input on timeout | Withdrawing it needs InputQueue's `input/withdrawn` service exposed through session-access |
-| Launch contract | The Agents supplement must define `launch` (non-interactive, resource node) |
-| FullAccess | Whether `persistent_configuration` asks under FullAccess (overview §13) |
+| Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); the difference is recorded, not open |
+| Launch contract | Agents supplement must define `launch` with `policy` and a way to resolve a Session's current policy for the cap; overview §7.2 still says Agents submits the first input (D17) |
