@@ -279,7 +279,7 @@ Characters: <start>-<end> of <total>
 | 分支级中断或分支关闭 | 分支中断 | 同 turn 中断 | ToolExecutor |
 | 批次中有另一个长调用 | Web 已返回，另一调用仍在运行 | 结果保留到批次的 `step/tool-result` | ToolExecutor |
 | 并发 Steer/Queue/Append | 任意 | 对调用无影响；Steer 在批次结果之后消费 | Loop |
-| 待处理输入的 `input/withdrawn` | 任意 | 无影响；Web 不消费输入 | InputQueue |
+| 对暂存输入的 `input/withdraw` / `input/deleted` | 任意 | 无影响；Web 不消费输入 | InputQueue |
 | 结果之后发生压缩 | `step/tool-result` < 压缩 | 文本只经摘要保留 | ContextPreparation |
 | 子分支切分 | 切分在 `step/tool-result` 之后 | 子分支继承该结果 | — |
 | 调用运行时编辑配置 | — | 调用继续使用开始时读取的值 | Web |

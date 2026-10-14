@@ -44,7 +44,7 @@ flowchart LR
 flowchart TB
   subgraph TL["本 Session 的 Timeline（只读）"]
     TE["main 上的 turn/start、turn/end"]
-    IN["input/message、input/consumed、input/withdrawn"]
+    IN["input/message、input/consumed、input/deleted"]
     AP["approval/request、respond、cancelled"]
     QU["question/asked、answered、cancelled"]
   end
@@ -83,7 +83,7 @@ sequenceDiagram
   NP->>CH: HTTPS POST 任务已完成
 ```
 
-挂钟时间只用于延迟读取；决定依据事实与序号。已撤回的输入不算待处理。
+挂钟时间只用于延迟读取；决定依据事实与序号。已删除的输入（`input/deleted`）不算待处理。
 
 ### 3.2 审批待处理
 
@@ -137,11 +137,11 @@ sequenceDiagram
   TL->>TL: input/message Queue 位于 N+1
   NP->>TL: 检查时读取前缀
   Note over NP: N 之后有待处理 Queue 输入，不发 turn.completed
-  TL->>TL: 该输入的 input/withdrawn
+  TL->>TL: 该输入的 input/deleted
   Note over NP: 由下一个 turn/end 决定
 ```
 
-待处理的驱动输入会抑制 `turn.completed`。在检查前撤回，则不再计入；在检查后撤回，则直到下一个 `turn/end` 都不会发生任何事（A15）。
+待处理的驱动输入会抑制 `turn.completed`。在检查前被删除，则不再计入；在检查后被删除，则直到下一个 `turn/end` 都不会发生任何事（A15）。
 
 | 场景 | 顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
@@ -216,7 +216,7 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 
 | 事件 | 触发 | 规则（事件触发要求 `interactive && collaborationRole = leader`） |
 | --- | --- | --- |
-| `main` 上的 `turn/end` | `turn.completed` / `turn.failed` | `completed` / `failed`；`cancelled` 不触发（A3）。仅当 `N` 是最新的 `turn/end`、其后无 `turn/start`、且没有既无 `input/consumed` 也无 `input/withdrawn` 的 Queue/Steer `input/message` 时触发 |
+| `main` 上的 `turn/end` | `turn.completed` / `turn.failed` | `completed` / `failed`；`cancelled` 不触发（A3）。仅当 `N` 是最新的 `turn/end`、其后无 `turn/start`、且没有既无 `input/consumed` 也无 `input/deleted` 的 Queue/Steer `input/message` 时触发 |
 | `approval/request`（任意分支） | `approval.pending` | 延迟后没有相同 `approval_id` 的 `approval/respond` 或 `approval/cancelled` |
 | `question/asked`（任意分支） | `question.pending` | 延迟后没有相同 `call_id` 的 `question/answered` 或 `question/cancelled` |
 | 运行结果 `{job_id, job_name, run_id, session_id?, state, reason?, ended_at}`，其中 `session_id` = 本 Session | `schedule.ended` | 每个此类通知（A17） |
@@ -241,15 +241,15 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | 场景 | 序号顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
 | 检查前出现续接或排队输入 | `turn/end` N < input | 不发 `turn.completed` | Notifications |
-| 该输入在检查前被撤回 | input < `input/withdrawn` < check | 不算待处理；发送 | Notifications |
-| 该输入在检查后被撤回 | check < `input/withdrawn` | N 不发任何内容；由下一个 `turn/end` 决定（A15） | Notifications |
+| 该输入在检查前被删除 | input < `input/deleted` < check | 不算待处理；发送 | Notifications |
+| 该输入在检查后被删除 | check < `input/deleted` | N 不发任何内容；由下一个 `turn/end` 决定（A15） | Notifications |
 | 检查后的输入 | check < input | 发送（可接受） | Notifications |
 | turn 因中断结束 | `turn/end {cancelled}` | 不发送（A3） | Notifications |
 | turn 失败 | `turn/end {failed}` | 若仍是最新 turn 则发 `turn.failed` | Notifications |
 | 延迟结束前审批已回应或取消 | request < respond/cancelled < check | 不发送 | Notifications |
 | 发送后审批被回应 | check < respond | 保持已发送；无后续消息（A11） | — |
 | 延迟结束前问题已回答或取消 | asked < answered/cancelled | 不发送 | Notifications |
-| 并发 Steer/Queue/Append | Timeline 顺序 | 未消费且未撤回的 Queue/Steer 抑制 `turn.completed`；Append 不抑制 | Notifications |
+| 并发 Steer/Queue/Append | Timeline 顺序 | 未消费且未删除的 Queue/Steer 抑制 `turn.completed`；Append 不抑制 | Notifications |
 | 工具批次未结算 | 批次内的审批 | 待处理审批会被通知；`turn/end` 不会先于批次结果 | Loop |
 | 压缩 | — | 无影响：检查读取事实 | — |
 | 子分支 | 子分支中的审批 | 会被通知；子分支的 `turn/end` 被忽略（A1） | Notifications |
@@ -280,7 +280,7 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 
 使用伪造 HTTP 端点与伪造模型的流程测试：
 
-1. 交互式 leader Session 中已完成的 `main` turn 发送一条 `turn.completed`；检查前的 Queue 输入会抑制它；同一输入在检查前被撤回则不抑制；cancelled 不发送；failed 发送 `turn.failed`。
+1. 交互式 leader Session 中已完成的 `main` turn 发送一条 `turn.completed`；检查前的 Queue 输入会抑制它；同一输入在检查前被删除（`input/deleted`）则不抑制；cancelled 不发送；failed 发送 `turn.failed`。
 2. 成员 Session 与 `interactive: false` 的 Session 不发送事件触发的通知。
 3. 延迟前已回应的审批不发送；未回应的发送一次；已取消的不发送。
 4. 有回答与无回答的 `question/asked`；没有 Questions 时不起作用。
@@ -307,7 +307,7 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | A12 | 尽力而为：无持久发件箱，重启后不恢复 | 判断 | 需要进程存储发件箱 |
 | A13 | 不论是否有客户端连接都发送 | 判断 | 需要连接契约 |
 | A14 | Slack 经 webhook 或 bot token + channel id；飞书经自定义机器人 webhook，可选签名 | 功能列表；模式为判断 | 其他适配器 |
-| A15 | 被抑制的 `turn.completed` 在之后撤回时不再重新评估 | 判断 | 撤回需要自己的触发 |
+| A15 | 被抑制的 `turn.completed` 在之后出现 `input/deleted` 时不再重新评估 | 判断 | 撤回需要自己的触发 |
 | A17 | `schedule.ended` 由运行 Session 的实例依据 `RunOutcome.session_id` 投递，只含作业名与状态 | Scheduler 通知携带 `session_id`；判断 | 由一个进程部件统一监听所有运行 |
 
 ## 附录 F. 待对齐问题

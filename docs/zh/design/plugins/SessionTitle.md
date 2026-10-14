@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条用户输入被写入时，它仅凭该输入的文本，经 Provider `AuxiliaryModel` 在用途 key `session-title` 下生成标题。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与准入检查](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条用户输入被写入时，它仅凭该输入的文本，经 Provider `AuxiliaryModel` 在用途 key `session-title` 下生成标题。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 1. 结构
 
@@ -123,7 +123,7 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- | --- | --- |
 | 成员、workflow 阶段或其他非交互 Session | `SessionConfig` | 从不生成；允许重命名 | SessionTitle |
 | 生成完成前出现第二条输入 | — | 跳过（在途） | SessionTitle |
-| 第一条输入被撤回 | input < `input/withdrawn` | 仍生成标题（A9） | SessionTitle |
+| 第一条输入已删除 | input < `input/deleted` | 仍生成标题（A9） | SessionTitle |
 | 生成失败 | — | 无标题期间的下一条 `main` 输入从第一条输入重试（A5） | SessionTitle |
 | 生成中途重载或 Session 卸载 | — | 取消，不写入；下一条 `main` 输入触发 | Lifecycle |
 
@@ -250,7 +250,7 @@ revision 检查就是复检：手动标题总是胜出。
 | A6 | 以 `null` 调用 `session.rename` 清除标题 | 判断 | 手动标题永久保留 |
 | A7 | Session fork 不复制标题 | 判断 | fork 显示源标题 |
 | A8 | 不含文本的第一条用户输入不产生自动标题 | 决定：标题取自第一条用户输入 | 使用后续输入或占位符 |
-| A9 | 撤回第一条输入不阻止也不移除其标题 | 判断（触发点是写入） | 生成需等待消费 |
+| A9 | 第一条输入被删除（`input/deleted`）不阻止也不移除其标题 | 判断（触发点是写入） | 生成需等待消费 |
 | A10 | “用户输入”指操作者输入：不带来源标记的 `user` 内容 | 判断 | 来源写入的输入可能为 Session 命名 |
 
 ## 附录 F. 待对齐问题

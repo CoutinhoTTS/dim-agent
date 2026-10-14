@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview §B.15](../overview.md)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（CLI 进程）。阶段：P3。语言：先以 TypeScript 独立程序实现，再并入 Rust CLI（[overview §F.3](../overview.md)）。
 
-`dimcode acp` 通过标准输入输出提供 Agent Client Protocol（ACP），使编辑器能够驱动 dim。它是 CLI 进程中的协议适配器：与 CLI 完全一样通过本地 RPC 连接守护进程，把每个 ACP session 映射为一个非交互 dim Session，把每个 ACP prompt 映射为一次 `session.submit`，把 Session 事件映射为 ACP `session/update` 通知，把 dim 审批请求映射为 ACP 权限请求。它不在守护进程中开辟任何执行路径，除通过 Rpc 内置的 Session 方法和 `sessionMethods` 服务（由 Rpc 经 Session 分派）外不写入任何内容，也不声明任何事件。`session.submit` 可能被 Session 的输入准入检查拒绝（`input_denied`）；网关将其映射为 ACP 错误。它仅有的契约是 RPC 线协议和 ACP schema，两者都是语言中立的数据，因此没有 Rust 绑定附录（[ADR 002 D5](../../adr/002-plugin-scope.md)）。
+`dimcode acp` 通过标准输入输出提供 Agent Client Protocol（ACP），使编辑器能够驱动 dim。它是 CLI 进程中的协议适配器：与 CLI 完全一样通过本地 RPC 连接守护进程，把每个 ACP session 映射为一个非交互 dim Session，把每个 ACP prompt 映射为一次 `session.submit`，把 Session 事件映射为 ACP `session/update` 通知，把 dim 审批请求映射为 ACP 权限请求。它不在守护进程中开辟任何执行路径，除通过 Rpc 内置的 Session 方法和 `sessionMethods` 服务（由 Rpc 经 Session 分派）外不写入任何内容，也不声明任何事件。一个 prompt 可能被 Hooks `user_prompt_submit` 规则在其自身批次中撤回（[Hooks](Hooks.md)）；网关将其映射为 ACP 停止原因 `refusal`。它仅有的契约是 RPC 线协议和 ACP schema，两者都是语言中立的数据，因此没有 Rust 绑定附录（[ADR 002 D5](../../adr/002-plugin-scope.md)）。
 
 ## 1. 结构
 
@@ -21,7 +21,7 @@ flowchart LR
     IQ["InputQueue：session.input.withdraw"]
     Appr["Approval：approval.respond"]
     Att["Attachments：attachment.put（sessionMethods key attachment）"]
-    IA["Session 输入边界：inputAdmissionCheck"]
+    TLD["Session Timeline：input/message（before 回调可能暂缓它）"]
   end
   Editor <-->|"基于 stdio 的 ACP JSON-RPC"| GW
   GW --- Schema
@@ -30,14 +30,14 @@ flowchart LR
   Rpc --> IQ
   Rpc --> Appr
   Rpc --> Att
-  Rpc -->|"session.submit"| IA
+  Rpc -->|"session.submit"| TLD
 ```
 
 网关只依赖公共 RPC；没有任何守护进程插件知道它的存在，用基于同一 RPC 的另一个 ACP 实现替换它不会改变守护进程中的任何内容。schema 和测试套件与 [ExternalAgent](ExternalAgent.md)（客户端侧）共享；不共享任何运行时代码。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `dimcode acp` | CLI 进程（不是守护进程插件） | 本地 RPC 协议 v3（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)、[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs)）：`hello`、`session.create`（带 `interactive` 和 `client`，Agents 补充）、`session.attach`/`detach`、`session.submit`、`session.input_lookup`、`session.history`、`session.stop`、`session.permission.update`、`approval.respond`；`session.input.withdraw`（Rpc 内置）和 `attachment.put`（[Attachments](Attachments.md)，`sessionMethods` key `attachment`）（[session-boundary](../contracts/session-boundary.md)）；Session 输入边界上的输入准入检查，可能以 `input_denied` 拒绝 `session.submit`（[session-boundary A.6](../contracts/session-boundary.md)）；通知 `session.event`、`session.state`、`session.model.progress`、`approval.request`、`approval.cancelled`、`session.closed`；CLI 守护进程发现 | stdio 上的 ACP agent；本文档的 ACP↔dim 映射 |
+| `dimcode acp` | CLI 进程（不是守护进程插件） | 本地 RPC 协议 v3（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)、[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs)）：`hello`、`session.create`（带 `interactive` 和 `client`，Agents 补充）、`session.attach`/`detach`、`session.submit`、`session.input_lookup`、`session.history`、`session.stop`、`session.permission.update`、`approval.respond`；`session.input.withdraw`（Rpc 内置）和 `attachment.put`（[Attachments](Attachments.md)，`sessionMethods` key `attachment`）（[session-boundary](../contracts/session-boundary.md)）；Hooks 事件 `hooks/prompt-blocked`（[Hooks](Hooks.md#a4-before-回调与声明的事件)），用于识别被 Hook 撤回的 prompt；通知 `session.event`、`session.state`、`session.model.progress`、`approval.request`、`approval.cancelled`、`session.closed`；CLI 守护进程发现 | stdio 上的 ACP agent；本文档的 ACP↔dim 映射 |
 
 ## 2. 数据与状态
 
@@ -73,21 +73,21 @@ sequenceDiagram
   G-->>E: sessionId、modes（忽略 mcpServers）
   E->>G: session/prompt {prompt}
   G->>R: session.submit {branchId main, submissionId, user, mode queue}
-  alt 某个输入准入检查拒绝
-    R-->>G: 错误 appError input_denied 及原因，不写入任何内容
-    G-->>E: session/prompt 错误 input_denied（原因作为 message）
-  else 所有检查均允许
-    R->>TL: Session 输入边界：校验、检查、追加 input/message（附带检查块）
-    R-->>G: 已提交事件：input_event_id
-  end
+  R->>TL: 校验，追加 input/message（before 回调可能添加块或撤回它）
+  R-->>G: 已提交事件：input_event_id
+  alt 在其自身批次中随 hooks/prompt-blocked 被撤回
+    TL-->>G: input/withdraw、hooks/prompt-blocked {input_id, reason}，然后 input/deleted
+    G-->>E: 携带原因的 agent_message_chunk，prompt 响应 refusal
+  else
   TL-->>G: input/applied、turn/start、input/consumed {input_event_id}
   TL-->>G: progress、step/text、step/tool-use-*、step/tool-result
   G-->>E: session/update 块和 tool_call 更新
   TL-->>G: 消费轮次的 turn/end
   G-->>E: prompt 响应 end_turn、cancelled 或错误 turn_failed
+  end
 ```
 
-被拒绝的 prompt 立即结束：历史中没有任何内容，不运行轮次，ACP session 仍可使用。已准入 prompt 的消费轮次是在 `input/consumed {input_event_id}` 的序号处于 `main` 上打开的轮次；其 `turn/end` 决定响应（`Completed` → `end_turn`，`Cancelled` → `cancelled`，`Failed` → `turn_failed`）。所有决策都使用按分支序号顺序的通知或 `session.history` 页，绝不使用墙钟时间。
+被 Hook 撤回的 prompt 立即以 `refusal` 结束：该输入在历史中只以已删除的形式存在，不运行轮次，ACP session 仍可使用。已准入 prompt 的消费轮次是在 `input/consumed {input_event_id}` 的序号处于 `main` 上打开的轮次；其 `turn/end` 决定响应（`Completed` → `end_turn`，`Cancelled` → `cancelled`，`Failed` → `turn_failed`）。所有决策都使用按分支序号顺序的通知或 `session.history` 页，绝不使用墙钟时间。
 
 ### 3.2 取消
 
@@ -98,11 +98,11 @@ sequenceDiagram
   participant R as Rpc
   participant TL as Session Timeline (main)
   E->>G: session/cancel
-  alt 尚未看到 input/consumed
+  alt 尚未看到 input/applied
     G->>R: session.input.withdraw {sessionId, main, inputId}
-    R->>TL: InputQueue 写入 input/withdrawn
+    R->>TL: input/withdraw，InputQueue 写入 input/deleted（仍被持有）
     G-->>E: prompt 响应 cancelled
-  else 已消费，或撤回因已被采纳而被拒
+  else 已应用，或撤回答复 notHeld
     G->>R: session.stop {sessionId, main}
     R->>TL: 经 Session 门面写入 stop/interrupt（轮次作用域）
     TL-->>G: 消费轮次的 turn/end
@@ -110,7 +110,7 @@ sequenceDiagram
   end
 ```
 
-先尝试撤回，因为它不在历史中留下痕迹；输入一旦被采纳（`input/applied`），InputQueue 就拒绝撤回，网关回退到 `session.stop`。`session/cancel` 之后，无论轮次结果如何，prompt 总是以 `cancelled` 响应（ACP 规则）；该 Session 待处理的 ACP 权限请求由客户端侧以 `cancelled` 回答。
+先尝试撤回，因为已删除的输入从不进入模型上下文；一旦 InputQueue 已应用该输入（`input/applied`），该指令不产生效果，答复为 `notHeld`，网关回退到 `session.stop`。`session/cancel` 之后，无论轮次结果如何，prompt 总是以 `cancelled` 响应（ACP 规则）；该 Session 待处理的 ACP 权限请求由客户端侧以 `cancelled` 回答。
 
 ### 3.3 权限
 
@@ -131,11 +131,11 @@ sequenceDiagram
   Note over TL: input/message 位于序号 n（编辑器 prompt）
   alt 撤回先落地
     G->>IQ: session.input.withdraw
-    IQ->>TL: input/withdrawn 位于 n+1
-    Note over G: prompt cancelled，从未消费
+    IQ->>TL: input/withdraw 位于 n+1，input/deleted 位于 n+2
+    Note over G: prompt cancelled，从未应用
   else 采纳先落地
     IQ->>TL: input/applied 位于 n+1
-    G->>IQ: session.input.withdraw 被拒（已采纳）
+    G->>IQ: session.input.withdraw：input/withdraw，无效果，notHeld
     G->>L: session.stop
     L->>TL: input/consumed，然后 stop/interrupt、turn/end Cancelled
     Note over G: turn/end 后 prompt cancelled
@@ -146,12 +146,12 @@ sequenceDiagram
 
 | 场景 | 顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
-| 另一个客户端撤回编辑器的输入 | `input_event_id` 的 `input/withdrawn` | Prompt `cancelled` | InputQueue、Gateway |
+| 另一个客户端撤回编辑器的输入 | `input_event_id` 的 `input/deleted`，无 `hooks/prompt-blocked` | Prompt `cancelled` | InputQueue、Gateway |
 | stop 落地前轮次已完成 | `turn/end` < `stop/interrupt` | Prompt `cancelled`（已请求取消）；stop 不覆盖任何轮次 | Loop、Gateway |
 | 模型在已加载的交互 Session 中提问 | `question/asked` | 显示为 `tool_call` 更新“waiting for an answer in another dim client”（A13）；prompt 等待；`session/cancel` 中断，Questions 写入 `question/cancelled` | Questions、Gateway |
 | 审批已由另一个客户端回答 | 更早的 `approval/respond` | 编辑器之后的回答被拒；忽略 | Approval |
 | 轮次中守护进程重启 | 轮次结算为 `Failed` | 从历史追赶；`turn_failed`（若已请求取消则为 `cancelled`） | Loop |
-| 输入准入检查拒绝 prompt（如 Hooks `user_prompt_submit` 规则） | 任何写入之前 | ACP 错误 `input_denied` 及原因；不写入任何内容；不留下在途 prompt | Session 输入边界、Gateway |
+| Hooks `user_prompt_submit` 规则撤回 prompt | input、`input/withdraw`、`hooks/prompt-blocked` 在同一批次中 < `input/deleted` | 原因作为 `agent_message_chunk`；prompt 响应 `refusal`；不留下在途 prompt | Hooks、Gateway |
 
 其余所有行：[附录 B](#附录-b-完整冲突表)。
 
@@ -166,7 +166,7 @@ sequenceDiagram
 | `resource_link` | `Text` 行 `"@<uri>"`（A6） | 同一消息 |
 | `session/set_mode` | 无：`permission/changed` 是 Session 配置，不是模型文本 | — |
 
-网关不写入 raw 块、key、提示词来源或工具声明；输入准入检查可能向同一输入追加其自身的带归属 raw 块（例如 Hooks 上下文），模型会在网关内容之后看到它们，放置方式与任何检查块相同。其输入在压缩后只经由摘要保留；子分支在切点前已消费时可以看到它们。ACP Session 是非交互的，因此那里从不声明 `ask_user`；除此之外上下文与任何 Queue 输入相同。模型永远看不到 ACP 身份、`mcpServers`、客户端 Capability、更新或诊断信息。
+网关不写入 raw 块、key、提示词来源或工具声明；before 回调可能向同一输入添加其自身的带归属 raw 块（Hooks `user_prompt_submit` 上下文），放在网关的用户内容之前。其输入在压缩后只经由摘要保留；子分支在切点前已消费时可以看到它们。ACP Session 是非交互的，因此那里从不声明 `ask_user`；除此之外上下文与任何 Queue 输入相同。模型永远看不到 ACP 身份、`mcpServers`、客户端 Capability、更新或诊断信息。
 
 ## 6. 接口（摘要）
 
@@ -195,8 +195,8 @@ sequenceDiagram
 | `authenticate` | — | 不提供；由本地传输进行认证 |
 | `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?, interactive: false, client: "acp"}`（A14），然后 `session.attach` | `sessionId` = dim session id；`modes` = 权限预设，当前值 = Session 的预设（A3）；忽略 `mcpServers`（E13） |
 | `session/load {sessionId, cwd, mcpServers}` | `session.attach`，然后从 0 开始读取 `main` 的 `session.history` | 响应前重放；`cwd` 不匹配 → `invalid_params`；已打开的 session 返回相同映射；Session 保留其自身的 `interactive` 事实 |
-| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | 消费轮次结束时响应；准入返回 `input_denied` → 立即返回 ACP 错误；已有在途 prompt 时的第二个 prompt → `prompt_in_progress`（A4） |
-| `session/cancel {sessionId}` | 未消费时 `session.input.withdraw {sessionId, branchId: "main", inputId: input_event_id}`，否则（或被拒时）`session.stop {sessionId, branchId: "main"}` | Prompt 以 `cancelled` 响应 |
+| `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | 消费轮次结束时响应；在输入的批次中出现 `hooks/prompt-blocked` 后被删除 → 立即 `refusal`；已有在途 prompt 时的第二个 prompt → `prompt_in_progress`（A4） |
+| `session/cancel {sessionId}` | 仍被持有时（未看到 `input/applied`）`session.input.withdraw {sessionId, branchId: "main", inputId: input_event_id}`，否则（或答复为 `notHeld` 时）`session.stop {sessionId, branchId: "main"}` | Prompt 以 `cancelled` 响应 |
 | `session/set_mode {sessionId, modeId}` | `session.permission.update` | （A3） |
 
 网关从不调用客户端的 `fs/*` 或 `terminal/*`：dim 在其自身的资源节点上工作（A5）。
@@ -215,7 +215,7 @@ sequenceDiagram
 | `step/tool-start` | `tool_call_update {status: in_progress}` |
 | `step/tool-result`（每个调用，随整个批次发布） | `tool_call_update {status: completed or failed, content: text of ToolResult.content bounded 16 KiB}` |
 | `question/asked`（仅交互 Session） | 带文本“waiting for an answer in another dim client”的 `tool_call_update`（A13） |
-| 仅含 raw 块的输入、`exec/*`、`collaboration/*`、`context/*`、`branch/*`、`input/withdrawn` | 无消息更新（A8） |
+| 仅含 raw 块的输入、`exec/*`、`collaboration/*`、`context/*`、`branch/*`、`input/withdraw`、`input/deleted` | 无消息更新（A8） |
 
 根据工具名得出 `kind`：`read`→`read`；`write`、`edit`→`edit`；`glob`、`grep`→`search`；`exec`→`execute`；`web_fetch`、`web_search`→`fetch`；其他 `other`（A9）。存在 `path` 输入字段时 `locations` 使用它。
 
@@ -223,13 +223,13 @@ sequenceDiagram
 
 | 步骤 | 路径 |
 | --- | --- |
-| Prompt 写入 | `session.submit` → Session 输入边界（用户内容，无块）：`validate`，然后执行每个 `inputAdmissionCheck`；任一拒绝 → `input_denied`，不写入任何内容；否则追加带检查块的 `input/message`；回复携带已提交事件 |
+| Prompt 写入 | `session.submit` → `Session::input`（用户内容，无块）：`validate`，然后追加 `input/message`；待定的 before 回调可能推迟提交、添加块，或向该批次追加 `input/withdraw` 和 `hooks/prompt-blocked`；回复携带已提交事件 |
 | 采纳 | InputQueue（Dispatcher）追加 `input/applied`；Loop 追加 `turn/start`、`input/consumed` 并运行轮次 |
-| 撤回 | `session.input.withdraw` → InputQueue 校验（本分支、未采纳）并写入 `input/withdrawn` |
+| 撤回 | `session.input.withdraw` 写入 `input/withdraw`；InputQueue 按顺序消费它，若仍持有未应用的该输入则写入 `input/deleted`，否则不写入任何内容（`notHeld`） |
 | 停止 | `session.stop` 经 Session 门面写入轮次作用域的 `stop/interrupt` 并等待结算 |
 | 审批 | `approval.respond` → Approval 校验、写入 `approval/respond`、按序号消费 |
 | 状态 | 无 `StateCell`，无 Dispatcher；仅网关内存 |
-| 守护进程重载 | 调用返回 `service_reloading`（随其 Session 插件重载的 `sessionMethods` 服务、正在重载的输入准入检查，或结构性重载）；网关在 `session.input_lookup` 之后以相同 `submissionId` 重试（`accepted` → 不重新提交） |
+| 守护进程重载 | 调用返回 `service_reloading`（随其 Session 插件重载的 `sessionMethods` 服务，或结构性重载）；网关在 `session.input_lookup` 之后以相同 `submissionId` 重试（`accepted` → 不重新提交） |
 | 重启或连接丢失 | 重连，重新 attach 每个已映射的 Session，读取最后已见序号之后的 `session.history`；在途 prompt 根据这些事实解析 |
 | 网关退出（stdin EOF） | 对每个 Session 执行 `session.detach`；运行中的轮次继续；不停止任何内容 |
 
@@ -238,12 +238,12 @@ sequenceDiagram
 | 场景 | 顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
 | submit 回复之前取消 | — | 等待回复，然后取消 | Gateway |
-| 采纳前取消 | `input/withdrawn` < `input/applied` | 已撤回；`cancelled`；历史中只有被撤回的输入 | InputQueue |
-| 采纳后、消费前取消 | `input/applied` < 撤回尝试 | 撤回被拒；`session.stop`；消费轮次以 `Cancelled` 结束 → `cancelled` | InputQueue、Loop |
+| 采纳前取消 | `input/withdraw` < `input/applied` | `input/deleted`；`cancelled`；历史中只有已删除的输入 | InputQueue |
+| 采纳后、消费前取消 | `input/applied` < `input/withdraw` | 无效果，`notHeld`；`session.stop`；消费轮次以 `Cancelled` 结束 → `cancelled` | InputQueue、Loop |
 | 已采纳，stop 在 `turn/start` 之前落地 | `stop/interrupt` < `input/consumed` | `session.stop` 返回且输入未消费时 prompt `cancelled`；输入保持待处理（中断契约），随下一个驱动输入运行，并以 `user_message_chunk` 镜像（A11） | Loop、Gateway |
 | 消费后取消 | consumed < `stop/interrupt` | 轮次 `Cancelled`；`cancelled`；已发送的文本保留 | Loop |
 | stop 之前轮次完成 | `turn/end` < `stop/interrupt` | `cancelled` | Gateway |
-| 其他客户端撤回输入 | `input/withdrawn` | `cancelled` | InputQueue |
+| 其他客户端撤回输入 | 无 `hooks/prompt-blocked` 的 `input/deleted` | `cancelled` | InputQueue |
 | 其他客户端停止轮次 | `stop/interrupt` | `cancelled` | Loop |
 | 其他客户端的 Queue 输入待处理 | Timeline 顺序 | 编辑器的 prompt 随消费它的轮次结束 | InputQueue、Loop |
 | 来自其他客户端的 Steer | 在同一轮次中消费 | Prompt 继续；内容被镜像 | Loop |
@@ -257,7 +257,7 @@ sequenceDiagram
 | 分支中断或 Session 关闭 | `session.closed` | 在途 prompt `cancelled`；之后为 `session_not_found` | Gateway |
 | attach 期间 Session 因空闲卸载 | — | attach 使其保持加载 | AgentIndex |
 | 资源节点离线 | — | Session 保持加载（不重载，不进入 Pending）；对其节点服务的调用失败为 `node_unavailable`，并以失败的工具结果呈现；prompt 在其 `turn/end` 作出决定时结束（对 [#5](https://github.com/arcships/dim/issues/5) 的要求） | Session 的节点服务、Loop |
-| 输入准入拒绝 prompt | — | ACP 错误 `input_denied`；不写入任何内容 | Session 输入边界 |
+| Hook 撤回 prompt | input、`input/withdraw`、`hooks/prompt-blocked` 在同一批次中 < `input/deleted` | 原因块；`refusal` | Hooks、Gateway |
 | submit 中途守护进程重载 | — | 由 `input_lookup` 决定是否重新提交 | Gateway |
 | 轮次中守护进程重启 | 轮次结算为 `Failed` | 追赶后 `turn_failed` | Loop |
 | 重复 `session/prompt` | — | `prompt_in_progress` | Gateway |
@@ -272,7 +272,6 @@ sequenceDiagram
 | `prompt_in_progress` | 同一 ACP session 上的第二个并发 prompt |
 | `unsupported_content` | 音频或二进制资源；被 `session.submit` 校验拒绝的图片（代码透传） |
 | `turn_failed` | 消费轮次以 `Failed` 结束且未请求取消 |
-| `input_denied` | 输入准入检查拒绝了 prompt（`session.submit` `appError: "input_denied"`）；`error.message` 携带合并后的原因；未写入任何内容 |
 | `daemon_unavailable` | 连接丢失且 30 s 内未重新建立（A12） |
 | `invalid_params` | ACP 参数校验失败、load 时 `cwd` 不匹配 |
 
@@ -284,11 +283,11 @@ sequenceDiagram
 
 1. initialize、new、prompt → 块在 progress 与已提交文本之间无重复；`end_turn`；创建的 Session 是非交互的，且不声明 `ask_user`。
 2. 工具调用更新；权限 allow 和 deny；由另一个客户端回答的审批。
-3. 采纳前取消（撤回）、采纳后取消（stop）、消费后取消；stop 与轮次结束竞争；另一个客户端的撤回。
+3. 采纳前取消（已删除）、采纳后取消（`notHeld`，stop）、消费后取消；stop 与轮次结束竞争；另一个客户端的撤回。
 4. `session/load` 按顺序重放历史；已加载交互 Session 的提问显示等待更新，取消使其结束。
 5. prompt 中途守护进程重启：追赶，`turn_failed`；submit 中途重载并使用 `input_lookup`。
 6. 图片和嵌入资源；拒绝音频；忽略 `mcpServers`。
-7. 拒绝型输入准入检查（Hooks `user_prompt_submit`）使 `session/prompt` 以 `input_denied` 及其原因失败；同一 ACP session 上的下一个 prompt 正常工作。
+7. 拒绝型 Hooks `user_prompt_submit` 规则使 `session/prompt` 在一个携带原因的 `agent_message_chunk` 之后以 `refusal` 结束；不带 `hooks/prompt-blocked` 的撤回仍以 `cancelled` 结束；同一 ACP session 上的下一个 prompt 正常工作。
 8. 编辑器 EOF 时 detach，不停止轮次。
 
 ## 附录 E. 假设

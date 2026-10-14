@@ -41,8 +41,8 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 | 观察 Session 的事件 | 现有的 Session 广播，由 Session 级插件监听 |
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 |
 | 把内容放入模型上下文 | Session 或分支输入（被采纳的输入）、工具结果 |
-| 在执行前检查工具调用 | 由 Approval 收集的分支级 `toolAdmissionCheck` |
-| 在写入前检查输入 | 由 Session 输入边界运行的 Session 级 `inputAdmissionCheck` |
+| 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调（同步，或借助运行时补充异步执行：该写入保持其在顺序中的位置，并在回调之后提交；回调可以变换草稿，或向同一批次追加事件） |
+| 在输入被应用前撤回它 | `input/withdraw {input_id}` 指令事件（由客户端、进程内调用方，或该输入所在批次中的 before 回调发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
 | 暴露关于某个 Session 的客户端方法 | Session 级 `sessionMethods` 服务，由 Rpc 经该 Session 分发 |
 | 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的 `managementMethods` 服务，标记为管理级；每个入口服务其配置的级别 |
 | 访问其他 Session | Agents 的 `sessions` 服务（AgentIndex 和 Session 公共接口），与 Collaboration 的做法相同 |
@@ -70,7 +70,7 @@ rutis 按名称跨语言调用插件与服务（rutis-bridge 运行时、配合 
 
 | 要素 | 形式 |
 | --- | --- |
-| 标识 | 服务名（camelCase 字符串）、作用域（进程、Session 或分支）和实例 key（命名空间、检查名、工具名） |
+| 标识 | 服务名（camelCase 字符串）、作用域（进程、Session 或分支）和实例 key（命名空间、工具名、种类） |
 | 方法 | 名称、`sync` 或 `async`、请求与回复为可序列化数据（字段表或 JSON 结构） |
 | 错误 | 数据：`{code, message}`，错误码有文档说明 |
 | 取消 | 一个协议动作：取消请求，或消费方丢弃该调用 |
@@ -78,7 +78,6 @@ rutis 按名称跨语言调用插件与服务（rutis-bridge 运行时、配合 
 | Rust 细节 | trait 签名、`TypeKey`、`Contributions<T>` 与 `AgentBuilder` 调用属于一种绑定，列在“Rust 绑定”附录中 |
 
 规范服务：`sessionMethods`（Session，按命名空间）、`managementMethods`（进程，按命名空间）、
-`toolAdmissionCheck`（分支，按检查名）、`inputAdmissionCheck`（Session，按检查名）、
 `toolContribution`（Session，按工具名）、`sessions`（进程）和 `modelKind`（进程，按种类）。它们
 定义在[合同](../design/contracts/session-boundary.md)和所属插件文档中。运行时现有的类型化服务
 （Timeline、Dispatcher、ToolHost 等）保持不变；把它们按名称暴露给非 Rust 的 Capability 部分是
@@ -95,7 +94,7 @@ issue #4 的工作。
 | Web | Session | 没有跨 Session 共享的状态；只提供工具 |
 | SessionTitle | Session | 观察 Session 的首条输入；标题由 SessionStore 保存 |
 | Notifications | Session | 观察 Session 的事件并提供 `notify` |
-| Hooks | Session（规则、Session 启动 Hook）+ 分支（工具前、工具后与 turn 结束 Hook；向 Approval 提供准入检查） | 规则作用于 Session；执行发生在分支 |
+| Hooks | Session（规则、Session 启动 Hook）+ 分支（用于提示词提交 Hook 与工具前 Hook 的 before 回调；工具后与 turn 结束 Hook） | 规则作用于 Session；执行发生在分支 |
 | Scheduler | 进程（任务、触发器）+ Session（`schedule` 工具） | 调度跨越多个 Session |
 | Workflow | 进程（运行）+ Session（`workflow` 工具） | 一次运行跨越多个 Session |
 | ExternalAgent | 进程 | 外部 Agent 连接是共享的 |

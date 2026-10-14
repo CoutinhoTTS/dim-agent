@@ -73,7 +73,7 @@ classDiagram
     workflow root, format version 1
   }
   class StageSessionTimeline {
-    stage input, input/consumed, input/withdrawn
+    stage input, input/consumed, input/deleted
     turn/end, stop/interrupt
   }
   class StarterTimeline {
@@ -129,7 +129,7 @@ sequenceDiagram
     WF->>ST: delivered；分支缺失或 Session 关闭时 undeliverable
   else workflow stop
     WF->>ST: stopping
-    WF->>WF: sessions.withdraw 自己未消费的阶段输入，对运行中阶段 sessions.stop(main)
+    WF->>WF: sessions.withdraw 自己未消费的阶段输入（notHeld：消费后 stop），对运行中阶段 sessions.stop(main)
     WF->>ST: stopped，无报告
   end
 ```
@@ -178,7 +178,7 @@ Workflow 自身重载、依赖（Agents、Collaboration）重载或重启都会�
 | 工具结果之后起始方轮次中断 | result < interrupt | 运行继续 | Workflow |
 | 运行很快结束时工具批次尚未结算 | report < `step/tool-result` | Steer 在批次结果之后消费；模型先看到 `run_id` | Loop |
 | `workflow.stop` 与阶段自身的 `turn/end` 竞争 | `turn/end` < `stop/interrupt` | 阶段 `completed` 并带结果；运行 `stopped` | 阶段 Session 顺序 |
-| 阶段输入在消费前被撤回（用户或 stop） | input < `input/withdrawn` | 阶段 `stopped`；从未消费 | InputQueue、Workflow |
+| 阶段输入在被持有时被撤回（用户或 stop） | input < `input/deleted` | 阶段 `stopped`；从未应用或消费 | InputQueue、Workflow |
 | Workflow、Agents 或 Collaboration 重载，或重启 | — | 运行 `interrupted`，活动阶段 `lost`，不重新启动；各一份报告（E15） | Workflow |
 | member 阶段运行中 leader 分支关闭 | close < report | member 阶段继续；报告 `undeliverable` | Workflow |
 
@@ -292,7 +292,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | --- | --- | --- |
 | `sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}`（非交互；`createdBy = {kind: "launch", source: "workflow"}`） | Agents 补充（[session-access](../contracts/session-access.md)） | 启动的阶段；第一个输入由 Workflow 自己写入 |
 | `establish {leaderSessionId, agentId}: async -> {sessionId}` | Collaboration 补充，`sessions` 之外的一个 Collaboration 服务 | member 阶段；Collaboration 维持 Team 规则（单一 leader、`Busy`），应用 leader 的 cwd 和 policy，并把 member 的审批转发给 leader |
-| 对自己的输入执行 `sessions.withdraw {sessionId, branchId, inputId}`；按 `submissionId` 执行 `sessions.lookup` | session-access（InputQueue） | 停止时撤回自己未消费的阶段输入 |
+| 对自己的输入执行 `sessions.withdraw {sessionId, branchId, inputId}`；按 `submissionId` 执行 `sessions.lookup` | session-access（InputQueue） | 停止时撤回自己未消费的阶段输入；回复 `deleted` 或 `notHeld` |
 
 ### A.6 Timeline 与 Capability 机制
 
@@ -300,12 +300,12 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | --- | --- |
 | 启动 | 处理器或管理调用进行校验、检查审批、解析 policy 上限、持久化 `Run{running}`，在进程部分的任务跟踪器上 spawn 运行任务并返回。不写 Timeline |
 | 阶段启动 | 在存储中复查（运行为 `running`；审批对快照指纹仍然有效，A12）。持久化 `launching`；`launch` 或 `establish`；持久化 `session_id` 和 `submission_id = workflow:<uuid>` |
-| 阶段输入 | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId, rawBlocks: [marker {kind: "stage", attrs: [run, stage], body: definition name}], content: [rendered prompt]}` → `{inputId}`，存为 `input_event_id`；先执行输入准入检查（`input_denied` → 阶段 `failed: input_denied`）；持久化 `running` |
+| 阶段输入 | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId, rawBlocks: [marker {kind: "stage", attrs: [run, stage], body: definition name}], content: [rendered prompt]}` → `{inputId}`，存为 `input_event_id`；持久化 `running` |
 | 消费 | 阶段 Session 的 InputQueue 和 Loop 在各自的 Dispatcher 上（`input/applied`、`input/consumed`），然后是轮次 |
-| 完成 | `sessions.idle {sessionId, branchId: "main"}` 返回截止点 `C`；按页读取 `sessions.history {through: C}`。在 `input/consumed{input_event_id}` 之前：`input/withdrawn` 或其后的 `stop/interrupt` → `stopped`，否则再次等待。消费之后：`(consumed, C]` 中其后的第一个 `turn/end` 决定 `completed`/`failed`/`stopped`；该轮次的最后一条回复文本即结果（Collaboration 的结果规则） |
+| 完成 | `sessions.idle {sessionId, branchId: "main"}` 返回截止点 `C`；按页读取 `sessions.history {through: C}`。在 `input/consumed{input_event_id}` 之前：`input/deleted` 或其后的 `stop/interrupt` → `stopped`，否则再次等待。消费之后：`(consumed, C]` 中其后的第一个 `turn/end` 决定 `completed`/`failed`/`stopped`；该轮次的最后一条回复文本即结果（Collaboration 的结果规则） |
 | 推进 | 持久化阶段结果；某一步的所有阶段都到达终态时，启动下一步或结束运行；失败的阶段会停止运行中的同组阶段并使运行失败（A4） |
-| 报告 | 在 `completed`、`failed` 或 `interrupted` 且有 `report_to` 时：持久化 `pending{submission_id}`，在起始分支上以标记 `report` 执行 `sessions.input`（模式 `steer`）；持久化 `delivered`，或在分支缺失、Session 已关闭或 `input_denied` 时持久化 `undeliverable` |
-| 停止 | 持久化 `stopping`；等待中的阶段 `skipped`；撤回未消费的阶段输入（`sessions.withdraw`）；对运行中的阶段执行 `sessions.stop {sessionId, branchId: "main"}`；由完成规则读取结果；运行 `stopped`，无报告 |
+| 报告 | 在 `completed`、`failed` 或 `interrupted` 且有 `report_to` 时：持久化 `pending{submission_id}`，在起始分支上以标记 `report` 执行 `sessions.input`（模式 `steer`）；持久化 `delivered`，或在分支缺失或 Session 已关闭时持久化 `undeliverable` |
+| 停止 | 持久化 `stopping`；等待中的阶段 `skipped`；撤回未消费的阶段输入（`sessions.withdraw`；`notHeld` 表示已应用，因此读到 `input/consumed` 后用 `sessions.stop` 停止该阶段）；对运行中的阶段执行 `sessions.stop {sessionId, branchId: "main"}`；由完成规则读取结果；运行 `stopped`，无报告 |
 | 重载、重启 | Session 部分随 Workflow 重载；在途的 `workflow` 调用随其轮次失败。卸载时旧一代停止运行中的阶段轮次（有界等待，A13）。新一代加载运行：`running`/`stopping` → `interrupted`；`launching`/`running` 阶段 → `lost`；不重新启动任何内容。`pending` 报告用 `sessions.lookup` 查询（已接受 → `delivered`，未知 → 现在写入）；带 `report_to` 且 `report: none` 的 interrupted 运行获得一份报告（E15） |
 
 ## 附录 B. 完整冲突表
@@ -319,13 +319,13 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | 运行结束时工具批次尚未结算 | report < `step/tool-result` | Steer 在批次结果之后消费 | Loop |
 | 报告分支上并发 Steer/Queue | Timeline 顺序 | 按模式应用；报告是普通的 Steer | InputQueue |
 | 起始方空闲时报告到达 | — | Steer 启动一个轮次 | InputQueue、Loop |
-| 用户撤回报告输入 | report < `input/withdrawn` | 报告计为 `delivered`；不重写 | InputQueue |
+| 用户在报告输入被持有时撤回它 | report < `input/deleted` | 报告计为 `delivered`；不重写 | InputQueue |
 | 报告写入与消费之间发生压缩 | input < compaction < consumed | 放在摘要之后 | ContextPreparation |
 | 报告写入与消费之间切出子分支 | input < cut < consumed | 子分支看不到它 | InputQueue（子分支） |
-| 消费前用户停止阶段 Session | input < interrupt | 阶段 `stopped`；除非撤回，输入在该 Session 中保持待处理 | Workflow |
-| 阶段输入被撤回 | input < `input/withdrawn` | 阶段 `stopped` | InputQueue、Workflow |
+| 消费前用户停止阶段 Session | input < interrupt | 阶段 `stopped`；除非已删除，输入在该 Session 中保持待处理 | Workflow |
+| 阶段输入在被持有时被撤回 | input < `input/withdraw` < `input/deleted` | 阶段 `stopped` | InputQueue、Workflow |
 | `workflow.stop` 与阶段的 `turn/end` 竞争 | `turn/end` < `stop/interrupt` | 阶段 `completed`；运行 `stopped` | 阶段 Session 顺序 |
-| `workflow.stop` 与消费竞争 | consumed < withdraw 请求 | 撤回被拒；走 `stop` 路径 | InputQueue、Workflow |
+| `workflow.stop` 与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`，不写入任何内容；`input/consumed` 之后 `stop` | InputQueue、Workflow |
 | 两次 `workflow.stop` 或结束后 stop | — | 幂等 | Workflow |
 | 重复 `start` | — | 两次运行（A15） | Workflow |
 | member 阶段，leader 对同一 member `request` | 阶段输入已排队，尚未开始 | 两个输入都在 member Session 中排队；只有轮次运行后才 `Busy`；阶段结果是其自身输入被消费后的第一个 `turn/end` | Collaboration、Workflow |
@@ -336,7 +336,6 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | 阶段资源节点离线 | — | 因节点不可用而被拒的 launch → 阶段 `failed: node_unavailable`；运行中的阶段 Session 保持加载（不重载，不进入 Pending），其节点服务调用失败为 `node_unavailable`，轮次按自身结果结束（对 [#5](https://github.com/arcships/dim/issues/5) 的要求） | Agents、阶段 Session |
 | 轮次中阶段 Session 的 Capability 重载 | 轮次以 `Failed` 结束 | 阶段 `failed` | 阶段 Loop |
 | 报告时起始方 Session 已卸载 | — | `sessions.input` 先恢复它，再写入 | Agents |
-| 输入准入检查拒绝阶段或报告输入 | — | 不写入任何内容；阶段 `failed: input_denied`（运行 `failed`），或报告 `undeliverable` | Session 输入边界、Workflow |
 | 运行中进程重启 | — | `interrupted`/`lost`；已提交但未消费的阶段输入留在各自 Session 中 | Workflow |
 | 报告写入结果不确定（重载、发布未知） | — | 重试前查询；绝不产生两份报告 | Workflow |
 | 启动后项目定义被编辑 | — | 运行保留其快照；下一次阶段启动复查快照指纹 → `failed: approval_revoked` | Workflow |
@@ -362,7 +361,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 
 1. 顺序和并行步骤；结果替换；保存时拒绝前向引用。
 2. 工具启动返回 `run_id`；报告 Steer 结束一次 `wait`，并在批次结果之后到达。
-3. 停止：等待中的阶段 `skipped`，未消费输入被撤回，运行中的阶段被中断，运行 `stopped`，无报告；重复停止幂等。
+3. 停止：等待中的阶段 `skipped`，被持有的输入被删除（`input/deleted`），已应用或运行中的阶段被中断，运行 `stopped`，无报告；重复停止幂等。
 4. 与阶段 `turn/end` 竞争的停止保留已完成的结果。
 5. 起始方轮次中断不停止运行；起始方分支关闭 → `undeliverable`。
 6. `.dimcode/workflows/` 中的项目定义：未审批 → `approval_required`；批准；编辑 → 下一阶段 `approval_revoked`。

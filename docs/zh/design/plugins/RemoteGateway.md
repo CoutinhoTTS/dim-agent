@@ -158,7 +158,7 @@ sequenceDiagram
 | --- | --- | --- |
 | 手机与终端回答同一审批或问题 | 第一个被消费的事实决定；第二个失败 | Approval、Questions |
 | 手机 `session.permission.update` 与终端竞争 | 两个 `permission/changed` 事实；序号较后者生效 | Permission |
-| 手机在输入被消费时撤回该输入（`session.input.withdraw`） | `input/consumed` 在先：撤回失败；`input/withdrawn` 在先：从不被消费 | InputQueue |
+| 手机在输入被应用时撤回该输入（`session.input.withdraw`） | `input/applied` 先于 `input/withdraw`：`notHeld`，不写入任何内容，正常消费；`input/withdraw` 在先：`input/deleted`，从不被应用 | InputQueue |
 | 带待处理审批断开连接 | 保持待处理；重新附着时重放；无超时（A14） | Approval |
 | 该设备的请求运行时被吊销 | 连接关闭；命令继续；回复丢失 | Rpc |
 
@@ -250,7 +250,7 @@ sequenceDiagram
 
 | 步骤 | 路径 |
 | --- | --- |
-| 写入 | RemoteGateway 不写入。远程调用与本地调用一样经 Rpc 到达所有者：`session.submit` → Session 输入边界（`Timeline::append`），`approval.respond` → 分支 Approval（`approval/respond`），`session.stop` → `stop/interrupt`，`session.permission.update` → Permission（`permission/changed`），`session.input.withdraw` → InputQueue（`input/withdrawn`） |
+| 写入 | RemoteGateway 不写入。远程调用与本地调用一样经 Rpc 到达所有者：`session.submit` → Session 输入边界（`Timeline::append`），`approval.respond` → 分支 Approval（`approval/respond`），`session.stop` → `stop/interrupt`，`session.permission.update` → Permission（`permission/changed`），`session.input.withdraw` → InputQueue 的撤回服务（撤回指令 `input/withdraw`；若 InputQueue 仍持有该输入，则写入 `input/deleted`） |
 | Dispatcher | 不订阅；设备通过其每连接的 Session 附着接收事件 |
 | 并发附着方 | 无独占所有者（A13）；全部以每分支顺序收到相同事件 |
 | 重载 | 关闭入口：监听器与远程连接关闭（脱离）；记录保留；邀约丢失；Rpc 因收集 `managementMethods` 而随之重载（ADR 002 D3，已接受）；在途调用遵循 Rpc 的重载规则。Transport 重载会重载 RemoteGateway（它依赖 `entryHost`）；运行时设置变更从不重载它 |
@@ -265,7 +265,7 @@ sequenceDiagram
 | 中断之前的远程回答 | 响应 < 中断 | 被接受；工具仍可能在启动前被停止 | Approval、ToolExecutor |
 | 附着期间的分支级中断或分支关闭 | — | 事件被投递；之后在该分支上的调用失败 | Session 所有者 |
 | 终端 Queue 输入待处理时手机 Steer | Timeline 顺序 | 按序号顺序依模式应用 | InputQueue、Loop |
-| 远程撤回与输入消费 | `input/consumed` 对 `input/withdrawn` | 较早的事实胜出；另一个被拒绝 | InputQueue |
+| 远程撤回与输入的应用 | InputQueue 序号顺序中的 `input/applied` 对 `input/withdraw` | 应用在先：`notHeld`，不写入任何内容；撤回在先：`input/deleted`，从不被应用 | InputQueue |
 | 未结算工具批次期间的远程提交 | 输入 < `step/tool-result` | Steer/Append 在批次结果之后；Queue 在 `turn/end` 之后 | Loop |
 | 远程 `session.permission.update` 对终端更新 | 序号 | 较后的 `permission/changed` 为当前值；工具准入使用准入时消费的策略 | Permission、Approval |
 | 远程 `session.exec.stop` 对 exec 完成 | 序号 | 较早的终态事实胜出 | WorkspaceTools exec 所有者 |
@@ -308,7 +308,7 @@ sequenceDiagram
 1. `remote.start`/`status`/`stop`；无 TLS 的非 loopback 被拒绝；`enabled` 时重启会重新打开；在业务来源中修改 `bind` 会重新打开入口而不重载插件。
 2. 使用有效、过期、重复使用的配对码以及尝试次数过多时的配对；`remote.devices` 列出该设备。
 3. 已配对设备调用 Session 方法，包括 `session.permission.update`、`session.exec.stop`、`session.model.update` 和 `session.input.withdraw`；每个管理级名称（包括 `remote.*` 和 `daemon.shutdown`）返回 `unknown_method`；v1 被拒绝。
-4. 两个附着的客户端：都收到事件；竞争的 `approval.respond`；远程响应之前和之后的中断；远程撤回与消费竞争。
+4. 两个附着的客户端：都收到事件；竞争的 `approval.respond`；远程响应之前和之后的中断；远程撤回与应用竞争（`input/deleted` 或 `notHeld`）。
 5. 带待处理审批和已提交输入时断开连接；重新附着时重放；`session.input_lookup` 找到该输入。
 6. 吊销关闭连接并拒绝令牌；轮换宽限窗口；`remote.rotate_token` 强制轮换。
 7. 损坏的设备文件导致拒绝所有升级请求，且不重置该文件。

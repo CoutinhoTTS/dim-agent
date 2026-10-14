@@ -1,18 +1,18 @@
-# 方法与准入检查
+# 方法与工具贡献
 
-状态：草案。总体设计：[总览 §3 集成](../overview.md#3-基于现有机制的集成)、[附录 B Rpc 与 Approval](../overview.md#附录-b-现有插件的补充)；规则：[ADR 002](../../adr/002-plugin-scope.md) D2、D3、D5。阶段：P0。语言：语言中立合同；Rust 绑定见[附录 F](#附录-f-rust-绑定)。
+状态：草案。总体设计：[总览 §3 集成](../overview.md#3-基于现有机制的集成)、[附录 B Rpc 与 ToolRegistry](../overview.md#附录-b-现有插件的补充)；规则：[ADR 002](../../adr/002-plugin-scope.md) D2、D3、D5。阶段：P0。语言：语言中立合同；Rust 绑定见[附录 F](#附录-f-rust-绑定)。
 
-本合同以 ADR 002 D5 的语言中立形式定义五个具名服务。每个服务由服务名、作用域和实例 key 标识；其方法接收并返回可序列化数据；错误是数据；取消是一个协议动作。任何语言的插件都可以通过在其 `provides`（loader 行）中声明来提供它们，消费方按名称和作用域收集。它们建立在运行时已有的机制之上：按作用域收集的具名服务，以及 Rpc 现有的经 Session 分发（与如今的 `approval.respond` 相同）。
+本合同以 ADR 002 D5 的语言中立形式定义三个具名服务。每个服务由服务名、作用域和实例 key 标识；其方法接收并返回可序列化数据；错误是数据；取消是一个协议动作。任何语言的插件都可以通过在其 `provides`（loader 行）中声明来提供它们，消费方按名称和作用域收集。它们建立在运行时已有的机制之上：按作用域收集的具名服务，以及 Rpc 现有的经 Session 分发（与如今的 `approval.respond` 相同）。
 
 | 服务 | 作用域 | Key | 提供方 | 收集方 |
 | --- | --- | --- | --- | --- |
 | `sessionMethods` | Session | 命名空间 | Session 级插件部分（Questions、Goal、SessionTitle、Attachments、ShellInput） | Rpc，经 Session 分发 |
 | `managementMethods` | 进程 | 命名空间 | 进程插件（Mcp、Provider、Scheduler 等） | Rpc 的方法表，级别 `management` |
-| `toolAdmissionCheck` | 分支 | 检查名 | 分支级插件部分（Hooks） | Approval，针对每次工具调用 |
-| `inputAdmissionCheck` | Session | 检查名 | Session 级插件部分（Hooks `user_prompt_submit`） | Session 输入边界，针对每个输入 |
 | `toolContribution` | Session | 工具名 | Session 级插件部分（Questions、Goal、Web、Notifications、Scheduler、Workflow） | ToolRegistry（补充：具名工具服务） |
 
 每个入口（本地 RPC、RemoteGateway、导出的 rutis 链接）服务其配置的级别。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。提供方重载会传播到其收集方，这是 D3 所接受的代价。
+
+在工具调用或输入提交前对其作出处理不是本合同的服务：分支级插件在 `step/tool-call` 或 `input/message` 上注册 Timeline before 回调（运行时 Timeline 补充，[总览附录 B](../overview.md#附录-b-现有插件的补充)），其写入的内容由该插件定义（[Hooks](../plugins/Hooks.md)）。Approval、ToolExecutor、InputQueue 和 Session 输入路径不变。
 
 ## 1. 结构
 
@@ -30,14 +30,10 @@ flowchart LR
   end
   subgraph SES["Session"]
     SM["sessionMethods[namespace]：Questions, Goal, SessionTitle, ..."]
-    IB["Session 输入边界"]
-    IC["inputAdmissionCheck[name]：Hooks"]
     TR["ToolRegistry"]
     TC2["toolContribution[tool]：Web, Questions, ..."]
   end
   subgraph BR["分支"]
-    AP["Approval"]
-    TC["toolAdmissionCheck[name]：Hooks"]
     BS["分支服务：Questions, Goal, InputQueue"]
   end
   Local --> Rpc
@@ -47,24 +43,20 @@ flowchart LR
   Rpc -->|"解析 sessionId"| AI
   AI -->|"按命名空间取 sessionMethods"| SM
   SM -->|"分支服务"| BS
-  IB -->|"按名称收集"| IC
   TR -->|"按名称收集"| TC2
-  AP -->|"按名称收集"| TC
 ```
 
 | 服务 | 缺失时 |
 | --- | --- |
 | `sessionMethods` | 对该 Session 返回 `unknown_method` |
 | `managementMethods` | `unknown_method` |
-| `toolAdmissionCheck` | 不做检查 |
-| `inputAdmissionCheck` | 不做检查；输入照常写入 |
 | `toolContribution` | 不提供该工具 |
 
-本文定义的合同：这五个服务、`MethodDecl`、`MethodCall`、`MethodReply`、`MethodError`、配套服务 `callChannel`、`ToolCallRequest`、`InputRequest`、`AdmissionReply`、`ToolDeclaration`、`ToolCall`、`ToolResult`、入口级别、命名、保留名、现有管理方法的迁移以及兼容性表。使用的合同：`SessionConfig`（[session-access](session-access.md#a3-sessionconfig-字段)）、来源输入约定（[session-access A.2](session-access.md#a2-来源输入约定)）、Rpc 命令信封、`appError` 码以及 Approval 的决策流程（[Approval](../../../architecture/rust-agent/plugins/Approval.md)）。
+本文定义的合同：这三个服务、`MethodDecl`、`MethodCall`、`MethodReply`、`MethodError`、配套服务 `callChannel`、`ToolDeclaration`、`ToolCall`、`ToolResult`、入口级别、命名、保留名、现有管理方法的迁移以及兼容性表。使用的合同：`SessionConfig`（[session-access](session-access.md#a3-sessionconfig-字段)）、来源输入约定（[session-access A.2](session-access.md#a2-来源输入约定)）、Rpc 命令信封以及 `appError` 码。
 
 ## 2. 数据与状态
 
-没有任何服务拥有 Timeline 事件或持久化状态。方法表在 Rpc 或 Session 装载时重建。服务的级别是入口装配数据，在每个连接被接受时记录为 `ConnectionEntry {name, levels, deviceId}`，从不由身份推导。链接的管理级导出是宿主本地的结构性配置。准入检查不保存状态：其规则在使用时从所有者的业务来源读取。
+没有任何服务拥有 Timeline 事件或持久化状态。方法表在 Rpc 或 Session 装载时重建。服务的级别是入口装配数据，在每个连接被接受时记录为 `ConnectionEntry {name, levels, deviceId}`，从不由身份推导。链接的管理级导出是宿主本地的结构性配置。
 
 ## 3. 流程
 
@@ -112,49 +104,6 @@ sequenceDiagram
 
 入口服务的级别是唯一的检查。服务管理级即授予宿主管理员权限。
 
-### 3.3 工具准入检查
-
-```mermaid
-sequenceDiagram
-  participant TE as ToolExecutor
-  participant AP as Approval
-  participant PM as Permission
-  participant H as toolAdmissionCheck hooks
-  TE->>AP: admit(call, risk)
-  AP->>PM: 策略决定
-  alt 策略拒绝
-    AP-->>TE: 拒绝
-  else 允许，或经用户批准
-    AP->>H: check(ToolCallRequest)，与其他检查并发
-    H-->>AP: verdict allow，或带原因的 deny
-    AP-->>TE: 允许，或以检查的原因拒绝
-  end
-```
-
-检查在策略决定之后、执行之前运行。任一检查拒绝即拒绝该调用，被拒绝的调用与策略拒绝完全相同地结算（一个错误工具结果，不产生新事件）。失败的检查映射为其自身声明的结果（Hooks `pre_tool_use` 默认拒绝）。
-
-### 3.4 输入准入检查
-
-```mermaid
-sequenceDiagram
-  participant C as 调用方（客户端、进程或分支部分）
-  participant IB as Session 输入边界
-  participant H as inputAdmissionCheck hooks
-  participant TL as 分支 Timeline
-  C->>IB: input(branch, message)
-  IB->>H: check(InputRequest)，与其他检查并发
-  alt 任一检查拒绝
-    H-->>IB: verdict deny，原因
-    IB-->>C: input_denied {reason}，不写入任何内容
-  else 全部允许
-    H-->>IB: verdict allow，blocks
-    IB->>TL: 追加检查块后的 input/message
-    IB-->>C: accepted {inputId, sequence}
-  end
-```
-
-Session 输入边界即运行时的 `Session::input` 路径，每次输入写入都使用它（`session.submit`、`sessions.input`、写入输入的分支部分）。本补充使它收集该 Session 的 `inputAdmissionCheck` 服务，并在写入前运行它们。每个检查都会收到输入的来源，并自行决定其规则适用于哪些输入；Hooks 只把 `user_prompt_submit` 规则应用于不带来源标记的输入（用户输入）。
-
 ## 4. 时序与冲突
 
 | 场景 | 顺序 | 结果 | 所有者 |
@@ -164,19 +113,14 @@ Session 输入边界即运行时的 `Session::input` 路径，每次输入写入
 | 对没有该插件的 Session 调用 Session 方法 | — | `unknown_method` | Rpc |
 | 管理方法所有者重载 | — | Rpc 随之重载（D3）；已打开的连接看到现有的 Rpc 重载行为 | rutis 生命周期 |
 | 在仅 session 级的入口上调用管理方法 | — | `unknown_method` | Rpc |
-| 两个提供方声明同一命名空间、检查名或工具名 | 装配 | 装配失败；key 在每个作用域内唯一 | 装配 |
-| 工具检查插件在 turn 期间重载 | check < reload | Approval 及其依赖方重载；在途 turn 以 `Failed` 结束（D3，已接受） | Approval |
-| 一个检查拒绝而另一个允许 | — | 拒绝 | Approval、输入边界 |
-| 工具检查期间 turn `stop/interrupt` | interrupt < verdict | 检查被取消；工具调用按中断结算 | Approval、ToolExecutor |
-| 输入检查待定，另一输入已提交 | other < this | 顺序在提交时决定；检查从不持有提交锁 | 输入边界 |
-| 输入检查插件在检查期间重载 | — | 写入以 `Reloading` 失败；调用方查找 `submissionId` 后重试 | 输入边界 |
-| Hooks 被禁用（结构性） | — | 装配时不含这些检查；调用与输入照常进行 | 装配 |
+| 两个提供方声明同一命名空间或工具名 | 装配 | 装配失败；key 在每个作用域内唯一 | 装配 |
+| 工具贡献提供方在 turn 期间重载 | call < reload | ToolRegistry 及其依赖方重载；在途 turn 以 `Failed` 结束（D3，已接受） | ToolRegistry |
 
 完整表格：[附录 B](#附录-b-完整冲突表)。
 
 ## 5. 上下文映射
 
-方法没有模型可见的效果。改变模型上下文的方法通过其所有者的输入或 Timeline 事实来做到，适用这些所有者的映射。工具准入拒绝只以错误工具结果的形式到达模型，携带检查的公开原因。被拒绝的输入从不写入，模型什么也看不到。允许的输入检查返回的块是该输入的 raw 块，位于输入自身 raw 块之后、其用户内容之前（[session-access §5](session-access.md#5-上下文映射)），模型原样看到它们。
+方法没有模型可见的效果。改变模型上下文的方法通过其所有者的输入或 Timeline 事实来做到，适用这些所有者的映射。`toolContribution` 与任何工具一样，只通过其声明和 `ToolResult` 到达模型。
 
 ## 6. 接口（摘要）
 
@@ -186,14 +130,12 @@ Session 输入边界即运行时的 `Session::input` 路径，每次输入写入
 | `sessionMethods[namespace].call(MethodCall) -> MethodReply` | async | 执行 Session 级方法 |
 | `managementMethods[namespace].describe / call` | async | 相同结构，进程作用域，管理级 |
 | `callChannel.progress / notify / closed`（Rpc） | sync / async | 逐次调用的进度与绑定连接的通知 |
-| `toolAdmissionCheck[name].check(ToolCallRequest) -> AdmissionReply` | async | 由 Approval 咨询的分支级检查 |
-| `inputAdmissionCheck[name].check(InputRequest) -> AdmissionReply` | async | 在写入输入前运行的 Session 级检查 |
 | `toolContribution[tool].declaration() -> ToolDeclaration` | sync | 工具声明 |
 | `toolContribution[tool].execute(ToolCall) -> ToolResult` | async | 工具执行 |
 
 ## 7. 安全
 
-入口装配是级别的唯一权威：本地 RPC 服务两个级别，RemoteGateway 服务 `session`（已配对设备可调用所有 Session 方法，决定 E3），rutis 链接只在宿主本地链接配置中显式导出时才服务 `management`。Rpc 对每个 Session 级方法授权 `sessionId`，与其内建方法完全相同，其他参数由提供方校验。运行命令或修改宿主配置的方法声明 `level: management`。准入检查只能拒绝、从不放宽：工具检查不能允许被策略或用户拒绝的调用，输入检查只能拒绝输入或添加带归属的块，从不修改调用方的内容或来源。宿主本地批准（`mcp.approve`、`hooks.approve`、`plugin.approve`、`workflow.approve`）是管理方法。
+入口装配是级别的唯一权威：本地 RPC 服务两个级别，RemoteGateway 服务 `session`（已配对设备可调用所有 Session 方法，决定 E3），rutis 链接只在宿主本地链接配置中显式导出时才服务 `management`。Rpc 对每个 Session 级方法授权 `sessionId`，与其内建方法完全相同，其他参数由提供方校验。运行命令或修改宿主配置的方法声明 `level: management`。`toolContribution` 与每个工具一样，按其声明的风险由 Approval 与 Permission 准入。宿主本地批准（`mcp.approve`、`hooks.approve`、`plugin.approve`、`workflow.approve`）是管理方法。
 
 ## 附录 A. 接口细节
 
@@ -257,28 +199,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 
 进度对两个级别都以通知 `management.progress {id, method, data}` 发送，排在响应之前，断开后丢弃。通知名必须声明且位于命名空间内。`connectionId` 在连接关闭前对 `notify` 一直有效。
 
-### A.3 工具准入检查
-
-`toolAdmissionCheck`（分支，key 为检查名）：`check(ToolCallRequest): async -> AdmissionReply`。
-
-```text
-// ToolCallRequest
-{ "sessionId": "string", "branchId": "string", "turnId": "string", "callId": "string",
-  "tool": "web_fetch", "arguments": {}, "risk": "network",
-  "config": { /* SessionConfig 数据，session-access A.3 */ } }
-// AdmissionReply（工具检查从不返回 blocks）
-{ "verdict": "allow" | "deny", "reason?": "string", "blocks?": [ { "marker": "dim-<owner>", "text": "string" } ] }
-```
-
-| 规则 | 内容 |
-| --- | --- |
-| 收集 | Approval 按名称收集其分支的每个 `toolAdmissionCheck`。已声明但没有提供方的名称会使分支构建失败 |
-| 顺序 | 所有检查在策略决定之后并发运行；任一 `deny` 即拒绝，原因（公开、模型可见）按名称顺序拼接 |
-| 取消 | turn 中断时发送取消请求（或丢弃调用）；工具调用按中断结算 |
-| 失败 | 由检查自身映射为 `allow` 或 `deny` |
-| 模型调用审批 | 不受影响：检查只作用于工具调用 |
-
-### A.4 入口级别与导出
+### A.3 入口级别与导出
 
 | 入口 | 级别 | 说明 |
 | --- | --- | --- |
@@ -287,7 +208,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 | RemoteGateway | `{session}` | [RemoteGateway](../plugins/RemoteGateway.md) |
 | 导出的 rutis 链接 | `{management}` | 仅在宿主本地链接配置中导出时。没有调用方接收端时，进度被丢弃，`notify` 返回 `unsupported` |
 
-### A.5 迁移与兼容性
+### A.4 迁移与兼容性
 
 来源：[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs) 中的 `MANAGEMENT_METHODS`、`MCP_METHODS`、`LOCAL_EXECUTION_METHODS`、`Call::is_management`；[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `validate_call`。
 
@@ -313,41 +234,10 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 | v3 RemoteGateway（新） | 不存在；execution Session 方法（`session.permission.get/update`、`session.exec.stop`、`session.skills`、`session.model.update`、`session.prompt.refresh`、`session.mcp`、`session.mcp.refresh`）仅限本地 | **兼容性变更（E3）：** 对已配对设备可用；管理名称 `unknown_method` |
 | v3，MCP 已禁用 | `mcp.*` `unknown_method` | 相同，使用 Rpc 的消息 |
 | v3，Mcp 正在重载 | `service_reloading` | Rpc 随 Mcp 重载（D3）；客户端重连并重试 |
-| v3，输入被检查拒绝（新） | 不存在 | `session.submit` 返回带原因的 `-32000 input_denied` |
 
 不增加协议版本，持久化格式不变。
 
-### A.6 输入准入检查
-
-Session 输入边界补充（运行时门面，`Session::input`）：在写入输入之前，边界运行该 Session 的每个 `inputAdmissionCheck`，只有全部允许时才写入。
-
-`inputAdmissionCheck`（Session，key 为检查名）：`check(InputRequest): async -> AdmissionReply`。
-
-```text
-// InputRequest
-{ "sessionId": "string", "branchId": "string",
-  "mode": "queue" | "steer" | "append",
-  "source?": "string",           // 标记来源（session-access 的 A.2）；用户输入时缺省
-  "origin": "client" | "process" | "branch",
-  "submissionId?": "string",
-  "rawBlocks": ["string"],       // 输入自身的 raw 块，标记在前
-  "content": [ { "type": "text", "text": "..." } | { "type": "image", "...": "..." } ],
-  "config": { /* SessionConfig 数据 */ } }
-// AdmissionReply
-{ "verdict": "allow" | "deny", "reason?": "string", "blocks?": [ { "marker": "dim-<owner>", "text": "string" } ] }
-```
-
-| 规则 | 内容 |
-| --- | --- |
-| 收集 | Session 装配按名称收集该 Session 的每个 `inputAdmissionCheck`；检查只在其插件启用时存在 |
-| 顺序 | 检查在写入前、提交锁之外并发运行；任一 `deny` 即拒绝，原因按名称顺序拼接 |
-| 拒绝 | 不写入任何内容。规范错误码为 `input_denied`，拼接后的原因作为 `message`：`session.submit` 返回带 `appError: "input_denied"` 的 `-32000`；`sessions.input` 返回 `{code: "input_denied", message}` |
-| 带块允许 | 每个块为 `{marker, text}`：`marker` 是检查所有者的标记（`dim-<owner>`，session-access A.2），`text` 是完整的 raw 块，其第一行必须是该标记元素；否则边界把回复视为 `deny`，原因为 `invalid check reply`。块按检查名顺序追加在输入自身 raw 块之后，并写入同一个 `input/message`。检查块中不允许使用 key |
-| 规则范围 | 每个检查依据 `source` 和 `origin` 决定其规则覆盖哪些输入。对于带有自身标记的输入，检查返回 `allow` |
-| 取消 | 调用方丢弃写入即取消待定的检查；不写入任何内容 |
-| 失败 | 由检查自身映射为 `allow` 或 `deny`。检查正在重载时，写入以 `Reloading` 失败 |
-
-### A.7 工具贡献
+### A.5 工具贡献
 
 ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名工具服务。插件在其 `provides` 中于 Session 作用域声明 `toolContribution[<tool name>]`，ToolRegistry 按名称收集该 Session 的工具服务。名称唯一性、与宿主工具冲突以及通过 `SessionConfig.tools` 启用的现有规则不变（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。
 
@@ -386,13 +276,8 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | 客户端在调用中途 detach | — | 调用继续；回复被丢弃 | Rpc |
 | 两个客户端修改同一配置 | 存储修订号 | 后者得到提供方的冲突错误 | 提供方 |
 | `daemon.shutdown` 与另一调用并发 | 准入 | 停止准入，然后已准入的调用按 `interruption` 结算 | 进程协调者 |
-| 工具检查待定，turn 被中断 | interrupt < verdict | 取消；工具调用按中断结算 | Approval |
-| 有待定检查时工具检查插件重载 | — | turn 随重载以 `Failed` 结束 | Approval（D3） |
-| 输入检查待定，`stop/interrupt` 已提交 | interrupt < input | 输入写在中断之后；按模式应用 | InputQueue、Loop |
-| 输入被拒绝，调用方以相同 `submissionId` 重试 | — | 再次检查；之前未写入任何内容 | 输入边界 |
-| 输入检查待定，分支已关闭 | close < write | `BranchMissing`；不写入任何内容 | 运行时门面 |
-| 输入检查插件重载 | — | 写入以 `Reloading` 失败；调用方查找后重试 | 输入边界 |
-| 未结算的工具批次、压缩、切出子分支、`input/withdrawn` | — | 对方法或检查无影响 | — |
+| turn `stop/interrupt` 期间调用工具贡献 | interrupt < result | 针对 `callId` 发送取消请求；ToolExecutor 把该调用按中断结算 | ToolExecutor |
+| 未结算的工具批次、压缩、切出子分支、`input/withdraw`、`input/deleted` | — | 对方法无影响 | — |
 | 调用中途进程重启 | — | 回复丢失；结果取决于提供方的持久化；从不重放 | 提供方 |
 
 ## 附录 C. 错误与恢复
@@ -403,7 +288,6 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | Session 级方法缺少 `sessionId` | `-32602` |
 | Session 正在重载 | `-32000`，`service_reloading` |
 | `report` 调用被中断 | `-32000`，`operation_interrupted` |
-| 输入被检查拒绝 | `-32000`，`input_denied` |
 | 提供方错误 | `-32000`，提供方的 `appError` |
 
 ## 附录 D. 验收
@@ -412,10 +296,8 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 2. 管理方法在本地入口上可达，在 RemoteGateway 上返回 `unknown_method`，只在导出时经链接可达。Session 级 `shell.*` 方法遵循相同的级别规则。
 3. 每个迁移后的管理方法的录制记录与迁移前的记录一致，且 v3 本地 profile 的 `hello.features` 不变。
 4. 在 RemoteGateway 测试入口上，`session.permission.update` 与 `session.exec.stop` 成功。
-5. 安装 Hooks 工具检查时，被拒绝的工具调用产生带原因的错误工具结果。禁用 Hooks 时，同一调用照常进行。turn 期间重载 Hooks 会使该 turn 以 `Failed` 结束。
-6. 安装 Hooks 输入检查时，被拒绝的用户提示词返回 `input_denied`，且不写入 `input/message`；带块被允许的提示词写入时，块位于其自身 raw 块之后。
-7. 由非 Rust 插件以 `toolContribution` 提供的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行。
-8. 进度先于响应，断开后 `notify` 报告 `gone`。
+5. 由非 Rust 插件以 `toolContribution` 提供的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行。
+6. 进度先于响应，断开后 `notify` 报告 `gone`。
 
 ## 附录 E. 假设
 
@@ -424,8 +306,6 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | A1 | Session 级命名空间可以使用 `session` 以外的根（`attachment`、`shell`） | 现有线上名称 | 全部移到 `session.` 之下 |
 | A2 | Session 能为 Rpc 按名称查找带 key 的 Session 服务 | 现有带 key 的 Session 服务 | Rpc 通过一个 Session 服务枚举提供方 |
 | A3 | Session 级方法按 Session 列出，而不在 `hello.features` 中 | 它们因 Session 而异 | 一个全局列表加上按 Session 的可用性 |
-| A4 | 工具准入检查在用户批准之后运行，而不在提示之前 | 最简单的顺序；检查只会拒绝 | 检查在提示之前运行，并可跳过提示 |
-| A5 | 每次输入写入都经过 `Session::input` | 运行时门面是输入路径 | 其他每条写入路径自行运行检查 |
 
 ## 附录 F. Rust 绑定
 
@@ -435,8 +315,6 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | --- | --- | --- | --- |
 | `sessionMethods[ns]` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，`SessionScope::named_key::<SessionMethodContribution>(ns)` | `AgentBuilder::session_methods(ns)` | `Session::method(ns)` |
 | `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)` | loader 行 | `Contributions<ManagementMethods>` |
-| `toolAdmissionCheck[name]` | `ToolAdmissionCheck(Arc<dyn AdmissionCheck>)`，`BranchScope::named_key::<ToolAdmissionCheck>(name)` | `AgentBuilder::tool_admission_check(name)` | Approval 的 Deps 中的 `Contributions<ToolAdmissionCheck>` |
-| `inputAdmissionCheck[name]` | `InputAdmissionCheck(Arc<dyn InputCheck>)`，`SessionScope::named_key::<InputAdmissionCheck>(name)` | `AgentBuilder::input_admission_check(name)` | Session 输入边界中的 `Contributions<InputAdmissionCheck>` |
 | `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | ToolRegistry 中的 `Contributions<ToolContribution>` |
 | `callChannel` | `CallChannel`、传给 `MethodProvider::call` 的 `ConnectionNotifier` | — | — |
 
@@ -459,19 +337,6 @@ impl CallChannel {
     pub fn take_final_reply(&self) -> Result<FinalReply, ChannelError>; // 仅限 Handoff
 }
 pub enum ChannelError { Unsupported, Undeclared, Gone }
-
-pub trait AdmissionCheck: Send + Sync + 'static {
-    fn check(&self, request: &AdmissionRequest, cancel: CancellationToken)
-        -> HostFuture<'_, AdmissionVerdict>;
-}
-pub enum AdmissionVerdict { Allow, Deny { reason: String } }
-
-pub trait InputCheck: Send + Sync + 'static {
-    fn check(&self, request: &InputRequest, cancel: CancellationToken)
-        -> HostFuture<'_, InputVerdict>;
-}
-pub enum InputVerdict { Allow { blocks: Vec<CheckBlock> }, Deny { reason: String } }
-pub struct CheckBlock { pub marker: String, pub text: String }
 ```
 
-`AdmissionRequest` 与 `InputRequest` 携带 A.3 和 A.6 的字段，其中 `config: Arc<SessionConfig>`、`risk: RiskCategory`。`ToolContribution` 与 `ToolHandler` 是 `dim-agent-capabilities/src/tool_registry.rs` 中的现有类型；来自其他语言的具名工具服务由生成的绑定包装为 `ToolHandler`。拒绝时 `Session::input` 返回 `AgentError::Rejected("input_denied: <reason>")`。
+`ToolContribution` 与 `ToolHandler` 是 `dim-agent-capabilities/src/tool_registry.rs` 中的现有类型；来自其他语言的具名工具服务由生成的绑定包装为 `ToolHandler`。

@@ -321,7 +321,7 @@ ExternalAgent 本身不追加任何内容，不订阅任何 Dispatcher，也不�
 | 无回答、无中断 | — | 无限等待（A17） | — |
 | 任何可见块之前 Steer | 调用期间 `input/applied`（Steer） | ModelProvider 替换请求并取消；下一个请求投递该 Steer（以及未被接受的更早输入） | ModelProvider、Bridge |
 | 可见输出（含权限行）之后 Steer | — | 不替换；同一轮次中的新请求 | Loop |
-| 已排队输入的 `input/withdrawn` | 消费前撤回 | 从未消费，因此从未投递；消费推进越过它后 `scan_from` 跳过它 | InputQueue、Bridge |
+| 已排队输入在被持有时的 `input/withdraw` | input < withdraw < `input/deleted` | 从未应用或消费，因此从未投递；消费推进越过它后 `scan_from` 跳过它 | InputQueue、Bridge |
 | 并发 Queue/Append 输入 | Timeline 顺序 | 按消费顺序投递 | Loop、Bridge |
 | 工具批次未结算 | — | 这些请求中没有 dim 工具调用 | — |
 | 调用前压缩 | `context/compaction` < `model/call` | 继续不受影响；初始化包含摘要 | ContextPreparation、Bridge |
@@ -358,7 +358,7 @@ ExternalAgent 本身不追加任何内容，不订阅任何 Dispatcher，也不�
 
 使用脚本化的 ACP agent 和脚本化的 CLI，通过公共接口进行流程测试：
 
-1. 第一次调用初始化；第二次只投递新输入；Append 输入随消费它的请求投递；被撤回的 Queue 输入从不投递。
+1. 第一次调用初始化；第二次只投递新输入；Append 输入随消费它的请求投递；已删除的 Queue 输入（`input/deleted`）从不投递。
 2. 文本、思考和工具活动映射为 `step/text` 和一个 `step/thinking` 块；无 `step/tool-use-start`。
 3. 接受前和接受后的中断；被忽略的取消 → `uncertain` → 下一次调用初始化。
 4. 可见输出之前的 Steer 替换请求；输出（含权限行）之后则成为新请求。

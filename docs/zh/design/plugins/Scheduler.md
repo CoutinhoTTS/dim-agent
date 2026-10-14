@@ -66,7 +66,7 @@ classDiagram
   }
   class RunSessionTimeline {
     input/message with dim-scheduler marker
-    input/applied, input/consumed, input/withdrawn
+    input/applied, input/consumed, input/deleted
     turn/start, turn/end, stop/interrupt
   }
   Job "1" --> "0..100" Run
@@ -115,14 +115,14 @@ sequenceDiagram
   Note over R: max_run_minutes 已到
   alt 输入未消费
     R->>S: sessions.withdraw 自己的输入
-    R->>ST: input/withdrawn 后 timed_out
+    R->>ST: deleted 得到 timed_out，notHeld 则等待 input/consumed 后 stop
   else 已消费
     R->>S: sessions.stop(main, scheduled run timed out)
     R->>ST: 读到 turn/end 后 timed_out
   end
 ```
 
-每个活动运行都有一个任务，等待 `sessions.idle` 并读取直到返回截止点的历史，与 Collaboration 和 Workflow 的做法相同；Scheduler 不观察 Session 广播。如果撤回时发现输入已被消费，跟踪器回退到 `stop`。通知在终态记录持久化后只发出一次。
+每个活动运行都有一个任务，等待 `sessions.idle` 并读取直到返回截止点的历史，与 Collaboration 和 Workflow 的做法相同；Scheduler 不观察 Session 广播。如果撤回答复 `notHeld`（InputQueue 已应用该输入，因此它归 Loop 所有），跟踪器等待 `input/consumed`，然后使用 `stop`。通知在终态记录持久化后只发出一次。
 
 ### 3.3 运行的权限
 
@@ -150,19 +150,19 @@ sequenceDiagram
   participant U as User
   participant IQ as InputQueue
   S->>IQ: 运行输入（Queue），序号 n
-  U->>IQ: session.input.withdraw，序号 n+1
-  IQ->>IQ: input/withdrawn
-  S->>S: 下次读历史：已撤回，从未消费
+  U->>IQ: session.input.withdraw 在序号 n+1 写入 input/withdraw
+  IQ->>IQ: 输入仍被持有：input/deleted
+  S->>S: 下次读历史：已删除，从未应用
   S->>S: 运行 cancelled（withdrawn）
 ```
 
-所有待处理输入的判定都排除已撤回的输入，因此被撤回的运行输入绝不会让运行永远停在 `submitted`。
+所有待处理输入的判定都排除已删除的输入，因此已删除的运行输入绝不会让运行永远停在 `submitted`。
 
 | 场景 | 序号顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
 | 窗口触发时上一次运行仍在活动 | —（存储） | `skipped: overlap`（A4） | Scheduler |
 | 用户中断运行的轮次 | consumed < `stop/interrupt` < `turn/end` | 运行 `cancelled` | Loop；Scheduler 记录 |
-| 超时撤回与消费竞争 | consumed < withdraw | 撤回被拒；走 `stop` 路径 | InputQueue、Scheduler |
+| 应用之后的超时撤回 | `input/applied` < `input/withdraw` | `notHeld`，不写入任何内容；`input/consumed` 之后 `stop` | InputQueue、Scheduler |
 | Agents 或 Scheduler 重载、重启 | — | `launching` → 查询：已接受 → `submitted`，未知 → `lost`；绝不重新提交；恢复跟踪 | Scheduler |
 | 窗口期间守护进程停机 | — | `missed`；不补跑（E5） | Scheduler |
 
@@ -248,10 +248,10 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | --- | --- |
 | 触发 | 定时器任务为每个已启用任务计算下一个窗口；到窗口时应用 overlap、capacity（A13）、启用与 policy 规则；以新的 `run_id` 持久化 `launching` |
 | Session | `create`：`sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}`；Agents 根据声明的来源记录 `createdBy = {kind: "launch", source: "scheduler"}`。对工具创建的任务，`starter` 为创建方 Session（A15），否则省略。`reuse`：已绑定的 `session_id`（未加载的 Session 由该调用恢复）；首次运行时 launch 并绑定 `session_id` |
-| 写入 | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId: "scheduler:<run_id>", rawBlocks: [marker {kind: "scheduled-run", attrs: [job, run], body: job name}], content: [prompt text]}` → `{inputId}`，存为 `input_event_id`；先执行输入准入检查；`input_denied` → 运行 `failed: input_denied`；持久化 `submitted` |
+| 写入 | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId: "scheduler:<run_id>", rawBlocks: [marker {kind: "scheduled-run", attrs: [job, run], body: job name}], content: [prompt text]}` → `{inputId}`，存为 `input_event_id`；持久化 `submitted` |
 | 消费 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed { input_id }` 并驱动轮次 |
-| 完成 | 跟踪器任务：`sessions.idle {sessionId, branchId: "main"}` → 截止点 `C`；按页读取 `sessions.history {through: C}`；一旦存在 `input/consumed { input_id = input_event_id }` 即为 `running`；在其后的第一个 `turn/end` 结束；消费前出现 `input/withdrawn` → `cancelled: withdrawn` |
-| 超时 | 未消费：对自己的输入执行 `sessions.withdraw` → `timed_out`；已消费：`sessions.stop {sessionId, branchId: "main"}`（轮次作用域），读到 `turn/end` 时 `timed_out` |
+| 完成 | 跟踪器任务：`sessions.idle {sessionId, branchId: "main"}` → 截止点 `C`；按页读取 `sessions.history {through: C}`；一旦存在 `input/consumed { input_id = input_event_id }` 即为 `running`；在其后的第一个 `turn/end` 结束；`input/deleted` → `cancelled: withdrawn`（除非是跟踪器自身的超时撤回写入的：`timed_out`） |
+| 超时 | 未消费：对自己的输入执行 `sessions.withdraw`；`deleted` → `timed_out`，`notHeld` → 等待 `input/consumed`，然后按已消费处理；已消费：`sessions.stop {sessionId, branchId: "main"}`（轮次作用域），读到 `turn/end` 时 `timed_out` |
 | 复查 | 写入前从存储重新读取任务和运行（已启用、revision 未变、运行仍为 `launching`） |
 | 重载或重启 | Session 部分随 Scheduler 重载；在途的 `schedule` 调用随其轮次失败。新一代进行结算：`launching` → 按 `submissionId` 执行 `sessions.lookup`：已接受 → `submitted`，未知 → `lost`（绝不重新提交）；`submitted`/`running` 恢复跟踪；已过的窗口为 `missed` |
 | 运行结果 | 持久化终态后，以 A.6 的数据发布 `scheduled_run_outcomes`；重载或重启后不重放 |
@@ -281,8 +281,9 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | 用户中断运行的轮次 | consumed < interrupt < `turn/end` | `cancelled` | Loop |
 | 中断发生在运行输入之前 | interrupt < input | 输入启动一个轮次 | Loop |
 | 输入已应用，消费前中断 | applied < interrupt | 保持待处理；由下一轮次消费；运行 `submitted` | Loop |
-| 用户撤回运行输入 | input < `input/withdrawn` | 运行 `cancelled: withdrawn` | InputQueue、Scheduler |
-| 超时撤回与消费竞争 | consumed < withdraw 请求 | 撤回被拒；`stop` 后 `timed_out` | InputQueue、Scheduler |
+| 用户在输入仍被持有时撤回运行输入 | input < `input/withdraw`，无 `input/applied` | `input/deleted`；运行 `cancelled: withdrawn` | InputQueue、Scheduler |
+| 用户在应用之后撤回 | `input/applied` < `input/withdraw` | `notHeld`；运行继续 | InputQueue |
+| 超时撤回与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`；`input/consumed` 之后 `stop`，然后 `timed_out` | InputQueue、Scheduler |
 | 写入前分支关闭或 Session 关闭 | — | `failed: session_missing`；保留 reuse 绑定（A6） | Scheduler |
 | 运行活动时 Session 关闭 | — | 历史读取失败；`failed` | Scheduler |
 | 运行期间压缩 | — | 无影响：`input/consumed` 和 `turn/end` 保留在本地历史中 | — |
@@ -293,7 +294,6 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | `schedule` 调用期间 Scheduler 重载 | — | 调用方 Session 部分重载；该轮次失败（D3，已接受） | Loop |
 | 窗口期间守护进程停机 | — | `missed`；不补跑 | Scheduler |
 | 触发时资源节点离线，`create` | — | 因节点不可用而被拒的 launch → `skipped: node_unavailable`，不重试（A6）；已启动的 Session 照常运行，其节点服务调用失败为 `node_unavailable`（见下一行） | Agents、Scheduler |
-| 输入准入检查拒绝运行输入 | — | 不写入任何内容；运行 `failed: input_denied`（原因保留在 `detail` 中）；不重试 | Session 输入边界、Scheduler |
 | 资源节点离线，`reuse` 或运行中 | — | 输入提交；运行 Session 保持加载（不重载，不进入 Pending）；其对节点服务的调用失败为 `node_unavailable`，轮次按自身结果结束；超时照常适用（对 [#5](https://github.com/arcships/dim/issues/5) 的要求） | Session 的节点服务、Scheduler |
 | 复用 Session 的 policy 高于任务的有效 policy | — | `skipped: policy` | Scheduler |
 | 运行 Session 中有待处理审批 | `approval/request` | 等待任一客户端的 `approval.respond` 或超时 | Approval；Scheduler |
@@ -321,8 +321,8 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 2. 到期的 `create` 任务产生一个非交互 Session，其第一个输入携带标记和提示词；运行 `completed`；一条通知。
 3. 重叠：活动运行期间的窗口为 `skipped: overlap`。
 4. `reuse` 遇到忙碌 Session：输入排在运行中的轮次之后。
-5. 用户中断 → `cancelled`；消费前超时 → `input/withdrawn` 且 `timed_out`；消费后 → `stop/interrupt` 且 `timed_out`。
-6. 用户撤回运行输入 → `cancelled: withdrawn`。
+5. 用户中断 → `cancelled`；输入被持有时超时 → `input/deleted` 且 `timed_out`；应用后超时 → `notHeld`，然后 `stop`；消费后 → `stop/interrupt` 且 `timed_out`。
+6. 用户在输入被持有时撤回运行输入 → `input/deleted` 且 `cancelled: withdrawn`。
 7. 时钟跳变 → 一条 `missed` 记录，无运行。
 8. 带 `launching` 运行重启：已接受的恢复，未知的 → `lost`；无重复输入。
 9. 运行中 Agents 重载：Scheduler 重载，运行完成并被跟踪到结束。

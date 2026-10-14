@@ -319,7 +319,7 @@ sequenceDiagram
 | 场景 | 顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
 | 任一 Session 中的轮次 `stop/interrupt` 或分支关闭 | — | 无影响；任务不是分支工作 | — |
-| Session 卸载、恢复、关闭；压缩；子分支；Steer/Queue/Append；`input/withdrawn` | — | 无影响；无模型可见输出 | — |
+| Session 卸载、恢复、关闭；压缩；子分支；Steer/Queue/Append；`input/withdraw`、`input/deleted` | — | 无影响；无模型可见输出 | — |
 | 启动前取消 | `queued` < 取消 | `cancelled`，不联系执行方 | Modality |
 | 取消与完成竞争 | 锁顺序 | 第一个终态写入胜出 | Modality（revision） |
 | 对终态任务取消 | 终态 < 取消 | 返回未改变的记录 | Modality |
