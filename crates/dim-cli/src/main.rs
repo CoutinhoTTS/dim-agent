@@ -38,6 +38,9 @@ fn main() {
             let env = ui::Env {
                 home: options.home.clone(),
                 workspace: options.cwd.clone(),
+                fullscreen: options
+                    .fullscreen
+                    .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
             };
             let host = session_host::SessionHost::start(options);
             return Ok(ui::tui::run(Box::new(host), env));
@@ -80,6 +83,18 @@ fn prepare() -> Result<Option<Options>> {
         && std::io::stdin().is_terminal()
     {
         return Err("exec requires --prompt TEXT, --image PATH or redirected stdin".into());
+    }
+    if let Action::DefaultTerminalMode { fullscreen } = options.action {
+        if let Some(error) = ui::config::save_fullscreen(&options.home, fullscreen) {
+            return Err(error.into());
+        }
+        let mode = if fullscreen {
+            "fullscreen"
+        } else {
+            "scrollback"
+        };
+        println!("Default terminal mode: {mode}");
+        return Ok(None);
     }
     if matches!(options.action, Action::Chat | Action::Exec)
         && options.prompt.is_none()
@@ -281,9 +296,10 @@ async fn run(options: Options) -> Result<i32> {
             }
             Ok(0)
         }
-        Action::Chat | Action::Tui | Action::Exec => {
-            session::chat(&mut client, &options, images).await
-        }
-        Action::Help | Action::Version | Action::DaemonStop => unreachable!(),
+        Action::Chat | Action::Tui | Action::Exec => session::chat(&mut client, &options).await,
+        Action::Help
+        | Action::Version
+        | Action::DaemonStop
+        | Action::DefaultTerminalMode { .. } => unreachable!(),
     }
 }

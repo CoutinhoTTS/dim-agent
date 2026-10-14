@@ -353,12 +353,7 @@ Allow once? [y/N]
 
 Only `y` or `yes` permits a pending tool operation once (`a` saves a rule first, as above); empty input or any other answer denies it. Approval and account prompts retain their existing line input and echo behavior. Tool status records and approval reasons are displayed without dumping arbitrary tool arguments or tool result bodies. Model and external text are filtered at the terminal boundary to remove control sequences.
 
-The terminal keeps the scrollback. The draft editor uses the existing terminal
-input owner and restores terminal modes and bracketed-paste settings when it
-yields. It does not create an alternate screen or a client-side input queue.
-Ordinary text typed during execution is discarded with a message to wait for
-the prompt; pending typeahead is cleared before an approval prompt so it cannot
-accidentally approve an operation.
+This is the `--no-tui` line client. The terminal keeps the scrollback; there is no alternate screen, multiline editor or client-side input queue. Input typed during execution is discarded before the next input or approval prompt so it cannot accidentally approve an operation.
 
 Interactive `!command` runs in the Session's working directory through `shell.run` and records the command and bounded output for the next model request, without starting a turn. `!!command` keeps its output private to this caller. Both also work during model execution. The prefix must be the first character; leading whitespace
 keeps the line ordinary model input. An approval prompt owns its answer line. Commands use the daemon's shell/environment and null stdin. Progress streams under one header per run without adding newlines to partial chunks; the final bounded output is displayed again, including truncation and recording failures. Commands are never retried after an RPC or transport error. Piped or `--prompt` text keeps its literal meaning.
@@ -388,6 +383,56 @@ target/debug/dimcode --home /path/to/isolated-home --model-config model.json \
 ```
 
 Interactive recovery displays main-branch history. Noninteractive recovery emits only the current output. History uses a fixed server watermark and its real `nextAfter` positions, including filtered records. Live events and progress snapshots are reconciled with already printed durable text. The client waits for an existing turn before accepting a new prompt. It never automatically retries a submission after a transport failure because the server may already have accepted it.
+
+## Terminal UI modes
+
+The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves:
+
+```text
+ ◆ answer row                                                   ▁   scrollbar: last column,
+ ◆ answer row (streaming tail scrolls with the transcript)      █   thumb in eighths of a row
+                                                                █
+ ╭─ · working…  3s ──────────────────────────────────────────╮
+ │ › Ask anything...                                          │      dock: queue, composer,
+ ╰────────────────────────────────────────────────────────────╯      panels and status stay
+ AGENT  ⏵⏵ default  esc interrupt                 provider / model    pinned to the bottom
+```
+
+| Fullscreen input | Effect |
+| --- | --- |
+| Mouse wheel, `PageUp` / `PageDown` | Scroll the transcript; new output does not move a scrolled view |
+| Sending a message | Follow the bottom again |
+| Mouse drag | Select transcript text; release copies it (OSC 52, plus `pbcopy` locally on macOS) |
+| `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again |
+| `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the palette closes |
+| `Esc` | Interrupt the run |
+| `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
+
+Pickers (`/resume`, `/models`, `/connect`, `/approvals`, `/theme`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts stay under the composer.
+
+```text
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    picked message: the box
+ ┃ › Explain this project                                   ┃    takes the blank rows
+ ┗━e to edit━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛    around it, nothing moves
+ ◆ The project …      ╭─ Command Palette ─────────────────╮
+                      │ > th                               │    palette: own query row,
+                      │ › /theme    Switch theme           │    transcript dimmed behind
+                      │   /exit     Exit the app           │
+                      ╰────────────────────────────────────╯
+```
+
+`e` cannot rewrite history: the App Server has no rewind or fork, so the edited text is sent as a new message.
+
+The transcript is a virtual list. The CLI keeps each committed block once, as its source (Markdown text, tool records), up to 5,000 blocks; fullscreen keeps only every block's height for the current width and renders the rows of the blocks within about a screen of the viewport, dropping them as it moves away. A settled resize or theme change measures the blocks again. The scrollback interface lays out the newest 10,000 rows of the same history when it rewrites the terminal's scrollback.
+
+`/tui` switches modes inside a running session, including during a run. Entering fullscreen erases the scrollback composer and lays the history out on the alternate screen; leaving rewrites the history into the terminal's scrollback. Exiting fullscreen returns to the shell's screen and prints the resume panel there.
+
+```bash
+dimcode --fullscreen            # this run only
+dimcode --scrollback default    # save the default mode and exit
+```
+
+The default is saved as `tuiMode` in `<home>/config.json`.
 
 ## Accounts and private plugin runtime
 
