@@ -1,6 +1,6 @@
 # Session boundary: method port and submission-admission port
 
-Status: Draft. Overall design: [overview §3 dependency direction and ports](../overview.md#3-dependency-direction-and-ports), [§6.1 method E](../overview.md#61-integration-methods), [Appendix C Rpc](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins); rules: [ADR 002](../../adr/002-dependency-direction.md) D2, D6. Phase: P1. Language: Rust (ports and entry layer); contributors in any language that provides the contract.
+Status: Draft. Overall design: [overview §3 dependency direction and ports](../overview.md#3-dependency-direction-and-ports), [§6.1 method E](../overview.md#61-integration-methods), [Appendix C Rpc](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D6. Phase: P1. Language: Rust (ports and entry layer); contributors in any language that provides the contract.
 
 The entry layer (Rpc) owns two stable registration ports, each hosted in its own plugin and neither naming a contributor. (1) The **method port**: process or Session-scoped plugins register wire methods under their own namespaces; each method declares `level: session | management`, and each entry dispatches the levels its assembly allows. [Management](../plugins/Management.md) is a level-filtered view of this port (level `management`) and keeps the management plane semantics (export, migration, `daemon.shutdown`). (2) The **submission-admission port**: one check of `session.submit`, used by Hooks, that may reject a submission or append attributed raw blocks. It is fail closed only where adopted business configuration requires a check that is not registered (D6). Contributors register in `apply` and unregister in `ctx.effect` with the [shared registration mechanics](process-tool-contribution.md#a2-registration-mechanics-shared-by-the-ports-of-these-contracts); Rpc never reloads because a contributor does.
 
@@ -63,7 +63,7 @@ flowchart TB
   E -->|"filters dispatch"| R1
 ```
 
-Neither port owns a Timeline event. Registrations are memory, rebuilt when contributors register in `apply`. The only persisted state is the requirement records, which belong to the checker owner's business configuration (Hooks' user rules and `disable_all` live in Settings, [ADR 002 D5](../../adr/002-dependency-direction.md#d5-structural-configuration-and-business-configuration-are-separate)) and stay readable while the checker is down. Dispatched levels are recorded per connection at accept time and never derived from identity.
+Neither port owns a Timeline event. Registrations are memory, rebuilt when contributors register in `apply`. The only persisted state is the requirement records, which belong to the checker owner's business configuration (Hooks' user rules and `disable_all` live in Settings, [ADR 002 D5](../../adr/002-plugin-scope.md#d5-structural-configuration-and-business-configuration-are-separate)) and stay readable while the checker is down. Dispatched levels are recorded per connection at accept time and never derived from identity.
 
 ## 3. Flows
 

@@ -1,6 +1,6 @@
 # Management
 
-Status: Draft. Overall design: [overview B.16](../overview.md#b16-management), [common constraints](../overview.md#62-constraints), [multiple nodes](../overview.md#63-multiple-nodes), [Rpc change](../overview.md#c2-app-server-process-plugins), [ADR 002](../../adr/002-dependency-direction.md). Phase: P0. Language: Rust.
+Status: Draft. Overall design: [overview B.16](../overview.md#b16-management), [common constraints](../overview.md#62-constraints), [multiple nodes](../overview.md#63-multiple-nodes), [Rpc change](../overview.md#c2-app-server-process-plugins), [ADR 002](../../adr/002-plugin-scope.md). Phase: P0. Language: Rust.
 
 Management is the management plane of the App Server process: the methods registered at `level: management` in Rpc's method port ([method contribution](../contracts/session-boundary.md#a1-method-port)). The contract (`MethodDecl`, `Interruption`, `CallChannel`, naming, reserved names, precedence) lives in [session boundary](../contracts/session-boundary.md); this document defines only what is specific to the management level: which entries serve it, its export over rutis links and the authority that grants, `management.methods`, `daemon.shutdown`, and the migration of existing methods out of Rpc's own table.
 

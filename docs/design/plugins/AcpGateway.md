@@ -215,7 +215,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` → submission admission ([session-boundary](../contracts/session-boundary.md), submission-admission port; fail closed only when a `RequiredCheck` record matching the Session names a checker that is not registered ([ADR 002](../../adr/002-dependency-direction.md) D6): `service_reloading`, nothing written) → `SessionLease::relay` → Session input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
+| Prompt write | `session.submit` → submission admission ([session-boundary](../contracts/session-boundary.md), submission-admission port; fail closed only when a `RequiredCheck` record matching the Session names a checker that is not registered ([ADR 002](../../adr/002-plugin-scope.md) D6): `service_reloading`, nothing written) → `SessionLease::relay` → Session input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` → InputQueue validates (own branch, not adopted) and writes `input/withdrawn` |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |

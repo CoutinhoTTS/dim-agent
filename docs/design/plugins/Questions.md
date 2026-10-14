@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.1](../overview.md#b1-questions). Phase: P1. Language: Rust.
 
-The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. A process part registers the tool into ToolRegistry's [tool source port](../contracts/process-tool-contribution.md), where it is offered per call only to interactive Sessions, and registers the Session method `session.question.respond` into Rpc's [method port](../contracts/session-boundary.md). A branch part records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number (the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern); it is the only scoped part because it writes the branch Timeline ([ADR 002](../../adr/002-dependency-direction.md) D3).
+The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. A process part registers the tool into ToolRegistry's [tool source port](../contracts/process-tool-contribution.md), where it is offered per call only to interactive Sessions, and registers the Session method `session.question.respond` into Rpc's [method port](../contracts/session-boundary.md). A branch part records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number (the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern); it is the only scoped part because it writes the branch Timeline ([ADR 002](../../adr/002-plugin-scope.md) D3).
 
 ## 1. Structure
 
@@ -374,7 +374,7 @@ Flow tests through RPC, tool calls and events:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | `ask_user` registers into the tool source port with requirement `interactive`, and the port's per-call context gives the handler the calling branch's service lookup | [ADR 002](../../adr/002-dependency-direction.md) D2, D3; [session-access](../contracts/session-access.md) `config` | The handler resolves the branch through Session access per call |
+| A1 | `ask_user` registers into the tool source port with requirement `interactive`, and the port's per-call context gives the handler the calling branch's service lookup | [ADR 002](../../adr/002-plugin-scope.md) D2, D3; [session-access](../contracts/session-access.md) `config` | The handler resolves the branch through Session access per call |
 | A2 | `interactive` omitted on `session.create` means interactive | Judgment (existing clients) | Existing Sessions lose the tool |
 | A3 | Payload adds `turn_id`, `request_id`, `declined` | Judgment | Correlation through `step/tool-call`; decline modeled as an answer |
 | A4 | 1..=4 questions, 2..=6 options | Edge-case reference; judgment | Schema limits change |

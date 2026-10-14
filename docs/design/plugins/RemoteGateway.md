@@ -1,6 +1,6 @@
 # RemoteGateway
 
-Status: Draft. Overall design: [overview B.13](../overview.md#b13-remotegateway), [Transport, Connection changes](../overview.md#c2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-dependency-direction.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
+Status: Draft. Overall design: [overview B.13](../overview.md#b13-remotegateway), [Transport, Connection changes](../overview.md#c2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
 RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only `level: session` of the [method contribution](../contracts/session-boundary.md#a1-method-port) contract, so devices may call every Session method, including `session.permission.update` (decision E3), and no management method. The entry is the product UI plane and never carries the rutis link plane between nodes.
 

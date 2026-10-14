@@ -35,13 +35,13 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-Goal depends only on stable ports ([ADR 002](../../adr/002-dependency-direction.md) D2); no Session or branch plugin and not Rpc depends on Goal, so a Goal reload never reloads them. All model-visible effects are `input/message` facts consumed by the existing InputQueue and Loop.
+Goal depends only on stable ports ([ADR 002](../../adr/002-plugin-scope.md) D2); no Session or branch plugin and not Rpc depends on Goal, so a Goal reload never reloads them. All model-visible effects are `input/message` facts consumed by the existing InputQueue and Loop.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `Goal` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md) and [Session access port](../contracts/session-access.md) (stable plugin, AgentIndex resolved per call), [tool source port](../contracts/process-tool-contribution.md), [method port](../contracts/session-boundary.md), Settings source (business configuration), public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end`, `stop/interrupt` | Tool set `goal` (`goal_update`) registered into the tool source port; Session methods `session.goal.*` registered with `level: session` into the method port; the goal block and continuation formats under source `goal`; business configuration key `goal.maxContinuations` |
 
-Goal registers both in `apply` and unregisters in its `ctx.effect` disposer after settling its own in-flight calls. While Goal is not registered, no tool is declared and `session.goal.*` get the method port's outcome for an unregistered method. `goal.maxContinuations` is business configuration in the Settings source ([ADR 002](../../adr/002-dependency-direction.md) D5): read at each decision, changed by a data update, never a reload. Goal never names another plugin's types and never reads capability state.
+Goal registers both in `apply` and unregisters in its `ctx.effect` disposer after settling its own in-flight calls. While Goal is not registered, no tool is declared and `session.goal.*` get the method port's outcome for an unregistered method. `goal.maxContinuations` is business configuration in the Settings source ([ADR 002](../../adr/002-plugin-scope.md) D5): read at each decision, changed by a data update, never a reload. Goal never names another plugin's types and never reads capability state.
 
 ## 2. Data and state
 

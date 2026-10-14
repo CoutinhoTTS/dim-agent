@@ -42,7 +42,7 @@ flowchart LR
   class ToolReg,MgmtReg,Launch,Access,Events,Store,Perm contract
 ```
 
-Scheduler registers its tool set and methods into stable ports owned by their consumers ([ADR 002 D2](../../adr/002-dependency-direction.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)), so its reload never reloads ToolRegistry, Rpc or a Session. It reaches Sessions only through `SessionAccess`, hosted in a stable plugin that returns `Reloading` during an Agents reload instead of reloading Scheduler. Run outcomes go out as an event notice ([D4](../../adr/002-dependency-direction.md#d4-peer-notices-use-events-not-dependencies)): listeners form no `Deps` edge on Scheduler and Scheduler names none of them.
+Scheduler registers its tool set and methods into stable ports owned by their consumers ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)), so its reload never reloads ToolRegistry, Rpc or a Session. It reaches Sessions only through `SessionAccess`, hosted in a stable plugin that returns `Reloading` during an Agents reload instead of reloading Scheduler. Run outcomes go out as an event notice ([D4](../../adr/002-plugin-scope.md#d4-peer-notices-use-events-not-dependencies)): listeners form no `Deps` edge on Scheduler and Scheduler names none of them.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |

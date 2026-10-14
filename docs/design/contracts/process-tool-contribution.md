@@ -1,10 +1,10 @@
 # Process-level tool contribution
 
-Status: Draft. Overall design: [overview §3 dependency direction and ports](../overview.md#3-dependency-direction-and-ports), [§6.1 method A](../overview.md#61-integration-methods), [Appendix C ToolRegistry supplement](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins); rules: [ADR 002](../../adr/002-dependency-direction.md) D1–D3. Phase: P0. Language: Rust (port and ToolRegistry side); a contributor may be implemented in any language that provides the provider contract.
+Status: Draft. Overall design: [overview §3 dependency direction and ports](../overview.md#3-dependency-direction-and-ports), [§6.1 method A](../overview.md#61-integration-methods), [Appendix C ToolRegistry supplement](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D1–D3. Phase: P0. Language: Rust (port and ToolRegistry side); a contributor may be implemented in any language that provides the provider contract.
 
 ToolRegistry's side owns the **tool source port**: a stable process service through which process plugins offer model tools to every Session. The port is hosted in its own plugin with no dependencies. Contributors (Mcp, Collaboration's `agent`, Goal, Web, Scheduler, Workflow, Notifications, Questions' `ask_user`) depend on the port, register in `apply` and unregister in `ctx.effect`; each Session's ToolRegistry depends on the port, never on a contributor. Values about the calling Session (cwd, interactivity, role, resource node) are passed per call, so contributors never read Session state and no contributor needs a Session part. Adoption, pinning, execution and admission reuse the implemented contract of [tool contributions §7](../../architecture/rust-agent/tool-contributions.md). When a contributor unloads, its sets disappear and only its own in-flight calls end with "tool provider unavailable"; ToolRegistry, ToolBinding, Loop and ToolExecutor never reload.
 
-`Contributions<ToolContribution>` stays reserved for stable first-party contributors that hold Session or branch state (`branch`, `wait`, `skill`); its names are fixed at assembly ([ADR 002](../../adr/002-dependency-direction.md#consequences)). `Contributions<SessionToolSource>` is no longer used: McpSession and the Questions Session placeholder are removed.
+`Contributions<ToolContribution>` stays reserved for stable first-party contributors that hold Session or branch state (`branch`, `wait`, `skill`); its names are fixed at assembly ([ADR 002](../../adr/002-plugin-scope.md#consequences)). `Contributions<SessionToolSource>` is no longer used: McpSession and the Questions Session placeholder are removed.
 
 ## 1. Structure
 
@@ -60,7 +60,7 @@ Every edge into the port points from the volatile side to the stable side; nothi
 | Mcp | `mcp` (keys `mcp:<server>`) | MCP catalog and the project root of `cwd`; replaces McpSession | Host-local approval rechecked per call (A9) |
 | Collaboration | `collaboration` (`agent`) | `collaboration_role` | The calling branch's CollaborationTimeline through `ToolCallScope::branch_service` |
 | Questions | `questions` (`ask_user`) | Declares `interactive: true`, so non-interactive Sessions never see it | The calling branch's Questions part through `ToolCallScope::branch_service` |
-| Goal, Web, Scheduler, Workflow, Notifications | own names | Their business configuration, read at use time ([ADR 002 D5](../../adr/002-dependency-direction.md#d5-structural-configuration-and-business-configuration-are-separate)) | Per their documents |
+| Goal, Web, Scheduler, Workflow, Notifications | own names | Their business configuration, read at use time ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-structural-configuration-and-business-configuration-are-separate)) | Per their documents |
 
 Contracts defined here (owner: ToolRegistry): `ToolSourcePort`, `ProcessToolProvider`, `ToolScope`, `ProcessToolSet`, `ProcessTool`, `ToolRequirements`, `ProcessToolHandler`, `ToolCallScope`, the registration mechanics (`Registered`, `CallGuard`, `Unavailable`, `PortError`; reused by the [Rpc ports](session-boundary.md)) and the per-call outcome "tool provider unavailable". Contracts depended on: `SessionConfig` with the [proposed fields](session-access.md#a3-sessionconfig-fields), the dynamic tool source contract (`ToolSourceSet`, `ToolHandler`, `ToolExecutionContext`), ToolBinding adoption and pinning, ToolExecutor settlement, the `ToolDefinition.risk` category read by Permission.
 
@@ -155,7 +155,7 @@ sequenceDiagram
   Note over TB: requests bound to V1 keep V1 handlers
 ```
 
-Configuration edits, credentials and external outages are new set versions or revocations, never a reload ([ADR 002 D5](../../adr/002-dependency-direction.md#d5-structural-configuration-and-business-configuration-are-separate)). A contributor that unregisters is handled the same way: all its keys are revoked.
+Configuration edits, credentials and external outages are new set versions or revocations, never a reload ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-structural-configuration-and-business-configuration-are-separate)). A contributor that unregisters is handled the same way: all its keys are revoked.
 
 ## 4. Timing and conflicts
 

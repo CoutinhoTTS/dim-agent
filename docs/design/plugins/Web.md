@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §B.5](../overview.md#b5-web). Phase: P2. Language: TypeScript first ([overview §F.3](../overview.md#f3-assignment)).
 
-Web is a process plugin that gives the model `web_search` and `web_fetch` by registering into ToolRegistry's tool source port ([process-tool-contribution](../contracts/process-tool-contribution.md), [ADR 002](../../adr/002-dependency-direction.md) D2). Search goes to a configured built-in adapter or to a search backend registered in Web's own `WebSearchBackends` port; fetch downloads one public page and returns bounded text. Web writes no Timeline events: every call and result is already a tool call fact. The `web.*` settings are business configuration read at use time, so editing them never reloads Web; a Web unload only removes its registration.
+Web is a process plugin that gives the model `web_search` and `web_fetch` by registering into ToolRegistry's tool source port ([process-tool-contribution](../contracts/process-tool-contribution.md), [ADR 002](../../adr/002-plugin-scope.md) D2). Search goes to a configured built-in adapter or to a search backend registered in Web's own `WebSearchBackends` port; fetch downloads one public page and returns bounded text. Web writes no Timeline events: every call and result is already a tool call fact. The `web.*` settings are business configuration read at use time, so editing them never reloads Web; a Web unload only removes its registration.
 
 ## 1. Structure
 
@@ -37,7 +37,7 @@ Sessions depend only on the stable tool source port, never on Web, and Web never
 | `Web` | Process (loader row; control node by default, A2) | Tool source port; Settings business source (section `web`) and credential-reference resolver; diagnostics channel | Registration of the `web` set (removed on unload); the `WebSearchBackends` port |
 | Search backend | Process, another plugin | `WebSearchBackends` | Registration of one named backend |
 
-**Contracts depended on:** tool source port and `ProcessToolSource` ([process-tool-contribution](../contracts/process-tool-contribution.md)); ports and configuration placement ([ADR 002](../../adr/002-dependency-direction.md)); Settings business source and credential-reference resolver ([overview §C.2](../overview.md#c2-app-server-process-plugins)); `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
+**Contracts depended on:** tool source port and `ProcessToolSource` ([process-tool-contribution](../contracts/process-tool-contribution.md)); ports and configuration placement ([ADR 002](../../adr/002-plugin-scope.md)); Settings business source and credential-reference resolver ([overview §C.2](../overview.md#c2-app-server-process-plugins)); `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
 **Contracts defined here:** the tool names, parameters and result formats; `WebSearchBackend` and the `WebSearchBackends` port; the `web.*` business configuration. Web knows no search provider's account semantics; a backend knows nothing about tools, Sessions or Web configuration (A1).
 
 **Node.** Network egress happens on the node running Web's row, independent of a Session's resource node, because network access is a process resource ([overview §6.3](../overview.md#63-multiple-nodes), A2). Web never resolves the node-services port, FileStorage or HostPlatform.
@@ -167,7 +167,7 @@ sequenceDiagram
   X->>TL: batch result, turn continues
 ```
 
-Case 2 is the contributor-unload rule of [ADR 002](../../adr/002-dependency-direction.md) D2: the per-call outcome is never `capability reloading`, so Loop does not fail the turn and no other Session is affected.
+Case 2 is the contributor-unload rule of [ADR 002](../../adr/002-plugin-scope.md) D2: the per-call outcome is never `capability reloading`, so Loop does not fail the turn and no other Session is affected.
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
@@ -309,7 +309,7 @@ pub trait WebSearchBackends: Send + Sync + 'static {
 }
 ```
 
-Port rules follow [ADR 002](../../adr/002-dependency-direction.md) D2: a backend plugin depends on `WebSearchBackends`, registers in `apply` and unregisters in its `ctx.effect` disposer after its in-flight searches return "provider unavailable". Which backend is required comes only from `web.search.service` (`{backend: name}`); a named backend that is not registered makes `web_search` unavailable. A backend reload is a registration change for Web, never a Web reload.
+Port rules follow [ADR 002](../../adr/002-plugin-scope.md) D2: a backend plugin depends on `WebSearchBackends`, registers in `apply` and unregisters in its `ctx.effect` disposer after its in-flight searches return "provider unavailable". Which backend is required comes only from `web.search.service` (`{backend: name}`); a named backend that is not registered makes `web_search` unavailable. A backend reload is a registration change for Web, never a Web reload.
 
 ### A.6 Business configuration (`web` section, Settings source)
 
@@ -319,7 +319,7 @@ Port rules follow [ADR 002](../../adr/002-dependency-direction.md) D2: a backend
 | `web.fetch.allow_private_hosts` | string[] | `[]` |
 | `web.proxy` | string (URL) | absent |
 
-All keys are business configuration ([ADR 002](../../adr/002-dependency-direction.md) D5), outside the loader editable layer: Web reads them at use time; a change is a data update plus notification that yields a new tool set version, never a row reload. Only Web's enablement and node binding are structural loader configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
+All keys are business configuration ([ADR 002](../../adr/002-plugin-scope.md) D5), outside the loader editable layer: Web reads them at use time; a change is a data update plus notification that yields a new tool set version, never a row reload. Only Web's enablement and node binding are structural loader configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
 
 ### A.7 Timeline and capability mechanics
 
@@ -419,4 +419,4 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | Question | Description |
 | --- | --- |
 | Cross-language migration | Overview §B.5 names Web as the first #4 migration target; the TypeScript implementation needs only process services (tool source port, Settings business source, credential resolver) |
-| Overview wording | Overview §C.1 ToolRegistry row must describe the tool source port of [ADR 002](../../adr/002-dependency-direction.md) |
+| Overview wording | Overview §C.1 ToolRegistry row must describe the tool source port of [ADR 002](../../adr/002-plugin-scope.md) |

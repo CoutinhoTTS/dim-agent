@@ -28,7 +28,7 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-Attachments touches only the method port and SessionStore, both stable ([ADR 002](../../adr/002-dependency-direction.md) D2); it never writes the Timeline, never sees images and owns no data of its own.
+Attachments touches only the method port and SessionStore, both stable ([ADR 002](../../adr/002-plugin-scope.md) D2); it never writes the Timeline, never sees images and owns no data of its own.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |

@@ -30,7 +30,7 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-SessionTitle touches no Session or branch plugin: it observes through the Session broadcast subscription, reads through SessionAccess and writes only SessionStore metadata. Rpc reaches it only through its method port and reads list fields from SessionStore directly; SessionTitle registers `session.rename` in `apply` and unregisters in `ctx.effect` ([ADR 002 D2](../../adr/002-dependency-direction.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)), so a SessionTitle reload never reloads Rpc.
+SessionTitle touches no Session or branch plugin: it observes through the Session broadcast subscription, reads through SessionAccess and writes only SessionStore metadata. Rpc reaches it only through its method port and reads list fields from SessionStore directly; SessionTitle registers `session.rename` in `apply` and unregisters in `ctx.effect` ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)), so a SessionTitle reload never reloads Rpc.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
@@ -194,7 +194,7 @@ async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
 
 ### A.3 Configuration
 
-`sessionTitle.enabled: bool` default `true`; `sessionTitle.maxLength: u32` default 80, range 10..=200 (A3). Business configuration ([ADR 002 D5](../../adr/002-dependency-direction.md#d5-structural-configuration-and-business-configuration-are-separate)) in a Settings source owned by SessionTitle, not the loader editable layer: read at each decision; a change is a data update with notification, never a reload. Enabling the plugin itself stays a loader row. Provider policy for `session-title` lives in Provider's per-purpose policy storage; unconfigured inherits the Session's model (A1).
+`sessionTitle.enabled: bool` default `true`; `sessionTitle.maxLength: u32` default 80, range 10..=200 (A3). Business configuration ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-structural-configuration-and-business-configuration-are-separate)) in a Settings source owned by SessionTitle, not the loader editable layer: read at each decision; a change is a data update with notification, never a reload. Enabling the plugin itself stays a loader row. Provider policy for `session-title` lives in Provider's per-purpose policy storage; unconfigured inherits the Session's model (A1).
 
 ### A.4 Mechanics
 
