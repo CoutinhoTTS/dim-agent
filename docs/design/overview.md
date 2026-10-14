@@ -1,100 +1,100 @@
-# 总体设计：未设计功能的插件化
+# Overall design: plugins for undesigned features
 
-状态：草案
+Status: Draft
 
-本文以 [CLI 功能清单](../feature-list.md) 为目标，找出现有插件职责尚未覆盖的功能，把它们设计成插件，并说明这些插件如何接入现有体系。每个新插件的详细需求另写在 `docs/design/plugins/<名称>.md`，按第 10 节的模板编写。
+This document takes the [CLI feature list](../feature-list.md) as its target, identifies the features that existing plugin responsibilities do not yet cover, designs them as plugins, and describes how these plugins integrate with the existing system. The detailed requirements of each new plugin are written separately in `docs/design/plugins/<name>.md`, following the template in section 10.
 
-现有插件及其内容不在本文修改范围内。现有插件需要的补充与变更登记在第 7 节，由对应插件另行设计。
+Existing plugins and their contents are outside the scope of changes in this document. Supplements and changes that existing plugins need are registered in section 7 and designed separately by the corresponding plugin.
 
-## 1. 范围与前提
+## 1. Scope and premises
 
-| 项 | 约定 |
+| Item | Convention |
 | --- | --- |
-| 终端形态 | 只设计 scrollback。功能清单中标为“仅全屏 TUI”的项不在范围内 |
-| 多模态 | 目标设计覆盖全部多模态类别（图片、视频、语音、音乐、音频、3D 资产、动作、实时、OCR）。“仅限特定 Desktop 构建”是构建与打包上的可用性约束，不缩小目标范围；可用性与目标范围分开描述，见 5.14 |
-| 不做 | 功能清单中的 Todo 状态与 `plan` Skill |
-| 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 已完成为前提：插件在运行时注册自己的事件类型（类型名、数据格式），注册随插件生命周期，Timeline 按注册校验写入。新插件不向内核事件枚举增加类型，也不设过渡方案 |
-| 模型上下文 | 按 [ADR 001](../adr/001-harness-foundation.md) 的提议：插件事件不直接投影进模型上下文；给模型看的内容经采用的输入或工具结果进入。#2 中“由注册的投影规则决定”的方案与此不同，见第 13 节 |
-| 配置与插件管理 | 按 [#3](https://github.com/arcships/dim/issues/3)：用户管理的插件意图（启用、停用、插件配置）经类型化的 Settings 操作写入 loader 可编辑层并持久化，loader 可编辑层是其权威。项目文件（如 `.mcp.json`、项目 Hook、项目工作流）与宿主本地批准保留各自的权威，按 ADR 001 的“按来源写入”处理 |
-| 现有设计 | [时间总线](../architecture/rust-agent/time-bus.md)、[设计规则](../architecture/rust-agent/principles.md)、[单树装配](../architecture/rust-agent/single-tree.md)、[生命周期](../architecture/rust-agent/lifecycle.md)、[事件驱动流程](../architecture/rust-agent/event-driven-flows.md) 与 ADR 001 的信任合同对所有新插件同样适用 |
+| Terminal form | Only scrollback is designed. Items marked "full-screen TUI only" in the feature list are out of scope |
+| Multimodality | The target design covers all multimodal categories (image, video, speech, music, audio, 3D assets, motion, realtime, OCR). "Specific Desktop builds only" is an availability constraint on build and packaging and does not narrow the target scope; availability and target scope are described separately, see 5.14 |
+| Not planned | The Todo status and the `plan` Skill from the feature list |
+| Dynamic events | Assumes [#2](https://github.com/arcships/dim/issues/2) is complete: plugins register their own event types (type name, data format) at runtime, registration follows the plugin lifecycle, and Timeline validates writes against the registration. New plugins do not add types to the kernel event enum, and there is no transitional scheme |
+| Model context | Per the proposal in [ADR 001](../adr/001-harness-foundation.md): plugin events are not projected directly into model context; content shown to the model enters through adopted input or tool results. The scheme in #2 where this is "decided by registered projection rules" differs from this, see section 13 |
+| Configuration and plugin management | Per [#3](https://github.com/arcships/dim/issues/3): user-managed plugin intent (enable, disable, plugin configuration) is written to the loader editable layer through typed Settings operations and persisted; the loader editable layer is its authority. Project files (such as `.mcp.json`, project Hooks, project workflows) and host-local approvals keep their own authority and are handled per ADR 001's "write by source" |
+| Existing design | The [time bus](../architecture/rust-agent/time-bus.md), [design rules](../architecture/rust-agent/principles.md), [single-tree assembly](../architecture/rust-agent/single-tree.md), [lifecycle](../architecture/rust-agent/lifecycle.md), [event-driven flows](../architecture/rust-agent/event-driven-flows.md) and the trust contract of ADR 001 apply equally to all new plugins |
 
-## 2. 现有体系
+## 2. Existing system
 
-| 层 | 职责 | 现有插件（按职责分组） |
+| Layer | Responsibility | Existing plugins (grouped by responsibility) |
 | --- | --- | --- |
-| CLI | 终端交互、命令、渲染；不执行 Agent | `dim-cli` |
-| App Server 进程 | 协议与连接、Session 目录与持久化、配置来源、Provider 与账号、MCP、Skill 目录、协作目录 | Transport、Connection、Rpc、ServerControl；AgentDirectory、Agents、SessionStore、SqliteStorage；Settings；Provider、ManagedProviders、各 OAuth、Aimux；McpPublication、Mcp；SkillsCatalog；Collaboration、CollaborationDirectory；FileStorage、FileWriteCoordinator、HostPlatform |
-| Session | 工具注册、提示词来源、分支树、协作工具 | ToolRegistry、PromptRegistry、PromptSources、Skills、Wait、WorkspaceTools、TimelineTree、CollaborationCapability（`agent` 工具） |
-| 分支 | 输入、循环、上下文、模型、工具执行、准入 | InputQueue、Loop、Prompt、ContextPreparation、ModelProvider、ToolBinding、ToolExecutor、Approval、Permission、BackgroundExec、FileReads、WaitBranch、SkillsBranch、PromptSourcesBranch、TreeTimeline、CollaborationTimeline |
+| CLI | Terminal interaction, commands, rendering; does not run the Agent | `dim-cli` |
+| App Server process | Protocol and connections, Session directory and persistence, configuration sources, Providers and accounts, MCP, Skill directory, collaboration directory | Transport, Connection, Rpc, ServerControl; AgentDirectory, Agents, SessionStore, SqliteStorage; Settings; Provider, ManagedProviders, the OAuth plugins, Aimux; McpPublication, Mcp; SkillsCatalog; Collaboration, CollaborationDirectory; FileStorage, FileWriteCoordinator, HostPlatform |
+| Session | Tool registration, prompt sources, branch tree, collaboration tools | ToolRegistry, PromptRegistry, PromptSources, Skills, Wait, WorkspaceTools, TimelineTree, CollaborationCapability (`agent` tool) |
+| Branch | Input, loop, context, model, tool execution, admission | InputQueue, Loop, Prompt, ContextPreparation, ModelProvider, ToolBinding, ToolExecutor, Approval, Permission, BackgroundExec, FileReads, WaitBranch, SkillsBranch, PromptSourcesBranch, TreeTimeline, CollaborationTimeline |
 
-各插件的职责见 [plugins](../architecture/rust-agent/plugins/README.md)、[单树装配](../architecture/rust-agent/single-tree.md) 的进程插件表与 [工具贡献](../architecture/rust-agent/tool-contributions.md)。
+The responsibilities of each plugin are described in [plugins](../architecture/rust-agent/plugins/README.md), the process plugin table of [single-tree assembly](../architecture/rust-agent/single-tree.md), and [tool contributions](../architecture/rust-agent/tool-contributions.md).
 
-## 3. 接入方式
+## 3. Integration methods
 
-新插件先判断能否用现有机制或现有插件实现：before、Capability 订阅、工具贡献、所有者管理的准入、带 key 的 raw 输入、后台 `exec`、模型连接、插件与 loader 体系。只有现有机制无法表达的职责才新建插件；属于现有插件职责的改动登记在第 7 节。
+A new plugin first checks whether it can be implemented with existing mechanisms or existing plugins: before, Capability subscription, tool contribution, owner-managed admission, keyed raw input, background `exec`, model connections, and the plugin and loader system. A new plugin is created only for responsibilities that existing mechanisms cannot express; changes that belong to existing plugin responsibilities are registered in section 7.
 
-| 方式 | 机制 | 现有先例 |
+| Method | Mechanism | Existing precedent |
 | --- | --- | --- |
-| **A 贡献工具** | 工具经 ToolRegistry 进入 Session：Session 插件贡献 Session 级工具；进程插件提供进程级工具贡献，由 ToolRegistry 在 `Deps` 中直接注入，不经中间插件，执行所需的 Session 上下文由调用传入。分支经 ToolBinding 采用并固定处理器；ToolExecutor 执行；Approval 与 Permission 准入。模型只读工具结果的 `content` | WorkspaceTools、Skills、Wait、TimelineTree、CollaborationCapability |
-| **B 输入注入** | 插件把最终内容写成 `input/message`：面向模型的内容放在 raw 块中，用户内容（含图片块）放在 `user` 中；按模式由 InputQueue 采用、Loop 消费后进入上下文。Queue 可开始 turn，Steer 插入当前 turn 并可结束 `wait`，Append 不开始 turn。带 `key` 的 raw 块持续生效：同 key 的新块取代旧块，`retire` 结束该 key，压缩后保留每个仍生效 key 的最新块 | BackgroundExec 完成通知、协作结果 |
-| **C 提示词来源** | 向 PromptRegistry 注册命名来源；分支由 PromptSourcesBranch 发现变化并经 Prompt 采用 | AGENTS.md、Skill 列表、环境与日期 |
-| **D 脱离工作** | 由发起它的**分支**上的插件执行、取消、恢复和结算；开始与终态写在发起分支；完成时以 Steer 输入唤醒；查询与停止由所有者的工具提供（[事件驱动流程](../architecture/rust-agent/event-driven-flows.md) §3） | BackgroundExec、Collaboration 的 request |
-| **E 进程服务** | App Server 进程插件；配置经 Settings 按来源写入；对外提供管理 RPC；外部协议适配与 Rpc 平级；在 RPC 边界执行的处理（提交前转换、用户发起的命令）也属于此类 | Mcp、Provider、SkillsCatalog |
+| **A Tool contribution** | Tools enter the Session through ToolRegistry: Session plugins contribute Session-scoped tools; process plugins provide process-level tool contributions, which ToolRegistry injects directly in `Deps` without an intermediate plugin, and the Session context needed for execution is passed in by the call. The branch adopts tools and fixes their handlers through ToolBinding; ToolExecutor executes; Approval and Permission handle admission. The model reads only the `content` of tool results | WorkspaceTools, Skills, Wait, TimelineTree, CollaborationCapability |
+| **B Input injection** | The plugin writes the final content as `input/message`: model-facing content goes in raw blocks, user content (including image blocks) goes in `user`; InputQueue adopts it by mode and Loop consumes it into context. Queue can start a turn, Steer inserts into the current turn and can end `wait`, Append does not start a turn. Raw blocks with a `key` stay in effect: a new block with the same key replaces the old one, `retire` ends that key, and compaction keeps the latest block of each key still in effect | BackgroundExec completion notices, collaboration results |
+| **C Prompt source** | Registers a named source with PromptRegistry; the branch detects changes through PromptSourcesBranch and adopts them through Prompt | AGENTS.md, Skill list, environment and date |
+| **D Detached work** | The plugin on the **branch** that started it executes, cancels, recovers and settles it; start and terminal state are written on the starting branch; on completion it wakes the branch with Steer input; query and stop are provided by the owner's tools ([event-driven flows](../architecture/rust-agent/event-driven-flows.md) §3) | BackgroundExec, Collaboration's request |
+| **E Process service** | App Server process plugin; configuration is written by source through Settings; provides management RPC externally; external protocol adapters sit at the same level as Rpc; processing performed at the RPC boundary (pre-submission transformation, user-initiated commands) also belongs here | Mcp, Provider, SkillsCatalog |
 
-共同约束：
+Common constraints:
 
-1. **事件最少化**：只为影响后续行为的结果新增事件（时间总线第 3 条）。能由已有事实推出的状态不另设事件：工具调用与工具结果、`input/*`、`turn/*`、`stop/interrupt` 都是可消费的事实。过程输出（进度、日志）走诊断通道，不写 Timeline。
-2. **所有权**：事件类型的声明方定义数据合同，但不独占写入：合法的生产方经所有者的公开端口写入共享事件，例如任何插件经 Session 输入接口写入 `input/message`（时间总线第 2 条、ADR 001）。发起工作的插件写该工作的开始与终态。状态机只依据自己消费过的事件做决定，不读其他插件的内存状态，但可以消费同样的事件自建视图（时间总线第 2 条）。
-3. **外部入口**：RPC 不直接写事件。RPC 调用所有者插件的服务，所有者在边界校验后写入，先例为 `approval.respond`。与中断等并发时，以 Timeline 序号判定：序号在前的有效事实生效。
-4. **重载与副作用**：开始事实已写、终态未写的工作，在重载或重启时以“未在恢复中存活”结算，不重新执行（时间总线第 5 条）。
-5. **作用域可见性**：进程插件不读取 Session 或分支状态，所需的值由调用方作为参数传入。
-6. **中断**：插件取消自己的在途工作、释放资源后再写终态（[中断](../architecture/rust-agent/interrupt.md)）。
-7. **准入**：新工具声明风险类别，由 Permission 与 Approval 准入；新类别登记在第 7 节。
-8. **管理面**：执行命令或改变宿主配置的方法是管理方法，由插件贡献给 Management 插件（5.16），不直接加入 Rpc。入口挂载了 Management 才能调用管理方法：本机 RPC 入口默认挂载，RemoteGateway 默认不挂载，其他节点经 rutis link 导出 Management 服务后才能使用。授权由装配与 link 配置决定，不另设身份分级或逐方法授权；导出 Management 等于授予宿主管理员权限。
-9. **在途工作**：不建立共享的在途工作登记。每个所有者提供自己的查询与停止，汇总只在 CLI 层显示（[事件驱动流程](../architecture/rust-agent/event-driven-flows.md) §3 “在途工作识别”暂不设计）。
+1. **Minimal events**: add events only for outcomes that affect later behavior (time bus rule 3). State that can be derived from existing facts gets no separate event: tool calls and tool results, `input/*`, `turn/*` and `stop/interrupt` are all consumable facts. Process output (progress, logs) goes through the diagnostics channel and is not written to Timeline.
+2. **Ownership**: the declarer of an event type defines the data contract but does not hold exclusive write access: legitimate producers write shared events through the owner's public port, for example any plugin writes `input/message` through the Session input interface (time bus rule 2, ADR 001). The plugin that starts a piece of work writes that work's start and terminal state. A state machine decides only on events it has consumed and does not read other plugins' in-memory state, but it may consume the same events to build its own view (time bus rule 2).
+3. **External entry**: RPC does not write events directly. RPC calls the owner plugin's service, and the owner writes after validating at the boundary; the precedent is `approval.respond`. When it races with an interrupt or similar, the Timeline sequence number decides: the valid fact with the earlier sequence number takes effect.
+4. **Reload and side effects**: work whose start fact is written but whose terminal state is not is settled as "did not survive recovery" on reload or restart, and is not re-executed (time bus rule 5).
+5. **Scope visibility**: process plugins do not read Session or branch state; the values they need are passed in as parameters by the caller.
+6. **Interrupt**: a plugin cancels its own in-flight work and releases resources before writing the terminal state ([interrupt](../architecture/rust-agent/interrupt.md)).
+7. **Admission**: new tools declare a risk category and are admitted by Permission and Approval; new categories are registered in section 7.
+8. **Management plane**: methods that execute commands or change host configuration are management methods; plugins contribute them to the Management plugin (5.16) instead of adding them directly to Rpc. Management methods are callable only on entries where Management is mounted: the local RPC entry mounts it by default, RemoteGateway does not by default, and other nodes can use it only after Management is exported as a service over a rutis link. Authorization is decided by assembly and link configuration; there are no separate identity tiers or per-method authorization. Exporting Management is equivalent to granting host administrator rights.
+9. **In-flight work**: there is no shared registry of in-flight work. Each owner provides its own query and stop; aggregation is shown only in the CLI layer ("in-flight work identification" in [event-driven flows](../architecture/rust-agent/event-driven-flows.md) §3 is not designed for now).
 
-### 3.1 多节点
+### 3.1 Multiple nodes
 
-rutis 节点之间经 link 连接，可以导出与导入服务、在对端运行插件（`peer:<节点>/<插件>`）、转发事件（[rutis 节点](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md)，[#5](https://github.com/arcships/dim/issues/5)）。本文不预设资源在本机或远程，按以下规则设计：
+rutis nodes connect through links and can export and import services, run plugins on the peer (`peer:<node>/<plugin>`), and forward events ([rutis nodes](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md), [#5](https://github.com/arcships/dim/issues/5)). This document does not presume that resources are local or remote, and designs by the following rules:
 
-| 规则 | 内容 |
+| Rule | Content |
 | --- | --- |
-| 控制节点 | App Server 所在节点承载 Timeline、Session、Capability、配置来源、Provider 与调度 |
-| 资源节点 | 文件、进程、shell、隔离、本机安装的 CLI、浏览器等宿主资源所在的节点。每个 Session 在创建配置中绑定一个资源节点，创建后不变；未指定时为控制节点自身，单机时行为与现在相同 |
-| 资源服务 | 访问宿主资源一律经 Session 绑定的资源服务（FileStorage、HostPlatform、WorkspaceTools 的宿主侧）。资源节点不是控制节点时，这些服务由对端导出、按 Session 导入；使用方不区分本机与导入的服务 |
-| 绑定节点的数据 | 宿主本地批准、隔离配置、外部 Agent 目录、附件存放位置都以“节点 + 路径”标识 |
-| 管理面 | 见共同约束 8：是否能管理由 Management 挂载与导出决定。向某个节点导出 Management，即把宿主管理员权限交给该节点，包括修改批准与配置、不经审批执行 shell |
-| 离线 | 按生命周期依赖处理：依赖资源服务的插件随依赖进入 Pending，节点恢复后重新装载；在途工作按现有生命周期合同结算，不另设离线状态 |
-| 认证 | 沿用 rutis link 的 token，不另设计；Management 只在显式配置时导出 |
-| 未来扩展 | 跨控制节点协作：Collaboration 的 member 可以是另一个 App Server 上的 Session，本文不设计 |
+| Control node | The node hosting the App Server carries Timeline, Sessions, Capabilities, configuration sources, Providers and scheduling |
+| Resource node | The node where host resources live: files, processes, shell, isolation, locally installed CLIs, browsers, and so on. Each Session binds one resource node in its creation configuration, which does not change after creation; when unspecified it is the control node itself, and single-machine behavior is the same as today |
+| Resource services | Host resources are always accessed through the resource services bound to the Session (FileStorage, HostPlatform, the host side of WorkspaceTools). When the resource node is not the control node, these services are exported by the peer and imported per Session; users of the services do not distinguish local from imported services |
+| Node-bound data | Host-local approvals, isolation configuration, the external Agent directory and attachment storage locations are all identified by "node + path" |
+| Management plane | See common constraint 8: whether management is possible is decided by Management mounting and export. Exporting Management to a node hands host administrator rights to that node, including changing approvals and configuration and running shell without approval |
+| Offline | Handled by lifecycle dependencies: plugins that depend on resource services enter Pending along with the dependency and are reloaded after the node recovers; in-flight work is settled under the existing lifecycle contract, with no separate offline state |
+| Authentication | Reuses the rutis link token, not designed separately; Management is exported only when explicitly configured |
+| Future extension | Cross-control-node collaboration: a Collaboration member can be a Session on another App Server; not designed in this document |
 
-### 3.2 Capability 与进程插件
+### 3.2 Capabilities and process plugins
 
-Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实例，以 `SessionScope`/`BranchScope` 实例键提供服务，经 Timeline 事件与声明的服务协作（[设计规则](../architecture/rust-agent/principles.md) §1）。不经这两种工厂注册的 rutis 插件是进程插件，如 App Server 进程插件与 FileStorage、HostPlatform、SkillsCatalog。Session 级能力不注册分支实例事件（[单树装配](../architecture/rust-agent/single-tree.md)），需要写事件或持有在途工作的部分放在分支级。
+A Capability is registered with the Agent instance through a Session-scoped or Timeline (branch)-scoped factory, provides services under `SessionScope`/`BranchScope` instance keys, and collaborates through Timeline events and declared services ([design rules](../architecture/rust-agent/principles.md) §1). rutis plugins not registered through either factory are process plugins, such as the App Server process plugins and FileStorage, HostPlatform and SkillsCatalog. Session-scoped capabilities do not register branch instance events ([single-tree assembly](../architecture/rust-agent/single-tree.md)); parts that need to write events or hold in-flight work go at branch scope.
 
-| 判断项 | Capability | 进程插件 |
+| Criterion | Capability | Process plugin |
 | --- | --- | --- |
-| 状态归属 | 属于某个 Session 或分支，可由 Timeline 重建 | 跨 Session 共享，存于进程存储或配置 |
-| Timeline | 写入或消费事件 | 不写 Timeline；或管理 Session 本身（创建、删除、调度） |
-| 对 Agent 实例的贡献 | 工具、输入、提示词来源 | 无，或经服务供 Capability 使用 |
-| 资源 | 自己发起的在途工作 | 宿主资源：存储、隔离、网络服务、外部协议端口、外部进程 |
-| 生命周期 | 随 Session 或分支：中断、重载、关闭 | 随进程或 loader |
+| State ownership | Belongs to a Session or branch and can be rebuilt from Timeline | Shared across Sessions, stored in process storage or configuration |
+| Timeline | Writes or consumes events | Does not write Timeline; or manages Sessions themselves (create, delete, schedule) |
+| Contribution to the Agent instance | Tools, input, prompt sources | None, or services used by Capabilities |
+| Resources | In-flight work it started itself | Host resources: storage, isolation, network services, external protocol ports, external processes |
+| Lifecycle | Follows the Session or branch: interrupt, reload, close | Follows the process or loader |
 
-功能同时具备两侧特征时，拆为进程插件与 Capability，沿用 SkillsCatalog（进程）、Skills（Session）、SkillsBranch（分支）的分法。工具可以由进程级贡献提供；观察 Session 事件可以经进程级实时订阅 Session 广播完成，需要据此做决定时经 Session 的公开读取接口读取固定前缀，写入经 Session 的公开输入接口；Session 状态能由 Timeline 推出时不设 Session 或分支部分。只有现有机制都无法表达的分支内行为才新建 Capability。
+When a feature has characteristics of both sides, it is split into a process plugin and a Capability, following the SkillsCatalog (process), Skills (Session), SkillsBranch (branch) split. Tools can be provided by process-level contributions; observing Session events can be done through a process-level live subscription to the Session broadcast, and when a decision depends on them the plugin reads the fixed prefix through the Session's public read interface and writes through the Session's public input interface; when Session state can be derived from Timeline, no Session or branch part is created. A new Capability is created only for in-branch behavior that no existing mechanism can express.
 
-| 类别 | 新插件与拆分 |
+| Category | New plugins and splits |
 | --- | --- |
-| 进程插件 + Capability | Questions（Session：`ask_user` 工具，按调用解析调用方分支的服务，先例为 Wait；分支：待答问题与回答事实，先例为 Approval） |
-| 进程插件 | Management、Goal、ShellInput、Attachments、SessionTitle、Web、Hooks、Scheduler、Workflow、Notifications、ExternalAgent、PluginManager、RemoteGateway、Modality。其中 Goal、Web、Scheduler、Workflow、Notifications 以进程级工具贡献提供工具 |
-| 非 daemon 插件 | AcpGateway（CLI 进程中的协议适配） |
+| Process plugin + Capability | Questions (Session: `ask_user` tool, which resolves the calling branch's service per call, following Wait; branch: pending questions and answer facts, following Approval) |
+| Process plugin | Management, Goal, ShellInput, Attachments, SessionTitle, Web, Hooks, Scheduler, Workflow, Notifications, ExternalAgent, PluginManager, RemoteGateway, Modality. Of these, Goal, Web, Scheduler, Workflow and Notifications provide tools through process-level tool contributions |
+| Non-daemon plugin | AcpGateway (protocol adapter in the CLI process) |
 
-拆分后的命名在各插件需求文档中确定。
+Names after splitting are decided in each plugin's requirement document.
 
-### 3.3 插件架构图
+### 3.3 Plugin architecture diagrams
 
-以下是目标结构，手绘，只用于说明新插件的位置。当前装配以 [生成图](../architecture/rust-agent/generated/) 为准。绿色为新插件（同一插件拆分的各部分用同一名称加括号说明），橙色边框为第 7 节中有“变更”的现有插件，虚线框为按配置启用的现有插件。
+The following is the target structure, drawn by hand, only to show where the new plugins sit. The current assembly is defined by the [generated diagrams](../architecture/rust-agent/generated/). Green marks new plugins (parts split from the same plugin use the same name with a parenthetical note), an orange border marks existing plugins with a "Change" in section 7, and a dashed box marks existing plugins enabled by configuration.
 
-#### 全量分布
+#### Full distribution
 
 ```mermaid
 flowchart TB
@@ -102,14 +102,14 @@ flowchart TB
   classDef changed stroke:#e8590c,stroke-width:3px
   classDef optional stroke-dasharray:4 3
 
-  subgraph CLIP["CLI 进程"]
+  subgraph CLIP["CLI process"]
     cli["dim-cli"]
     acp["AcpGateway"]:::new
   end
 
-  subgraph PROC["App Server 进程（进程插件）"]
+  subgraph PROC["App Server process (process plugins)"]
     direction TB
-    subgraph PC["连接与协议"]
+    subgraph PC["Connections and protocol"]
       ServerControl["ServerControl"]
       Connection["Connection"]:::changed
       Rpc["Rpc"]:::changed
@@ -117,7 +117,7 @@ flowchart TB
       RemoteGateway["RemoteGateway"]:::new
       Management["Management"]:::new
     end
-    subgraph PS["存储与 Session 管理"]
+    subgraph PS["Storage and Session management"]
       FileStorage["FileStorage"]
       FileWriteCoordinator["FileWriteCoordinator"]
       SqliteStorage["SqliteStorage"]
@@ -125,12 +125,12 @@ flowchart TB
       Attachments["Attachments"]:::new
       SessionTitle["SessionTitle"]:::new
     end
-    subgraph PCFG["配置与插件管理"]
+    subgraph PCFG["Configuration and plugin management"]
       Settings["Settings"]
       Loader["rutis-loader"]
       PluginManager["PluginManager"]:::new
     end
-    subgraph PM["Provider 与模型"]
+    subgraph PM["Providers and models"]
       Provider["Provider"]
       ManagedProviders["ManagedProviders"]
       NodeBinding["ManagedProviderBinding + Node runtime"]:::optional
@@ -138,36 +138,36 @@ flowchart TB
       GrokOAuth["GrokOAuth"]
       Aimux["Aimux"]
       ConfiguredModels["ConfiguredModels"]:::optional
-      ExternalAgent["ExternalAgent（外部 Agent 连接）"]:::new
+      ExternalAgent["ExternalAgent (external Agent connections)"]:::new
       Modality["Modality"]:::new
     end
-    subgraph PE["MCP、Skill 与扩展目录"]
+    subgraph PE["MCP, Skill and extension directories"]
       McpPublication["McpPublication"]
       Mcp["Mcp"]
-      McpServer["McpServer（按代次）"]
+      McpServer["McpServer (per generation)"]
       SkillsCatalog["SkillsCatalog"]
       HooksP["Hooks"]:::new
       WorkflowP["Workflow"]:::new
       WebP["Web"]:::new
       GoalP["Goal"]:::new
     end
-    subgraph PA["Agent 与协作"]
+    subgraph PA["Agents and collaboration"]
       AgentDirectory["AgentDirectory"]
       Agents["Agents"]
       CollaborationDirectory["CollaborationDirectory"]
       Collaboration["Collaboration"]:::changed
       SchedulerP["Scheduler"]:::new
     end
-    subgraph PH["宿主与通知"]
+    subgraph PH["Host and notifications"]
       HostPlatform["HostPlatform"]
       ShellInput["ShellInput"]:::new
       NotificationsP["Notifications"]:::new
     end
   end
 
-  subgraph SES["Session（Capability）"]
+  subgraph SES["Session (Capability)"]
     direction TB
-    subgraph SEX["现有"]
+    subgraph SEX["Existing"]
       SessionScope["SessionScope"]
       ToolRegistry["ToolRegistry"]
       TimelineTree["TimelineTree"]
@@ -180,14 +180,14 @@ flowchart TB
       PrepareModelHost["PrepareModelHost"]
       SessionBroadcastEnd["SessionBroadcastEnd"]
     end
-    subgraph SNEW["新增"]
-      QuestionsS["Questions（ask_user）"]:::new
+    subgraph SNEW["New"]
+      QuestionsS["Questions (ask_user)"]:::new
     end
   end
 
-  subgraph BR["分支（Capability）"]
+  subgraph BR["Branch (Capability)"]
     direction TB
-    subgraph BEX["现有"]
+    subgraph BEX["Existing"]
       BranchScope["BranchScope"]
       SessionBroadcast["SessionBroadcast"]
       TreeTimeline["TreeTimeline"]
@@ -207,29 +207,29 @@ flowchart TB
       PromptSourcesBranch["PromptSourcesBranch"]
       CollabTimeline["CollaborationTimeline"]
     end
-    subgraph BNEW["新增"]
-      QuestionsB["Questions（待答问题与回答事实）"]:::new
+    subgraph BNEW["New"]
+      QuestionsB["Questions (pending questions and answer facts)"]:::new
     end
   end
 
-  RN["资源节点（默认即控制节点；可经 rutis link 导入）"]
-  CLIP -->|本地 RPC| PROC
-  RN -.->|资源服务按 Session 导入| SES
-  WebP & SchedulerP & WorkflowP & NotificationsP & GoalP -.->|进程级工具贡献| ToolRegistry
-  PROC -->|Agents 装载| SES
-  SES -->|TimelineTree 装载| BR
+  RN["Resource node (the control node by default; can be imported over rutis link)"]
+  CLIP -->|Local RPC| PROC
+  RN -.->|Resource services imported per Session| SES
+  WebP & SchedulerP & WorkflowP & NotificationsP & GoalP -.->|Process-level tool contribution| ToolRegistry
+  PROC -->|Loaded by Agents| SES
+  SES -->|Loaded by TimelineTree| BR
 ```
 
-#### 新插件接入关系
+#### New plugin integration relations
 
-箭头表示“使用”或“接入”，标注对应第 3 节的接入方式。拆分插件按插件整体画出，各部分见下表。
+Arrows mean "uses" or "integrates with", labeled with the integration method from section 3. Split plugins are drawn as a whole; their parts are listed in the table below.
 
 ```mermaid
 flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef changed stroke:#e8590c,stroke-width:3px
 
-  subgraph N["新插件"]
+  subgraph N["New plugins"]
     Questions["Questions"]:::new
     Goal["Goal"]:::new
     ShellInput["ShellInput"]:::new
@@ -248,7 +248,7 @@ flowchart LR
     Management["Management"]:::new
   end
 
-  subgraph E["现有插件"]
+  subgraph E["Existing plugins"]
     ToolRegistry["ToolRegistry"]
     ToolExecutor["ToolExecutor"]
     Approval["Approval"]
@@ -264,554 +264,554 @@ flowchart LR
     SkillsCatalog["SkillsCatalog"]
     Mcp["Mcp"]
     Provider["Provider"]
-    Aimux["Aimux（ModelHost）"]
-    SessionBroadcast["Session 广播"]
+    Aimux["Aimux (ModelHost)"]
+    SessionBroadcast["Session broadcast"]
     Transport["Transport"]:::changed
     Rpc["Rpc"]:::changed
   end
 
-  Questions -->|A Session 级工具贡献| ToolRegistry
-  Goal & Web & Workflow & Scheduler & Notifications -->|A 进程级工具贡献，由 ToolRegistry 直接注入| ToolRegistry
-  Questions -->|按序号接受回答后完成工具调用| ToolExecutor
-  Goal & ShellInput & Hooks -->|B 写入输入| InputQueue
-  ShellInput & Hooks & ExternalAgent -->|启动进程与隔离| HostPlatform
-  Approval -->|注入进程级准入服务| Hooks
-  Web & Notifications & Scheduler -.->|新风险类别| Permission
-  Workflow -->|阶段 Session 与回报| Agents
-  Workflow -->|阶段 member| Collaboration
-  Collaboration -->|外部 Agent 作为成员| Agents
-  ExternalAgent -->|外部 Agent 连接与目录| Provider
-  Aimux -->|按连接类型分派| ExternalAgent
-  SessionTitle -->|标题元数据| SessionStore
-  SessionTitle -->|辅助模型| Provider
-  Modality -->|非对话模型| Provider
-  Scheduler -->|新建或复用 Session| Agents
+  Questions -->|A Session-scoped tool contribution| ToolRegistry
+  Goal & Web & Workflow & Scheduler & Notifications -->|A Process-level tool contribution, injected directly by ToolRegistry| ToolRegistry
+  Questions -->|Completes the tool call after accepting an answer by sequence number| ToolExecutor
+  Goal & ShellInput & Hooks -->|B Write input| InputQueue
+  ShellInput & Hooks & ExternalAgent -->|Process launch and isolation| HostPlatform
+  Approval -->|Injects process-level admission service| Hooks
+  Web & Notifications & Scheduler -.->|New risk categories| Permission
+  Workflow -->|Stage Sessions and reports| Agents
+  Workflow -->|Stage members| Collaboration
+  Collaboration -->|External Agents as members| Agents
+  ExternalAgent -->|External Agent connections and directory| Provider
+  Aimux -->|Dispatch by connection type| ExternalAgent
+  SessionTitle -->|Title metadata| SessionStore
+  SessionTitle -->|Auxiliary model| Provider
+  Modality -->|Non-conversational models| Provider
+  Scheduler -->|Create or reuse Session| Agents
   Attachments --> FileStorage
-  Hooks & Scheduler & Web & Notifications & Workflow & ExternalAgent -->|配置来源| Settings
-  PluginManager -->|来源与 loader 行| Settings
+  Hooks & Scheduler & Web & Notifications & Workflow & ExternalAgent -->|Configuration sources| Settings
+  PluginManager -->|Sources and loader rows| Settings
   PluginManager --> Loader
-  PluginManager -->|插件内容| SkillsCatalog
-  PluginManager -->|插件内容| Mcp
-  PluginManager -->|插件内容| Hooks
-  Notifications & SessionTitle & Hooks & Goal -->|实时订阅| SessionBroadcast
-  RemoteGateway -->|认证连接| Transport
+  PluginManager -->|Plugin content| SkillsCatalog
+  PluginManager -->|Plugin content| Mcp
+  PluginManager -->|Plugin content| Hooks
+  Notifications & SessionTitle & Hooks & Goal -->|Live subscription| SessionBroadcast
+  RemoteGateway -->|Authenticated connections| Transport
   RemoteGateway --> Rpc
-  AcpGateway -->|本地 RPC| Rpc
-  ShellInput & Hooks & Scheduler & Workflow & ExternalAgent & PluginManager & RemoteGateway -->|贡献管理方法| Management
-  Management -->|挂载到本机入口| Rpc
+  AcpGateway -->|Local RPC| Rpc
+  ShellInput & Hooks & Scheduler & Workflow & ExternalAgent & PluginManager & RemoteGateway -->|Contribute management methods| Management
+  Management -->|Mounted on local entry| Rpc
 ```
 
-#### 新插件位置
+#### New plugin placement
 
-| 新插件 | 进程部分 | Session 部分 | 分支部分 | 挂接的现有插件 |
+| New plugin | Process part | Session part | Branch part | Existing plugins it attaches to |
 | --- | --- | --- | --- | --- |
-| Questions | — | `ask_user` 工具 | 待答问题与回答事实 | ToolRegistry、ToolExecutor、TreeCommands |
-| Goal | `goal_update` 工具、`session.goal.*` 方法与继续 | — | — | ToolRegistry、Session 广播、InputQueue |
-| ShellInput | RPC 边界执行命令 | — | — | HostPlatform（Session 绑定）、InputQueue、Management |
-| Attachments | 提交边界转换与文本附件 | — | — | FileStorage |
-| Web | 搜索与抓取；`web_search`、`web_fetch` 工具 | — | — | Settings、ToolRegistry、Permission |
-| SessionTitle | 订阅与标题生成 | — | — | Session 广播、Provider、SessionStore |
-| Hooks | 目录、批准与全部时机的执行 | — | — | Settings、Approval、Session 广播、HostPlatform、InputQueue |
-| Scheduler | 作业与触发；`schedule` 工具 | — | — | Settings、Agents、ToolRegistry、Management |
-| Workflow | 定义、运行与阶段推进；`workflow` 工具 | — | — | Settings、ToolRegistry、Agents、Collaboration、Management |
-| ExternalAgent | 外部 Agent 目录、连接与桥接 | — | — | Provider、Aimux、Agents、Collaboration、HostPlatform |
-| Notifications | 订阅与发送；`notify` 工具 | — | — | Settings、Session 广播、ToolRegistry |
-| PluginManager | 插件市场与安装 | — | — | Settings（loader 可编辑层）、rutis-loader、SkillsCatalog、Mcp、Hooks |
-| RemoteGateway | 远程访问 | — | — | Transport、Rpc |
-| Modality | 全部多模态类别的任务与实时连接 | — | — | Provider、HostPlatform（OCR） |
-| AcpGateway | CLI 进程 | — | — | Rpc（本地 RPC） |
-| Management | 管理方法的汇集与挂载 | — | — | Rpc、各插件的管理贡献 |
+| Questions | — | `ask_user` tool | Pending questions and answer facts | ToolRegistry, ToolExecutor, TreeCommands |
+| Goal | `goal_update` tool, `session.goal.*` methods and continuation | — | — | ToolRegistry, Session broadcast, InputQueue |
+| ShellInput | Command execution at the RPC boundary | — | — | HostPlatform (Session-bound), InputQueue, Management |
+| Attachments | Submission-boundary transformation and text attachments | — | — | FileStorage |
+| Web | Search and fetch; `web_search`, `web_fetch` tools | — | — | Settings, ToolRegistry, Permission |
+| SessionTitle | Subscription and title generation | — | — | Session broadcast, Provider, SessionStore |
+| Hooks | Directory, approval and execution at every timing point | — | — | Settings, Approval, Session broadcast, HostPlatform, InputQueue |
+| Scheduler | Jobs and triggers; `schedule` tool | — | — | Settings, Agents, ToolRegistry, Management |
+| Workflow | Definitions, runs and stage advancement; `workflow` tool | — | — | Settings, ToolRegistry, Agents, Collaboration, Management |
+| ExternalAgent | External Agent directory, connections and bridging | — | — | Provider, Aimux, Agents, Collaboration, HostPlatform |
+| Notifications | Subscription and delivery; `notify` tool | — | — | Settings, Session broadcast, ToolRegistry |
+| PluginManager | Plugin marketplace and installation | — | — | Settings (loader editable layer), rutis-loader, SkillsCatalog, Mcp, Hooks |
+| RemoteGateway | Remote access | — | — | Transport, Rpc |
+| Modality | Tasks and realtime connections for all multimodal categories | — | — | Provider, HostPlatform (OCR) |
+| AcpGateway | CLI process | — | — | Rpc (local RPC) |
+| Management | Collection and mounting of management methods | — | — | Rpc, each plugin's management contributions |
 
-## 4. 功能归属
+## 4. Feature ownership
 
-“现有”表示由现有插件职责覆盖；“扩展”表示属于现有插件职责但现有设计未写到，见第 7 节；“新”表示第 5 节的新插件；“CLI”表示只在 CLI 层实现，见第 8 节；“范围外”与“不做”见第 1 节。可用性（构建、平台、运行时资源、适配器）不影响归属。
+"Existing" means covered by existing plugin responsibilities; "Extension" means it belongs to existing plugin responsibilities but the existing design does not cover it, see section 7; "New" means a new plugin in section 5; "CLI" means implemented only in the CLI layer, see section 8; "Out of scope" and "Not planned" see section 1. Availability (build, platform, runtime resources, adapters) does not affect ownership.
 
-### Provider 与模型
+### Providers and models
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| OAuth / API-key Provider、Provider 管理、`/connect`、`/models` | 现有：Provider、ManagedProviders、各 OAuth、Aimux |
-| `/effort`、`/fast` | 扩展：Prompt、ModelProvider |
-| 子代理模型、辅助模型 | 扩展：Provider（按用途选择模型） |
+| OAuth / API-key Providers, Provider management, `/connect`, `/models` | Existing: Provider, ManagedProviders, the OAuth plugins, Aimux |
+| `/effort`, `/fast` | Extension: Prompt, ModelProvider |
+| Sub-agent models, auxiliary models | Extension: Provider (model selection by purpose) |
 
-### Session 管理
+### Session management
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| `/new`、`/resume`、Session 列表、`/history` | 现有：Agents、SessionStore |
-| `/timeline` | CLI（读取历史） |
-| Session 标题 | 新：SessionTitle |
-| `/export` | CLI（读取历史并格式化为 Markdown 或 JSON） |
-| Session 分叉、删除与清理 | 扩展：SessionStore、Agents |
-| 请求快照导出 | 扩展：Trace |
-| 文件回滚、文件与对话回滚 | 范围外（仅全屏 TUI） |
+| `/new`, `/resume`, Session list, `/history` | Existing: Agents, SessionStore |
+| `/timeline` | CLI (reads history) |
+| Session titles | New: SessionTitle |
+| `/export` | CLI (reads history and formats it as Markdown or JSON) |
+| Session fork, deletion and cleanup | Extension: SessionStore, Agents |
+| Request snapshot export | Extension: Trace |
+| File rollback, file and conversation rollback | Out of scope (full-screen TUI only) |
 
-### 会话内交互
+### In-session interaction
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| 发送、排队、自动发送、Steer、中断 | 现有：InputQueue、Loop |
-| `Ctrl+S`、`/queue`、取回编辑、删除排队消息 | 扩展：InputQueue |
-| 多行编辑、输入历史、命令补全、Skill 与文件引用、粘贴、剪贴板、复制、打开链接 | CLI |
-| 图片附件、大段粘贴转文本附件、混合附件 | 新：Attachments |
-| `!command`、`!!command` | 新：ShellInput |
-| 流式输出、运行状态、文件变更反馈 | 现有事件，CLI 渲染 |
-| 工具审批 | 现有：Approval、Permission |
-| 用户提问 | 新：Questions |
-| Todo 状态 | 不做 |
-| 后台任务查看与停止 | 各所有者提供（BackgroundExec、Collaboration、Workflow），CLI 汇总 |
+| Send, queue, auto-send, Steer, interrupt | Existing: InputQueue, Loop |
+| `Ctrl+S`, `/queue`, recall for editing, delete queued messages | Extension: InputQueue |
+| Multi-line editing, input history, command completion, Skill and file references, paste, clipboard, copy, open links | CLI |
+| Image attachments, large pastes converted to text attachments, mixed attachments | New: Attachments |
+| `!command`, `!!command` | New: ShellInput |
+| Streaming output, run status, file change feedback | Existing events, rendered by CLI |
+| Tool approval | Existing: Approval, Permission |
+| User questions | New: Questions |
+| Todo status | Not planned |
+| Viewing and stopping background tasks | Provided by each owner (BackgroundExec, Collaboration, Workflow), aggregated by CLI |
 
-### 系统管理
+### System management
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| `/exit`、`/theme`、`/keys`、升级 | CLI |
-| `/settings` | 各项归属对应插件；CLI 汇总入口 |
-| `/usage` | 扩展：ContextPreparation（上下文用量）、ManagedProviders（套餐用量） |
-| `/language` | CLI（界面）；扩展：PromptSources（提示词语言） |
-| `/debug`、调试日志 | 现有：Trace 诊断通道 |
-| `/stats`、鼠标设置 | 范围外（仅全屏 TUI） |
+| `/exit`, `/theme`, `/keys`, upgrade | CLI |
+| `/settings` | Each item belongs to its plugin; CLI provides the aggregate entry |
+| `/usage` | Extension: ContextPreparation (context usage), ManagedProviders (plan usage) |
+| `/language` | CLI (interface); Extension: PromptSources (prompt language) |
+| `/debug`, debug logs | Existing: Trace diagnostics channel |
+| `/stats`, mouse settings | Out of scope (full-screen TUI only) |
 
-### Agent 行为
+### Agent behavior
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| `/agent` | 扩展：Agents、Prompt |
-| `/goal`、目标继续 | 新：Goal |
-| `/approvals`、命令规则 | 扩展：Permission、Settings |
-| 权限策略三档 | 现有：Permission |
-| 沙箱 | 扩展：HostPlatform |
-| `/compact`、自动压缩 | 扩展：ContextPreparation（手动入口；生产用压缩宿主尚未提供） |
-| `/scheduled`、定时任务 | 新：Scheduler |
+| `/agent` | Extension: Agents, Prompt |
+| `/goal`, goal continuation | New: Goal |
+| `/approvals`, command rules | Extension: Permission, Settings |
+| Three permission policy levels | Existing: Permission |
+| Sandbox | Extension: HostPlatform |
+| `/compact`, automatic compaction | Extension: ContextPreparation (manual entry; the production compaction host is not yet provided) |
+| `/scheduled`, scheduled tasks | New: Scheduler |
 
-### 扩展
+### Extensions
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| `/plugins`、`/reload-plugins`、插件市场、插件安装 | 新：PluginManager |
-| `/skills` 查看与启用、`/reload-skills`、Skill 来源 | 现有：SkillsCatalog、Skills；安装与移除归 PluginManager |
-| `plan` Skill | 不做 |
-| `AGENTS.md` | 现有：PromptSources |
-| `/mcp`、MCP 连接 | 现有：Mcp、Settings；HTTP/SSE 的 OAuth 授权为扩展 |
-| `/workflow`、`/workflow:save`、工作流管理 | 新：Workflow |
-| `/external-agents`、外部 Agent | 新：ExternalAgent，经 Collaboration 委派 |
-| 并行子代理 | 现有：Collaboration；模型选择为 Provider 扩展 |
-| Hooks | 新：Hooks |
-| 网页搜索与抓取 | 新：Web |
-| Slack 与飞书 | 新：Notifications |
+| `/plugins`, `/reload-plugins`, plugin marketplace, plugin installation | New: PluginManager |
+| `/skills` viewing and enabling, `/reload-skills`, Skill sources | Existing: SkillsCatalog, Skills; installation and removal belong to PluginManager |
+| `plan` Skill | Not planned |
+| `AGENTS.md` | Existing: PromptSources |
+| `/mcp`, MCP connections | Existing: Mcp, Settings; OAuth authorization for HTTP/SSE is an extension |
+| `/workflow`, `/workflow:save`, workflow management | New: Workflow |
+| `/external-agents`, external Agents | New: ExternalAgent, delegated through Collaboration |
+| Parallel sub-agents | Existing: Collaboration; model selection is a Provider extension |
+| Hooks | New: Hooks |
+| Web search and fetch | New: Web |
+| Slack and Feishu | New: Notifications |
 
-### 工作区工具
+### Workspace tools
 
-`read`、`write`、`edit`、`glob`、`grep`、`exec`、`wait` 均由现有 WorkspaceTools、BackgroundExec、Wait 覆盖。
+`read`, `write`, `edit`, `glob`, `grep`, `exec` and `wait` are all covered by the existing WorkspaceTools, BackgroundExec and Wait.
 
-### 远程与外部访问
+### Remote and external access
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| JSON-RPC 常驻服务 | 现有：Transport、Rpc |
-| ACP | 新：AcpGateway |
-| `/web`、Web 访问、`/remote`、远程服务、手机配对、远程 Session | 新：RemoteGateway |
+| JSON-RPC resident service | Existing: Transport, Rpc |
+| ACP | New: AcpGateway |
+| `/web`, Web access, `/remote`, remote service, phone pairing, remote Sessions | New: RemoteGateway |
 | VS Code | CLI |
 
-### CLI 命令
+### CLI commands
 
-子命令体系、`exec --json`、`exec --verify` 属于 CLI；各子命令调用对应插件的 RPC。
+The subcommand system, `exec --json` and `exec --verify` belong to the CLI; each subcommand calls the RPC of the corresponding plugin.
 
-### 多模态
+### Multimodality
 
-| 功能 | 归属 |
+| Feature | Ownership |
 | --- | --- |
-| `image generate`、`image edit`、`image enhance`、`modality`、`modality task` | 新：Modality |
-| `image read` | 现有：视觉模型经 `read` 读取图片 |
-| `video`、`speech`、`music`、`audio`、`asset`、`motion`、`realtime` | 新：Modality（服务商执行；当前只随特定 Desktop 构建提供） |
-| `ocr` | 新：Modality（宿主执行；需要 OCR 运行时组件） |
+| `image generate`, `image edit`, `image enhance`, `modality`, `modality task` | New: Modality |
+| `image read` | Existing: a vision model reads images through `read` |
+| `video`, `speech`, `music`, `audio`, `asset`, `motion`, `realtime` | New: Modality (provider-executed; currently shipped only with specific Desktop builds) |
+| `ocr` | New: Modality (host-executed; requires the OCR runtime component) |
 
-## 5. 新插件
+## 5. New plugins
 
-每个插件给出作用域、职责、接入方式、事件、对外接口和与现有插件的关系。事件与接口名为设计建议，以各插件需求文档为准。
+Each plugin lists its scope, responsibility, integration method, events, external interfaces and relations to existing plugins. Event and interface names are design suggestions; each plugin's requirement document is authoritative.
 
 ### 5.1 Questions
 
-工具调用“有调用、无结果”不等于“正在等回答”：准入先于处理器，ToolExecutor 在整批调用结束后才发布结果，已回答的问题在此期间仍没有结果。因此待答与已回答必须有自己的事实，流程沿用 Approval。
+A tool call that "has a call but no result" does not mean "waiting for an answer": admission precedes the handler, and ToolExecutor publishes results only after the whole batch of calls finishes, so an answered question still has no result during that time. Pending and answered therefore need their own facts, and the flow follows Approval.
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | Session（`ask_user` 工具，按调用解析调用方分支的服务，先例为 Wait）+ 分支（待答问题与回答事实，先例为 Approval） |
-| 职责 | 模型向用户提问并等待回答：单选、多选、多问题、自定义回答 |
-| 接入 | A：工具处理器在准入通过后请求分支服务登记问题并等待；分支写 `question/asked`；回答经 Session 边界写入 `question/answered`；分支按序号消费回答后完成处理器，回答作为工具结果返回 |
-| 事件 | `question/asked {call_id, questions}`：问题进入待答，由分支写入；`question/answered {call_id, answers}`：回答事实，经边界写入，由分支按序号消费；`question/cancelled {call_id, reason}`：待答问题因中断、分支关闭或重载结束，由分支写入 |
-| 接口 | Session 方法 `session.question.respond {call_id, answers}`：调用分支服务，边界校验后写入 `question/answered` |
-| 关系 | 待答问题为已 `asked` 且尚无 `answered` 或 `cancelled` 的问题。回答与中断以序号判定：`question/answered` 序号在覆盖该 turn 的 `stop/interrupt` 之前才被接受，否则问题以 `question/cancelled` 结束。重载时未结束的问题以 `question/cancelled` 结算。非交互 Session（如 `exec`、定时作业创建的 Session）在创建配置中不贡献 `ask_user` |
+| Scope | Session (`ask_user` tool, which resolves the calling branch's service per call, following Wait) + branch (pending questions and answer facts, following Approval) |
+| Responsibility | The model asks the user a question and waits for the answer: single choice, multiple choice, multiple questions, custom answer |
+| Integration | A: after admission passes, the tool handler asks the branch service to register the question and waits; the branch writes `question/asked`; the answer is written as `question/answered` through the Session boundary; the branch consumes the answer by sequence number and then completes the handler, and the answer is returned as the tool result |
+| Events | `question/asked {call_id, questions}`: the question becomes pending, written by the branch; `question/answered {call_id, answers}`: the answer fact, written through the boundary and consumed by the branch by sequence number; `question/cancelled {call_id, reason}`: a pending question ends because of interrupt, branch close or reload, written by the branch |
+| Interfaces | Session method `session.question.respond {call_id, answers}`: calls the branch service, which writes `question/answered` after boundary validation |
+| Relations | A pending question is one that is `asked` and has no `answered` or `cancelled` yet. Answer and interrupt are decided by sequence number: `question/answered` is accepted only if its sequence number precedes the `stop/interrupt` covering that turn; otherwise the question ends with `question/cancelled`. On reload, unfinished questions are settled with `question/cancelled`. Non-interactive Sessions (such as `exec` and Sessions created by scheduled jobs) do not contribute `ask_user` in their creation configuration |
 
 ### 5.2 Goal
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 设置、编辑、暂停、恢复、清除目标；目标未完成时自动继续；记录完成或受阻 |
-| 接入 | B：目标以带 key 的 raw 输入块表达，设置、编辑、暂停、恢复由 `session.goal.*` 在边界经 Session 输入写入同 key 的新块（内容含目标与状态），清除以 `retire` 结束该 key，目标因此持续留在上下文中。A：以进程级工具贡献提供 `goal_update`，报告完成或受阻；处理器在返回工具结果前，经 Session 输入写入同 key 的终态块（已完成或受阻，含说明），使压缩后重放的目标块不再是“进行中”。继续：经进程级实时订阅 Session 广播得知目标所在分支的 `turn/end`，再经 Session 的公开读取接口读取截至该序号的固定前缀做判断，需要继续时经 Session 输入写入 Queue 模式的继续输入，raw 块标明来自目标 |
-| 事件 | 无。目标与其状态（含完成与受阻）由该 key 的输入块推出 |
-| 接口 | Session 方法 `session.goal.set/edit/pause/resume/clear` |
-| 关系 | 是否继续只依据读取到的固定前缀中的目标块、`input/*` 与 `stop/interrupt`，不读 InputQueue 或 Loop 的状态；读取固定前缀即消费这段事实，订阅本身不需要保证顺序。`stop/interrupt` 使目标进入暂停，并写入同 key 的“已暂停”块；连续继续次数由带来源标记的继续输入计数，达到上限即暂停。进程重启期间错过的 `turn/end` 不补，目标保持原状态，由用户恢复或下一次 `turn/end` 时继续。中断与继续输入并发时，继续输入可能排在中断之后并开始一个 turn；此 turn 中模型从目标块看到已暂停并结束，最多多出一个 turn |
+| Scope | Process |
+| Responsibility | Set, edit, pause, resume and clear the goal; continue automatically while the goal is unfinished; record completion or blocking |
+| Integration | B: the goal is expressed as a keyed raw input block; set, edit, pause and resume are handled by `session.goal.*`, which at the boundary writes a new block with the same key through Session input (content includes the goal and its status), and clear ends the key with `retire`, so the goal stays in context. A: provides `goal_update` through a process-level tool contribution to report completion or blocking; before returning the tool result, the handler writes a terminal block with the same key through Session input (completed or blocked, with an explanation), so that the goal block replayed after compaction is no longer "in progress". Continuation: learns of `turn/end` on the goal's branch through a process-level live subscription to the Session broadcast, then reads the fixed prefix up to that sequence number through the Session's public read interface to decide; when continuation is needed it writes a Queue-mode continuation input through Session input, with the raw block marking it as coming from the goal |
+| Events | None. The goal and its status (including completed and blocked) are derived from the input blocks of that key |
+| Interfaces | Session methods `session.goal.set/edit/pause/resume/clear` |
+| Relations | Whether to continue depends only on the goal block, `input/*` and `stop/interrupt` in the fixed prefix that was read, not on InputQueue or Loop state; reading the fixed prefix consumes those facts, so the subscription itself does not need ordering guarantees. `stop/interrupt` pauses the goal and writes a "paused" block with the same key; consecutive continuations are counted by continuation inputs carrying the source marker, and reaching the limit pauses the goal. `turn/end` missed while the process restarts is not replayed; the goal keeps its state and continues when the user resumes it or at the next `turn/end`. When interrupt and continuation input race, the continuation input may be ordered after the interrupt and start a turn; in that turn the model sees from the goal block that it is paused and ends, so at most one extra turn occurs |
 
 ### 5.3 ShellInput
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程（RPC 边界） |
-| 职责 | 执行用户在输入框发起的 `!command` 与 `!!command` |
-| 接入 | E：在 RPC 边界执行命令，与 Hooks 的用户提交 Hook 相同；B：`!command` 结束后把命令与有界输出写成 Append 模式输入，在下一次模型请求时进入上下文，不单独开始 turn |
-| 事件 | 无。`!command` 的结果即输入；`!!command` 的输出只返回给发起的客户端并写入诊断通道 |
-| 接口 | 管理方法 `session.shell.run`、`session.shell.stop`，贡献给 Management |
-| 关系 | 在 Session 的资源节点上执行：经 Session 绑定的 HostPlatform 启动进程并套用该节点的隔离配置；用户直接发起，不经 Approval。命令不属于分支的在途工作，不受分支中断影响，由 `session.shell.stop` 停止；daemon 退出时终止 |
+| Scope | Process (RPC boundary) |
+| Responsibility | Execute `!command` and `!!command` entered by the user in the input box |
+| Integration | E: executes the command at the RPC boundary, the same as Hooks' user-submit Hook; B: after `!command` finishes, writes the command and its bounded output as Append-mode input, which enters context on the next model request without starting a turn on its own |
+| Events | None. The result of `!command` is the input; the output of `!!command` is returned only to the originating client and written to the diagnostics channel |
+| Interfaces | Management methods `session.shell.run` and `session.shell.stop`, contributed to Management |
+| Relations | Runs on the Session's resource node: starts the process through the Session-bound HostPlatform and applies that node's isolation configuration; initiated directly by the user, without Approval. The command is not in-flight work of the branch and is not affected by branch interrupt; it is stopped by `session.shell.stop` and terminated when the daemon exits |
 
 ### 5.4 Attachments
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程（提交边界） |
-| 职责 | 在提交边界把附件转为最终内容；保存文本附件 |
-| 接入 | B：图片在提交边界转为 `user` 内容中的图片块（最终内容）；文本附件保存到 Session 资源节点上的附件目录（经 Session 绑定的 FileStorage），输入中以该节点上的文件路径出现，由模型按需 `read` |
-| 事件 | 无 |
-| 接口 | RPC `attachment.put` 保存文本附件并返回路径 |
-| 关系 | 附件与模型的 `read` 位于同一资源节点。分叉时附件文件随 Session 复制，只随 Session 删除，保证历史引用完整。模型不支持图片时在提交边界拒绝。终端创建的临时图片缓存由 CLI 清理 |
+| Scope | Process (submission boundary) |
+| Responsibility | Convert attachments into final content at the submission boundary; save text attachments |
+| Integration | B: images are converted at the submission boundary into image blocks in the `user` content (final content); text attachments are saved to the attachment directory on the Session's resource node (through the Session-bound FileStorage), appear in the input as file paths on that node, and are `read` by the model as needed |
+| Events | None |
+| Interfaces | RPC `attachment.put` saves a text attachment and returns its path |
+| Relations | Attachments and the model's `read` are on the same resource node. On fork, attachment files are copied with the Session and deleted only with the Session, keeping historical references intact. When the model does not support images, they are rejected at the submission boundary. Temporary image caches created by the terminal are cleaned up by the CLI |
 
 ### 5.5 Web
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 网页搜索与网页正文抓取 |
-| 接入 | A：以进程级工具贡献提供 `web_search`、`web_fetch`；抓取结果转为有界正文 |
-| 事件 | 无；结果即工具结果 |
-| 接口 | 搜索服务与凭据引用经 Settings 配置 |
-| 关系 | 工具风险类别为“网络”。可作为 [#4](https://github.com/arcships/dim/issues/4) 跨语言插件的首个迁移对象 |
+| Scope | Process |
+| Responsibility | Web search and web page body fetching |
+| Integration | A: provides `web_search` and `web_fetch` through a process-level tool contribution; fetch results are converted into bounded body text |
+| Events | None; the result is the tool result |
+| Interfaces | The search service and credential references are configured through Settings |
+| Relations | The tool risk category is "network". Can be the first migration target for [#4](https://github.com/arcships/dim/issues/4) cross-language plugins |
 
 ### 5.6 SessionTitle
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 自动生成 Session 标题；支持手动改名 |
-| 接入 | E：订阅 Session 广播，主分支第一个正常结束的 turn 之后，用 Provider 按“辅助”用途选出的模型生成标题，写入 SessionStore 元数据 |
-| 事件 | 无。标题是 Session 目录元数据，带来源字段 `auto` 或 `manual` |
-| 接口 | RPC `session.rename` 直接写元数据，Session 未装载时也可改名；Session 列表读取元数据 |
-| 关系 | 元数据只有一个写入方。自动标题只在来源不是 `manual` 时写入，以修订检查保证手动标题不被覆盖。生成失败不影响 Session；已有标题的 Session 不再生成。依赖进程级订阅 Session 广播，见第 13 节 |
+| Scope | Process |
+| Responsibility | Generate Session titles automatically; support manual renaming |
+| Integration | E: subscribes to the Session broadcast; after the first turn on the main branch that ends normally, generates a title with the model Provider selects for the "auxiliary" purpose and writes it to SessionStore metadata |
+| Events | None. The title is Session directory metadata, with a source field of `auto` or `manual` |
+| Interfaces | RPC `session.rename` writes the metadata directly and can rename a Session that is not loaded; the Session list reads the metadata |
+| Relations | The metadata has a single writer. An automatic title is written only when the source is not `manual`, and a revision check ensures a manual title is not overwritten. Generation failure does not affect the Session; a Session that already has a title is not regenerated. Depends on process-level subscription to the Session broadcast, see section 13 |
 
 ### 5.7 Hooks
 
-Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机制的适配层：同步 before、准入扩展点、Session 广播订阅、Session 输入与插件体系。进程内插件需要 Hook 能力时直接使用 before 或订阅，不经本插件。
+Hooks is not a new extension mechanism but an adapter layer that maps command Hook configuration onto existing mechanisms: synchronous before, admission extension points, Session broadcast subscription, Session input and the plugin system. In-process plugins that need Hook capabilities use before or subscription directly, without this plugin.
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 在生命周期节点执行用户、项目、插件来源的命令 Hook |
-| 接入 | 命令 Hook 会启动外部进程，不能放进同步 before（before 在提交锁内运行，不执行 I/O）。各时机的映射：Session 开始与用户提交在 RPC 边界执行，用户提交 Hook 可以拒绝提交或以 raw 块附加内容；工具调用前的 Hook 作为进程级准入服务，由 Approval 在 `Deps` 中注入并异步调用，由业务所有者管理（[单树装配](../architecture/rust-agent/single-tree.md) 同步 before）；工具调用后、turn 结束与通知 Hook 经进程级订阅 Session 广播后异步执行；需要注入的输出经 Session 输入写入。命令一律在 Session 的资源节点上经 Session 绑定的 HostPlatform 执行 |
-| 事件 | 无。拦截决定记录在所有者的事实中（输入是否写入、工具结果为拒绝）；注入的输出本身是输入；执行记录走诊断通道 |
-| 接口 | 管理方法 `hooks.catalog`、`hooks.approve`、`hooks.set_enabled`、`hooks.disable_all`，贡献给 Management |
-| 关系 | Session 开始 Hook 只在创建 Session 时执行，恢复与重载不重新执行。观察类 Hook 只由实时广播触发，不补跑。项目与插件来源的 Hook 需要宿主本地批准才能执行，批准绑定节点、工作区与配置指纹。准入服务上的 Hook 在中断时取消，对应调用以取消结算。插件来源依赖 #3 |
+| Scope | Process |
+| Responsibility | Execute command Hooks from user, project and plugin sources at lifecycle points |
+| Integration | Command Hooks start external processes and cannot go into synchronous before (before runs inside the commit lock and performs no I/O). Mapping per timing point: Session start and user submit run at the RPC boundary, and a user-submit Hook can reject the submission or attach content as a raw block; pre-tool-call Hooks act as a process-level admission service, which Approval injects in `Deps` and calls asynchronously, managed by the business owner ([single-tree assembly](../architecture/rust-agent/single-tree.md) synchronous before); post-tool-call, turn-end and notification Hooks run asynchronously after a process-level subscription to the Session broadcast; output that needs injecting is written through Session input. Commands always run on the Session's resource node through the Session-bound HostPlatform |
+| Events | None. Interception decisions are recorded in the owner's facts (whether the input was written, a tool result of denial); injected output is itself input; execution records go through the diagnostics channel |
+| Interfaces | Management methods `hooks.catalog`, `hooks.approve`, `hooks.set_enabled` and `hooks.disable_all`, contributed to Management |
+| Relations | Session-start Hooks run only when a Session is created, not again on resume or reload. Observation Hooks are triggered only by the live broadcast and are not replayed. Hooks from project and plugin sources need host-local approval to run; the approval is bound to the node, workspace and configuration fingerprint. Hooks on the admission service are cancelled on interrupt, and the corresponding call is settled as cancelled. Plugin sources depend on #3 |
 
 ### 5.8 Scheduler
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 定时任务的创建、编辑、暂停、恢复、删除、立即运行与执行历史 |
-| 接入 | E：到点时经 Agents 新建或复用 Session，提交作业提示词，raw 块标明来自定时作业；A：以进程级工具贡献提供 `schedule`，供模型管理作业 |
-| 事件 | 无。作业与执行历史存于进程存储 |
-| 接口 | 管理方法 `schedule.list/save/delete/set_enabled/run_now/history`，贡献给 Management |
-| 关系 | 作业字段：周期、提示词、资源节点与工作目录、模型、新建或复用 Session；作业创建的 Session 为非交互 Session。触发要求 daemon 存活；错过的时间窗跳过，不补跑。工具 `schedule` 的风险类别为“持久配置” |
+| Scope | Process |
+| Responsibility | Create, edit, pause, resume, delete and run scheduled tasks immediately, and keep execution history |
+| Integration | E: when due, creates or reuses a Session through Agents and submits the job prompt, with the raw block marking it as coming from a scheduled job; A: provides `schedule` through a process-level tool contribution so the model can manage jobs |
+| Events | None. Jobs and execution history are stored in process storage |
+| Interfaces | Management methods `schedule.list/save/delete/set_enabled/run_now/history`, contributed to Management |
+| Relations | Job fields: schedule, prompt, resource node and working directory, model, create or reuse Session; Sessions created by jobs are non-interactive Sessions. Triggering requires the daemon to be alive; missed time windows are skipped, not replayed. The risk category of the `schedule` tool is "persistent configuration" |
 
 ### 5.9 Workflow
 
-一次工作流运行跨多个 Agent 与 Session，不属于发起它的分支，归进程级的 Workflow 所有。
+A workflow run spans multiple Agents and Sessions, does not belong to the branch that started it, and is owned by the process-level Workflow.
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 工作流定义的查看与保存；提供参数并启动；推进阶段；查看阶段、日志、状态与结果；停止 |
-| 接入 | E：运行记录、阶段推进与日志存于进程存储；各阶段经 Agents 新建非交互 Session 执行，或作为 Collaboration 的 member（含外部 Agent）执行。A：以进程级工具贡献提供 `workflow`，由模型启动、查询与停止。由工具启动时，工具结果返回 `run_id`；运行结束后经发起 Session 的公开接口以 Steer 输入回报结果 |
-| 事件 | 无。工具结果与回报输入已是发起分支上的事实；运行状态归进程存储 |
-| 接口 | 管理方法 `workflow.list/save/start/status/stop`，贡献给 Management |
-| 关系 | 发起 Session 未装载时经 Agents 恢复后回报；发起方 turn 被中断不停止运行，与 Collaboration 对已送达 request 的规则一致。定义文件经 Settings 的用户与项目来源保存；项目来源的定义需要宿主本地批准才能运行。阶段模型经 Provider 按用途选择 |
+| Scope | Process |
+| Responsibility | View and save workflow definitions; provide parameters and start; advance stages; view stages, logs, status and results; stop |
+| Integration | E: run records, stage advancement and logs are stored in process storage; each stage runs in a new non-interactive Session created through Agents, or as a Collaboration member (including external Agents). A: provides `workflow` through a process-level tool contribution, with which the model starts, queries and stops runs. When started by the tool, the tool result returns `run_id`; after the run ends, the result is reported as Steer input through the starting Session's public interface |
+| Events | None. The tool result and the report input are already facts on the starting branch; run status belongs to process storage |
+| Interfaces | Management methods `workflow.list/save/start/status/stop`, contributed to Management |
+| Relations | When the starting Session is not loaded, it is recovered through Agents before reporting; interrupting the starter's turn does not stop the run, consistent with Collaboration's rule for delivered requests. Definition files are saved through Settings' user and project sources; definitions from the project source need host-local approval to run. Stage models are selected by Provider by purpose |
 
 ### 5.10 ExternalAgent
 
-外部 Agent 不另设运行时，而是作为一种模型连接接入：以外部 Agent 为模型的 Session 照常由 Loop 与 ModelProvider 驱动，模型调用由本插件桥接到外部 Agent。因此外部 Agent 既可以作为 Collaboration 的 member 被委派，也可以直接作为 Session 使用。
+External Agents get no separate runtime; they integrate as a kind of model connection: a Session whose model is an external Agent is driven by Loop and ModelProvider as usual, and this plugin bridges model calls to the external Agent. An external Agent can therefore be delegated to as a Collaboration member, or used directly as a Session.
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 按节点探测已安装的 Claude Code、Codex、Cursor、OpenCode 等；启用、停用与配置；把模型调用桥接到外部 Agent：支持 ACP 的经 ACP 客户端连接，其余以非交互 CLI 调用 |
-| 接入 | E：作为 Provider 目录中的一类连接（每个外部 Agent 一项）；Aimux（ModelHost）按连接类型把请求分派给本插件。Agent profile 选择外部 Agent 为模型时不装配工具，外部 Agent 使用自己的工具 |
-| 事件 | 无。委派沿用 Collaboration 的事实；member Session 内是普通的 turn 与模型输出事件 |
-| 接口 | 管理方法 `external_agents.list/set_enabled/configure`，贡献给 Management |
+| Scope | Process |
+| Responsibility | Detect installed Claude Code, Codex, Cursor, OpenCode and others per node; enable, disable and configure them; bridge model calls to the external Agent: those that support ACP connect through an ACP client, the rest are invoked as non-interactive CLIs |
+| Integration | E: acts as a kind of connection in the Provider directory (one entry per external Agent); Aimux (ModelHost) dispatches requests to this plugin by connection type. When an Agent profile selects an external Agent as its model, no tools are assembled; the external Agent uses its own tools |
+| Events | None. Delegation reuses Collaboration's facts; inside the member Session there are ordinary turn and model output events |
+| Interfaces | Management methods `external_agents.list/set_enabled/configure`, contributed to Management |
 
-| 合同 | 内容 |
+| Contract | Content |
 | --- | --- |
-| 分支隔离 | 外部会话身份与输入投递游标按“Session + 分支”保存在进程存储中，不在分支之间共享 |
-| 历史初始化 | 分支第一次调用外部 Agent 时，新建外部会话，把该分支截点之前的可见历史（用户输入、助手回复、工具结果）渲染为文本作为首条内容；子分支从自己继承的历史初始化，不续接、不修改父分支的外部会话。会话中途切换到外部 Agent 时同样按此初始化 |
-| 后续调用 | 只投递游标之后新消费的输入，随后推进游标 |
-| 转发字段 | 转发：用户内容（文本，模型支持时含图片）与 raw 输入块的文本。不转发：dim 的系统提示词、工具声明与采样参数；推理强度等参数仅在外部 Agent 支持时映射 |
-| 重试 | 沿用 ModelProvider 现有的失败策略：外部 Agent 可能在返回任何输出前已执行工具，无法确定是否已被接受时不重试；确定发生在接受之前的失败（启动失败、连接被拒）可以重试 |
-| 节点 | 外部 Agent 目录按节点区分，连接身份包含节点；桥接以 `peer:<节点>/<插件>` 行在外部 Agent 所在节点运行，经该节点的 HostPlatform 启动进程并套用隔离配置 |
-| 中断 | 中断取消外部调用；外部 Agent 自身的权限请求如何处理见第 13 节 |
+| Branch isolation | External conversation identity and the input delivery cursor are kept in process storage per "Session + branch" and are not shared between branches |
+| History initialization | The first time a branch calls the external Agent, a new external conversation is created, and the visible history before the branch's cut point (user input, assistant replies, tool results) is rendered as text as the first content; a child branch initializes from its own inherited history and does not continue or modify the parent branch's external conversation. Switching to an external Agent in the middle of a conversation initializes the same way |
+| Subsequent calls | Only input newly consumed after the cursor is delivered, then the cursor advances |
+| Forwarded fields | Forwarded: user content (text, plus images when the model supports them) and the text of raw input blocks. Not forwarded: dim's system prompt, tool declarations and sampling parameters; parameters such as reasoning effort are mapped only when the external Agent supports them |
+| Retry | Follows ModelProvider's existing failure policy: the external Agent may have executed tools before returning any output, so there is no retry when it cannot be determined whether the request was accepted; failures known to occur before acceptance (launch failure, connection refused) can be retried |
+| Node | The external Agent directory is per node, and connection identity includes the node; the bridge runs on the node where the external Agent lives as a `peer:<node>/<plugin>` row, starting the process through that node's HostPlatform and applying isolation configuration |
+| Interrupt | Interrupt cancels the external call; how the external Agent's own permission requests are handled is in section 13 |
 
 ### 5.11 Notifications
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 任务完成、待审批、待回答、定时作业结束时发送通知；发送 Slack 与飞书消息 |
-| 接入 | E：订阅 Session 广播；A：以进程级工具贡献提供 `notify`，供模型主动发送 |
-| 事件 | 无 Timeline 事件；发送记录走诊断通道 |
-| 接口 | 渠道与凭据引用经 Settings 配置 |
-| 关系 | 工具 `notify` 的风险类别为“外发消息”。终端内提醒由 CLI 完成 |
+| Scope | Process |
+| Responsibility | Send notifications when a task completes, approval is pending, an answer is pending, or a scheduled job ends; send Slack and Feishu messages |
+| Integration | E: subscribes to the Session broadcast; A: provides `notify` through a process-level tool contribution so the model can send proactively |
+| Events | No Timeline events; delivery records go through the diagnostics channel |
+| Interfaces | Channels and credential references are configured through Settings |
+| Relations | The risk category of the `notify` tool is "outbound message". In-terminal reminders are handled by the CLI |
 
 ### 5.12 PluginManager
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 插件市场（Git 来源）的增删与更新；搜索、查看、安装（市场、本地路径、Git URL）、启用、停用、重载、移除插件 |
-| 接入 | E：插件清单声明其内容：Skill、Hook、MCP 配置、工作流、能力插件；安装、启停与配置经类型化的 Settings 操作写入 loader 可编辑层（#3），管理操作对应 loader 操作；安装指定目标节点，对端节点上的插件以 `peer:<节点>/<插件>` 行加载 |
-| 事件 | 无 Timeline 事件；状态来自 loader 条目 |
-| 接口 | 管理方法 `plugin.marketplace.*`、`plugin.install/remove/set_enabled/reload/list`，贡献给 Management |
-| 关系 | 依赖 #3（loader 管理）；Rust 以外语言的能力插件依赖 #4。插件内容按来源接入 SkillsCatalog、Hooks、Mcp、Workflow。插件内的可执行内容需要宿主本地批准 |
+| Scope | Process |
+| Responsibility | Add, remove and update plugin marketplaces (Git sources); search, view, install (marketplace, local path, Git URL), enable, disable, reload and remove plugins |
+| Integration | E: the plugin manifest declares its content: Skills, Hooks, MCP configuration, workflows, capability plugins; install, enable/disable and configuration are written to the loader editable layer through typed Settings operations (#3), and management operations map to loader operations; installation specifies a target node, and plugins on a peer node are loaded as `peer:<node>/<plugin>` rows |
+| Events | No Timeline events; state comes from loader entries |
+| Interfaces | Management methods `plugin.marketplace.*` and `plugin.install/remove/set_enabled/reload/list`, contributed to Management |
+| Relations | Depends on #3 (loader management); capability plugins in languages other than Rust depend on #4. Plugin content is integrated by source into SkillsCatalog, Hooks, Mcp and Workflow. Executable content in plugins needs host-local approval |
 
 ### 5.13 RemoteGateway
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | Web 工作区与远程访问：启动与停止服务、认证、访问令牌轮换、手机配对（二维码或配对码）、设备授权与撤销、远程访问 Session |
-| 接入 | E：建在 Transport 的 WebSocket 之上，增加认证、配对与设备授权；提供 Web 工作区静态资源 |
-| 事件 | 无 Timeline 事件；设备与令牌存于进程存储 |
-| 接口 | 管理方法 `remote.start/stop/status/pair/devices/revoke/rotate_token`，贡献给 Management |
-| 关系 | 默认不挂载 Management，远程客户端只能使用 Session 方法。认证、断线与 TLS 部署的取舍与 [#5](https://github.com/arcships/dim/issues/5) 的待定问题一并决定 |
+| Scope | Process |
+| Responsibility | Web workspace and remote access: start and stop the service, authentication, access token rotation, phone pairing (QR code or pairing code), device authorization and revocation, remote access to Sessions |
+| Integration | E: built on top of Transport's WebSocket, adding authentication, pairing and device authorization; serves the Web workspace static assets |
+| Events | No Timeline events; devices and tokens are stored in process storage |
+| Interfaces | Management methods `remote.start/stop/status/pair/devices/revoke/rotate_token`, contributed to Management |
+| Relations | Management is not mounted by default, so remote clients can use only Session methods. Trade-offs for authentication, disconnection and TLS deployment are decided together with the open questions in [#5](https://github.com/arcships/dim/issues/5) |
 
 ### 5.14 Modality
 
-目标设计覆盖全部类别；构建、平台、运行时资源与适配器的可用性单独报告。声明了能力或命令不代表已有可执行的适配器。
+The target design covers all categories; availability by build, platform, runtime resources and adapters is reported separately. Declaring a capability or command does not mean an executable adapter exists.
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 多模态能力的统一入口：能力查询、默认模型或执行器选择、任务提交与结果、任务状态查询、等待与取消 |
-| 接入 | E：调用服务商的类别经 Provider 调用非对话类模型；在宿主执行的类别（OCR）经 Session 资源节点或指定节点上的宿主运行时组件执行 |
-| 事件 | 无 Timeline 事件；任务与结果存于进程存储 |
-| 接口 | 服务与管理方法 `modality.capabilities`（含各类别的可用性）、`modality.task.submit/status/wait/cancel`；CLI 各类别子命令 |
-| 关系 | 默认模型或执行器经 Provider 按用途（类别）选择。结果为文件或结构化数据，写入调用方指定的输出位置或任务结果 |
+| Scope | Process |
+| Responsibility | Unified entry for multimodal capabilities: capability query, default model or executor selection, task submission and results, task status query, wait and cancel |
+| Integration | E: provider-executed categories call non-conversational models through Provider; host-executed categories (OCR) run through the host runtime component on the Session's resource node or a specified node |
+| Events | No Timeline events; tasks and results are stored in process storage |
+| Interfaces | Service and management methods `modality.capabilities` (including availability per category) and `modality.task.submit/status/wait/cancel`; CLI subcommands per category |
+| Relations | The default model or executor is selected by Provider by purpose (category). Results are files or structured data, written to the output location specified by the caller or to the task result |
 
-| 类别 | CLI 入口 | 操作 | 执行方 | 生命周期 |
+| Category | CLI entry | Operations | Executor | Lifecycle |
 | --- | --- | --- | --- | --- |
-| 图片 | `image` | 生成、编辑（参考图与遮罩）、增强、理解 | 服务商；理解经视觉模型 `read` | 异步任务 |
-| 视频 | `video` | 生成、编辑、增强 | 服务商 | 异步任务 |
-| 语音 | `speech` | 合成、转写 | 服务商 | 异步任务 |
-| 音乐 | `music` | 生成 | 服务商 | 异步任务 |
-| 音频 | `audio` | 生成 | 服务商 | 异步任务 |
-| 3D 资产 | `asset` | 生成 | 服务商 | 异步任务 |
-| 动作 | `motion` | 动作数据生成 | 服务商 | 异步任务 |
-| 实时 | `realtime` | 实时连接 | 服务商 | 连接：建立、收发、关闭，不是任务 |
-| OCR | `ocr` | 图片与 PDF 文字识别 | 宿主运行时组件 | 异步任务 |
+| Image | `image` | Generate, edit (reference image and mask), enhance, understand | Provider; understanding through a vision model's `read` | Async task |
+| Video | `video` | Generate, edit, enhance | Provider | Async task |
+| Speech | `speech` | Synthesize, transcribe | Provider | Async task |
+| Music | `music` | Generate | Provider | Async task |
+| Audio | `audio` | Generate | Provider | Async task |
+| 3D assets | `asset` | Generate | Provider | Async task |
+| Motion | `motion` | Motion data generation | Provider | Async task |
+| Realtime | `realtime` | Realtime connection | Provider | Connection: open, send and receive, close; not a task |
+| OCR | `ocr` | Text recognition for images and PDFs | Host runtime component | Async task |
 
-| 可用性维度 | 说明 |
+| Availability dimension | Description |
 | --- | --- |
-| 构建 | 某些类别只随特定构建（如 Desktop）发布 |
-| 平台 | 宿主执行的类别依赖平台支持 |
-| 运行时资源 | 如 OCR 运行时组件是否安装 |
-| 适配器 | 是否已有对应服务商或执行器的适配器 |
+| Build | Some categories ship only with specific builds (such as Desktop) |
+| Platform | Host-executed categories depend on platform support |
+| Runtime resources | For example, whether the OCR runtime component is installed |
+| Adapter | Whether an adapter exists for the corresponding provider or executor |
 
-`modality.capabilities` 按以上维度逐类别报告可用性；不可用的类别明确报告原因，不静默隐藏。
+`modality.capabilities` reports availability per category along these dimensions; unavailable categories report the reason explicitly and are not silently hidden.
 
 ### 5.15 AcpGateway
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | CLI 进程 |
-| 职责 | `dimcode acp` 在标准输入输出上提供 ACP 服务，供编辑器连接 |
-| 接入 | 协议适配：ACP 会话对应 dim Session；提示对应提交；更新来自 Session 事件；权限请求对应 `approval.request` |
-| 事件 | 无 |
-| 接口 | ACP 协议 |
-| 关系 | 与 CLI 一样经本地 RPC 连接 daemon，不在 daemon 中另开执行路径。ACP 的 schema 与一致性测试与 ExternalAgent 的 ACP 客户端共用；两侧实现可以是不同语言（如 ExternalAgent 先以 TS 实现、AcpGateway 在 Rust CLI 中实现），共享的是协议定义与测试，不是同一份运行时代码，因此迁移语言不影响共享 |
+| Scope | CLI process |
+| Responsibility | `dimcode acp` provides an ACP service over standard input and output for editors to connect to |
+| Integration | Protocol adapter: an ACP session maps to a dim Session; a prompt maps to a submission; updates come from Session events; permission requests map to `approval.request` |
+| Events | None |
+| Interfaces | ACP protocol |
+| Relations | Connects to the daemon over local RPC like the CLI, and does not open a separate execution path in the daemon. The ACP schema and conformance tests are shared with ExternalAgent's ACP client; the two sides can be implemented in different languages (for example ExternalAgent first in TS and AcpGateway in the Rust CLI); what is shared is the protocol definition and tests, not the same runtime code, so migrating languages does not affect the sharing |
 
 ### 5.16 Management
 
-| 项 | 设计 |
+| Item | Design |
 | --- | --- |
-| 作用域 | 进程 |
-| 职责 | 汇集各插件贡献的管理方法，并把它们挂载到指定入口 |
-| 接入 | E：插件以命名贡献登记管理方法（同 ToolRegistry 的工具贡献）；入口是否挂载 Management 由装配决定：本机 RPC 入口默认挂载，RemoteGateway 默认不挂载；其他节点经 rutis link `export` Management 服务后使用 |
-| 事件 | 无 |
-| 接口 | 各插件贡献的管理方法；`management.methods` 列出当前入口可用的方法 |
-| 关系 | 不做身份分级或逐方法授权：能否管理只取决于入口是否挂载、link 是否导出。现有的 `mcp.*`、`provider.*`、`skills.*`、`account.*` 等管理方法迁入 Management，见第 7 节 Rpc 的变更 |
+| Scope | Process |
+| Responsibility | Collect the management methods contributed by plugins and mount them on specified entries |
+| Integration | E: plugins register management methods as named contributions (like ToolRegistry's tool contributions); whether an entry mounts Management is decided by assembly: the local RPC entry mounts it by default, RemoteGateway does not by default; other nodes use it after the Management service is `export`ed over a rutis link |
+| Events | None |
+| Interfaces | The management methods contributed by each plugin; `management.methods` lists the methods available on the current entry |
+| Relations | No identity tiers or per-method authorization: whether management is possible depends only on whether the entry mounts it and whether the link exports it. Existing management methods such as `mcp.*`, `provider.*`, `skills.*` and `account.*` move into Management, see the Rpc change in section 7 |
 
-## 6. 新增 Timeline 事件
+## 6. New Timeline events
 
-按共同约束 1 逐个审查后，新增事件共 4 种：
+After reviewing each against common constraint 1, there are 4 new events in total:
 
-| 事件 | 写入方 | 为什么需要 |
+| Event | Writer | Why it is needed |
 | --- | --- | --- |
-| `question/asked`、`question/answered`、`question/cancelled` | Questions（分支；`answered` 经边界写入） | 待答与回答无法由工具调用与结果推出：结果要等整批调用结束才发布；回答必须以序号与中断比较，先例为 Approval |
-| `input/withdrawn` | InputQueue | 撤回尚未采用的排队消息必须成为事实，队列状态才能重建；见第 7 节 |
+| `question/asked`, `question/answered`, `question/cancelled` | Questions (branch; `answered` is written through the boundary) | Pending and answered cannot be derived from tool calls and results: results are published only after the whole batch of calls finishes; answers must be compared with interrupts by sequence number; precedent Approval |
+| `input/withdrawn` | InputQueue | Withdrawing a queued message that has not been adopted must become a fact for queue state to be rebuildable; see section 7 |
 
-不设事件的情况与依据：
+Cases without events and the reasoning:
 
-| 原设想 | 处理 | 依据 |
+| Original idea | Handling | Reasoning |
 | --- | --- | --- |
-| `goal/*` | 带 key 的 raw 输入块，含完成与受阻的终态块 | 目标与状态已是输入事实；中断导致的暂停可由 `stop/interrupt` 推出 |
-| `shell/*` | 在 RPC 边界执行，`!command` 的结果写为输入 | 不是分支内的在途工作 |
-| `hook/*` | 拦截决定记录在所有者事实中，注入内容是输入，执行记录走诊断通道 | Hook 是现有机制上的适配 |
-| `external_agent/*` | Collaboration 的事实与 member Session 内的普通事件 | 外部 Agent 作为模型连接接入 |
-| `session/titled` | SessionStore 元数据 | 标题不影响分支后续行为 |
-| `workflow/*` | 工具结果与回报输入；运行状态、阶段与日志归进程存储 | 运行归进程所有，不是分支的脱离工作 |
-| 输入来源 | `input/message` 的 raw 块 | 现有结构已支持，不改冻结事件 |
-| 排队消息转为 Steer | `input/withdrawn` 加新的 Steer 输入，同一批次写入 | 不另设事件 |
+| `goal/*` | Keyed raw input blocks, including terminal blocks for completed and blocked | The goal and its status are already input facts; pausing caused by interrupt can be derived from `stop/interrupt` |
+| `shell/*` | Executed at the RPC boundary; the result of `!command` is written as input | Not in-flight work within a branch |
+| `hook/*` | Interception decisions are recorded in the owner's facts, injected content is input, execution records go through the diagnostics channel | Hooks are an adapter over existing mechanisms |
+| `external_agent/*` | Collaboration's facts and ordinary events inside the member Session | External Agents integrate as model connections |
+| `session/titled` | SessionStore metadata | Titles do not affect later branch behavior |
+| `workflow/*` | Tool results and report input; run status, stages and logs belong to process storage | Runs are owned by the process, not detached work of a branch |
+| Input source | Raw blocks of `input/message` | The existing structure already supports it; frozen events are not changed |
+| Converting a queued message to Steer | `input/withdrawn` plus a new Steer input, written in the same batch | No separate event |
 
-## 7. 现有插件的补充与变更
+## 7. Supplements and changes to existing plugins
 
-现有插件需要两类改动：一类是功能清单中属于其职责、但现有设计未覆盖的功能；另一类是新插件接入时需要现有插件提供的配合。本文只登记，具体设计写入对应插件的需求文档。
+Existing plugins need two kinds of changes: features in the feature list that belong to their responsibilities but that the existing design does not cover; and cooperation that new plugins need from existing plugins to integrate. This document only registers them; the concrete design goes into each plugin's requirement document.
 
-- **补充**：新增服务、方法或配置项，原有行为不变。
-- **变更**：原有行为或合同改变，需要说明兼容与迁移。
+- **Supplement**: adds services, methods or configuration items; existing behavior is unchanged.
+- **Change**: existing behavior or contracts change; compatibility and migration must be described.
 
-所有现有事件类型改为经 #2 的注册机制声明，属于 #2 本身的工作，不在下表重复。`input/message` 的结构不变：附件以现有图片块与文件路径表达，来源与目标以 raw 块表达。
+Declaring all existing event types through the #2 registration mechanism is part of #2's own work and is not repeated in the tables below. The structure of `input/message` is unchanged: attachments are expressed with existing image blocks and file paths, and sources and goals with raw blocks.
 
-### 7.1 分支与 Session 能力
+### 7.1 Branch and Session capabilities
 
-| 插件 | 类型 | 内容 | 原因 |
+| Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| ToolRegistry | 补充 | 在 `Deps` 中直接注入进程插件提供的进程级工具贡献，与 Session 级贡献一起组成工具集合；依赖随配置启用，生命周期随依赖 | Goal、Web、Scheduler、Workflow、Notifications |
-| InputQueue | 变更 | 新增 `input/withdrawn`：撤回尚未采用的输入，撤回的输入不再采用，队列状态与可撤回性由事件重建；提供撤回、以及“撤回并以 Steer 重新写入”的服务，经 Session 边界调用 | `Ctrl+S`、`/queue`、取回编辑、删除排队消息 |
-| Permission | 补充 | 风险类别“网络”“外发消息”“持久配置”，并规定 FullAccess 是否自动放行各类别；来自 Settings 的跨 Session 规则来源；允许命令清单 | Web、Notifications、Scheduler；`/approvals`、命令规则 |
-| Approval | 补充 | 工具调用前的准入扩展点：在 `Deps` 中注入进程级准入服务（如 Hooks），在策略判定后、执行前异步调用，给出允许或拒绝；中断时取消并以取消结算 | Hooks |
-| Prompt、ModelProvider | 补充 | 模型参数（推理强度、快速模式）随模型配置采用，并传入模型请求 | `/effort`、`/fast` |
-| Prompt | 补充 | 在 Session 内切换 Agent 配置（提示词、模型、工具集）作为一次配置采用 | `/agent` |
-| PromptSources | 补充 | 提示词语言来源 | `/language` |
-| ContextPreparation | 补充 | 查询当前上下文用量与预算；手动压缩入口；接入生产用压缩宿主（`ContextModelHost` 的提供者，模型经 Provider 按“辅助”用途选择） | `/usage`、`/compact`、自动压缩 |
-| FileStorage、HostPlatform、WorkspaceTools | 补充 | 宿主侧服务可由资源节点导出、按 Session 导入；Session 内的使用方经 Session 绑定的服务访问，不直接使用控制节点的进程服务 | 多节点（3.1）；依赖 #5 |
-| HostPlatform | 补充 | 操作系统级隔离：启动进程时套用调用方传入的隔离配置（文件、网络、进程）；平台后端 macOS seatbelt、Linux landlock 或 bubblewrap，Windows 无后端时明确不可用。隔离在启动进程的节点上生效，配置按节点区分，来自 Settings 的宿主本地来源，不来自 Timeline；Permission 的权限预设是准入，不放宽隔离 | 沙箱；ShellInput、Hooks、ExternalAgent |
+| ToolRegistry | Supplement | Injects process-level tool contributions provided by process plugins directly in `Deps`, forming the tool set together with Session-scoped contributions; dependencies are enabled by configuration and their lifecycle follows the dependency | Goal, Web, Scheduler, Workflow, Notifications |
+| InputQueue | Change | Adds `input/withdrawn`: withdraws input not yet adopted; withdrawn input is no longer adopted, and queue state and withdrawability are rebuilt from events; provides withdraw and "withdraw and rewrite as Steer" services, called through the Session boundary | `Ctrl+S`, `/queue`, recall for editing, delete queued messages |
+| Permission | Supplement | Risk categories "network", "outbound message" and "persistent configuration", and whether FullAccess automatically allows each category; a cross-Session rule source from Settings; an allowed-command list | Web, Notifications, Scheduler; `/approvals`, command rules |
+| Approval | Supplement | Admission extension point before tool calls: injects process-level admission services (such as Hooks) in `Deps` and calls them asynchronously after the policy decision and before execution, returning allow or deny; on interrupt they are cancelled and settled as cancelled | Hooks |
+| Prompt, ModelProvider | Supplement | Model parameters (reasoning effort, fast mode) are adopted with the model configuration and passed into model requests | `/effort`, `/fast` |
+| Prompt | Supplement | Switching the Agent configuration (prompt, model, tool set) within a Session is adopted as one configuration | `/agent` |
+| PromptSources | Supplement | Prompt language source | `/language` |
+| ContextPreparation | Supplement | Query current context usage and budget; manual compaction entry; integrate the production compaction host (provider of `ContextModelHost`, with the model selected by Provider for the "auxiliary" purpose) | `/usage`, `/compact`, automatic compaction |
+| FileStorage, HostPlatform, WorkspaceTools | Supplement | Host-side services can be exported by the resource node and imported per Session; users within a Session access them through Session-bound services and do not use the control node's process services directly | Multiple nodes (3.1); depends on #5 |
+| HostPlatform | Supplement | OS-level isolation: applies the isolation configuration passed by the caller (files, network, processes) when starting a process; platform backends are macOS seatbelt, Linux landlock or bubblewrap, and Windows is explicitly unavailable when there is no backend. Isolation takes effect on the node that starts the process; configuration is per node and comes from the host-local source in Settings, not from Timeline; Permission's permission presets are admission and do not relax isolation | Sandbox; ShellInput, Hooks, ExternalAgent |
 
-### 7.2 App Server 进程插件
+### 7.2 App Server process plugins
 
-| 插件 | 类型 | 内容 | 原因 |
+| Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Settings | 补充 | 按 #3 区分权威：用户管理的插件意图与插件配置（插件启停、Web 搜索服务、通知渠道、按用途的模型策略、沙箱配置、外部 Agent、插件市场、跨 Session 权限规则）经类型化的 Settings 操作写入 loader 可编辑层；项目文件（项目 Hook、项目工作流、`.mcp.json`）保留文件权威；宿主本地批准（Hook、工作流、MCP）保留各自的批准文件。凭据只以引用出现 | Hooks、Workflow、Web、Notifications、Provider、HostPlatform、ExternalAgent、PluginManager、Permission 规则 |
-| Rpc | 变更 | 只承载 Session 方法；管理方法改由 Management 贡献与挂载，现有管理方法迁入 Management | Management；RemoteGateway |
-| Transport、Connection | 变更 | 远程连接携带认证后的设备身份，用于 Session 级访问；管理方法不按身份授权，由 Management 是否挂载决定 | RemoteGateway |
-| Provider | 补充 | `ModelSelectionHost` 按用途（子代理、辅助任务、各多模态类别）选择模型：继承调用方传入的模型、固定模型与推理强度、由 Agent 选择（仅子代理）；外部 Agent 连接类型；各多模态类别的非对话类模型 | 子代理与辅助模型；ExternalAgent；Modality |
-| Aimux | 补充 | 按连接类型把模型请求分派给 ExternalAgent 桥接 | ExternalAgent |
-| Agents | 补充 | Session 创建配置包含资源节点，创建后不变；以非交互配置新建或复用 Session 并提交首条输入；从另一 Session 的截点创建 Session；以外部 Agent 为模型、不装配工具的 profile | Scheduler；Session 分叉；ExternalAgent |
-| SessionStore | 补充 | Session 元数据（标题及其来源、分叉来源）与修订检查；删除（先关闭 Session，Loop 未空闲时拒绝）与按时间或数量清理（含预览）；分叉复制来源截点之前的事实及其引用闭包（附件、事件声明），不复制宿主安全设置；附件随 Session 复制与删除 | SessionTitle、Session 分叉与清理、Attachments |
-| Collaboration | 变更 | 子代理模型改由 Provider 按“子代理”用途选择，调用方传入主 Session 已采用的模型 | 子代理模型 |
-| Collaboration | 补充 | 外部 Agent 可作为 member 目标，在 `list`、`inspect` 中列出 | ExternalAgent |
-| ManagedProviders | 补充 | 查询套餐用量；未提供时明确不可用 | `/usage` |
-| Mcp | 补充 | HTTP/SSE 连接的 OAuth 授权；接受插件来源的配置 | MCP 连接；PluginManager |
-| SkillsCatalog | 补充 | 接受插件来源的 Skill 根；安装与移除由 PluginManager 发起 | PluginManager |
-| Trace | 补充 | 导出指定步骤的模型请求快照，可过滤推理、工具记录与压缩内容 | 请求快照导出 |
-| Session 广播 | 待确认 | 进程级实时订阅所有 Session 的事件（turn 结束、工具结果、待审批、待回答等）；不保证顺序、不支持续读，需要正确性的使用方读取 Timeline 固定前缀 | Notifications、SessionTitle、Hooks、Goal |
+| Settings | Supplement | Separates authority per #3: user-managed plugin intent and plugin configuration (plugin enable/disable, Web search service, notification channels, per-purpose model policy, sandbox configuration, external Agents, plugin marketplaces, cross-Session permission rules) is written to the loader editable layer through typed Settings operations; project files (project Hooks, project workflows, `.mcp.json`) keep file authority; host-local approvals (Hooks, workflows, MCP) keep their own approval files. Credentials appear only as references | Hooks, Workflow, Web, Notifications, Provider, HostPlatform, ExternalAgent, PluginManager, Permission rules |
+| Rpc | Change | Carries only Session methods; management methods are instead contributed to and mounted by Management, and existing management methods move into Management | Management; RemoteGateway |
+| Transport, Connection | Change | Remote connections carry the authenticated device identity, used for Session-level access; management methods are not authorized by identity but by whether Management is mounted | RemoteGateway |
+| Provider | Supplement | `ModelSelectionHost` selects models by purpose (sub-agent, auxiliary tasks, each multimodal category): inherit the model passed by the caller, a fixed model and reasoning effort, or selection by the Agent (sub-agents only); external Agent connection type; non-conversational models for each multimodal category | Sub-agent and auxiliary models; ExternalAgent; Modality |
+| Aimux | Supplement | Dispatches model requests to the ExternalAgent bridge by connection type | ExternalAgent |
+| Agents | Supplement | The Session creation configuration includes the resource node, which does not change after creation; creates or reuses a Session with a non-interactive configuration and submits the first input; creates a Session from another Session's cut point; a profile with an external Agent as its model and no assembled tools | Scheduler; Session fork; ExternalAgent |
+| SessionStore | Supplement | Session metadata (title and its source, fork source) and revision checks; deletion (closes the Session first, rejected when Loop is not idle) and cleanup by time or count (with preview); fork copies the facts before the source cut point and their reference closure (attachments, event declarations), without copying host security settings; attachments are copied and deleted with the Session | SessionTitle, Session fork and cleanup, Attachments |
+| Collaboration | Change | Sub-agent models are instead selected by Provider for the "sub-agent" purpose, with the caller passing the model already adopted by the main Session | Sub-agent models |
+| Collaboration | Supplement | External Agents can be member targets and are listed in `list` and `inspect` | ExternalAgent |
+| ManagedProviders | Supplement | Query plan usage; explicitly unavailable when not provided | `/usage` |
+| Mcp | Supplement | OAuth authorization for HTTP/SSE connections; accepts configuration from plugin sources | MCP connections; PluginManager |
+| SkillsCatalog | Supplement | Accepts Skill roots from plugin sources; installation and removal are initiated by PluginManager | PluginManager |
+| Trace | Supplement | Exports model request snapshots for a specified step, with optional filtering of reasoning, tool records and compacted content | Request snapshot export |
+| Session broadcast | To confirm | Process-level live subscription to events of all Sessions (turn end, tool results, pending approval, pending answer, and so on); no ordering guarantee and no resumable reads; users that need correctness read the Timeline fixed prefix | Notifications, SessionTitle, Hooks, Goal |
 
-## 8. CLI 层
+## 8. CLI layer
 
-以下只在 CLI 中实现，不新增插件：多行编辑、输入历史、命令补全、`$` 与 `@` 引用、粘贴与拖放路径、剪贴板、消息复制、打开链接、`/timeline`、`/export`（读取历史并格式化）、`/exit`、`/theme`、`/keys`、界面语言、升级、VS Code 集成、子命令体系、`exec --json`、`exec --verify` 修复循环、后台任务汇总显示。
+The following are implemented only in the CLI, with no new plugins: multi-line editing, input history, command completion, `$` and `@` references, paste and drag-and-drop paths, clipboard, message copy, opening links, `/timeline`, `/export` (reads history and formats it), `/exit`, `/theme`, `/keys`, interface language, upgrade, VS Code integration, the subcommand system, `exec --json`, the `exec --verify` repair loop, and aggregated display of background tasks.
 
-## 9. 横切约定
+## 9. Cross-cutting conventions
 
-| 主题 | 约定 |
+| Topic | Convention |
 | --- | --- |
-| 事件 | 每个插件在需求文档中列出声明的事件、数据格式与消费规则（哪些状态机必须消费、消费后达到什么效果），并说明为什么不能由已有事实推出 |
-| 上下文 | 只经 A 或 B 进入模型上下文；持续生效的规则经 C 或带 key 的 raw 输入块 |
-| 配置 | 每项配置有明确来源（用户、工作区、Session）和唯一写入路径；凭据只以引用形式出现在配置中 |
-| 信任 | 来自项目文件或插件的可执行内容（Hook、MCP、工作流、能力插件）需要宿主本地批准，批准绑定节点、工作区与配置指纹；读取配置不产生执行权限 |
-| 安全设置 | 宿主安全设置（隔离、批准）不写入 Timeline；回放与分叉不恢复或放宽权限 |
-| 持久化 | 进程级存储变更遵循现有存储兼容策略；不跨不兼容格式复用版本号 |
-| 协议 | Session 方法进入 Rpc；管理方法贡献给 Management，由挂载与导出决定可用范围 |
-| 节点 | 访问宿主资源只经 Session 绑定的资源服务；不假设资源节点就是控制节点 |
-| 国际化 | 用户可见文案由 CLI 负责；模型可见文案由提示词来源负责 |
+| Events | Each plugin lists in its requirement document the events it declares, their data formats and consumption rules (which state machines must consume them and what effect consumption has), and explains why they cannot be derived from existing facts |
+| Context | Model context is entered only through A or B; rules that stay in effect go through C or keyed raw input blocks |
+| Configuration | Each configuration item has an explicit source (user, workspace, Session) and a single write path; credentials appear in configuration only as references |
+| Trust | Executable content from project files or plugins (Hooks, MCP, workflows, capability plugins) needs host-local approval, bound to the node, workspace and configuration fingerprint; reading configuration does not grant execution rights |
+| Security settings | Host security settings (isolation, approvals) are not written to Timeline; replay and fork do not restore or relax permissions |
+| Persistence | Process-level storage changes follow the existing storage compatibility policy; version numbers are not reused across incompatible formats |
+| Protocol | Session methods go into Rpc; management methods are contributed to Management, and mounting and export decide where they are available |
+| Nodes | Host resources are accessed only through the Session-bound resource services; do not assume the resource node is the control node |
+| Internationalization | User-visible text is the CLI's responsibility; model-visible text is the responsibility of prompt sources |
 
-## 10. 插件需求文档模板
+## 10. Plugin requirement template
 
-每个新插件的需求文档 `docs/design/plugins/<名称>.md` 包含：
+Each new plugin's requirement document `docs/design/plugins/<name>.md` contains:
 
-1. 用户流程：从用户或模型的操作到可见结果
-2. 范围：负责与不负责的内容
-3. 作用域与依赖：拆分、作用域、注入的服务、提供的服务
-4. 事件：类型名、数据格式、写入方、消费规则，以及不能由已有事实推出的理由
-5. 状态：拥有的状态及如何由 Timeline 或进程存储重建
-6. 接口：工具（含风险类别）、Session 方法、管理方法、CLI 入口；涉及宿主资源时说明使用哪个节点的服务
-7. 错误与恢复：取消、中断、重载、进程退出时的结算
-8. 安全：准入、信任、隔离、敏感数据
-9. 验收：需要的流程测试
+1. User flow: from the user's or model's action to the visible result
+2. Scope: what it is and is not responsible for
+3. Scope and dependencies: split, scope, injected services, provided services
+4. Events: type names, data formats, writers, consumption rules, and the reason they cannot be derived from existing facts
+5. State: the state it owns and how it is rebuilt from Timeline or process storage
+6. Interfaces: tools (including risk category), Session methods, management methods, CLI entries; when host resources are involved, which node's services are used
+7. Errors and recovery: settlement on cancel, interrupt, reload and process exit
+8. Security: admission, trust, isolation, sensitive data
+9. Acceptance: the flow tests needed
 
-## 11. 开发语言与迁移路径
+## 11. Implementation language and migration path
 
-### 11.1 前提
+### 11.1 Premises
 
-| 项 | 现状与约束 |
+| Item | Current state and constraints |
 | --- | --- |
-| TS 进程服务插件 | 已可运行：Node 运行时与 `definePlugin` 插件作为 loader 行装载，插件提供异步服务，Rust 侧按服务合同使用；未配置时不启动 Node（[App Server](../../crates/dim-app-server/README.md) 的 managed provider 先例） |
-| TS 能力插件 | 读写 Timeline、贡献工具、订阅分支事件需要 [#4](https://github.com/arcships/dim/issues/4) 的语言中立能力端口，并依赖 #2 |
-| Node 依赖 | API-key 基础流程不依赖 Node。TS 先行只用于可选功能。交付时 TS 插件以插件包发布，随内置固定 Node 版本的发行版提供（与带账号插件的发行版相同，版本见 `.node-version`）；Node 不可用时这些功能明确不可用 |
+| TS process service plugins | Already runnable: the Node runtime and `definePlugin` plugins load as loader rows, plugins provide async services, and the Rust side uses them by service contract; Node does not start when not configured (precedent: the managed provider in [App Server](../../crates/dim-app-server/README.md)) |
+| TS capability plugins | Reading and writing Timeline, contributing tools and subscribing to branch events need the language-neutral capability port of [#4](https://github.com/arcships/dim/issues/4), and depend on #2 |
+| Node dependency | The API-key baseline flow does not depend on Node. TypeScript first applies only to optional features. On delivery, TS plugins are published as plugin packages and shipped with distributions that bundle a pinned Node version (the same as distributions with account plugins; the version is in `.node-version`); when Node is unavailable, these features are explicitly unavailable |
 
-### 11.2 判断标准
+### 11.2 Criteria
 
-| TS 先行 | Rust |
+| TypeScript first | Rust |
 | --- | --- |
-| 业务规则仍需验证 | 安全边界与准入：执行命令、批准、隔离、远程入口、管理面 |
-| 主要工作是外部 I/O 或协议：HTTP API、ACP、第三方 SDK | 输入与提交边界 |
-| 不在 turn 的热路径上 | 内核热路径与在途工具调用的结算 |
-| 失败只影响该功能 | loader 与插件管理骨干；被其他插件依赖的基础服务 |
+| Business rules still need validation | Security boundaries and admission: command execution, approval, isolation, remote entry, management plane |
+| The main work is external I/O or protocols: HTTP APIs, ACP, third-party SDKs | Input and submission boundary |
+| Not on the turn hot path | Kernel hot path and settlement of in-flight tool calls |
+| Failure affects only that feature | loader and plugin management backbone; base services that other plugins depend on |
 
-### 11.3 划分
+### 11.3 Assignment
 
-| 插件 | 语言 | 理由 | 前置条件 |
+| Plugin | Language | Rationale | Prerequisites |
 | --- | --- | --- | --- |
-| ExternalAgent | TS 先行 | ACP 有 TS SDK；各外部 CLI 行为差异大，需要验证 | Aimux 分派到桥接的服务合同 |
-| Modality | TS 先行（服务商类别）；OCR 视运行时组件而定 | 各服务商多模态 API 变化快 | Provider 非对话模型的服务合同 |
-| Notifications | TS 先行 | Slack、飞书 SDK | 进程级订阅 Session 广播；进程级工具贡献的服务合同 |
-| SessionTitle | TS 先行 | 生成策略需要验证 | 进程级订阅；SessionStore 元数据与模型选择的服务合同 |
-| Scheduler | TS 先行 | 调度规则需要验证 | Agents 新建或复用 Session 的服务合同；进程级工具贡献的服务合同 |
-| AcpGateway | TS 先行 | 只是本地 RPC 客户端，可先以独立程序验证 ACP 映射，再并入 Rust CLI | 无 |
-| Web | TS 先行 | #4 已把 `web` 列为首个迁移对象；工具以进程服务提供，不需要能力端口 | 进程级工具贡献的服务合同 |
-| Workflow | TS 先行 | 编排规则需要验证；运行归进程，不需要能力端口 | Agents、Collaboration 与进程级工具贡献的服务合同 |
-| Goal | TS 先行 | 继续策略需要验证；不需要能力端口 | 进程级实时订阅 Session 广播；Session 读取与输入的服务合同；进程级工具贡献的服务合同 |
-| Management | Rust | 管理面骨干 | — |
-| Questions | Rust | 分支事实与在途工具调用的结算紧密相关 | — |
-| ShellInput | Rust | 执行命令，属于安全边界 | — |
-| Attachments | Rust | 提交边界 | — |
-| Hooks | Rust | 准入路径与命令执行，属于安全边界 | — |
-| RemoteGateway | Rust | 远程入口 | — |
-| PluginManager | Rust | loader 与插件管理骨干 | #3 |
-| 现有插件的补充与变更 | Rust | 现有插件为 Rust | — |
+| ExternalAgent | TypeScript first | ACP has a TS SDK; external CLIs differ widely and need validation | Service contract for Aimux dispatching to the bridge |
+| Modality | TypeScript first (provider categories); OCR depends on the runtime component | Providers' multimodal APIs change quickly | Service contract for Provider non-conversational models |
+| Notifications | TypeScript first | Slack and Feishu SDKs | Process-level subscription to the Session broadcast; service contract for process-level tool contributions |
+| SessionTitle | TypeScript first | The generation strategy needs validation | Process-level subscription; service contracts for SessionStore metadata and model selection |
+| Scheduler | TypeScript first | Scheduling rules need validation | Service contract for Agents creating or reusing Sessions; service contract for process-level tool contributions |
+| AcpGateway | TypeScript first | It is only a local RPC client, so the ACP mapping can first be validated as a standalone program and then merged into the Rust CLI | None |
+| Web | TypeScript first | #4 already lists `web` as the first migration target; tools are provided as a process service and do not need the capability port | Service contract for process-level tool contributions |
+| Workflow | TypeScript first | Orchestration rules need validation; runs belong to the process and do not need the capability port | Service contracts for Agents, Collaboration and process-level tool contributions |
+| Goal | TypeScript first | The continuation strategy needs validation; does not need the capability port | Process-level live subscription to the Session broadcast; service contracts for Session read and input; service contract for process-level tool contributions |
+| Management | Rust | Management plane backbone | — |
+| Questions | Rust | Branch facts are tightly tied to settlement of in-flight tool calls | — |
+| ShellInput | Rust | Executes commands; part of the security boundary | — |
+| Attachments | Rust | Submission boundary | — |
+| Hooks | Rust | Admission path and command execution; part of the security boundary | — |
+| RemoteGateway | Rust | Remote entry | — |
+| PluginManager | Rust | loader and plugin management backbone | #3 |
+| Supplements and changes to existing plugins | Rust | Existing plugins are Rust | — |
 
-### 11.4 从 TS 转为 Rust
+### 11.4 Moving from TS to Rust
 
-| 约束 | 内容 |
+| Constraint | Content |
 | --- | --- |
-| 先定合同 | 服务合同、事件类型名与数据格式、工具名与参数、Session 方法与管理方法在需求文档中与语言无关地定义，TS 与 Rust 实现遵守同一份 |
-| 稳定身份 | 插件声明身份、事件类型与进程存储格式不随实现语言改变；替换只换 loader 行，历史事件与已存数据照常可读 |
-| 同一套验收 | 流程测试只经公开接口（Session 方法、管理方法、工具、事件），不依赖实现语言，迁移后原样通过 |
-| 转换时机 | 合同稳定且验收覆盖后；或出现性能、资源、分发（去掉 Node 依赖）、安全上的要求时 |
-| 不并存 | 同一插件同一时刻只装载一种实现 |
+| Contract first | Service contracts, event type names and data formats, tool names and parameters, Session methods and management methods are defined language-independently in the requirement document, and TS and Rust implementations follow the same definition |
+| Stable identity | Plugin declared identity, event types and process storage formats do not change with the implementation language; replacement only swaps the loader row, and historical events and stored data remain readable |
+| Same acceptance | Flow tests use only public interfaces (Session methods, management methods, tools, events), do not depend on the implementation language, and pass unchanged after migration |
+| When to convert | After the contract is stable and covered by acceptance; or when performance, resource, distribution (removing the Node dependency) or security requirements arise |
+| No coexistence | Only one implementation of a plugin is loaded at a time |
 
-## 12. 实施阶段
+## 12. Phases
 
-| 阶段 | 内容 |
+| Phase | Content |
 | --- | --- |
-| P0 地基 | #2 动态事件；Management 与现有管理方法迁入；Permission 新风险类别；服务合同：进程级实时订阅 Session 广播、进程级工具贡献、Session 读取与输入 |
-| P1 核心交互 | Questions、ShellInput、Attachments、SessionTitle（依赖 P0 的订阅合同）；InputQueue 撤回、Permission 规则、模型参数、Provider 按用途选择模型、SessionStore 删除清理与分叉；CLI 子命令、`/export` 与 `exec --json` |
-| P2 能力扩展 | Goal、Web、HostPlatform 隔离、Hooks（用户与项目来源）、Scheduler、Workflow、Notifications；Mcp OAuth；生产用压缩宿主 |
-| P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway、Modality；PluginManager（依赖 #3、#4）；资源节点导入（依赖 #5） |
+| P0 Foundation | #2 dynamic events; Management and migration of existing management methods; new Permission risk categories; service contracts: process-level live subscription to the Session broadcast, process-level tool contributions, Session read and input |
+| P1 Core interaction | Questions, ShellInput, Attachments, SessionTitle (depends on the P0 subscription contract); InputQueue withdrawal, Permission rules, model parameters, Provider model selection by purpose, SessionStore deletion, cleanup and fork; CLI subcommands, `/export` and `exec --json` |
+| P2 Capability extension | Goal, Web, HostPlatform isolation, Hooks (user and project sources), Scheduler, Workflow, Notifications; Mcp OAuth; production compaction host |
+| P3 External integration | ExternalAgent, AcpGateway, RemoteGateway, Modality; PluginManager (depends on #3, #4); resource node import (depends on #5) |
 
-## 13. 待对齐问题
+## 13. Open questions
 
-| 问题 | 说明 |
+| Question | Description |
 | --- | --- |
-| 事件进入上下文的方式 | #2 已定“由注册的投影规则决定”，ADR 001 提议“只经输入与工具结果”。本文按后者设计，需维护者对齐 |
-| 定时任务的存活条件 | 功能清单写“交互终端进程存活”，本文按 daemon 存活设计 |
-| 远程访问 | 认证、断线与 TLS 部署与 #5 的待定问题相关 |
-| 隔离的覆盖面 | MCP stdio 进程是否默认受隔离 |
-| FullAccess 与新风险类别 | 外发消息与持久配置是否在 FullAccess 下仍需询问 |
-| 进程级订阅 | Notifications、SessionTitle、Hooks 与 Goal 所需的跨 Session 实时订阅是否复用 Session 广播 |
-| 外部 Agent 的权限 | 外部 Agent 自身的权限请求（如 ACP 的权限请求）映射为 dim 审批，还是按配置的权限模式自动应答 |
-| 外部会话续接 | 外部 Agent 不支持续接或续接失败时，是新开外部会话并附带历史摘要，还是明确失败 |
+| How events enter context | #2 decided that registered projection rules determine it; ADR 001 proposes "only through input and tool results". This document designs for the latter; maintainers need to align |
+| Liveness condition for scheduled tasks | The feature list says "the interactive terminal process is alive"; this document designs for the daemon being alive |
+| Remote access | Authentication, disconnection and TLS deployment relate to the open questions in #5 |
+| Isolation coverage | Whether MCP stdio processes are isolated by default |
+| FullAccess and new risk categories | Whether outbound messages and persistent configuration still require asking under FullAccess |
+| Process-level subscription | Whether the cross-Session live subscription needed by Notifications, SessionTitle, Hooks and Goal reuses the Session broadcast |
+| External Agent permissions | Whether the external Agent's own permission requests (such as ACP permission requests) map to dim approval, or are answered automatically according to the configured permission mode |
+| External conversation continuation | When an external Agent does not support continuation or continuation fails, whether to open a new external conversation with a history summary attached, or fail explicitly |
