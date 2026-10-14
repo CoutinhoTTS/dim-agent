@@ -277,7 +277,7 @@ flowchart LR
   Goal & ShellInput & Hooks -->|B Write input| InputQueue
   ShellInput & Hooks & ExternalAgent -->|Process launch and isolation| HostPlatform
   Approval -->|Injects process-level admission service| Hooks
-  Web & Notifications & Scheduler -.->|New risk categories| Permission
+  Web & Notifications & Scheduler -.->|Risk categories| Permission
   Workflow -->|Stage Sessions and reports| Agents
   Workflow -->|Stage members| Collaboration
   Collaboration -->|Member Sessions by Agent profile| Agents
@@ -485,7 +485,7 @@ A tool call that "has a call but no result" does not mean "waiting for an answer
 | Integration | A: provides `web_search` and `web_fetch` through a process-level tool contribution; fetch results are converted into bounded body text |
 | Events | None; the result is the tool result |
 | Interfaces | The search service and credential references are configured through Settings |
-| Relations | The tool risk category is "network". Can be the first migration target for [#4](https://github.com/arcships/dim/issues/4) cross-language plugins |
+| Relations | The tool risk category is the existing "network". Can be the first migration target for [#4](https://github.com/arcships/dim/issues/4) cross-language plugins |
 
 ### 5.6 SessionTitle
 
@@ -683,7 +683,7 @@ Declaring all existing event types through the #2 registration mechanism is part
 | --- | --- | --- | --- |
 | ToolRegistry | Supplement | Injects process-level tool contributions provided by process plugins directly in `Deps`, forming the tool set together with Session-scoped contributions; dependencies are enabled by configuration and their lifecycle follows the dependency | Goal, Web, Scheduler, Workflow, Notifications |
 | InputQueue | Change | Adds `input/withdrawn`: withdraws input not yet adopted; withdrawn input is no longer adopted, and queue state and withdrawability are rebuilt from events; provides withdraw and "withdraw and rewrite as Steer" services, called through the Session boundary | `Ctrl+S`, `/queue`, recall for editing, delete queued messages |
-| Permission | Supplement | Risk categories "network", "outbound message" and "persistent configuration", and whether FullAccess automatically allows each category; a cross-Session rule source from Settings; an allowed-command list | Web, Notifications, Scheduler; `/approvals`, command rules |
+| Permission | Supplement | New risk categories "outbound message" and "persistent configuration" (Web uses the existing "network"), and whether FullAccess automatically allows each new category; a cross-Session rule source from Settings; an allowed-command list | Web, Notifications, Scheduler; `/approvals`, command rules |
 | Approval | Supplement | Admission extension point before tool calls: injects process-level admission services (such as Hooks) in `Deps` and calls them asynchronously after the policy decision and before execution, returning allow or deny; on interrupt they are cancelled and settled as cancelled | Hooks |
 | Prompt, ModelProvider | Supplement | Model parameters (reasoning effort, fast mode) are adopted with the model configuration and passed into model requests | `/effort`, `/fast` |
 | Prompt | Supplement | Switching the Agent configuration (prompt, model, tool set) within a Session is adopted as one configuration | `/agent` |
