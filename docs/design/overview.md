@@ -69,7 +69,7 @@ Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实�
 | 类别 | 新插件与拆分 |
 | --- | --- |
 | Capability | Questions（Session：工具；分支：待答问题）、Todo（Session：工具；分支：列表）、Goal（Session：工具；分支：目标状态与继续）、ShellInput（分支） |
-| 进程插件 + Capability | Web（进程：搜索服务配置；Session：工具）、Hooks（进程：目录、批准与提交前 Hook；分支：执行）、Scheduler（进程：作业与触发；Session：`schedule` 工具）、Workflow（进程：定义；Session：工具；分支：运行）、ExternalAgent（进程：探测与配置；Session：工具；分支：运行）、Notifications（进程：订阅与发送；Session：`notify` 工具）、SessionTitle（进程：标题元数据与生成；分支：首个 turn 结束后请求生成） |
+| 进程插件 + Capability | Web（进程：搜索服务配置；Session：工具）、Hooks（进程：目录、批准与提交前 Hook；分支：订阅与执行）、Scheduler（进程：作业与触发；Session：`schedule` 工具）、Workflow（进程：定义；Session：工具；分支：运行）、ExternalAgent（进程：探测与配置；Session：工具；分支：运行）、Notifications（进程：订阅与发送；Session：`notify` 工具）、SessionTitle（进程：标题元数据与生成；分支：首个 turn 结束后请求生成） |
 | 进程插件 | Attachments、ModelPolicy、PluginManager、Sandbox、SessionArchive、RemoteGateway、Modality |
 | 非 daemon 插件 | AcpGateway（CLI 进程中的协议适配） |
 
