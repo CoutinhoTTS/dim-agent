@@ -16,7 +16,7 @@ node scripts/pack-release.mjs staging/local release/local
 
 The first command stages an API-key-only distribution. Account-enabled staging adds `--with-plugin` and requires `DIM_OAUTH_PACKAGE_SHA256` plus exactly one of `DIM_OAUTH_PACKAGE_URL` (build-time internal download) or `DIM_OAUTH_PACKAGE_ARCHIVE` (local archive). An optional `DIM_OAUTH_DOWNLOAD_TOKEN` is a Bearer download credential. Addresses and credentials are never added to manifests. Redirects fail; archive digest, exact file list, path containment, file types, entry digest and interface versions are checked before loading code.
 
-An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `dist/index.js`. The manifest uses schema 1, host API 1 and rutis 0.10.0. The private SDK is bundled in `dist/index.js`; source maps, tests and account files are excluded.
+An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `dist/index.js`. The manifest uses schema 1, host API 2 and rutis 0.10.0. Host API 2 requires `quiesce` and supports native file transactions; API 1 archives are rejected. The private SDK is bundled in `dist/index.js`; source maps, tests and account files are excluded.
 
 Account-enabled staging copies the pinned Node executable and license, installs the locked rutis runtime with install scripts disabled, and copies the verified plugin. The installed layout is fixed:
 
