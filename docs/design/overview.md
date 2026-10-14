@@ -534,4 +534,6 @@ Plugin and contract documents use this layout:
 - 5 Context mapping.
 - 6 Interfaces (summary).
 - 7 Security.
+- 8 Rule check: each rule in [design rules §4](../architecture/rust-agent/principles.md) and each decision in [ADR 002](../adr/002-plugin-scope.md), answered or marked not applicable with a reason.
+- 9 Requirements raised to mechanism owners: in the format of §4 rule 8, or "None".
 - Appendices for interface details, the full conflict table (with an `input/deleted` row where inputs are derived), errors and recovery, acceptance, assumptions and open questions.
