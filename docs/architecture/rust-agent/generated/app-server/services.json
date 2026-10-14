@@ -693,9 +693,29 @@
         "name": "McpPublication",
         "state": "Active",
         "generation": 1,
-        "injects": [],
-        "resolved": [],
-        "reads": []
+        "injects": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "provider": 14,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 14,
+            "declared": true,
+            "external": true
+          }
+        ]
       },
       {
         "id": 14,

@@ -543,12 +543,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         };
         rows.push(register_capability(&mut builtins, move || settings.clone()));
     }
-    let mut publication = None;
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
-        let (publisher, row) = mcp::McpPublication::register(&mut builtins);
-        publication = Some(publisher);
-        rows.push(row);
+        rows.push(mcp::McpPublication::register(&mut builtins));
         rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
@@ -776,7 +773,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .get::<ListenAddresses>()
         .ok_or_else(|| ServerError::Configuration("listener addresses missing".into()))?;
     handle.open();
-    let task = tokio::spawn(coordinate(root.clone(), handle.clone(), publication));
+    let task = tokio::spawn(coordinate(root.clone(), handle.clone()));
     startup.armed = false;
     Ok(RunningServer {
         unix_path: addresses.unix_path.clone(),
@@ -817,13 +814,7 @@ impl dim_agent_runtime::Capability for NodeRows {
 
 /// Graceful shutdown: stop admission, settle Agent work, drain commands and
 /// trace writers, close connections, then release the process tree.
-async fn coordinate(
-    root: Ctx,
-    control: Arc<ServerControl>,
-    publication: Option<mcp::McpPublication>,
-) -> Result<ShutdownReason> {
-    let publication =
-        publication.map(|publisher| tokio::spawn(publisher.run(control.shutdown().clone())));
+async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownReason> {
     control.shutdown().cancelled().await;
     let hub = root.get::<ConnectionHub>();
     // Taking RPC admission fences the shutdown-request tracker. Every accepted
@@ -862,13 +853,6 @@ async fn coordinate(
     }
     if let Some(hub) = hub {
         hub.close().await;
-    }
-    if let Some(publication) = publication
-        && publication.await.is_err()
-    {
-        errors.push(AgentError::Build(
-            "MCP configuration publisher failed".into(),
-        ));
     }
     if let Err(error) = root.shutdown().await {
         errors.push(error.into());

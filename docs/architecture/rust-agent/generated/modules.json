@@ -8851,7 +8851,6 @@
       "from": "dim_app_server",
       "to": "dim_app_server::mcp::publication",
       "references": [
-        "path mcp::McpPublication",
         "path mcp::McpPublication::register"
       ]
     },

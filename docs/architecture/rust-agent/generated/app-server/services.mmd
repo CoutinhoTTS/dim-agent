@@ -60,6 +60,7 @@ flowchart LR
   p3 -->|"dim_agent_capabilities::file_storage::FileStorage"| p17
   p15 -->|"dim_app_server::mcp::publication::Publication"| p16
   p14 -->|"dim_app_server::settings::SettingsService"| p16
+  p14 -->|"dim_app_server::settings::SettingsService"| p15
   p3 -->|"dim_agent_capabilities::file_storage::FileStorage"| p14
   p5 -->|"dim_app_server::user_configuration::UserConfiguration"| p14
   p11 -->|"dim_app_server::codex_oauth::OpenAICodexOAuthService"| p13

@@ -392,7 +392,6 @@ impl TypedPlugin for McpPlugin {
         (settings, publication): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            publication.bind(settings.clone());
             let service = Arc::new(McpService {
                 settings,
                 publication,

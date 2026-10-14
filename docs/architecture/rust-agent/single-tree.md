@@ -22,6 +22,10 @@ External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-ap
 MCP connection generations are nested `McpConnections` group instances owned by
 each Session in the same loader. `McpPublication` serializes source selection,
 authorization and cross-Session retirement; it does not reconcile root layers.
+Its plugin declares Settings as a dependency and owns the publication worker in
+an asynchronous effect. Reload and disposal stop admission, settle the current
+operation and retire retained connections before withdrawing the service. The
+process shutdown coordinator neither starts nor joins MCP-specific tasks.
 See [ADR 002](../../adr/002-loader-plugin-management.md).
 
 `SettingsPlugin` 不作为 `SessionScopePlugin` 的 `Deps` 依赖：Session 创建入口传入已校验的配置快照，既有 Session 的设置变更由受影响能力按业务合同更新（如 McpSession 观察目录修订）。普通配置写入不通过 rutis 重载重建 Session。
