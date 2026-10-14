@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §B.5](../overview.md#b5-web). Phase: P2. Language: TypeScript first ([overview §F.3](../overview.md#f3-assignment)).
 
-Web is a process plugin that gives the model `web_search` and `web_fetch` as a contributor to the process tool registry ([process-tool-contribution](../contracts/process-tool-contribution.md), pattern in [extension-registry](../contracts/extension-registry.md)). Search goes to a configured built-in adapter or to a search backend registered in Web's own `WebSearchBackends` registry; fetch downloads one public page and returns bounded text. Web writes no Timeline events: every call and result is already a tool call fact. Configuration changes are volatile updates and never reload Web; a Web unload only withdraws its tools.
+Web is a process plugin that gives the model `web_search` and `web_fetch` by registering into ToolRegistry's tool source port ([process-tool-contribution](../contracts/process-tool-contribution.md), [ADR 002](../../adr/002-dependency-direction.md) D2). Search goes to a configured built-in adapter or to a search backend registered in Web's own `WebSearchBackends` port; fetch downloads one public page and returns bounded text. Web writes no Timeline events: every call and result is already a tool call fact. The `web.*` settings are business configuration read at use time, so editing them never reloads Web; a Web unload only removes its registration.
 
 ## 1. Structure
 
@@ -10,56 +10,50 @@ Web is a process plugin that gives the model `web_search` and `web_fetch` as a c
 flowchart LR
   subgraph PROC["Process (control node by default)"]
     Web["Web: tool contributor"]:::new
-    WSB["WebSearchBackends registry (owned by Web)"]:::new
-    WebMount["Web tool mount"]:::new
-    BMount["Backend mount, one per configured backend"]:::new
-    Backend["Search backend from another plugin"]
-    PTR["Process tool registry"]:::contract
-    Settings["Settings: volatile configuration, credential-reference resolver"]:::contract
+    WSB["WebSearchBackends port (hosted in Web)"]:::new
+    Backend["Search backend plugin"]
+    PTR["Tool source port (ToolRegistry side)"]:::contract
+    Settings["Settings: web business source, credential-reference resolver"]:::contract
   end
   subgraph SESS["Session and branches"]
     ToolRegistry["ToolRegistry"]
     Exec["ToolBinding, ToolExecutor, Approval, Permission"]
   end
-  WebMount -->|"register web set"| PTR
-  WebMount --> Web
+  Web -->|"register web set"| PTR
   Web --> WSB
-  BMount -->|"register"| WSB
-  BMount --> Backend
-  Web -->|"read web section, change notices, resolve secretRef"| Settings
-  ToolRegistry -->|"injects stable registry only"| PTR
+  Backend -->|"register"| WSB
+  Web -->|"read web section at use, change notices, resolve secretRef"| Settings
+  ToolRegistry -->|"depends on stable port only"| PTR
   ToolRegistry --> Exec
   Exec -->|"handler call with SessionConfig subset and cancel token"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-Sessions inject only the stable process tool registry, never Web; Web injects only its own registry, never a backend. A Web unload, a backend unload or a configuration edit therefore never reloads any Session plugin and never reloads Web.
+Sessions depend only on the stable tool source port, never on Web, and Web never depends on a backend. A Web unload or a configuration edit therefore never reloads any Session plugin, and a backend unload never reloads Web. Web hosts `WebSearchBackends` itself rather than in a separate stable plugin: backends depend on Web and reload with it, which is accepted because a Web reload already ends every search and backends hold no state that must survive (D2).
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Web` | Process (loader row; control node by default, A2) | Settings volatile configuration of the `web` section; Settings credential-reference resolver; `WebSearchBackends` (own); diagnostics channel | Keyed `ProcessToolSource` `web` |
-| Web tool mount | Process | Process tool registry, keyed `web` source | Registration of the `web` set (withdraw-only on unload) |
-| `WebSearchBackends` | Process, inside Web | — | Defines `WebSearchBackend`; name → backend with availability flag |
-| Backend mount (one per configured backend) | Process | `WebSearchBackends`, keyed backend service | Registration of one backend |
+| `Web` | Process (loader row; control node by default, A2) | Tool source port; Settings business source (section `web`) and credential-reference resolver; diagnostics channel | Registration of the `web` set (removed on unload); the `WebSearchBackends` port |
+| Search backend | Process, another plugin | `WebSearchBackends` | Registration of one named backend |
 
-**Contracts depended on:** process tool registry and `ProcessToolSource` ([process-tool-contribution](../contracts/process-tool-contribution.md)); the registry pattern ([extension-registry](../contracts/extension-registry.md)); Settings volatile configuration and the Settings credential-reference resolver ([overview §C.2](../overview.md#c2-app-server-process-plugins)); `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
-**Contracts defined here:** the tool names, parameters and result formats; `WebSearchBackend` and the `WebSearchBackends` registry; the `web.*` configuration keys. Web knows no search provider's account semantics; a backend knows nothing about tools, Sessions or Web configuration (A1).
+**Contracts depended on:** tool source port and `ProcessToolSource` ([process-tool-contribution](../contracts/process-tool-contribution.md)); ports and configuration placement ([ADR 002](../../adr/002-dependency-direction.md)); Settings business source and credential-reference resolver ([overview §C.2](../overview.md#c2-app-server-process-plugins)); `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
+**Contracts defined here:** the tool names, parameters and result formats; `WebSearchBackend` and the `WebSearchBackends` port; the `web.*` business configuration. Web knows no search provider's account semantics; a backend knows nothing about tools, Sessions or Web configuration (A1).
 
-**Node.** Network egress happens on the node running Web's row, independent of a Session's resource node, because network access is a process resource ([overview §6.3](../overview.md#63-multiple-nodes), A2). Web never resolves node services (`node-services`), FileStorage or HostPlatform.
+**Node.** Network egress happens on the node running Web's row, independent of a Session's resource node, because network access is a process resource ([overview §6.3](../overview.md#63-multiple-nodes), A2). Web never resolves the node-services port, FileStorage or HostPlatform.
 
 ## 2. Data and state
 
 ```mermaid
 flowchart TB
-  subgraph CFG["Configuration (Settings, loader editable layer)"]
+  subgraph CFG["Business configuration (Settings source, section web)"]
     WebCfg["web.search.service, web.fetch.allow_private_hosts, web.proxy"]
     Secret["secretRef (reference only)"]
   end
   subgraph MEM["Web memory (not persisted)"]
     Snap["Configuration snapshot"]
     Set["Tool set web, version = generation id + counter"]
-    Avail["Backend availability flags"]
+    Avail["Registered backends"]
     Cache["Fetch cache, bounded (A9)"]
     Inflight["In-flight calls: abort handle each"]
   end
@@ -67,14 +61,14 @@ flowchart TB
     Cfgd["context/configured: adopted tools"]
     Calls["step/tool-call ... step/tool-result, approval/*"]
   end
-  WebCfg -->|"volatile change notice"| Snap
+  WebCfg -->|"change notice, read at use"| Snap
   Snap --> Set
   Avail --> Set
   Set -->|"adopted by ToolBinding"| Cfgd
   Inflight -->|"one ToolResult per call, written by ToolExecutor"| Calls
 ```
 
-Web owns no Timeline state and no `StateCell`. Everything in memory is recomputed on `apply` from Settings and the registry, and the cache starts empty; nothing needs rebuilding from the Timeline.
+Web owns no Timeline state and no `StateCell`. Everything in memory is recomputed on `apply` from Settings and the backend port, and the cache starts empty; nothing needs rebuilding from the Timeline.
 
 ## 3. Flows
 
@@ -85,12 +79,12 @@ sequenceDiagram
   participant U as User via Settings
   participant S as Settings
   participant W as Web
-  participant R as Process tool registry
+  participant R as Tool source port
   participant TR as ToolRegistry per Session
   participant B as ToolBinding per branch
   participant TL as Timeline
   U->>S: typed operation sets web.search.service
-  S-->>W: volatile change notice (no reload)
+  S-->>W: business data change notice (no reload)
   W->>W: rebuild set, new version, web_search present if usable
   W-->>R: changed()
   R-->>TR: refresh adapted sets
@@ -98,7 +92,7 @@ sequenceDiagram
   B->>TL: append_batch_registered context/configured before next request
 ```
 
-`web_search` is present only while a service is configured and its adapter or backend is available (A3); removing the credential or the backend's availability flag going false publishes a set without it.
+`web_search` is present only while `web.search.service` names a usable adapter or a registered backend (A3); removing the credential, or the named backend's registration disappearing, publishes a set without it. Whether a backend is required comes only from `web.search.service`, never from loader declarations (D6).
 
 ### 3.2 A `web_fetch` call
 
@@ -132,7 +126,7 @@ sequenceDiagram
   participant X as ToolExecutor
   participant W as Web handler
   participant C as Settings credential resolver
-  participant G as WebSearchBackends
+  participant G as WebSearchBackends port
   participant K as Backend
   X->>W: execute(query, filters, cancel)
   alt built-in adapter
@@ -141,7 +135,7 @@ sequenceDiagram
     W->>W: query the service over HTTP
   else configured backend name
     W->>G: lookup(name)
-    G-->>W: backend or unavailable
+    G-->>W: backend or not registered
     W->>K: search(request, cancel)
     K-->>W: hits
   end
@@ -150,14 +144,14 @@ sequenceDiagram
 
 ## 4. Timing and conflicts
 
-Web makes no Timeline decision; ordering is decided by ToolExecutor, Approval and the registries.
+Web makes no Timeline decision; ordering is decided by ToolExecutor, Approval and the ports.
 
 ```mermaid
 sequenceDiagram
   participant TL as Timeline
   participant X as ToolExecutor
   participant W as Web
-  participant R as Process tool registry
+  participant R as Tool source port
   Note over TL,W: Case 1, turn interrupt during a request
   TL->>X: step/tool-start
   X->>W: execute
@@ -167,19 +161,19 @@ sequenceDiagram
   X->>TL: step/tool-result for the batch
   Note over TL,R: Case 2, Web unloaded mid-call
   W->>W: disposer aborts in-flight calls first
-  W-->>X: error result tool provider unavailable (not capability reloading)
+  W-->>X: error result provider unavailable (not capability reloading)
   W->>R: unregister web set
   R-->>X: branches adopt a set without web tools at next opportunity
   X->>TL: batch result, turn continues
 ```
 
-Case 2 is the withdraw-only rule of [extension-registry](../contracts/extension-registry.md): the per-call outcome is never `capability reloading`, so Loop does not fail the turn and no other Session is affected.
+Case 2 is the contributor-unload rule of [ADR 002](../../adr/002-dependency-direction.md) D2: the per-call outcome is never `capability reloading`, so Loop does not fail the turn and no other Session is affected.
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
 | Configuration edit during a call | Call continues with the snapshot and credential resolved at its start; next call uses the new set version | Web |
 | Old-version `web_search` called after the service was removed | Error result `search_unavailable` | Web |
-| Backend mount unloaded mid-search | That call fails `search_unavailable`; Web publishes a set without `web_search`; Web is not reloaded | Web, `WebSearchBackends` |
+| Backend unloaded mid-search | That call fails `search_unavailable`; Web publishes a set without `web_search`; Web is not reloaded | Web, `WebSearchBackends` |
 | Process restart mid-call | ToolExecutor settles the committed call as not surviving recovery; Web never repeats a request | ToolExecutor |
 | Compaction after a result | Fetched text survives only through the summary; the model can fetch again | ContextPreparation |
 
@@ -204,9 +198,9 @@ Full table in Appendix B.
 | --- | --- | --- |
 | `web_search` | Tool, risk `network` | Query the configured service; numbered result list |
 | `web_fetch` | Tool, risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
-| `ProcessToolSource` key `web` | Contribution to the process tool registry | One set `web`; withdraw-only on unload |
-| `WebSearchBackend` / `WebSearchBackends` | Extension point and registry defined by Web | Search backends from other plugins (A1) |
-| `web.*` configuration | Settings, loader editable layer, volatile | Search service, private-host exceptions, proxy |
+| `ProcessToolSource` key `web` | Registration in the tool source port | One set `web`; removed on unload |
+| `WebSearchBackend` / `WebSearchBackends` | Port defined and hosted by Web | Search backends from other plugins (A1) |
+| `web.*` configuration | Business configuration in a Settings source, read at use | Search service, private-host exceptions, proxy |
 
 No Session methods, no management methods, no CLI subcommand: configuration goes through Settings' typed operations and `/settings`. Details in Appendix A.
 
@@ -224,7 +218,7 @@ No Session methods, no management methods, no CLI subcommand: configuration goes
 
 ### A.1 Tool set
 
-One set, key `web`. `web_fetch` is present while Web is registered. `web_search` is present only when a service is configured and its adapter or backend is available (A3). Both tools: `risk: "network"`, `requires: { interactive: false, roles: None }`. Parameters are validated by the handler (the external boundary); a violation returns an error result without network access.
+One set, key `web`. `web_fetch` is present while Web is registered. `web_search` is present only when a service is configured and its adapter is usable or its backend is registered (A3). Both tools: `risk: "network"`, `requires: { interactive: false, roles: None }`. Parameters are validated by the handler (the external boundary); a violation returns an error result without network access.
 
 ### A.2 `web_search`
 
@@ -299,25 +293,25 @@ Bracketed lines appear only when they apply. `structured_content`: `{ url, final
 ### A.5 `WebSearchBackend` and `WebSearchBackends`
 
 ```rust
-/// Keyed process service provided by a backend plugin; key TypeKey::keyed_dynamic::<dyn WebSearchBackend>(name).
+/// Implemented by a backend plugin and registered into WebSearchBackends.
 pub trait WebSearchBackend: Send + Sync + 'static {
-    fn available(&self) -> watch::Receiver<bool>;
     fn search(&self, request: SearchRequest, cancel: CancellationToken) -> HostFuture<'_, Vec<SearchHit>>;
 }
 pub struct SearchRequest { pub query: String, pub max_results: u8,
     pub allowed_domains: Vec<String>, pub blocked_domains: Vec<String> }
 pub struct SearchHit { pub title: String, pub url: String, pub snippet: String, pub published_at: Option<String> }
 
-/// Process service provided by Web; stable for Web's lifetime.
+/// Port hosted by Web; backends depend on it and reload with Web.
 pub trait WebSearchBackends: Send + Sync + 'static {
     fn register(&self, name: &str, backend: Arc<dyn WebSearchBackend>) -> Registration; // drop = unregister
-    fn lookup(&self, name: &str) -> Lookup; // Active(backend) | ConfiguredInactive | NotConfigured
+    fn lookup(&self, name: &str) -> Option<Arc<dyn WebSearchBackend>>;
+    fn changed(&self) -> watch::Receiver<u64>;
 }
 ```
 
-Registry rules follow [extension-registry](../contracts/extension-registry.md): one backend mount per configured backend injects `(WebSearchBackends, keyed backend)`, registers in `apply` and unregisters in its `ctx.effect` disposer after its in-flight searches return. The configured set comes from loader row declarations, so `lookup` distinguishes "not configured" from "configured but inactive". A backend reload reloads only its mount; for Web it is an availability change.
+Port rules follow [ADR 002](../../adr/002-dependency-direction.md) D2: a backend plugin depends on `WebSearchBackends`, registers in `apply` and unregisters in its `ctx.effect` disposer after its in-flight searches return "provider unavailable". Which backend is required comes only from `web.search.service` (`{backend: name}`); a named backend that is not registered makes `web_search` unavailable. A backend reload is a registration change for Web, never a Web reload.
 
-### A.6 Configuration (`web` section, loader editable layer, volatile)
+### A.6 Business configuration (`web` section, Settings source)
 
 | Key | Type | Default |
 | --- | --- | --- |
@@ -325,19 +319,19 @@ Registry rules follow [extension-registry](../contracts/extension-registry.md): 
 | `web.fetch.allow_private_hosts` | string[] | `[]` |
 | `web.proxy` | string (URL) | absent |
 
-All keys are volatile: a change produces a notice to Web and a new tool set version, never a row reload. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
+All keys are business configuration ([ADR 002](../../adr/002-dependency-direction.md) D5), outside the loader editable layer: Web reads them at use time; a change is a data update plus notification that yields a new tool set version, never a row reload. Only Web's enablement and node binding are structural loader configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
 
 ### A.7 Timeline and capability mechanics
 
 | Step | Path |
 | --- | --- |
-| Register | The Web tool mount's `apply` registers the keyed `web` source with the process tool registry; Web's own `apply` reads configuration, builds the set and subscribes to Settings notices and backend availability with `ctx.effect` |
-| Adopt | ToolRegistry refreshes from the registry; ToolBinding adopts into `context/configured` through `Timeline::append_batch_registered` (Prompt's configuration publisher). Web writes nothing |
+| Register | Web's `apply` reads configuration, builds the set, registers the keyed `web` source in the tool source port and subscribes to Settings notices and backend registration changes, with `ctx.effect` |
+| Adopt | ToolRegistry refreshes from the port; ToolBinding adopts into `context/configured` through `Timeline::append_batch_registered` (Prompt's configuration publisher). Web writes nothing |
 | Call | ToolExecutor consumes `step/tool-call` on the Dispatcher, registers the batch task and returns; per call `step/tool-start` (`Timeline::append`), admission, handler on the executor's task, `step/tool-completed`, then one `step/tool-result` per batch |
 | Dispatcher | Web has no subscription |
 | State and recheck | No `StateCell`; no consumed facts; decisions use arguments and the snapshot at call start |
 | Terminal facts | Written by ToolExecutor (initiator); Web returns exactly one `ToolResult` per call |
-| Web unload or reload | The disposer aborts in-flight requests, returning "tool provider unavailable" per call, then unregisters; branches adopt without the `web` set; the new generation registers a set with a new version |
+| Web unload or reload | The disposer aborts in-flight requests, returning "provider unavailable" per call, then unregisters; registered backends reload with Web; branches adopt without the `web` set; the new generation registers a set with a new version |
 | Process restart | Committed calls without results are settled by ToolExecutor's rebuild; Web never repeats a request |
 
 ## Appendix B. Full conflict table
@@ -355,12 +349,12 @@ All keys are volatile: a change produces a notice to Web and a new tool set vers
 | Child branch cut | cut after `step/tool-result` | Child inherits the result; no per-branch state | — |
 | Configuration edit while a call runs | new version published during call | Call continues with values resolved at its start | Web |
 | Old-version `web_search` after removal | call > new version, bound to old | Error `search_unavailable` | Web |
-| Backend mount unloaded or Pending | flag false | That call `search_unavailable`; set without `web_search` published | Web |
-| Web unload or reload mid-call | no result yet | Error "tool provider unavailable" for that call; batch and turn continue; tools withdrawn until re-registered | Web, ToolExecutor, ToolRegistry |
+| Backend unloaded or Pending | not registered | That call `search_unavailable`; set without `web_search` published | Web |
+| Web unload or reload mid-call | no result yet | Error "provider unavailable" for that call; batch and turn continue; tools withdrawn until re-registered | Web, ToolExecutor, ToolRegistry |
 | Process restart mid-call | committed, no result | Settled as not surviving recovery; not repeated | ToolExecutor |
 | Session unload and restore | `branch/resume` | Re-adopt current version; cache unaffected | ToolRegistry, ToolBinding |
 | Session resource node offline | — | No effect; Web resolves no node services | — |
-| Web's own peer row node offline | Web mount Pending | Registry treats `web` as configured but inactive; branches adopt without it; no Session Pending | Process tool registry |
+| Web's own peer row node offline | Web Pending, not registered | Branches adopt without the `web` set; no Session Pending | Tool source port |
 | Duplicate or late handler call after cancellation | token already cancelled | Returns `cancelled` without network access | Web |
 | Two branches fetch the same URL | — | Independent requests; cache filled by the first to finish | Web |
 | Client detach | — | No effect | — |
@@ -381,7 +375,7 @@ Every error is an error `ToolResult` (`is_error: true`) with content `web_fetch 
 | `search_unavailable` | No service configured, backend unavailable, or credential unresolvable |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `cancelled` | Token cancelled |
-| tool provider unavailable | Returned by the disposer on unload (contract outcome of [process-tool-contribution](../contracts/process-tool-contribution.md)) |
+| provider unavailable | Returned by the disposer on unload (contract outcome of [process-tool-contribution](../contracts/process-tool-contribution.md)) |
 
 Recovery: Web holds no durable work; unload and restart lose only the cache.
 
@@ -390,14 +384,14 @@ Recovery: Web holds no durable work; unload and restart lose only the cache.
 Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allow_private_hosts` entry, a fake backend plugin.
 
 1. Without a service only `web_fetch` is declared; configuring one publishes `web_search` in a new version adopted before the next request, with no Web reload; removing it withdraws it and an old bound call returns `search_unavailable`.
-2. `web_search` format, domain filters, zero results, service error; same through a fake backend; unloading the backend mount withdraws `web_search` without reloading Web or any Session plugin.
+2. `web_search` format, domain filters, zero results, service error; same through a fake backend; unloading the backend withdraws `web_search` without reloading Web or any Session plugin.
 3. `web_fetch` HTML header and Markdown; `start_char` pagination to the end; `max_chars`; download limit notice.
 4. Plain text, JSON, unsupported type, 404, empty page.
 5. Same-host redirects up to 5; sixth fails; cross-host redirect returns the notice.
 6. Loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname blocked; DNS rebinding test not connected.
 7. Permission: read-only denies, workspace-write asks, FullAccess allows.
 8. Interrupt before dispatch, during approval and during a slow response (socket closed, one result).
-9. Unloading Web during a slow fetch yields "tool provider unavailable" for that call; the turn continues; other Sessions are unaffected; restart settlement repeats no request.
+9. Unloading Web during a slow fetch yields "provider unavailable" for that call; the turn continues; other Sessions are unaffected; restart settlement repeats no request.
 10. Non-interactive Session declares both tools.
 11. Diagnostics and results never contain the resolved credential.
 
@@ -405,7 +399,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Search backends from other plugins (for example account-backed ones) plug in through Web's `WebSearchBackends` registry | Feature list ("configuration or account permissions"); overview §6.2 constraint 13 | Account-backed search must be a built-in adapter |
+| A1 | Search backends from other plugins (for example account-backed ones) plug in through Web's `WebSearchBackends` port | Feature list ("configuration or account permissions"); overview §6.2 constraint 13 | Account-backed search must be a built-in adapter |
 | A2 | Network access happens on the node running Web (control node by default) | Overview §6.3; judgment | A Session-bound network service on each resource node |
 | A3 | `web_search` is withdrawn when no service is usable | Judgment | Tool always declared, failing at call time |
 | A4 | Query length 500; `max_results` 1 to 10, default 5 | Judgment | Limits change |
@@ -424,5 +418,5 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | Question | Description |
 | --- | --- |
-| Cross-language migration | Overview §B.5 names Web as the first #4 migration target; the TypeScript implementation needs only process services (process tool registry, Settings volatile configuration, credential resolver) |
-| Overview wording | Overview §C.1 ToolRegistry row still says the contributor lifecycle "follows the dependency"; this design follows the withdraw-only registry of decisions B.3 |
+| Cross-language migration | Overview §B.5 names Web as the first #4 migration target; the TypeScript implementation needs only process services (tool source port, Settings business source, credential resolver) |
+| Overview wording | Overview §C.1 ToolRegistry row must describe the tool source port of [ADR 002](../../adr/002-dependency-direction.md) |

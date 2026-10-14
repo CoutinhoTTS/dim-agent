@@ -215,7 +215,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` → submission admission ([session-boundary](../contracts/session-boundary.md), fail closed: an inactive configured checker returns `service_reloading`, nothing written) → `SessionLease::relay` → Session input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
+| Prompt write | `session.submit` → submission admission ([session-boundary](../contracts/session-boundary.md), submission-admission port; fail closed only when an adopted rule matching the submission requires a checker that is not registered ([ADR 002](../../adr/002-dependency-direction.md) D6): `service_reloading`, nothing written) → `SessionLease::relay` → Session input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` → InputQueue validates (own branch, not adopted) and writes `input/withdrawn` |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |
@@ -249,7 +249,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | Branch interrupt or Session close | `session.closed` | In-flight prompt `cancelled`; later `session_not_found` | Gateway |
 | Session idle-unload while attached | — | Attachment keeps it loaded | AgentIndex |
 | Resource node offline | capabilities Pending | Prompt waits; `turn/end` decides | rutis lifecycle |
-| Submission admission checker inactive | — | `service_reloading`, nothing written; retried after `input_lookup` | Rpc |
+| Adopted rule matches but its checker is not registered (D6) | — | `service_reloading`, nothing written; retried after `input_lookup` | Rpc |
 | Daemon reload mid-submit | — | `input_lookup` decides resubmission | Gateway |
 | Daemon restart mid-turn | turn settled `Failed` | `turn_failed` after catch-up | Loop |
 | Duplicate `session/prompt` | — | `prompt_in_progress` | Gateway |

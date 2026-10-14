@@ -14,11 +14,11 @@ flowchart LR
     Tool["workflow tool handler"]
     Mgmt["workflow.* methods"]
   end
-  ToolReg["Process tool registry (ToolRegistry)"]
+  ToolReg["Tool source port (ToolRegistry side)"]
   MgmtReg["Method contribution, level management (session-boundary)"]
-  Launch["Agents launch (non-interactive, policy cap)"]
-  Estab["Collaboration establish"]
-  Access["SessionAccess facade"]
+  Access["Session access port (stable host plugin)"]
+  Launch["Agents launch, registered (non-interactive, policy cap)"]
+  Estab["Collaboration establish, registered"]
   Purpose["Provider model selection, purpose workflow.stage"]
   Store["Process storage (App Server)"]
   Approvals["Host-local approval service (Settings)"]
@@ -26,9 +26,9 @@ flowchart LR
   Contents["PluginContents type workflows"]
   Tool --> ToolReg
   Mgmt --> MgmtReg
-  Runner --> Launch
-  Runner -.->|When| Estab
   Runner --> Access
+  Access -.->|per call| Launch
+  Access -.->|per call| Estab
   Runner --> Purpose
   Runner --> Store
   Defs --> Sources
@@ -40,13 +40,13 @@ flowchart LR
   class ToolReg,MgmtReg,Launch,Estab,Access,Purpose,Store,Approvals,Sources,Contents contract
 ```
 
-Runs belong to the process, not to the starting branch, so there is no Session or branch part. Workflow drives every stage Session, member or not, only through the `SessionAccess` facade, so an Agents or Collaboration reload returns `Reloading` to Workflow instead of interrupting runs.
+Runs belong to the process, not to the starting branch, so there is no Session or branch part. Workflow depends only on stable ports ([ADR 002](../../adr/002-dependency-direction.md) D1, D2): the Session access port is hosted in a stable plugin, and Agents (`launch`, AgentIndex) and Collaboration (`establish`) register into it and are resolved per call. An Agents or Collaboration reload therefore returns `Reloading` or "provider unavailable" to that call instead of reloading Workflow or interrupting runs.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `WorkflowPlugin` | Process (control node) | `SessionAccess` (`config`, acquire, input, `withdraw`, idle, stop, lookup, pages), Agents launch, `When<Collaboration establish>`, Provider purpose selection, App Server process storage, Settings sources and host-local approval service, `When<PluginContents>` (type key `workflows`) | Mount instances: process tool set `workflow` ([process-tool-contribution](../contracts/process-tool-contribution.md)), methods `workflow.*` at level `management` ([session-boundary](../contracts/session-boundary.md)) |
+| `WorkflowPlugin` | Process (control node) | Session access port (`config`, acquire, input, `withdraw`, idle, stop, lookup, pages; Agents `launch` and Collaboration `establish` resolved per call), Provider model selection port, App Server process storage, Settings sources and host-local approval service, `When<PluginContents>` (stable registry, type key `workflows`) | Registrations: process tool set `workflow` in the tool source port ([process-tool-contribution](../contracts/process-tool-contribution.md)), methods `workflow.*` at level `management` in Rpc's method port ([session-boundary](../contracts/session-boundary.md)) |
 
-**Contracts depended on**: [extension-registry](../contracts/extension-registry.md) (mount pattern), process-tool-contribution, [session-access](../contracts/session-access.md), Agents launch (overview §C.2; shape in [Scheduler A.5](Scheduler.md#a5-agents-launch-depended-on)), Collaboration `establish(leader, agent)` (Collaboration supplement), Provider purpose policy (overview §C.2), [session-boundary](../contracts/session-boundary.md) (method contribution), App Server process storage (R8), Settings sources and host-local approval service (R11), `PluginContents` (optional). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
+**Contracts depended on**: [ADR 002](../../adr/002-dependency-direction.md) (ports and per-call resolution), process-tool-contribution, [session-access](../contracts/session-access.md), Agents launch (overview §C.2; shape in [Scheduler A.5](Scheduler.md#a5-agents-launch-depended-on)), Collaboration `establish(leader, agent)` (Collaboration supplement, registered into the Session access port), Provider purpose policy (overview §C.2), [session-boundary](../contracts/session-boundary.md) (method contribution), App Server process storage (R8), Settings sources and host-local approval service (R11), `PluginContents` (optional). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
 
 ## 2. Data and state
 
@@ -176,7 +176,7 @@ sequenceDiagram
   WF->>WF: stage outcome from facts, run continues
 ```
 
-Agents and Collaboration reloads no longer interrupt runs; only Workflow's own reload or a restart settles runs `interrupted`.
+Agents and Collaboration reloads never interrupt runs; only Workflow's own reload or a restart settles runs `interrupted`. A Collaboration reload makes `establish` unavailable for that window only; member stages already running are driven through the Session access port and continue.
 
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
@@ -212,7 +212,7 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 
 ## 7. Security
 
-Project and plugin definitions are executable content: `start` and every stage launch require a grant in the Settings host-local approval service, record `{owner: workflow, node, workspace, source, id: name, fingerprint}`, fingerprint = SHA-256 over the canonical definition document (R11). Grants come only from `workflow.approve` on an entry that mounts the `management` level; the tool, Timeline facts, replay and fork never grant. User definitions need no approval. Stage policy follows 3.3 and a definition can only narrow it. Approvals raised inside a member stage are forwarded to the leader by Collaboration (E6), not by Workflow. Stage Sessions reach host resources only through node services resolved per call by their `resource_node` (`node-services`, [extension-registry](../contracts/extension-registry.md)). Params and results become Timeline content of stage and report Sessions; definitions must not carry credentials.
+Project and plugin definitions are executable content: `start` and every stage launch require a grant in the Settings host-local approval service, record `{owner: workflow, node, workspace, source, id: name, fingerprint}`, fingerprint = SHA-256 over the canonical definition document (R11). Grants come only from `workflow.approve` on an entry that mounts the `management` level; the tool, Timeline facts, replay and fork never grant. User definitions need no approval. Stage policy follows 3.3 and a definition can only narrow it. Approvals raised inside a member stage are forwarded to the leader by Collaboration (E6), not by Workflow. Stage Sessions reach host resources only through the node-services port, resolved per call by their `resource_node` ([ADR 002](../../adr/002-dependency-direction.md)). Params and results become Timeline content of stage and report Sessions; definitions must not carry credentials.
 
 ## Appendix A. Interface details
 
@@ -293,8 +293,8 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 
 | Contract | Owner | Use |
 | --- | --- | --- |
-| `launch(...) -> SessionLease` with `SessionConfig` values `interactive: false`, `resource_node`, `created_by: Launch { source: "workflow" }` (`SessionOrigin`), and `policy` | Agents supplement | Launched stages; Workflow writes the first input itself |
-| `establish(leader_session_id, agent_id) -> MemberRef` | Collaboration supplement | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
+| `launch(...) -> SessionLease` with `SessionConfig` values `interactive: false`, `resource_node`, `created_by: Launch { source: "workflow" }` (`SessionOrigin`), and `policy` | Agents supplement; reached through the Session access port, resolved per call | Launched stages; Workflow writes the first input itself |
+| `establish(leader_session_id, agent_id) -> MemberRef` | Collaboration supplement; registered into the Session access port, resolved per call | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
 | `SessionAccess::withdraw(branch, input_id)` | session-access (InputQueue contract) | Withdraw own unconsumed stage inputs on stop |
 
 ### A.6 Timeline and capability mechanics
@@ -309,8 +309,8 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | Advance | Persist the stage result; when all stages of a step are terminal, start the next step or end the run; a failed stage stops running siblings and fails the run (A4) |
 | Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `acquire`, `lease.input(branch_id, Steer, marker report)`; persist `delivered` or `undeliverable` |
 | Stop | Persist `stopping`; waiting stages `skipped`; unconsumed stage inputs withdrawn; running stages `lease.stop("main", "workflow stopped")`; completion rule reads the outcome; run `stopped`, no report |
-| Agents or Collaboration reload | Facade calls return `Reloading`; the run task keeps state and retries after the window; `establish` unavailable during the window retries until the startup deadline, then the stage `failed` |
-| Own reload, restart | Mounts unregister (in-flight tool call → "tool provider unavailable"; `workflow.*` → `service_reloading`). On unload the old generation stops running stage turns (bounded wait, A13). The new generation loads runs: `running`/`stopping` → `interrupted`; `launching`/`running` stages → `lost`; nothing relaunched. A `pending` report is looked up (`Accepted` → `delivered`, `Unknown` → written now); interrupted runs with `report_to` and `report: none` get one report (E15) |
+| Agents or Collaboration reload | Session access port calls return `Reloading` (Agents) or "provider unavailable" (`establish` not registered); the run task keeps state and retries; `launch`/`establish` unavailable retries until the startup deadline, then the stage `failed`. Workflow never reloads with them |
+| Own reload, restart | Registrations disappear (in-flight tool call → "provider unavailable"; `workflow.*` answered by the method port from registration state). On unload the old generation stops running stage turns (bounded wait, A13). The new generation loads runs: `running`/`stopping` → `interrupted`; `launching`/`running` stages → `lost`; nothing relaunched. A `pending` report is looked up (`Accepted` → `delivered`, `Unknown` → written now); interrupted runs with `report_to` and `report: none` get one report (E15) |
 
 ## Appendix B. Full conflict table
 
@@ -335,7 +335,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | Member stage, leader `request`s the same member | stage input queued, not started | Both inputs queue in the member Session; `Busy` only once a turn runs; the stage result is the first `turn/end` after its own input's consumption | Collaboration, Workflow |
 | Leader branch closed with a member stage | close < stage end | Member stage continues (member belongs to the Session); report `undeliverable` | Workflow |
 | Leader Session closed with a member stage | — | Member closed by Collaboration → stage `failed: session_closed`; run `failed` | Collaboration, Workflow |
-| Collaboration reload | — | Running member stages unaffected (driven through SessionAccess); `establish` retried until deadline | Workflow |
+| Collaboration reload | — | Running member stages unaffected (driven through the Session access port); `establish` resolved per call, retried until deadline | Workflow |
 | Agents reload | — | `Reloading`; runs kept; tracking resumes | Workflow |
 | Stage resource node offline | capabilities Pending | `launch` fails at deadline → `failed: node_unavailable`; a running stage waits in `idle` | Agents, rutis lifecycle |
 | Stage Session capability reload mid-turn | turn ends `Failed` | Stage `failed` | Stage Loop |
@@ -403,4 +403,4 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | --- | --- |
 | Overview method list | Overview §B.9 lists `workflow.list/save/start/status/stop`; this design adds `workflow.approve/revoke` (D11) |
 | Launch contract | Agents supplement must define `launch` with `policy` and the starter-policy resolution; overview §C.2 still says Agents submits the first input (D17) |
-| Collaboration `establish` | Must be registered in overview §C.2 Collaboration row |
+| Collaboration `establish` | Must be registered in overview §C.2 Collaboration row as a registration into the Session access port |
