@@ -80,7 +80,7 @@ Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实�
 | 资源 | 自己发起的在途工作 | 宿主资源：存储、隔离、网络服务、外部协议端口、外部进程 |
 | 生命周期 | 随 Session 或分支：中断、重载、关闭 | 随进程或 loader |
 
-功能同时具备两侧特征时，拆为进程插件与 Capability，沿用 SkillsCatalog（进程）、Skills（Session）、SkillsBranch（分支）的分法。工具可以由进程级贡献提供；按序观察 Session 事件可以经进程级订阅 Session 广播完成，写入经 Session 的公开输入接口；Session 状态能由 Timeline 推出时不设 Session 或分支部分。只有现有机制都无法表达的分支内行为才新建 Capability。
+功能同时具备两侧特征时，拆为进程插件与 Capability，沿用 SkillsCatalog（进程）、Skills（Session）、SkillsBranch（分支）的分法。工具可以由进程级贡献提供；观察 Session 事件可以经进程级实时订阅 Session 广播完成，需要据此做决定时经 Session 的公开读取接口读取固定前缀，写入经 Session 的公开输入接口；Session 状态能由 Timeline 推出时不设 Session 或分支部分。只有现有机制都无法表达的分支内行为才新建 Capability。
 
 | 类别 | 新插件与拆分 |
 | --- | --- |
@@ -287,7 +287,7 @@ flowchart LR
   PluginManager -->|插件内容| SkillsCatalog
   PluginManager -->|插件内容| Mcp
   PluginManager -->|插件内容| Hooks
-  Notifications & SessionTitle & Hooks & Goal -->|按序订阅| SessionBroadcast
+  Notifications & SessionTitle & Hooks & Goal -->|实时订阅| SessionBroadcast
   RemoteGateway -->|认证连接| Transport
   RemoteGateway --> Rpc
   AcpGateway -->|本地 RPC| Rpc
@@ -440,10 +440,10 @@ flowchart LR
 | --- | --- |
 | 作用域 | 进程 |
 | 职责 | 设置、编辑、暂停、恢复、清除目标；目标未完成时自动继续；记录完成或受阻 |
-| 接入 | B：目标以带 key 的 raw 输入块表达，设置、编辑、暂停、恢复由 `session.goal.*` 在边界经 Session 输入写入同 key 的新块（内容含目标与状态），清除以 `retire` 结束该 key，目标因此持续留在上下文中。A：以进程级工具贡献提供无状态的 `goal_update`，报告完成或受阻。继续：经进程级订阅 Session 广播按序号观察目标所在分支的事件，需要继续时经 Session 输入写入 Queue 模式的继续输入，raw 块标明来自目标 |
+| 接入 | B：目标以带 key 的 raw 输入块表达，设置、编辑、暂停、恢复由 `session.goal.*` 在边界经 Session 输入写入同 key 的新块（内容含目标与状态），清除以 `retire` 结束该 key，目标因此持续留在上下文中。A：以进程级工具贡献提供无状态的 `goal_update`，报告完成或受阻。继续：经进程级实时订阅 Session 广播得知目标所在分支的 `turn/end`，再经 Session 的公开读取接口读取截至该序号的固定前缀做判断，需要继续时经 Session 输入写入 Queue 模式的继续输入，raw 块标明来自目标 |
 | 事件 | 无。目标与其状态由该 key 的输入块推出；完成与受阻由 `goal_update` 的工具结果推出 |
 | 接口 | Session 方法 `session.goal.set/edit/pause/resume/clear` |
-| 关系 | 是否继续只依据按序号观察到的 `turn/end`、`input/*`、`stop/interrupt` 与 `goal_update` 结果，不读 InputQueue 或 Loop 的状态。`stop/interrupt` 使目标进入暂停，并写入同 key 的“已暂停”块；连续继续次数由带来源标记的继续输入计数，达到上限即暂停。进程重启后经 Session 的公开读取接口从历史重建。中断与继续输入并发时，继续输入可能排在中断之后并开始一个 turn；此 turn 中模型从目标块看到已暂停并结束，最多多出一个 turn |
+| 关系 | 是否继续只依据读取到的固定前缀中的目标块、`input/*`、`stop/interrupt` 与 `goal_update` 结果，不读 InputQueue 或 Loop 的状态；读取固定前缀即消费这段事实，订阅本身不需要保证顺序。`stop/interrupt` 使目标进入暂停，并写入同 key 的“已暂停”块；连续继续次数由带来源标记的继续输入计数，达到上限即暂停。进程重启期间错过的 `turn/end` 不补，目标保持原状态，由用户恢复或下一次 `turn/end` 时继续。中断与继续输入并发时，继续输入可能排在中断之后并开始一个 turn；此 turn 中模型从目标块看到已暂停并结束，最多多出一个 turn |
 
 ### 5.3 ShellInput
 
@@ -668,7 +668,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | Mcp | 补充 | HTTP/SSE 连接的 OAuth 授权；接受插件来源的配置 | MCP 连接；PluginManager |
 | SkillsCatalog | 补充 | 接受插件来源的 Skill 根；安装与移除由 PluginManager 发起 | PluginManager |
 | Trace | 补充 | 导出指定步骤的模型请求快照，可过滤推理、工具记录与压缩内容 | 请求快照导出 |
-| Session 广播 | 待确认 | 进程级按序号订阅所有 Session 的事件（turn 结束、输入、中断、工具结果、待审批、待回答等） | Notifications、SessionTitle、Hooks、Goal |
+| Session 广播 | 待确认 | 进程级实时订阅所有 Session 的事件（turn 结束、工具结果、待审批、待回答等）；不保证顺序、不支持续读，需要正确性的使用方读取 Timeline 固定前缀 | Notifications、SessionTitle、Hooks、Goal |
 
 ## 8. CLI 层
 
@@ -733,7 +733,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | AcpGateway | TS 先行 | 只是本地 RPC 客户端，可先以独立程序验证 ACP 映射，再并入 Rust CLI | 无 |
 | Web | TS 先行 | #4 已把 `web` 列为首个迁移对象；工具以进程服务提供，不需要能力端口 | 进程级工具贡献的服务合同 |
 | Workflow | TS 先行 | 编排规则需要验证；运行归进程，不需要能力端口 | Agents、Collaboration 与进程级工具贡献的服务合同 |
-| Goal | TS 先行 | 继续策略需要验证；不需要能力端口 | 进程级订阅 Session 广播；进程级工具贡献的服务合同 |
+| Goal | TS 先行 | 继续策略需要验证；不需要能力端口 | 进程级实时订阅 Session 广播；Session 读取与输入的服务合同；进程级工具贡献的服务合同 |
 | Management | Rust | 管理面骨干 | — |
 | Questions | Rust | 与在途工具调用的结算紧密相关，逻辑简单 | — |
 | ShellInput | Rust | 执行命令，属于安全边界 | — |
@@ -771,6 +771,6 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 远程访问 | 认证、断线与 TLS 部署与 #5 的待定问题相关 |
 | 隔离的覆盖面 | MCP stdio 进程是否默认受隔离 |
 | FullAccess 与新风险类别 | 外发消息与持久配置是否在 FullAccess 下仍需询问 |
-| 进程级订阅 | Notifications、SessionTitle、Hooks 与 Goal 所需的跨 Session 按序订阅是否复用 Session 广播 |
+| 进程级订阅 | Notifications、SessionTitle、Hooks 与 Goal 所需的跨 Session 实时订阅是否复用 Session 广播 |
 | 外部 Agent 的权限 | 外部 Agent 自身的权限请求（如 ACP 的权限请求）映射为 dim 审批，还是按配置的权限模式自动应答 |
 | 外部会话续接 | 外部 Agent 不支持续接或续接失败时，是新开外部会话并附带历史摘要，还是明确失败 |
