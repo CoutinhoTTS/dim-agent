@@ -174,13 +174,13 @@ Decided by sequence, not wall-clock: the continuation precedes no earlier interr
 ```mermaid
 sequenceDiagram
   participant TE as ToolExecutor
-  participant Mount as Goal
+  participant G as Goal
   participant Reg as tool source port
   participant TL as Branch Timeline
-  TE->>Mount: goal_update in flight
-  Mount->>Mount: ctx.effect disposer cancels handler
-  Mount-->>TE: error result tool provider unavailable
-  Mount->>Reg: unregister set goal
+  TE->>G: goal_update in flight
+  G->>G: ctx.effect disposer cancels handler
+  G-->>TE: error result tool provider unavailable
+  G->>Reg: unregister set goal
   TE->>TL: step/tool-result, batch and turn continue
   Note over TL: no turn/end failed, so no paused turn_failed
 ```

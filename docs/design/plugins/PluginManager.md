@@ -45,7 +45,7 @@ flowchart LR
 | Package code rows | Process, on the package's node | what the code declares, plus `PluginApproval` | what the code declares; reads its business configuration at use time |
 | Content owners | Process | `PluginContents` | — (each defines its own type key) |
 
-Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace index `dim-marketplace.json`, the `PluginContents` publication contract (`ContentSource`), the package directory layout, the `PluginApproval` gate key, `plugin.*` methods. Contracts depended on: typed Settings operations on the loader editable layer (#3) for plugin intent, the Settings business source for per-plugin configuration (ADR 002 D5), the Settings host-local approval service (R11) and credential-reference resolver (R10), process storage on the control node, the rutis-loader `Loader` (`entries`, `reload`, `restart`, `LoaderChanged`), `NodeServices` (`FileStorage`, `HostPlatform`) of the package's node through the node-services port, the [method contribution](../contracts/session-boundary.md#a1-method-contribution) contract. PluginManager never calls a consumer and never names a content type key in code.
+Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace index `dim-marketplace.json`, the `PluginContents` publication contract (`ContentSource`), the package directory layout, the `PluginApproval` gate key, `plugin.*` methods. Contracts depended on: typed Settings operations on the loader editable layer (#3) for plugin intent, the Settings business source for per-plugin configuration (ADR 002 D5), the Settings host-local approval service (R11) and credential-reference resolver (R10), process storage on the control node, the rutis-loader `Loader` (`entries`, `reload`, `restart`, `LoaderChanged`), `NodeServices` (`FileStorage`, `HostPlatform`) of the package's node through the node-services port, the [method contribution](../contracts/session-boundary.md#a1-method-port) contract. PluginManager never calls a consumer and never names a content type key in code.
 
 ## 2. Data and state
 
@@ -169,7 +169,7 @@ Install is ordered stage, commit, Settings write; the Settings revision is the c
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Code row contributing tools revoked or disabled while a call runs | That call gets "tool provider unavailable"; batch and turn continue | Tool source port, code row |
+| Code row contributing tools revoked or disabled while a call runs | That call gets "tool provider unavailable"; batch and turn continue | [Tool source port](../contracts/process-tool-contribution.md), code row |
 | Approval granted, then package updated | New fingerprint does not match; code rows Pending until re-approved | `PluginPackage` row |
 | Node goes offline after install | Only that node's rows Pending; its sources withdrawn | rutis lifecycle |
 | `plugin.configure` while the plugin runs | Business data update and notification; no row reload; next use reads the new value | Plugin |

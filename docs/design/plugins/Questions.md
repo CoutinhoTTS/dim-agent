@@ -26,7 +26,7 @@ flowchart LR
   TR --> PT
   QP -- "registers session.question.respond" --> MP
   RPC --> MP
-  QP -. "per call: service::<Questions>(branch)" .-> QB
+  QP -. "per call: ToolCallScope::branch_service" .-> QB
   TE -- "handler call + batch token" --> QB
   QB -- "append_registered / append" --> TL
   TL -- "question/answered (Dispatcher)" --> QB
@@ -34,14 +34,14 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-ToolRegistry offers `ask_user` only when the calling Session's `SessionConfig.interactive` is true; all waiting and ordering lives in the branch part. The process part holds no state, depends on no Session or branch plugin and reaches the branch only per call through `service::<Questions>(branch)` of the calling Session.
+ToolRegistry offers `ask_user` only when the calling Session's `SessionConfig.interactive` is true; all waiting and ordering lives in the branch part. The process part holds no state, depends on no Session or branch plugin and reaches the branch only per call through `ToolCallScope::branch_service::<Questions>()` ([process-tool-contribution A.4](../contracts/process-tool-contribution.md#a4-per-call-context)).
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `QuestionsPlugin` | Process | [tool source port](../contracts/process-tool-contribution.md), [method port](../contracts/session-boundary.md) | Tool set `questions` (`ask_user`, requirement `interactive`); method `session.question.respond` (`level: session`) |
 | `QuestionsBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher` | `B:Questions` (`ask`, `respond`) |
 
-Contracts depended on: the tool source port and its per-call context (calling Session's `SessionConfig`, branch, batch token, branch service lookup, A1); `service::<T>()` on the calling branch (as [Wait](../../architecture/rust-agent/plugins/Wait.md)); Permission risk category `session`; ToolExecutor's batch token and settlement; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md); `SessionConfig.interactive` (proposed Agents supplement, set by `session.create`); the method port (Rpc passes the acquired Session to `level: session` handlers); client-visible dynamic events (#2, A10).
+Contracts depended on: the tool source port and its per-call context (calling Session's `SessionConfig`, branch, batch token, `ToolCallScope::branch_service::<T>()`, A1), which resolves the calling branch's service as [Wait](../../architecture/rust-agent/plugins/Wait.md) does; Permission risk category `session`; ToolExecutor's batch token and settlement; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md); `SessionConfig.interactive` (proposed Agents supplement, set by `session.create`); the method port (Rpc passes the acquired Session to `level: session` handlers); client-visible dynamic events (#2, A10).
 
 Contracts defined here: the `ask_user` tool, the `question/*` data and consumption contracts, `B:Questions`, `session.question.respond` and its errors. The only write path of `question/answered` is `Questions::respond`. Questions names no other plugin's internal type.
 
@@ -268,7 +268,7 @@ pub enum QuestionRespondError { Unknown, AlreadyAnswered, Cancelled, Invalid(Str
 
 | Step | Mechanics |
 | --- | --- |
-| Tool resolution | Handler: the calling branch's `service::<Questions>()` from the per-call context; `AgentError::Reloading` maps to `HostError::Cancelled(CAPABILITY_RELOADING)` (as Wait) |
+| Tool resolution | Handler: `ToolCallScope::branch_service::<Questions>()`; no AgentIndex is involved, so no `Reloading`; `BranchMissing` (branch closed), `Pending` (branch part not active) or `NotProvided` → error result, turn continues |
 | Ask | Token already cancelled: return Cancelled, write nothing. Else `append_registered(question/asked)`; on commit failure remove the entry and return Cancelled or an error |
 | Wait | `select! biased { response, cancel.cancelled() }`. On cancel: take the entry under the lock; if taken, write `question/cancelled {reason: "Tool execution cancelled"}` after releasing the lock; return Cancelled. Dropped sender: Cancelled with `CAPABILITY_RELOADING`. Ask future dropped (process part unloaded): the entry guard takes the entry and writes `question/cancelled {reason: "provider unavailable"}` |
 | Respond | Pre-check pending and validate against the entry's `asked` data; `append_registered(question/answered)`; await the dispatch result |

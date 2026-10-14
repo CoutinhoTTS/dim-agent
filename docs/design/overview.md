@@ -63,7 +63,7 @@ flowchart TB
   rg -->|"authenticated entry"| tr
   tr --> rpc
   tr --> meth
-  meth -->|"management level, mounted per entry"| mgmt
+  meth -->|"management level, dispatched per entry"| mgmt
   auto & integ & ext -->|"register"| ports
   toolreg -->|"reads per call"| ports
   rpc --> agents
@@ -108,12 +108,12 @@ flowchart LR
   classDef changed stroke:#e8590c,stroke-width:3px
   classDef contract stroke-dasharray:4 3
 
-  pTool["Tool source (ToolRegistry side)"]:::contract
+  pTool["ToolSourcePort (ToolRegistry side)"]:::contract
   pAdm["Admission check (Approval side)"]:::contract
-  pSub["Submission admission (Rpc side)"]:::contract
-  pM["Method (Rpc side)"]:::contract
+  pSub["SubmissionAdmissionPort (Rpc side)"]:::contract
+  pM["MethodPort (Rpc side)"]:::contract
   pKind["Model kind (ModelHost side)"]:::contract
-  pSA["Session access, broadcast subscription"]:::contract
+  pSA["SessionAccessHost: SessionAccess, SessionEvents"]:::contract
   pNode["Node services"]:::contract
 
   Mcp["Mcp"]:::changed
@@ -137,16 +137,16 @@ flowchart LR
 
 Notice: Management is a level-filtered view of the method port. The model selection/connection port (Provider, ConfiguredModels) and the Provider secret port are omitted. Hooks' Session-start Hooks need no port: they observe the broadcast `Created` notice.
 
-| Port (consumer side) | Host | Contributors | Contributor gone | Fail-closed requirement (D6) |
+| Port (consumer side) | Host plugin (Deps) | Contributors | Contributor gone | Fail-closed requirement (D6) |
 | --- | --- | --- | --- | --- |
-| Tool source (ToolRegistry) | Stable process plugin | Mcp, Collaboration `agent`, Goal, Web, Scheduler, Workflow, Notifications, Questions `ask_user` (filtered per call by `interactive`) | Its sets disappear; branches adopt without them; that call gets "tool provider unavailable"; batch and turn continue | — |
-| Admission check (Approval) | Stable process plugin | Hooks | Cancelled check denies | Deny with a retryable reason only when an adopted hook rule matches the call and no checker is registered |
-| Submission admission (Rpc) | Stable process plugin | Hooks | Cancelled check rejects | `session.submit` returns `service_reloading`, nothing written, only when an adopted user-submit rule matches and no checker is registered |
-| Method (Rpc) | Stable process plugin | Every method contributor; Management is a level-filtered view | Registration state alone decides `unknown_method` or `service_reloading` | — |
-| Model kind (ModelHost) | Aimux side (stable) | ExternalAgent | Requests of that kind fail before acceptance; availability from adopted Provider connection entries | — |
+| Tool source (ToolRegistry, [process-tool-contribution](contracts/process-tool-contribution.md)) | `ToolSourcePort` (none) | `register(ctx, name, provider)`: Mcp, Collaboration `agent`, Goal, Web, Scheduler, Workflow, Notifications, Questions `ask_user` (filtered per call by `interactive`); `agent` and `ask_user` reach their branch part through `ToolCallScope::branch_service::<T>()` | Its sets disappear; branches adopt without them; that call gets "tool provider unavailable"; batch and turn continue | — |
+| Admission check (Approval) | Approval's admission-check port, stable process plugin (no contract file yet) | Hooks (`pre_tool_use`) | Cancelled check denies | Deny with a retryable reason only when a `RequiredCheck` record matching the calling Session names an unregistered checker |
+| Submission admission (Rpc, [session-boundary](contracts/session-boundary.md)) | `SubmissionAdmissionPort` (Settings) | Hooks (`user_prompt_submit`) | Cancelled check rejects | `session.submit` returns `service_reloading`, nothing written, only when a `RequiredCheck` record (in the checker owner's Settings section) matching the Session names an unregistered checker |
+| Method (Rpc, [session-boundary](contracts/session-boundary.md)) | `MethodPort` (none) | Every method contributor; Management is a level-filtered view | `lookup`: `NotRegistered` or level not dispatched → `-32601` `unknown_method`; `Unloading` → `service_reloading`; started call → `operation_interrupted` | — |
+| Model kind (ModelHost) | Model kind port on the Aimux/ModelHost side (stable) | ExternalAgent | Requests of that kind fail before acceptance; availability from adopted Provider connection entries | — |
 | Model selection/connection; Provider secret | Stable process plugin | Provider, ConfiguredModels; secret supplier | Per request | — |
-| Session access and broadcast subscription | Stable plugin depending only on AgentDirectory and Loader | AgentIndex (resolved per call, `Reloading` during an Agents reload); Collaboration `establish` | Per call | — |
-| Node services | Stable process plugin | Local node (strong core deps); peer nodes as structural loader rows per configured link | `node_unavailable` per call | — |
+| Session access and broadcast subscription ([session-access](contracts/session-access.md), [session-broadcast-subscription](contracts/session-broadcast-subscription.md)) | `SessionAccessHost` (AgentDirectory, Loader): `SessionAccess`, `SessionEvents` | AgentIndex through `register_index` (resolved per call, `Reloading` during an Agents reload); Collaboration through `register_establish`, called with `establish` | Per call | — |
+| Node services | Node services port, stable process plugin | Local node (strong core deps); peer nodes as structural loader rows per configured link | `node_unavailable` per call | — |
 | Web search backend, Modality adapter, ExternalAgent node | Their owner (Web, Modality, ExternalAgent) | Backends, adapters, per-node bridges | That call or task fails | Availability from `web.search.service`, purpose policies, enabled entries |
 
 The last row's contributors reload with their volatile owner; both sides are volatile, so this is accepted (move the port to a stable plugin if that changes).
@@ -164,8 +164,8 @@ New plugins:
 
 | Plugin | Scope | Role | Phase | Language | Document |
 | --- | --- | --- | --- | --- | --- |
-| Management | Process | Management plane: mounting and export of `management`-level methods, migration, `daemon.shutdown` | P0 | Rust | [Management](plugins/Management.md) |
-| Questions | Process + branch | `ask_user` registered into the tool port; branch part holds pending questions and answer facts; contributes `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
+| Management | Process | Management plane: listing and export of `management`-level methods, migration, `daemon.shutdown` | P0 | Rust | [Management](plugins/Management.md) |
+| Questions | Process + branch | `ask_user` registered into the tool source port; branch part holds pending questions and answer facts; contributes `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
 | ShellInput | Process | `!command` / `!!command` as management methods `shell.*` | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Process | `attachment.put` for large text; files in the Session directory | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Process | Title from the first user input; `session.rename` | P1 | TypeScript first | [SessionTitle](plugins/SessionTitle.md) |
@@ -204,13 +204,13 @@ sequenceDiagram
   participant TE as ToolExecutor
   participant AP as Approval + Permission
   participant AR as Admission-check port
-  participant TR as Tool source port
+  participant TR as ToolSourcePort
   participant Web as Web (contributor)
   participant TL as Timeline
   LP->>TE: tool call web_fetch (step facts in Timeline)
   TE->>AP: admit (risk network)
   AP->>AR: checks after policy decision, with SessionConfig subset
-  AR-->>AP: allow (deny only if an adopted rule matches and no checker is registered)
+  AR-->>AP: allow (deny only if a matching RequiredCheck names an unregistered checker)
   AP-->>TE: allowed
   TE->>TR: handler fixed by ToolBinding, call context with SessionConfig subset
   TR->>Web: invoke
@@ -320,7 +320,7 @@ A new plugin first uses existing mechanisms; a plugin is created only for respon
 6. **Interrupt**: a plugin cancels its in-flight work and releases resources before writing terminal facts ([interrupt](../architecture/rust-agent/interrupt.md)).
 7. **Admission**: new tools declare a risk category. New categories `outbound_message` and `persistent_configuration` are allowed automatically under FullAccess. Sessions started by automation use the starter's policy as an upper bound; Scheduler jobs and Workflow definitions may narrow it; runs started by a management method default to read-only unless the job or definition declares more, capped by host configuration. The `workflow` tool uses the same risk category as Collaboration's `agent` tool.
 8. **Dependency direction** ([ADR 002](../adr/002-dependency-direction.md), §3): no consumer declares a dependency on a volatile provider; contributions go through consumer-owned stable ports, peer outcomes through event notices. A contributor's unload removes its registrations and ends only its own in-flight calls with "provider unavailable"; consumers never reload. Session or branch parts exist only for scope state or Timeline writes. Business configuration is read at use time from the owner's business source, never from loader rows. Fail-closed points deny only for adopted business configuration that requires an unregistered check.
-9. **Management plane**: methods that execute commands or change host configuration declare `level: management` and never `session`. Entries mount levels: local RPC mounts both, RemoteGateway only `session`, other nodes `management` only after explicit export over a rutis link (equivalent to granting host administrator rights). No identity tiers or per-method authorization. Contributions may declare a per-call progress sink and connection-bound notifications. Rpc keeps `hello`, `daemon.ping` and `agent.*`; `daemon.shutdown` moves to Management.
+9. **Management plane**: methods that execute commands or change host configuration declare `level: management` and never `session`. Entries dispatch levels: local RPC dispatches both, RemoteGateway only `session`, other nodes `management` only after explicit export over a rutis link (equivalent to granting host administrator rights). No identity tiers or per-method authorization. Contributions may declare a per-call progress sink and connection-bound notifications. Rpc keeps `hello`, `daemon.ping` and `agent.*`; `daemon.shutdown` moves to Management.
 10. **Remote Session methods**: paired remote devices may call all `session`-level methods, including `session.permission.update`; previously local-only execution methods become available to remote entries (recorded in Management's compatibility table).
 11. **In-flight work**: no shared registry; each owner provides its own query and stop; the CLI aggregates.
 12. **Withdrawal**: one contract owned by InputQueue: Session method `session.input.withdraw {sessionId, branchId, inputId}`, `SessionAccess::withdraw` limited to the caller's own source, data contract `input/withdrawn {input_id}`. "Withdraw and re-submit as Steer" is one InputQueue atomic batch. Every "pending input" derivation excludes withdrawn inputs, and every conflict table has an `input/withdrawn` row.
@@ -350,7 +350,7 @@ rutis nodes connect through links, export and import services, run plugins on th
 | Trust | Executable content from project files or plugins (Hooks, MCP, workflows, capability plugins) needs host-local approval from the Settings host-local approval service, recorded as `{owner namespace, node, workspace, source, id, fingerprint}`; fingerprint is SHA-256 over the canonical executable content declared by the owner |
 | Security settings | Host security settings (isolation, approvals) never enter the Timeline; replay and fork never restore or widen them. Exception: the permission preset is Session configuration, a Timeline fact (`permission/changed`) inherited by child branches; it is reset to the default when a Session is forked |
 | Persistence | Process storage uses the App Server process storage contract (per-plugin root, UTF-8 and binary atomic replace, lock, format version); format versions are never reused. Session files (e.g. text attachments) live in the Session directory owned by SessionStore |
-| Protocol | Rpc built-ins take precedence over contributed methods; contributed methods are mounted by level per entry |
+| Protocol | Rpc built-ins take precedence over contributed methods; contributed methods are dispatched by level per entry |
 | Internationalization | User-visible text belongs to the CLI; model-visible text to prompt sources |
 
 ## 7. New Timeline events
@@ -519,7 +519,7 @@ Names here are summaries; each plugin document is authoritative.
 
 ### B.1 Questions
 
-Process part (`ask_user` registered into the tool port, filtered per call by `interactive`, resolving the calling branch's service per call) + branch part (pending questions and answers, like Approval; kept because it writes `question/*` facts). No Session placeholder. The process part contributes `session.question.respond` (level `session`) through the method port. After admission the handler asks the branch service, which writes `question/asked`; the answer is written as `question/answered` by `session.question.respond`; the branch consumes it by sequence and completes the handler. An answer is accepted only if it precedes the `stop/interrupt` covering the turn; otherwise `question/cancelled`. Reload settles pending questions with `question/cancelled`. No timeout; the user may decline a whole call. Non-interactive Sessions do not get `ask_user`. [Questions](plugins/Questions.md)
+Process part (`ask_user` registered into the [tool source port](contracts/process-tool-contribution.md), filtered per call by `interactive`, resolving the calling branch's Questions part through `ToolCallScope::branch_service`) + branch part (pending questions and answers, like Approval; kept because it writes `question/*` facts). No Session placeholder. The process part contributes `session.question.respond` (level `session`) through the method port. After admission the handler asks the branch service, which writes `question/asked`; the answer is written as `question/answered` by `session.question.respond`; the branch consumes it by sequence and completes the handler. An answer is accepted only if it precedes the `stop/interrupt` covering the turn; otherwise `question/cancelled`. Reload settles pending questions with `question/cancelled`. No timeout; the user may decline a whole call. Non-interactive Sessions do not get `ask_user`. [Questions](plugins/Questions.md)
 
 ### B.2 Goal
 
@@ -543,7 +543,7 @@ Process. Triggered when the first user input on the main branch is written (§5.
 
 ### B.7 Hooks
 
-Process; an adapter over existing mechanisms. Pre-tool Hooks: registered into Approval's admission-check port (`pre_tool_use` default `on_error` is deny). User-submit Hooks: registered into Rpc's submission-admission port, may reject or append attributed raw blocks. Session-start Hooks: observe the broadcast `Created` notice, only for `created_by = Client`, fail open; injected context is written through SessionAccess. Post-tool, turn-end and notification Hooks: broadcast subscription, writes through SessionAccess. Commands run on the Session's `resource_node` through `node-services`. Fail closed only when an adopted hook rule matches and no checker is registered (D6). User rules and `disable_all` live in Hooks' business source; project Hooks live under `.dimcode/`; project and plugin Hooks need host-local approval. Management-level methods `hooks.catalog/approve/revoke/set_enabled/disable_all`. No events. [Hooks](plugins/Hooks.md)
+Process; an adapter over existing mechanisms. Pre-tool Hooks: registered into Approval's admission-check port (`pre_tool_use` default `on_error` is deny). User-submit Hooks: registered into Rpc's submission-admission port, may reject or append attributed raw blocks. Session-start Hooks: observe the broadcast `Created` notice, only for `created_by = Client`, fail open; injected context is written through SessionAccess. Post-tool, turn-end and notification Hooks: broadcast subscription, writes through SessionAccess. Commands run on the Session's `resource_node` through `node-services`. Hooks writes `RequiredCheck` records in its Settings section for adopted `pre_tool_use` and `user_prompt_submit` rules; Approval and Rpc fail closed only when a matching record's checker is unregistered (D6). User rules and `disable_all` live in Hooks' business source; project Hooks live under `.dimcode/`; project and plugin Hooks need host-local approval. Management-level methods `hooks.catalog/approve/revoke/set_enabled/disable_all`. No events. [Hooks](plugins/Hooks.md)
 
 ### B.8 Scheduler
 
@@ -567,7 +567,7 @@ Process. Marketplaces, install, enable, disable, reload, remove; writes plugin i
 
 ### B.13 RemoteGateway
 
-Process. Authenticated remote entry on Transport's `EntryHost`; pairing, devices, token rotation; serves the Web workspace. Mounts only `session`-level methods; paired devices may call all of them. Devices and tokens in process storage; runtime settings in its business source, `enabled` stays structural. Management-level methods `remote.start/stop/status/pair/devices/revoke/rotate_token`. [RemoteGateway](plugins/RemoteGateway.md)
+Process. Authenticated remote entry on Transport's `EntryHost`; pairing, devices, token rotation; serves the Web workspace. Dispatches only `session`-level methods; paired devices may call all of them. Devices and tokens in process storage; runtime settings in its business source, `enabled` stays structural. Management-level methods `remote.start/stop/status/pair/devices/revoke/rotate_token`. [RemoteGateway](plugins/RemoteGateway.md)
 
 ### B.14 Modality
 
@@ -593,7 +593,7 @@ CLI process. `dimcode acp` over stdio; ACP session ↔ non-interactive dim Sessi
 
 ### B.16 Management
 
-Process. Management plane as a level-filtered view of Rpc's [method port](contracts/session-boundary.md): mounting and export of `management`-level methods, `management.methods`, migration and compatibility. Existing `mcp.*`, `provider.*`, `skills.*`, `account.*` and `daemon.shutdown` move here. [Management](plugins/Management.md)
+Process. Management plane as a level-filtered view of Rpc's [method port](contracts/session-boundary.md): listing and export of `management`-level methods, `management.methods`, migration and compatibility. Existing `mcp.*`, `provider.*`, `skills.*`, `account.*` and `daemon.shutdown` move here. [Management](plugins/Management.md)
 
 ## Appendix C. Supplements and changes to existing plugins
 
@@ -603,10 +603,10 @@ Process. Management plane as a level-filtered view of Rpc's [method port](contra
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| ToolRegistry | Supplement | Owns the tool source port ([process-tool-contribution](contracts/process-tool-contribution.md)), hosted in a stable process plugin and read by each Session as one dynamic source with per-call Session values; withdraw-only; in-flight calls of an unregistered contributor get "tool provider unavailable" | Goal, Web, Scheduler, Workflow, Notifications, packaged code |
+| ToolRegistry | Supplement | Owns the tool source port ([process-tool-contribution](contracts/process-tool-contribution.md)), hosted in the stable `ToolSourcePort` plugin (contributors `register(ctx, name, provider)`; sets per `ToolScope`; handlers reach the calling branch through `ToolCallScope::branch_service::<T>()`) and read by each Session as one dynamic source with per-call Session values; withdraw-only; in-flight calls of an unregistered contributor get "tool provider unavailable" | Goal, Web, Scheduler, Workflow, Notifications, packaged code |
 | InputQueue | Change | `input/withdrawn {input_id}`; Session method `session.input.withdraw {sessionId, branchId, inputId}`; withdrawal method behind `SessionAccess::withdraw` (own source only); "withdraw and re-submit as Steer" as one atomic batch; queue state rebuilt from events | `Ctrl+S`, `/queue`, recall, delete; AcpGateway, Scheduler, Goal |
 | Permission | Supplement | Categories `outbound_message` and `persistent_configuration`, allowed automatically under FullAccess (`network` already exists); cross-Session rules read at use time through a stable Settings port, never a reloading dependency of Approval; allowed-command list | Notifications, Scheduler; `/approvals` |
-| Approval | Supplement | Owns the admission-check port ([ADR 002](../adr/002-dependency-direction.md)), hosted in a stable process plugin: checks run after the policy decision and before execution with the `SessionConfig` subset; denies with a retryable reason only when an adopted rule matching the call requires a check that is not registered (D6); cancelled check denies. Accepts `approval/request` raised through the call-bound approval port while a model step is open (existing request/respond facts, no new event) | Hooks; ExternalAgent |
+| Approval | Supplement | Owns the admission-check port ([ADR 002](../adr/002-dependency-direction.md); no contract file yet), hosted in a stable process plugin: checks run after the policy decision and before execution with the `SessionConfig` subset; denies with a retryable reason only when a `RequiredCheck` record ([session-boundary A.3](contracts/session-boundary.md#a3-submission-admission-port)) matching the calling Session names a checker that is not registered (D6); cancelled check denies. Accepts `approval/request` raised through the call-bound approval port while a model step is open (existing request/respond facts, no new event) | Hooks; ExternalAgent |
 | ModelProvider | Supplement | Passes `ModelCallScope` (call identity: session, branch, request and step ids + `SessionConfig` subset) to ModelHost providers; the scope carries a call-bound approval port reaching the branch's Approval | ExternalAgent |
 | Prompt, ModelProvider | Supplement | Model parameters (reasoning effort, fast mode) adopted with the model configuration | `/effort`, `/fast` |
 | Prompt | Supplement | Switching Agent configuration (prompt, model, tools) adopted as one configuration | `/agent` |
@@ -621,11 +621,11 @@ Process. Management plane as a level-filtered view of Rpc's [method port](contra
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
 | Settings | Supplement | Authority split per #3 confined by ADR 002 D5 (loader editable layer for structural plugin configuration; business configuration in each owner's Settings source or own store, read at use time, changed by data update plus notification; project files under `.dimcode/` and `.mcp.json` keep file authority); credential-reference resolver (not keyed by Provider); host-local approval service (§6.4 Trust) | Hooks, Workflow, Web, Notifications, ExternalAgent, PluginManager, Mcp, Permission rules |
-| Rpc | Change | Carries Rpc built-ins (`hello`, `daemon.ping`, `agent.*`) and owns the method port ([session-boundary](contracts/session-boundary.md)), hosted in a stable process plugin; contributors register, entries mount by level; registration state alone decides `unknown_method` or `service_reloading`; built-ins take precedence, reserved names are protected; Rpc never names a contributor. Existing management methods move to Management, and `daemon.shutdown` moves to Management (E21). Previously local-only execution Session methods become available to remote entries (E3). Owns the submission-admission port (used by Hooks; fails closed only for an adopted matching rule without a registered checker, D6). Registered methods and fields: `session.question.respond` (Questions), `session.goal.set/edit/pause/resume/clear/get` (Goal), `session.rename` (SessionTitle), `attachment.put` (Attachments), `session.input.withdraw` (InputQueue), `interactive` and `created_by` set by `session.create`, `title`/`titleSource` in Session lists, image validation against model capability and `hook_rejected` on `session.submit`, `hello.features` | Management, Questions, Goal, SessionTitle, Attachments, Hooks, AcpGateway, RemoteGateway |
-| Transport, Connection | Change | `EntryHost` with upgrade authenticators; connections carry `{mounts_management, device_id}`; management is gated by mounting, not identity | RemoteGateway |
-| Agents | Supplement | `SessionConfig` fields `interactive`, `resource_node`, `created_by` ([session-access](contracts/session-access.md)); SessionAccess as a facade over the existing public Session interface (read prefix, `config`, write input, withdraw own input) and the process-level subscription, both hosted in a stable plugin depending only on AgentDirectory and Loader, into which AgentIndex registers and is resolved per call (`Reloading` during an Agents reload); process-level subscription to the existing Session broadcast with notices `Created`, `Loaded{restored}` (with a `SessionConfig` subset), `Closed`, `Gap` ([session-broadcast-subscription](contracts/session-broadcast-subscription.md)); Collaboration's restore listener filters `restored: true`; `launch` with creation configuration (resource node, non-interactive, `policy` field resolved against the starter's current policy as upper bound) returning a lease, the caller writing the first input through SessionAccess; creation from another Session's cut point; profiles with an external agent as model and no tools | Goal, SessionTitle, Hooks, Notifications, Scheduler, Workflow, ShellInput, fork, ExternalAgent |
+| Rpc | Change | Carries Rpc built-ins (`hello`, `daemon.ping`, `agent.*`) and owns the method port ([session-boundary](contracts/session-boundary.md)), hosted in the stable `MethodPort` plugin; contributors register, entries dispatch by level; registration state alone decides (`MethodPort::lookup`: `NotRegistered` or a level the entry does not dispatch → `-32601` `unknown_method`; `Unloading` → `service_reloading`; `operation_interrupted` after the call started); built-ins take precedence, reserved names are protected; Rpc never names a contributor. Existing management methods move to Management, and `daemon.shutdown` moves to Management (E21). Previously local-only execution Session methods become available to remote entries (E3). Owns the submission-admission port, hosted in the stable `SubmissionAdmissionPort` plugin (Deps: Settings; used by Hooks; fails closed only when a matching `RequiredCheck` record, kept in the checker owner's Settings section, names an unregistered checker, D6). Registered methods and fields: `session.question.respond` (Questions), `session.goal.set/edit/pause/resume/clear/get` (Goal), `session.rename` (SessionTitle), `attachment.put` (Attachments), `session.input.withdraw` (InputQueue), `interactive` and `created_by` set by `session.create`, `title`/`titleSource` in Session lists, image validation against model capability and `hook_rejected` on `session.submit`, `hello.features` | Management, Questions, Goal, SessionTitle, Attachments, Hooks, AcpGateway, RemoteGateway |
+| Transport, Connection | Change | `EntryHost` with upgrade authenticators; connections carry `ConnectionEntry {name, levels, device_id}` ([RemoteGateway](plugins/RemoteGateway.md)); management is gated by the levels an entry dispatches, not identity | RemoteGateway |
+| Agents | Supplement | `SessionConfig` fields `interactive`, `resource_node`, `created_by` ([session-access](contracts/session-access.md)); SessionAccess as a facade over the existing public Session interface (read prefix, `config`, write input, withdraw own input) and the process-level subscription, both hosted in the stable `SessionAccessHost` plugin depending only on AgentDirectory and Loader, into which AgentIndex registers (`register_index`) and is resolved per call (`Reloading` during an Agents reload); process-level subscription to the existing Session broadcast with notices `Created`, `Loaded{restored}` (with a `SessionConfig` subset), `Closed`, `Gap` ([session-broadcast-subscription](contracts/session-broadcast-subscription.md)); Collaboration's restore listener filters `restored: true`; `launch` with creation configuration (resource node, non-interactive, `policy` field resolved against the starter's current policy as upper bound) returning a lease, the caller writing the first input through SessionAccess; creation from another Session's cut point; profiles with an external agent as model and no tools | Goal, SessionTitle, Hooks, Notifications, Scheduler, Workflow, ShellInput, fork, ExternalAgent |
 | SessionStore | Supplement | Metadata (title and source, fork source) with revision checks; deletion (closes first, rejected when Loop is not idle) and cleanup by time or count with preview; fork copies facts before the cut, resets the permission preset to the default, never copies host security settings; Session files (text attachments) are stored on the Session's resource node under a per-Session attachments root through that node's `node-services` FileStorage (the Session directory when the resource node is the control node), owned and recorded by SessionStore, shared on fork without a byte copy and deleted with the last owning Session | SessionTitle, fork and cleanup, Attachments |
-| Collaboration | Change | Member models selected by Provider for purpose `collaboration.member`, caller passes the leader's adopted model; `establish(leader, agent)` creates members from outside a branch; member approvals are forwarded to the leader, whose model decides through the `agent` tool; `establish` registered into the Session access port and resolved per call | Sub-agent models; Workflow; ExternalAgent |
+| Collaboration | Change | Member models selected by Provider for purpose `collaboration.member`, caller passes the leader's adopted model; `establish(leader, agent)` creates members from outside a branch; member approvals are forwarded to the leader, whose model decides through the `agent` tool; `establish` registered into `SessionAccessHost` (`register_establish`) and called per call through `SessionAccess::establish` | Sub-agent models; Workflow; ExternalAgent |
 | Provider | Supplement | Per-purpose policy storage with a single write path; purposes are opaque consumer keys; policies: inherit caller's model, fixed model and effort, or Agent's choice (members only); `AuxiliaryModel::complete(purpose, …)` for one-shot calls; non-conversational model connections per Modality category; external agent connection type; registers into the model selection/connection port read by Agents and ModelProvider | SessionTitle, compaction, Collaboration, Modality, ExternalAgent |
 | Aimux / ModelHost | Supplement | Model kind port ([ADR 002](../adr/002-dependency-direction.md)) on the stable ModelHost side; requests of a kind without a registered provider fail before acceptance; Aimux stays the native provider and knows no other | ExternalAgent |
 | App Server | Supplement | Process storage contract generalizing `pluginFiles`: per-plugin root, UTF-8 and binary atomic replace, lock, format version, for both languages | Scheduler, Workflow, ExternalAgent, Modality, RemoteGateway, PluginManager |
@@ -642,7 +642,7 @@ Future changes recorded in [ADR 002](../adr/002-dependency-direction.md#review-o
 | Id | Plugins | Change |
 | --- | --- | --- |
 | A1 | Mcp, ToolRegistry | Remove McpSession; Mcp registers tool sets into the tool source port, derived per call from the Session's working directory and the MCP catalog |
-| A2 | Collaboration, ToolRegistry | Remove Collaboration's Session part; `agent` registers into the tool source port; CollaborationTimeline stays a branch capability and reaches Collaboration per call through a stable port |
+| A2 | Collaboration, ToolRegistry | Remove Collaboration's Session part; `agent` registers into the tool source port; CollaborationTimeline stays a branch capability, reached by the `agent` handler per call through `ToolCallScope::branch_service`, and reaches Collaboration per call through a stable port |
 | A3 | Rpc; Mcp, Settings, SkillsCatalog, Provider, OAuth, ManagedProviders | Services register methods into Rpc's method port; Rpc no longer depends on them |
 | A4 | Agents | Reads Settings and model selection at use time through stable ports; depends only on AgentDirectory, Loader and storage |
 | A5 | Provider, Agents, ModelProvider | The secret supplier registers into a Provider secret port (failure per request); model selection resolved through a stable port that Provider and ConfiguredModels register into |
@@ -721,7 +721,7 @@ flowchart TB
       Agents["Agents"]:::changed
       Collaboration["Collaboration"]:::changed
       QuestionsP["Questions (ask_user)"]:::new
-      Ports["Stable port hosts (tool source, admission, methods, Session access)"]:::changed
+      Ports["Stable port hosts (ToolSourcePort, admission check, MethodPort, SubmissionAdmissionPort, SessionAccessHost, node services)"]:::changed
     end
     subgraph PH["Host and notifications"]
       HostPlatform["HostPlatform"]:::changed
@@ -824,7 +824,7 @@ Implemented only in the CLI: multi-line editing, input history, command completi
 | Scheduler | TypeScript first | Scheduling rules need validation | Agents `launch`, SessionAccess, tool source port, process storage |
 | AcpGateway | TypeScript first | Local RPC client; merge into the Rust CLI later | `session.input.withdraw`, `interactive` and `created_by` on `session.create` |
 | Web | TypeScript first | #4 lists `web` as first migration target | Tool source port, credential resolver, business configuration source |
-| Workflow | TypeScript first | Orchestration rules need validation | Agents `launch`, Collaboration `establish` via the Session access port, tool source port, process storage |
+| Workflow | TypeScript first | Orchestration rules need validation | Agents `launch`, Collaboration `establish` via `SessionAccess` (`SessionAccessHost`), tool source port, process storage |
 | Goal | TypeScript first | Continuation strategy needs validation | Broadcast subscription, SessionAccess, tool source port, method port |
 | Management | Rust | Management plane backbone | — |
 | Questions | Rust | Tied to settlement of in-flight tool calls | `interactive` on `session.create` |

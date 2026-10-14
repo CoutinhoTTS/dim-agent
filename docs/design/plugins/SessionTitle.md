@@ -36,7 +36,7 @@ SessionTitle touches no Session or branch plugin: it observes through the Sessio
 | --- | --- | --- | --- |
 | `SessionTitle` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (`Event`, `Loaded` with its `SessionConfig` subset), [`SessionAccess`](../contracts/session-access.md) (`get`, `prefix`, `config`; never `input`), SessionStore title metadata supplement (overview §7.2), Provider `AuxiliaryModel` port by purpose (decisions R9), its own business configuration in a Settings source, public data contracts of `input/message` and `context/configured` | `session.rename` registered into Rpc's method port ([session-boundary](../contracts/session-boundary.md)) with `level: session`; the opaque purpose key `session-title`; business configuration keys `sessionTitle.enabled`, `sessionTitle.maxLength` |
 
-Registration state alone decides the error while SessionTitle is absent: never registered → `method_not_found`; registered earlier and now unregistered (reload) → `service_reloading`. Provider does not know the purpose key's consumer.
+Registration state alone decides the error ([session-boundary A.1](../contracts/session-boundary.md#a1-method-port)): while SessionTitle unloads → `service_reloading` (`operation_interrupted` for a call already started); not registered (never, or unregistered after a reload) → `-32601` `unknown_method`. Provider does not know the purpose key's consumer.
 
 ## 2. Data and state
 

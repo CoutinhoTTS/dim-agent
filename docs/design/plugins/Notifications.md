@@ -304,7 +304,7 @@ Templates (to channels, not to the model): `[dim <label>] Task completed.`, `[di
 | Invalid configuration | Rejected by Settings at the write boundary; last valid document kept |
 | Delivery failure after retries | Diagnostic; tool returns an error result; no Session effect |
 | Cancellation (interrupt, reload) | Outstanding requests aborted; resources released before the tool returns |
-| Not registered (reload) | `notifications.test` returns `service_reloading`; `notify` withdrawn |
+| Reload | `notifications.test` returns `service_reloading` while Notifications unloads, then `unknown_method` until it registers again; `notify` withdrawn |
 | Process exit | In-memory checks lost; no persistent queue (A12) |
 
 ## Appendix D. Acceptance

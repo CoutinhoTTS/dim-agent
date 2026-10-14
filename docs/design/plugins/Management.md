@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.16](../overview.md#b16-management), [common constraints](../overview.md#62-constraints), [multiple nodes](../overview.md#63-multiple-nodes), [Rpc change](../overview.md#c2-app-server-process-plugins), [ADR 002](../../adr/002-dependency-direction.md). Phase: P0. Language: Rust.
 
-Management is the management plane of the App Server process: the methods registered at `level: management` in Rpc's method port ([method contribution](../contracts/session-boundary.md#a1-method-contribution)). The contract (`MethodDecl`, `Interruption`, `CallChannel`, naming, reserved names, precedence) lives in [session boundary](../contracts/session-boundary.md); this document defines only what is specific to the management level: which entries serve it, its export over rutis links and the authority that grants, `management.methods`, `daemon.shutdown`, and the migration of existing methods out of Rpc's own table.
+Management is the management plane of the App Server process: the methods registered at `level: management` in Rpc's method port ([method contribution](../contracts/session-boundary.md#a1-method-port)). The contract (`MethodDecl`, `Interruption`, `CallChannel`, naming, reserved names, precedence) lives in [session boundary](../contracts/session-boundary.md); this document defines only what is specific to the management level: which entries serve it, its export over rutis links and the authority that grants, `management.methods`, `daemon.shutdown`, and the migration of existing methods out of Rpc's own table.
 
 ## 1. Structure
 
@@ -29,7 +29,7 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-Management owns no registration: every contributed method, at either level, registers in Rpc's one method port (ADR 002 D2), and Rpc dispatches a name only when the calling entry serves that method's level. `ManagementService` is a level-filtered view of the port, the unit that a host-local link configuration may export to a peer. There are no per-contributor mounts and no discovery from loader declarations: registration state alone decides whether a name is reachable.
+Management owns no registration: every contributed method, at either level, registers in Rpc's one method port (ADR 002 D2), and Rpc dispatches a name only when the calling entry serves that method's level. `ManagementService` is a level-filtered view of the port, the unit that a host-local link configuration may export to a peer. Loader rows never make a name reachable: registration state in the port alone decides it.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
@@ -38,7 +38,7 @@ Management owns no registration: every contributed method, at either level, regi
 | `RpcPlugin` (change) | Process | AgentIndex, ConnectionHub, ServerControl, method port | Per-entry levels; built-ins first, then registered methods |
 | Contributors | Process | their own dependencies, method port | Methods with `level: management`, registered in `apply`, removed in `ctx.effect` |
 
-Contracts defined here: the management level's entry and export rules, `ManagementService`, `management.methods`, the migration and compatibility tables. Contracts depended on: [method contribution](../contracts/session-boundary.md#a1-method-contribution) (including `CallChannel` and precedence), rutis service export over links ([rutis nodes](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md)). Management never knows a contributor or a method's meaning, and neither Management nor Rpc reloads when a contributor does.
+Contracts defined here: the management level's entry and export rules, `ManagementService`, `management.methods`, the migration and compatibility tables. Contracts depended on: [method contribution](../contracts/session-boundary.md#a1-method-port) (including `CallChannel` and precedence), rutis service export over links ([rutis nodes](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.md)). Management never knows a contributor or a method's meaning, and neither Management nor Rpc reloads when a contributor does.
 
 ## 2. Data and state
 
@@ -121,7 +121,7 @@ Management has no Timeline facts; unload, interruption and collision rules are t
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Contributor unloads | Its names leave the port (`unknown_method` until it registers again); its own in-flight calls end per `Interruption` as provider unavailable; Rpc and Management do not reload | Contributor, Rpc |
+| Contributor unloads | Its names return `service_reloading` while it unloads, then leave the port (`unknown_method` until it registers again); its own in-flight calls end per `Interruption` (`Report`: `operation_interrupted`; `Drain`: the unload waits); Rpc and Management do not reload | Contributor, Rpc |
 | Link drops mid-call | Peer sees a link error; call continues | rutis link, contributor |
 | `daemon.shutdown` concurrent with another call | Coordinator stops admission, then settles admitted calls per `Interruption` | Process coordinator |
 | Management reload | Link export and `management.methods` briefly `service_reloading`; local-entry dispatch through the port unaffected | rutis lifecycle |
@@ -137,7 +137,7 @@ No model-visible effect. Management methods are never model tools and their call
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| Method registration with `level: management` | Contract ([session boundary](../contracts/session-boundary.md#a1-method-contribution)) | How contributors add management methods |
+| Method registration with `level: management` | Contract ([session boundary](../contracts/session-boundary.md#a1-method-port)) | How contributors add management methods |
 | `ManagementService::dispatch/methods` | Service | Management-level view; exported over links |
 | `management.methods` | Management method | Registered management methods and revision on this entry |
 | `daemon.shutdown` | Management method | Moved from Rpc; `daemon` namespace |
@@ -192,7 +192,7 @@ Sources: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS`, `Call::
 | `session.create/list/summaries/attach/detach/submit/input_lookup/history/stop/idle/close/branch_create`, `approval.respond`, `session.permission.get/update`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp`, `session.mcp.refresh` | Rpc built-ins (Session) | — |
 | `agent.create/list/close` | Rpc built-ins | — (E21) |
 | `hello`, `daemon.ping` | Rpc protocol | — |
-| New plugin methods (`session.goal.*`, `session.input.withdraw`, `session.question.respond`, `session.rename`, `attachment.put`) | level session, [method contribution](../contracts/session-boundary.md#a1-method-contribution) | each owner |
+| New plugin methods (`session.goal.*`, `session.input.withdraw`, `session.question.respond`, `session.rename`, `attachment.put`) | level session, [method contribution](../contracts/session-boundary.md#a1-method-port) | each owner |
 
 Interruption reproduces today: `mcp.*`, `skills.*` are `Report`; `account.*`, `provider.*` are `Drain`. After migration Rpc no longer injects `ProductServices` or the management part of `ExecutionServices`; a Provider or Mcp restart no longer reloads Rpc (ADR 002 A3).
 
@@ -216,7 +216,7 @@ Contribution-level rows (unload with `Report`/`Drain`, calls during unload, name
 | --- | --- | --- | --- |
 | Turn or branch interrupt, branch close, Steer/Queue/Append, unsettled tool batch, compaction, child branch cut, `input/withdrawn`, Session unload/restore | — | No effect: Management reads and writes no Timeline | — |
 | Management method called on a session-only entry | — | `unknown_method` | Rpc |
-| Contributor unloads or restarts | — | Its names `unknown_method` until it registers again; its in-flight calls end per `Interruption` as provider unavailable; Rpc and Management do not reload | Contributor, Rpc |
+| Contributor unloads or restarts | — | Its names `service_reloading` while it unloads, then `unknown_method` until it registers again; its in-flight calls end per `Interruption` (`Report`: `operation_interrupted`; `Drain`: the unload waits); Rpc and Management do not reload | Contributor, Rpc |
 | Two clients mutate the same configuration | storage revision | Second gets the contributor's conflict | Contributor |
 | Management reload | — | Export and `management.methods` `service_reloading` in the window; contributors and local dispatch unaffected | rutis lifecycle |
 | Method set changes between `hello` and a call | — | Current registrations decide | Method port |

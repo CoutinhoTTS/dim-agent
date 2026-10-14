@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.13](../overview.md#b13-remotegateway), [Transport, Connection changes](../overview.md#c2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-dependency-direction.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
-RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only `level: session` of the [method contribution](../contracts/session-boundary.md#a1-method-contribution) contract, so devices may call every Session method, including `session.permission.update` (decision E3), and no management method. The entry is the product UI plane and never carries the rutis link plane between nodes.
+RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only `level: session` of the [method contribution](../contracts/session-boundary.md#a1-method-port) contract, so devices may call every Session method, including `session.permission.update` (decision E3), and no management method. The entry is the product UI plane and never carries the rutis link plane between nodes.
 
 ## 1. Structure
 
@@ -40,7 +40,7 @@ RemoteGateway only authenticates upgrades and records the device on the connecti
 | `TransportPlugin` (change) | Process | existing | existing `ListenAddresses`; added `EntryHost` |
 | `ConnectionPlugin` / `RpcPlugin` (change) | Process | existing | `ConnectionEntry {name, levels, device_id}`; Rpc dispatches only the entry's levels |
 
-Contracts defined here: device records and tokens, pairing and rotation HTTP endpoints, `remote.*` methods, the `remote-devices.json` format. Contracts depended on: Transport's `EntryHost` and `UpgradeAuthenticator` (proposed Transport change; Transport owns them as their consumer), Connection's entry record, the [method contribution](../contracts/session-boundary.md#a1-method-contribution) contract and its entry level rules ([Management A.1](Management.md#a1-entry-levels-and-export)), [process storage](../overview.md#c2-app-server-process-plugins), a typed Settings operation for the structural `enabled` field (`x-volatile`, `VolatileUpdate`, rutis-loader 0.10), and the Settings business source for runtime settings (ADR 002 D5). RemoteGateway knows no Session method's meaning and no other plugin.
+Contracts defined here: device records and tokens, pairing and rotation HTTP endpoints, `remote.*` methods, the `remote-devices.json` format. Contracts depended on: Transport's `EntryHost` and `UpgradeAuthenticator` (proposed Transport change; Transport owns them as their consumer), Connection's entry record, the [method contribution](../contracts/session-boundary.md#a1-method-port) contract and its entry level rules ([Management A.1](Management.md#a1-entry-levels-and-export)), [process storage](../overview.md#c2-app-server-process-plugins), a typed Settings operation for the structural `enabled` field (`x-volatile`, `VolatileUpdate`, rutis-loader 0.10), and the Settings business source for runtime settings (ADR 002 D5). RemoteGateway knows no Session method's meaning and no other plugin.
 
 ## 2. Data and state
 
@@ -284,7 +284,7 @@ Tokens: 32 random bytes, base64url; SHA-256 hashes compared in constant time. Pa
 | `remote.rotate_token` while a device rotates | persisted flag order | Rotation before the flag is also flagged | RemoteGateway |
 | `remote.stop` with attached devices | — | Connections close (detach); Sessions continue | RemoteGateway, Transport |
 | Rpc reload | — | `service_reloading` for affected calls; connections stay unless the protocol instance changes | Rpc |
-| Contributor of a session-level namespace unloads | — | Its names `unknown_method` until it registers again; its in-flight calls end as provider unavailable; connections stay | Rpc, contributor |
+| Contributor of a session-level namespace unloads | — | Its names `service_reloading` while it unloads, then `unknown_method` until it registers again; its in-flight `Report` calls end `operation_interrupted`, `Drain` calls delay the unload; connections stay | Rpc, contributor |
 | Runtime settings change while devices are connected | business source revision | Entry reopens with the new settings; connections detach and reconnect | RemoteGateway |
 | Session closed by another client | `session.closed` | Remote attachers receive it | Connection |
 | Session idle unload with only remote attachers | — | Attachment pins the Session; detach releases | AgentIndex |
