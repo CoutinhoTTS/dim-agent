@@ -1067,6 +1067,58 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     reopened.close().await.unwrap();
 }
 
+// Hold a child before exec, when close-on-exec descriptors are still inherited.
+// The database must release ownership on close, not when that child reaches exec.
+#[cfg(unix)]
+#[tokio::test]
+async fn sqlite_close_releases_ownership_while_a_spawned_child_inherits_descriptors() {
+    use std::{
+        io::{Read, Write},
+        os::{fd::AsRawFd, unix::net::UnixStream, unix::process::CommandExt},
+    };
+    unsafe extern "C" {
+        fn read(fd: i32, buffer: *mut u8, count: usize) -> isize;
+        fn write(fd: i32, buffer: *const u8, count: usize) -> isize;
+    }
+
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let (mut parent, child) = UnixStream::pair().unwrap();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let spawning = std::thread::spawn(move || {
+        let fd = child.as_raw_fd();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--list").stdout(std::process::Stdio::null());
+        // SAFETY: the child uses only async-signal-safe read/write before exec;
+        // its socket and both one-byte buffers remain live throughout the calls.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1_u8;
+                if write(fd, &byte, 1) != 1 || read(fd, &mut byte, 1) != 1 {
+                    return Err(std::io::Error::from_raw_os_error(5));
+                }
+                Ok(())
+            });
+        }
+        command.spawn().unwrap().wait().unwrap()
+    });
+    let mut ready = [0];
+    parent.read_exact(&mut ready).unwrap();
+    assert_eq!(ready, [1]);
+    let closed = db.close().await;
+    let replacement = SqliteStorage::open(database.0.clone());
+    // Always release and reap the child before asserting the observed result.
+    parent.write_all(&[1]).unwrap();
+    assert!(spawning.join().unwrap().success());
+    closed.unwrap();
+    let replacement = replacement.expect("successful close must release native ownership");
+    db.close().await.unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    replacement.close().await.unwrap();
+}
+
 #[test]
 fn sqlite_shutdown_drains_cancelled_and_queued_operations_before_releasing_ownership() {
     use std::{future::Future, task::Poll};
