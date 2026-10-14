@@ -1,6 +1,6 @@
 # RemoteGateway
 
-Status: Draft. Overall design: [overview B.13](../overview.md#4-plugin-catalog), [Transport, Connection changes](../overview.md#b2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
+Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [Transport, Connection changes](../overview.md#b2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
 RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only Session methods of the [methods](../contracts/session-boundary.md) contract (Rpc's Session built-ins and every `sessionMethods` service), so devices may call every Session method, including `session.permission.update` and `shell.*` (decision E3), and never a management method: `managementMethods` and Rpc's management built-ins are never served to paired remote devices. The entry is the product UI plane and never carries the rutis link plane between nodes.
 
@@ -14,7 +14,8 @@ flowchart LR
     TR["Transport"]
     CONN["Connection<br/>ConnectionEntry record"]
     RPC["Rpc<br/>built-ins, sessionMethods services,<br/>method table of managementMethods"]
-    SET["Settings<br/>enabled row field, remote settings source"]
+    SET["Settings<br/>remote business source"]
+    LDR["rutis Loader<br/>enabled row field (x-volatile),<br/>written only by PluginManager"]
     PST["pluginFiles (extended)<br/>remote-devices.json"]:::contract
   end
   DEV["Phone or Web workspace"]
@@ -25,6 +26,7 @@ flowchart LR
   CONN --> RPC
   RPC -->|"collects remote.* as managementMethods"| RG
   RG --> SET
+  LDR -->|"VolatileUpdate"| RG
   RG --> PST
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
@@ -34,17 +36,17 @@ RemoteGateway only authenticates upgrades and records the device on the connecti
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `RemoteGatewayPlugin` | Process, control node | `entryHost` (Transport), `pluginFiles` (extended), Settings | `managementMethods` key `remote` (`remote.*`), collected by Rpc; answers the call-scoped `authenticate` and `handle` requests of its open entry |
+| `RemoteGatewayPlugin` | Process, control node | `entryHost` (Transport), `pluginFiles` (extended), Settings business source `remote`, its own loader row (`VolatileUpdate`) | `managementMethods` key `remote` (`remote.*`), collected by Rpc; answers the call-scoped `authenticate` and `handle` requests of its open entry |
 | `TransportPlugin` (change) | Process | existing; nothing of RemoteGateway | existing `ListenAddresses`; added `entryHost` |
-| `ConnectionPlugin` / `RpcPlugin` (change) | Process | existing | `ConnectionEntry {name, device_id}`; Rpc never serves management methods to a connection that carries a `device_id` |
+| `ConnectionPlugin` / `RpcPlugin` (change) | Process | existing | `ConnectionEntry {name, deviceId}`; Rpc never serves management methods to a connection that carries a `deviceId` |
 
-Contracts defined here: device records and tokens, pairing and rotation HTTP endpoints, `remote.*` methods, the `remote-devices.json` format. Contracts depended on: Transport's `entryHost` service with its call-scoped `authenticate` and `handle` requests (proposed Transport change, [language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral) in A.1, Rust binding in Appendix G; the dependency runs one way, RemoteGateway on Transport), Connection's entry record, the [methods](../contracts/session-boundary.md) contract (`managementMethods` collected into Rpc's method table, never served to paired devices), `pluginFiles` (extended) ([App Server README](../../../crates/dim-app-server/README.md#trusted-plugin-storage)), a typed Settings operation for the structural `enabled` field (`x-volatile`, `VolatileUpdate`, rutis-loader 0.10), and Settings typed operations on the business source `remote` for the listener settings, whose schema RemoteGateway declares (ADR 002 D4). RemoteGateway knows no Session method's meaning and no other plugin.
+Contracts defined here: device records and tokens, pairing and rotation HTTP endpoints, `remote.*` methods, the `remote-devices.json` format. Contracts depended on: Transport's `entryHost` service with its call-scoped `authenticate` and `handle` requests (proposed Transport change, [language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral) in A.1, Rust binding in Appendix G; the dependency runs one way, RemoteGateway on Transport), Connection's entry record, the [methods](../contracts/session-boundary.md) contract (`managementMethods` collected into Rpc's method table, never served to paired devices), `pluginFiles` (extended) ([App Server README](../../../crates/dim-app-server/README.md#trusted-plugin-storage)), the structural `enabled` field of its own loader row (`x-volatile`), which only PluginManager writes ([PluginManager](PluginManager.md), typed loader operations of [#3](https://github.com/arcships/dim/issues/3)) and which reaches RemoteGateway as a rutis-loader 0.10 `VolatileUpdate`, and Settings typed operations on the business source `remote` for the listener settings, whose schema RemoteGateway declares (ADR 002 D4). RemoteGateway knows no Session method's meaning and no other plugin.
 
 ## 2. Data and state
 
 ```mermaid
 flowchart TB
-  subgraph LEL["Loader editable layer, via Settings"]
+  subgraph LEL["Loader editable layer, written only by PluginManager (#3)"]
     CFG["Structural: enabled, x-volatile"]
   end
   subgraph BS["Settings business source remote"]
@@ -67,7 +69,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-`enabled` is structural plugin configuration; `bind`, `tls` and `plaintext` are business configuration ([ADR 002 D4](../../adr/002-plugin-scope.md)) read when the entry opens; a change is a data update with a notification, on which RemoteGateway rebinds its listener (close and reopen the entry), never a plugin reload (A16). Device records are host-local security material in `pluginFiles` (extended: atomic replace, lock, format version, owner-only file); a corrupt or unreadable file fails closed. Offers and live connections are in memory and lost on reload or restart. The Timeline holds only facts that Session owners write for remote calls, without device attribution (A2).
+`enabled` is structural plugin configuration, written only by PluginManager (RemoteGateway never writes it); `bind`, `tls` and `plaintext` are business configuration ([ADR 002 D4](../../adr/002-plugin-scope.md)) read when the entry opens; a change is a data update with a notification, on which RemoteGateway rebinds its listener (close and reopen the entry), never a plugin reload (A16). Device records are host-local security material in `pluginFiles` (extended: atomic replace, lock, format version, owner-only file); a corrupt or unreadable file fails closed. Offers and live connections are in memory and lost on reload or restart. The Timeline holds only facts that Session owners write for remote calls, without device attribution (A2).
 
 ## 3. Flows
 
@@ -89,7 +91,7 @@ sequenceDiagram
   D->>T: GET /ws with token
   T->>RG: authenticate upgrade
   RG-->>T: allow, device_id
-  T->>R: connection with ConnectionEntry device_id
+  T->>R: connection with ConnectionEntry deviceId
   D->>R: hello v3, session.list, session.attach
 ```
 
@@ -175,7 +177,7 @@ No model-visible effect of its own. Content from remote clients enters the model
 | `GET /`, `/assets/*` | HTTP | Web workspace static assets |
 | `POST /api/pair`, `POST /api/token/rotate` | HTTP | Pairing, device token rotation |
 | `GET /ws` | WebSocket | App Server protocol v3 for paired devices: all Session methods |
-| `remote.start/stop/status/pair/devices/revoke/rotate_token` | Management methods | Local administration of the entry and devices |
+| `remote.status/pair/devices/revoke/rotate_token` | Management methods | Local administration of the entry and devices; the entry is switched on and off by PluginManager's `plugin.set_enabled` |
 | `entryHost` (call-scoped `authenticate`, `handle`), `ConnectionEntry` | Transport/Connection change (process service, data record) | Authenticated entries; device connections are never served management methods |
 | CLI | `/remote`, `/web`, `dimcode remote`, `dimcode web` | User entries |
 
@@ -183,7 +185,7 @@ Details: [Appendix A](#appendix-a-interface-details).
 
 ## 7. Security
 
-Every paired device can call every Session method on every Session of the host: submitting input, answering approvals and questions, stopping turns, `session.permission.update`, `session.exec.stop`, `session.model.update`, `session.mcp*` and creating Sessions in any authorized directory (decision E3, A12). This widens today's local-only execution Session methods and is recorded in the [compatibility table](#a3-protocol-and-compatibility-on-the-remote-entry). The permission preset changed remotely is Session configuration (decision E4): a Timeline fact inherited by child branches and reset to the default on fork. The entry never grants management: pairing, revocation, configuration, host-local approvals and `daemon.shutdown` are management methods, which are never served to paired devices. Authentication stays minimal ([overview multiple nodes](../overview.md#63-multiple-nodes)): one bearer token per device, hashed at rest, rotated by the device, revoked locally; pairing codes are short-lived, single-use and rate-limited. Cookies are `HttpOnly`, `Secure`, `SameSite=Strict` with a same-origin `Origin` check. Tokens never appear in URLs, logs, diagnostics or Timeline. The entry never accepts rutis link frames or exports services.
+Every paired device can call every Session method on every Session of the host: submitting input, answering approvals and questions, stopping turns, `session.permission.update`, `session.exec.stop`, `session.model.update`, `session.mcp*` and creating Sessions in any authorized directory (decision E3, A12). This widens today's local-only execution Session methods and is recorded in the [compatibility table](#a3-protocol-and-compatibility-on-the-remote-entry). The permission preset changed remotely is Session configuration (decision E4): a Timeline fact inherited by child branches and reset to the default on fork. The entry never grants management: pairing, revocation and configuration are management methods, and `daemon.shutdown` is an Rpc built-in; none of them is served to paired devices. Authentication stays minimal ([overview multiple nodes](../overview.md#63-multiple-nodes)): one bearer token per device, hashed at rest, rotated by the device, revoked locally; pairing codes are short-lived, single-use and rate-limited. Cookies are `HttpOnly`, `Secure`, `SameSite=Strict` with a same-origin `Origin` check. Tokens never appear in URLs, logs, diagnostics or Timeline. The entry never accepts rutis link frames or exports services.
 
 ## 8. Rule check
 
@@ -191,24 +193,41 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 | Rule | How this document complies |
 | --- | --- |
-| §4.1 Command events for state owned by others | RemoteGateway writes no Timeline event; remote calls reach the owners' own methods, which write their commands and results, and RemoteGateway changes only its own device records and Settings rows through typed operations. |
+| §4.1 Command events for state owned by others | RemoteGateway writes no Timeline event; remote calls reach the owners' own methods, which write their commands and results, and RemoteGateway changes only its own device records and its business source `remote` through Settings typed operations; it never writes its own structural `enabled` field. |
 | §4.2 No withdrawal after handover | Remote withdrawal is InputQueue's `input/withdraw`, which has no effect after `input/applied` (`notHeld`); later only `stop/interrupt` applies. |
 | §4.3 Intervene before a write only through before callbacks | RemoteGateway adds no check at a Session entry; it authenticates only the transport upgrade, and Rpc keeps its external-boundary checks. |
 | §4.4 Core mechanisms carry no business meaning | `entryHost` and `ConnectionEntry` are generic transport records; Rpc only refuses management methods to device connections. |
 | §4.5 Read the whole batch before deciding | Not applicable: RemoteGateway decides nothing from Timeline events; owners decide remote calls by their own consumed facts. |
 | §4.6 Model context only from handed-over events | Remote content enters the model only as ordinary consumed Session input. |
 | §4.7 Plugins interact only through public events and services | RemoteGateway knows no Session method's meaning and uses only Transport, Settings, `pluginFiles` and Rpc's method collection. |
-| §4.8 Generic requirements to mechanism owners | None raised; the call-scoped requests of `entryHost` are part of the proposed Transport change (Appendix F). |
+| §4.8 Generic requirements to mechanism owners | Call-scoped requests from provider to caller in the neutral service protocol are raised in §9.1; typed loader operations (#3) are stated in PluginManager §9.1; the Transport and Connection change is in overview Appendix B.2. |
+| §4.9 Only facts later decisions use enter the Timeline | RemoteGateway writes no Timeline event; device records, offers and connections stay in `pluginFiles` and memory, and remote calls write only the owners' own facts, without device attribution. |
 | §1 Capability and App Server boundary | RemoteGateway is a process plugin in its own crate, not a Capability; Transport, Connection and Rpc get only generic entry changes. |
 | ADR 002 D1 Scope follows the owner | Devices and the listener are per host, so RemoteGateway is process-scoped. |
 | ADR 002 D2 No wiring modules | Rpc collects `managementMethods` by name; no wiring module exists. |
 | ADR 002 D3 Dependencies follow scope | RemoteGateway depends one way on Transport's `entryHost`; its own reload reloads Rpc as an accepted rare structural event. |
-| ADR 002 D4 Structural and business configuration | Only `enabled` is structural; `bind`, `tls` and `plaintext` are business configuration in the source `remote`, and a change rebinds the listener without a reload. |
+| ADR 002 D4 Structural and business configuration | Only `enabled` is structural and only PluginManager writes it; `bind`, `tls` and `plaintext` are business configuration in the source `remote`, and a change rebinds the listener without a reload. |
 | ADR 002 D5 Language-neutral contracts | `entryHost`, the HTTP surface and the methods are given in neutral form; Appendix G is a binding only. |
 
 ## 9. Requirements raised to mechanism owners
 
-None.
+### 9.1 Call-scoped requests from provider to caller
+
+| Item | Content |
+| --- | --- |
+| Blocked by | `entryHost` (A.1) must ask its caller `authenticate` and `handle` while `open` runs, and ADR 002 D5 requires the contract in neutral form; the neutral service protocol today carries requests from caller to provider and per-call notifications only. |
+| Existing mechanisms considered | Per-call notifications carry no reply; `callChannel` is a separate service the provider calls, which would make Transport depend on RemoteGateway; a separate service provided by RemoteGateway and collected by Transport would also reverse the dependency. |
+| Generic capability | A request sent by the provider on an open call to its caller, with a reply, scoped to that call and ended when the call ends; no knowledge of entries, devices or HTTP. |
+| Effect on sequence, batch, interrupt, reload | No Timeline sequence or batch is involved; dropping the call cancels its pending requests; a reload of either side ends the call and its requests. |
+| Owner and issue | rutis (service protocol and rutis-bridge); no issue yet. Rust-to-Rust use (Appendix G) does not wait for it. |
+
+### 9.2 Other requirements (stated elsewhere)
+
+| Requirement | Owner | Five items |
+| --- | --- | --- |
+| Typed operations on the loader editable layer, used by PluginManager to write RemoteGateway's `enabled` field | rutis-loader, [#3](https://github.com/arcships/dim/issues/3) | [PluginManager §9.1](PluginManager.md#9-requirements-raised-to-mechanism-owners) |
+
+`entryHost`, `ConnectionEntry {name, deviceId}` and Rpc serving no management method to device connections are changes to Transport, Connection and Rpc, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
 
 ## Appendix A. Interface details
 
@@ -224,7 +243,7 @@ One process service, `entryHost` (no key), provided by Transport. The entry's au
 | `authenticate` (call-scoped request, Transport to caller) | async | `{ headers, origin?, remote_addr }` (tokens only in headers or cookie) | `{ verdict: "allow", device_id } \| { verdict: "deny" }` |
 | `handle` (call-scoped request, Transport to caller) | async | `{ method, path, headers, body_base64? }` | `{ status, headers, body_base64? }` |
 
-Every connection accepted on the entry carries the data record `ConnectionEntry { name, device_id }`; Rpc serves a connection with a `device_id` only Session methods (A1). Revocation calls `closeDevice`; dropping the `open` call or calling `close` closes the entry. Transport and RemoteGateway are Rust and use the binding in Appendix G.
+Every connection accepted on the entry carries the data record `ConnectionEntry { name, deviceId }` (`deviceId` from the `authenticate` reply); Rpc serves a connection with a `deviceId` only Session methods (A1). Revocation calls `closeDevice`; dropping the `open` call or calling `close` closes the entry. Transport and RemoteGateway are Rust and use the binding in Appendix G.
 
 Without RemoteGateway, the bare WebSocket keeps today's rules (protected profiles: `hello` and `daemon.ping` only).
 
@@ -244,9 +263,9 @@ Tokens: 32 random bytes, base64url; SHA-256 hashes compared in constant time. Pa
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 only; v1/v2 rejected with `protocol_version` (A11) |
-| Methods | Rpc Session built-ins and every `sessionMethods` service, on every Session of the host (E3, A12); management methods (`managementMethods` and Rpc's management built-ins, including `daemon.shutdown`) → `-32601 unknown_method` |
+| Methods | Rpc Session built-ins and every `sessionMethods` service, on every Session of the host (E3, A12); management methods (`managementMethods` and Rpc's management built-ins) and the Rpc built-in `daemon.shutdown` → `-32601 unknown_method` |
 | `hello.features` | Session features only |
-| Identity | `ConnectionEntry.device_id` for diagnostics and revocation; grants nothing beyond the entry's method set |
+| Identity | `ConnectionEntry.deviceId` for diagnostics and revocation; grants nothing beyond the entry's method set |
 | Reverse requests | None: client requests, server notifies ([#5](https://github.com/arcships/dim/issues/5)) |
 
 Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [protocol.rs](../../../crates/dim-app-server/src/protocol.rs); `validate_call` in [connection.rs](../../../crates/dim-app-server/src/connection.rs)):
@@ -261,15 +280,13 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 
 | Method | Params | Result | Interruption |
 | --- | --- | --- | --- |
-| `remote.start` | `{bind?, tls?, plaintext?}` | `{address}` after bind | Report |
-| `remote.stop` | `{}` | `{}` after listener and connections closed | Report |
 | `remote.status` | `{}` | `{enabled, running, address?, tls, error?, devices, connections}` | Drain |
 | `remote.pair` | `{ttlSeconds?}` (default 300, max 900) | `{code, url, expiresAt}`; `url` is `<origin>/pair#code=<code>` | Drain |
 | `remote.devices` | `{}` | `[{deviceId, name, pairedAt, lastSeenAt, connections, rotationRequired}]` | Drain |
 | `remote.revoke` | `{deviceId}` | `{}` after record removed and connections closed | Report |
 | `remote.rotate_token` | `{deviceId?}` (absent: all) | `{}` after flag persisted and connections closed | Report |
 
-`remote.start`/`stop` write the structural `enabled` field through the typed Settings operation; the loader delivers a `VolatileUpdate` without reloading the plugin, and RemoteGateway calls `entryHost.open` or `close`. `remote.start` parameters `bind`, `tls`, `plaintext` are first written through the Settings typed operation into the business source `remote`. A business-source change while the entry runs rebinds the listener: RemoteGateway closes and reopens the entry with the new settings (connections detach) without reloading the plugin (A16).
+RemoteGateway has no start or stop method and never writes its own `enabled` field. The entry is switched on and off by PluginManager's `plugin.set_enabled {id: "remote-gateway", enabled}` ([PluginManager A.5](PluginManager.md#a5-methods-managementmethods-key-plugin)), which writes the field through the typed loader operations (#3); the loader delivers a `VolatileUpdate` without reloading the plugin, and RemoteGateway calls `entryHost.open` or `close`. Listener settings `bind`, `tls`, `plaintext` are written through Settings typed operations into the business source `remote`, under the schema RemoteGateway declares (which rejects a non-loopback `bind` without `tls` or `plaintext: true`). The CLI `/remote` and `dimcode remote start` write the settings first, then call `plugin.set_enabled`, then read `remote.status`. A business-source change while the entry runs rebinds the listener: RemoteGateway closes and reopens the entry with the new settings (connections detach) without reloading the plugin (A16).
 
 ### A.5 Capability mechanics
 
@@ -304,7 +321,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 | Two phones use one pairing code | first `POST /api/pair` | Second fails, counts as an attempt | RemoteGateway |
 | Rotation response lost | — | Previous token valid in the grace window; device retries | RemoteGateway |
 | `remote.rotate_token` while a device rotates | persisted flag order | Rotation before the flag is also flagged | RemoteGateway |
-| `remote.stop` with attached devices | — | Connections close (detach); Sessions continue | RemoteGateway, Transport |
+| `enabled` set false (`plugin.set_enabled`) with attached devices | `VolatileUpdate` | Connections close (detach); Sessions continue | RemoteGateway, Transport |
 | Rpc reload | — | `service_reloading` for affected calls; connections stay unless the protocol instance changes | Rpc |
 | Session plugin contributing Session methods reloads | — | Its names `service_reloading` while it reloads, then served again; in-flight calls follow the [methods](../contracts/session-boundary.md) contract; connections stay | Rpc, contributor |
 | Runtime settings change while devices are connected | business source revision | Entry reopens with the new settings; connections detach and reconnect | RemoteGateway |
@@ -317,9 +334,9 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 
 | Case | Result |
 | --- | --- |
-| Bind failure on `remote.start` | `-32000 remote_bind_failed`; `enabled` stays false |
-| TLS files unreadable | `-32000 remote_tls_invalid`; not started |
-| Non-loopback bind without TLS or `plaintext` | `-32602 invalid_params` |
+| Bind failure after `enabled` is set | `remote.status.error` = `remote_bind_failed`; entry not open; `enabled` unchanged (RemoteGateway never writes it); the CLI reports it |
+| TLS files unreadable | `remote.status.error` = `remote_tls_invalid`; entry not open |
+| Non-loopback bind without TLS or `plaintext` | The Settings typed write to `remote` fails `invalid_params` (schema declared by RemoteGateway); nothing is written |
 | Device file corrupt or unreadable | `remote.status.error`; all upgrades rejected; `remote.devices` fails `remote_storage_failed`; file kept for repair |
 | `pluginFiles` lock or write failure on pair/revoke/rotate | `-32000 remote_storage_failed`; in-memory state unchanged; revocation not reported done |
 | Unknown device id | `-32602 invalid_params` |
@@ -330,7 +347,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 
 Flow tests in the App Server suite over a real WebSocket entry:
 
-1. `remote.start`/`status`/`stop`; non-loopback without TLS rejected; restart reopens when `enabled`; changing `bind` in the business source reopens the entry without reloading the plugin.
+1. `plugin.set_enabled` on RemoteGateway's row opens and closes the entry without a reload, shown by `remote.status`; RemoteGateway itself never writes `enabled`; a non-loopback `bind` without TLS is rejected by the business source schema; restart reopens when `enabled`; changing `bind` in the business source reopens the entry without reloading the plugin.
 2. Pairing with valid, expired, reused code and too many attempts; `remote.devices` lists the device.
 3. A paired device calls Session methods including `session.permission.update`, `session.exec.stop`, `session.model.update` and `session.input.withdraw`; every management method, including `remote.*` and `daemon.shutdown`, returns `unknown_method`; v1 is rejected.
 4. Two attached clients: both receive events; competing `approval.respond`; interrupt before and after a remote response; remote withdraw racing apply (`input/deleted` or `notHeld`).
@@ -342,7 +359,7 @@ Flow tests in the App Server suite over a real WebSocket entry:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | A connection from a paired device (with `device_id`) is served only Session methods; management methods are never served to it | Methods contract; decision E3 | — |
+| A1 | A connection from a paired device (with `deviceId`) is served only Session methods; management methods are never served to it | Methods contract; decision E3 | — |
 | A2 | Device identity is not written to Timeline | Overview §9; judgment | Inputs carry device attribution |
 | A3 | Devices stored in `remote-devices.json` in RemoteGateway's `pluginFiles` (extended) root | Decision R8 | Another store with a format change |
 | A4 | Pairing offers in memory only | Judgment | Persisted offers |
@@ -351,13 +368,13 @@ Flow tests in the App Server suite over a real WebSocket entry:
 | A7 | Device-initiated rotation with a 10-minute grace window; forced rotation by flag | Feature list "rotate access tokens"; judgment | Different rotation model |
 | A8 | Pairing code format and 32-byte tokens | Judgment | — |
 | A9 | Attempt limits 5 per offer, 20 per minute | Judgment | Different limits |
-| A10 | Loopback default; non-loopback needs TLS or explicit plaintext | Overview §5.13; judgment | Policy decided in #5 |
+| A10 | Loopback default; non-loopback needs TLS or explicit plaintext | Overview §6.3; judgment | Policy decided in #5 |
 | A11 | Remote entry accepts protocol v3 only | Judgment | v1/v2 on the entry |
 | A12 | A paired device can access every Session and every Session method | Decision E3; feature list "access projects and Sessions" | Per-entry method filter or per-device scoping |
 | A13 | No exclusive Session ownership; "take over" means attaching and acting | Feature list "collaborate with or take over" | A control-lock protocol |
 | A14 | Pending approvals have no timeout with no client attached | Existing Approval behavior | Timeout in Approval |
 | A15 | A listener failure stops only the remote entry | Judgment | Daemon shutdown on remote failure |
-| A16 | `bind`, `tls`, `plaintext` are business configuration in a Settings business source; only `enabled` is structural | ADR 002 D4 (listener settings are business configuration) | Listener settings become structural loader fields |
+| A16 | `bind`, `tls`, `plaintext` are business configuration in a Settings business source; only `enabled` is structural, and only PluginManager writes it | ADR 002 D4 (listener settings are business configuration) | Listener settings become structural loader fields |
 
 ## Appendix F. Open questions
 
@@ -365,7 +382,7 @@ Flow tests in the App Server suite over a real WebSocket entry:
 | --- | --- |
 | [#5](https://github.com/arcships/dim/issues/5) and overview open questions "Remote access" | Relation of product device identity to peer tokens, link disconnection, TLS deployment |
 | Per-device scope | Whether devices may later be limited to workspaces or Sessions (not required by E3) |
-| Transport/Connection change | `entryHost` with its call-scoped `authenticate` and `handle` requests is proposed here and needs the Transport change document, which also confirms that the neutral service protocol carries call-scoped requests from provider to caller as `callChannel` does |
+| Transport/Connection change | `entryHost` with its call-scoped `authenticate` and `handle` requests is proposed here and needs the Transport change document; the neutral protocol support is the requirement in [§9.1](#91-call-scoped-requests-from-provider-to-caller) |
 
 ## Appendix G. Rust binding
 

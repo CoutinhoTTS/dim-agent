@@ -1,8 +1,8 @@
 # PluginManager
 
-Status: Draft. Overall design: [overview B.12](../overview.md#4-plugin-catalog), [Settings, Mcp, SkillsCatalog changes](../overview.md#b2-app-server-process-plugins), [conventions](../overview.md#64-conventions), [multiple nodes](../overview.md#63-multiple-nodes), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (depends on [#3](https://github.com/arcships/dim/issues/3); non-Rust capability plugins on [#4](https://github.com/arcships/dim/issues/4); peer nodes on [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
+Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [Settings, Mcp, SkillsCatalog changes](../overview.md#b2-app-server-process-plugins), [conventions](../overview.md#64-conventions), [multiple nodes](../overview.md#63-multiple-nodes), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (depends on [#3](https://github.com/arcships/dim/issues/3); non-Rust capability plugins on [#4](https://github.com/arcships/dim/issues/4); peer nodes on [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
-PluginManager is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): installation is per host). It installs plugin packages from Git marketplaces, local paths or Git URLs onto a target node, records plugin intent (install, enable, node binding, package paths) through typed Settings operations into loader rows, and publishes the typed content of enabled packages as the named process service `pluginContents`. Content owners (SkillsCatalog, Mcp, Hooks, Workflow, in any language) depend on `pluginContents` by name, define their own content type keys and read the content they understand; PluginManager knows none of them. Package code loads only after approval through the Settings host-local approval service, bound to node and package fingerprint. Packages are never upgraded automatically. PluginManager handles only structural operations (install, enable, disable, update, approve); each plugin declares the schema of its own business configuration, which is written through Settings typed operations into that plugin's Settings business source, never through PluginManager.
+PluginManager is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): installation is per host). It installs plugin packages from Git marketplaces, local paths or Git URLs onto a target node, records plugin intent (install, enable, node binding, package paths) through typed Settings operations into loader rows, and publishes the typed content of enabled packages as the named process service `pluginContents`. Content owners (SkillsCatalog, Mcp, Hooks, Workflow, in any language) depend on `pluginContents` by name, define their own content type keys and read the content they understand; PluginManager knows none of them. Package code runs when its package is enabled: there is no host-local approval, because installing and enabling are host configuration done through management methods, outside Approval and Permission, which govern only agent-initiated actions ([overview conventions](../overview.md#64-conventions)). Packages are never upgraded automatically. PluginManager handles only structural operations (install, enable, disable, update, remove), and it is the only writer of structural fields of any plugin row, including the `enabled` field of built-in plugins such as [RemoteGateway](RemoteGateway.md); each plugin declares the schema of its own business configuration, which is written through Settings typed operations into that plugin's Settings business source, never through PluginManager.
 
 ## 1. Structure
 
@@ -10,22 +10,21 @@ PluginManager is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): ins
 flowchart LR
   subgraph CN["App Server process, control node"]
     PM["PluginManagerPlugin<br/>plugin.* methods, package store,<br/>pluginContents"]:::new
-    SET["Settings<br/>typed operations on loader rows,<br/>host-local approvals"]
+    SET["Settings<br/>typed operations on loader rows"]
     LOADER["rutis Loader"]
     RPC["Rpc method table<br/>collects managementMethods"]
     CONS["Content owners<br/>SkillsCatalog, Mcp, Hooks, Workflow"]
   end
   subgraph NODE["Each configured node, local or peer"]
     SVC["FileStorage, HostPlatform<br/>of that node"]
-    CODE["Package code rows<br/>load only with a matching approval"]:::new
+    CODE["Package code rows<br/>load when enabled"]:::new
   end
   PM --> SET
   PM --> LOADER
   PM -->|"per operation on node"| SVC
   RPC -->|"plugin.* managementMethods"| PM
   CONS -->|"sources by own type key, changed"| PM
-  CODE -->|"verify and check grant in apply"| SET
-  CODE --> SVC
+  CODE -->|"verify integrity in apply"| SVC
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
@@ -33,11 +32,11 @@ All dependencies are process services at the same scope ([ADR 002 D3](../../adr/
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `PluginManagerPlugin` | Process, control node | Settings (typed operations on the loader editable layer, host-local approvals), `pluginFiles` (extended) on the control node, the rutis Loader, `FileStorage` and `HostPlatform` of each configured node | `pluginContents` process service; `managementMethods` key `plugin` (`plugin.*`), collected by Rpc |
-| Package code rows | Process, on the package's node | that node's `FileStorage`, the host-local approval service, what the code declares | named services declared in its `provides`; reads its own business configuration (its Settings business source, its own schema) at use time |
+| `PluginManagerPlugin` | Process, control node | Settings (typed operations on the loader editable layer), `pluginFiles` (extended) on the control node, the rutis Loader, `FileStorage` and `HostPlatform` of each configured node | `pluginContents` process service; `managementMethods` key `plugin` (`plugin.*`), collected by Rpc |
+| Package code rows | Process, on the package's node | that node's `FileStorage`, what the code declares | named services declared in its `provides`; reads its own business configuration (its Settings business source, its own schema) at use time |
 | Content owners | Process | `pluginContents` | — (each defines its own type key) |
 
-Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace index `dim-marketplace.json`, the `pluginContents` service and its `ContentSource` shape ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.3; Rust binding in Appendix G), the package directory layout, the code-row approval check, `plugin.*` methods. Contracts depended on: typed Settings operations on the loader editable layer (#3) for plugin intent, the Settings host-local approval service (R11), `pluginFiles` (extended) on the control node, the rutis-loader `Loader` (`entries`, `reload`, `restart`, `LoaderChanged`), `FileStorage` and `HostPlatform` of the package's node (peer nodes: imported over the rutis link), the [methods](../contracts/session-boundary.md) contract. These depended-on services are existing typed Rust services that PluginManager, a Rust plugin, uses directly; exposing them by name to non-Rust code rows is [#4](https://github.com/arcships/dim/issues/4)'s work. PluginManager never calls a content owner and never names a content type key in code.
+Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace index `dim-marketplace.json`, the `pluginContents` service and its `ContentSource` shape ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.3; Rust binding in Appendix G), the package directory layout, the code-row integrity check, `plugin.*` methods. Contracts depended on: typed Settings operations on the loader editable layer (#3) for plugin intent and structural fields, `pluginFiles` (extended) on the control node, the rutis-loader `Loader` (`entries`, `reload`, `restart`, `LoaderChanged`), `FileStorage` and `HostPlatform` of the package's node (peer nodes: imported over the rutis link), the [methods](../contracts/session-boundary.md) contract. These depended-on services are existing typed Rust services that PluginManager, a Rust plugin, uses directly; exposing them by name to non-Rust code rows is [#4](https://github.com/arcships/dim/issues/4)'s work. PluginManager never calls a content owner and never names a content type key in code.
 
 ## 2. Data and state
 
@@ -47,9 +46,6 @@ flowchart TB
     MK["Marketplace registrations"]
     PR["Package intent per node and id<br/>version, source, commit, fingerprint,<br/>contents, enabled; code rows"]
   end
-  subgraph HLA["Settings host-local approval service"]
-    AP["owner plugin, node, source, id, fingerprint"]
-  end
   subgraph PS["Package root on each node, via its FileStorage"]
     PKG["Package directories<br/>content-addressed by fingerprint"]
     STG["Staging"]
@@ -58,11 +54,10 @@ flowchart TB
   MEM["pluginContents sources and revision<br/>memory"]:::new
   PR -->|"apply and each change: verify"| PKG
   PKG -->|"publishes"| MEM
-  AP -->|"gates code rows"| PR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-Package intent in loader rows is the persisted state; `plugin.list` is projected from loader entries, never from a separate store. Published sources are rebuilt from intent on `apply` (verifying each enabled package) and updated in place after each operation, with a revision bump. Per-plugin business configuration is neither in rows nor in PluginManager: each plugin declares its schema, the configuration is written through Settings typed operations into that plugin's Settings business source, and the plugin reads it at use time, so configuring never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md), A16). Package bytes live under the package root of their node, marketplace caches in control-node `pluginFiles` (extended); approvals live only in the host-local approval service. Nothing is a Session fact.
+Package intent in loader rows is the persisted state; `plugin.list` is projected from loader entries, never from a separate store. Published sources are rebuilt from intent on `apply` (verifying each enabled package) and updated in place after each operation, with a revision bump. Per-plugin business configuration is neither in rows nor in PluginManager: each plugin declares its schema, the configuration is written through Settings typed operations into that plugin's Settings business source, and the plugin reads it at use time, so configuring never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md), A16). Package bytes live under the package root of their node, marketplace caches in control-node `pluginFiles` (extended). Nothing is a Session fact.
 
 ## 3. Flows
 
@@ -83,34 +78,34 @@ sequenceDiagram
   PM->>S: plugins.install with expected revision
   S->>L: package intent and code rows
   PM->>PM: publish sources, revision bump
-  PM-->>C: id, fingerprint, approval required or notRequired
+  PM-->>C: id, fingerprint
   PM-->>O: changed
   O->>PM: sources of its own type key
 ```
 
-Content-only packages are active once published; owners reconcile on `changed` and never receive pushes. Code rows stay Pending until approval.
+Content-only packages are active once published; owners reconcile on `changed` and never receive pushes. Code rows of an enabled package load at once; they are Pending only while their runtime is unavailable.
 
-### 3.2 Approve, revoke and code lifecycle
+### 3.2 Enable, disable and code lifecycle
 
 ```mermaid
 sequenceDiagram
   participant C as Client
   participant PM as PluginManager
-  participant A as Host-local approval service
+  participant S as Settings
   participant L as Loader
   participant K as Code row
-  C->>PM: plugin.approve id, approvalToken
-  PM->>A: grant owner plugin, node, id, fingerprint
-  PM->>L: restart code rows
-  L->>K: apply verifies package and finds matching grant
-  C->>PM: plugin.revoke
-  PM->>A: revoke
-  PM->>L: restart code rows
-  L->>K: dispose, then apply fails approval_required
+  C->>PM: plugin.set_enabled id, true
+  PM->>S: plugins.set_enabled with expected revision
+  S->>L: code rows enabled
+  L->>K: apply verifies package integrity
+  C->>PM: plugin.set_enabled id, false
+  PM->>S: plugins.set_enabled
+  S->>L: code rows disabled
+  L->>K: dispose
   PM-->>C: done after disposal
 ```
 
-A code row checks integrity and a matching grant in its own `apply`; without one it fails `approval_required` and stays out of service. Revoking or disabling code unloads that row; its dependents reload per D3, and in-flight turns that used what it offered may fail. That cost is documented, not prevented.
+A code row checks integrity in its own `apply`; a mismatch fails `integrity_failed` and keeps it out of service. No approval is asked: the package runs because a local administrator enabled it. Disabling code unloads that row; its dependents reload per D3, and in-flight turns that used what it offered may fail. That cost is documented, not prevented.
 
 ### 3.3 Explicit update, never automatic
 
@@ -126,7 +121,7 @@ sequenceDiagram
   C->>PM: plugin.update id, expectedRevision
   PM->>PS: stage and commit new fingerprint directory
   PM->>S: plugins.update version, fingerprint
-  Note over PM,S: old approval no longer matches, code rows fail approval_required until re-approved
+  Note over PM,S: code rows restart on the new fingerprint directory after verification
 ```
 
 A marketplace refresh only marks `updateAvailable`; changing an installed package always takes an explicit `plugin.update` (decision E22).
@@ -147,12 +142,12 @@ sequenceDiagram
   end
 ```
 
-Install is ordered stage, commit, Settings write; the Settings revision is the commit point, so an interruption never leaves an approved or half-registered package.
+Install is ordered stage, commit, Settings write; the Settings revision is the commit point, so an interruption never leaves a half-registered package.
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Code row revoked or disabled while something it offers is in use | The row unloads; dependents reload (D3); affected in-flight turns may fail | Loader, code row |
-| Approval granted, then package updated | New fingerprint does not match; code rows fail `approval_required` until re-approved | Code row |
+| Code row disabled while something it offers is in use | The row unloads; dependents reload (D3); affected in-flight turns may fail | Loader, code row |
+| Package updated while its code runs | Code rows restart on the new fingerprint directory; dependents reload (D3) | Loader, code row |
 | Node offline after install | Operations on that node `node_unavailable`; its sources withdrawn; its code rows' services fail calls `node_unavailable`; nothing reloads or goes Pending; other nodes unaffected | PluginManager |
 | Plugin business configuration changed (Settings typed operation) while the plugin runs | Business data update and notification; no reload; next use reads the new value | Plugin, Settings |
 | Two installs of one id | Second waits on the lock, then `plugin_exists` | PluginManager |
@@ -163,16 +158,16 @@ Full table: [Appendix B](#appendix-b-full-conflict-table).
 
 ## 5. Context mapping
 
-No direct model-visible effect. PluginManager writes no input, offers no tool and registers no prompt source. Package content reaches the model only through its owner, in that owner's form: Skills through the Skill prompt source (adopted per branch, replayed after compaction as configuration, inherited by child branches from the adopted prefix), MCP and code-row tools through tool declarations and `ToolResult.content`, Hooks output through Session input. Non-interactive Sessions differ only as owners define. The model never sees package ids, fingerprints, approvals, marketplace data, configuration or diagnostics.
+No direct model-visible effect. PluginManager writes no input, offers no tool and registers no prompt source. Package content reaches the model only through its owner, in that owner's form: Skills through the Skill prompt source (adopted per branch, replayed after compaction as configuration, inherited by child branches from the adopted prefix), MCP and code-row tools through tool declarations and `ToolResult.content`, Hooks output through Session input. Non-interactive Sessions differ only as owners define. The model never sees package ids, fingerprints, marketplace data, configuration or diagnostics.
 
 ## 6. Interfaces (summary)
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `plugin.marketplace.list/add/remove/update/search/view` | Management methods | Marketplaces; `update` refreshes indexes only |
-| `plugin.install/update/list/set_enabled/reload/approve/revoke/remove` | Management methods | Package lifecycle |
+| `plugin.install/update/list/set_enabled/reload/remove` | Management methods | Package lifecycle; `set_enabled` also switches built-in plugin rows |
 | `pluginContents` (`sources`, `changed`) | Process service, no key | Generic content publication |
-| Code-row approval check | Loader row rule | Code rows load only with a matching grant |
+| Code-row integrity check | Loader row rule | Code rows load when enabled and their package verifies |
 | `dim-plugin.json` v2, `dim-marketplace.json` v1 | File formats | Package and marketplace descriptions |
 | Typed Settings operations `plugins.*`, `marketplaces.*` | Depended on (#3, ADR 002 D4) | Persist intent (structural only) |
 | CLI | `/plugins`, `/plugin`, `/reload-plugins`, `dimcode plugin …` | User entries |
@@ -181,7 +176,7 @@ Details: [Appendix A](#appendix-a-interface-details).
 
 ## 7. Security
 
-Installing, approving and removing are management methods, provided only by this process plugin and never served to paired remote devices ([methods](../contracts/session-boundary.md)); RemoteGateway never serves them. Package code is trusted native-process code once loaded (AGENTS rule 11), so loading requires a host-local approval of the exact fingerprint on that node; replay, fork, FullAccess, project files and installation itself never grant it. Git fetch runs no repository hooks or submodules; package files are never executed at install time; integrity is rechecked on every load. Content owners apply their own host-local approval to executable content they interpret (Hooks, MCP, workflows). A plugin's business configuration (in its own Settings business source) holds credential references only, resolved by the plugin through the Settings credential resolver; PluginManager never reads it, and resolved secrets never enter rows, `plugin.list`, diagnostics or content sources. A package whose code contributes management methods extends the host administration surface only after approval.
+Installing, enabling and removing are management methods, provided only by this process plugin and never served to paired remote devices ([methods](../contracts/session-boundary.md)); RemoteGateway never serves them. Package code is trusted native-process code once loaded (AGENTS rule 11). It runs because a local administrator installed and enabled it, not because of an agent decision, so Approval and Permission do not govern it and there is no host-local approval: the security of that configuration is the administrator's. Git fetch runs no repository hooks or submodules; package files are never executed at install time; integrity is rechecked on every load. Content owners run executable content they interpret (Hooks, MCP, workflows) when it is enabled, with no approval step. A plugin's business configuration (in its own Settings business source) holds credential references only, resolved by the plugin through the Settings credential resolver; PluginManager never reads it, and resolved secrets never enter rows, `plugin.list`, diagnostics or content sources. A package whose code contributes management methods extends the host administration surface only once a local administrator enabled it.
 
 ## 8. Rule check
 
@@ -189,19 +184,20 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 | Rule | How this document complies |
 | --- | --- |
-| §4.1 Command events for state owned by others | Loader rows and approvals are process state with no Timeline; PluginManager changes them only through the owners' typed write operations (Settings `plugins.*`, the host-local approval service) and never writes other plugins' business configuration. |
+| §4.1 Command events for state owned by others | Loader rows are process state with no Timeline; PluginManager changes them only through the owner's typed write operations (Settings `plugins.*` over #3) and never writes other plugins' business configuration. |
 | §4.2 No withdrawal after handover | Not applicable: PluginManager hands no Timeline object to another module; a published source change reaches a branch only when its owner re-adopts. |
-| §4.3 Intervene before a write only through before callbacks | Not applicable: PluginManager registers no before callback and adds no check at a Session or RPC entry; the code-row approval check runs in that row's own `apply`. |
+| §4.3 Intervene before a write only through before callbacks | Not applicable: PluginManager registers no before callback and adds no check at a Session or RPC entry; the code-row integrity check runs in that row's own `apply`. |
 | §4.4 Core mechanisms carry no business meaning | `pluginContents` publishes opaque typed sources; the Loader and Rpc get no plugin-specific handling. |
 | §4.5 Read the whole batch before deciding | Not applicable: PluginManager reads no Timeline event. |
 | §4.6 Model context only from handed-over events | Package content reaches the model only through its owner's adopted prompt, tool or input rules. |
 | §4.7 Plugins interact only through public events and services | PluginManager never calls a content owner; owners read `pluginContents`, and each plugin's business configuration is reached only through Settings. |
 | §4.8 Generic requirements to mechanism owners | Typed loader operations (#3), services by name for non-Rust code (#4) and offline-node behaviour (#5) are raised in §9. |
+| §4.9 Only facts later decisions use enter the Timeline | PluginManager writes no Timeline event; intent stays in loader rows, packages in node storage, and clients read `plugin.list`. |
 | §1 Capability and App Server boundary | PluginManager is a process plugin in its own crate, not a Capability; the App Server only collects its `managementMethods`. |
 | ADR 002 D1 Scope follows the owner | Installation is per host, so PluginManager is process-scoped. |
 | ADR 002 D2 No wiring modules | Content owners and code-row consumers collect services by name; no wiring module exists. |
 | ADR 002 D3 Dependencies follow scope | All dependencies are process services; PluginManager and code-row reloads propagate as documented rare structural events. |
-| ADR 002 D4 Structural and business configuration | PluginManager writes only structural intent (install, enable, disable, update, approve) to loader rows; business configuration belongs to each plugin's own Settings business source. |
+| ADR 002 D4 Structural and business configuration | PluginManager writes only structural intent (install, enable, disable, update, remove) to loader rows, and is the only writer of structural fields such as RemoteGateway's `enabled`; business configuration belongs to each plugin's own Settings business source. |
 | ADR 002 D5 Language-neutral contracts | `pluginContents`, the manifest and the methods are neutral; Appendix G is a binding only. |
 
 ## 9. Requirements raised to mechanism owners
@@ -212,16 +208,16 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | --- | --- |
 | Blocked by | ADR 002 D4 puts structural plugin intent in loader rows, and principles §4.1 and §4.7 forbid editing another module's state directly; rutis-loader 0.10 offers no typed write operation for adding, updating or removing rows. |
 | Existing mechanisms considered | `Loader` `entries`, `reload` and `restart` only read or restart rows; `VolatileUpdate` changes `x-volatile` fields of an existing row but cannot add or remove rows; a Settings business source holds business configuration, not rows; a PluginManager-owned store would be a second source of truth for rows. |
-| Generic capability | Typed operations on the editable layer: add, update and remove a row and set its `disabled` flag, each with an expected revision, atomic, with a change notification; no knowledge of packages or plugins. |
+| Generic capability | Typed operations on the editable layer: add, update and remove a row, set its `disabled` flag and set a field of an existing row (an `x-volatile` field arrives as `VolatileUpdate` without reload), each with an expected revision, atomic, with a change notification; no knowledge of packages or plugins. |
 | Effect on sequence, batch, interrupt, reload | No Timeline sequence or batch is involved; an interrupted operation either committed its revision or wrote nothing; adding or removing a row loads or unloads only that row, and its dependents reload per D3. |
-| Owner and issue | rutis-loader with the Settings supplement, [#3](https://github.com/arcships/dim/issues/3). |
+| Owner and issue | rutis-loader, [#3](https://github.com/arcships/dim/issues/3). The Settings typed operations that wrap it (A.6) are a Settings supplement, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 
 ### 9.2 Other requirements (stated elsewhere)
 
 | Requirement | Owner | Five items |
 | --- | --- | --- |
 | Services imported from a peer node stay registered while the link is down and fail calls with `node_unavailable` | rutis, [#5](https://github.com/arcships/dim/issues/5) | [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners); PluginManager needs it so an offline node never reloads PluginManager or makes a code row's dependents Pending |
-| Runtime services exposed by name to non-Rust plugins | runtime, [#4](https://github.com/arcships/dim/issues/4) | [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); Node code rows need it to use `FileStorage` and the host-local approval service |
+| Runtime services exposed by name to non-Rust plugins | runtime, [#4](https://github.com/arcships/dim/issues/4) | [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); Node code rows need it to use `FileStorage` |
 
 ## Appendix A. Interface details
 
@@ -254,7 +250,7 @@ Version 1 is the existing managed-provider manifest ([App Server contract](../..
 | `files` | Every file except `dim-plugin.json` and `.git/`; relative POSIX paths, no `..`, no symlinks; unlisted file or digest mismatch rejects |
 | `contents` | Opaque `type` `[a-z][a-z0-9-]*` (key defined by its consumer: `skills`, `hooks`, `mcp`, `workflows`, R14), `path` inside the package, optional `options` ≤ 64 KiB; only this shape is validated |
 | `code` | Optional; `runtime: "node"` loads `entry` as a rutis runtime row; `hostApiVersion`/`rutisVersion` checked; other runtimes rejected until #4 (A1) |
-| Fingerprint | SHA-256 of the stored manifest bytes; the manifest lists every file digest, so it binds all package bytes. This is the canonical executable content PluginManager declares to the host-local approval service (R11) |
+| Fingerprint | SHA-256 of the stored manifest bytes; the manifest lists every file digest, so it binds all package bytes. It names the exact package content in `plugin.list` and `pluginContents` and addresses its directory |
 
 ### A.2 Marketplace index `dim-marketplace.json` (A5)
 
@@ -275,13 +271,13 @@ Service `pluginContents`, scope process, no key, provided by PluginManagerPlugin
 | --- | --- | --- |
 | `package` | string | Package id |
 | `version` | string | Package version |
-| `fingerprint` | string | Consumers bind their own approvals to it |
+| `fingerprint` | string | Identifies the exact package bytes |
 | `node` | string or null | null = control node |
 | `root` | string | Package directory on `node` |
 | `path` | string | Declared path, relative to `root` |
 | `options` | object | From the manifest |
 
-A consumer owns its type key and format, reads files through services valid for `node`, and binds its own host-local approval to `node + package + fingerprint` ([overview conventions](../overview.md#64-conventions)). Node rule (A6): a source on node N is content of node N. A consumer that executes content against a Session (for example Hooks) uses only sources whose node equals that Session's resource node (`SessionConfig.resource_node`); a consumer that only reads content on the control node ignores sources it cannot reach and reports them in its own catalog.
+A consumer owns its type key and format and reads files through services valid for `node`. Node rule (A6): a source on node N is content of node N. A consumer that executes content against a Session (for example Hooks) uses only sources whose node equals that Session's resource node (`SessionConfig.resource_node`); a consumer that only reads content on the control node ignores sources it cannot reach and reports them in its own catalog.
 
 ### A.4 Package store
 
@@ -299,16 +295,14 @@ Packages live under PluginManager's package root on their node, written through 
 | `plugin.marketplace.update` | `{name?}` | `[{name, commit, error?}]`; refreshes indexes only | Report |
 | `plugin.marketplace.search` | `{query, marketplace?}` | `[{marketplace, id, version, description, installed: [{node, version}]}]` | Drain |
 | `plugin.marketplace.view` | `{marketplace, id}` | entry plus manifest summary (`contents` types, `code` presence) | Drain |
-| `plugin.install` | `{source: {marketplace, id} \| {path} \| {git, ref?}, node?, enabled?}` | `{id, version, node, fingerprint, approval, approvalToken?}` | Report |
-| `plugin.update` | `{id, node?, version?, expectedRevision}` | `{version, fingerprint, approval}` | Report |
-| `plugin.list` | `{node?}` | `[{id, version, node, enabled, status, approval, approvalToken?, contents, source, updateAvailable, error?}]` | Drain |
-| `plugin.set_enabled` | `{id, node?, enabled, expectedRevision}` | `{}` | Report |
+| `plugin.install` | `{source: {marketplace, id} \| {path} \| {git, ref?}, node?, enabled?}` | `{id, version, node, fingerprint}` | Report |
+| `plugin.update` | `{id, node?, version?, expectedRevision}` | `{version, fingerprint}` | Report |
+| `plugin.list` | `{node?}` | `[{id, version, node, builtin, enabled, status, contents, source, updateAvailable, error?}]`; built-in plugin rows appear with `builtin: true` | Drain |
+| `plugin.set_enabled` | `{id, node?, enabled, expectedRevision}`; `id` may name a built-in plugin row (A17) | `{}` | Report |
 | `plugin.reload` | `{id?, node?}` | `[{id, node, status, error?}]` | Report |
-| `plugin.approve` | `{id, node?, approvalToken}` | `{}` | Report |
-| `plugin.revoke` | `{id, node?}` | `{}` after code rows are disposed | Report |
 | `plugin.remove` | `{id, node?}` | `{cleanupError?}` | Report |
 
-`status`: `active`, `pending` (awaiting approval or runtime), `unavailable` (node offline; its services fail calls), `failed` (reason), `disabled`. `approval`: `notRequired`, `required`, `approved`; `approvalToken` is the fingerprint (a digest, not a credential). `install`, `update` and `marketplace.update` report phases (`fetch`, `verify`, `commit`) through the call's progress sink ([methods](../contracts/session-boundary.md), A14). Additions to overview B.12: `approve`, `revoke`, `update`, `marketplace.search/view` (A9).
+`status`: `active`, `pending` (awaiting runtime), `unavailable` (node offline; its services fail calls), `failed` (reason), `disabled`. `install`, `update` and `marketplace.update` report phases (`fetch`, `verify`, `commit`) through the call's progress sink ([methods](../contracts/session-boundary.md), A14). Additions to the overview catalog entry: `update`, `marketplace.search/view` (A9).
 
 ### A.6 Typed Settings operations used (#3, proposed Settings supplement)
 
@@ -316,10 +310,9 @@ Packages live under PluginManager's package root on their node, written through 
 | --- | --- |
 | `plugins.install(entry, expected_revision)` | Records package intent and creates code rows on the editable layer |
 | `plugins.update(id, node, version, fingerprint, expected_revision)` | Updates package intent; code rows follow |
-| `plugins.set_enabled(id, node, enabled, expected_revision)` | Sets the package's enabled flag and `set_disabled` on its code rows |
+| `plugins.set_enabled(id, node, enabled, expected_revision)` | Sets the package's enabled flag and `set_disabled` on its code rows; for a built-in plugin row, sets its structural `enabled` field (`VolatileUpdate` when `x-volatile`) |
 | `plugins.remove(id, node, expected_revision)` | Removes the package intent and all its code rows |
 | `marketplaces.save/remove` | Marketplace registrations |
-| Host-local approval service `grant/revoke {owner: "plugin", node, source, id, fingerprint}` | Outside loader and Timeline (R11) |
 
 `reload`, `restart` and status call the `Loader` directly.
 
@@ -327,10 +320,10 @@ Packages live under PluginManager's package root on their node, written through 
 
 | Step | Path |
 | --- | --- |
-| Timeline | No writes, no Dispatcher subscription, no `StateCell`; rechecks are Settings revisions and approval matches |
+| Timeline | No writes, no Dispatcher subscription, no `StateCell`; rechecks are Settings revisions |
 | Install | Lock `(node, id)` (A10), `stage`, compare with intent, `commit`, `plugins.install`, publish sources, reply; a failed Settings write leaves an unreferenced directory collected later (A11) |
 | Publication | On `apply`, verify each enabled package and build sources; after each operation, update sources and bump the revision; a package that fails verification is withdrawn and reported `failed` |
-| Code rows | `apply` verifies integrity and requires a grant matching node, id and fingerprint, else fails `approval_required`; `approve`/`revoke`/`update` restart them through the `Loader`; each code row reads its own business configuration at use time |
+| Code rows | `apply` verifies integrity, else fails `integrity_failed`; `set_enabled`/`update` restart them through the `Loader`; each code row reads its own business configuration at use time |
 | PluginManager reload | Content owners and Rpc reload with it (D3); in-flight install/remove return `operation_interrupted`; code rows are unaffected |
 | Process restart | Loader restores rows; packages re-verify; staging deleted; orphans collected after the loader settled |
 
@@ -340,10 +333,10 @@ Packages live under PluginManager's package root on their node, written through 
 | --- | --- | --- | --- |
 | Turn or branch interrupt, branch close, concurrent inputs, `input/withdraw`/`input/deleted`, unsettled batch, compaction, child cut | — | No effect on PluginManager; owners' adoption rules apply | Content owners |
 | Package disabled while a Session uses its Skill | revision bump < next adoption | Branch keeps its adopted prompt until it re-adopts | Skills / PromptSourcesBranch |
-| Code row revoked or disabled while in use | — | Row unloads; its dependents reload (D3); affected in-flight turns may fail | Loader |
+| Code row disabled while in use | — | Row unloads; its dependents reload (D3); affected in-flight turns may fail | Loader |
 | Two installs of one id on one node | lock, then Settings revision | Second `plugin_exists` (or `plugin_settings_conflict` across processes) | PluginManager, Settings |
-| Approval granted, then package updated | new fingerprint | Code rows fail `approval_required` until re-approved | Code row |
-| Revoke while code runs | revoke persisted < restart | Code rows disposed after settling their work; reply after disposal | Loader, code rows |
+| Package updated while its code runs | new fingerprint | Code rows restart on the new directory; dependents reload (D3) | Loader, code row |
+| Disable while code runs | disable persisted < restart | Code rows disposed after settling their work; reply after disposal | Loader, code rows |
 | Install interrupted after commit, before Settings | — | `operation_interrupted`; no intent; directory collected | PluginManager |
 | Install interrupted after Settings write | — | `operation_interrupted`; intent exists; retry `plugin_exists` | Client reads state |
 | Duplicate or late `plugin.install` | — | `plugin_exists` | PluginManager |
@@ -367,8 +360,6 @@ Packages live under PluginManager's package root on their node, written through 
 | `node_unavailable` | Target node not configured or its services unavailable |
 | `plugin_exists`, `plugin_not_found`, `marketplace_not_found` | Identity errors |
 | `plugin_settings_conflict` | Stale `expectedRevision` |
-| `approval_stale` | `approvalToken` differs from the current fingerprint |
-| `approval_required` | Code row has no matching grant (row status) |
 | `runtime_unavailable` | Node runtime not configured; code rows Pending |
 | `operation_interrupted` | `Report` rule of the methods contract; read `plugin.list` before retrying |
 
@@ -381,8 +372,8 @@ Flow tests through `plugin.*` methods with a local test marketplace and a test c
 1. Add, update, search, view a marketplace; invalid index `manifest_invalid`; update marks `updateAvailable` without changing installed packages.
 2. Install from marketplace, path and Git URL; tampered, unlisted and fingerprint-mismatched packages are rejected with nothing written.
 3. A content-only package publishes sources to the test consumer through `changed()` without reloading it; disable withdraws them; remove deletes intent then files; a PluginManager reload reloads the test consumer, which then reads the same sources.
-4. A package with Node code fails `approval_required` until `plugin.approve`; `plugin.update` requires re-approval; revoke disposes the code row.
-5. Revoking a code row that offers a test tool reloads its dependents; the test records the failed in-flight turn as the documented outcome.
+4. A package with Node code loads its code row as soon as it is enabled, with no approval step; `plugin.update` restarts it on the new directory; disabling disposes it; `plugin.set_enabled` on RemoteGateway's built-in row reaches it as `VolatileUpdate` without a reload.
+5. Disabling a package whose code row offers a test tool reloads its dependents; the test records the failed in-flight turn as the documented outcome.
 6. Concurrent installs; stale `expectedRevision`; interruption after commit and after the Settings write.
 7. Peer test node: install targets it; taking it offline makes only its operations and its code rows' services fail with `node_unavailable`, withdraws its sources and reloads nothing; recovery restores them.
 8. Restart: rows restored, integrity verified, staging removed, orphans collected.
@@ -391,15 +382,15 @@ Flow tests through `plugin.*` methods with a local test marketplace and a test c
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Package code is Node runtime rows (rutis-bridge) that provide and consume named services; no dynamic Rust code; access to the runtime's typed services by name waits on #4 | Overview §5.12, §11.1; ADR 002 D5 | More `code.runtime` values |
-| A2 | Code approvals use the Settings host-local approval service with owner `plugin` | Decision R11; overview conventions | A plugin-owned approval file |
+| A1 | Package code is Node runtime rows (rutis-bridge) that provide and consume named services; no dynamic Rust code; access to the runtime's typed services by name waits on #4 | Overview §4, Appendix C; ADR 002 D5 | More `code.runtime` values |
+| A2 | Package code runs when its package is enabled; there is no host-local approval | Decision R6 (round 2); overview conventions | An approval step before code loads |
 | A3 | Manifest schema 2 extends the existing format; v1 only for `--plugin-dir` | App Server README; judgment | Compatibility mapping |
 | A4 | One installed version per `(node, id)` | Judgment | Side-by-side versions |
 | A5 | Marketplace index format and name | Judgment; feature list "Git plugin marketplaces" | Format replaced |
 | A6 | Sources are node content; executing consumers match the Session's resource node | Overview multiple nodes; judgment | Consumers read peer content through imported services |
 | A7 | Git via the node's `git`, hooks/submodules disabled, `https`/`ssh` only | Judgment | Library fetcher or more schemes |
 | A8 | Local paths copied, not linked | Judgment (integrity) | A development link mode |
-| A9 | Additional methods `approve`, `revoke`, `update`, `marketplace.search/view` | Feature list; overview B.12 | Folded into other methods |
+| A9 | Additional methods `update`, `marketplace.search/view` | Feature list; overview §4 | Folded into other methods |
 | A10 | Operations serialize per `(node, id)` | Judgment | Settings revisions alone |
 | A11 | Unreferenced directories garbage-collected after the loader settled | Judgment | Explicit cleanup command |
 | A12 | Content owners depend on `pluginContents`; a PluginManager reload reloads them | ADR 002 D3 | A separately hosted publication service |
@@ -407,6 +398,7 @@ Flow tests through `plugin.*` methods with a local test marketplace and a test c
 | A14 | Install and update report progress phases | Methods contract progress sink; judgment | Result only |
 | A15 | No automatic upgrade, including content-only packages | Decision E22 | Opt-in auto-upgrade setting |
 | A16 | Each plugin declares the schema of its business configuration, which is written through Settings typed operations into that plugin's own Settings business source and read at use time; PluginManager has no configure method | ADR 002 D4 | PluginManager would write other plugins' business configuration |
+| A17 | `plugin.set_enabled` also sets the structural `enabled` field of built-in plugin rows (for example RemoteGateway); no plugin writes its own structural fields | Decision R3 (round 2); ADR 002 D4 | Each plugin writes its own structural fields |
 
 ## Appendix F. Open questions
 

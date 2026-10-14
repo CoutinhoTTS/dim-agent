@@ -10,7 +10,7 @@ This contract defines three named services in the language-neutral form of ADR 0
 | `managementMethods` | Process | namespace | Process plugins only (Mcp, Provider, Settings, Scheduler, ...) | Rpc's method table |
 | `toolContribution` | Session | tool name | Session-scoped plugin parts (Questions, Goal, Web, Notifications, Scheduler, Workflow) | ToolRegistry (supplement: named tool services) |
 
-**Management methods** are client RPC methods about the host rather than a Session: `account.*`, `provider.*`, `mcp.*`, `skills.*`, settings and `daemon.shutdown`, plus the methods of new process plugins. Today Rpc injects their services directly (`ProductServices` and `ExecutionServices` in [connection.rs](../../../crates/dim-app-server/src/connection.rs)); this design collects them through `managementMethods` instead. Only process plugins provide them, and they are never served to paired remote devices. Session methods have no level; the only split is `sessionMethods` (dispatched through a Session) versus `managementMethods`.
+**Management methods** are client RPC methods about the host rather than a Session: `account.*`, `provider.*`, `mcp.*`, `skills.*` and settings, plus the methods of new process plugins. `daemon.shutdown` stays an Rpc built-in and is likewise never served to paired devices. Today Rpc injects their services directly (`ProductServices` and `ExecutionServices` in [connection.rs](../../../crates/dim-app-server/src/connection.rs)); this design collects them through `managementMethods` instead. Only process plugins provide them, and they are never served to paired remote devices. Session methods have no level; the only split is `sessionMethods` (dispatched through a Session) versus `managementMethods`.
 
 Rpc decides what a connection is served from its `ConnectionEntry {name, deviceId}`: a local connection gets Session and management methods, a connection with a `deviceId` (a paired device through RemoteGateway) never gets management methods, and an exported rutis link gets management methods only when exported. There is no registry, no port and no Management plugin. Providers are optional plugins installed only when enabled. A provider reload propagates to its collector, which is the accepted cost of D3.
 
@@ -110,11 +110,11 @@ The connection's entry record is the only check. Being served management methods
 
 | Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Session-scoped provider reloads mid-call | call < reload | `Report`: `operation_interrupted`; `Drain`: reload waits | Rpc |
+| Session-scoped provider reloads mid-call | call < reload | `report`: `operation_interrupted`; `drain`: reload waits | Rpc |
 | Session method while the Session's capabilities reload | — | `service_reloading` | Rpc |
 | Session method on a Session without that plugin | — | `unknown_method` | Rpc |
 | Management owner reloads | — | Rpc reloads with it (D3); open connections see the existing Rpc reload behaviour | rutis lifecycle |
-| Management method on a session-only entry | — | `unknown_method` | Rpc |
+| Management method or `daemon.shutdown` on a connection with a `deviceId` | — | `unknown_method` | Rpc |
 | Two providers claim one namespace or tool name | assembly | Assembly fails; keys are unique per scope | Assembly |
 | Tool-contribution provider reloads during a turn | call < reload | ToolRegistry and dependants reload; the in-flight turn ends `Failed` (D3, accepted) | ToolRegistry |
 
@@ -137,7 +137,7 @@ Methods have no model-visible effect. A method that changes model context does s
 
 ## 7. Security
 
-The connection's `ConnectionEntry {name, deviceId}` is the only authority for what it is served: local RPC gets Session and management methods, a connection with a `deviceId` (RemoteGateway) gets Session methods only (paired devices may call every Session method, including `shell.*`, decision E3), and a rutis link serves management methods only when they are explicitly exported in host-local link configuration. Rpc validates only at the external boundary: param shape and `sessionId` authorization for every Session-scoped method, exactly as for its built-ins. Feature checks (content sniffing, size limits, model capability) belong to the method's owner. A `toolContribution` is admitted by Approval and Permission like every tool, under its declared risk. Host-local approvals (`mcp.approve`, `plugin.approve`, `workflow.approve`, and Settings' host-local approval methods keyed by owner namespace, which replace `hooks.approve`) are management methods.
+The connection's `ConnectionEntry {name, deviceId}` is the only authority for what it is served: local RPC gets Session and management methods, a connection with a `deviceId` (RemoteGateway) gets Session methods only (paired devices may call every Session method, including `shell.*`, decision E3), and a rutis link serves management methods only when they are explicitly exported in host-local link configuration. Rpc validates only at the external boundary: param shape and `sessionId` authorization for every Session-scoped method, exactly as for its built-ins. Feature checks (content sniffing, size limits, model capability) belong to the method's owner. A `toolContribution` is admitted by Approval and Permission like every tool, under its declared risk. There is no host-local approval: Approval and Permission govern only actions an agent decides, and commands that user or project configuration runs are that configuration's responsibility and run when enabled ([overview §6.4](../overview.md#64-conventions)). The existing `mcp.approve`/`mcp.revoke` are removed in a follow-up code change (A.4).
 
 ## 8. Rule check
 
@@ -208,8 +208,8 @@ Shapes are JSON with camelCase fields; a `?` after a field name marks it optiona
 { "callId": "string", "method": "session.goal.set",
   "sessionId?": "string",              // present and authorized for sessionMethods
   "params": {},
-  "origin": { "kind": "local" | "entry" | "link", "entry?": "string",
-              "connectionId?": "string", "peer?": "string" } } // diagnostics only
+  "origin": { "entry?": { "name": "string", "deviceId?": "string" }, // the connection's ConnectionEntry
+              "connectionId?": "string", "peer?": "string" } } // peer: rutis link; diagnostics only
 // MethodReply
 { "kind": "value", "value": {} } | { "kind": "handedOff" }
 // MethodError
@@ -263,8 +263,9 @@ Sources: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS`, `Call::
 | `account.codex.*`, `account.grok.*` | `managementMethods` | OpenAI Codex OAuth (`account.codex`), Grok OAuth (`account.grok`) |
 | `provider.*` | `managementMethods` | Provider (`provider`) |
 | `skills.catalog/set_enabled/refresh` | `managementMethods` | SkillsCatalog (`skills`) |
-| `mcp.catalog/set_enabled/save/remove/disconnect/approve/revoke` | `managementMethods` | Mcp (`mcp`) |
-| `daemon.shutdown` | Rpc built-in management method, reply handoff | — |
+| `mcp.catalog/set_enabled/save/remove/disconnect` | `managementMethods` | Mcp (`mcp`) |
+| `mcp.approve/revoke` | Removed in a follow-up code change (no host-local approval; stdio servers launch when enabled) | — |
+| `daemon.shutdown` | Rpc built-in, reply handoff; never served to a connection with a `deviceId` | — |
 | `hello`, `daemon.ping`, `agent.*`, existing `session.*`, `approval.respond` | Rpc built-ins | — |
 | New `session.input.withdraw` | `sessionMethods` | InputQueue (`session.input`) |
 | New Session methods | `sessionMethods` | Each owner (A.1) |

@@ -29,7 +29,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `Web` | Session（仅启用时安装） | Settings 业务来源（`web` 段）与凭据引用解析器；诊断通道 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
 
-**依赖的契约：** `toolContribution`（附录 A.1）；Settings 业务来源与凭据引用解析器；由 Permission 读取的 `ToolDefinition.risk = "network"`（既有，[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。**本文定义的契约：** 工具名称、参数与结果格式；`web.*` 业务配置。Settings 与诊断通道是既有的类型化服务；将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
+**依赖的契约：** `toolContribution`（附录 A.1）；Settings 业务来源与凭据引用解析器；由 Permission 读取的 `ToolDefinition.risk = "network"`（既有，[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。**本文定义的契约：** 工具名称、参数与结果格式；`web.*` 业务配置。诊断通道是既有的类型化服务；Settings 业务来源与凭据引用解析器是 Settings 的补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
 
 **重载。** Web 只依赖外层作用域（Settings）。启用、禁用或升级 Web，或 Settings 重载，会重载 Web，并经被收集的 `toolContribution` 服务重载 ToolRegistry 及其依赖方；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
@@ -76,7 +76,7 @@ sequenceDiagram
   A-->>X: 允许（或询问、拒绝）
   X->>W: execute(ToolCall)
   W->>W: 校验 URL，解析主机，检查每个地址
-  W->>N: GET，固定到已校验地址
+  W->>N: GET，固定到已校验 IP（直连，或经 web.proxy CONNECT IP:port）
   N-->>W: 正文，至多 5 MiB
   W-->>X: ToolResult 头部加文本切片
   X->>TL: step/tool-completed，然后整个批次一个 step/tool-result
@@ -158,11 +158,11 @@ sequenceDiagram
 ## 7. 安全
 
 - 准入：两个工具都声明 `network`；每次调用都经过 Approval 与 Permission（read-only 拒绝，workspace-write 询问，FullAccess 允许）。
-- SSRF：Web 自行解析名称，按封禁范围检查每个地址，只连接已检查的地址；跨主机重定向需要一次新调用与新的准入（A.4、A10）。
+- SSRF：Web 自行解析名称，按封禁范围检查每个地址，只连接已检查的地址，有无 `web.proxy` 都一样；跨主机重定向需要一次新调用与新的准入（A.4、A10）。
 - 无环境权限：仅 `GET`；不带 cookie、已存站点凭据或客户端证书；除模型写出的 URL 外不携带 Session 中的任何内容（A8）。
 - 凭据：引用在每次调用时解析；从不出现在声明、结果、`structuredContent`、诊断或错误中。
 - 经 URL 外泄是 `network` 类别的固有风险，由准入控制。
-- 使用 `web.proxy` 时，由代理自行解析名称；此时私有地址保护依赖代理（需向用户说明）。
+- 使用 `web.proxy` 时，Web 请代理对已校验的 IP 和端口做 HTTP `CONNECT`，从不把主机名交给代理，代理不解析目标名称；TLS SNI 和 `Host` 头用原主机名。固定连接和私有地址保护与直连相同（A.4）。
 
 ## 8. 规则检查
 
@@ -175,7 +175,7 @@ sequenceDiagram
 | 原则 §4 第 5 条（读完整个批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 结果只以 ToolExecutor 写入的 `step/tool-result` 事实进入模型。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolContribution`、Settings 业务来源和凭据解析器。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 没有新需求；#4 写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 没有自己对运行时或 rutis 的需求；所用的 Settings 补充列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)；#4 写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Web 不写事件；抓取缓存只在内存中。 |
 | 原则 §1（Capability 与 App Server 边界） | Web 是放在自己插件包中的 Session Capability；App Server 不含它的代码。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
@@ -186,7 +186,7 @@ sequenceDiagram
 
 ## 9. 向机制所有者提出的需求
 
-无。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
+无。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；诊断通道属于其通用能力覆盖的公开类型化服务。Settings 业务来源与凭据引用解析器是 Settings 的补充，列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。
 
 ## 附录 A. 接口细节
 
@@ -199,7 +199,7 @@ sequenceDiagram
 | `declaration` | 同步 | — | `ToolDeclaration {name, description, inputSchema, risk: "network"}` |
 | `execute` | 异步 | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
 
-取消是针对该调用的取消请求，或消费方丢弃该调用；Web 中止请求，若仍回复则回复 `cancelled`。错误是 `is_error: true` 的 `ToolResult`（附录 C），从不是调用失败。参数由 handler 校验；违反时返回错误结果，不访问网络。
+取消是针对该调用的取消请求，或消费方丢弃该调用；Web 中止请求，若仍回复则回复 `cancelled`。错误是 `isError: true` 的 `ToolResult`（附录 C），从不是调用失败。参数由 handler 校验；违反时返回错误结果，不访问网络。
 
 ### A.2 `web_search`
 
@@ -222,7 +222,7 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-标题与摘要为纯文本，各占一行，摘要至多 500 个字符。零结果返回 `No results for "<query>".`（不是错误）。不显示服务名。`structured_content` 为客户端携带 `{ results: [{ title, url, snippet, published_at? }] }`。总时限 20 s（A5）。
+标题与摘要为纯文本，各占一行，摘要至多 500 个字符。零结果返回 `No results for "<query>".`（不是错误）。不显示服务名。`structuredContent` 为客户端携带 `{ results: [{ title, url, snippet, published_at? }] }`。总时限 20 s（A5）。
 
 ### A.3 `web_fetch`
 
@@ -264,12 +264,12 @@ Characters: <start>-<end> of <total>
 
 | 规则 | 内容 |
 | --- | --- |
-| 解析 | Web 解析主机名，校验每个解析出的地址，只连接已校验的地址（固定），因此检查与连接之间不可能发生 DNS 重绑定 |
+| 解析 | Web 解析主机名，校验每个解析出的地址，只连接已校验的地址（固定），直连或经 `web.proxy` 都一样，因此检查与连接之间不可能发生 DNS 重绑定 |
 | 默认封禁 | 回环（`127.0.0.0/8`、`::1`）、未指定地址、RFC 1918、链路本地（`169.254.0.0/16`、`fe80::/10`，含云元数据）、CGNAT `100.64.0.0/10`、唯一本地 `fc00::/7`、组播、广播、保留范围，以及这些地址的 IPv4 映射与 IPv4 兼容 IPv6 形式；主机名 `localhost` 与 `*.localhost` |
 | 字面 IP | 仅当按相同规则为公网地址时允许 |
 | 端口 | 公网地址上的任意端口（A12） |
 | 例外 | `web.fetch.allow_private_hosts`：精确主机名或 CIDR；默认为空；只由用户经 Settings 写入 |
-| 代理 | 使用 `web.proxy` 时，Web 仍校验自己的解析结果，并经代理发送 |
+| 代理 | 使用 `web.proxy` 时，Web 照上面解析并校验，再向代理发 HTTP `CONNECT <已校验 IP>:<端口>`，`http` 和 `https` 都如此；TLS SNI 和 `Host` 头用原主机名；代理从不收到作为连接目标的主机名。代理拒绝 `CONNECT` 时调用以 `connect_failed` 失败（A15） |
 
 ### A.5 业务配置（`web` 段，Settings 来源）
 
@@ -324,7 +324,7 @@ Characters: <start>-<end> of <total>
 | --- | --- |
 | `invalid_input` | 参数违反附录 A |
 | `blocked_address` | 主机或某一重定向跳解析到被封禁地址；消息只指明规则 |
-| `dns_failed`、`connect_failed`、`tls_failed` | 网络错误 |
+| `dns_failed`、`connect_failed`、`tls_failed` | 网络错误；`connect_failed` 包括代理拒绝 `CONNECT` |
 | `timeout` | 达到连接或整个调用的时限 |
 | `http_status` | 最终状态非 2xx |
 | `too_many_redirects` | 同主机跳转超过 5 次 |
@@ -344,7 +344,7 @@ Characters: <start>-<end> of <total>
 3. `web_fetch` 的 HTML 头部与 Markdown；`start_char` 分页至结尾；`max_chars`；下载上限提示。
 4. 纯文本、JSON、不支持的类型、404、空页面。
 5. 同主机重定向至多 5 次；第六次失败；跨主机重定向返回提示。
-6. 回环、私有、链路本地、IPv4 映射 IPv6、`localhost` 以及解析到私有地址的主机名均被封禁；DNS 重绑定测试未建立连接。
+6. 回环、私有、链路本地、IPv4 映射 IPv6、`localhost` 以及解析到私有地址的主机名均被封禁；DNS 重绑定测试未建立连接，直连和使用 `web.proxy` 都要测（测试代理只收到 `CONNECT <已校验 IP>:<端口>`，SNI 和 `Host` 为主机名）。
 7. Permission：read-only 拒绝，workspace-write 询问，FullAccess 允许。
 8. 派发前、审批期间与慢响应期间中断（socket 关闭，一个结果）。
 9. 重启结算不重复任何请求。
@@ -369,6 +369,7 @@ Characters: <start>-<end> of <total>
 | A12 | 公网地址上任意端口 | 判断 | 限制为 80/443 |
 | A13 | 内置适配器列表是实现选择 | overview 未指定服务 | 由 overview 固定某个服务 |
 | A14 | 抓取内容周围不加框定文本 | 判断 | 需要定义模型可见的框定 |
+| A15 | 配置的代理支持对 IP 地址做 HTTP `CONNECT`，`http` 和 `https` 目标都支持 | 维护者决定：有无代理都是同一个固定连接保证 | 只接受主机名的代理不能用；私有地址保护将依赖代理 |
 
 ## 附录 F. 待对齐问题
 

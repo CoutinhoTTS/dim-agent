@@ -1,6 +1,6 @@
 # ExternalAgent
 
-状态：草案。总体设计：[overview §B.10](../overview.md)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程）。阶段：P3。语言：优先 TypeScript（[overview §F.3](../overview.md)）。
+状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程）。阶段：P3。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
 ExternalAgent 让本地安装的编码 agent（Claude Code、Codex、Cursor、OpenCode、ZCode 等）可作为一种模型连接使用。模型为外部 agent 的 Session 照常经由 Loop 和 ModelProvider 运行：ExternalAgent 为类型 `external-agent` 提供 `modelKind` 服务，由 Aimux 的 ModelHost 路由到该服务（Aimux 补充），它把每个 dim 模型请求转换为一次外部轮次，再把外部流转换回模型输出块。外部 agent 使用自己的工具；它们的权限请求在流中以审批询问的形式返回，由 ModelProvider 在执行该调用的 Session 中作为普通 dim 审批准入。ExternalAgent 不写自己的 Timeline 事件。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。
 
@@ -41,13 +41,13 @@ flowchart LR
   Bridge -->|"在其节点上启动 agent 进程"| HP
 ```
 
-外部 agent 连接、记录和每节点进程在多个 Session 之间共享，因此 ExternalAgent 是进程插件（[ADR 002](../../adr/002-plugin-scope.md) D1）。它依赖同一作用域的 Aimux、Agents、Provider 和 Settings。按类型路由是 Aimux 补充：ModelHost 按名称收集 `modelKind` 服务，并把解析出的连接类型为 `external-agent` 的请求路由到具有该 key 的实例。依赖遵循作用域（D3）：Aimux、Agents、Provider 或 Settings 重载会重载 ExternalAgent，并使其在途外部调用失败；这一罕见的结构性代价已被接受并有文档记录。ModelProvider 不依赖 ExternalAgent：在没有注册 key 为 `external-agent` 的 `modelKind` 实例期间，该类型的请求在接受前失败（暂时性），其他类型不受影响。桥接是业务配置，不是结构（D4）：桥接是 ExternalAgent 进程插件的内部组件，每个至少启用一个 agent 的节点一个，启用状态变化时由 ExternalAgent 自己启动和停止；启用 agent 不增加 loader 行，也不重载任何内容。桥接通过所在节点的 `HostPlatform`（控制节点自己的，或经 rutis 链路导入的对等节点的；[overview §6.3](../overview.md#63-多节点)）在该节点上运行 agent 进程，并通过其标准流使用 ACP 或 CLI 协议。对等链路断开期间，导入的 `HostPlatform` 保持登记，其调用以 `node_unavailable` 失败，因此不会重载任何内容，只有指向该节点的调用失败（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 §9.1）。ExternalAgent 从不访问 Approval：由 ModelProvider 准入流中携带的审批询问。
+外部 agent 连接、记录和每节点进程在多个 Session 之间共享，因此 ExternalAgent 是进程插件（[ADR 002](../../adr/002-plugin-scope.md) D1）。它依赖同一作用域的 Aimux、Agents、Provider 和 Settings。按类型路由是 Aimux 补充：ModelHost 按名称收集 `modelKind` 服务，并把解析出的连接类型为 `external-agent` 的请求路由到具有该 key 的实例。依赖遵循作用域（D3）：Aimux、Agents、Provider 或 Settings 重载会重载 ExternalAgent，并使其在途外部调用失败；这一罕见的结构性代价已被接受并有文档记录。ModelProvider 不依赖 ExternalAgent：在没有注册 key 为 `external-agent` 的 `modelKind` 实例期间，该类型的请求在接受前失败（暂时性），其他类型不受影响。桥接是业务配置，不是结构（D4）：桥接是 ExternalAgent 进程插件的内部组件，每个至少启用一个 agent 的节点一个，启用状态变化时由 ExternalAgent 自己启动和停止；启用 agent 不增加 loader 行，也不重载任何内容。桥接通过所在节点的 `HostPlatform`（控制节点自己的，或经 rutis 链路导入的对等节点的；[overview §6.3](../overview.md#63-多节点)）在该节点上运行 agent 进程，并通过其标准流使用 ACP 或 CLI 协议。对等链路断开期间，导入的 `HostPlatform` 保持登记，其调用以 `node_unavailable` 失败，因此不会重载任何内容，只有指向该节点的调用失败（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 §9.1）。#5 只保证这种按调用的失败：该节点上已在运行的 agent 进程，由该节点自己的 `HostPlatform` 在它与控制节点的链路断开时结束（HostPlatform 补充，[overview 附录 B](../overview.md#附录-b-现有插件的补充)）。ExternalAgent 从不访问 Approval：由 ModelProvider 准入流中携带的审批询问。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
 | `ExternalAgent` | 进程，控制节点 | Aimux（ModelHost 按类型路由）、Agents（profile 写操作，提议；用于读取历史的 `sessions`）、Provider（连接条目写操作，提议）、Settings（业务来源 `external_agents`、凭据解析器）、各节点的 `HostPlatform`（由该节点的桥接使用）、存放对话记录的 `pluginFiles`（扩展） | `modelKind` key `external-agent`；`managementMethods` key `external_agents`；内部桥接，每个有已启用 agent 的节点一个 |
 
-**依赖的契约**：Aimux 补充（ModelHost 按名称收集 `modelKind`，并带调用作用域按类型路由，A.2）；另外两个补充：**ModelProvider** 通过其分支的 Approval 准入 `approval_ask` 流条目，并用 `answerApproval` 回答，**Approval** 在模型步骤打开期间接受 `Host` 来源的准入，复用 `approval/request`、`approval/respond` 和 `approval/cancelled`（无新事件）；现有模型契约的模型块和失败数据（[host.rs](../../../../crates/dim-agent-capabilities/src/host.rs)）以及 ModelProvider 的失败策略（[recovery.rs](../../../../crates/dim-agent-capabilities/src/model_provider/recovery.rs)）；Approval 的 `admit`（[Approval](../../../architecture/rust-agent/plugins/Approval.md)）；Collaboration 补充“member 审批转发给 leader”（decisions E6）；`sessions`（[session-access](../contracts/session-access.md)）；由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）；[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（TypeScript 部分直接使用）；业务来源 `external_agents` 的 Settings 类型化写操作和变更通知（[ADR 002 D4](../../adr/002-plugin-scope.md)）；Provider 的连接条目写操作和 Agents 的 profile 写操作（均为提议，由这两个插件拥有并定义形态；附录 F）；各节点的 `HostPlatform`（overview 附录 B 补充）。现有的类型化服务待 [#4](https://github.com/arcships/dim/issues/4) 暴露后可由 TypeScript 部分按名称访问（[session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）。**此处定义的契约**：`modelKind` key `external-agent` 及其目标 `{node, agent}`；对话记录；审批调用形态 `external_agent.<kind>`；业务配置 `external_agents.*`；方法 `external_agents.*`；与 [AcpGateway](AcpGateway.md) 共享的 ACP schema 和一致性测试套件（客户端侧）。Provider、Agents、Approval 和 Collaboration 从不指名本插件。
+**依赖的契约**：Aimux 补充（ModelHost 按名称收集 `modelKind`，并带调用作用域按类型路由，A.2）；另外两个补充：**ModelProvider** 通过其分支的 Approval 准入 `approval_ask` 流条目，并用 `answerApproval` 回答，**Approval** 在模型步骤打开期间接受 `Host` 来源的准入，复用 `approval/request`、`approval/respond` 和 `approval/cancelled`（无新事件）；现有模型契约的模型块和失败数据（[host.rs](../../../../crates/dim-agent-capabilities/src/host.rs)）以及 ModelProvider 的失败策略（[recovery.rs](../../../../crates/dim-agent-capabilities/src/model_provider/recovery.rs)）；Approval 的 `admit`（[Approval](../../../architecture/rust-agent/plugins/Approval.md)）；Collaboration 补充“member 审批转发给 leader”（decisions E6）；`sessions`（[session-access](../contracts/session-access.md)）；由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）；[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（TypeScript 部分直接使用）；业务来源 `external_agents` 的 Settings 类型化写操作和变更通知（[ADR 002 D4](../../adr/002-plugin-scope.md)）；Provider 的连接条目写操作和 Agents 的 profile 写操作（均为提议，由这两个插件拥有并定义形态；附录 F）；各节点的 `HostPlatform`（overview 附录 B 补充，包括在它与控制节点的链路断开时结束它启动的进程）。现有的类型化服务待 [#4](https://github.com/arcships/dim/issues/4) 暴露后可由 TypeScript 部分按名称访问（[session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）。**此处定义的契约**：`modelKind` key `external-agent` 及其目标 `{node, agent}`；对话记录；审批调用形态 `external_agent.<kind>`；业务配置 `external_agents.*`；方法 `external_agents.*`；与 [AcpGateway](AcpGateway.md) 共享的 ACP schema 和一致性测试套件（客户端侧）。Provider、Agents、Approval 和 Collaboration 从不指名本插件。
 
 ## 2. 数据与状态
 
@@ -185,7 +185,7 @@ sequenceDiagram
 | leader 不可用（已卸载、轮次已结束、其对 member 的请求已停止） | 按 Collaboration | 由 Collaboration 补充决定投递或回退给用户；停止 member 请求会中断 member 轮次（上一行） | Collaboration |
 | 审批待处理时 Steer | 思考行之后的 `input/applied` | 不替换（已有可见输出）；Loop 在下一个请求中投递 Steer | Loop |
 | 有待处理审批时 ExternalAgent 重载 | — | 调用得到“provider unavailable”（而非 `capability reloading`）；询问取消；其桥接停止，取消并终止各自的进程；记录 `uncertain` | ExternalAgent、ModelProvider |
-| agent 节点离线 | 链路断开；该节点的 `HostPlatform` 导入保持注册 | 该节点的调用在接受前失败为 `node_unavailable`（暂时性）；不重载任何内容；其他节点不受影响（对 #5 的要求） | ExternalAgent |
+| agent 节点离线 | 链路断开；该节点的 `HostPlatform` 导入保持注册 | 该节点的调用在接受前失败为 `node_unavailable`（暂时性）；那里已在运行的 agent 进程由该节点自己的 `HostPlatform` 结束；不重载任何内容；其他节点不受影响（对 #5 的要求） | ExternalAgent、该节点的 HostPlatform |
 | 调用中进程重启 | `model/call` 和 `approval/request` 未结束 | Approval 恢复写入 `approval/cancelled`；ModelProvider 不调用即令该调用失败；记录 `uncertain`；不重发任何内容 | Approval、ModelProvider |
 
 其余所有行：[附录 B](#附录-b-完整冲突表)。
@@ -214,7 +214,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-外部 agent 以自己的账户和工具运行；dim 只在它们询问时，通过调用方 Session 的 policy 和 Approval 准入其操作，无法阻止 agent 不经询问而采取的操作：节点 HostPlatform 的隔离是强制边界，重放或 fork 绝不扩大它。绝不选择 `*_always`。凭据是启动时由 Settings 解析器从引用解析出的环境变量值，绝不写入记录、Timeline、诊断信息或回复。启用 agent 是宿主配置，只能通过管理方法进行（只由进程插件提供，从不提供给配对的远程设备）；模型无法启用 agent。可执行文件在节点上解析，绝不来自项目文件。
+外部 agent 以自己的账户和工具运行；dim 只在它们询问时，通过调用方 Session 的 policy 和 Approval 准入其操作，无法阻止 agent 不经询问而采取的操作：节点 HostPlatform 的隔离是强制边界，重放或 fork 绝不扩大它。绝不选择 `*_always`。凭据是启动时由 Settings 解析器从引用解析出的环境变量值，绝不写入记录、Timeline、诊断信息或回复。启用 agent 是功能开关，属于普通业务配置，与批准无关（[overview §6.4](../overview.md#64-约定)），只能通过管理方法修改（只由进程插件提供，从不提供给配对的远程设备）；模型无法启用 agent。可执行文件在节点上解析，绝不来自项目文件。
 
 ## 8. 规则检查
 
@@ -229,7 +229,7 @@ sequenceDiagram
 | §4.5 决定前读完整个批次 | 投递决定读取到 `call_sequence` 为止的事实，该位置已分派且是批次边界（§3.1）。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 外部 agent 只收到已消费的输入和投影出的历史（§5）。 |
 | §4.7 插件之间只通过公开事件和服务交互 | ExternalAgent 通过 `sessions` 读取历史，使用所有者的公开写操作，从不读取别的插件的内存。 |
-| §4.8 向机制所有者提通用需求 | #5 在 §9.1 中写明；#4 见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。 |
+| §4.8 向机制所有者提通用需求 | #5 在 §9.1 中写明；#4 见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；Aimux、ModelProvider、Approval、Agents、Provider 和 HostPlatform 的补充见 [overview 附录 B](../overview.md#附录-b-现有插件的补充)。 |
 | §4.9 只有后续决定要用的事实才进 Timeline | 配置、Provider 条目、Agents profile 和对话记录不进 Timeline，通过类型化操作改变；由所有者通知客户端。 |
 | §1 Capability 与 App Server 边界 | ExternalAgent 是进程插件，不是 Capability；存储是 `pluginFiles` 插件。 |
 | ADR 002 D1 作用域跟随状态所有者 | 连接、记录和 agent 进程在多个 Session 之间共享，因此插件是进程作用域。 |
@@ -244,10 +244,10 @@ sequenceDiagram
 
 | 项 | 内容 |
 | --- | --- |
-| 被哪条规则挡住 | ADR 002 D3 与 overview §6.3（离线规则）：对等节点的 `HostPlatform`（及其他节点服务）经 rutis 链路导入；如果链路断开时撤销导入，每个依赖方（ExternalAgent、绑定该节点的 Session、Hooks、PluginManager 代码行）都会重载或变为 Pending，一个离线节点会影响无关的工作。 |
+| 被哪条规则挡住 | ADR 002 D3 与 overview §6.3（离线规则）：对等节点的 `HostPlatform`（及其他节点服务）经 rutis 链路导入；如果链路断开时撤销导入，每个依赖方（ExternalAgent、绑定该节点的 Session、Hooks、RemoteGateway、PluginManager 代码行）都会重载或变为 Pending，一个离线节点会影响无关的工作。 |
 | 考虑过的现有机制 | 由插件按节点切换的 loader 行：不行，业务状态会驱动结构（D4）。在插件侧捕获缺失导入的代理：不行，这是绕过机制的适配器（§4.8）。重连后重载：不行，重载会使其他节点上的在途工作失败。 |
 | 需要的通用能力 | 经 rutis 链路导入的服务在链路断开期间保持登记；调用直接以 `node_unavailable` 失败，重连后恢复成功；不带业务含义。 |
-| 对序号、批次、中断、重载的影响 | 不影响 Timeline：失败的调用在自己的批次中成为普通的失败工具结果或模型失败；中断照常；没有依赖方重载或变为 Pending；链路断开前经该链路启动的进程由其所有者结束（例如 HostPlatform 结束进程树）。 |
+| 对序号、批次、中断、重载的影响 | 不影响 Timeline：失败的调用在自己的批次中成为普通的失败工具结果或模型失败；中断照常；没有依赖方重载或变为 Pending。#5 只保证每次调用以 `node_unavailable` 失败；链路断开前经该链路启动的进程由该节点自己的 `HostPlatform` 结束，这是列在 [overview 附录 B](../overview.md#附录-b-现有插件的补充) 的 HostPlatform 补充，不属于 #5。 |
 | 由谁实现，对应 issue | rutis（链路与导入），[#5](https://github.com/arcships/dim/issues/5)。其他文档链接到这里。 |
 
 ## 附录 A. 接口细节
@@ -318,7 +318,7 @@ sequenceDiagram
 
 ### A.5 共享 ACP schema
 
-固定的协议版本、按语言生成的类型、与 AcpGateway 共享的基于转录的一致性测试套件；fixtures 覆盖 initialize、new/load、带文本和图片的 prompt、流式更新、prompt 期间的取消、分别以 allow、reject 和 cancelled 回答的权限请求、取消期间的权限请求，以及 prompt 中途进程退出。不共享任何运行时代码（[overview §B.15](../overview.md)）。
+固定的协议版本、按语言生成的类型、与 AcpGateway 共享的基于转录的一致性测试套件；fixtures 覆盖 initialize、new/load、带文本和图片的 prompt、流式更新、prompt 期间的取消、分别以 allow、reject 和 cancelled 回答的权限请求、取消期间的权限请求，以及 prompt 中途进程退出。不共享任何运行时代码（[overview §4](../overview.md#4-插件目录)）。
 
 ### A.6 各步骤机制
 
@@ -367,8 +367,8 @@ ExternalAgent 本身不追加任何内容，不订阅任何 Dispatcher，也不�
 | Agents、Aimux、Provider 或 Settings 重载 | — | ExternalAgent 重载（D3，已接受）；在途外部调用如其自身重载时一样失败 | ExternalAgent |
 | 调用中进程重启 | 未结束的事实 | 由重建结算；`uncertain`；不重发任何内容 | ModelProvider、Approval |
 | Session 卸载与恢复 | — | 记录保留；ACP 进程因空闲关闭；以 `session/load` 重新打开或初始化 | Bridge |
-| agent 节点离线 | 链路断开；`HostPlatform` 导入保持注册 | 接受前 `node_unavailable` 暂时性失败，在上限内重试，然后 `Failed`；不重载任何内容；其他节点不受影响（对 #5 的要求） | ExternalAgent |
-| `Accepted` 之后链路丢失 | — | 非暂时性失败；询问取消；`uncertain` | Bridge |
+| agent 节点离线 | 链路断开；`HostPlatform` 导入保持注册 | 接受前 `node_unavailable` 暂时性失败，在上限内重试，然后 `Failed`；那里运行中的 agent 进程由该节点的 `HostPlatform` 结束；不重载任何内容；其他节点不受影响（对 #5 的要求） | ExternalAgent |
+| `Accepted` 之后链路丢失 | — | 非暂时性失败；询问取消；该节点的 `HostPlatform` 结束 agent 进程；`uncertain` | Bridge、该节点的 HostPlatform |
 | Session 资源节点与 agent 节点不同 | — | `external_agent_wrong_node`，非暂时性（A13） | ExternalAgent |
 | 重复 `set_enabled` | — | 幂等 | ExternalAgent |
 | 该节点上有调用运行时启用或禁用 | 配置变更通知 | 不重载；启用会启动该节点的桥接；禁用使新调用以 `external_agent_disabled` 失败，桥接在其打开的轮次结束后停止 | ExternalAgent |
@@ -404,7 +404,7 @@ ExternalAgent 本身不追加任何内容，不订阅任何 Dispatcher，也不�
 9. 权限：WorkspaceWrite 下 `execute` → `approval/request`；allow → `allow_once`，deny → `reject_once`；ReadOnly 下 `execute` → 无事件直接 reject；FullAccess → 无事件直接 allow；无 `allow_once` 选项 → `cancelled`。
 10. member Session：审批经 Collaboration 到达 leader，leader 的决定被投递；没有 leader 时由用户经 `approval.request` 回答。
 11. 中断与 `approval.respond` 以两种顺序竞争；外部撤回取消审批；ExternalAgent 重载取消审批而不重载 ModelProvider。
-12. 一个离线对等节点只使其自身的调用失败；其他节点和原生连接继续。
+12. 一个离线对等节点只使其自身的调用失败，其正在运行的 agent 进程由该节点自己的 `HostPlatform` 结束；其他节点和原生连接继续。
 13. 共享 ACP 一致性测试套件在客户端侧通过。
 14. 启用和禁用 agent 不增删 loader 行，也不重载任何内容；连接条目和 profile 只通过 Provider 和 Agents 的写操作改变。
 
@@ -417,7 +417,7 @@ ExternalAgent 本身不追加任何内容，不订阅任何 Dispatcher，也不�
 | A3 | 检测到的 agent 在启用前保持禁用 | 判断（它们消耗用户的账户） | 默认开启 |
 | A4 | 取消宽限期 10 s | 判断 | 其他上限 |
 | A5 | 每个对话一个 ACP 进程，空闲 10 分钟后关闭 | 判断 | 共享进程 |
-| A6 | 适配器定义是插件内的数据 | Overview §F.3 | 每个 agent 一个插件 |
+| A6 | 适配器定义是插件内的数据 | [Overview 附录 C](../overview.md#附录-c-实现语言) | 每个 agent 一个插件 |
 | A7 | ACP 工具类型 → 调用名 `external_agent.<kind>` 和风险类别映射 | Decisions E6（普通审批）；映射为判断 | 单一未分类类别（WorkspaceWrite 下总是询问） |
 | A8 | 增量为空时调用失败 | 判断 | 发送继续 prompt |
 | A9 | 外部工具活动渲染为思考行 | 判断 | 文本，或仅诊断信息 |
@@ -425,7 +425,7 @@ ExternalAgent 本身不追加任何内容，不订阅任何 Dispatcher，也不�
 | A11 | `max_turn_requests` 和 `refusal` 使请求失败 | 判断 | 映射为 `EndTurn` |
 | A12 | 记录在最后使用后保留 30 天 | 判断 | 其他保留策略或在 Session 关闭时删除 |
 | A13 | 外部 agent 只服务资源节点为其所在节点的 Session | Overview §6.3；判断 | 跨节点工作目录 |
-| A14 | 转录格式；省略思考 | Overview §B.10 列出内容；格式为判断 | 其他渲染方式 |
+| A14 | 转录格式；省略思考 | [Overview §4](../overview.md#4-插件目录) 列出内容；格式为判断 | 其他渲染方式 |
 | A15 | 不确定或失败的继续从历史重新初始化 | Overview §9（仍未决） | 显式失败 |
 | A16 | CLI 适配器以 agent 自身的非自动批准模式启动；它们无法询问 dim | 判断（无请求通道） | 每个 CLI 的权限桥接 |
 | A17 | 外部权限审批无超时 | Approval 没有超时；Questions 先例（E24） | 超时即以 reject 回答 |

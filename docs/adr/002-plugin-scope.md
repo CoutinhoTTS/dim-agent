@@ -45,7 +45,7 @@ own scope:
 | Observe a Session's events | the existing Session broadcast, from a Session-scoped plugin |
 | Observe and act on a branch's events in order | the branch Dispatcher, from a branch-scoped plugin |
 | Put content into the model context | Session or branch input (adopted inputs), tool results |
-| Act on a write before it is committed | a Timeline before callback registered by a branch-scoped plugin (synchronous, or asynchronous with the runtime supplement: the write keeps its place in order and commits after the callback, which may transform the draft or append events to the same batch) |
+| Act on a write before it is committed | a Timeline before callback registered by a branch-scoped plugin (synchronous, or asynchronous with the runtime supplement: the write keeps its place in order and commits after the callback, which may transform the draft or append to the same batch only commands to an event's owner or its own declared events; it never fails or blocks the write) |
 | Withdraw an input before it is applied | the `input/withdraw {input_id, reason?}` command event (clients, process callers, or a before callback in the input's own batch); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
 | Expose a client method about a Session | a Session-scoped `sessionMethods` service that Rpc dispatches through the Session |
 | Expose a host management method | a process plugin's `managementMethods` service in Rpc's method table; connections from paired devices are never served management methods |
@@ -100,7 +100,7 @@ of issue #4.
 | ShellInput | Session | commands run in the Session's workspace and feed its input |
 | Attachments | Session | attachments are Session data |
 | Web | Session | no state shared across Sessions; it only offers tools |
-| SessionTitle | Session | observes the Session's first input; the title is stored by SessionStore |
+| SessionTitle | Session | observes the adoption (`input/applied`) of the first user input on main; the title is stored by SessionStore |
 | Notifications | Session | observes the Session's events and offers `notify` |
 | Hooks | Session (rules, Session-start hooks) + branch (before callbacks for prompt-submit and pre-tool hooks; post-tool and turn-end hooks) | rules apply to a Session; execution happens in a branch |
 | Scheduler | process (jobs, triggers) + Session (`schedule` tool) | schedules span Sessions |

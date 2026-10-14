@@ -38,7 +38,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `Notifications` | Session (installed only when enabled) | Session broadcast of its Session, TimelineTree, `SessionConfig`; process services Settings business source and credential resolver, SessionStore title metadata; listens (no dependency) to Scheduler's `scheduled_run_outcomes` event | `toolContribution` key `notify` (risk `outbound_message`) and `sessionMethods` key `notifications` (`notifications.test`), declared in its `provides`; trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business document `notifications` |
 
-All dependencies are existing typed services; exposing them and Scheduler's event by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
+The Session broadcast, TimelineTree and `SessionConfig` are existing typed services; the Settings business source, credential resolver and SessionStore title metadata are supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing these services by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); listening to Scheduler's event by name across languages is a rutis requirement stated in [Scheduler §9.1](Scheduler.md#91-named-process-events-across-languages). Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
 
 ## 2. Data and state
 
@@ -110,7 +110,7 @@ sequenceDiagram
 
 ### 3.3 Scheduled run ended
 
-Scheduler emits one `RunOutcome` per ended run. The Notifications instance of the run's Session (`session_id` in the notice) formats and delivers it; instances of other Sessions ignore it. No prefix read is needed, and the non-interactive exclusion does not apply. If the run Session is not loaded when the notice is emitted, the notice is lost; this is accepted, and `schedule.history` remains the record (A17).
+Scheduler emits one `RunOutcome` per ended run. The Notifications instance of the run's Session (`session_id` in the notice) formats and delivers it; instances of other Sessions ignore it. No prefix read is needed, and the non-interactive exclusion does not apply. If the run Session is not loaded when the notice is emitted, the notice is lost; this is accepted, and `schedule.history` remains the record (A16).
 
 ### 3.4 Model sends a message
 
@@ -195,10 +195,10 @@ Channels are tested with `notifications.test`, a Session method, not a managemen
 | Principles §4 rule 5 (read the whole batch) | Each check reads the fixed prefix through the end of the triggering event's batch, after the delay. |
 | Principles §4 rule 6 (context from handed-over events) | Event-triggered messages add nothing to context; `notify` results enter only as `step/tool-result` facts. |
 | Principles §4 rule 7 (public events and services only) | It uses the Session broadcast, fixed-prefix read, Settings, the credential resolver, SessionStore title metadata and Scheduler's public event notice. |
-| Principles §4 rule 8 (requirements to mechanism owners) | No new requirement; #4, including Scheduler's event by name, is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
+| Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement of its own. #4 (services by name) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); named process events across languages (Scheduler's event) are stated in [Scheduler §9.1](Scheduler.md#91-named-process-events-across-languages). The Settings and SessionStore supplements it uses are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 | Principles §4 rule 9 (only facts later decisions use) | Notifications writes no event; delivery records are diagnostics only. |
 | Principles §1 (Capability and App Server boundary) | Notifications is a Session Capability in its own plugin package; `notifications.test` is a Session method, not a management method. |
-| ADR 002 D1 (scope follows state) | Session scope: triggers belong to the Session; a run outcome for an unloaded Session is lost, which is accepted (A17). |
+| ADR 002 D1 (scope follows state) | Session scope: triggers belong to the Session; a run outcome for an unloaded Session is lost, which is accepted (A16). |
 | ADR 002 D2 (no wiring modules) | No wiring module; Scheduler's outcomes are listened to without a dependency. |
 | ADR 002 D3 (dependencies follow scope) | Settings and SessionStore are in the enclosing scope; their reload reloads Notifications, which is accepted. |
 | ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `notifications` document is business configuration in its own Settings source, read at use. |
@@ -206,7 +206,7 @@ Channels are tested with `notifications.test`, a Session method, not a managemen
 
 ## 9. Requirements raised to mechanism owners
 
-None. #4 (typed services and process events by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
+None of its own. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); named process events across languages, needed to listen to `scheduled_run_outcomes`, are stated in [Scheduler §9.1](Scheduler.md#91-named-process-events-across-languages). The Settings business source, credential resolver and SessionStore title metadata are supplements listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
 
 ## Appendix A. Interface details
 
@@ -250,7 +250,7 @@ Messages sent by the tool are prefixed `[dim <session label>] ` (A7).
 | `turn/end` on `main` | `turn.completed` / `turn.failed` | `completed` / `failed`; `cancelled` none (A3). Fires only if `N` is the latest `turn/end`, no `turn/start` after it, and no Queue/Steer `input/message` lacks both `input/consumed` and `input/deleted` |
 | `approval/request` (any branch) | `approval.pending` | No `approval/respond` or `approval/cancelled` with the same `approval_id` after the delay |
 | `question/asked` (any branch) | `question.pending` | No `question/answered` or `question/cancelled` with the same `call_id` after the delay |
-| Run outcome `{job_id, job_name, run_id, session_id?, state, reason?, ended_at}` with `session_id` = this Session | `schedule.ended` | Every such notice (A17) |
+| Run outcome `{job_id, job_name, run_id, session_id?, state, reason?, ended_at}` with `session_id` = this Session | `schedule.ended` | Every such notice (A16) |
 | `step/text` | Content | Optional excerpt of the turn's last request (`includeContent`) |
 
 Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Task failed.`, `[dim <label>] Approval needed: <tool name>.`, `[dim <label>] The agent is waiting for your answer.`, `[dim schedule <job name>] Run <state>.` With `includeContent`: turn triggers append up to 500 characters of the last request's `step/text`; `approval.pending` the request `reason`; `question.pending` the question texts up to 500 characters (A5).
@@ -295,7 +295,7 @@ Any configured channel can be tested, whatever its `allowTool` and `enabled` val
 | Compaction | — | No effect: checks read facts | — |
 | Child branch | approval in child | Notified; child `turn/end` ignored (A1) | Notifications |
 | Scheduled run ends in this Session | terminal record < notice | One `schedule.ended` | Scheduler; Notifications |
-| Run without a Session (`session_id` absent) or run Session not loaded | — | Not reported: the notice is lost (accepted, A17); `schedule.history` remains the record (A12) | — |
+| Run without a Session (`session_id` absent) or run Session not loaded | — | Not reported: the notice is lost (accepted, A16); `schedule.history` remains the record (A12) | — |
 | Scheduler reload or absent | no dependency | Notices stop; Notifications unaffected | — |
 | Branch close during the delay | — | Nothing | Notifications |
 | Session unload or close during the delay | — | Check cancelled with the plugin (A4) | Lifecycle |
@@ -344,7 +344,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 | A5 | No Session content unless `includeContent`; excerpt 500 characters | Judgment | Content always or never included |
 | A6 | `notify` parameters | Judgment | Different schema |
 | A7 | Label = metadata title if available, else Session id | Judgment | Other labels |
-| A8 | Channels configurable only in user scope | Judgment | Project channels need host-local approval |
+| A8 | Channels configurable only in user scope | Judgment | Project configuration could name channels; where messages go is then that configuration's own responsibility, with no approval step |
 | A9 | The channel test is the Session method `notifications.test`, not a management method | Maintainer decision | A management method would need a process part |
 | A10 | Retry 3 attempts (1/4/16 s); 20 messages per minute per channel per Session | Judgment | Other policies |
 | A11 | No follow-up when a pending item resolves after notification | Judgment | Extra messages |
@@ -352,7 +352,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 | A13 | Sent regardless of attached clients | Judgment | Needs an attachment contract |
 | A14 | Slack via webhook or bot token + channel id; Feishu via custom-bot webhook with optional signing | Feature list; modes are judgment | Other adapters |
 | A15 | A suppressed `turn.completed` is not re-evaluated after a later `input/deleted` | Judgment | Withdrawal needs its own trigger |
-| A17 | `schedule.ended` is delivered by the run Session's instance using `RunOutcome.session_id`, with job name and state only; if that Session is not loaded the notice is lost | Scheduler notice carries `session_id`; maintainer decision (loss accepted) | A process part would listen once for all runs |
+| A16 | `schedule.ended` is delivered by the run Session's instance using `RunOutcome.session_id`, with job name and state only; if that Session is not loaded the notice is lost | Scheduler notice carries `session_id`; maintainer decision (loss accepted) | A process part would listen once for all runs |
 
 ## Appendix F. Open questions
 
@@ -360,7 +360,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 | --- | --- |
 | Inbound actions | Answering approvals or questions from Slack/Feishu is out of scope |
 | Runs without a Session | Runs that fail before launching a Session are not reported (A12) |
-| Services by name | The TypeScript implementation needs the Session broadcast, fixed-prefix read, SessionStore metadata, Settings and Scheduler's event exposed by name ([#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)) |
+| Services by name | The TypeScript implementation needs the Session broadcast, fixed-prefix read, SessionStore metadata, Settings exposed by name ([#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)), and Scheduler's event by name ([Scheduler §9.1](Scheduler.md#91-named-process-events-across-languages)) |
 
 ## Appendix G. Rust binding
 

@@ -11,13 +11,13 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Questions](Questions.md) | — | `ask_user` tool, `session.question.*` | pending questions, `question/*` | P1 |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 |
-| [SessionTitle](SessionTitle.md) | — | first-input observer, `session.rename` | — | P1 |
-| [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state, continuation | P2 |
+| [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |
+| [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:current` blocks, continuation | P2 |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2 |
 | [Hooks](Hooks.md) | — | rules, Session-start hooks | before callbacks, post-tool and turn-end hooks | P2 |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | P2 |
-| [Scheduler](Scheduler.md) | jobs, triggers, history | `schedule` tool | — | P2 |
-| [Workflow](Workflow.md) | definitions, runs | `workflow` tool | — | P2 |
+| [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
+| [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
 | [ExternalAgent](ExternalAgent.md) | connections, ModelHost kind | — | — | P3 |
 | [AcpGateway](AcpGateway.md) | — (a client in the CLI process, not a daemon plugin) | — | — | P3 |
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |

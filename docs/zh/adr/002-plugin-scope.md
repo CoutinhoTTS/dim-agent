@@ -41,7 +41,7 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 | 观察 Session 的事件 | 现有的 Session 广播，由 Session 级插件监听 |
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 |
 | 把内容放入模型上下文 | Session 或分支输入（被采纳的输入）、工具结果 |
-| 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调（同步，或借助运行时补充异步执行：该写入保持其在顺序中的位置，并在回调之后提交；回调可以变换草稿，或向同一批次追加事件） |
+| 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调（同步，或借助运行时补充异步执行：该写入保持其在顺序中的位置，并在回调之后提交；回调可以变换草稿，或向同一批次追加事件，追加的只能是发给事件所有者的指令或自己声明的事件；回调从不使写入失败或阻止写入） |
 | 在输入被应用前撤回它 | `input/withdraw {input_id, reason?}` 指令事件（由客户端、进程内调用方，或该输入所在批次中的 before 回调发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
 | 暴露关于某个 Session 的客户端方法 | Session 级 `sessionMethods` 服务，由 Rpc 经该 Session 分发 |
 | 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的 `managementMethods` 服务；已配对设备的连接不会获得管理方法 |
@@ -92,7 +92,7 @@ issue #4 的工作。
 | ShellInput | Session | 命令在 Session 的工作区中运行并写入其输入 |
 | Attachments | Session | 附件是 Session 数据 |
 | Web | Session | 没有跨 Session 共享的状态；只提供工具 |
-| SessionTitle | Session | 观察 Session 的首条输入；标题由 SessionStore 保存 |
+| SessionTitle | Session | 观察 main 上首条用户输入的采纳（`input/applied`）；标题由 SessionStore 保存 |
 | Notifications | Session | 观察 Session 的事件并提供 `notify` |
 | Hooks | Session（规则、Session 启动 Hook）+ 分支（用于提示词提交 Hook 与工具前 Hook 的 before 回调；工具后与 turn 结束 Hook） | 规则作用于 Session；执行发生在分支 |
 | Scheduler | 进程（任务、触发器）+ Session（`schedule` 工具） | 调度跨越多个 Session |

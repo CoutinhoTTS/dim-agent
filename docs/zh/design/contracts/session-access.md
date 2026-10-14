@@ -7,11 +7,11 @@
 | 补充 | 所有者 | 使用方 |
 | --- | --- | --- |
 | `sessions` 服务：按名称、纯数据地访问 Session | Agents | Scheduler、Workflow 进程部分 |
-| 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow、Collaboration `establish` |
+| 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow |
 | `SessionConfig` 字段 `interactive`、`resourceNode`、`createdBy` | Agents | 所有作用域，通过所属 Session 的 `SessionConfig` |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 与 Hooks 分支部分写入相同形式 |
 | 固定前缀读取 | 运行时门面（需求，§9） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
-| 撤回（带可选 `reason` 的指令 `input/withdraw`、结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`、自有来源撤回） | InputQueue | 客户端、Hooks、AcpGateway、Scheduler、Workflow |
+| 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`、自有来源撤回） | InputQueue | 客户端、Hooks、AcpGateway、Scheduler、Workflow |
 
 Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用所属 Session 与分支的服务、分支 Dispatcher 和 Session 广播。
 
@@ -21,7 +21,6 @@ Session 级与分支级插件不使用此接口访问自己的 Session。它们�
 flowchart LR
   subgraph PROC["进程"]
     Agents["Agents：sessions（launch, input, history, ...）"]
-    Coll["Collaboration（establish）"]
     Sched["Scheduler 进程部分"]
     Wf["Workflow 进程部分"]
     Rpc["Rpc"]
@@ -37,8 +36,6 @@ flowchart LR
   end
   Sched --> Agents
   Wf --> Agents
-  Wf --> Coll
-  Coll --> Agents
   Rpc --> Agents
   Agents -->|"逐次调用：acquire Session"| Fac
   Fac --> SC
@@ -52,11 +49,10 @@ flowchart LR
 | --- | --- | --- |
 | `sessions`（Agents） | 进程 | 补充；映射到现有的 `acquire` 与门面，外加 `launch` |
 | `SessionConfig` 字段 | Session 记录 | 补充 |
-| Session 门面（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)） | Session、分支 | 已存在；输入归属是补充（§9） |
+| Session 门面（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)） | Session、分支 | 已存在；固定前缀读取（§9.2）与按插件身份确定调用方来源（§9.3）是需求 |
 | InputQueue | 分支 | 变更：消费 `input/withdraw`，写入 `input/deleted`；撤回服务 |
-| Collaboration `establish(leader, agent)`、`memberRequest`、`memberRequestLookup` | 进程 | 变更：从分支外部创建成员和发起成员请求（提议） |
 
-本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`WithdrawRequest` 与 `SessionsError`；`SessionOrigin` 与三个 `SessionConfig` 字段；`session.create` 的 `interactive` 与 `client` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、Session 输入路径，以及 Timeline before 回调（运行时补充，[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
+本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`LookupReply`、`WithdrawRequest`、`WithdrawReply` 与 `SessionsError`；`SessionOrigin` 与三个 `SessionConfig` 字段；`session.create` 的 `interactive` 与 `client` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、Session 输入路径，以及 Timeline before 回调（运行时补充，[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
 
 ## 2. 数据与状态
 
@@ -104,9 +100,9 @@ sequenceDiagram
   participant W as InputQueue 撤回服务
   participant TL as 分支 Timeline
   participant IQ as InputQueue（分发）
-  C->>W: withdraw(inputId, source)
-  W->>W: 对进程调用方做自有来源检查
-  W->>TL: 在 w 处追加 input/withdraw {input_id}
+  C->>W: withdraw(inputId, reason?)
+  W->>W: 对进程调用方做自有来源检查（来源由插件身份确定）
+  W->>TL: 在 w 处追加 input/withdraw {input_id, reason?}
   TL-->>IQ: 按序号顺序分发 w
   alt 输入被持有：无 input/applied，无 input/deleted
     IQ->>TL: 在 d 处写 input/deleted {input_id}
@@ -158,10 +154,9 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | `session.input.withdraw {sessionId, branchId, inputId, reason?}` | RPC | 客户端撤回；InputQueue 的 `sessionMethods`（命名空间 `session.input`） |
 | `sessions.withdraw(WithdrawRequest) -> WithdrawReply` | async | 为调用方自有来源的输入写入 `input/withdraw`，并返回 InputQueue 的决定 |
 | `sessions.stop({sessionId, branchId}) -> {sequence}` | async | 中断该分支的 turn |
-| `sessions.idle({sessionId, branchId}) -> {sequence}` | async | 等待分支空闲 |
+| `sessions.idle({sessionId, branchId}) -> {sequence}` | async | 等待分支空闲；返回的序号是最后提交的序号，位于整批次边界 |
 | `SessionConfig` 字段 | 数据 | 创建时配置（`interactive`、`resourceNode`、`createdBy`） |
 | `session.create {interactive, client}` | RPC | 非交互创建与客户端来源 |
-| Collaboration `establish({leader, agent})`、`memberRequest`、`memberRequestLookup` | async | 从分支外部创建成员和发起成员请求（Workflow）；属于 Collaboration 服务（提议），不在 `sessions` 中。其他插件只通过 Collaboration 的公共接口管理成员；需求见 [Workflow §9](../plugins/Workflow.md#9-向机制所有者提出的需求) |
 
 ## 7. 安全
 
@@ -173,13 +168,13 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | --- | --- |
 | §4 第 1 条（指令事件） | 撤回是指令 `input/withdraw`；只有 InputQueue 写结果 `input/deleted`，没有生效的撤回不写入任何内容，回复 `notHeld`。 |
 | §4 第 2 条（交接） | `input/applied` 把输入从 InputQueue 交给 Loop；之后输入不能撤回，只能用 `stop/interrupt` 中断。 |
-| §4 第 3 条（只用 before 回调） | 入口只检查参数格式、授权和调用方的自有来源；before 回调对输入的处理只有向其批次追加 `input/withdraw`。 |
+| §4 第 3 条（只用 before 回调） | 入口只检查参数格式、授权和调用方的自有来源；before 回调对输入的处理只有修改草稿，或向其批次只追加指令 `input/withdraw`。 |
 | §4 第 4 条（核心不带业务含义） | `reason`、标记、key 和 `submissionId` 是通用数据；InputQueue 与 Agents 从不解释来源。 |
 | §4 第 5 条（整个批次） | InputQueue 只在输入的整个批次分发后才决定是否采纳，因此同批次的撤回总是生效。 |
 | §4 第 6 条（模型上下文） | 被删除的输入从不进入上下文；已消费的输入放在其消费位置（§5）。 |
-| §4 第 7 条（公开事件与服务） | 进程调用方只通过 `sessions` 访问 Session，只通过 Collaboration 的公共接口（`establish`、`memberRequest`）访问其成员。 |
+| §4 第 7 条（公开事件与服务） | 进程调用方只通过 `sessions` 访问 Session，只通过 InputQueue 公开的撤回服务撤回输入。 |
 | §4 第 8 条（需求） | #4、固定前缀读取、由插件身份确定调用方来源、可选部分的装配，在 §9 提出。 |
-| §4 第 9 条（只有决定用的事实进 Timeline） | `SessionConfig`、租约和调用方进度不进 Timeline；只有输入以及撤回的指令和结果是事件。 |
+| §4 第 9 条（只有决定用的事实进 Timeline） | `SessionConfig`、租约和调用方进度不进 Timeline；只有输入、撤回的指令和结果，以及 `stop` 写入的 `stop/interrupt` 是事件；必需事件 `input/withdraw` 上的描述性字段 `reason` 符合第 9 条。 |
 | §1（Capability 与 App Server 边界） | Agents 只提供访问；调用方的业务逻辑留在各自插件中。 |
 | ADR 002 D1 | `sessions` 是 Agents 的进程服务；InputQueue 的撤回留在其分支部分，由其 Session 部分提供给客户端。 |
 | ADR 002 D2 | 没有访问宿主或门面插件；调用方像 Collaboration 一样使用 Agents。 |
@@ -193,7 +188,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 | 项 | 内容 |
 | --- | --- |
-| 被什么挡住 | ADR 002 D5：非 Rust 的 Session 与分支部分（SessionTitle、Goal、Web、Notifications，以及 Scheduler 与 Workflow 的 Session 部分）需要在没有手写 Rust 绑定的情况下使用运行时的类型化服务（Timeline、Dispatcher、InputQueue、Session 广播、SessionStore 元数据、Settings、`AuxiliaryModel`）。 |
+| 被什么挡住 | ADR 002 D5：非 Rust 部分（SessionTitle、Goal、Web、Notifications、Scheduler 与 Workflow 的 Session 部分、ExternalAgent、PluginManager）需要在没有手写 Rust 绑定的情况下使用运行时的类型化服务（Timeline、Dispatcher、InputQueue、Session 广播）。它们还用到的 App Server 服务（SessionStore 元数据、Settings、`AuxiliaryModel`）由各所有者的补充按名称提供（[总览附录 B.2](../overview.md#b2-app-server-进程插件)）。 |
 | 考虑过的现有机制 | rutis 具名服务（`TypeKey::named`、`host_key`）：只对按名称注册的服务有效，而运行时按 Rust 类型注册这些服务。每个插件手写绑定：D5 不允许。先用 Rust 实现：在此需求落地前的退路。 |
 | 需要的通用能力 | 运行时把每个公开的类型化服务也以稳定的服务名和纯数据方法形式注册，作用域与 key 不变。 |
 | 对序号、批次、中断、重载的影响 | 无：按名称调用沿用类型化服务的顺序、批次和中断规则；具名服务随其所有者重载。 |
@@ -226,10 +221,10 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | 被什么挡住 | ADR 002 后果：可选的 Session 与分支部分只在启用时安装；非交互 Session 不安装 Questions（A.3）。 |
 | 考虑过的现有机制 | 全部安装、在部分内部检查：这是 ADR 不允许的占位。每个插件在宿主侧调用 `AgentBuilder`：不是语言中立的（D5）。 |
 | 需要的通用能力 | Agent 装配收集每个已安装插件在 `provides` 中声明的具名服务，只在插件启用且其声明的 `SessionConfig` 条件成立时安装该部分。 |
-| 对序号、批次、中断、重载的影响 | 在 Session 装载时决定；启用插件只影响之后装载的 Session。 |
+| 对序号、批次、中断、重载的影响 | 在 Session 装载时决定，Session 重载时重新决定；启用插件只影响之后装载的 Session。 |
 | 由谁实现、对应 issue | 运行时（Agent 装配）；issue 待开。 |
 
-§3.1 用到的异步 before 回调在 [Hooks §9](../plugins/Hooks.md#9-向机制所有者提出的需求) 提出；离线相关行用到的 #5 在 [ExternalAgent §9](../plugins/ExternalAgent.md#9-向机制所有者提出的需求) 提出。
+§3.1 用到的异步 before 回调在 [Hooks §9](../plugins/Hooks.md#9-向机制所有者提出的需求) 提出；离线相关行用到的 #5 在 [ExternalAgent §9](../plugins/ExternalAgent.md#9-向机制所有者提出的需求) 提出。`input/withdraw` 的可选 `reason` 和 `LaunchRequest.agent` 的缺省值是 InputQueue 与 Agents 的变更，列在[总览附录 B](../overview.md#附录-b-现有插件的补充)。
 
 ## 附录 A. 接口细节
 
@@ -241,18 +236,18 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | --- | --- | --- | --- | --- |
 | `launch` | async | `LaunchRequest` | `{sessionId}` | `rejected`、`reloading`、`failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`、`failed` |
-| `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`、`session_closed`、`branch_missing` |
-| `history` | async | `HistoryRequest` | `HistoryPage` | `future_sequence`、`session_closed`、`branch_missing` |
-| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `foreign_source`、`session_closed`、`branch_missing` |
-| `stop` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`、`branch_missing` |
-| `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`、`branch_missing` |
+| `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`、`session_closed`、`branch_missing`、`reloading` |
+| `history` | async | `HistoryRequest` | `HistoryPage` | `future_sequence`、`session_closed`、`branch_missing`、`reloading` |
+| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `foreign_source`、`rejected`、`session_closed`、`branch_missing`、`reloading` |
+| `stop` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`、`branch_missing`、`reloading` |
+| `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`、`branch_missing`、`reloading` |
 
 ```text
 // LaunchRequest
-{ "agent": "string",                 // Agent profile id
+{ "agent?": "string",                // Agent profile id；缺省：Agents 的默认 profile
   "cwd": "string",
   "resourceNode?": "string",         // 缺省：控制节点
-  "model?": "string",                // 模型 id；缺省：profile 的模型
+  "model?": "string",                // 模型 id；优先于 profile 的模型
   "policy?": { /* PermissionPolicy 数据 */ },  // 收窄后的请求；缺省：启动方策略或只读默认值
   "starter?": { "sessionId": "string", "branchId": "string" } } // 上限；缺省：以宿主配置为界
 // InputWrite
@@ -284,7 +279,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 取消：调用方丢弃 `idle` 或 `history` 调用即结束它，没有任何效果。在回复前丢弃 `input` 会使结果不确定；调用方用 `lookup` 确认。
 
-`launch` 创建一个 `createdBy = {kind: "launch", source}` 的非交互 Session。生效策略是请求的策略，并以启动方的当前策略为上限；该策略是启动时读取的 Timeline 事实。没有启动方时，由管理方法启动的运行除非任务或定义声明了更多权限，否则默认只读，并始终受宿主配置约束。Collaboration 的 `establish(leader, agent)` 使用相同的上限。
+`launch` 创建一个 `createdBy = {kind: "launch", source}` 的非交互 Session。生效策略是请求的策略，并以启动方的当前策略为上限；该策略是启动时读取的 Timeline 事实。没有启动方时，由管理方法启动的运行除非请求声明了策略，否则默认只读，并始终受宿主配置约束。
 
 ### A.2 来源输入约定
 
@@ -387,7 +382,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | A1 | 每个来源输入都以一个标记块开头 | 现有 context-block 格式 | 每个插件自行定义识别方式 |
 | A2 | 缺少 `interactive` 的已存储 Session 是交互式的 | 判断 | 客户端必须始终发送该字段 |
 | A3 | 进程调用方可以对自己启动的 Session 调用 `idle` 和 `stop` | Collaboration 先例 | 另设停止路径 |
-| A4 | 重新提交为 Steer 的批次是 `session.input.withdraw` 的一个参数 | 判断 | 单独的内建方法 |
+| A4 | “撤回并作为 Steer 重新提交”由 InputQueue 的 `session.input.withdraw` 通过另一个可选参数写成一个批次（提议；本文不定义其格式） | 判断 | 单独的内建方法 |
 
 ## 附录 E. Rust 绑定
 
@@ -399,18 +394,18 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | `input` | `Session::input(InputMessageData, branch)`（已有），key 为 `KeyUse::Live(name)` / `Retire(name)` |
 | `lookup` | 门面上的 `session.input_lookup` 语义 |
 | 带 `atLeast` 的 `history` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>`（补充）；否则为 `Session::history`，设置了 `after` 时为 `Session::local_page(branch, after, limit, through)` |
-| `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(input_id, source) -> Result<WithdrawOutcome, AgentError>`：追加 `input/withdraw`，等待 InputQueue 对它的决定；`WithdrawOutcome::Deleted { sequence }` 或 `WithdrawOutcome::NotHeld` |
+| `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`，调用方来源取自其插件身份（§9.3）：追加 `input/withdraw`，等待 InputQueue 对它的决定；`WithdrawOutcome::Deleted { sequence }` 或 `WithdrawOutcome::NotHeld` |
 | `stop`、`idle` | `Session::stop`、`Session::idle`（已有） |
 | `SessionConfig`、`SessionOrigin` | 下方的 Rust 结构体 |
 | 错误 | `AgentError`：`SessionClosed`、`BranchMissing`、`Reloading`、`Rejected(reason)`（包括 `foreign source`、`FutureSequence`）、`PublicationUnknown`、`Failed` |
 
 ```rust
 pub struct LaunchRequest {
-    pub agent: String,
+    pub agent: Option<String>,            // 缺省：Agents 的默认 profile
     pub cwd: PathBuf,
     pub resource_node: Option<NodeId>,
-    pub model: Option<String>,            // 缺省：profile 的模型
-    pub source: String,                   // 记录为 SessionOrigin::Launch { source }
+    pub model: Option<String>,            // 优先于 profile 的模型
+    // 没有 source 字段：Agents 按调用插件的身份确定（§9.3）
     pub policy: Option<PermissionPolicy>,
     pub starter: Option<SessionRef>,
 }

@@ -1,8 +1,8 @@
 # Attachments
 
-Status: Draft. Overall design: [overview B.4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
-Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (proposed ModelProvider supplement, [§9](#9-requirements-raised-to-mechanism-owners)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`) ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file owned by SessionStore on the Session's resource node and returns its path; the user's text references the path and the model reads the file with `read` when needed. Fork sharing and deletion of those files are SessionStore behavior. No events.
+Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (proposed ModelProvider supplement, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`) ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file owned by SessionStore on the Session's resource node and returns its path; the user's text references the path and the model reads the file with `read` when needed. Fork sharing and deletion of those files are SessionStore behavior. No events.
 
 ## 1. Structure
 
@@ -35,7 +35,7 @@ Attachments depends only on SessionStore, an enclosing-scope plugin ([ADR 002](.
 | --- | --- | --- | --- |
 | `AttachmentsPlugin` | Session | `S:SessionIdentity`; SessionStore Session-file supplement | `sessionMethods` key `attachment` (`attachment.put`) |
 
-Contracts depended on: `sessionMethods` (Rpc resolves the Session and calls it); a SessionStore supplement that stores an immutable file on the Session's resource node, shares it on fork and removes it with the last owning Session (overview Appendix C, SessionStore); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a store on an offline resource node fails `node_unavailable` while Attachments stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement [#5](https://github.com/arcships/dim/issues/5), stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)); ModelProvider's image handling when it builds a request (proposed supplement, A.1 and [§9](#9-requirements-raised-to-mechanism-owners)). Contracts defined here: `attachment.put`, its error codes and limits, the CLI image checks and reference format. Attachments names no other plugin's internal type.
+Contracts depended on: `sessionMethods` (Rpc resolves the Session and calls it); a SessionStore supplement that stores an immutable file on the Session's resource node, shares it on fork and removes it with the last owning Session ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins), SessionStore); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a store on an offline resource node fails `node_unavailable` while Attachments stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement [#5](https://github.com/arcships/dim/issues/5), stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)); ModelProvider's image handling when it builds a request (proposed supplement, A.1 and [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Contracts defined here: `attachment.put`, its error codes and limits, the CLI image checks and reference format. Attachments names no other plugin's internal type.
 
 ## 2. Data and state
 
@@ -142,7 +142,7 @@ The CLI decodes images only to check headers and limits; ModelProvider decodes t
 | Principles §4 rule 5 (read the whole batch) | Not applicable: Attachments decides on no event. |
 | Principles §4 rule 6 (context from handed-over events) | Images reach the model only from consumed inputs; deleted inputs never enter context. |
 | Principles §4 rule 7 (public events and services only) | Attachments uses only `sessionMethods` and SessionStore's public Session-file operation. |
-| Principles §4 rule 8 (requirements to mechanism owners) | The ModelProvider supplement is stated in §9; #5 is stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners). |
+| Principles §4 rule 8 (requirements to mechanism owners) | The only runtime or rutis requirement, #5, is stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The ModelProvider supplement is a requirement to another plugin and is listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), with the reasons in A.1. |
 | Principles §4 rule 9 (only facts later decisions use) | Attachments writes no event; text files are SessionStore state and images ride in the existing `input/message`. |
 | Principles §1 (Capability and App Server boundary) | Attachments is a Session Capability in its own crate; Rpc holds no image logic. |
 | ADR 002 D1 (scope follows state) | Session scope: text files belong to the Session. |
@@ -153,17 +153,9 @@ The CLI decodes images only to check headers and limits; ModelProvider decodes t
 
 ## 9. Requirements raised to mechanism owners
 
-**R1. Image handling at request build (ModelProvider supplement).**
+None of its own to the runtime or rutis. #5 (imported services stay registered while a rutis link is down) is stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners).
 
-| Item | Content |
-| --- | --- |
-| Blocked by | Principles §4 rule 3 and §1: image checks may not sit at the RPC entry or in App Server; the maintainers assigned model-capability handling to ModelProvider. CLI checks do not cover raw clients or other writers. |
-| Existing mechanisms considered | Rpc validation on `session.submit` (entry check, rule 3); a before callback on `input/message` (feature checks are not to be added as before callbacks, and the model of the consuming request is not known at write time); an Attachments upload method (images do not go through Attachments and other writers would be missed). |
-| Generic capability | When ModelProvider builds a request, it sends each image block that the request's model and adapter accept and replaces any other with a fixed text placeholder; no business meaning, every image block is treated the same. |
-| Effect on sequence, batch, interrupt, reload | None: no event is written and history is unchanged; the decision is made per request from the adopted `context/configured` and the Provider catalog, so interrupts and reloads only affect the request being built. |
-| Owner and issue | ModelProvider (existing branch module; overview Appendix B row to add); no issue yet. |
-
-#5 (imported services stay registered while a rutis link is down) is stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners).
+The ModelProvider supplement (image handling at request build) is a requirement to another plugin; it is listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities) and specified in A.1.
 
 ## Appendix A. Interface details
 
@@ -181,7 +173,7 @@ CLI checks, before submitting:
 
 Limits (A2): at most 20 images per submission, 5 MiB decoded each, 8000 px per side; violations rejected, never resized. Blocks keep their order.
 
-ModelProvider supplement (proposed, [§9](#9-requirements-raised-to-mechanism-owners)), applied to every image block when it builds a model request:
+ModelProvider supplement (proposed, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)), applied to every image block when it builds a model request:
 
 | Image block | Request content |
 | --- | --- |
@@ -191,6 +183,8 @@ ModelProvider supplement (proposed, [§9](#9-requirements-raised-to-mechanism-ow
 | URL source, undecodable data, or a format or size the adapter does not accept | Text `[Image omitted: the image cannot be sent to this model.]` (A10) |
 
 The history is never changed; each request decides again from its own model.
+
+Why ModelProvider: image checks may not sit at the RPC entry or in App Server (principles §4 rule 3 and §1), and CLI checks do not cover raw clients or other writers. Rejected: Rpc validation on `session.submit` (an entry check); a before callback on `input/message` (the model of the consuming request is not known at write time); an Attachments upload method (other writers would be missed). The supplement writes no event and leaves history unchanged; it decides per request from the adopted `context/configured` and the Provider catalog, so interrupts and reloads affect only the request being built.
 
 ### A.2 `attachment.put`
 
@@ -265,7 +259,7 @@ An image the CLI rejects is never sent. A file stored without a later submit is 
 | A2 | Limits: 20 images, 5 MiB, 8000 px (CLI), 10 MiB text (`attachment.put`); reject rather than resize | Edge-case reference; judgment | Different limits or resizing |
 | A3 | The CLI never sends URL image sources; ModelProvider replaces them | Overview "final content"; judgment | Provider fetches URLs |
 | A4 | With unknown model capability ModelProvider sends images | Judgment | Unknown replaced by the placeholder |
-| A5 | CLI chooses the paste threshold and reference format | Overview Appendix E (CLI); judgment | Server returns a formatted reference |
+| A5 | CLI chooses the paste threshold and reference format | [Overview Appendix D](../overview.md#appendix-d-cli-layer) (CLI); judgment | Server returns a formatted reference |
 | A6 | Fork shares immutable files (SessionStore behavior) | Maintainer decision; copied bytes at a new path would break inherited paths | Byte copy plus path rewriting, impossible for fixed history |
 | A7 | No deduplication | Judgment | Content-addressed ids |
 | A8 | Image handling happens in ModelProvider at request build, so it covers images from every writer | Maintainer decision: feature checks belong to their owners | Each writer checks its own images |
@@ -274,7 +268,7 @@ An image the CLI rejects is never sent. A file stored without a later submit is 
 
 ## Appendix F. Open questions
 
-None. Image capability is handled by ModelProvider at request build (A.1, [§9](#9-requirements-raised-to-mechanism-owners)).
+None. Image capability is handled by ModelProvider at request build (A.1, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)).
 
 ## Appendix G. Rust binding
 

@@ -7,11 +7,11 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | Supplement | Owner | Used by |
 | --- | --- | --- |
 | `sessions` service: named, data-only access to Sessions | Agents | Scheduler, Workflow process parts |
-| `launch` with a policy capped by the starter | Agents | Scheduler, Workflow, Collaboration `establish` |
+| `launch` with a policy capped by the starter | Agents | Scheduler, Workflow |
 | `SessionConfig` fields `interactive`, `resourceNode`, `createdBy` | Agents | Every scope, through the Session's `SessionConfig` |
 | Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal and Hooks branch parts write the same form |
 | Fixed-prefix read | Runtime facade (requirement, §9) | Process callers and branch parts deciding from Timeline facts |
-| Withdrawal (command `input/withdraw` with optional `reason`, result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`, own-source withdrawal) | InputQueue | Clients, Hooks, AcpGateway, Scheduler, Workflow |
+| Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`, own-source withdrawal) | InputQueue | Clients, Hooks, AcpGateway, Scheduler, Workflow |
 
 Session-scoped and branch-scoped plugins do not use this interface to reach their own Session. They use their Session's and branch's services, the branch Dispatcher and the Session broadcast directly.
 
@@ -21,7 +21,6 @@ Session-scoped and branch-scoped plugins do not use this interface to reach thei
 flowchart LR
   subgraph PROC["Process"]
     Agents["Agents: sessions (launch, input, history, ...)"]
-    Coll["Collaboration (establish)"]
     Sched["Scheduler process part"]
     Wf["Workflow process part"]
     Rpc["Rpc"]
@@ -37,8 +36,6 @@ flowchart LR
   end
   Sched --> Agents
   Wf --> Agents
-  Wf --> Coll
-  Coll --> Agents
   Rpc --> Agents
   Agents -->|"per call: acquire Session"| Fac
   Fac --> SC
@@ -52,11 +49,10 @@ flowchart LR
 | --- | --- | --- |
 | `sessions` (Agents) | Process | Supplement; maps to the existing `acquire` and facade, plus `launch` |
 | `SessionConfig` fields | Session record | Supplement |
-| Session facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) | Session, branch | Existing; input attribution is a supplement (§9) |
+| Session facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) | Session, branch | Existing; fixed-prefix read (§9.2) and caller source from plugin identity (§9.3) are requirements |
 | InputQueue | Branch | Change: consumes `input/withdraw`, writes `input/deleted`; withdrawal service |
-| Collaboration `establish(leader, agent)`, `memberRequest`, `memberRequestLookup` | Process | Change: member creation and member requests from outside a branch (proposed) |
 
-Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWrite`, `RawBlock`, `HistoryRequest`, `HistoryPage`, `WithdrawRequest` and `SessionsError`; `SessionOrigin` and the three `SessionConfig` fields; the `interactive` and `client` parameters of `session.create`; the source marker, key and `submissionId` conventions; and the withdrawal contract. Contracts used are the runtime facade, Agents loading, the `input/message` data and consumption contract, the existing context-block element format, the Session input path and Timeline before callbacks (runtime supplement, [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)).
+Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWrite`, `RawBlock`, `HistoryRequest`, `HistoryPage`, `LookupReply`, `WithdrawRequest`, `WithdrawReply` and `SessionsError`; `SessionOrigin` and the three `SessionConfig` fields; the `interactive` and `client` parameters of `session.create`; the source marker, key and `submissionId` conventions; and the withdrawal contract. Contracts used are the runtime facade, Agents loading, the `input/message` data and consumption contract, the existing context-block element format, the Session input path and Timeline before callbacks (runtime supplement, [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)).
 
 ## 2. Data and state
 
@@ -104,9 +100,9 @@ sequenceDiagram
   participant W as InputQueue withdrawal service
   participant TL as Branch Timeline
   participant IQ as InputQueue (dispatch)
-  C->>W: withdraw(inputId, source)
-  W->>W: own-source check for process callers
-  W->>TL: append input/withdraw {input_id} at w
+  C->>W: withdraw(inputId, reason?)
+  W->>W: own-source check for process callers (source fixed from plugin identity)
+  W->>TL: append input/withdraw {input_id, reason?} at w
   TL-->>IQ: dispatch w in sequence order
   alt input held: no input/applied, no input/deleted
     IQ->>TL: input/deleted {input_id} at d
@@ -158,10 +154,9 @@ Queue inputs are consumed when Loop starts the turn they drive. Steer inputs are
 | `session.input.withdraw {sessionId, branchId, inputId, reason?}` | RPC | Client withdrawal; InputQueue's `sessionMethods` (namespace `session.input`) |
 | `sessions.withdraw(WithdrawRequest) -> WithdrawReply` | async | Write `input/withdraw` for an input of the caller's own source and return InputQueue's decision |
 | `sessions.stop({sessionId, branchId}) -> {sequence}` | async | Interrupt the branch's turn |
-| `sessions.idle({sessionId, branchId}) -> {sequence}` | async | Wait until the branch is idle |
+| `sessions.idle({sessionId, branchId}) -> {sequence}` | async | Wait until the branch is idle; the returned sequence is the last committed one, a whole-batch boundary |
 | `SessionConfig` fields | data | Creation-time configuration (`interactive`, `resourceNode`, `createdBy`) |
 | `session.create {interactive, client}` | RPC | Non-interactive creation and client origin |
-| Collaboration `establish({leader, agent})`, `memberRequest`, `memberRequestLookup` | async | Member created, and member requests made, from outside a branch (Workflow); Collaboration services (proposed), outside `sessions`. Other plugins manage members only through Collaboration's public interface; requirement in [Workflow §9](../plugins/Workflow.md#9-requirements-raised-to-mechanism-owners) |
 
 ## 7. Security
 
@@ -173,13 +168,13 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | --- | --- |
 | §4 rule 1 (command events) | Withdrawal is the command `input/withdraw`; only InputQueue writes the result `input/deleted`, and a withdraw with no effect writes nothing and replies `notHeld`. |
 | §4 rule 2 (handover) | `input/applied` hands an input from InputQueue to Loop; after it the input cannot be withdrawn, only interrupted with `stop/interrupt`. |
-| §4 rule 3 (before callbacks only) | Entries check only param shape, authorization and the caller's own source; a before callback acts on an input only by appending `input/withdraw` to its batch. |
+| §4 rule 3 (before callbacks only) | Entries check only param shape, authorization and the caller's own source; a before callback acts on an input by editing the draft or by appending only the command `input/withdraw` to its batch. |
 | §4 rule 4 (no business meaning in core) | `reason`, markers, keys and `submissionId` are generic data; InputQueue and Agents never interpret a source. |
 | §4 rule 5 (whole batch) | InputQueue decides adoption only after an input's whole batch is dispatched, so a same-batch withdraw always wins. |
 | §4 rule 6 (model context) | A deleted input never enters context; consumed inputs are placed at their consumed position (§5). |
-| §4 rule 7 (public events and services) | Process callers reach Sessions only through `sessions`, and Collaboration members only through Collaboration's public interface (`establish`, `memberRequest`). |
+| §4 rule 7 (public events and services) | Process callers reach Sessions only through `sessions`, and withdraw only through InputQueue's public withdrawal service. |
 | §4 rule 8 (requirements) | #4, fixed-prefix read, caller source from plugin identity and optional-part assembly are raised in §9. |
-| §4 rule 9 (only decision facts in the Timeline) | `SessionConfig`, leases and caller progress stay out of the Timeline; only inputs and withdrawal commands and results are events. |
+| §4 rule 9 (only decision facts in the Timeline) | `SessionConfig`, leases and caller progress stay out of the Timeline; only inputs, withdrawal commands and results, and `stop/interrupt` from `stop` are events; the descriptive `reason` on the required `input/withdraw` is allowed by rule 9. |
 | §1 (Capability and App Server boundary) | Agents only exposes access; callers keep their business logic in their own plugins. |
 | ADR 002 D1 | `sessions` is a process service of Agents; InputQueue's withdrawal stays in its branch part, served to clients by its Session part. |
 | ADR 002 D2 | No access host or facade plugin; callers use Agents as Collaboration does. |
@@ -193,7 +188,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 
 | Item | Content |
 | --- | --- |
-| Blocked by | ADR 002 D5: non-Rust Session and branch parts (SessionTitle, Goal, Web, Notifications, Scheduler and Workflow Session parts) must use the runtime's typed services (Timeline, Dispatcher, InputQueue, Session broadcast, SessionStore metadata, Settings, `AuxiliaryModel`) without a hand-written Rust binding. |
+| Blocked by | ADR 002 D5: non-Rust parts (SessionTitle, Goal, Web, Notifications, the Scheduler and Workflow Session parts, ExternalAgent, PluginManager) must use the runtime's typed services (Timeline, Dispatcher, InputQueue, Session broadcast) without a hand-written Rust binding. App Server services they also use (SessionStore metadata, Settings, `AuxiliaryModel`) are named by their owners' supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
 | Existing mechanisms considered | rutis named services (`TypeKey::named`, `host_key`): work only for services registered by name, and the runtime registers these by Rust type. Hand-written bindings per plugin: rejected by D5. Starting in Rust: the fallback until this lands. |
 | Generic capability | The runtime registers each public typed service also under a stable service name with a data-only method shape, at the same scope and key. |
 | Effect on sequence, batch, interrupt, reload | None: calls by name keep the typed service's ordering, batch and interrupt rules; a named service reloads with its owner. |
@@ -226,10 +221,10 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled, and Questions is not installed in non-interactive Sessions (A.3). |
 | Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls per plugin: not language-neutral (D5). |
 | Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled and its declared condition on `SessionConfig` holds. |
-| Effect on sequence, batch, interrupt, reload | Decided at Session load; enabling a plugin applies to Sessions loaded afterwards. |
+| Effect on sequence, batch, interrupt, reload | Decided at Session load, and a Session reload decides again; enabling a plugin applies to Sessions loaded afterwards. |
 | Owner and issue | Runtime (Agent assembly); issue to be opened. |
 
-Asynchronous before callbacks, used by §3.1, are raised in [Hooks §9](../plugins/Hooks.md#9-requirements-raised-to-mechanism-owners); #5, used by the offline rows, in [ExternalAgent §9](../plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners).
+Asynchronous before callbacks, used by §3.1, are raised in [Hooks §9](../plugins/Hooks.md#9-requirements-raised-to-mechanism-owners); #5, used by the offline rows, in [ExternalAgent §9](../plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The optional `reason` on `input/withdraw` and the `LaunchRequest.agent` default are changes of InputQueue and Agents, listed in [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins).
 
 ## Appendix A. Interface details
 
@@ -241,18 +236,18 @@ Asynchronous before callbacks, used by §3.1, are raised in [Hooks §9](../plugi
 | --- | --- | --- | --- | --- |
 | `launch` | async | `LaunchRequest` | `{sessionId}` | `rejected`, `reloading`, `failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown`, `failed` |
-| `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing` |
-| `history` | async | `HistoryRequest` | `HistoryPage` | `future_sequence`, `session_closed`, `branch_missing` |
-| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `foreign_source`, `session_closed`, `branch_missing` |
-| `stop` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing` |
-| `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing` |
+| `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing`, `reloading` |
+| `history` | async | `HistoryRequest` | `HistoryPage` | `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
+| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `foreign_source`, `rejected`, `session_closed`, `branch_missing`, `reloading` |
+| `stop` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing`, `reloading` |
+| `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing`, `reloading` |
 
 ```text
 // LaunchRequest
-{ "agent": "string",                 // Agent profile id
+{ "agent?": "string",                // Agent profile id; absent: Agents' default profile
   "cwd": "string",
   "resourceNode?": "string",         // absent: control node
-  "model?": "string",                // model id; absent: the profile's model
+  "model?": "string",                // model id; takes precedence over the profile's model
   "policy?": { /* PermissionPolicy data */ },  // narrowed request; absent: starter's or read-only default
   "starter?": { "sessionId": "string", "branchId": "string" } } // upper bound; absent: host configuration bound
 // InputWrite
@@ -284,7 +279,7 @@ Asynchronous before callbacks, used by §3.1, are raised in [Hooks §9](../plugi
 
 Cancellation: the caller dropping an `idle` or `history` call ends it with no effect. Dropping an `input` before the reply leaves the outcome uncertain; the caller resolves it with `lookup`.
 
-`launch` creates a non-interactive Session with `createdBy = {kind: "launch", source}`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the job or definition declares more, and it is always capped by host configuration. Collaboration's `establish(leader, agent)` uses the same cap.
+`launch` creates a non-interactive Session with `createdBy = {kind: "launch", source}`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the request declares a policy, and it is always capped by host configuration.
 
 ### A.2 Source input conventions
 
@@ -387,7 +382,7 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | A1 | Every source input starts with one marker block | Existing context-block format | Each plugin defines recognition |
 | A2 | Stored Sessions without `interactive` are interactive | Judgment | Clients must always send the field |
 | A3 | Process callers may call `idle` and `stop` on Sessions they started | Collaboration precedent | Another stop path |
-| A4 | The re-submit-as-Steer batch is a parameter of `session.input.withdraw` | Judgment | A separate built-in |
+| A4 | "Withdraw and re-submit as Steer" is written as one batch by InputQueue's `session.input.withdraw` through a further optional parameter (proposed; its shape is not defined here) | Judgment | A separate built-in |
 
 ## Appendix E. Rust binding
 
@@ -399,18 +394,18 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | `input` | `Session::input(InputMessageData, branch)` (existing), keys as `KeyUse::Live(name)` / `Retire(name)` |
 | `lookup` | `session.input_lookup` semantics on the facade |
 | `history` with `atLeast` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>` (supplement); otherwise `Session::history`, or `Session::local_page(branch, after, limit, through)` when `after` is set |
-| `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(input_id, source) -> Result<WithdrawOutcome, AgentError>`: appends `input/withdraw`, awaits InputQueue's decision for it; `WithdrawOutcome::Deleted { sequence }` or `WithdrawOutcome::NotHeld` |
+| `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`, with the caller's source taken from its plugin identity (§9.3): appends `input/withdraw`, awaits InputQueue's decision for it; `WithdrawOutcome::Deleted { sequence }` or `WithdrawOutcome::NotHeld` |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
 | `SessionConfig`, `SessionOrigin` | Rust structs below |
 | Errors | `AgentError`: `SessionClosed`, `BranchMissing`, `Reloading`, `Rejected(reason)` (including `foreign source`, `FutureSequence`), `PublicationUnknown`, `Failed` |
 
 ```rust
 pub struct LaunchRequest {
-    pub agent: String,
+    pub agent: Option<String>,            // absent: Agents' default profile
     pub cwd: PathBuf,
     pub resource_node: Option<NodeId>,
-    pub model: Option<String>,            // absent: the profile's model
-    pub source: String,                   // recorded as SessionOrigin::Launch { source }
+    pub model: Option<String>,            // takes precedence over the profile's model
+    // no source field: Agents fixes it from the calling plugin's identity (§9.3)
     pub policy: Option<PermissionPolicy>,
     pub starter: Option<SessionRef>,
 }

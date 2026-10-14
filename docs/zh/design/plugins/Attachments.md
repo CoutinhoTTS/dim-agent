@@ -1,8 +1,8 @@
 # Attachments
 
-状态：草案。总体设计：[overview B.4](../overview.md)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
+状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
 
-让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（拟议的 ModelProvider 补充，[§9](#9-向机制所有者提出的需求)）。Attachments 是一个小型 Session 插件，通过 `sessionMethods` 服务（Session 作用域，key `attachment`）提供一个 Session 方法 `attachment.put`（[session-boundary](../contracts/session-boundary.md)）；契约以语言中立形式给出，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法把文本附件（一次大段粘贴）存为由 SessionStore 拥有、位于 Session 资源节点上的不可变 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为。没有事件。
+让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（拟议的 ModelProvider 补充，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。Attachments 是一个小型 Session 插件，通过 `sessionMethods` 服务（Session 作用域，key `attachment`）提供一个 Session 方法 `attachment.put`（[session-boundary](../contracts/session-boundary.md)）；契约以语言中立形式给出，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法把文本附件（一次大段粘贴）存为由 SessionStore 拥有、位于 Session 资源节点上的不可变 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为。没有事件。
 
 ## 1. 结构
 
@@ -35,7 +35,7 @@ Attachments 只依赖 SessionStore，一个外层作用域插件（[ADR 002](../
 | --- | --- | --- | --- |
 | `AttachmentsPlugin` | Session | `S:SessionIdentity`；SessionStore 的 Session 文件补充 | `sessionMethods` key `attachment`（`attachment.put`） |
 
-依赖的契约：`sessionMethods`（Rpc 解析 Session 并调用它）；一项 SessionStore 补充，在 Session 资源节点上存储不可变文件，分叉时共享，并随最后一个拥有它的 Session 删除（总体设计附录 C，SessionStore）；节点离线规则（[overview §6.3](../overview.md)）：在离线资源节点上的存储以 `node_unavailable` 失败，而 Attachments 保持加载，这要求经 rutis 链路导入的服务在链路断开期间保持注册并让调用失败（需求 [#5](https://github.com/arcships/dim/issues/5)，见 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)）；ModelProvider 构建请求时对图片的处理（拟议补充，见 A.1 和 [§9](#9-向机制所有者提出的需求)）。本文定义的契约：`attachment.put`、其错误码与限制、CLI 的图片检查与引用格式。Attachments 不引用任何其他插件的内部类型。
+依赖的契约：`sessionMethods`（Rpc 解析 Session 并调用它）；一项 SessionStore 补充，在 Session 资源节点上存储不可变文件，分叉时共享，并随最后一个拥有它的 Session 删除（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)，SessionStore）；节点离线规则（[overview §6.3](../overview.md)）：在离线资源节点上的存储以 `node_unavailable` 失败，而 Attachments 保持加载，这要求经 rutis 链路导入的服务在链路断开期间保持注册并让调用失败（需求 [#5](https://github.com/arcships/dim/issues/5)，见 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)）；ModelProvider 构建请求时对图片的处理（拟议补充，见 A.1 和 [总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。本文定义的契约：`attachment.put`、其错误码与限制、CLI 的图片检查与引用格式。Attachments 不引用任何其他插件的内部类型。
 
 ## 2. 数据与状态
 
@@ -142,7 +142,7 @@ CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请�
 | 原则 §4 第 5 条（读完整个批次） | 不适用：Attachments 不依据事件做决定。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 图片只从已消费的输入进入模型；被删除的输入不进入上下文。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | Attachments 只使用 `sessionMethods` 和 SessionStore 公开的 Session 文件操作。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | ModelProvider 补充写在 §9；#5 写在 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 唯一的运行时或 rutis 需求 #5 写在 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)。ModelProvider 补充是对其他插件的需求，列在[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)，理由见 A.1。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Attachments 不写事件；文本文件是 SessionStore 的状态，图片放在现有的 `input/message` 中。 |
 | 原则 §1（Capability 与 App Server 边界） | Attachments 是放在自己 crate 中的 Session Capability；Rpc 不含图片逻辑。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：文本文件属于 Session。 |
@@ -153,17 +153,9 @@ CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请�
 
 ## 9. 向机制所有者提出的需求
 
-**R1. 构建请求时的图片处理（ModelProvider 补充）。**
+没有自己对运行时或 rutis 的需求。#5（rutis 链路断开时导入的服务保持登记）写在 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)。
 
-| 项目 | 内容 |
-| --- | --- |
-| 被哪条规则挡住 | 原则 §4 第 3 条和 §1：图片检查不能放在 RPC 入口或 App Server；维护者决定模型能力处理归 ModelProvider。CLI 的检查覆盖不到原始客户端和其他写入方。 |
-| 考虑过的现有机制 | 在 `session.submit` 上由 Rpc 校验（入口检查，违反第 3 条）；`input/message` 上的 before 回调（功能检查不做成 before 回调，而且写入时还不知道消费它的请求用哪个模型）；Attachments 上传方法（图片不经过 Attachments，也覆盖不到其他写入方）。 |
-| 需要的通用能力 | ModelProvider 构建请求时，发送请求所用模型和适配器能接收的图片块，其余换成固定的文本占位；不带业务含义，所有图片块一样处理。 |
-| 对序号、批次、中断、重载的影响 | 无：不写事件，历史不变；每个请求按已采用的 `context/configured` 和 Provider 目录决定，中断和重载只影响正在构建的请求。 |
-| 由谁实现，对应 issue | ModelProvider（现有分支模块；需在总体设计附录 B 增加一行）；暂无 issue。 |
-
-#5（rutis 链路断开时导入的服务保持登记）写在 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)。
+ModelProvider 补充（构建请求时的图片处理）是对其他插件的需求，列在[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)，具体规则见 A.1。
 
 ## 附录 A. 接口细节
 
@@ -181,7 +173,7 @@ CLI 在提交前检查：
 
 限制（A2）：每次提交最多 20 张图片，每张解码后 5 MiB，每边 8000 px；违反即拒绝，从不缩放。块保持其顺序。
 
-ModelProvider 补充（拟议，[§9](#9-向机制所有者提出的需求)），在构建模型请求时作用于每个图片块：
+ModelProvider 补充（拟议，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)），在构建模型请求时作用于每个图片块：
 
 | 图片块 | 请求内容 |
 | --- | --- |
@@ -191,6 +183,8 @@ ModelProvider 补充（拟议，[§9](#9-向机制所有者提出的需求)）�
 | URL 来源、无法解码的数据，或适配器不接受的格式或大小 | 文本 `[Image omitted: the image cannot be sent to this model.]`（A10） |
 
 历史从不改变；每个请求按自己的模型重新决定。
+
+为什么放在 ModelProvider：图片检查不能放在 RPC 入口或 App Server（原则 §4 第 3 条和 §1），CLI 的检查覆盖不到原始客户端和其他写入方。不采用的做法：在 `session.submit` 上由 Rpc 校验（入口检查）；`input/message` 上的 before 回调（写入时还不知道消费它的请求用哪个模型）；Attachments 上传方法（覆盖不到其他写入方）。这项补充不写事件，历史不变；每个请求按已采用的 `context/configured` 和 Provider 目录决定，中断和重载只影响正在构建的请求。
 
 ### A.2 `attachment.put`
 
@@ -265,7 +259,7 @@ CLI 读取图片（剪贴板、`@`、粘贴的路径），检查后（A.1）在 
 | A2 | 限制：20 张图片、5 MiB、8000 px（CLI），10 MiB 文本（`attachment.put`）；拒绝而非缩放 | 边界情况参考；判断 | 不同的限制或缩放 |
 | A3 | CLI 从不发送 URL 图片来源；ModelProvider 把它们换成占位 | 总体设计"最终内容"；判断 | 由提供方获取 URL |
 | A4 | 模型能力未知时 ModelProvider 发送图片 | 判断 | 未知即换成占位 |
-| A5 | CLI 选择粘贴阈值和引用格式 | 总体设计附录 E（CLI）；判断 | 由服务端返回格式化的引用 |
+| A5 | CLI 选择粘贴阈值和引用格式 | [总体设计附录 D](../overview.md#附录-d-cli-层)（CLI）；判断 | 由服务端返回格式化的引用 |
 | A6 | 分叉共享不可变文件（SessionStore 行为） | 维护者决定；把字节复制到新路径会破坏继承的路径 | 复制字节并重写路径，对固定历史不可能实现 |
 | A7 | 不去重 | 判断 | 内容寻址的 id |
 | A8 | 图片处理在 ModelProvider 构建请求时进行，因此覆盖所有写入方的图片 | 维护者决定：功能检查归其所有者 | 各写入方自行检查图片 |
@@ -274,7 +268,7 @@ CLI 读取图片（剪贴板、`@`、粘贴的路径），检查后（A.1）在 
 
 ## 附录 F. 待对齐问题
 
-无。图片能力由 ModelProvider 在构建请求时处理（A.1、[§9](#9-向机制所有者提出的需求)）。
+无。图片能力由 ModelProvider 在构建请求时处理（A.1、[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。
 
 ## 附录 G. Rust 绑定
 

@@ -10,7 +10,7 @@
 | `managementMethods` | 进程 | 命名空间 | 只有进程插件（Mcp、Provider、Settings、Scheduler 等） | Rpc 的方法表 |
 | `toolContribution` | Session | 工具名 | Session 级插件部分（Questions、Goal、Web、Notifications、Scheduler、Workflow） | ToolRegistry（补充：具名工具服务） |
 
-**管理方法**是关于宿主而不是某个 Session 的客户端 RPC 方法：`account.*`、`provider.*`、`mcp.*`、`skills.*`、设置和 `daemon.shutdown`，以及新进程插件的方法。现在 Rpc 直接注入这些服务（[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `ProductServices` 与 `ExecutionServices`）；本设计改为通过 `managementMethods` 收集。只有进程插件提供管理方法，已配对的远程设备从不获得它们。Session 方法没有级别；唯一的区分是 `sessionMethods`（经 Session 分发）与 `managementMethods`。
+**管理方法**是关于宿主而不是某个 Session 的客户端 RPC 方法：`account.*`、`provider.*`、`mcp.*`、`skills.*` 和设置，以及新进程插件的方法。`daemon.shutdown` 仍是 Rpc 内建方法，同样从不提供给已配对设备。现在 Rpc 直接注入这些服务（[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `ProductServices` 与 `ExecutionServices`）；本设计改为通过 `managementMethods` 收集。只有进程插件提供管理方法，已配对的远程设备从不获得它们。Session 方法没有级别；唯一的区分是 `sessionMethods`（经 Session 分发）与 `managementMethods`。
 
 Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。提供方重载会传播到其收集方，这是 D3 所接受的代价。
 
@@ -110,11 +110,11 @@ sequenceDiagram
 
 | 场景 | 顺序 | 结果 | 所有者 |
 | --- | --- | --- | --- |
-| Session 级提供方在调用中途重载 | call < reload | `Report`：`operation_interrupted`；`Drain`：重载等待 | Rpc |
+| Session 级提供方在调用中途重载 | call < reload | `report`：`operation_interrupted`；`drain`：重载等待 | Rpc |
 | Session 的 Capability 重载期间调用 Session 方法 | — | `service_reloading` | Rpc |
 | 对没有该插件的 Session 调用 Session 方法 | — | `unknown_method` | Rpc |
 | 管理方法所有者重载 | — | Rpc 随之重载（D3）；已打开的连接看到现有的 Rpc 重载行为 | rutis 生命周期 |
-| 在仅 session 级的入口上调用管理方法 | — | `unknown_method` | Rpc |
+| 在带 `deviceId` 的连接上调用管理方法或 `daemon.shutdown` | — | `unknown_method` | Rpc |
 | 两个提供方声明同一命名空间或工具名 | 装配 | 装配失败；key 在每个作用域内唯一 | 装配 |
 | 工具贡献提供方在 turn 期间重载 | call < reload | ToolRegistry 及其依赖方重载；在途 turn 以 `Failed` 结束（D3，已接受） | ToolRegistry |
 
@@ -137,7 +137,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-连接的 `ConnectionEntry {name, deviceId}` 是其服务范围的唯一权威：本地 RPC 获得 Session 方法和管理方法，带 `deviceId` 的连接（RemoteGateway）只获得 Session 方法（已配对设备可调用所有 Session 方法，包括 `shell.*`，决定 E3），rutis 链接只在宿主本地链接配置中显式导出时才服务管理方法。Rpc 只做外部边界校验：对每个 Session 级方法校验参数格式并授权 `sessionId`，与其内建方法完全相同。功能检查（内容嗅探、大小限制、模型能力）归方法的所有者。`toolContribution` 与每个工具一样，按其声明的风险由 Approval 与 Permission 准入。宿主本地批准（`mcp.approve`、`plugin.approve`、`workflow.approve`，以及 Settings 按所有者命名空间区分的宿主本地批准方法，取代 `hooks.approve`）是管理方法。
+连接的 `ConnectionEntry {name, deviceId}` 是其服务范围的唯一权威：本地 RPC 获得 Session 方法和管理方法，带 `deviceId` 的连接（RemoteGateway）只获得 Session 方法（已配对设备可调用所有 Session 方法，包括 `shell.*`，决定 E3），rutis 链接只在宿主本地链接配置中显式导出时才服务管理方法。Rpc 只做外部边界校验：对每个 Session 级方法校验参数格式并授权 `sessionId`，与其内建方法完全相同。功能检查（内容嗅探、大小限制、模型能力）归方法的所有者。`toolContribution` 与每个工具一样，按其声明的风险由 Approval 与 Permission 准入。没有宿主本地批准：Approval 与 Permission 只管 agent 决策引起的动作，按用户或项目配置运行的命令由该配置自己负责，启用即运行（[总览 §6.4](../overview.md#64-约定)）。现有的 `mcp.approve`/`mcp.revoke` 在后续代码变更中删除（A.4）。
 
 ## 8. 规则检查
 
@@ -208,8 +208,8 @@ sequenceDiagram
 { "callId": "string", "method": "session.goal.set",
   "sessionId?": "string",              // sessionMethods 时存在且已授权
   "params": {},
-  "origin": { "kind": "local" | "entry" | "link", "entry?": "string",
-              "connectionId?": "string", "peer?": "string" } } // 仅用于诊断
+  "origin": { "entry?": { "name": "string", "deviceId?": "string" }, // 连接的 ConnectionEntry
+              "connectionId?": "string", "peer?": "string" } } // peer：rutis 链接；仅用于诊断
 // MethodReply
 { "kind": "value", "value": {} } | { "kind": "handedOff" }
 // MethodError
@@ -263,8 +263,9 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 | `account.codex.*`、`account.grok.*` | `managementMethods` | OpenAI Codex OAuth（`account.codex`）、Grok OAuth（`account.grok`） |
 | `provider.*` | `managementMethods` | Provider（`provider`） |
 | `skills.catalog/set_enabled/refresh` | `managementMethods` | SkillsCatalog（`skills`） |
-| `mcp.catalog/set_enabled/save/remove/disconnect/approve/revoke` | `managementMethods` | Mcp（`mcp`） |
-| `daemon.shutdown` | Rpc 内建的管理方法，回复 handoff | — |
+| `mcp.catalog/set_enabled/save/remove/disconnect` | `managementMethods` | Mcp（`mcp`） |
+| `mcp.approve/revoke` | 在后续代码变更中删除（没有宿主本地批准；stdio 服务启用即启动） | — |
+| `daemon.shutdown` | Rpc 内建方法，回复 handoff；从不提供给带 `deviceId` 的连接 | — |
 | `hello`、`daemon.ping`、`agent.*`、现有 `session.*`、`approval.respond` | Rpc 内建方法 | — |
 | 新的 `session.input.withdraw` | `sessionMethods` | InputQueue（`session.input`） |
 | 新的 Session 方法 | `sessionMethods` | 各所有者（A.1） |

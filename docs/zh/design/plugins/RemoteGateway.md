@@ -1,6 +1,6 @@
 # RemoteGateway
 
-状态：草案。总体设计：[overview B.13](../overview.md)，[Transport、Connection 变更](../overview.md)，[多节点](../overview.md)，[通用约束](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（认证、断连与 TLS 的取舍与 [#5](https://github.com/arcships/dim/issues/5) 一起决定）。语言：Rust。
+状态：草案。总体设计：[overview §4 插件目录](../overview.md)，[Transport、Connection 变更](../overview.md)，[多节点](../overview.md)，[通用约束](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（认证、断连与 TLS 的取舍与 [#5](https://github.com/arcships/dim/issues/5) 一起决定）。语言：Rust。
 
 RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一个经认证的入口：通过二维码或配对码配对，每设备令牌及其轮换与吊销，以及 Web 工作区的静态资源。已配对设备使用现有的 App Server 协议；该入口只提供[方法](../contracts/session-boundary.md)契约中的 Session 方法（Rpc 的 Session 内置方法和每个 `sessionMethods` 服务），因此设备可以调用每个 Session 方法，包括 `session.permission.update` 和 `shell.*`（决策 E3），但从不能调用管理方法：`managementMethods` 与 Rpc 的管理类内置方法从不提供给已配对的远程设备。该入口是产品 UI 面，从不承载节点之间的 rutis 链路面。
 
@@ -14,7 +14,8 @@ flowchart LR
     TR["Transport"]
     CONN["Connection<br/>ConnectionEntry 记录"]
     RPC["Rpc<br/>内置方法、sessionMethods 服务、<br/>managementMethods 方法表"]
-    SET["Settings<br/>enabled 行字段、remote 设置来源"]
+    SET["Settings<br/>remote 业务来源"]
+    LDR["rutis Loader<br/>enabled 行字段（x-volatile），<br/>只由 PluginManager 写入"]
     PST["pluginFiles（扩展）<br/>remote-devices.json"]:::contract
   end
   DEV["手机或 Web 工作区"]
@@ -25,6 +26,7 @@ flowchart LR
   CONN --> RPC
   RPC -->|"将 remote.* 作为 managementMethods 收集"| RG
   RG --> SET
+  LDR -->|"VolatileUpdate"| RG
   RG --> PST
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
@@ -34,17 +36,17 @@ RemoteGateway 只认证升级请求，并在连接上记录设备；此后的每
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `RemoteGatewayPlugin` | 进程，控制节点 | `entryHost`（Transport）、`pluginFiles`（扩展）、Settings | `managementMethods` key `remote`（`remote.*`），由 Rpc 收集；回答其打开的入口在调用内发来的 `authenticate` 与 `handle` 请求 |
+| `RemoteGatewayPlugin` | 进程，控制节点 | `entryHost`（Transport）、`pluginFiles`（扩展）、Settings 业务来源 `remote`、它自己的 loader 行（`VolatileUpdate`） | `managementMethods` key `remote`（`remote.*`），由 Rpc 收集；回答其打开的入口在调用内发来的 `authenticate` 与 `handle` 请求 |
 | `TransportPlugin`（变更） | 进程 | 现有；不依赖 RemoteGateway 的任何内容 | 现有 `ListenAddresses`；新增 `entryHost` |
-| `ConnectionPlugin` / `RpcPlugin`（变更） | 进程 | 现有 | `ConnectionEntry {name, device_id}`；Rpc 从不向带 `device_id` 的连接提供管理方法 |
+| `ConnectionPlugin` / `RpcPlugin`（变更） | 进程 | 现有 | `ConnectionEntry {name, deviceId}`；Rpc 从不向带 `deviceId` 的连接提供管理方法 |
 
-此处定义的契约：设备记录与令牌、配对与轮换 HTTP 端点、`remote.*` 方法、`remote-devices.json` 格式。依赖的契约：Transport 的 `entryHost` 服务及其调用内的 `authenticate` 与 `handle` 请求（拟议的 Transport 变更，[语言中立](../../adr/002-plugin-scope.md)形式见 A.1，Rust 绑定见附录 G；依赖是单向的，RemoteGateway 依赖 Transport）、Connection 的入口记录、[方法](../contracts/session-boundary.md)契约（收集进 Rpc 方法表的 `managementMethods`，从不提供给已配对设备）、`pluginFiles`（扩展）（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）、用于结构性 `enabled` 字段的类型化 Settings 操作（`x-volatile`、`VolatileUpdate`，rutis-loader 0.10），以及对业务来源 `remote` 的 Settings 类型化操作，用于监听设置，其 schema 由 RemoteGateway 声明（ADR 002 D4）。RemoteGateway 不了解任何 Session 方法的含义，也不了解任何其他插件。
+此处定义的契约：设备记录与令牌、配对与轮换 HTTP 端点、`remote.*` 方法、`remote-devices.json` 格式。依赖的契约：Transport 的 `entryHost` 服务及其调用内的 `authenticate` 与 `handle` 请求（拟议的 Transport 变更，[语言中立](../../adr/002-plugin-scope.md)形式见 A.1，Rust 绑定见附录 G；依赖是单向的，RemoteGateway 依赖 Transport）、Connection 的入口记录、[方法](../contracts/session-boundary.md)契约（收集进 Rpc 方法表的 `managementMethods`，从不提供给已配对设备）、`pluginFiles`（扩展）（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）、它自己 loader 行上的结构性 `enabled` 字段（`x-volatile`），只由 PluginManager 写入（[PluginManager](PluginManager.md)，[#3](https://github.com/arcships/dim/issues/3) 的 loader 类型化操作），以 rutis-loader 0.10 的 `VolatileUpdate` 送达 RemoteGateway，以及对业务来源 `remote` 的 Settings 类型化操作，用于监听设置，其 schema 由 RemoteGateway 声明（ADR 002 D4）。RemoteGateway 不了解任何 Session 方法的含义，也不了解任何其他插件。
 
 ## 2. 数据与状态
 
 ```mermaid
 flowchart TB
-  subgraph LEL["Loader 可编辑层，经 Settings"]
+  subgraph LEL["Loader 可编辑层，只由 PluginManager 写入（#3）"]
     CFG["结构性：enabled、x-volatile"]
   end
   subgraph BS["Settings 业务来源 remote"]
@@ -67,7 +69,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-`enabled` 是结构性插件配置；`bind`、`tls` 和 `plaintext` 是业务配置（[ADR 002 D4](../../adr/002-plugin-scope.md)），在入口打开时读取；变更是带通知的数据更新，RemoteGateway 据此重新绑定监听器（关闭并重新打开入口），从不触发插件重载（A16）。设备记录是位于 `pluginFiles`（扩展）中的宿主本地安全材料（原子替换、锁、格式版本、仅所有者可访问的文件）；文件损坏或不可读时失败即拒绝。邀约和活动连接位于内存中，重载或重启时丢失。Timeline 只保存 Session 所有者为远程调用写入的事实，不含设备归属（A2）。
+`enabled` 是结构性插件配置，只由 PluginManager 写入（RemoteGateway 从不写它）；`bind`、`tls` 和 `plaintext` 是业务配置（[ADR 002 D4](../../adr/002-plugin-scope.md)），在入口打开时读取；变更是带通知的数据更新，RemoteGateway 据此重新绑定监听器（关闭并重新打开入口），从不触发插件重载（A16）。设备记录是位于 `pluginFiles`（扩展）中的宿主本地安全材料（原子替换、锁、格式版本、仅所有者可访问的文件）；文件损坏或不可读时失败即拒绝。邀约和活动连接位于内存中，重载或重启时丢失。Timeline 只保存 Session 所有者为远程调用写入的事实，不含设备归属（A2）。
 
 ## 3. 流程
 
@@ -89,7 +91,7 @@ sequenceDiagram
   D->>T: GET /ws 携带令牌
   T->>RG: 认证升级请求
   RG-->>T: allow、device_id
-  T->>R: 连接，ConnectionEntry 带 device_id
+  T->>R: 连接，ConnectionEntry 带 deviceId
   D->>R: hello v3、session.list、session.attach
 ```
 
@@ -175,7 +177,7 @@ sequenceDiagram
 | `GET /`、`/assets/*` | HTTP | Web 工作区静态资源 |
 | `POST /api/pair`、`POST /api/token/rotate` | HTTP | 配对、设备令牌轮换 |
 | `GET /ws` | WebSocket | 面向已配对设备的 App Server 协议 v3：全部 Session 方法 |
-| `remote.start/stop/status/pair/devices/revoke/rotate_token` | 管理方法 | 入口与设备的本地管理 |
+| `remote.status/pair/devices/revoke/rotate_token` | 管理方法 | 入口与设备的本地管理；入口由 PluginManager 的 `plugin.set_enabled` 开关 |
 | `entryHost`（调用内的 `authenticate`、`handle`）、`ConnectionEntry` | Transport/Connection 变更（进程服务、数据记录） | 经认证的入口；设备连接从不获得管理方法 |
 | CLI | `/remote`、`/web`、`dimcode remote`、`dimcode web` | 用户入口 |
 
@@ -183,7 +185,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-每个已配对设备可以在宿主的每个 Session 上调用每个 Session 方法：提交输入、回答审批和问题、停止轮次、`session.permission.update`、`session.exec.stop`、`session.model.update`、`session.mcp*`，以及在任何已授权目录中创建 Session（决策 E3、A12）。这放宽了如今仅限本地的执行类 Session 方法，并记录在[兼容性表](#a3-远程入口上的协议与兼容性)中。远程更改的权限预设是 Session 配置（决策 E4）：一个由子分支继承、在 fork 时重置为默认值的 Timeline 事实。该入口从不授予管理权限：配对、吊销、配置、宿主本地批准和 `daemon.shutdown` 都是管理方法，从不提供给已配对设备。认证保持最小化（[overview 多节点](../overview.md)）：每设备一个 bearer 令牌，静态存储为哈希，由设备轮换，在本地吊销；配对码短时有效、一次性使用且有速率限制。Cookie 为 `HttpOnly`、`Secure`、`SameSite=Strict`，并进行同源 `Origin` 检查。令牌从不出现在 URL、日志、诊断或 Timeline 中。该入口从不接受 rutis 链路帧，也不导出服务。
+每个已配对设备可以在宿主的每个 Session 上调用每个 Session 方法：提交输入、回答审批和问题、停止轮次、`session.permission.update`、`session.exec.stop`、`session.model.update`、`session.mcp*`，以及在任何已授权目录中创建 Session（决策 E3、A12）。这放宽了如今仅限本地的执行类 Session 方法，并记录在[兼容性表](#a3-远程入口上的协议与兼容性)中。远程更改的权限预设是 Session 配置（决策 E4）：一个由子分支继承、在 fork 时重置为默认值的 Timeline 事实。该入口从不授予管理权限：配对、吊销和配置是管理方法，`daemon.shutdown` 是 Rpc 内置方法；它们都不提供给已配对设备。认证保持最小化（[overview 多节点](../overview.md)）：每设备一个 bearer 令牌，静态存储为哈希，由设备轮换，在本地吊销；配对码短时有效、一次性使用且有速率限制。Cookie 为 `HttpOnly`、`Secure`、`SameSite=Strict`，并进行同源 `Origin` 检查。令牌从不出现在 URL、日志、诊断或 Timeline 中。该入口从不接受 rutis 链路帧，也不导出服务。
 
 ## 8. 规则检查
 
@@ -191,24 +193,41 @@ sequenceDiagram
 
 | 规则 | 本文如何符合 |
 | --- | --- |
-| §4.1 改别的模块拥有的状态时写指令事件 | RemoteGateway 不写 Timeline 事件；远程调用到达所有者自己的方法，由所有者写指令与结果，RemoteGateway 只经类型化操作改动自己的设备记录与 Settings 行。 |
+| §4.1 改别的模块拥有的状态时写指令事件 | RemoteGateway 不写 Timeline 事件；远程调用到达所有者自己的方法，由所有者写指令与结果，RemoteGateway 只改动自己的设备记录，并经 Settings 类型化操作改动它的业务来源 `remote`；它从不写自己的结构性 `enabled` 字段。 |
 | §4.2 交接后不能撤回 | 远程撤回是 InputQueue 的 `input/withdraw`，在 `input/applied` 之后不生效（`notHeld`）；之后只能用 `stop/interrupt`。 |
 | §4.3 只用 before 回调在写入前干预 | RemoteGateway 不在 Session 入口加检查；它只认证传输层升级，Rpc 保留其外部边界检查。 |
 | §4.4 核心机制不带业务含义 | `entryHost` 与 `ConnectionEntry` 是通用的传输记录；Rpc 只对设备连接拒绝管理方法。 |
 | §4.5 决定前读完整个批次 | 不适用：RemoteGateway 不依据 Timeline 事件做决定；远程调用由所有者按自己已消费的事实决定。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 远程内容只作为被消费的普通 Session 输入进入模型。 |
 | §4.7 插件之间只通过公开事件和服务交互 | RemoteGateway 不了解任何 Session 方法的含义，只使用 Transport、Settings、`pluginFiles` 与 Rpc 的方法收集。 |
-| §4.8 向机制所有者提通用需求 | 未提出；`entryHost` 的调用内请求属于拟议的 Transport 变更（附录 F）。 |
+| §4.8 向机制所有者提通用需求 | 中立服务协议中提供方在调用内向调用方发请求的需求见 §9.1；loader 类型化操作（#3）见 PluginManager §9.1；Transport 与 Connection 变更列在 overview 附录 B.2。 |
+| §4.9 只有后续决定要用的事实才进 Timeline | RemoteGateway 不写 Timeline 事件；设备记录、邀约和连接留在 `pluginFiles` 和内存中，远程调用只写所有者自己的事实，不含设备归属。 |
 | §1 Capability 与 App Server 边界 | RemoteGateway 是位于自己 crate 的进程插件，不是 Capability；Transport、Connection 与 Rpc 只做通用的入口变更。 |
 | ADR 002 D1 作用域跟随状态所有者 | 设备与监听器按宿主存在，因此 RemoteGateway 是进程作用域。 |
 | ADR 002 D2 不设接线模块 | Rpc 按名字收集 `managementMethods`；没有接线模块。 |
 | ADR 002 D3 依赖跟随作用域 | RemoteGateway 单向依赖 Transport 的 `entryHost`；它自己的重载会重载 Rpc，这是可接受的少见结构性事件。 |
-| ADR 002 D4 结构性配置与业务配置分离 | 只有 `enabled` 是结构性的；`bind`、`tls`、`plaintext` 是来源 `remote` 中的业务配置，变更时重新绑定监听器而不重载。 |
+| ADR 002 D4 结构性配置与业务配置分离 | 只有 `enabled` 是结构性的，且只由 PluginManager 写入；`bind`、`tls`、`plaintext` 是来源 `remote` 中的业务配置，变更时重新绑定监听器而不重载。 |
 | ADR 002 D5 合同语言中立 | `entryHost`、HTTP 接口与各方法以中立形式给出；附录 G 只是绑定。 |
 
 ## 9. 向机制所有者提出的需求
 
-无。
+### 9.1 提供方在调用内向调用方发请求
+
+| 项 | 内容 |
+| --- | --- |
+| 被哪条规则挡住 | `entryHost`（A.1）在 `open` 运行期间必须向调用方请求 `authenticate` 与 `handle`，而 ADR 002 D5 要求契约有中立形式；目前中立服务协议只支持调用方向提供方发请求，以及调用内的通知。 |
+| 考虑过的现有机制 | 调用内通知没有回复；`callChannel` 是由提供方调用的另一个服务，用它会让 Transport 依赖 RemoteGateway；由 RemoteGateway 提供、Transport 收集的另一个服务同样会反转依赖。 |
+| 需要的通用能力 | 提供方在一个打开的调用上向调用方发请求并得到回复，作用范围限于该调用，调用结束时随之结束；不了解入口、设备或 HTTP。 |
+| 对序号、批次、中断、重载的影响 | 不涉及 Timeline 序号或批次；丢弃调用会取消其未完成的请求；任一方重载都会结束该调用及其请求。 |
+| 由谁实现，对应 issue | rutis（服务协议与 rutis-bridge）；尚无 issue。Rust 之间的使用（附录 G）不必等待它。 |
+
+### 9.2 其他需求（在别处写明）
+
+| 需求 | 所有者 | 五项内容 |
+| --- | --- | --- |
+| loader 可编辑层上的类型化操作，PluginManager 用它写 RemoteGateway 的 `enabled` 字段 | rutis-loader，[#3](https://github.com/arcships/dim/issues/3) | 见 [PluginManager](PluginManager.md) §9.1 |
+
+`entryHost`、`ConnectionEntry {name, deviceId}` 以及 Rpc 不向设备连接提供管理方法，是对 Transport、Connection 与 Rpc 的改动，列在 [overview 附录 B.2](../overview.md)。
 
 ## 附录 A. 接口细节
 
@@ -224,7 +243,7 @@ sequenceDiagram
 | `authenticate`（调用内请求，Transport 发给调用方） | 异步 | `{ headers, origin?, remote_addr }`（令牌只在 headers 或 cookie 中） | `{ verdict: "allow", device_id } \| { verdict: "deny" }` |
 | `handle`（调用内请求，Transport 发给调用方） | 异步 | `{ method, path, headers, body_base64? }` | `{ status, headers, body_base64? }` |
 
-入口接受的每个连接都携带数据记录 `ConnectionEntry { name, device_id }`；对带 `device_id` 的连接，Rpc 只提供 Session 方法（A1）。吊销调用 `closeDevice`；丢弃 `open` 调用或调用 `close` 会关闭入口。Transport 与 RemoteGateway 是 Rust 实现，使用附录 G 中的绑定。
+入口接受的每个连接都携带数据记录 `ConnectionEntry { name, deviceId }`（`deviceId` 来自 `authenticate` 的回复）；对带 `deviceId` 的连接，Rpc 只提供 Session 方法（A1）。吊销调用 `closeDevice`；丢弃 `open` 调用或调用 `close` 会关闭入口。Transport 与 RemoteGateway 是 Rust 实现，使用附录 G 中的绑定。
 
 没有 RemoteGateway 时，裸 WebSocket 保持现有规则（受保护 profile：只允许 `hello` 和 `daemon.ping`）。
 
@@ -244,9 +263,9 @@ sequenceDiagram
 | 项目 | 规则 |
 | --- | --- |
 | 版本 | 仅 `hello` v3；v1/v2 以 `protocol_version` 拒绝（A11） |
-| 方法 | Rpc Session 内置方法和每个 `sessionMethods` 服务，作用于宿主上的每个 Session（E3、A12）；管理方法（`managementMethods` 与 Rpc 的管理类内置方法，包括 `daemon.shutdown`）→ `-32601 unknown_method` |
+| 方法 | Rpc Session 内置方法和每个 `sessionMethods` 服务，作用于宿主上的每个 Session（E3、A12）；管理方法（`managementMethods` 与 Rpc 的管理类内置方法）以及 Rpc 内置方法 `daemon.shutdown` → `-32601 unknown_method` |
 | `hello.features` | 仅 Session 功能 |
-| 身份 | `ConnectionEntry.device_id` 用于诊断与吊销；不授予超出入口方法集的任何权限 |
+| 身份 | `ConnectionEntry.deviceId` 用于诊断与吊销；不授予超出入口方法集的任何权限 |
 | 反向请求 | 无：客户端发请求，服务端发通知（[#5](https://github.com/arcships/dim/issues/5)） |
 
 兼容性（来源：[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs) 中的 `LOCAL_EXECUTION_METHODS`、`Call::is_management`；[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `validate_call`）：
@@ -261,15 +280,13 @@ sequenceDiagram
 
 | 方法 | 参数 | 结果 | 中断 |
 | --- | --- | --- | --- |
-| `remote.start` | `{bind?, tls?, plaintext?}` | 绑定后返回 `{address}` | Report |
-| `remote.stop` | `{}` | 监听器与连接关闭后返回 `{}` | Report |
 | `remote.status` | `{}` | `{enabled, running, address?, tls, error?, devices, connections}` | Drain |
 | `remote.pair` | `{ttlSeconds?}`（默认 300，最大 900） | `{code, url, expiresAt}`；`url` 为 `<origin>/pair#code=<code>` | Drain |
 | `remote.devices` | `{}` | `[{deviceId, name, pairedAt, lastSeenAt, connections, rotationRequired}]` | Drain |
 | `remote.revoke` | `{deviceId}` | 记录删除且连接关闭后返回 `{}` | Report |
 | `remote.rotate_token` | `{deviceId?}`（缺省：全部） | 标记持久化且连接关闭后返回 `{}` | Report |
 
-`remote.start`/`stop` 通过类型化 Settings 操作写入结构性 `enabled` 字段；loader 投递 `VolatileUpdate` 而不重载插件，RemoteGateway 随之调用 `entryHost.open` 或 `close`。`remote.start` 的参数 `bind`、`tls`、`plaintext` 先经 Settings 类型化操作写入业务来源 `remote`。入口运行期间业务来源变更时，RemoteGateway 重新绑定监听器：以新设置关闭并重新打开入口（连接脱离），而不重载插件（A16）。
+RemoteGateway 没有启动或停止方法，也从不写自己的 `enabled` 字段。入口由 PluginManager 的 `plugin.set_enabled {id: "remote-gateway", enabled}` 开关（[PluginManager](PluginManager.md) A.5），它经 loader 类型化操作（#3）写入该字段；loader 投递 `VolatileUpdate` 而不重载插件，RemoteGateway 随之调用 `entryHost.open` 或 `close`。监听设置 `bind`、`tls`、`plaintext` 经 Settings 类型化操作写入业务来源 `remote`，遵循 RemoteGateway 声明的 schema（该 schema 拒绝没有 `tls` 或 `plaintext: true` 的非 loopback `bind`）。CLI `/remote` 和 `dimcode remote start` 先写设置，再调用 `plugin.set_enabled`，然后读取 `remote.status`。入口运行期间业务来源变更时，RemoteGateway 重新绑定监听器：以新设置关闭并重新打开入口（连接脱离），而不重载插件（A16）。
 
 ### A.5 Capability 机制
 
@@ -304,7 +321,7 @@ sequenceDiagram
 | 两部手机使用同一配对码 | 第一个 `POST /api/pair` | 第二个失败，计为一次尝试 | RemoteGateway |
 | 轮换响应丢失 | — | 上一个令牌在宽限窗口内有效；设备重试 | RemoteGateway |
 | 设备轮换期间 `remote.rotate_token` | 持久化标记的顺序 | 标记之前完成的轮换也会被标记 | RemoteGateway |
-| 有附着设备时 `remote.stop` | — | 连接关闭（脱离）；Session 继续 | RemoteGateway、Transport |
+| 有附着设备时 `enabled` 被设为 false（`plugin.set_enabled`） | `VolatileUpdate` | 连接关闭（脱离）；Session 继续 | RemoteGateway、Transport |
 | Rpc 重载 | — | 受影响的调用 `service_reloading`；除非协议实例改变，否则连接保留 | Rpc |
 | 贡献 Session 方法的 Session 插件重载 | — | 其名称在重载期间 `service_reloading`，之后恢复提供；在途调用遵循[方法](../contracts/session-boundary.md)契约；连接保留 | Rpc、贡献方 |
 | 设备已连接时运行时设置变更 | 业务来源 revision | 入口以新设置重新打开；连接脱离并重连 | RemoteGateway |
@@ -317,9 +334,9 @@ sequenceDiagram
 
 | 情况 | 结果 |
 | --- | --- |
-| `remote.start` 时绑定失败 | `-32000 remote_bind_failed`；`enabled` 保持 false |
-| TLS 文件不可读 | `-32000 remote_tls_invalid`；不启动 |
-| 无 TLS 或 `plaintext` 的非 loopback 绑定 | `-32602 invalid_params` |
+| `enabled` 设置后绑定失败 | `remote.status.error` = `remote_bind_failed`；入口未打开；`enabled` 不变（RemoteGateway 从不写它）；由 CLI 报告 |
+| TLS 文件不可读 | `remote.status.error` = `remote_tls_invalid`；入口未打开 |
+| 无 TLS 或 `plaintext` 的非 loopback 绑定 | 对 `remote` 的 Settings 类型化写入以 `invalid_params` 失败（schema 由 RemoteGateway 声明）；不写入任何内容 |
 | 设备文件损坏或不可读 | `remote.status.error`；拒绝所有升级请求；`remote.devices` 以 `remote_storage_failed` 失败；保留文件以供修复 |
 | 配对/吊销/轮换时 `pluginFiles` 加锁或写入失败 | `-32000 remote_storage_failed`；内存状态不变；吊销不报告为完成 |
 | 未知设备 id | `-32602 invalid_params` |
@@ -330,7 +347,7 @@ sequenceDiagram
 
 在 App Server 测试套件中基于真实 WebSocket 入口进行流程测试：
 
-1. `remote.start`/`status`/`stop`；无 TLS 的非 loopback 被拒绝；`enabled` 时重启会重新打开；在业务来源中修改 `bind` 会重新打开入口而不重载插件。
+1. 对 RemoteGateway 的行调用 `plugin.set_enabled` 会打开和关闭入口而不重载，可由 `remote.status` 看到；RemoteGateway 自己从不写 `enabled`；没有 TLS 的非 loopback `bind` 被业务来源 schema 拒绝；`enabled` 时重启会重新打开；在业务来源中修改 `bind` 会重新打开入口而不重载插件。
 2. 使用有效、过期、重复使用的配对码以及尝试次数过多时的配对；`remote.devices` 列出该设备。
 3. 已配对设备调用 Session 方法，包括 `session.permission.update`、`session.exec.stop`、`session.model.update` 和 `session.input.withdraw`；每个管理方法（包括 `remote.*` 和 `daemon.shutdown`）返回 `unknown_method`；v1 被拒绝。
 4. 两个附着的客户端：都收到事件；竞争的 `approval.respond`；远程响应之前和之后的中断；远程撤回与应用竞争（`input/deleted` 或 `notHeld`）。
@@ -342,7 +359,7 @@ sequenceDiagram
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
-| A1 | 来自已配对设备的连接（带 `device_id`）只获得 Session 方法；管理方法从不提供给它 | 方法契约；决策 E3 | — |
+| A1 | 来自已配对设备的连接（带 `deviceId`）只获得 Session 方法；管理方法从不提供给它 | 方法契约；决策 E3 | — |
 | A2 | 设备身份不写入 Timeline | Overview §9；判断 | 输入携带设备归属 |
 | A3 | 设备存储在 RemoteGateway 的 `pluginFiles`（扩展）根目录中的 `remote-devices.json` | 决策 R8 | 换用另一存储并变更格式 |
 | A4 | 配对邀约只在内存中 | 判断 | 持久化邀约 |
@@ -351,13 +368,13 @@ sequenceDiagram
 | A7 | 由设备发起轮换，宽限窗口 10 分钟；通过标记强制轮换 | 功能清单“rotate access tokens”；判断 | 不同的轮换模型 |
 | A8 | 配对码格式与 32 字节令牌 | 判断 | — |
 | A9 | 尝试上限：每个邀约 5 次，每分钟 20 次 | 判断 | 不同的上限 |
-| A10 | 默认 loopback；非 loopback 需要 TLS 或显式 plaintext | Overview §5.13；判断 | 策略在 #5 中决定 |
+| A10 | 默认 loopback；非 loopback 需要 TLS 或显式 plaintext | Overview §6.3；判断 | 策略在 #5 中决定 |
 | A11 | 远程入口只接受协议 v3 | 判断 | 入口上支持 v1/v2 |
 | A12 | 已配对设备可访问每个 Session 和每个 Session 方法 | 决策 E3；功能清单“access projects and Sessions” | 每入口方法过滤或每设备作用域划分 |
 | A13 | 无独占的 Session 所有权；“接管”指附着并操作 | 功能清单“collaborate with or take over” | 控制锁协议 |
 | A14 | 无客户端附着时待处理审批无超时 | 现有 Approval 行为 | 在 Approval 中加入超时 |
 | A15 | 监听器失败只停止远程入口 | 判断 | 远程失败时守护进程关闭 |
-| A16 | `bind`、`tls`、`plaintext` 是 Settings 业务来源中的业务配置；只有 `enabled` 是结构性的 | ADR 002 D4（监听设置是业务配置） | 监听设置成为结构性 loader 字段 |
+| A16 | `bind`、`tls`、`plaintext` 是 Settings 业务来源中的业务配置；只有 `enabled` 是结构性的，且只由 PluginManager 写入 | ADR 002 D4（监听设置是业务配置） | 监听设置成为结构性 loader 字段 |
 
 ## 附录 F. 待对齐问题
 
@@ -365,7 +382,7 @@ sequenceDiagram
 | --- | --- |
 | [#5](https://github.com/arcships/dim/issues/5) 与 overview 待对齐问题“Remote access” | 产品设备身份与对端令牌的关系、链路断连、TLS 部署 |
 | 每设备作用域 | 之后是否可将设备限制到特定工作区或 Session（E3 不要求） |
-| Transport/Connection 变更 | `entryHost` 及其调用内的 `authenticate` 与 `handle` 请求在此提出，需要 Transport 变更文档，并由其确认中立服务协议像 `callChannel` 一样支持提供方在调用内向调用方发请求 |
+| Transport/Connection 变更 | `entryHost` 及其调用内的 `authenticate` 与 `handle` 请求在此提出，需要 Transport 变更文档；中立协议的支持是 [§9.1](#91-提供方在调用内向调用方发请求) 中的需求 |
 
 ## 附录 G. Rust 绑定
 

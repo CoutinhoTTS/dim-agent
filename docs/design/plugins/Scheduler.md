@@ -1,8 +1,8 @@
 # Scheduler
 
-Status: Draft. Overall design: [overview B.8](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first (overview §F.3).
+Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
-Scheduler keeps scheduled jobs and their run history in its process storage, [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage). While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part offers the `schedule` tool (risk `persistent_configuration`) to interactive leader Sessions as a `toolContribution`. Operators use the `schedule.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: a run's outcome is read from the run Session's history and published as a run-outcome event notice.
+Scheduler keeps scheduled jobs, which are user-written configuration, in its Settings business source `schedule`, and their run history in its process storage, [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage). While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part offers the `schedule` tool (risk `persistent_configuration`) to interactive leader Sessions as a `toolContribution`. Operators use the `schedule.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: a run's outcome is read from the run Session's history and published as a run-outcome event notice.
 
 ## 1. Structure
 
@@ -14,7 +14,8 @@ flowchart LR
     Out["Run-outcome event scheduled_run_outcomes"]
     Agents["Agents: sessions (launch, input, history, idle, stop, withdraw)"]
     Rpc["Rpc method table"]
-    Store["Process storage: pluginFiles (extended)"]
+    Store["Process storage: pluginFiles (extended), run history"]
+    Set["Settings: business source schedule (jobs)"]
     Listen["Listeners: Notifications instance of the run Session (no dependency)"]
   end
   subgraph SESS["Interactive leader Session"]
@@ -26,6 +27,7 @@ flowchart LR
   Tool -->|"enclosing scope"| Sched
   Sched --> Agents
   Sched --> Store
+  Sched --> Set
   Sched --> MM
   Rpc -->|"collects managementMethods by name"| MM
   Agents -->|"sessions calls"| TL
@@ -35,14 +37,14 @@ flowchart LR
   class Sched,MM,Out,Tool new
 ```
 
-Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The Session part depends on the process part (enclosing scope). The process part depends on Agents (service `sessions`) and `pluginFiles` (extended); it reaches run Sessions only through `sessions`. Dependencies follow scope (D3): an Agents reload reloads Scheduler, and a Scheduler reload reloads its Session parts, failing their in-flight turns; both are rare structural events and an accepted, documented cost. Job edits are business configuration (D4): a data update plus notification, never a reload.
+Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The Session part depends on the process part (enclosing scope). The process part depends on Agents (service `sessions`), Settings (business source `schedule`) and `pluginFiles` (extended); it reaches run Sessions only through `sessions`. Dependencies follow scope (D3): an Agents reload reloads Scheduler, and a Scheduler reload reloads its Session parts, failing their in-flight turns; both are rare structural events and an accepted, documented cost. Job edits are business configuration (D4): written through Settings' typed write operation, read at use time on change notification, never a reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Scheduler` | Process (control node) | `sessions` (Agents; `launch` with `policy`), `pluginFiles` (extended) | Job store, timer, run tracker; `scheduleJobs` (the tool's access to the job store, A.2); `managementMethods` key `schedule`; process event `scheduled_run_outcomes` |
+| `Scheduler` | Process (control node) | `sessions` (Agents; `launch` with `policy`), Settings business source `schedule`, `pluginFiles` (extended) | Job access, timer, run tracker; `scheduleJobs` (the tool's access to the job store, A.2); `managementMethods` key `schedule`; process event `scheduled_run_outcomes` |
 | `SchedulerSession` | Session, installed when Scheduler is enabled | `scheduleJobs` (`Scheduler`), Session configuration | `toolContribution` key `schedule`, declared only when `interactive` and not a Collaboration member |
 
-**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields `interactive`/`resourceNode`/`createdBy`, `input` with source raw blocks, fixed-prefix `history`, `idle`, `stop`, `withdraw`), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)), Permission category `persistent_configuration` (FullAccess allows it, E1), [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (R8: binary read and write and a format version are added to the existing trusted plugin storage; a TypeScript part uses it natively, a Rust part through the same named service), the [single-tree event contract](../../architecture/rust-agent/single-tree.md). **Contracts defined here**: job and run formats, the `schedule` tool, the `scheduleJobs` service, the `schedule.*` methods, the run-outcome event (A.6), source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
+**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields `interactive`/`resourceNode`/`createdBy`, `input` with source raw blocks, fixed-prefix `history`, `idle`, `stop`, `withdraw`; `agent` optional), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)), Permission category `persistent_configuration` (FullAccess allows it, E1), [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (run history; binary read and write and a format version are added to the existing trusted plugin storage; a TypeScript part uses it natively, a Rust part through the same named service), the Settings business source `schedule` with typed writes under the schema Scheduler declares (Settings supplement, [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)), the [single-tree event contract](../../architecture/rust-agent/single-tree.md). **Contracts defined here**: job and run formats, the `schedule` tool, the `scheduleJobs` service, the `schedule.*` methods, the run-outcome event (A.6), source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
 
 ## 2. Data and state
 
@@ -60,6 +62,10 @@ classDiagram
     session_id, input_event_id, submission_id
     outcome, detail, timestamps
   }
+  class SettingsSource {
+    business source schedule
+    typed writes, revision
+  }
   class ProcessStorage {
     scheduler root, format version 1
     atomic replace, lock
@@ -70,12 +76,12 @@ classDiagram
     turn/start, turn/end, stop/interrupt
   }
   Job "1" --> "0..100" Run
-  ProcessStorage *-- Job
+  SettingsSource *-- Job
   ProcessStorage *-- Run
   Run ..> RunSessionTimeline : decided from history
 ```
 
-Jobs and runs live only in process storage; nothing is rebuilt from Timeline and Scheduler owns no `StateCell`. A run's progress is derived from existing facts on the run Session's `main` branch. The Session part holds no state.
+Jobs live in the Settings business source and runs only in process storage; nothing is rebuilt from Timeline and Scheduler owns no `StateCell`. A run's progress is derived from existing facts on the run Session's `main` branch. The Session part holds no state.
 
 ## 3. Flows
 
@@ -88,9 +94,9 @@ sequenceDiagram
   participant AG as Agents
   participant S as Run Session (main)
   participant IQ as InputQueue and Loop
-  T->>ST: recheck job, persist run launching
+  T->>ST: recheck job (Settings), persist run launching
   alt mode create, or first reuse run
-    T->>AG: sessions.launch(agent, cwd, resourceNode, model, policy)
+    T->>AG: sessions.launch(agent?, cwd, resourceNode, model?, policy)
     AG-->>T: sessionId
   end
   T->>S: sessions.input(sessionId, main, queue, marker scheduled-run, prompt)
@@ -202,16 +208,16 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.2 No take-back after hand-off | Before `input/applied` the run input is withdrawn; after it (`notHeld`) Scheduler only uses `stop` once `input/consumed` is read (§3.2). |
 | §4.3 Intervene only through before callbacks | Not applicable: Scheduler adds no entry check and no before callback; job validation is the owner's own boundary validation of its methods and tool. |
 | §4.4 Core mechanisms carry no business meaning | Scheduler needs no runtime change carrying its meaning; the run-outcome event is its own process event. |
-| §4.5 Read the whole batch before deciding | Run decisions read history up to the `sessions.idle` cutoff, which is a batch boundary (A.5). |
+| §4.5 Read the whole batch before deciding | Run decisions read history through the cutoff `C` that `sessions.idle` returns and use only events up to `C`; batches commit whole, so no batch is split at `C` (A.5). |
 | §4.6 Model context holds only handed-over events | The run prompt reaches the model only as a consumed Queue input; a withdrawn input is deleted and never seen. |
-| §4.7 Only public events and services | Scheduler uses `sessions`, `pluginFiles` (extended) and its own `scheduleJobs`; Notifications listens to its public event without a dependency. |
-| §4.8 Requirements to mechanism owners | Named process events across languages are raised in §9; the offline-node behaviour relies on #5 ([ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)). |
-| §4.9 Only facts later decisions use enter the Timeline | Scheduler writes no Timeline event; jobs and runs stay in process storage and the run outcome is a process event notice. |
+| §4.7 Only public events and services | Scheduler uses `sessions`, Settings' typed operations, `pluginFiles` (extended) and its own `scheduleJobs`; Notifications listens to its public event without a dependency. |
+| §4.8 Requirements to mechanism owners | Named process events across languages are raised in §9; the offline-node behaviour relies on #5 ([ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)); the Agents and Settings supplements are in [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins). |
+| §4.9 Only facts later decisions use enter the Timeline | Scheduler writes no Timeline event; jobs stay in Settings, runs in process storage and the run outcome is a process event notice. |
 | §1 Capability and App Server boundary | Jobs and runs are process-level, not a Capability; storage is the `pluginFiles` plugin, not an App Server service. |
 | ADR 002 D1 | Jobs span Sessions (process part); the tool belongs to a Session (Session part). |
 | ADR 002 D2 | No wiring module: Rpc collects `managementMethods`, ToolRegistry collects `toolContribution`, listeners subscribe to the event by name. |
 | ADR 002 D3 | Agents and Scheduler reloads propagate by scope and are accepted and documented (§1). |
-| ADR 002 D4 | Job edits and the run limit are business data read at use time; nothing structural changes. |
+| ADR 002 D4 | Jobs and the run limit are business data in the Settings business source `schedule`, read at use time; nothing structural changes. |
 | ADR 002 D5 | `scheduleJobs`, the tool, the methods and the event are named services with data shapes; Rust forms are in Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
@@ -232,10 +238,10 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 | Record | Fields |
 | --- | --- |
-| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = Agents default), `agent_id` (optional profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool:<session_id>`) |
+| Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (`None` = control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured at save), `enabled`, `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool:<session_id>`) |
 | Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `session_id`, `input_event_id`, `submission_id`, timestamps, `outcome` (`completed` \| `failed` \| `cancelled` with reason), `detail` |
 
-Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 runs per job (A8). Writes use atomic replace under the storage lock with `revision` checks, so tool and management saves never overwrite each other silently.
+Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. History keeps the last 100 runs per job (A8). Job writes go through Settings' typed write operation with `revision` checks, so tool and management saves never overwrite each other silently; run records use atomic replace under the storage lock.
 
 ### A.2 Tool `schedule`
 
@@ -261,7 +267,7 @@ Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `
 | --- | --- | --- |
 | `schedule.list` | `{}` | Jobs with `next_window`, last run |
 | `schedule.save` | `{job, revision?}` | Saved job (`policy_cap` = host configuration maximum); stale `revision` → `schedule_conflict` |
-| `schedule.delete` | `{job_id}` | Removes job and history; an active run is not stopped (A14) |
+| `schedule.delete` | `{job_id}` | Removes the job (Settings) and its history (`pluginFiles`); an active run is not stopped (A14) |
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume |
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
@@ -283,12 +289,12 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 | Step | Path |
 | --- | --- |
 | Trigger | Timer task computes the next window per enabled job; at a window applies overlap, capacity (A13), enablement and policy rules; persists `launching` with a fresh `run_id` |
-| Session | `create`: `sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}`; Agents records `createdBy = {kind: "launch", source: "scheduler"}` from the declared source. For a tool-created job `starter` is the creating Session (A15), else absent. `reuse`: the bound `session_id` (an unloaded Session is restored by the call); the first run launches and binds `session_id` |
+| Session | `create`: `sessions.launch {agent?, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}`; `agent` and `model` are passed only when the job sets them: absent `agent` = Agents' default profile, a request `model` overrides the profile's model; Scheduler resolves neither; Agents records `createdBy = {kind: "launch", source: "scheduler"}` from the declared source. For a tool-created job `starter` is the creating Session (A15), else absent. `reuse`: the bound `session_id` (an unloaded Session is restored by the call); the first run launches and binds `session_id` |
 | Write | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId: "scheduler:<run_id>", rawBlocks: [marker {kind: "scheduled-run", attrs: [job, run], body: job name}], content: [prompt text]}` → `{inputId}` stored as `input_event_id`; persist `submitted` |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn |
 | Completion | Tracker task: `sessions.idle {sessionId, branchId: "main"}` → cutoff `C`; `sessions.history {through: C}` pages; `running` once `input/consumed { input_id = input_event_id }` exists; ends at the first `turn/end` after it; `input/deleted` → `cancelled: withdrawn` (unless the tracker's own timeout withdraw wrote it: `timed_out`) |
 | Timeout | Not consumed: `sessions.withdraw` of the own input; `deleted` → `timed_out`, `notHeld` → wait for `input/consumed`, then as consumed; consumed: `sessions.stop {sessionId, branchId: "main"}` (turn scope), `timed_out` when `turn/end` is read |
-| Recheck | Before writing, re-read job and run from storage (enabled, revision unchanged, run still `launching`) |
+| Recheck | Before writing, re-read the job from Settings and the run from storage (enabled, revision unchanged, run still `launching`) |
 | Reload or restart | Session parts reload with Scheduler; an in-flight `schedule` call fails with its turn. The new generation settles: `launching` → `sessions.lookup` by `submissionId`: accepted → `submitted`, unknown → `lost` (never resubmitted); `submitted`/`running` resume tracking; passed windows `missed` |
 | Run outcome | After persisting a terminal state, publish `scheduled_run_outcomes` with the A.6 data; nothing is replayed after reload or restart |
 
@@ -304,7 +310,7 @@ Process event named `scheduled_run_outcomes`; listeners subscribe by name and fo
 | `reason` | string, optional; fixed reason text, never Session content |
 | `ended_at` | RFC 3339 instant |
 
-Emitted once per run after its terminal record is persisted (A16, A17). Delivery is live and non-resumable; a listener that is not loaded misses the notice. In particular, when the run Session is unloaded at the time of the notice, no `schedule.ended` is sent and the notice is lost; this is accepted, and `schedule.history` is the durable record (A18). The notice carries no prompt or Session content; `schedule.history` is the durable record.
+Emitted once per run after its terminal record is persisted (A16, A17). Delivery is live and non-resumable; a listener that is not loaded misses the notice. In particular, when the run Session is unloaded at the time of the notice, no `schedule.ended` is sent and the notice is lost; this is accepted, and `schedule.history` is the durable record (A18). The notice carries no prompt or Session content.
 
 ## Appendix B. Full conflict table
 
@@ -377,17 +383,17 @@ With a controllable clock, through management methods, the `schedule` tool and t
 | A6 | Failures never retry or fall back to `create` | Judgment | Fallback policy |
 | A7 | `max_run_minutes` default 60 | Judgment | Unbounded runs |
 | A8 | Last 100 runs per job | Judgment | Retention setting |
-| A9 | Tool only for interactive leader Sessions | Overview §5.1; judgment | Runs could create jobs |
-| A10 | One risk category for all actions | Overview §5.8 | Split read-only tool |
+| A9 | Tool only for interactive leader Sessions | [Overview §6.2](../overview.md#62-constraints) constraint 15; judgment | Runs could create jobs |
+| A10 | One risk category for all actions | [Overview §6.2](../overview.md#62-constraints) constraint 7 | Split read-only tool |
 | A11 | Tool-created jobs use the caller's resource node | Judgment (overview §6.3) | Other nodes allowed |
-| A13 | Max concurrent runs = 4, a business setting read at each window | Judgment; ADR 002 D4 | Other limit |
+| A13 | Max concurrent runs = 4, a business setting in the Settings business source `schedule`, read at each window | Judgment; ADR 002 D4 | Other limit |
 | A14 | Deleting a job does not stop its active run | Judgment | Delete stops the run |
 | A15 | The cap of a tool-created job is captured at save | Judgment within E2 | Re-resolve per run |
-| A16 | Run outcomes are a live, non-resumable notice | Overview §5.11; judgment | Persistent outbox per listener |
+| A16 | Run outcomes are a live, non-resumable notice | [Overview §5.5](../overview.md#55-scheduled-run-through-agents); judgment | Persistent outbox per listener |
 | A17 | Only runs that reached `launching` produce a notice | Judgment | Listeners see every window |
 | A18 | `schedule.ended` is delivered only by the run Session's Notifications instance; lost if that Session is unloaded | User decision (process-level delivery not added) | A process-level listener delivers every notice |
 
-Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), process storage in `pluginFiles` (extended) (R8), withdrawal (R7), scope ([ADR 002](../../adr/002-plugin-scope.md)).
+Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), jobs in a Settings business source and run history in `pluginFiles` (extended) (user decision), optional `LaunchRequest.agent` (user decision), withdrawal of own inputs, scope ([ADR 002](../../adr/002-plugin-scope.md)).
 
 ## Appendix F. Open questions
 

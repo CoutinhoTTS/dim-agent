@@ -32,6 +32,8 @@ Capability 实现 rutis `TypedPlugin` 与 runtime `Capability`：`Deps` 声明�
 | 事件处理器内的等待 | Capability 自持任务，登记后返回 |
 | 模型、工具、上下文的执行与格式转换 | Capability 定义的宿主端口；审批宿主在 app-server |
 
+Approval 与 Permission 只管 agent 决策引起的动作（工具调用）；按用户或项目配置运行的命令不属于 agent 体系，由该配置自己负责，启用即运行；功能开关是普通配置，与批准无关。
+
 职责放错位置时修正归属方。
 
 ## 4. 通过时间线扩展行为
@@ -53,7 +55,7 @@ Capability 实现 rutis `TypedPlugin` 与 runtime `Capability`：`Deps` 声明�
    - 由谁实现，对应哪个 issue。
 
    已提出的例子：before 支持异步回调（运行时）；rutis link 断开时导入的服务保持登记、调用直接失败（#5）；运行时服务按名字暴露给非 Rust 能力（#4）。
-9. **只有后续决定要用的事实才进 Timeline。** 给 UI 显示的走 Session 广播通知。进程级状态（标题、Provider 条目、配置）不进 Timeline，通过所有者的类型化写操作修改。
+9. **只有后续决定要用的事实才进 Timeline。** 给 UI 显示的走 Session 广播通知。进程级状态（标题、Provider 条目、配置）不进 Timeline，通过所有者的类型化写操作修改。这条规则限制新增事件；必需事件上可以带描述性字段。
 
 插件放在哪个作用域、不设接线模块、配置分离、合同语言中立，见 [ADR 002](../../adr/002-plugin-scope.md) 的决策。
 

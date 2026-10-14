@@ -1,6 +1,6 @@
 # ShellInput
 
-状态：草案。总体设计：[overview B.3](../overview.md)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
+状态：草案。总体设计：[overview §4](../overview.md)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 在 Session 资源节点上的工作区中执行用户输入的 `!command` 和 `!!command`。`!command` 的结果（命令及有界输出）作为 Append 输入写入，因此随下一次模型请求进入上下文；`!!command` 的输出只发给调用方客户端和诊断。ShellInput 是一个没有事件的 Session 插件。它通过 `sessionMethods` 服务（Session 作用域，key `shell`）以普通 Session 方法提供 `shell.run`、`shell.stop` 和 `shell.list`（[session-boundary](../contracts/session-boundary.md)）；契约以语言中立形式给出，Rust 形式见[附录 G](#附录-g-rust-绑定)。每个 Session 最多同时运行一个命令；命令在 `shell.stop` 时或 Session 部分结束时（Session 关闭或卸载、重载、守护进程退出）结束。
 
@@ -34,7 +34,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `ShellInputPlugin` | Session | `S:SessionConfig`（`cwd`）、`S:TreeCommands`、Session 资源节点的 HostPlatform（与 WorkspaceTools 的用法相同）、诊断通道 | `sessionMethods` key `shell`，在插件的 `provides` 中声明 |
 
-依赖的契约：`sessionMethods` 与每次调用的进度（[session-boundary](../contracts/session-boundary.md)）；带边界校验的 `Branch::input`（[interrupt](../../../architecture/rust-agent/interrupt.md)）；HostPlatform 进程服务（启动进程树、读取输出、等待退出、终止进程树；Rust 名称见附录 G）；节点的 exec shell，作为每次 spawn 时读取的业务配置（[ADR 002](../../adr/002-plugin-scope.md)"现有插件"）；隔离（总体设计附录 C 补充）；节点离线规则（[overview §6.3](../overview.md)）：对离线资源节点的调用以 `node_unavailable` 失败，而 ShellInput 保持加载，这要求经 rutis 链路导入的服务在链路断开期间保持注册并让调用失败（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 [ExternalAgent](ExternalAgent.md) §9）；`exec` 工具的 shell argv 构造（[exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs)，作为 HostPlatform 辅助函数暴露，A2）。
+依赖的契约：`sessionMethods` 与每次调用的进度（[session-boundary](../contracts/session-boundary.md)）；带边界校验的 `Branch::input`（[interrupt](../../../architecture/rust-agent/interrupt.md)）；HostPlatform 进程服务（启动进程树、读取输出、等待退出、终止进程树；Rust 名称见附录 G）；节点的 exec shell，作为每次 spawn 时读取的业务配置（[ADR 002](../../adr/002-plugin-scope.md)"现有插件"）；隔离（总体设计附录 C 补充）；节点离线规则（[overview §6.3](../overview.md)）：对离线资源节点的调用以 `node_unavailable` 失败，而 ShellInput 保持加载，这要求经 rutis 链路导入的服务在链路断开期间保持注册并让调用失败（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 [ExternalAgent](ExternalAgent.md) §9）；到资源节点的链路断开时，由该节点自己的 HostPlatform 结束它启动的进程树（HostPlatform 补充，见 [overview 附录 B.1](../overview.md)）；`exec` 工具的 shell argv 构造（[exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs)，作为 HostPlatform 辅助函数暴露，A2）。
 
 本文定义的契约：`shell.*` 方法、来源标记 `dim-shell-input`（kind `command`）以及 `submissionId` 前缀 `shell-input:`。
 
@@ -122,7 +122,7 @@ sequenceDiagram
   SI->>TL: X
   TL->>L: step/tool-result（整批）
   L->>TL: step/model-start，带 input/consumed X
-  Note over L: 若 I 在 X 之前，X 保持待处理直到下一轮
+  Note over L: 若轮次级 stop/interrupt 在 X 之前，X 保持待处理直到下一轮
 ```
 
 位置由输入的拥有方按序号决定；ShellInput 没有复核，因为它的写入不依赖任何 Timeline 事实。
@@ -173,7 +173,8 @@ sequenceDiagram
 | §4.5 决定前读完整个批次 | 不适用：ShellInput 不读任何 Timeline 事件。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 输出只在 InputQueue 采用、Loop 消费该输入后进入模型；`!!` 的输出从不进入。 |
 | §4.7 插件之间只通过公开事件和服务交互 | ShellInput 只使用 `Branch::input`、`S:TreeCommands`、`SessionConfig` 与 HostPlatform。 |
-| §4.8 向机制所有者提通用需求 | 运行计为活动以防空闲卸载见 §9；#5 给出链接。 |
+| §4.8 向机制所有者提通用需求 | §9 链接 #5；防止空闲卸载的 Session 活动句柄是 Agents 的补充，列在 [overview 附录 B.2](../overview.md)，设计见 A.5。 |
+| §4.9 只有后续决定要用的事实进入 Timeline | 只有 `!` 的记录结果进入，它是 InputQueue 与 Loop 据以决定、模型会读取的输入；`!!` 输出、进度与运行记录只留在回复和诊断中。 |
 | §1 Capability 与 App Server 边界 | ShellInput 是各自包中的 Session Capability；Rpc 只分派 `sessionMethods`。 |
 | ADR 002 D1 作用域跟随状态所有者 | 运行是该 Session 资源节点上的 Session 工作，因此插件是 Session 作用域。 |
 | ADR 002 D2 不设接线模块 | Rpc 经 Session 的 `sessionMethods` 按名字找到 `shell.*`；没有模块指名 ShellInput。 |
@@ -183,17 +184,9 @@ sequenceDiagram
 
 ## 9. 向机制所有者提出的需求
 
-### R1. Session 工作计为活动，防止空闲卸载（Agents）
+除 #5 外，没有对运行时或 rutis 的需求。ShellInput 需要的 Session 活动句柄是对 Agents 的改动，列在 [overview 附录 B.2](../overview.md)，设计见 [A.5](#a5-对其他插件的改动)。
 
-| 项 | 内容 |
-| --- | --- |
-| 被哪条规则挡住 | ADR 002 D1（运行是 Session 工作，随 Session 部分结束）与生命周期规则“客户端断开不等于关闭 Session”：调用方断开后，没有东西阻止 Session 空闲卸载，而空闲卸载会终止长时间运行的 `!` 命令。 |
-| 考虑过的现有机制 | Rpc 在每次调用期间持有的 `SessionUse` 租约（调用被丢弃时释放，A12）；运行中的 turn（`!` 运行不是 turn）；为运行设进程级拥有者（把 Session 工作移出其作用域，D1）。 |
-| 需要的通用能力 | Session 部件可以在自己的 Session 上持有一个活动句柄；只要有句柄被持有，Agents 就不空闲卸载该 Session。句柄不带业务含义，由 `ctx.effect` 释放。 |
-| 对序号、批次、中断、重载的影响 | 对序号与批次无影响。中断：不变（运行不理会 turn 中断）。重载：句柄随部件释放；关闭仍会终止运行。 |
-| 由谁实现，对应 issue | Agents（`AgentIndex`，App Server）与运行时 Session 门面；尚未建 issue。 |
-
-链接：#5，包括链路断开时终止导入的 HostPlatform 的进程树（见 [ExternalAgent](ExternalAgent.md) §9）。
+链接：#5 只保证链路断开期间对导入服务的每次调用以 `node_unavailable` 失败（见 [ExternalAgent](ExternalAgent.md) §9）；节点上已经启动的进程，在链路断开时由该节点自己的 HostPlatform 结束（[overview 附录 B.1](../overview.md) 的 HostPlatform 行）。
 
 ## 附录 A. 接口细节
 
@@ -230,8 +223,8 @@ sequenceDiagram
 | 字段 | 值 |
 | --- | --- |
 | `submissionId` | `shell-input:<runId>` |
-| `rawBlocks` | 一个 raw 块：标记 `dim-shell-input`，kind `command`，属性 `status`、`exit`（退出码或信号）、`truncated`；正文为 `$ <command>`、换行、去除终端转义序列的有界输出 |
-| `content` | 无 |
+| `blocks` | 一个 raw 块：标记 `dim-shell-input`，kind `command`，属性 `status`、`exit`（退出码或信号）、`truncated`；正文为 `$ <command>`、换行、去除终端转义序列的有界输出 |
+| `user` | 无 |
 | `mode` | `append` |
 
 ANSI/OSC 序列从正文中移除（A8）；回复中保留它们以供终端使用。
@@ -247,6 +240,20 @@ ANSI/OSC 序列从正文中移除（A8）；回复中保留它们以供终端使
 | 消费 | InputQueue `input/applied {mode: append}`，Loop `input/consumed` |
 | 复核 | 无 |
 | Session 部分结束 | 卸载清理函数取消所有运行，终止进程树并等待它们，不写任何输入。守护进程退出：进程树随进程一起结束（`ProcessTree` 的 drop 会杀死进程树）。这包括结构性操作之后的重载，是可接受的代价（[ADR 002](../../adr/002-plugin-scope.md) D3） |
+
+### A.5 对其他插件的改动
+
+列在 [overview 附录 B.2](../overview.md)（Agents 行）；本节用五项说明 ShellInput 为什么需要它。
+
+#### Session 工作计为活动，防止空闲卸载（Agents 补充）
+
+| 项 | 内容 |
+| --- | --- |
+| 被哪条规则挡住 | ADR 002 D1（运行是 Session 工作，随 Session 部分结束）与生命周期规则“客户端断开不等于关闭 Session”：调用方断开后，没有东西阻止 Session 空闲卸载，而空闲卸载会终止长时间运行的 `!` 命令。 |
+| 考虑过的现有机制 | Rpc 在每次调用期间持有的 `SessionUse` 租约（调用被丢弃时释放，A12）；运行中的 turn（`!` 运行不是 turn）；为运行设进程级拥有者（把 Session 工作移出其作用域，D1）。 |
+| 需要的通用能力 | Session 部件可以在自己的 Session 上持有一个活动句柄；只要有句柄被持有，Agents 就不空闲卸载该 Session。句柄不带业务含义，由 `ctx.effect` 释放。 |
+| 对序号、批次、中断、重载的影响 | 对序号与批次无影响。中断：不变（运行不理会 turn 中断）。重载：句柄随部件释放；关闭仍会终止运行。 |
+| 由谁实现，对应 issue | Agents（`AgentIndex`，App Server）与运行时 Session 门面；尚未建 issue。 |
 
 ## 附录 B. 完整冲突表
 
@@ -276,7 +283,7 @@ ANSI/OSC 序列从正文中移除（A8）；回复中保留它们以供终端使
 | 已提交，然后回复丢失 | X 已提交 | 在同一代中重试 → `duplicate_run`；重启后客户端通过 `session.input_lookup` 检查 `shell-input:<runId>`（A11） | 客户端 |
 | 启动时 Session 已卸载 | — | Rpc 在分发前恢复它 | Rpc、AgentIndex |
 | 启动时资源节点离线 | — | `node_unavailable`；不启动任何内容；ShellInput 保持加载，其他 Session 不受影响（对 #5 的要求） | ShellInput |
-| 运行中途失去资源节点 | — | 状态 `failed`；对于 `record`，以 `status="failed"` 写入部分输出（A6） | ShellInput |
+| 运行中途失去资源节点 | — | 链路断开时由该节点自己的 HostPlatform 结束进程树；ShellInput 的调用以 `node_unavailable` 失败（#5）；状态 `failed`；对于 `record`，以 `status="failed"` 写入已读到的部分输出（A6） | ShellInput；该节点的 HostPlatform |
 | 重复或迟到的 `stop` | — | `{stopped: false}` | ShellInput |
 | 客户端断开或失去连接 | — | 运行继续，并被记录或丢弃；进度被丢弃（A12） | ShellInput |
 | 已配对的远程设备 | — | 与任何有 Session 访问的客户端一样允许（E3）；运行与本地客户端发起时相同 | ShellInput |
@@ -330,7 +337,7 @@ ANSI/OSC 序列从正文中移除（A8）；回复中保留它们以供终端使
 | A7 | `exec` 预览上限（2000 行，50 KiB） | 现有 `exec` 常量 | 单独的限制 |
 | A8 | 模型可见文本中去除终端转义序列 | 判断 | 转义序列到达模型 |
 | A9 | 进度通过调用的进度通道发送，按速率合并 | [session-boundary](../contracts/session-boundary.md)；合并是判断 | 只在完成时输出 |
-| A10 | 运行是 Session 工作：随 Session 部分结束而结束（关闭、重载，以及 §9 R1 实现之前的空闲卸载） | ADR 002 D1（Session 作用域）、D3 | 运行需要一个进程级拥有者 |
+| A10 | 运行是 Session 工作：随 Session 部分结束而结束（关闭、重载，以及 A.5 的 Agents 活动句柄实现之前的空闲卸载） | ADR 002 D1（Session 作用域）、D3 | 运行需要一个进程级拥有者 |
 | A11 | 客户端通过 `session.input_lookup` 按 `runId` 去重 | Session 公开接口 | 可能出现重复输入 |
 | A12 | 客户端断开不会停止运行 | 生命周期（"连接关闭保留 Session 工作"） | 断开会停止运行 |
 | A13 | 诊断只携带元数据和有界尾部 | 判断 | 诊断中包含完整输出 |

@@ -1,6 +1,6 @@
 # Modality
 
-Status: Draft. Overall design: [overview B.14](../overview.md#4-plugin-catalog), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3. Language: TypeScript first for provider-executed categories; OCR depends on the OCR runtime component ([overview F.3](../overview.md#appendix-c-implementation-language)).
+Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3. Language: TypeScript first for provider-executed categories; OCR depends on the OCR runtime component ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
 Modality is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): tasks and provider connections are shared across Sessions) and the single entry for non-conversational multimodal work in nine categories: image, video, speech, music, audio, 3D asset, motion, realtime and OCR. It reports availability per category with reasons, resolves the default model by a Modality-owned purpose key, runs asynchronous tasks (submit, status, wait, cancel) stored through `pluginFiles` (extended), and holds realtime connections bound to the opening client connection. Provider adapters are built into Modality or provided by adapter plugins, in any language, as named process services `modalityAdapter`; OCR runs through the HostPlatform of the control node or of a configured node. Its methods are a `managementMethods` service (key `modality`): process-plugin methods about the host, collected into Rpc's method table and never served to paired remote devices. Modality's settings, including the OCR component path per node, are business configuration in its own Settings business source, written through Settings typed operations and read at use time. It has no Session or branch part: it writes no Timeline events and offers no model-visible tool.
 
@@ -39,7 +39,7 @@ All dependencies are process services at the same scope ([ADR 002 D3](../../adr/
 | `Modality` | Process (control node) | Provider purpose selection, purpose-policy write path and non-conversational connection resolution; `pluginFiles` (extended: UTF-8 and binary); Settings business source `modality`; all `modalityAdapter` services; HostPlatform of the control node and of each configured OCR node; diagnostics | `modalityTasks` process service; `managementMethods` key `modality` (`modality.*`), collected by Rpc |
 | Adapter plugins | Process | their own provider dependencies | `modalityAdapter` service, key adapter name, declared in the plugin's `provides` |
 
-**Contracts depended on:** the [methods](../contracts/session-boundary.md) contract (`managementMethods` collected into Rpc's method table, per-call progress sink, connection-bound notifications); Provider's per-purpose policy storage with its single write path and non-conversational connection resolution ([overview C.2](../overview.md#b2-app-server-process-plugins)); `pluginFiles` (extended) with binary atomic replace and a format version ([App Server README](../../../crates/dim-app-server/README.md#trusted-plugin-storage)); HostPlatform spawn with isolation ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md), isolation supplement in [overview C.1](../overview.md#b1-session-and-branch-capabilities)).
+**Contracts depended on:** the [methods](../contracts/session-boundary.md) contract (`managementMethods` collected into Rpc's method table, per-call progress sink, connection-bound notifications); Provider's per-purpose policy storage with its single write path and non-conversational connection resolution ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)); `pluginFiles` (extended) with binary atomic replace and a format version ([App Server README](../../../crates/dim-app-server/README.md#trusted-plugin-storage)); HostPlatform spawn with isolation ([HostPlatform](../../architecture/rust-agent/plugins/HostPlatform.md), isolation supplement in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)).
 **Contracts defined here:** category and operation identifiers; purpose keys `modality.<category>` and `modality.<category>.<operation>` (opaque to Provider); the `modalityAdapter` and `modalityTasks` services ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.2 and A.3; Rust binding in Appendix G); the `modality` settings document and its schema; task record and result formats (format version 1); the `modality.*` methods and the `modality.realtime.event` notification. Provider knows nothing about modalities; Modality knows no provider-specific semantics outside its built-in adapters.
 
 ## 2. Data and state
@@ -71,7 +71,7 @@ flowchart TB
   Cfg -->|"read at use time"| Mod
 ```
 
-Task records are the only durable state; the index is rebuilt from them on `apply`, and non-terminal records are settled by the startup rule (§4). Running work and realtime connections are never rebuilt. Defaults live only in Provider. Modality settings, the OCR component path per node included, are business configuration ([ADR 002 D4](../../adr/002-plugin-scope.md)), written through Settings typed operations into the `modality` business source under the schema Modality declares: a change is a data update with a notification, read at the next use, never a reload (A16). The set of adapter plugins and the nodes OCR may run on are structural configuration in loader rows. No Timeline state, no `StateCell`; ordering of competing writes uses the record `revision` under the per-task lock.
+Task records are the only durable state; the index is rebuilt from them on `apply`, and non-terminal records are settled by the startup rule (§4). Running work and realtime connections are never rebuilt. Defaults live only in Provider. Modality settings, the OCR component path per node included, are business configuration ([ADR 002 D4](../../adr/002-plugin-scope.md)), written through Settings typed operations into the `modality` business source under the schema Modality declares: a change is a data update with a notification, read at the next use, never a reload (A16). The set of adapter plugins is structural configuration in loader rows; a "configured node" is a peer node the host already imports over a rutis link (structural link configuration, not Modality's), and which of them OCR uses is chosen per task by the caller. No Timeline state, no `StateCell`; ordering of competing writes uses the record `revision` under the per-task lock.
 
 ## 3. Flows
 
@@ -223,11 +223,12 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.6 Model context only from handed-over events | Modality writes nothing model-visible; a result reaches a model only as an ordinary input owned by another plugin. |
 | §4.7 Plugins interact only through public events and services | Modality uses Provider, Settings, `pluginFiles`, HostPlatform and `modalityAdapter` through their public services only. |
 | §4.8 Generic requirements to mechanism owners | The offline-node requirement is raised to rutis as [#5](https://github.com/arcships/dim/issues/5) (§9). |
+| §4.9 Only facts later decisions use enter the Timeline | Modality writes no Timeline event; task records stay in `pluginFiles`, the default model in Provider and settings in its Settings business source. |
 | §1 Capability and App Server boundary | Modality is a process plugin, not a Capability; its business code lives in its own package, and the App Server only collects its `managementMethods`. |
 | ADR 002 D1 Scope follows the owner | Tasks and provider connections are shared across Sessions, so Modality is process-scoped. |
 | ADR 002 D2 No wiring modules | Adapters are collected by service name and scope; no wiring module exists. |
 | ADR 002 D3 Dependencies follow scope | All dependencies are process services; adapter and Modality reloads propagate as accepted rare structural events. |
-| ADR 002 D4 Structural and business configuration | Adapter plugins and OCR nodes are loader rows; the OCR component path and limits are business configuration read at use time. |
+| ADR 002 D4 Structural and business configuration | Adapter plugins are loader rows and peer nodes come from the host's link configuration; the OCR component path per node and the limits are business configuration in the `modality` source, written through Settings and read at use time. |
 | ADR 002 D5 Language-neutral contracts | `modalityAdapter`, `modalityTasks` and the methods are given in neutral form; Appendix G is a binding only. |
 
 ## 9. Requirements raised to mechanism owners
@@ -236,6 +237,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | --- | --- | --- |
 | Services imported from a peer node stay registered while the link is down and fail calls with `node_unavailable` | rutis, [#5](https://github.com/arcships/dim/issues/5) | [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners); Modality needs it so an offline OCR node fails only its tasks and never reloads Modality or makes it Pending |
 | Runtime services exposed by name to non-Rust plugins | runtime, [#4](https://github.com/arcships/dim/issues/4) | [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); needed only for a TypeScript implementation of Modality |
+
+The Provider supplement (purpose policy, non-conversational connections), the Settings business source and the `pluginFiles` supplement are changes to other plugins, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
 
 ## Appendix A. Interface details
 
@@ -323,6 +326,7 @@ Records and result files use `pluginFiles` (extended): per-plugin root, UTF-8 an
 | --- | --- |
 | `dimcode modality` | Table of all categories and operations; unavailable ones marked with their reason; default models |
 | `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | `modality.configure` |
+| `dimcode modality settings [<key> [<value>]]` | Reads or writes the `modality` settings document (OCR component path per node, limits) through Settings' typed operations on that business source (Settings supplement); not a `modality.*` method |
 | `dimcode modality task list\|status\|wait\|cancel` | Task methods; `wait --out <path>` retrieves results |
 | `dimcode image generate\|edit\|enhance`, `video`, `speech synthesize\|transcribe`, `music`, `audio`, `asset`, `motion` | Submit; by default waits and writes results to `--out` or the current directory; `--no-wait` prints the id; `--json` prints the record |
 | `dimcode ocr <file> [--node <id>]` | Submit `ocr.recognize`; prints text |
@@ -403,15 +407,15 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A2 | Retention 30 days or 200 terminal tasks | Judgment | Disk use differs |
-| A3 | Purpose keys per category, per operation for speech, with per-operation override | Overview §5.14; judgment | Synthesis and transcription share one default |
+| A3 | Purpose keys per category, per operation for speech, with per-operation override | Overview §4; judgment | Synthesis and transcription share one default |
 | A4 | Operation parameters declared by adapters, validated at submission | Judgment | Fixed schema per operation |
 | A5 | 25 MiB per inline file, 100 MiB per submission | Judgment | Limits change |
 | A6 | At most 4 running tasks per category | Judgment | Other concurrency |
-| A7 | The CLI sends inputs inline and writes outputs; Modality writes only its storage root | Overview §5.14; judgment | Modality needs write access to caller paths |
+| A7 | The CLI sends inputs inline and writes outputs; Modality writes only its storage root | Overview §4; judgment | Modality needs write access to caller paths |
 | A8 | Ctrl+C during a CLI wait detaches rather than cancels | Judgment | Ctrl+C cancels costly tasks |
 | A9 | Realtime idle timeout 10 minutes | Judgment | Connections outlive clients |
 | A10 | Progress written at most once per second | Judgment | More storage writes |
-| A11 | `queued` tasks are not started after restart or reload | Overview §3 constraint 4, extended | Queued tasks start after restart |
+| A11 | `queued` tasks are not started after restart or reload | Overview §6.2 constraint 4, extended | Queued tasks start after restart |
 | A12 | A running provider task with a stored handle is resumed by polling (observation, not re-execution) | Decision E16 | All running tasks `interrupted` on restart |
 | A13 | No model-visible tool | Decision E16; feature list defines only CLI commands | A Session-scoped tool contribution must be designed |
 | A14 | OCR component runs with input read access and no network | Judgment; overview isolation supplement | Weaker isolation |
