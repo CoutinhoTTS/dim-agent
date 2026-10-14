@@ -203,7 +203,7 @@ Workflow 自身重载、依赖（Agents）重载或重启都会把运行结算�
 
 ## 7. 安全
 
-Workflow 没有宿主本地批准（[overview §6.4](../overview.md#64-约定)）。通过 `workflow` 工具启动运行是 agent 的动作，由 Approval 和 Permission 按该工具的风险类别管理（E2）。定义（用户、项目或插件）以及通过管理方法启动的运行，由该配置及其运维方自己负责：可用的定义无需批准即可运行。阶段 policy 遵循 3.3，定义只能收窄它。阶段 Session 只使用自身资源节点的服务。参数和结果会成为阶段 Session 和报告 Session 的 Timeline 内容；定义不得携带凭据。
+Workflow 没有宿主本地批准（[overview §6.4](../overview.md#64-约定)）。通过 `workflow` 工具启动运行是 agent 的动作，由 Approval 和 Permission 按该工具的风险类别管理（E2）。定义（用户、项目或插件）以及通过管理方法启动的运行，由该配置及其运维方自己负责：已启用的定义无需批准即可运行。项目定义默认关闭（[ADR 003 D3](../../adr/003-approval-scope.md#d3-启用是普通配置项目条目默认关闭)）：项目文件不能启用自己；启用状态存在用户的 Settings 业务来源 `workflow` 中，按工作区和定义名称记录，只由用户通过 Settings 的类型化写入操作修改（CLI 和 UI 建在其上）。因此打开含 `.dimcode/workflows/` 的仓库不会运行任何东西，直到用户启用某个定义；启用后，对文件的修改用于之后的运行，不再询问（ADR 003 D4）。阶段 policy 遵循 3.3，定义只能收窄它。阶段 Session 只使用自身资源节点的服务。参数和结果会成为阶段 Session 和报告 Session 的 Timeline 内容；定义不得携带凭据。
 
 ## 8. 规则检查
 
@@ -274,12 +274,12 @@ steps:
 
 | 动作 | 参数 | `ToolResult.content` |
 | --- | --- | --- |
-| `list` | — | 对调用方 cwd 可见的定义：名称、来源、描述、参数 |
+| `list` | — | 对调用方 cwd 可见的已启用定义：名称、来源、描述、参数 |
 | `start` | `name`、`source?`（先 `project`，再 `user`，再 `plugin`）、`params` | `{"run_id", "status": "running", "stages": [...]}`，并附一句说明结果会作为报告输入到达 |
 | `status` | `run_id` | 状态、各阶段状态、Session id、有界的结果预览、最近的日志条目 |
 | `stop` | `run_id` | 传播后的最终状态 |
 
-`start` 设置 `report_to = {session_id, branch_id}`，从调用方 Session 的配置取 `cwd`/`resource_node`，从起始方取 `policy_cap`（由 Agents 解析）。错误：`definition_not_found`、`invalid_definition`、`invalid_parameters`、`run_not_found`、`limit_exceeded`（A11）。
+`start` 设置 `report_to = {session_id, branch_id}`，从调用方 Session 的配置取 `cwd`/`resource_node`，从起始方取 `policy_cap`（由 Agents 解析）。错误：`definition_not_found`（用户未启用的项目定义也返回它）、`invalid_definition`、`invalid_parameters`、`run_not_found`、`limit_exceeded`（A11）。
 
 ### A.3 管理方法
 
@@ -287,8 +287,8 @@ steps:
 
 | 方法 | 参数 | 结果 | `mutating` |
 | --- | --- | --- | --- |
-| `workflow.list` | `cwd` | 定义及来源、问题 | 否 |
-| `workflow.save` | `source: user\|project`、`cwd?`、`document` | `{name}`；`user`：通过 Settings 类型化写入业务来源 `workflow`；`project`：经 Settings 的项目来源写入项目文件（文件权威） | 是 |
+| `workflow.list` | `cwd` | 定义及来源、启用状态、问题 | 否 |
+| `workflow.save` | `source: user\|project`、`cwd?`、`document` | `{name}`；`user`：通过 Settings 类型化写入业务来源 `workflow`；`project`：经 Settings 的项目来源写入项目文件（文件权威）；保存不会启用项目定义 | 是 |
 | `workflow.start` | `name`、`source?`、`cwd`、`resource_node?`、`params`、`report_to?` | `{run_id}`；`policy_cap` = 宿主配置最大值，默认只读 | 是 |
 | `workflow.status` | `run_id?` | 一次运行或最近的运行 | 否 |
 | `workflow.stop` | `run_id` | 运行的最终状态 | 是 |
@@ -356,7 +356,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 报告时起始方 Session 已卸载 | — | `sessions.input` 先恢复它，再写入 | Agents |
 | 运行中进程重启 | — | `interrupted`/`lost`；已提交但未消费的阶段输入留在各自 Session 中 | Workflow |
 | 报告写入结果不确定（重载、发布未知） | — | 重试前查询；绝不产生两份报告 | Workflow |
-| 启动后项目定义被编辑 | — | 运行保留其快照；之后的阶段使用该快照 | Workflow |
+| 启动后项目定义被编辑 | — | 运行保留其快照；之后的阶段使用该快照；已启用定义的之后运行直接使用修改后的文件，不再询问（ADR 003 D4） | Workflow |
 | 客户端断开 | — | 无影响 | — |
 
 ## 附录 C. 错误与恢复
@@ -381,7 +381,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 3. 停止：等待中的阶段 `skipped`，被持有的输入被删除（`input/deleted`），已应用或运行中的阶段被中断，运行 `stopped`，无报告；重复停止幂等。
 4. 与阶段 `turn/end` 竞争的停止保留已完成的结果。
 5. 起始方轮次中断不停止运行；起始方分支关闭 → `undeliverable`。
-6. `.dimcode/workflows/` 中的项目定义无需任何批准即可启动；启动后编辑它不改变运行中的快照。
+6. `.dimcode/workflows/` 中的项目定义：打开工作区后列为关闭，`start` 返回 `definition_not_found`；用户通过 Settings 类型化写入启用后无需任何批准即可启动；启动后编辑它不改变运行中的快照，下一次运行直接使用修改，不再询问。
 7. 重启、Workflow 重载和 Agents 重载：`interrupted`/`lost`，不重新启动，恰好一份报告。
 8. Policy：WorkspaceWrite 下工具启动 → 阶段最多 WorkspaceWrite；管理启动 → 默认 ReadOnly；ReadOnly 下 `workflow` 被拒。
 9. 每个阶段（包括并行阶段）都在自己启动的非交互 Session 中运行；未声明 `agent` 的阶段使用 Agents 的默认 profile。
@@ -393,7 +393,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | --- | --- | --- | --- |
 | A1 | 定义每次调用时读取，不缓存 | 判断（文件权威） | 带变更检测的缓存 |
 | A2 | YAML，带 `schema: dim.workflow/v1` | 判断 | 其他语法 |
-| A3 | 用户保存的定义是 Settings 业务来源 `workflow` 中的文档，每个名称一份 | 用户决定（第二轮 R7） | 存为 dim home 下的文件 |
+| A3 | 用户保存的定义是 Settings 业务来源 `workflow` 中的文档，每个名称一份；项目定义按工作区和名称的启用状态也存于该来源 | 用户决定（第二轮 R7）；[ADR 003](../../adr/003-approval-scope.md) D3 | 存为 dim home 下的文件 |
 | A4 | 阶段或并行组（≤ 32 步，每组 ≤ 8）；快速失败 | 功能清单（“stages”）；限制为判断 | 每阶段的失败策略 |
 | A5 | 模型优先级：阶段 > profile > purpose `workflow.stage` | [Overview §4](../overview.md#4-插件目录)；优先级为判断 | 其他优先级 |
 | A6 | 渲染后提示词 ≤ 32 KiB；存储结果 ≤ 64 KiB | 判断 | 其他上限 |

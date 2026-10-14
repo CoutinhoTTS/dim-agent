@@ -203,7 +203,7 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 
 ## 7. Security
 
-Workflow has no host-local approval ([overview §6.4](../overview.md#64-conventions)). Starting a run from the `workflow` tool is an agent action, so Approval and Permission govern it through the tool's risk category (E2). A definition (user, project or plugin) and a run started through a management method are the responsibility of that configuration and its operator: an available definition runs without approval. Stage policy follows 3.3 and a definition can only narrow it. Stage Sessions use only their own resource node's services. Params and results become Timeline content of stage and report Sessions; definitions must not carry credentials.
+Workflow has no host-local approval ([overview §6.4](../overview.md#64-conventions)). Starting a run from the `workflow` tool is an agent action, so Approval and Permission govern it through the tool's risk category (E2). A definition (user, project or plugin) and a run started through a management method are the responsibility of that configuration and its operator: an enabled definition runs without approval. Project definitions start disabled ([ADR 003 D3](../../adr/003-approval-scope.md#d3-enablement-is-ordinary-configuration-project-entries-start-disabled)): a project file cannot enable itself; the enabled state lives in the user's Settings business source `workflow`, keyed by workspace and definition name, and is changed only by the user through Settings' typed write operation (CLI and UI build on it). Opening a repository with `.dimcode/workflows/` therefore runs nothing until the user enables a definition; after that, edits to the file apply to later runs without asking again (ADR 003 D4). Stage policy follows 3.3 and a definition can only narrow it. Stage Sessions use only their own resource node's services. Params and results become Timeline content of stage and report Sessions; definitions must not carry credentials.
 
 ## 8. Rule check
 
@@ -274,12 +274,12 @@ Validation happens at the external boundary (source read, `workflow.save`, `star
 
 | Action | Parameters | `ToolResult.content` |
 | --- | --- | --- |
-| `list` | — | Definitions visible for the caller's cwd: name, source, description, parameters |
+| `list` | — | Enabled definitions visible for the caller's cwd: name, source, description, parameters |
 | `start` | `name`, `source?` (`project`, then `user`, then `plugin`), `params` | `{"run_id", "status": "running", "stages": [...]}` and a sentence that the result arrives as a report input |
 | `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
 | `stop` | `run_id` | Final state after propagation |
 
-`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the calling Session's configuration, and `policy_cap` from the starter (resolved by Agents). Errors: `definition_not_found`, `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
+`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the calling Session's configuration, and `policy_cap` from the starter (resolved by Agents). Errors: `definition_not_found` (also for a project definition the user has not enabled), `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
 
 ### A.3 Management methods
 
@@ -287,8 +287,8 @@ Validation happens at the external boundary (source read, `workflow.save`, `star
 
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
-| `workflow.list` | `cwd` | Definitions with source and issues | no |
-| `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name}`; `user`: Settings typed write into the business source `workflow`; `project`: the project file, through Settings' project source (file authority) | yes |
+| `workflow.list` | `cwd` | Definitions with source, enabled state and issues | no |
+| `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name}`; `user`: Settings typed write into the business source `workflow`; `project`: the project file, through Settings' project source (file authority); saving does not enable a project definition | yes |
 | `workflow.start` | `name`, `source?`, `cwd`, `resource_node?`, `params`, `report_to?` | `{run_id}`; `policy_cap` = host configuration maximum, default read-only | yes |
 | `workflow.status` | `run_id?` | One run or recent runs | no |
 | `workflow.stop` | `run_id` | Final run state | yes |
@@ -356,7 +356,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | Starter Session unloaded at report time | — | `sessions.input` restores it, then writes | Agents |
 | Process restart mid-run | — | `interrupted`/`lost`; committed unconsumed stage inputs stay in their Sessions | Workflow |
 | Report write uncertain (reload, publication unknown) | — | Lookup before retry; never two reports | Workflow |
-| Project definition edited after start | — | Run keeps its snapshot; later stages use the snapshot | Workflow |
+| Project definition edited after start | — | Run keeps its snapshot; later stages use the snapshot; later runs of an enabled definition use the edited file without asking again (ADR 003 D4) | Workflow |
 | Client detach | — | No effect | — |
 
 ## Appendix C. Errors and recovery
@@ -381,7 +381,7 @@ Through the tool, management methods and Session history reads:
 3. Stop: waiting stages `skipped`, held input deleted (`input/deleted`), applied or running stage interrupted, run `stopped`, no report; repeated stop idempotent.
 4. Stop racing a stage `turn/end` keeps the completed result.
 5. Starter turn interrupt does not stop the run; starter branch closed → `undeliverable`.
-6. Project definition in `.dimcode/workflows/` starts without any approval step; editing it after start leaves the running run's snapshot unchanged.
+6. Project definition in `.dimcode/workflows/`: after opening the workspace it is listed disabled and `start` returns `definition_not_found`; after the user enables it through a Settings typed write it starts without any approval step; editing it after start leaves the running run's snapshot unchanged, and the next run uses the edit without asking.
 7. Restart, Workflow reload and Agents reload: `interrupted`/`lost`, no relaunch, exactly one report.
 8. Policy: tool start under WorkspaceWrite → stages at most WorkspaceWrite; management start → ReadOnly by default; `workflow` denied under ReadOnly.
 9. Every stage, parallel ones included, runs in its own launched non-interactive Session; a stage without `agent` runs with Agents' default profile.
@@ -393,7 +393,7 @@ Through the tool, management methods and Session history reads:
 | --- | --- | --- | --- |
 | A1 | Definitions read per call, not cached | Judgment (file authority) | Cache with change detection |
 | A2 | YAML with `schema: dim.workflow/v1` | Judgment | Other syntax |
-| A3 | User-saved definitions are documents in the Settings business source `workflow`, one per name | User decision (round 2 R7) | Files under the dim home |
+| A3 | User-saved definitions are documents in the Settings business source `workflow`, one per name; the same source holds the enabled state of project definitions per workspace and name | User decision (round 2 R7); [ADR 003](../../adr/003-approval-scope.md) D3 | Files under the dim home |
 | A4 | Stages or parallel groups (≤ 32 steps, ≤ 8 per group); fail-fast | Feature list ("stages"); limits judgment | Per-stage failure policies |
 | A5 | Model precedence: stage > profile > purpose `workflow.stage` | [Overview §4](../overview.md#4-plugin-catalog); precedence judgment | Other precedence |
 | A6 | Rendered prompt ≤ 32 KiB; stored result ≤ 64 KiB | Judgment | Other bounds |

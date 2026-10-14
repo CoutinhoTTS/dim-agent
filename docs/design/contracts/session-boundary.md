@@ -264,7 +264,7 @@ Sources: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS`, `Call::
 | `provider.*` | `managementMethods` | Provider (`provider`) |
 | `skills.catalog/set_enabled/refresh` | `managementMethods` | SkillsCatalog (`skills`) |
 | `mcp.catalog/set_enabled/save/remove/disconnect` | `managementMethods` | Mcp (`mcp`) |
-| `mcp.approve/revoke` | Removed in a follow-up code change (no host-local approval; stdio servers launch when enabled) | — |
+| `mcp.approve/revoke` | Removed in a follow-up code change (no host-local approval; servers run when enabled; project entries start disabled; [ADR 003](../../adr/003-approval-scope.md)) | — |
 | `daemon.shutdown` | Rpc built-in, reply handoff; never served to a connection with a `deviceId` | — |
 | `hello`, `daemon.ping`, `agent.*`, existing `session.*`, `approval.respond` | Rpc built-ins | — |
 | New `session.input.withdraw` | `sessionMethods` | InputQueue (`session.input`) |

@@ -344,7 +344,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 | A5 | No Session content unless `includeContent`; excerpt 500 characters | Judgment | Content always or never included |
 | A6 | `notify` parameters | Judgment | Different schema |
 | A7 | Label = metadata title if available, else Session id | Judgment | Other labels |
-| A8 | Channels configurable only in user scope | Judgment | Project configuration could name channels; where messages go is then that configuration's own responsibility, with no approval step |
+| A8 | Channels configurable only in user scope | Judgment | Project configuration could name channels; they would start disabled until the user enables them ([ADR 003](../../adr/003-approval-scope.md) D3), with no approval step |
 | A9 | The channel test is the Session method `notifications.test`, not a management method | Maintainer decision | A management method would need a process part |
 | A10 | Retry 3 attempts (1/4/16 s); 20 messages per minute per channel per Session | Judgment | Other policies |
 | A11 | No follow-up when a pending item resolves after notification | Judgment | Extra messages |

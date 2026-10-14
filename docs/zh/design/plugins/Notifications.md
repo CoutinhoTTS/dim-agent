@@ -344,7 +344,7 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | A5 | 除非 `includeContent`，否则不含 Session 内容；摘录 500 个字符 | 判断 | 内容总是或从不包含 |
 | A6 | `notify` 参数 | 判断 | 不同的 schema |
 | A7 | 标签 = 有元数据标题时取标题，否则取 Session id | 判断 | 其他标签 |
-| A8 | 渠道只能在用户作用域配置 | 判断 | 项目配置可以指定渠道；消息发往哪里由该配置自己负责，没有批准步骤 |
+| A8 | 渠道只能在用户作用域配置 | 判断 | 项目配置可以指定渠道；它们默认关闭，直到用户启用（[ADR 003](../../adr/003-approval-scope.md) D3），没有批准步骤 |
 | A9 | 渠道测试是 Session 方法 `notifications.test`，不是管理方法 | 维护者决定 | 管理方法需要进程部件 |
 | A10 | 重试 3 次（1/4/16 s）；每个 Session 每个渠道每分钟 20 条消息 | 判断 | 其他策略 |
 | A11 | 通知后待处理项被解决时不发后续消息 | 判断 | 额外消息 |

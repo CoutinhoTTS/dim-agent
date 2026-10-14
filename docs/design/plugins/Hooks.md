@@ -215,12 +215,12 @@ Non-interactive Sessions: identical, except that Session-start Hooks run only fo
 | Before callback on `step/tool-call` | Branch Timeline registration by `HooksBranch` | Run `pre_tool_use` Hooks; mark denied calls `skip` |
 | Before callback on `input/message` | Branch Timeline registration by `HooksBranch` | Run `user_prompt_submit` Hooks; add context blocks, or append `input/withdraw {input_id, reason?}` |
 | `hooks.catalog {sessionId}` | `sessionMethods` key `hooks` | Effective Hooks of the Session with their enabled state |
-| `hooks` document | Settings business source | User Hooks, `disable_all`, enable overrides |
+| `hooks` document | Settings business source | User Hooks, `disable_all`, enable overrides (project Hooks keyed by workspace and Hook ID) |
 | Configuration format, command protocol | Defined here | Appendix A |
 
 ## 7. Security
 
-Hook commands run because of user or project configuration, not because of an agent decision, so they are outside Approval and Permission, which govern only agent-initiated actions such as tool calls ([overview §6.4](../overview.md#64-conventions)). Every enabled Hook runs, whatever its source (user, project file or plugin); its security is that of the configuration that declares it, and there is no approval, grant or fingerprint. Enabling and disabling (per Hook, per source through `disable_all`) is plain configuration. Commands run on the Session's resource node with that node's isolation applied by HostPlatform; a Hook is not admitted by Permission and never widens authority: no outcome admits a call that Permission or the user denied, and no output edits tool input or the user's input text (a pre-tool Hook only marks a call skipped; a prompt-submit Hook only adds attributed blocks or withdraws the input). The callbacks change only the draft they hold and append only `input/withdraw` to its batch (A.4). stdin may contain prompts and tool input; diagnostics keep only Hook id, exit status, duration and a bounded stderr excerpt.
+Hook commands run because of user or project configuration, not because of an agent decision, so they are outside Approval and Permission, which govern only agent-initiated actions such as tool calls ([overview §6.4](../overview.md#64-conventions)). Every enabled Hook runs, whatever its source (user, project file or plugin); its security is that of the configuration that declares it, and there is no approval, grant or fingerprint. Enabling and disabling (per Hook, per source through `disable_all`) is plain configuration. Project Hooks start disabled ([ADR 003 D3](../../adr/003-approval-scope.md#d3-enablement-is-ordinary-configuration-project-entries-start-disabled)): the project file's own `enabled` field cannot enable them; their enabled state lives in the user's `hooks` document keyed by workspace and Hook ID and is changed only by the user through the Settings operation (A9). Opening a repository with `.dimcode/hooks.json` runs none of its Hooks until the user enables them; after that, edits to an enabled Hook's command in the file take effect at the next execution point without asking again (ADR 003 D4). Commands run on the Session's resource node with that node's isolation applied by HostPlatform; a Hook is not admitted by Permission and never widens authority: no outcome admits a call that Permission or the user denied, and no output edits tool input or the user's input text (a pre-tool Hook only marks a call skipped; a prompt-submit Hook only adds attributed blocks or withdraws the input). The callbacks change only the draft they hold and append only `input/withdraw` to its batch (A.4). stdin may contain prompts and tool input; diagnostics keep only Hook id, exit status, duration and a bounded stderr excerpt.
 
 ## 8. Rule check
 
@@ -286,7 +286,7 @@ One JSON document per source, the same shape for user configuration (`hooks` doc
 | `command` | string | Run by the node's execution shell with `SessionConfig.cwd` as working directory (A8) |
 | `timeout_ms` | integer 100..=600000 | Default 60000 (A10) |
 | `on_error` | `allow` \| `deny` | Only `pre_tool_use` (default `deny`) and `user_prompt_submit` (default `allow`, A27) |
-| `enabled` | bool | Default `true` |
+| `enabled` | bool | Default `true` in user configuration; ignored in the project file, whose Hooks start disabled (A9) |
 
 Invalid entries are listed `invalid` and never run. Order per event: user, project, plugin sources, then document order (A12).
 
@@ -337,7 +337,7 @@ Served through `sessionMethods` key `hooks` (`describe(): async -> MethodDecl[]`
 | --- | --- |
 | `{sessionId}` | Hooks per source: `id`, `source`, `event`, matcher, `command`, `enabled`, `invalid?`; global `disabled` |
 
-Enabling, disabling and `disable_all` are typed Settings operations on the `hooks` document (A9); there is no approval.
+Enabling, disabling and `disable_all` are typed Settings operations on the `hooks` document, made only by the user (A9); there is no approval.
 
 ### A.6 Mechanics
 
@@ -402,7 +402,7 @@ These two contract changes are listed in [overview Appendix B.1](../overview.md#
 | Compaction | — | Session-start keyed blocks replayed; others via summary | History projection |
 | Child branch cut between Hook input and consumption | input < cut < consumed | Child does not adopt it; not re-run | InputQueue |
 | Child branch | — | Its own `HooksBranch` and callbacks | Hooks |
-| Hook disabled or file edited while a Hook runs | — | Running process finishes; later executions follow the new state | Hooks |
+| Hook disabled or file edited while a Hook runs | — | Running process finishes; later executions follow the new state; an enabled project Hook's edited command runs without asking again (ADR 003 D4) | Hooks |
 | Hooks or Settings reload | — | Only Hooks parts reload; pending callbacks commit their fallback drafts; writes and events in the window pass without Hooks (D3, A31) | Timeline, Lifecycle |
 | Session restore or unload | — | Session start not re-run once a turn or session-start input exists (A25) | Hooks |
 | Session created by launch, Collaboration or fork | `createdBy.kind` ≠ `"client"` | No Session start | Hooks |
@@ -427,7 +427,7 @@ These two contract changes are listed in [overview Appendix B.1](../overview.md#
 2. Pre-tool deny in a three-call batch: the committed `step/tool-call` holds all three calls, the denied one with `skip {reason}`; no `approval/request` and no execution for it; ToolExecutor's one batch `step/tool-result` carries its error and the other two results; Hooks writes no `step/tool-result`. All three denied: all skipped, a batch result of errors, Loop continues.
 3. `stop/interrupt` during a pre-tool Hook: the fallback draft commits at once with calls not yet allowed skipped (`Hooks did not finish`); the process is terminated; the interrupt commits right after the batch.
 4. `HooksBranch` unload during a pre-tool Hook: the write commits with calls not yet allowed skipped; no write fails and the turn does not end `Failed` because of Hooks.
-5. Project Hook in `.dimcode/hooks.json`: runs when enabled, with no approval step; stops after the file changes or when disabled; `hooks.catalog` shows no approval state.
+5. Project Hook in `.dimcode/hooks.json`: opening the workspace runs nothing and `hooks.catalog` lists it disabled; `enabled: true` in the file changes nothing; after the user enables it in user configuration it runs with no approval step; a later edit of its command in the file takes effect at the next execution point without asking; it stops when disabled; `hooks.catalog` shows no approval state.
 6. Session-start context survives compaction; not run on restore or for launched, member or forked Sessions.
 7. Post-tool context after a consumed interrupt is not written; follow-up stops at the limit, after consumed user input, and ignores deleted follow-ups.
 8. Editing rules or `disable_all` takes effect at the next execution point without a reload.
@@ -443,7 +443,7 @@ These two contract changes are listed in [overview Appendix B.1](../overview.md#
 | A5 | Tool name patterns with `*` glob only | Judgment | Regex matching |
 | A6 | Project file re-read at each execution point | Judgment | A watcher is needed |
 | A8 | Node shell in Session cwd, base environment plus three variables, no `env` | Judgment | Env configuration with references |
-| A9 | Enable overrides for project and plugin Hooks are Settings business data; enabling is plain configuration, unrelated to approval | Judgment; [overview §6.4](../overview.md#64-conventions) | Only user Hooks can be disabled individually |
+| A9 | Enable overrides for project and plugin Hooks are Settings business data in user configuration; project Hooks start disabled and are enabled per workspace and Hook ID only by the user; enabling is plain configuration, unrelated to approval | [ADR 003](../../adr/003-approval-scope.md) D3; [overview §6.4](../overview.md#64-conventions) | Only user Hooks can be disabled individually |
 | A10 | Default timeout 60 s, range 0.1–600 s | Judgment | Values change |
 | A12 | Order: user, project, plugin, document order | Judgment | Other ordering |
 | A13 | stdout JSON or plain text; 64 KiB stdout, 16 KiB per output | Judgment | Limits change |

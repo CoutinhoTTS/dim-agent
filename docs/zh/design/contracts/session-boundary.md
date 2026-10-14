@@ -264,7 +264,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 | `provider.*` | `managementMethods` | Provider（`provider`） |
 | `skills.catalog/set_enabled/refresh` | `managementMethods` | SkillsCatalog（`skills`） |
 | `mcp.catalog/set_enabled/save/remove/disconnect` | `managementMethods` | Mcp（`mcp`） |
-| `mcp.approve/revoke` | 在后续代码变更中删除（没有宿主本地批准；stdio 服务启用即启动） | — |
+| `mcp.approve/revoke` | 在后续代码变更中删除（没有宿主本地批准；启用即运行；项目条目默认关闭；[ADR 003](../../../adr/003-approval-scope.md)） | — |
 | `daemon.shutdown` | Rpc 内建方法，回复 handoff；从不提供给带 `deviceId` 的连接 | — |
 | `hello`、`daemon.ping`、`agent.*`、现有 `session.*`、`approval.respond` | Rpc 内建方法 | — |
 | 新的 `session.input.withdraw` | `sessionMethods` | InputQueue（`session.input`） |

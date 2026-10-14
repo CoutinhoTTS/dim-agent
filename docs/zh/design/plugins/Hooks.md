@@ -215,12 +215,12 @@ sequenceDiagram
 | `step/tool-call` 上的 before 回调 | 由 `HooksBranch` 在分支 Timeline 上注册 | 运行 `pre_tool_use` Hook；给被拒绝的调用标记 `skip` |
 | `input/message` 上的 before 回调 | 由 `HooksBranch` 在分支 Timeline 上注册 | 运行 `user_prompt_submit` Hook；添加 context 块，或追加 `input/withdraw {input_id, reason?}` |
 | `hooks.catalog {sessionId}` | `sessionMethods` key `hooks` | Session 的有效 Hook 及其启用状态 |
-| `hooks` 文档 | Settings 业务来源 | 用户 Hook、`disable_all`、启用覆盖 |
+| `hooks` 文档 | Settings 业务来源 | 用户 Hook、`disable_all`、启用覆盖（项目 Hook 按工作区和 Hook ID 记录） |
 | 配置格式、命令协议 | 本文定义 | 附录 A |
 
 ## 7. 安全
 
-Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，因此不属于 Approval 与 Permission 的范围；它们只管 agent 决策引起的动作，例如工具调用（[overview §6.4](../overview.md)）。每个已启用的 Hook 都会运行，不论来源（用户、项目文件或插件）；它的安全由声明它的配置负责，没有批准、授权或指纹。启用与禁用（按 Hook，或用 `disable_all` 按来源）是普通配置。命令在 Session 的资源节点上运行，由 HostPlatform 应用该节点的隔离；Hook 不经 Permission 准入，也从不扩大权限：任何结果都不会准入 Permission 或用户已拒绝的调用，任何输出都不会编辑工具输入或用户的输入文本（工具前 Hook 只把调用标记为跳过；提示提交 Hook 只添加带归属的块或撤回该输入）。回调只修改其持有的草稿，并只向其批次追加 `input/withdraw`（A.4）。stdin 可能包含提示与工具输入；诊断只保留 Hook id、退出状态、耗时与有界的 stderr 摘录。
+Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，因此不属于 Approval 与 Permission 的范围；它们只管 agent 决策引起的动作，例如工具调用（[overview §6.4](../overview.md)）。每个已启用的 Hook 都会运行，不论来源（用户、项目文件或插件）；它的安全由声明它的配置负责，没有批准、授权或指纹。启用与禁用（按 Hook，或用 `disable_all` 按来源）是普通配置。项目 Hook 默认关闭（[ADR 003 D3](../../adr/003-approval-scope.md#d3-启用是普通配置项目条目默认关闭)）：项目文件自己的 `enabled` 字段不能启用它们；启用状态存在用户的 `hooks` 文档中，按工作区和 Hook ID 记录，只由用户通过 Settings 操作修改（A9）。打开含 `.dimcode/hooks.json` 的仓库不会运行其中任何 Hook，直到用户启用；启用后，文件里对该 Hook 命令的修改在下一个执行点生效，不再询问（ADR 003 D4）。命令在 Session 的资源节点上运行，由 HostPlatform 应用该节点的隔离；Hook 不经 Permission 准入，也从不扩大权限：任何结果都不会准入 Permission 或用户已拒绝的调用，任何输出都不会编辑工具输入或用户的输入文本（工具前 Hook 只把调用标记为跳过；提示提交 Hook 只添加带归属的块或撤回该输入）。回调只修改其持有的草稿，并只向其批次追加 `input/withdraw`（A.4）。stdin 可能包含提示与工具输入；诊断只保留 Hook id、退出状态、耗时与有界的 stderr 摘录。
 
 ## 8. 规则检查
 
@@ -286,7 +286,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 | `command` | string | 由节点的执行 shell 以 `SessionConfig.cwd` 为工作目录运行（A8） |
 | `timeout_ms` | integer 100..=600000 | 默认 60000（A10） |
 | `on_error` | `allow` \| `deny` | 仅用于 `pre_tool_use`（默认 `deny`）与 `user_prompt_submit`（默认 `allow`，A27） |
-| `enabled` | bool | 默认 `true` |
+| `enabled` | bool | 用户配置中默认 `true`；项目文件中忽略，项目 Hook 默认关闭（A9） |
 
 无效条目列为 `invalid`，从不运行。每个事件内的顺序：用户、项目、插件来源，然后按文档顺序（A12）。
 
@@ -337,7 +337,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 | --- | --- |
 | `{sessionId}` | 按来源列出的 Hook：`id`、`source`、`event`、匹配器、`command`、`enabled`、`invalid?`；全局 `disabled` |
 
-启用、禁用与 `disable_all` 是对 `hooks` 文档的类型化 Settings 操作（A9）；没有批准。
+启用、禁用与 `disable_all` 是对 `hooks` 文档的类型化 Settings 操作，只由用户执行（A9）；没有批准。
 
 ### A.6 机制
 
@@ -402,7 +402,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 | 压缩 | — | Session 启动的带 key 块被重放；其他经摘要 | 历史投影 |
 | 子分支切分位于 Hook 输入与消费之间 | 输入 < 切分 < 消费 | 子分支不采用它；不重新运行 | InputQueue |
 | 子分支 | — | 有自己的 `HooksBranch` 与回调 | Hooks |
-| Hook 运行期间被禁用或文件被编辑 | — | 运行中的进程完成；之后的执行遵循新状态 | Hooks |
+| Hook 运行期间被禁用或文件被编辑 | — | 运行中的进程完成；之后的执行遵循新状态；已启用的项目 Hook 修改后的命令直接运行，不再询问（ADR 003 D4） | Hooks |
 | Hooks 或 Settings 重载 | — | 只重载 Hooks 部件；挂起的回调提交兜底草稿；窗口期内的写入与事件不经 Hooks 直接通过（D3，A31） | Timeline、Lifecycle |
 | Session 恢复或卸载 | — | 一旦存在 turn 或 session-start 输入，Session 启动不再重新运行（A25） | Hooks |
 | 由 launch、Collaboration 或 fork 创建的 Session | `createdBy.kind` ≠ `"client"` | 无 Session 启动 | Hooks |
@@ -427,7 +427,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 2. 三个调用的批次中工具前拒绝：已提交的 `step/tool-call` 含全部三个调用，被拒绝的那个带 `skip {reason}`；它没有 `approval/request`，也不执行；ToolExecutor 的一个批次 `step/tool-result` 含它的错误与另外两个结果；Hooks 不写 `step/tool-result`。三个全被拒绝：全部被跳过，批次结果只含错误，Loop 继续。
 3. 工具前 Hook 运行期间 `stop/interrupt`：进程立即被终止；未决定的调用标记为未执行而被跳过；中断紧随批次之后提交。
 4. 工具前 Hook 运行期间 `HooksBranch` 卸载：写入提交，尚未允许的调用被跳过；没有写入失败，turn 不因 Hooks 以 `Failed` 结束。
-5. `.dimcode/hooks.json` 中的项目 Hook：启用即运行，没有批准步骤；文件变更或被禁用后停止运行；`hooks.catalog` 不显示批准状态。
+5. `.dimcode/hooks.json` 中的项目 Hook：打开工作区不运行任何命令，`hooks.catalog` 列为关闭；文件中写 `enabled: true` 不起作用；用户在用户配置中启用后即运行，没有批准步骤；之后文件中命令的修改在下一个执行点生效，不再询问；禁用后停止；`hooks.catalog` 不显示批准状态。
 6. Session 启动 context 在压缩后保留；恢复时以及对 launch 启动、成员或 fork 的 Session 不运行。
 7. 已消费的中断之后，工具后 context 不被写入；后续在达到上限时、在已消费的用户输入之后停止，并忽略已删除的后续。
 8. 编辑规则或 `disable_all` 在下一个执行点生效，无需重载。
@@ -443,7 +443,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 | A5 | 工具名模式只支持 `*` 通配 | 判断 | 正则匹配 |
 | A6 | 每个执行点重新读取项目文件 | 判断 | 需要文件监视 |
 | A8 | 在 Session cwd 中使用节点 shell，基础环境加三个变量，无 `env` | 判断 | 带引用的环境配置 |
-| A9 | 项目与插件 Hook 的启用覆盖是 Settings 业务数据；启用是普通配置，与批准无关 | 判断；[overview §6.4](../overview.md) | 只能单独禁用用户 Hook |
+| A9 | 项目与插件 Hook 的启用覆盖是用户配置中的 Settings 业务数据；项目 Hook 默认关闭，只由用户按工作区和 Hook ID 启用；启用是普通配置，与批准无关 | [ADR 003](../../adr/003-approval-scope.md) D3；[overview §6.4](../overview.md) | 只能单独禁用用户 Hook |
 | A10 | 默认超时 60 s，范围 0.1–600 s | 判断 | 取值改变 |
 | A12 | 顺序：用户、项目、插件、文档顺序 | 判断 | 其他顺序 |
 | A13 | stdout 为 JSON 或纯文本；stdout 64 KiB，每项输出 16 KiB | 判断 | 限制改变 |
