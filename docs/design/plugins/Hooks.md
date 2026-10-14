@@ -1,8 +1,8 @@
 # Hooks
 
-Status: Draft. Overall design: [overview §5.7](../overview.md#57-hooks). Phase: P2 (user and project sources); plugin source after #3. Language: Rust.
+Status: Draft. Overall design: [overview B.7](../overview.md#b7-hooks). Phase: P2 (user and project sources); plugin source after #3. Language: Rust.
 
-Hooks is an adapter that maps command Hook configuration onto extension points that other owners define; it adds no extension mechanism and no Timeline event. Pre-tool Hooks implement Approval's admission check, user-submit Hooks implement Rpc's submission filter in phase `policy`, Session-start Hooks implement an Agents Session-created observer, and post-tool, turn-end and notification Hooks run after the live [Session broadcast subscription](../contracts/session-broadcast-subscription.md). Every command runs on the Session's resource node through [`SessionResources`](../contracts/session-access.md), resolved per call; output enters context only as input.
+Hooks is an adapter that maps command Hook configuration onto extension points that other owners define; it adds no extension mechanism and no Timeline event. Pre-tool Hooks implement Approval's admission check and user-submit Hooks implement the single [`submission-admission`](../contracts/session-boundary.md) point; Session-start, post-tool, turn-end and notification Hooks run after notices of the live [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (Session start after the `Created` notice). Every command runs on the Session's resource node (`SessionConfig.resource_node`), whose services are looked up per call through the `node-services` point of the [extension registry](../contracts/extension-registry.md); output enters context only as input.
 
 ## 1. Structure
 
@@ -12,21 +12,19 @@ flowchart LR
     Catalog["Catalog and matcher"]
     Runner["Command runner"]
     Observer["Observation workers per branch"]
-    Mounts["Registry mounts: admission, filter, created-observer, management"]
+    Mounts["Registry mounts: admission check, submission admission, methods"]
   end
   AdmReg["Admission check registry (Approval)"]
-  FilterReg["SubmissionFilter registry (Rpc)"]
-  CreatedReg["Session-created observers (Agents)"]
-  MgmtReg["ManagementContribution (Management)"]
-  Events["SessionEvents"]
-  Access["SessionAccess and SessionFacts"]
-  Res["SessionResources (per call)"]
+  FilterReg["submission-admission point"]
+  MgmtReg["Method contribution registry, level management"]
+  Events["Session broadcast subscription: Created and events"]
+  Access["SessionAccess, config"]
+  Res["node-services by node id (per call)"]
   Approvals["Host-local approval service (Settings)"]
   Settings["Typed Settings operations"]
   Contents["PluginContents type hooks"]
   Mounts --> AdmReg
   Mounts --> FilterReg
-  Mounts --> CreatedReg
   Mounts --> MgmtReg
   Observer --> Events
   Observer --> Access
@@ -38,16 +36,16 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
   class Catalog,Runner,Observer,Mounts new
-  class AdmReg,FilterReg,CreatedReg,MgmtReg,Events,Access,Res,Approvals,Contents contract
+  class AdmReg,FilterReg,MgmtReg,Events,Access,Res,Approvals,Contents contract
 ```
 
-Hooks only contributes to registries owned by their consumers ([extension-registry](../contracts/extension-registry.md)); Approval, Rpc and Agents never inject Hooks and never reload because of it. Project files and process execution go through `SessionResources`, so an offline resource node affects only calls on that node.
+Hooks only contributes to registries owned by their consumers ([extension-registry](../contracts/extension-registry.md)); Approval and Rpc never inject Hooks and never reload because of it. Project files and process execution go through the node services of the Session's resource node, resolved per call, so an offline node affects only calls on that node.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `HooksPlugin` | Process | `SessionEvents`, `SessionAccess` (facts, prefix reads, writes), `SessionResources`, Settings typed operations and host-local approval service, `When<PluginContents>` (type key `hooks`) | Mount instances: admission check `hooks` (Approval registry), submission filter `hooks` phase `policy` (Rpc registry, [session-boundary](../contracts/session-boundary.md)), Session-created observer `hooks` (Agents, session-boundary), management contribution `hooks` |
+| `HooksPlugin` | Process | Session broadcast subscription, `SessionAccess` (`config`, prefix reads, writes), `node-services` lookup, Settings typed operations and host-local approval service, `When<PluginContents>` (type key `hooks`) | Mount instances: admission check `hooks` (Approval registry), submission admission `hooks` ([session-boundary](../contracts/session-boundary.md)), method namespace `hooks` at level `management` |
 
-**Contracts depended on** (none names Hooks): the admission check registry (Approval; [extension-registry](../contracts/extension-registry.md)), the submission filter registry with phases and the Session-created observer registry ([session-boundary](../contracts/session-boundary.md)), [session-access](../contracts/session-access.md) (`SessionAccess`, `SessionFacts`, `SessionResources`, per-block relay attribution), [session-broadcast-subscription](../contracts/session-broadcast-subscription.md), [Management](Management.md) contribution, Settings typed operations and host-local approval service (overview §7.2), `PluginContents` (PluginManager, optional). **Contracts defined here**: the Hook configuration format, the command protocol, the `hooks.*` management methods, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks does not define the admission or filter contracts; it only implements them.
+**Contracts depended on** (none names Hooks): the admission check registry (Approval; [extension-registry](../contracts/extension-registry.md)), the `submission-admission` point and the method contribution ([session-boundary](../contracts/session-boundary.md)), [session-access](../contracts/session-access.md) (`SessionAccess`, `config`, per-block relay attribution), [session-broadcast-subscription](../contracts/session-broadcast-subscription.md) (`Created` notice), `node-services` ([extension-registry](../contracts/extension-registry.md)), Settings typed operations and host-local approval service (overview §7.2), `PluginContents` (PluginManager, optional). **Contracts defined here**: the Hook configuration format, the command protocol, the `hooks.*` management methods, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks does not define the admission contracts; it only implements them.
 
 ## 2. Data and state
 
@@ -61,7 +59,7 @@ flowchart TB
   Diag["Diagnostics channel"]
   TL["Session Timeline: input/message with dim-hooks marker or relayed blocks"]
   UserCfg --> Catalog
-  ProjFile -->|SessionResources read per call| Catalog
+  ProjFile -->|node-services read per call| Catalog
   PlugCfg --> Catalog
   Grants -->|read per execution| Catalog
   Catalog --> Diag
@@ -82,13 +80,13 @@ sequenceDiagram
   participant AP as Approval (branch)
   participant REG as Admission registry
   participant HK as Hooks
-  participant RES as SessionResources
+  participant RES as node-services
   TE->>TE: Dispatcher consumes step/tool-call, registers batch task, returns
   TE->>AP: admit(call) after step/tool-start
   AP->>AP: Permission decision (Ask path via append_registered)
   AP->>REG: run configured checks in order
-  REG->>HK: check(request with SessionFacts, cancel)
-  HK->>RES: resolve node HostPlatform for this call
+  REG->>HK: check(request with config subset, cancel)
+  HK->>RES: HostPlatform of resource_node, this call
   HK->>HK: run matching pre_tool_use Hooks serially
   HK-->>AP: Allow or Deny(reason)
   AP-->>TE: admitted or admission error
@@ -103,30 +101,31 @@ Hooks runs outside every commit lock and Dispatcher handler and writes nothing; 
 sequenceDiagram
   participant C as Client
   participant RPC as Rpc session.submit
-  participant HK as Hooks filter (phase policy)
-  participant SA as SessionAccess relay
+  participant HK as Hooks
+  participant SA as SessionAccess
   participant TL as Timeline
   participant AG as Agents (session.create)
+  participant SB as Broadcast subscription
   C->>RPC: session.submit
-  RPC->>RPC: normalize-phase filters
-  RPC->>HK: filter(SessionFacts, branch, draft)
-  HK-->>RPC: draft plus context blocks attributed to hooks, or rejected
+  RPC->>HK: submission-admission(config subset, branch, submission)
+  HK-->>RPC: accept with attributed raw blocks, or reject
   RPC->>SA: relay(user, blocks with per-block source)
   SA->>TL: Timeline::append input/message
   C->>AG: session.create
-  AG->>HK: Session-created observer (created_by = session.create)
+  AG-->>SB: Created notice (created_by Client)
+  AG-->>C: reply (does not wait for Hooks)
+  SB-->>HK: Created notice
   HK->>SA: input Append with keyed hooks:session-start blocks
   SA->>TL: Timeline::append
-  AG-->>C: reply after observers finished or were skipped
 ```
 
-The filter is fail closed (inactive filter → `service_reloading`, nothing written); the observer is fail open (creation proceeds, diagnostic). Session-start Hooks run only for Sessions whose `SessionFacts.created_by` is `session.create` (E10), never on restore.
+Submission admission is fail closed (inactive → `service_reloading`, nothing written). Session start is observe-only and fail open: it runs only for a `Created` notice with `created_by = Client` (E10), never on restore (`Loaded`), and its context reaches the next model request after it is written (A24).
 
 ### 3.3 Observation Hooks
 
 ```mermaid
 sequenceDiagram
-  participant SB as SessionEvents (lossy, unordered)
+  participant SB as Broadcast subscription (lossy, unordered)
   participant W as Hooks worker per branch
   participant SA as SessionAccess
   participant TL as Timeline
@@ -164,8 +163,8 @@ An interrupt after `step/tool-start` always wins over a finished Hook: output is
 | --- | --- | --- | --- |
 | Turn-end follow-up vs user input or Goal continuation | `turn/end` < other input < Hook write | Recheck sees the input: not written. If both read before either writes, both Queue inputs stand (at most one extra turn each) | Hooks, InputQueue |
 | Follow-up withdrawn by the user | follow-up < `input/withdrawn` | Not consumed; not counted as a follow-up and not rewritten | InputQueue, Hooks |
-| Hooks inactive (reload, Pending, disabled) | — | Approval denies checks (retryable); `session.submit` → `service_reloading`; Session creation proceeds; no observation runs | Approval, Rpc, Agents |
-| Agents reload | — | `SessionAccess`/`SessionEvents` return `Reloading`; Hooks does not reload; writes `lookup` before one retry | Hooks |
+| Hooks inactive (reload, Pending, disabled) | — | Approval denies checks (retryable); `session.submit` → `service_reloading`; no Session-start or observation Hooks run | Approval, Rpc |
+| Agents reload | — | `SessionAccess` and the broadcast subscription return `Reloading`; Hooks does not reload; writes `lookup` before one retry | Hooks |
 | Resource node offline | per call | That call's Hook errors: pre-tool → `on_error` (deny), observation → diagnostic; other nodes unaffected | Hooks |
 
 Full table: Appendix B.
@@ -174,23 +173,23 @@ Full table: Appendix B.
 
 | Source | What the model sees | Placement | Compaction | Child branches |
 | --- | --- | --- | --- | --- |
-| `session_start` | One Append input: marker `<dim-hooks kind="session-start">`, one raw block per Hook with key `hooks:session-start/<source>/<id>` | Next model request | Latest block per key replayed | Inherited while live at the cut |
+| `session_start` | One Append input: marker `<dim-hooks kind="session-start">`, one raw block per Hook with key `hooks:session-start/<source>/<id>` | Next model request after the write (A24) | Latest block per key replayed | Inherited while live at the cut |
 | `user_prompt_submit` | Raw blocks `<dim-hooks kind="user-prompt-submit" hook="...">`, rendered by session-access from the per-block source `hooks`, before the user content of the relayed input | Consumed position of that input | Summary only | If consumed before the cut |
 | `pre_tool_use` deny | Error text in `ToolResult.content` | Call position in the batch result | Summary only | If before the cut |
 | `post_tool_use` | Append input, marker `kind="post-tool" call_id tool` | Next model request of a turn | Summary only | As inputs |
 | `turn_end` | Queue input, marker `kind="follow-up"` | Start of the turn it drives | Summary only | As inputs |
 | `notification` | Nothing | — | — | — |
 
-Non-interactive Sessions: identical, except that Session-start Hooks run only for `session.create` Sessions, so Scheduler runs, Workflow stages and Collaboration members never get them. The model never sees configuration, commands, exit codes, stderr (except a deny reason), approvals, diagnostics or other plugins' events.
+Non-interactive Sessions: identical, except that Session-start Hooks run only for `created_by = Client` Sessions, so Scheduler runs, Workflow stages and Collaboration members never get them. The model never sees configuration, commands, exit codes, stderr (except a deny reason), approvals, diagnostics or other plugins' events.
 
 ## 6. Interfaces (summary)
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | Admission check `hooks` | Implements Approval's registry contract | Run `pre_tool_use` Hooks; deny or allow |
-| Submission filter `hooks`, phase `policy` | Implements Rpc's filter contract | Run `user_prompt_submit` Hooks; reject or add attributed blocks |
-| Session-created observer `hooks` | Implements Agents' observer contract | Run `session_start` Hooks for `session.create` Sessions |
-| `hooks.catalog`, `hooks.approve`, `hooks.revoke`, `hooks.set_enabled`, `hooks.disable_all` | Management methods | Inspect, approve, enable/disable |
+| Submission admission `hooks` | Implements the `submission-admission` point | Run `user_prompt_submit` Hooks; reject or append attributed blocks |
+| `Created` notice | Consumed from the broadcast subscription | Run `session_start` Hooks for Client-created Sessions |
+| `hooks.catalog`, `hooks.approve`, `hooks.revoke`, `hooks.set_enabled`, `hooks.disable_all` | Methods, level `management` | Inspect, approve, enable/disable |
 | `dimcode hooks`, `/hooks` | CLI | Call the management methods |
 | Configuration format, command protocol | Defined here | Appendix A |
 
@@ -223,7 +222,7 @@ One JSON document per source, the same shape for user configuration (plugin conf
 | `event` | `session_start` \| `user_prompt_submit` \| `pre_tool_use` \| `post_tool_use` \| `turn_end` \| `notification` | Required (A4) |
 | `tools` | string array of name patterns | Only `pre_tool_use`/`post_tool_use`; `*` matches any run of characters, otherwise exact and case-sensitive; omitted = all tools (A5) |
 | `kinds` | array of `approval` \| `question` | Only `notification`; omitted = both (A15) |
-| `command` | string | Run by the resource node's execution shell with `SessionFacts.cwd` as working directory (A8) |
+| `command` | string | Run by the resource node's execution shell with `SessionConfig.cwd` as working directory (A8) |
 | `timeout_ms` | integer 100..=600000 | Default 60000 (A10) |
 | `on_error` | `allow` \| `deny` | Only blocking events; default `deny` for `pre_tool_use` (E9), `allow` for `user_prompt_submit` (A11) |
 | `enabled` | bool | Default `true` |
@@ -257,10 +256,11 @@ Event fields: `user_prompt_submit {prompt: text of the user content, images: cou
 
 | Contract (owner, file) | Hooks' implementation |
 | --- | --- |
-| Admission check (Approval, [extension-registry](../contracts/extension-registry.md)) | Reads `SessionFacts` from the request; runs matching `pre_tool_use` Hooks in order; block, or error with `on_error: deny`, → deny; on cancel terminates the process tree, awaits release, returns the cancelled outcome (Approval settles it as deny) |
-| Submission filter, phase `policy` ([session-boundary](../contracts/session-boundary.md)) | Runs `user_prompt_submit` Hooks on the draft after the `normalize` phase; adds blocks attributed by the registry to source `hooks`; rejection → `hook_rejected` |
-| Session-created observer ([session-boundary](../contracts/session-boundary.md)) | Returns immediately unless `created_by` is `session.create`; otherwise runs `session_start` Hooks and writes one Append input through the observer's `SessionAccess` lease |
-| Management contribution ([Management](Management.md)) | Methods of A.6 |
+| Admission check (Approval, [extension-registry](../contracts/extension-registry.md)) | Reads the `SessionConfig` subset from the request; runs matching `pre_tool_use` Hooks in order; block, or error with `on_error: deny`, → deny; on cancel terminates the process tree, awaits release, returns the cancelled outcome (Approval settles it as deny) |
+| `submission-admission` ([session-boundary](../contracts/session-boundary.md)) | Runs `user_prompt_submit` Hooks on the submission; appends raw blocks attributed to source `hooks`; rejection → `hook_rejected` |
+| Method contribution, level `management` ([session-boundary](../contracts/session-boundary.md)) | Methods of A.6 |
+
+Session start is not a registry: Hooks ignores `Created` notices unless `created_by = Client`, then runs `session_start` Hooks and writes one Append input through `SessionAccess`.
 
 Each mount registers in `apply` and unregisters in its `ctx.effect` disposer after terminating its running processes; Hooks never uses the `capability reloading` reason.
 
@@ -290,9 +290,9 @@ No later behavior depends on a Hook run except through these facts, so a Hook ev
 | Path | Mechanics |
 | --- | --- |
 | Pre-tool | ToolExecutor consumes `step/tool-call`, registers the batch task and returns; per call appends `step/tool-start` (`Timeline::append`) and awaits `Approval::admit`, which after its own `append_registered` request path (if Ask) awaits the registry checks. Hooks writes nothing |
-| User submit | Filter chain in phase order, then `SessionAccess::relay` → `Session::input` → `TimelineContext::input` → `Timeline::append` (no registration callback). InputQueue's Dispatcher subscription appends `input/applied`; Loop appends `input/consumed` |
-| Session start | Agents awaits observers after the Session exists, before replying; Hooks writes one Append input with marker and keyed blocks |
-| Observation | `SessionEvents::subscribe` with `types = {step/tool-result, turn/end, approval/request, question/asked}`; the stream task (`ctx.effect`) enqueues per `(session, branch)` and returns; one worker per branch runs serially in sequence order (A20) |
+| User submit | Submission admission, then `SessionAccess::relay` → `Session::input` → `TimelineContext::input` → `Timeline::append` (no registration callback). InputQueue's Dispatcher subscription appends `input/applied`; Loop appends `input/consumed` |
+| Session start | `Created` notice handled by the stream task like an event (worker per Session `main`); Hooks writes one Append input with marker and keyed blocks; Agents never waits for it |
+| Observation | Broadcast `subscribe` with `types = {step/tool-result, turn/end, approval/request, question/asked}` (notices always delivered); the stream task (`ctx.effect`) enqueues per `(session, branch)` and returns; one worker per branch runs serially in sequence order (A20) |
 | Fixed prefix | `lease.prefix(branch, at_least = event.sequence)`; `post_tool_use` resolves names and inputs from the `step/tool-call` named by `call_event_id`; never reads capability state |
 | Recheck | Before writing: branch exists; for `post_tool_use`, no `stop/interrupt` after the tool result; for `turn_end`, no `stop/interrupt` and no non-withdrawn `input/message` after the `turn/end`, and fewer than N consecutive non-withdrawn follow-ups since the last input with another source or user content (A14). Later facts precede the write in sequence and are resolved by InputQueue and Loop |
 | Writes | `SourceAccess` bound to `hooks`; `submission_id = hooks:<uuid>`; on `Reloading`/`PublicationUnknown`, `lookup` before one retry |
@@ -315,24 +315,26 @@ No later behavior depends on a Hook run except through these facts, so a Hook ev
 | Follow-up written, then interrupt | follow-up < interrupt | Consumed by the next turn or cancelled with the turn (session-access) | Loop |
 | Follow-up or post-tool input withdrawn | input < `input/withdrawn` | Never consumed; not counted toward the follow-up limit; not rewritten | InputQueue, Hooks |
 | Concurrent Steer/Queue/Append | Timeline order | Applied by mode in sequence order | InputQueue |
-| User-submit Hook and a concurrent submit | — | Each filtered independently; written in commit order | Rpc, Timeline |
+| User-submit Hook and a concurrent submit | — | Each admitted independently; written in commit order | Rpc, Timeline |
 | Compaction between write and consumption | input < compaction < consumed | Placed at its consumed position after the summary | ContextPreparation |
 | Compaction after consumption | — | Session-start keyed blocks replayed; others via summary | History projection |
 | Child branch cut between Hook input and consumption | input < cut < consumed | Child does not adopt it; Hook not re-run | InputQueue (child) |
 | Observation event during Hooks reload or restart | dispatch in window | Never replayed | Hooks |
 | Subscription `Gap` | — | Dropped events' Hooks never run; diagnostic | Hooks |
-| Duplicate delivery | — | Impossible within a subscription; workers skip a handled `(session, branch, sequence)` | SessionEvents, Hooks |
+| Duplicate delivery | — | Impossible within a subscription; workers skip a handled `(session, branch, sequence)` | Broadcast subscription, Hooks |
 | Duplicate or retried `session.submit` | two calls | Hooks run per call (A21); retry after uncertainty is the client's (`session.input_lookup`) | Rpc, client |
 | Duplicate `hooks.approve` | — | Idempotent for the same token; stale token rejected | Hooks |
 | Grant revoked or file edited while a Hook runs | — | Running process finishes; later executions not run | Hooks |
-| Hooks mount inactive (reload, Pending, disabled) | — | Approval denies every call reaching the check stage with retryable reason; in-flight check → deny; `session.submit` → `service_reloading`, nothing written; Session creation proceeds with a diagnostic | Approval, Rpc, Agents |
+| Hooks mount inactive (reload, Pending, disabled) | — | Approval denies every call reaching the check stage with retryable reason; in-flight check → deny; `session.submit` → `service_reloading`, nothing written; `Created` notices in the window are missed (fail open) | Approval, Rpc |
 | Approval reload mid-check | — | Token cancelled; Hook terminated; Approval's own reload settlement | ToolExecutor |
-| Agents reload | — | Facades return `Reloading`; Hooks stays loaded; observer skipped if creation is in the window (fail open); writes `lookup` then one retry | Hooks |
+| Agents reload | — | Facades return `Reloading`; Hooks stays loaded; writes `lookup` then one retry | Hooks |
 | Session unload during a worker | — | Lease pins for read and write; afterwards `get` returns none and work is dropped | AgentIndex, Hooks |
 | Session restore | `Loaded {restored: true}` | `session_start` does not run | Hooks |
-| Session created by launch, Collaboration or fork | `created_by` ≠ `session.create` | `session_start` does not run (E10) | Hooks |
-| Resource node offline | `SessionResources` returns `node_unavailable` for that call | Pre-tool: error → `on_error` (default deny); user-submit: `on_error` (default allow); project file unreadable → project Hooks of that call skipped, diagnostic; observation: diagnostic; other nodes unaffected | Hooks |
-| Client detach | — | No effect; a pending `session.submit` completes its filter chain | — |
+| Session created by launch, Collaboration or fork | `created_by` ≠ `Client` | `session_start` does not run (E10) | Hooks |
+| First user input before the Session-start write | `input/message` < Hooks Append | Context applies from the next model request; not inserted before the first input (A24) | InputQueue |
+| `Created` notice lost (`Gap`) | — | `session_start` not run; diagnostic (fail open) | Hooks |
+| Resource node offline | `node-services` returns `node_unavailable` for that call | Pre-tool: error → `on_error` (default deny); user-submit: `on_error` (default allow); project file unreadable → project Hooks of that call skipped, diagnostic; observation: diagnostic; other nodes unaffected | Hooks |
+| Client detach | — | No effect; a pending `session.submit` completes its admission | — |
 
 ## Appendix C. Errors and recovery
 
@@ -357,7 +359,7 @@ Through management methods, `session.create`/`session.submit`, tools and events:
 3. Interrupt during a pre-tool Hook: process terminated before the result; result cancelled.
 4. Hooks disabled or reloading: tool calls denied with a retryable reason; `session.submit` returns `service_reloading`; `session.create` succeeds; no Session reloads.
 5. Project Hook in `.dimcode/hooks.json`: not run before approval; runs after; stops after the file changes.
-6. User-submit context appears as `<dim-hooks kind="user-prompt-submit">` before the user content; a normalize-phase filter's output is visible to the Hook.
+6. User-submit context appears as `<dim-hooks kind="user-prompt-submit">` before the user content.
 7. Session-start context survives compaction; not run on restore or for launched/member Sessions.
 8. Post-tool context after an interrupt is not written; follow-up stops at the limit, after user input, and ignores withdrawn follow-ups.
 9. Reload and restart: events in the window produce no runs and no duplicates.
@@ -385,8 +387,9 @@ Through management methods, `session.create`/`session.submit`, tools and events:
 | A20 | Observation Hooks run serially per branch | Judgment | Injected order may differ |
 | A21 | Submit Hooks run per `session.submit` call, retries included | Judgment | Rpc dedupes first |
 | A23 | Plugin Hooks run only from packages installed on the Session's resource node | Judgment; overview §3.1 | Cross-node content transfer |
+| A24 | Session creation does not wait for Session-start Hooks; their context may follow the first user input | Simplification (observe the broadcast `Created` notice) | A blocking creation hook is needed |
 
-Decided items formerly listed as assumptions: project path `.dimcode/hooks.json` (E11), `pre_tool_use` default deny and Approval fail-closed rule (E9), Session-start only for `session.create` and fail-open observers (E10), host-local approval service (R11).
+Decided items formerly listed as assumptions: project path `.dimcode/hooks.json` (E11), `pre_tool_use` default deny and Approval fail-closed rule (E9), Session start only for `created_by = Client`, observed from the broadcast `Created` notice, fail open (E10), host-local approval service (R11).
 
 ## Appendix F. Open questions
 
@@ -394,5 +397,5 @@ Decided items formerly listed as assumptions: project path `.dimcode/hooks.json`
 | --- | --- |
 | Overview §13 "How events enter context" | This design uses adopted input only (E12) |
 | Overview wording | Overview §5.7 and §7.1 Approval still say Approval injects the admission service in `Deps`; this document follows the registry pattern (decisions R2) |
-| Remote resource nodes | `SessionResources` on a peer node depends on #5 |
+| Remote resource nodes | `node-services` on a peer node depends on #5 |
 | Plugin source | Depends on #3 and `PluginContents` |

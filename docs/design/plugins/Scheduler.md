@@ -1,8 +1,8 @@
 # Scheduler
 
-Status: Draft. Overall design: [overview §5.8](../overview.md#58-scheduler). Phase: P2. Language: TypeScript first (overview §11.3).
+Status: Draft. Overall design: [overview B.8](../overview.md#b8-scheduler). Phase: P2. Language: TypeScript first (overview §11.3).
 
-Scheduler keeps scheduled jobs and their run history in App Server process storage. While the daemon is alive and a window is due, it creates (through the Agents launch contract) or reuses a non-interactive Session and writes the job prompt as a Queue input with its own source marker through [session-access](../contracts/session-access.md). It contributes the process-level `schedule` tool (risk `persistent_configuration`) and the `schedule.*` management methods, and writes no Timeline event: a run's outcome is read from the run Session's fixed prefix.
+Scheduler keeps scheduled jobs and their run history in App Server process storage. While the daemon is alive and a window is due, it creates (through the Agents launch contract) or reuses a non-interactive Session and writes the job prompt as a Queue input with its own source marker through [session-access](../contracts/session-access.md). It contributes the process-level `schedule` tool (risk `persistent_configuration`) and the `schedule.*` management methods, and writes no Timeline event: a run's outcome is read from the run Session's fixed prefix and published as a run-outcome notice on Scheduler's own subscription service.
 
 ## 1. Structure
 
@@ -13,12 +13,14 @@ flowchart LR
     Runs["Run tracker"]
     Tool["schedule tool handler"]
     Mgmt["schedule.* methods"]
+    Out["ScheduledRunOutcomes subscription"]
   end
   ToolReg["Process tool registry (ToolRegistry)"]
-  MgmtReg["ManagementContribution (Management)"]
+  MgmtReg["Method contribution registry, level management"]
   Launch["Agents launch (non-interactive, policy cap)"]
-  Access["SessionAccess and SessionFacts"]
-  Events["SessionEvents"]
+  Access["SessionAccess, config"]
+  Events["Session broadcast subscription"]
+  Subs["Subscribers, e.g. Notifications (When)"]
   Store["Process storage (App Server)"]
   Perm["Permission category persistent_configuration"]
   Tool --> ToolReg
@@ -31,20 +33,22 @@ flowchart LR
   Runs --> Store
   Tool --> Store
   Mgmt --> Store
+  Runs --> Out
+  Subs -.-> Out
   ToolReg -.-> Perm
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
-  class Timer,Runs,Tool,Mgmt new
+  class Timer,Runs,Tool,Mgmt,Out new
   class ToolReg,MgmtReg,Launch,Access,Events,Store,Perm contract
 ```
 
-Scheduler contributes to registries owned by their consumers ([extension-registry](../contracts/extension-registry.md)), so its reload never reloads a Session. It reaches Sessions only through `SessionAccess`, a facade that returns `Reloading` during an Agents reload instead of reloading Scheduler.
+Scheduler contributes to registries owned by their consumers ([extension-registry](../contracts/extension-registry.md)), so its reload never reloads a Session. It reaches Sessions only through `SessionAccess`, a facade that returns `Reloading` during an Agents reload instead of reloading Scheduler. Subscribers of run outcomes depend on Scheduler's contract, never the reverse.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SchedulerPlugin` | Process (control node) | `SessionAccess` (facts, acquire, prefix, input, `withdraw`, `stop`, lookup), Agents launch contract, `SessionEvents`, App Server process storage, typed Settings operations | Mount instances: process tool set `scheduler` ([process-tool-contribution](../contracts/process-tool-contribution.md)), management contribution `schedule` ([Management](Management.md)) |
+| `SchedulerPlugin` | Process (control node) | `SessionAccess` (`config`, acquire, prefix, input, `withdraw`, `stop`, lookup), Agents launch contract, Session broadcast subscription, App Server process storage, typed Settings operations | Mount instances: process tool set `scheduler` ([process-tool-contribution](../contracts/process-tool-contribution.md)), method namespace `schedule` at level `management` ([method contribution](../contracts/session-boundary.md)); process service `ScheduledRunOutcomes` |
 
-**Contracts depended on** (none names Scheduler): process-tool-contribution, [session-access](../contracts/session-access.md) (`SessionAccess`, `SessionFacts`, `SessionAccess::withdraw`), Agents launch (overview §7.2 Agents supplement), [session-broadcast-subscription](../contracts/session-broadcast-subscription.md), Permission category `persistent_configuration` (overview §7.1; FullAccess allows it, E1), Management contribution, App Server process storage (overview §7.2; per-plugin root, atomic replace, lock, format version, R8). **Contracts defined here**: job and run formats, the `schedule` tool, the `schedule.*` methods, source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
+**Contracts depended on** (none names Scheduler): process-tool-contribution, [session-access](../contracts/session-access.md) (`SessionAccess`, `config`, `withdraw`), Agents launch with `policy` (overview §7.2 Agents supplement), [session-broadcast-subscription](../contracts/session-broadcast-subscription.md), Permission category `persistent_configuration` (overview §7.1; FullAccess allows it, E1), [method contribution](../contracts/session-boundary.md), App Server process storage (overview §7.2; per-plugin root, atomic replace, lock, format version, R8). **Contracts defined here**: job and run formats, the `schedule` tool, the `schedule.*` methods, the run-outcome notice and `ScheduledRunOutcomes` (A.7), source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
 
 ## 2. Data and state
 
@@ -110,7 +114,7 @@ The run is persisted `launching` before any external effect, so a restart can se
 
 ```mermaid
 sequenceDiagram
-  participant SB as SessionEvents
+  participant SB as Broadcast subscription
   participant R as Run tracker
   participant SA as SessionAccess
   participant ST as Process storage
@@ -118,6 +122,7 @@ sequenceDiagram
   R->>SA: prefix(main, at_least)
   R->>R: consumed? first turn/end after consumption?
   R->>ST: running or terminal outcome
+  R-->>R: terminal: publish RunOutcome to subscribers
   Note over R: max_run_minutes elapsed
   alt input not consumed
     R->>SA: withdraw(main, input_event_id)
@@ -128,7 +133,7 @@ sequenceDiagram
   end
 ```
 
-The withdrawal is limited to Scheduler's own input; if InputQueue rejects it because the input was consumed first, the tracker falls back to `stop`.
+The withdrawal is limited to Scheduler's own input; if InputQueue rejects it because the input was consumed first, the tracker falls back to `stop`. A run-outcome notice is published once, after the terminal record is persisted.
 
 ### 3.3 Permission of a run
 
@@ -146,7 +151,7 @@ flowchart LR
   Declared --> Eff
 ```
 
-Automation never widens authority: the starter's policy is an upper bound, a job may only narrow it, and jobs saved by management default to read-only (E2). The effective policy is passed to `launch` as creation configuration; reused Sessions keep their own policy, which a reuse job must not exceed (otherwise the run is `skipped: policy`).
+Automation never widens authority: the starter's policy is an upper bound, a job may only narrow it, and jobs saved by management default to read-only (E2). The effective policy is passed in `launch`'s `policy` field, which Agents caps by the starter (here the job's `policy_cap`); reused Sessions keep their own policy, which a reuse job must not exceed (otherwise the run is `skipped: policy`).
 
 ## 4. Timing and conflicts
 
@@ -190,9 +195,10 @@ Run Sessions are non-interactive: no `ask_user`, no `schedule` tool. Prior runs 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `schedule` | Process tool, risk `persistent_configuration`, interactive leaders only | Model manages jobs |
-| `schedule.list/save/delete/set_enabled/run_now/history` | Management methods | Operators manage jobs |
+| `schedule.list/save/delete/set_enabled/run_now/history` | Methods, level `management` | Operators manage jobs |
+| `ScheduledRunOutcomes::subscribe` | Process service defined here | Live notice per ended run (Notifications consumes it) |
 | `/scheduled`, `/schedule`, `dimcode schedule` | CLI | Call the management methods |
-| Agents `launch` | Depended on (Agents supplement) | Create a non-interactive run Session with node, model and policy |
+| Agents `launch` | Depended on (Agents supplement) | Create a non-interactive run Session with node, model and a starter-capped `policy` |
 | Job and run formats | Defined here | Appendix A |
 
 ## 7. Security
@@ -222,7 +228,7 @@ Process tool set key `scheduler`, `requires: { interactive: true, roles: {leader
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`cwd` and `resource_node` default to the caller's `SessionFacts`; the tool cannot target another resource node (A11). On `create`/`update`, `policy_cap` is the calling Session's policy, resolved through the Agents launch contract at the call (A15). Result `content`: a short text with `job_id`, next window, or the list; `structured_content` holds records. Validation errors are error results.
+`cwd` and `resource_node` default to the caller's `SessionConfig` subset in the tool call context; the tool cannot target another resource node (A11). On `create`/`update`, `policy_cap` is the calling Session's current policy, resolved through the Agents launch contract at the call (A15). Result `content`: a short text with `job_id`, next window, or the list; `structured_content` holds records. Validation errors are error results.
 
 ### A.3 Management methods
 
@@ -250,12 +256,12 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 ```rust
 // Agents supplement (overview §7.2); shape owned by Agents.
 async fn launch(&self, config: LaunchConfig) -> Result<SessionLease, LaunchError>;
-struct LaunchConfig { agent_id: Option<String>, cwd: String, resource_node: Option<String>,
-    model: Option<ModelSelection>, interactive: bool /* false */, policy: PermissionPolicy,
-    created_by: String /* "scheduler" */ }
+struct LaunchConfig { agent_id: Option<String>, cwd: String, resource_node: Option<NodeId>,
+    model: Option<ModelSelection>, interactive: bool /* false */,
+    policy: PermissionPolicy /* capped by the starter; Scheduler passes min(job policy, policy_cap) */ }
 ```
 
-The resulting `SessionFacts` carries `interactive: false` and `created_by: scheduler`. Scheduler writes the first input itself through the lease (overview §7.2 says Agents submits it; see Appendix F).
+The resulting `SessionConfig` carries `interactive: false` and Agents' launch value of `created_by`. Scheduler writes the first input itself through the lease (overview §7.2 says Agents submits it; see Appendix F).
 
 ### A.6 Timeline and capability mechanics
 
@@ -269,7 +275,28 @@ The resulting `SessionFacts` carries `interactive: false` and `created_by: sched
 | Timeout | Not consumed: `SessionAccess::withdraw` (own source) → `timed_out`; consumed: `lease.stop("main", ...)` (turn-scoped `stop/interrupt`), `timed_out` when `turn/end` is read |
 | Recheck | Before writing, re-read job and run from storage (enabled, revision unchanged, run still `launching`); never reads capability state; busy state is not consulted |
 | Own reload / restart | Mounts unregister (in-flight tool call gets "tool provider unavailable"; `schedule.*` returns `service_reloading`); timers and subscription end; leases drop. The new generation settles: `launching` → `lookup(submission_id)`: `Accepted` → `submitted`, `Unknown` → `lost` (never resubmitted); `submitted`/`running` resume tracking; passed windows `missed` |
-| Agents reload | `SessionAccess`/`SessionEvents` return `Reloading`; Scheduler stays loaded; a write in the window does `lookup` before one retry within the 60 s grace |
+| Run outcome | After persisting a terminal state, emit one `RunOutcome` to each live subscriber; nothing is replayed after reload or restart |
+| Agents reload | `SessionAccess` and the broadcast subscription return `Reloading`; Scheduler stays loaded; a write in the window does `lookup` before one retry within the 60 s grace |
+
+### A.7 Run-outcome notice (public contract)
+
+```rust
+/// Process service provided by Scheduler; consumers inject it with `When`.
+pub trait ScheduledRunOutcomes: Send + Sync + 'static {
+    /// Live stream owned by the subscriber's context; ends when Scheduler unloads.
+    fn subscribe(&self, ctx: &Ctx, capacity: usize) -> RunOutcomeStream;
+}
+pub enum RunOutcomeItem { Outcome(RunOutcome), Gap { dropped: u64 } }
+pub struct RunOutcome {
+    pub job_id: String, pub job_name: String, pub run_id: String,
+    pub session_id: Option<String>,
+    pub state: RunEnd,               // Completed | Failed | Cancelled | TimedOut | Lost
+    pub reason: Option<String>,      // fixed reason text, never Session content
+    pub ended_at: Timestamp,
+}
+```
+
+Emitted once per run after its terminal record is persisted (A16, A17). Delivery is live and non-resumable; a full subscriber buffer drops notices and reports `Gap`. The notice carries no prompt or Session content. Subscribers never read job storage; `schedule.history` is the durable record. A Scheduler reload ends the streams; a `When` subscriber is reloaded with it by the loader and resubscribes.
 
 ## Appendix B. Full conflict table
 
@@ -352,7 +379,8 @@ With a controllable clock, through management methods, the `schedule` tool and e
 | A13 | Settings hold only plugin settings (enablement, max concurrent runs = 4) | Judgment | Jobs in Settings |
 | A14 | Deleting a job does not stop its active run | Judgment | Delete stops the run |
 | A15 | The cap of a tool-created job is captured at save, not re-evaluated per run | Judgment within E2 | Re-resolve the creator's policy per run |
-| A16 | Run-end notifications are Notifications' business | Overview §5.11 | Scheduler calls Notifications |
+| A16 | Run outcomes are published as a live, lossy, non-resumable notice; history is read with `schedule.history` | Overview §5.11 (scheduled job ends); judgment | A persistent outbox per subscriber |
+| A17 | Only runs that reached `launching` produce a notice; `skipped` and `missed` do not | Judgment | Subscribers see every window |
 
 Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), process storage contract (R8), withdrawal contract (R7).
 
@@ -361,4 +389,4 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | Question | Description |
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); the difference is recorded, not open |
-| Launch contract | Agents supplement must define `launch` with `policy` and a way to resolve a Session's current policy for the cap; overview §7.2 still says Agents submits the first input (D17) |
+| Launch contract | Agents supplement must define `launch` with `policy` capped by the starter and a way to resolve a Session's current policy; overview §7.2 still says Agents submits the first input (D17) |
