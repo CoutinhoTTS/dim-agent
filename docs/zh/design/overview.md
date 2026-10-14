@@ -152,6 +152,8 @@ flowchart LR
 
 ## 4. 插件目录
 
+插件设计文档索引：[plugins/README.md](plugins/README.md)。
+
 | 插件 | 作用域 | 职责 | 阶段 | 语言 | 文档 |
 | --- | --- | --- | --- | --- | --- |
 | Questions | Session + 分支 | `ask_user`；待答问题与回答；`session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |

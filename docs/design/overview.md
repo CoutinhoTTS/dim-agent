@@ -152,6 +152,8 @@ The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others
 
 ## 4. Plugin catalog
 
+Index of plugin design documents: [plugins/README.md](plugins/README.md).
+
 | Plugin | Scopes | Role | Phase | Language | Document |
 | --- | --- | --- | --- | --- | --- |
 | Questions | Session + branch | `ask_user`; pending questions and answers; `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
