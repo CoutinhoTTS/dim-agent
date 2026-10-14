@@ -75,6 +75,258 @@ Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实�
 
 拆分后的命名在各插件需求文档中确定。
 
+### 3.2 插件架构图
+
+以下是目标结构，手绘，只用于说明新插件的位置。当前装配以 [生成图](../architecture/rust-agent/generated/) 为准。绿色为新插件（同一插件拆分的各部分用同一名称加括号说明），橙色边框为第 7 节中有“变更”的现有插件，虚线框为按配置启用的现有插件。
+
+#### 全量分布
+
+```mermaid
+flowchart TB
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef changed stroke:#e8590c,stroke-width:3px
+  classDef optional stroke-dasharray:4 3
+
+  subgraph CLIP["CLI 进程"]
+    cli["dim-cli"]
+    acp["AcpGateway"]:::new
+  end
+
+  subgraph PROC["App Server 进程（进程插件）"]
+    direction TB
+    subgraph PC["连接与协议"]
+      ServerControl["ServerControl"]
+      Connection["Connection"]:::changed
+      Rpc["Rpc"]
+      Transport["Transport"]:::changed
+      RemoteGateway["RemoteGateway"]:::new
+    end
+    subgraph PS["存储与 Session 管理"]
+      FileStorage["FileStorage"]
+      FileWriteCoordinator["FileWriteCoordinator"]
+      SqliteStorage["SqliteStorage"]
+      SessionStore["SessionStore"]
+      Attachments["Attachments"]:::new
+      SessionArchive["SessionArchive"]:::new
+      SessionTitleP["SessionTitle（标题服务）"]:::new
+    end
+    subgraph PCFG["配置与插件管理"]
+      Settings["Settings"]
+      Loader["rutis-loader"]
+      PluginManager["PluginManager"]:::new
+    end
+    subgraph PM["Provider 与模型"]
+      Provider["Provider"]
+      ManagedProviders["ManagedProviders"]
+      NodeBinding["ManagedProviderBinding + Node runtime"]:::optional
+      CodexOAuth["OpenAICodexOAuth"]
+      GrokOAuth["GrokOAuth"]
+      Aimux["Aimux"]
+      ConfiguredModels["ConfiguredModels"]:::optional
+      ModelPolicy["ModelPolicy"]:::new
+      Modality["Modality"]:::new
+    end
+    subgraph PE["MCP、Skill 与扩展目录"]
+      McpPublication["McpPublication"]
+      Mcp["Mcp"]
+      McpServer["McpServer（按代次）"]
+      SkillsCatalog["SkillsCatalog"]
+      HooksP["Hooks（目录、批准、提交前）"]:::new
+      WorkflowP["Workflow（定义）"]:::new
+      ExternalAgentP["ExternalAgent（探测与配置）"]:::new
+      WebP["Web（搜索服务）"]:::new
+    end
+    subgraph PA["Agent 与协作"]
+      AgentDirectory["AgentDirectory"]
+      Agents["Agents"]
+      CollaborationDirectory["CollaborationDirectory"]
+      Collaboration["Collaboration"]:::changed
+      SchedulerP["Scheduler（作业与触发）"]:::new
+    end
+    subgraph PH["宿主与通知"]
+      HostPlatform["HostPlatform"]
+      Sandbox["Sandbox"]:::new
+      NotificationsP["Notifications（订阅与发送）"]:::new
+    end
+  end
+
+  subgraph SES["Session（Capability）"]
+    direction TB
+    subgraph SEX["现有"]
+      SessionScope["SessionScope"]
+      ToolRegistry["ToolRegistry"]
+      TimelineTree["TimelineTree"]
+      PromptRegistry["PromptRegistry"]
+      PromptSources["PromptSources"]
+      Skills["Skills"]
+      Wait["Wait"]
+      WorkspaceTools["WorkspaceTools"]
+      CollabCap["CollaborationCapability"]
+      PrepareModelHost["PrepareModelHost"]
+      SessionBroadcastEnd["SessionBroadcastEnd"]
+    end
+    subgraph SNEW["新增：工具贡献"]
+      QuestionsS["Questions（ask_user）"]:::new
+      TodoS["Todo（todo_write）"]:::new
+      GoalS["Goal（goal_update）"]:::new
+      WebS["Web（web_search、web_fetch）"]:::new
+      SchedulerS["Scheduler（schedule）"]:::new
+      WorkflowS["Workflow（workflow）"]:::new
+      ExternalAgentS["ExternalAgent（external_agent）"]:::new
+      NotificationsS["Notifications（notify）"]:::new
+    end
+  end
+
+  subgraph BR["分支（Capability）"]
+    direction TB
+    subgraph BEX["现有"]
+      BranchScope["BranchScope"]
+      SessionBroadcast["SessionBroadcast"]
+      TreeTimeline["TreeTimeline"]
+      InputQueue["InputQueue"]:::changed
+      Loop["Loop"]
+      Prompt["Prompt"]
+      ContextPreparation["ContextPreparation"]
+      ModelProvider["ModelProvider"]
+      ToolBinding["ToolBinding"]
+      ToolExecutor["ToolExecutor"]
+      Approval["Approval"]
+      Permission["Permission"]
+      BackgroundExec["BackgroundExec"]
+      FileReads["FileReads"]
+      WaitBranch["WaitBranch"]
+      SkillsBranch["SkillsBranch"]
+      PromptSourcesBranch["PromptSourcesBranch"]
+    end
+    subgraph BNEW["新增：状态、在途工作与触发"]
+      QuestionsB["Questions（待答问题）"]:::new
+      TodoB["Todo（列表）"]:::new
+      GoalB["Goal（目标与继续）"]:::new
+      ShellInput["ShellInput"]:::new
+      HooksB["Hooks（分支 Hook）"]:::new
+      WorkflowB["Workflow（运行）"]:::new
+      ExternalAgentB["ExternalAgent（运行）"]:::new
+      SessionTitleB["SessionTitle（触发）"]:::new
+    end
+  end
+
+  CLIP -->|本地 RPC| PROC
+  PROC -->|Agents 装载| SES
+  SES -->|TimelineTree 装载| BR
+```
+
+#### 新插件接入关系
+
+箭头表示“使用”或“接入”，标注对应第 3 节的接入方式。拆分插件除 Hooks 外按插件整体画出，各部分见下表。
+
+```mermaid
+flowchart LR
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef changed stroke:#e8590c,stroke-width:3px
+
+  subgraph N["新插件"]
+    QuestionsS["Questions"]:::new
+    TodoS["Todo"]:::new
+    GoalB["Goal"]:::new
+    ShellInput["ShellInput"]:::new
+    HooksB["Hooks（分支）"]:::new
+    HooksP["Hooks（进程）"]:::new
+    WorkflowB["Workflow"]:::new
+    ExternalAgentB["ExternalAgent"]:::new
+    WebS["Web"]:::new
+    SchedulerP["Scheduler"]:::new
+    NotificationsP["Notifications"]:::new
+    SessionTitle["SessionTitle"]:::new
+    ModelPolicy["ModelPolicy"]:::new
+    Attachments["Attachments"]:::new
+    SessionArchive["SessionArchive"]:::new
+    PluginManager["PluginManager"]:::new
+    Sandbox["Sandbox"]:::new
+    RemoteGateway["RemoteGateway"]:::new
+    AcpGateway["AcpGateway"]:::new
+    Modality["Modality"]:::new
+  end
+
+  subgraph E["现有插件"]
+    ToolRegistry["ToolRegistry"]
+    ToolExecutor["ToolExecutor"]
+    Approval["Approval"]
+    Permission["Permission"]
+    InputQueue["InputQueue"]:::changed
+    HostPlatform["HostPlatform"]
+    TimelineTree["TimelineTree"]
+    Collaboration["Collaboration"]:::changed
+    Agents["Agents"]
+    SessionStore["SessionStore"]
+    FileStorage["FileStorage"]
+    Settings["Settings"]
+    Loader["rutis-loader"]
+    SkillsCatalog["SkillsCatalog"]
+    Mcp["Mcp"]
+    Provider["Provider"]
+    ContextPreparation["ContextPreparation"]
+    SessionBroadcast["SessionBroadcast"]
+    Transport["Transport"]:::changed
+    Rpc["Rpc"]
+  end
+
+  QuestionsS & TodoS & WebS -->|A 贡献工具| ToolRegistry
+  GoalB & WorkflowB & ExternalAgentB & SchedulerP & NotificationsP -->|A 贡献工具| ToolRegistry
+  QuestionsS -->|回答完成工具调用| ToolExecutor
+  GoalB & ShellInput & HooksB & WorkflowB & ExternalAgentB -->|B 写入输入| InputQueue
+  ShellInput & HooksB & ExternalAgentB -->|启动进程| HostPlatform
+  HostPlatform -->|套用隔离配置| Sandbox
+  HooksB -->|准入扩展点| Approval
+  WebS & NotificationsP & SchedulerP & ExternalAgentB -.->|新风险类别| Permission
+  WorkflowB -->|阶段| TimelineTree
+  WorkflowB -->|阶段| Collaboration
+  Collaboration -->|子代理模型| ModelPolicy
+  ContextPreparation -->|压缩模型| ModelPolicy
+  SessionTitle -->|辅助模型| ModelPolicy
+  Modality -->|默认模型| ModelPolicy
+  ModelPolicy -->|解析连接| Provider
+  Modality -->|非对话模型| Provider
+  SessionTitle -->|标题元数据| SessionStore
+  SessionArchive --> SessionStore
+  SessionArchive -->|分叉| Agents
+  SchedulerP -->|新建或复用 Session| Agents
+  Attachments --> FileStorage
+  HooksP & SchedulerP & WebS & NotificationsP & Sandbox & ModelPolicy -->|配置来源| Settings
+  PluginManager -->|来源与 loader 行| Settings
+  PluginManager --> Loader
+  PluginManager -->|插件内容| SkillsCatalog
+  PluginManager -->|插件内容| Mcp
+  PluginManager -->|插件内容| HooksP
+  NotificationsP -->|订阅| SessionBroadcast
+  RemoteGateway -->|认证连接| Transport
+  RemoteGateway --> Rpc
+  AcpGateway -->|本地 RPC| Rpc
+```
+
+#### 新插件位置
+
+| 新插件 | 进程部分 | Session 部分 | 分支部分 | 挂接的现有插件 |
+| --- | --- | --- | --- | --- |
+| Questions | — | `ask_user` 工具 | 待答问题 | ToolRegistry、ToolExecutor |
+| Todo | — | `todo_write` 工具 | 列表 | ToolRegistry |
+| Goal | — | `goal_update` 工具 | 目标状态与继续 | ToolRegistry、InputQueue |
+| ShellInput | — | — | 命令执行 | HostPlatform、InputQueue |
+| Hooks | 目录、批准、Session 开始与提交前 Hook | — | 分支 Hook | Settings、Approval、HostPlatform、InputQueue |
+| Workflow | 定义 | `workflow` 工具 | 运行 | Settings、ToolRegistry、TimelineTree、Collaboration、InputQueue |
+| ExternalAgent | 探测与配置 | `external_agent` 工具 | 运行 | ToolRegistry、HostPlatform、InputQueue |
+| Web | 搜索服务配置 | `web_search`、`web_fetch` 工具 | — | Settings、ToolRegistry、Permission |
+| Scheduler | 作业与触发 | `schedule` 工具 | — | Settings、Agents、ToolRegistry |
+| Notifications | 订阅与发送 | `notify` 工具 | — | Settings、Session 广播、ToolRegistry |
+| SessionTitle | 标题服务 | — | 首个 turn 结束后触发 | SessionStore、ModelPolicy |
+| Attachments | 附件 | — | — | FileStorage |
+| ModelPolicy | 模型策略 | — | — | Settings、Provider |
+| SessionArchive | 导出、删除、清理、分叉 | — | — | SessionStore、Agents |
+| PluginManager | 插件市场与安装 | — | — | Settings、rutis-loader、SkillsCatalog、Mcp、Hooks |
+| Sandbox | 隔离配置 | — | — | Settings、HostPlatform |
+| RemoteGateway | 远程访问 | — | — | Transport、Rpc |
+| Modality | 多模态任务 | — | — | Provider、ModelPolicy |
+| AcpGateway | CLI 进程 | — | — | Rpc（本地 RPC） |
+
 ## 4. 功能归属
 
 “现有”表示由现有插件职责覆盖；“扩展”表示属于现有插件职责但现有设计未写到，见第 7 节；“新”表示第 5 节的新插件；“CLI”表示只在 CLI 层实现，见第 8 节；“范围外”见第 1 节。
