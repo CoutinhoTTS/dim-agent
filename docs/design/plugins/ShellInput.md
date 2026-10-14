@@ -36,7 +36,7 @@ flowchart LR
 
 Contracts depended on: `sessionMethods` and per-call progress ([session-boundary](../contracts/session-boundary.md)); `Branch::input` with boundary validation ([interrupt](../../architecture/rust-agent/interrupt.md)); `HostPlatform::spawn(ProcessSpec)`, `ProcessTree::{stdout, stderr, wait, terminate}`; the node's exec shell as business configuration read at each spawn ([ADR 002](../../adr/002-plugin-scope.md) "Existing plugins"); isolation (overview Appendix C supplement); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a call on an offline resource node fails `node_unavailable` while ShellInput stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5)); shell argv construction of the `exec` tool ([exec.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs), exposed as a HostPlatform helper, A2).
 
-Contracts defined here: the `shell.*` methods, the source marker `dim-shell-input` (kind `command`) and the `submission_id` prefix `shell-input:`.
+Contracts defined here: the `shell.*` methods, the source marker `dim-shell-input` (kind `command`) and the `submissionId` prefix `shell-input:`.
 
 ## 2. Data and state
 
@@ -78,7 +78,7 @@ sequenceDiagram
   HP-->>SI: stdout/stderr chunks
   SI-->>C: progress {runId, stream, text}
   HP-->>SI: exit
-  SI->>TL: Branch::input(Append, marker, submission_id shell-input:runId)
+  SI->>TL: input(append, marker, submissionId shell-input:runId)
   SI-->>C: {status, exitCode, output, recorded}
 ```
 
@@ -144,7 +144,7 @@ Full table: Appendix B.
 | `!command` | `<dim-shell-input kind="command" status="completed" exit="0" truncated="false">` + `$ command` + bounded output | One unkeyed raw block (user-role message) at the input's consumed position |
 | `!!command` | Nothing | — |
 
-No tool declaration, prompt source or key: each run is a one-time observation. After compaction the result survives only through the summary. Child branches inherit it only if consumed before the cut. The model never sees `runId`, `submission_id`, stream separation, durations, diagnostics or terminal escapes.
+No tool declaration, prompt source or key: each run is a one-time observation. After compaction the result survives only through the summary. Child branches inherit it only if consumed before the cut. The model never sees `runId`, `submissionId`, stream separation, durations, diagnostics or terminal escapes.
 
 ## 6. Interfaces (summary)
 
@@ -194,9 +194,9 @@ One input written through the branch's input boundary:
 
 | Field | Value |
 | --- | --- |
-| `submission_id` | `shell-input:<runId>` |
-| `blocks` | One raw block: marker `dim-shell-input`, kind `command`, attributes `status`, `exit` (code or signal), `truncated`; body `$ <command>`, newline, bounded output without terminal escapes |
-| `user` | none |
+| `submissionId` | `shell-input:<runId>` |
+| `rawBlocks` | One raw block: marker `dim-shell-input`, kind `command`, attributes `status`, `exit` (code or signal), `truncated`; body `$ <command>`, newline, bounded output without terminal escapes |
+| `content` | none |
 | `mode` | `append` |
 
 ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the terminal.

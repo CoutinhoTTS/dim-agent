@@ -129,13 +129,13 @@ sequenceDiagram
   C->>AG: session.create
   AG->>HS: apply (Session assembly)
   AG-->>C: reply (does not wait for Hooks)
-  Note over HS: created_by Client, main has no turn and no session-start input
+  Note over HS: createdBy client, main has no turn and no session-start input
   HS->>HS: run session_start Hooks
   HS-->>HB: results
   HB->>TL: append Append input with keyed hooks:session-start blocks
 ```
 
-Session start is fail open and runs only for `created_by = Client` Sessions that have not started a turn (A24, A25). Its context reaches the next model request after it is written, which may follow the first user input.
+Session start is fail open and runs only for `createdBy.kind = "client"` Sessions that have not started a turn (A24, A25). Its context reaches the next model request after it is written, which may follow the first user input.
 
 ### 3.4 Observation Hooks
 
@@ -195,7 +195,7 @@ Full table: Appendix B.
 | `turn_end` | Queue input, marker `kind="follow-up"` | Start of the turn it drives | Summary only | As inputs |
 | `notification` | Nothing | — | — | — |
 
-Non-interactive Sessions: identical, except that Session-start Hooks run only for `created_by = Client`. The model never sees configuration, commands, exit codes, stderr (except a deny reason), approvals or diagnostics.
+Non-interactive Sessions: identical, except that Session-start Hooks run only for `createdBy.kind = "client"`. The model never sees configuration, commands, exit codes, stderr (except a deny reason), approvals or diagnostics.
 
 ## 6. Interfaces (summary)
 
@@ -271,8 +271,8 @@ Outcomes are recorded only as other owners' facts: a tool deny is the call's err
 
 | Service | Scope, key | Method | Request (fields Hooks reads) | Reply |
 | --- | --- | --- | --- | --- |
-| `toolAdmissionCheck` | branch, `hooks` | `check`, async | `ToolCallRequest {session_id, branch_id, turn_id, call_id, tool, arguments, risk}` | `{verdict: "allow" \| "deny", reason?}`; `reason` is model-visible |
-| `inputAdmissionCheck` | Session, `hooks` | `check`, async | `InputRequest {session_id, branch_id, mode, content, source?}` | `{verdict: "allow" \| "deny", reason?, blocks?: [{marker, text}]}`; `reason` goes to the caller, `blocks` are written with the input |
+| `toolAdmissionCheck` | branch, `hooks` | `check`, async | `ToolCallRequest {sessionId, branchId, turnId, callId, tool, arguments, risk}` | `AdmissionReply {verdict: "allow" \| "deny", reason?}`; `reason` is model-visible |
+| `inputAdmissionCheck` | Session, `hooks` | `check`, async | `InputRequest {sessionId, branchId, mode, source?, origin, content}` | `AdmissionReply {verdict: "allow" \| "deny", reason?, blocks?: [{marker, text}]}`; `reason` goes to the caller, `blocks` are written with the input |
 
 Request shapes are owned by [methods and admission checks](../contracts/session-boundary.md). Cancellation is the consumer dropping the call or sending a cancel request (turn interrupt for tool checks, caller gone for input checks); Hooks terminates the process tree, awaits release and replies `deny` (tool) or nothing is written (input). Errors are never returned as call failures: every Hook failure is mapped to a verdict by `on_error`.
 
@@ -323,7 +323,7 @@ Approving or revoking uses the `approvalToken` with the Settings host-local appr
 | Grant revoked or file edited while a Hook runs | — | Running process finishes; later executions follow the new state | Hooks |
 | Hooks, Approval or Settings reload | — | Approval, the input boundary and dependents reload; in-flight turns and submissions fail (`service_reloading`); events in the window not run (D3) | Lifecycle |
 | Session restore or unload | — | Session start not re-run once a turn or session-start input exists (A25) | Hooks |
-| Session created by launch, Collaboration or fork | `created_by` ≠ `Client` | No Session start | Hooks |
+| Session created by launch, Collaboration or fork | `createdBy.kind` ≠ `"client"` | No Session start | Hooks |
 | First user input before the Session-start write | input < Hooks Append | Context applies from the next model request | InputQueue |
 | Resource node offline | — | Calls fail `node_unavailable`; no reload or Pending. Pre-tool and prompt-submit: `on_error`; project file unreadable → project Hooks skipped, diagnostic; observation and Session start: diagnostic | Hooks |
 | Client detach | — | No effect | — |

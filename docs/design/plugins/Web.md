@@ -142,7 +142,7 @@ Full table in Appendix B.
 - Compaction: declarations survive as configuration; results only through the summary.
 - Child branches inherit results in their ancestor prefix.
 - Non-interactive Sessions see the same tools (`requires.interactive = false`).
-- Never visible: `structured_content`, the service name, configuration, credential references, private-host exceptions, diagnostics.
+- Never visible: `structuredContent`, the service name, configuration, credential references, private-host exceptions, diagnostics.
 - Fetched page text is untrusted third-party content placed in a tool result without instruction framing (A14).
 
 ## 6. Interfaces (summary)
@@ -160,7 +160,7 @@ No methods and no CLI subcommand: configuration goes through Settings' typed ope
 - Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
 - SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address; cross-host redirects need a new call and a new admission (A.4, A10).
 - No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
-- Credentials: references resolved per call; never in definitions, results, `structured_content`, diagnostics or errors.
+- Credentials: references resolved per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
 - With `web.proxy`, the proxy resolves names itself; private-address protection then depends on the proxy (stated to the user).
 
@@ -172,8 +172,8 @@ Each tool is one `toolContribution` service (Session scope, key = tool name):
 
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
-| `declaration` | sync | — | `ToolDeclaration {name, description, input_schema, risk: "network", requires: {interactive: false, roles: null}}` |
-| `execute` | async | `ToolCall {session_id, branch_id, call_id, arguments}` | `ToolResult {content: [{type: "text", text}], is_error, structured_content?}` |
+| `declaration` | sync | — | `ToolDeclaration {name, description, inputSchema, risk: "network"}` |
+| `execute` | async | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
 
 Cancellation is a cancel request for the call or the consumer dropping it; Web aborts the request and replies `cancelled` if it still replies. Errors are `ToolResult`s with `is_error: true` (Appendix C), never call failures. Parameters are validated by the handler; a violation returns an error result without network access.
 
@@ -221,7 +221,7 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-Bracketed lines appear only when they apply. `structured_content`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited }`.
+Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited }`.
 
 | Item | Rule |
 | --- | --- |
@@ -294,7 +294,7 @@ Read at each call; a change is a data update with notification, never a reload. 
 
 ## Appendix C. Errors and recovery
 
-Every error is an error `ToolResult` (`is_error: true`) with content `web_fetch failed: <code>: <message>` or `web_search failed: ...`. No error affects other calls or the Session.
+Every error is an error `ToolResult` (`isError: true`) with content `web_fetch failed: <code>: <message>` or `web_search failed: ...`. No error affects other calls or the Session.
 
 | Code | Meaning |
 | --- | --- |

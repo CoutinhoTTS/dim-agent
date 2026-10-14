@@ -134,7 +134,7 @@ sequenceDiagram
   end
 ```
 
-An explicit owner stop never wakes the starter ([event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md)). Lookup by `submission_id` before any retry guarantees at most one report.
+An explicit owner stop never wakes the starter ([event-driven flows §3](../../architecture/rust-agent/event-driven-flows.md)). `sessions.lookup` by `submissionId` before any retry guarantees at most one report.
 
 ### 3.3 Policy of a stage
 
@@ -290,7 +290,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 
 | Contract | Owner | Use |
 | --- | --- | --- |
-| `sessions.launch {agent, cwd, resourceNode?, policy?, starter?}` → `{sessionId}` (non-interactive; `createdBy = {kind: "launch", source: "workflow"}`) | Agents supplement ([session-access](../contracts/session-access.md)) | Launched stages; Workflow writes the first input itself |
+| `sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}` (non-interactive; `createdBy = {kind: "launch", source: "workflow"}`) | Agents supplement ([session-access](../contracts/session-access.md)) | Launched stages; Workflow writes the first input itself |
 | `establish {leaderSessionId, agentId}: async -> {sessionId}` | Collaboration supplement, a Collaboration service outside `sessions` | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
 | `sessions.withdraw {sessionId, branchId, inputId}` of an own input; `sessions.lookup` by `submissionId` | session-access (InputQueue) | Withdraw own unconsumed stage inputs on stop |
 
@@ -397,7 +397,6 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Question | Description |
 | --- | --- |
 | Overview method list | Overview §B.9 lists `workflow.list/save/start/status/stop`; this design adds `workflow.approve/revoke` (D11) |
-| Launch contract | The Agents supplement must define `sessions.launch` with `policy` and the starter-policy resolution; `LaunchRequest` has no `model` field, so `stage.model` needs one (or a profile per model) |
 
 ## Appendix G. Rust binding
 

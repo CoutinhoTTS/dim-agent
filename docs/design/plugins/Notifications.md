@@ -214,7 +214,7 @@ Messages sent by the tool are prefixed `[dim <session label>] ` (A7).
 
 ### A.3 Trigger rules
 
-| Event | Trigger | Rule (event triggers require `interactive && collaboration_role = leader`) |
+| Event | Trigger | Rule (event triggers require `interactive && collaborationRole = leader`) |
 | --- | --- | --- |
 | `turn/end` on `main` | `turn.completed` / `turn.failed` | `completed` / `failed`; `cancelled` none (A3). Fires only if `N` is the latest `turn/end`, no `turn/start` after it, and no Queue/Steer `input/message` lacks both `input/consumed` and `input/withdrawn` |
 | `approval/request` (any branch) | `approval.pending` | No `approval/respond` or `approval/cancelled` with the same `approval_id` after the delay |

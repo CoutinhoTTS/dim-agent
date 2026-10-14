@@ -187,7 +187,7 @@ Full table: Appendix B.
 | Answers, decline | `ToolResult.content` (Appendix A.1) | Tool result position, after every call of the batch settles |
 | Cancellation | Error text from ToolExecutor | Same position |
 
-Never visible: `question/*` events, `structured_content`, the CLI rendering. Compaction keeps the declaration and keeps answers only through the summary. Child branches inherit answers whose `step/tool-result` precedes the cut; a call cut between `asked` and its result projects as not executed.
+Never visible: `question/*` events, `structuredContent`, the CLI rendering. Compaction keeps the declaration and keeps answers only through the summary. Child branches inherit answers whose `step/tool-result` precedes the cut; a call cut between `asked` and its result projects as not executed.
 
 ## 6. Interfaces (summary)
 
@@ -229,7 +229,7 @@ User answered:
    -> (custom) <text>
 ```
 
-A declined call yields `User declined to answer the question(s).` (A6). `structured_content` carries `{answers, declined}` for clients only. A cancelled call ends with the error `{code: "cancelled", reason}`, which ToolExecutor reports.
+A declined call yields `User declined to answer the question(s).` (A6). `structuredContent` carries `{answers, declined}` for clients only. A cancelled call ends with the error `{code: "cancelled", reason}`, which ToolExecutor reports.
 
 ### A.2 Event payloads
 

@@ -186,7 +186,7 @@ Full table: [Appendix B](#appendix-b-full-conflict-table).
 | Compaction | The baseline replays the latest live `goal:current` block verbatim; retired goals are not replayed; continuations and earlier blocks survive only through the summary |
 | Child branches | Inherit blocks consumed before the cut; the block names its owner branch and tells delegated work not to call `goal_update` (A3) |
 | Non-interactive Sessions | Same mapping; continuations drive turns without a user present |
-| Never visible | `submission_id`, mode, count of operator inputs, diagnostics, other plugins' events |
+| Never visible | `submissionId`, mode, count of operator inputs, diagnostics, other plugins' events |
 
 Exact texts: [Appendix A.5](#a5-model-visible-texts).
 
@@ -285,7 +285,7 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | --- | --- |
 | Load | Subscribe to the Dispatcher (`"Goal"`), fix `S = committed()` under the gate, fold the prefix through `S` into the view, set `rebuilt = S`, provide `goal`. If the latest `turn/end` has no Goal write after it, take its decision once |
 | Consume | Under the branch mutex, skip `sequence <= rebuilt`, advance the view, decide on `turn/end` and `stop/interrupt` (A.4), append if needed and return |
-| Write | `input/message` with source `goal`, `submission_id: "goal:<uuid>"`, marker and mode, appended to the branch Timeline (capability inputs are appended directly; the producer guarantees validity, [interrupt](../../architecture/rust-agent/interrupt.md)) |
+| Write | `input/message` with source `goal`, `submissionId: "goal:<uuid>"`, marker and mode, appended to the branch Timeline (capability inputs are appended directly; the producer guarantees validity, [interrupt](../../architecture/rust-agent/interrupt.md)) |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed`. Goal never writes Steer |
 | Recheck | Decisions use only consumed events ([time-bus](../../architecture/rust-agent/time-bus.md) §4); later facts precede the write in sequence and are resolved by InputQueue and Loop |
 | Tool and method calls | Take the branch mutex, decide on the view, append, await commit, release |

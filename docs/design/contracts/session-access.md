@@ -8,7 +8,7 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | --- | --- | --- |
 | `sessions` service: named, data-only access to Sessions | Agents | Scheduler, Workflow process parts |
 | `launch` with a policy capped by the starter | Agents | Scheduler, Workflow, Collaboration `establish` |
-| `SessionConfig` fields `interactive`, `resource_node`, `created_by` | Agents | Every scope: `S:SessionConfig`, `Session::config()` |
+| `SessionConfig` fields `interactive`, `resourceNode`, `createdBy` | Agents | Every scope: `S:SessionConfig`, `Session::config()` |
 | Input with source raw blocks (marker, keys, `submissionId`), subject to input admission checks ([session-boundary A.6](session-boundary.md#a6-input-admission-check)) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal and Hooks branch parts write the same form |
 | Fixed-prefix read | Runtime facade | Process callers and branch parts deciding from Timeline facts |
 | Withdrawal (`input/withdrawn`, `session.input.withdraw`, own-source withdrawal) | InputQueue | Clients, AcpGateway, Scheduler |
@@ -183,6 +183,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 { "agent": "string",                 // Agent profile id
   "cwd": "string",
   "resourceNode?": "string",         // absent: control node
+  "model?": "string",                // model id; absent: the profile's model
   "policy?": { /* PermissionPolicy data */ },  // narrowed request; absent: starter's or read-only default
   "starter?": { "sessionId": "string", "branchId": "string" } } // upper bound; absent: host configuration bound
 // InputWrite
@@ -197,6 +198,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 { "status": "accepted", "inputId": "string", "sequence": 0 } | { "status": "unknown" }
 // HistoryRequest
 { "sessionId": "string", "branchId": "string",
+  "after?": 0,                        // exclusive lower bound; absent: from the start of the branch
   "through?": 0,                      // read up to this sequence
   "atLeast?": 0 }                     // fixed-prefix read (A.5)
 // HistoryPage
@@ -236,7 +238,7 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | { "kind": "fork", "sourceSession": "string" }
 ```
 
-`session.create` gains `interactive?: bool` (default `true`) and `client?: string`. A fork copies `cwd`, `resource_node`, `interactive` and `collaboration_role`. The fields are fixed at creation. The Session assembly reads `interactive` to decide which optional plugins are installed (no `ask_user` in non-interactive Sessions).
+`session.create` gains `interactive?: bool` (default `true`) and `client?: string`. A fork copies `cwd`, `resourceNode`, `interactive` and `collaborationRole`. The fields are fixed at creation. The Session assembly reads `interactive` to decide which optional plugins are installed (no `ask_user` in non-interactive Sessions).
 
 ### A.4 Withdrawal
 
@@ -318,7 +320,7 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | per-call acquire | `AgentIndex::acquire(id)` (existing) returning a `SessionUse` lease |
 | `input` | `Session::input(InputMessageData, branch)` (existing), keys as `KeyUse::Live(name)` / `Retire(name)` |
 | `lookup` | `session.input_lookup` semantics on the facade |
-| `history` with `atLeast` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>` (supplement); otherwise `Session::history` |
+| `history` with `atLeast` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>` (supplement); otherwise `Session::history`, or `Session::local_page(branch, after, limit, through)` when `after` is set |
 | `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(input_id, source)` |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
 | `SessionConfig`, `SessionOrigin` | Rust structs below |
@@ -329,6 +331,7 @@ pub struct LaunchRequest {
     pub agent: String,
     pub cwd: PathBuf,
     pub resource_node: Option<NodeId>,
+    pub model: Option<String>,            // absent: the profile's model
     pub source: String,                   // recorded as SessionOrigin::Launch { source }
     pub policy: Option<PermissionPolicy>,
     pub starter: Option<SessionRef>,

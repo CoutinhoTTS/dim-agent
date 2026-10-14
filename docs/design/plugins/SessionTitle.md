@@ -48,7 +48,7 @@ flowchart TB
   subgraph STORE["SessionStore metadata (persistent)"]
     MD["revision, title text, source auto or manual"]
   end
-  CONF["SessionConfig: interactive, collaboration_role"]
+  CONF["SessionConfig: interactive, collaborationRole"]
   CFG["sessionTitle.enabled, sessionTitle.maxLength"]
   MEM["in-flight generation, failed attempts (memory)"]:::new
   FUI -->|"text only"| MEM
@@ -182,7 +182,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | Step | Path |
 | --- | --- |
 | Listen | On apply: Session broadcast listener for `input/message` events on `main`, removed on unload |
-| Eligibility | `SessionConfig.interactive && collaboration_role = leader` |
+| Eligibility | `SessionConfig.interactive && collaborationRole = leader` |
 | Trigger | On `input/message` at `N` with `user` content: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `metadata(session)`: skip if any title exists; keep revision `r` |
 | Read | Fixed prefix of `main` up to `N`; the first operator input (user content, no source marker; A10) and its text. No text: no title (A8) |

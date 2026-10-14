@@ -42,7 +42,7 @@ Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../a
 | `Scheduler` | Process (control node) | `sessions` (Agents; `launch` with `policy`), App Server process storage | Job store, timer, run tracker; `managementMethods` key `schedule`; process event `scheduled_run_outcomes` |
 | `SchedulerSession` | Session, installed when Scheduler is enabled | `Scheduler`, Session configuration | `toolContribution` key `schedule`, declared only when `interactive` and not a Collaboration member |
 
-**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields `interactive`/`resource_node`/`created_by`, `input` with source raw blocks, fixed-prefix `history`, `idle`, `stop`, `withdraw`), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)), Permission category `persistent_configuration` (FullAccess allows it, E1), App Server process storage (R8; an existing typed service, reachable by name from a TypeScript part once [#4](https://github.com/arcships/dim/issues/4) exposes it), the [single-tree event contract](../../architecture/rust-agent/single-tree.md). **Contracts defined here**: job and run formats, the `schedule` tool, the `schedule.*` methods, the run-outcome event (A.6), source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
+**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields `interactive`/`resourceNode`/`createdBy`, `input` with source raw blocks, fixed-prefix `history`, `idle`, `stop`, `withdraw`), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)), Permission category `persistent_configuration` (FullAccess allows it, E1), App Server process storage (R8; an existing typed service, reachable by name from a TypeScript part once [#4](https://github.com/arcships/dim/issues/4) exposes it), the [single-tree event contract](../../architecture/rust-agent/single-tree.md). **Contracts defined here**: job and run formats, the `schedule` tool, the `schedule.*` methods, the run-outcome event (A.6), source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
 
 ## 2. Data and state
 
@@ -90,7 +90,7 @@ sequenceDiagram
   participant IQ as InputQueue and Loop
   T->>ST: recheck job, persist run launching
   alt mode create, or first reuse run
-    T->>AG: sessions.launch(agent, cwd, resourceNode, policy)
+    T->>AG: sessions.launch(agent, cwd, resourceNode, model, policy)
     AG-->>T: sessionId
   end
   T->>S: sessions.input(sessionId, main, queue, marker scheduled-run, prompt)
@@ -247,7 +247,7 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 | Step | Path |
 | --- | --- |
 | Trigger | Timer task computes the next window per enabled job; at a window applies overlap, capacity (A13), enablement and policy rules; persists `launching` with a fresh `run_id` |
-| Session | `create`: `sessions.launch {agent, cwd, resourceNode?, policy?, starter?}` → `{sessionId}`; Agents records `createdBy = {kind: "launch", source: "scheduler"}` from the declared source. For a tool-created job `starter` is the creating Session (A15), else absent. `reuse`: the bound `session_id` (an unloaded Session is restored by the call); the first run launches and binds `session_id` |
+| Session | `create`: `sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}`; Agents records `createdBy = {kind: "launch", source: "scheduler"}` from the declared source. For a tool-created job `starter` is the creating Session (A15), else absent. `reuse`: the bound `session_id` (an unloaded Session is restored by the call); the first run launches and binds `session_id` |
 | Write | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId: "scheduler:<run_id>", rawBlocks: [marker {kind: "scheduled-run", attrs: [job, run], body: job name}], content: [prompt text]}` → `{inputId}` stored as `input_event_id`; input admission checks run first; `input_denied` → run `failed: input_denied`; persist `submitted` |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn |
 | Completion | Tracker task: `sessions.idle {sessionId, branchId: "main"}` → cutoff `C`; `sessions.history {through: C}` pages; `running` once `input/consumed { input_id = input_event_id }` exists; ends at the first `turn/end` after it; `input/withdrawn` before consumption → `cancelled: withdrawn` |
@@ -357,7 +357,6 @@ Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), dae
 | Question | Description |
 | --- | --- |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
-| Launch contract | The Agents supplement must define `sessions.launch` with `policy` capped by the starter and a way to resolve a Session's current policy; `LaunchRequest` has no `model` field, so a job's `model` needs one (or a profile per model) |
 
 ## Appendix G. Rust binding
 

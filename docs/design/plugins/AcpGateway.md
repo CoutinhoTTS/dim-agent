@@ -308,8 +308,8 @@ Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus th
 | A11 | An input adopted before the stop stays pending and runs later | Interrupt contract | Requires withdrawal of adopted inputs |
 | A12 | Reconnect window 30 s | Judgment | Other bound |
 | A13 | Questions in loaded interactive Sessions are shown as waiting, not answered over ACP | Decisions E13; ACP has no question request | Map to an ACP elicitation if one is standardized |
-| A14 | `session.create` gains an optional client label; ACP passes `acp`, recorded in `SessionConfig.created_by` as `Client` with that label (Agents supplement) | Judgment; `hello.clientKind` not needed | ACP Sessions not distinguishable |
-| A15 | "ACP Session display" (feature list, `/settings`) is a CLI display preference owned by the CLI: whether Sessions whose `created_by` carries the client label `acp` appear in CLI Session lists, default shown; nothing in this adapter | Feature list names only the setting | Defined elsewhere; adapter unchanged |
+| A14 | `session.create` gains an optional client label; ACP passes `acp`, recorded in `SessionConfig.createdBy` as `{kind: "client", client: "acp"}` (Agents supplement) | Judgment; `hello.clientKind` not needed | ACP Sessions not distinguishable |
+| A15 | "ACP Session display" (feature list, `/settings`) is a CLI display preference owned by the CLI: whether Sessions whose `createdBy` carries the client label `acp` appear in CLI Session lists, default shown; nothing in this adapter | Feature list names only the setting | Defined elsewhere; adapter unchanged |
 
 ## Appendix F. Open questions
 

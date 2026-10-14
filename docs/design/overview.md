@@ -60,7 +60,7 @@ flowchart TB
   agents -->|"loads"| SES
   SES -->|"TimelineTree loads"| BR
   pnew -->|"launch, input, idle"| agents
-  SES -.->|"per call by resource_node"| rn
+  SES -.->|"per call by resourceNode"| rn
 ```
 
 Green parts are new and orange-bordered parts are changed. Each new plugin part sits at the scope that owns its state. A feature with parts at two scopes is one plugin package with one part per scope, as SkillsCatalog, Skills and SkillsBranch are. Optional Session and branch parts are installed only when the plugin is enabled, never as placeholders.
@@ -178,7 +178,7 @@ The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others
 | Contract | Owner | Defines |
 | --- | --- | --- |
 | [Methods and admission checks](contracts/session-boundary.md) | Rpc, Approval, Session input boundary, ToolRegistry | `sessionMethods`, `managementMethods`, `callChannel`, entry levels, `unknown_method`/`service_reloading`/`input_denied`, migration and compatibility of existing management methods, `toolAdmissionCheck`, `inputAdmissionCheck`, `toolContribution` |
-| [Session access](contracts/session-access.md) | Agents, InputQueue | the `sessions` service; `launch` with a capped policy, `SessionConfig` fields `interactive`/`resource_node`/`created_by`, source raw blocks, fixed-prefix read, withdrawal |
+| [Session access](contracts/session-access.md) | Agents, InputQueue | the `sessions` service; `launch` with a capped policy, `SessionConfig` fields `interactive`/`resourceNode`/`createdBy`, source raw blocks, fixed-prefix read, withdrawal |
 
 ## 5. Key flows
 
@@ -292,12 +292,13 @@ sequenceDiagram
   M->>X: invoke with ModelCallScope
   X->>EA: prompt over ACP or CLI
   EA-->>X: permission request
-  X->>M: approval/request through the call-bound approval port
+  X-->>M: approval_ask stream item
+  M->>M: ModelProvider admits through Approval, approval/request
   M->>C: approval pending in a member
   C-->>L: forwarded to the leader
   L->>C: leader model decides through the agent tool
   C->>M: approval/respond
-  M-->>X: decision
+  M->>X: answerApproval(outcome)
   X->>EA: allow once or reject once
   EA-->>X: output
   X-->>M: model output
@@ -305,7 +306,7 @@ sequenceDiagram
   C-->>L: result
 ```
 
-The permission request becomes an ordinary dim approval (existing `approval/request` and `approval/respond` facts). A Collaboration member's approval goes to the leader's model, and with no leader the user decides. `always` options are never selected.
+The permission request reaches the member branch as an `approval_ask` item in the model stream; ModelProvider admits it through the branch's Approval and answers with `answerApproval`, so it becomes an ordinary dim approval (existing `approval/request` and `approval/respond` facts). A Collaboration member's approval goes to the leader's model, and with no leader the user decides. `always` options are never selected.
 
 ## 6. Common constraints
 
@@ -329,7 +330,7 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 12. **Withdrawal**: one contract owned by InputQueue: `input/withdrawn {input_id}`, the Rpc built-in `session.input.withdraw`, and own-source withdrawal for plugins. "Withdraw and re-submit as Steer" is one atomic batch. Every pending-input derivation excludes withdrawn inputs.
 13. **Input admission**: every input write passes the Session input boundary, which runs the Session's `inputAdmissionCheck`s; a denial writes nothing and returns `input_denied` to the caller.
 14. **Low business coupling**: raw-block markers and keys, configuration keys and method namespaces carry the owner's prefix. Purposes passed to shared services are consumer-owned keys (`session-title`, `compaction`, `collaboration.member`, `modality.<category>`). Collectors never name contributors.
-15. **Interactive Sessions**: `session.create` sets `interactive` and `created_by`. Exec, ACP and automation create non-interactive Sessions, which do not install Questions. Notifications and SessionTitle act only on interactive leader Sessions.
+15. **Interactive Sessions**: `session.create` sets `interactive` and `createdBy`. Exec, ACP and automation create non-interactive Sessions, which do not install Questions. Notifications and SessionTitle act only on interactive leader Sessions.
 
 ### 6.3 Multiple nodes
 
@@ -338,7 +339,7 @@ rutis nodes connect through links, export and import services, run plugins on th
 | Rule | Content |
 | --- | --- |
 | Control node | Hosts the App Server: Timeline, Sessions, configuration sources, Providers, scheduling |
-| Resource node | Where host resources live (files, processes, shell, isolation, local CLIs). Each Session binds one as `SessionConfig.resource_node`, fixed at creation; the default is the control node |
+| Resource node | Where host resources live (files, processes, shell, isolation, local CLIs). Each Session binds one as `SessionConfig.resourceNode`, fixed at creation; the default is the control node |
 | Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are resolved through the Session's assembly (imported services for a peer node). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own configuration |
 | Node-bound data | Host-local approvals, isolation configuration and the external agent directory are identified by node and path |
 | Offline | A call on an offline resource node fails with `node_unavailable`; dependents do not reload or go Pending. This requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5)) |
@@ -400,7 +401,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | Scheduled job outcome for Notifications | Decided: job Sessions are non-interactive, so Scheduler publishes a run-outcome notice that Notifications listens to, with no dependency |
 | Scheduled task liveness | Decided: the daemon must be alive ([Scheduler](plugins/Scheduler.md)) |
 | FullAccess and new categories | Decided: allowed automatically (constraint 7) |
-| External agent permissions | Decided: ordinary dim approval, forwarded to the leader for Collaboration members (§5.4, [ExternalAgent](plugins/ExternalAgent.md)) |
+| External agent permissions | Decided: ordinary dim approval, forwarded to the leader for Collaboration members (§5.6, [ExternalAgent](plugins/ExternalAgent.md)) |
 | External conversation continuation | Proposed: re-initialize from the branch history ([ExternalAgent](plugins/ExternalAgent.md)) |
 | Permission preset on fork | Decided: reset on fork (§6.4) |
 | Reload propagation | Decided: accepted cost of rare structural operations ([ADR 002](../adr/002-plugin-scope.md) D3) |
@@ -473,13 +474,13 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Approval | Supplement | Collects the branch's `toolAdmissionCheck` services and consults every check after the policy decision and before execution; any denial denies ([methods A.3](contracts/session-boundary.md#a3-tool-admission-check)). Accepts `approval/request` raised through the call-bound approval port while a model step is open | Hooks; ExternalAgent |
+| Approval | Supplement | Collects the branch's `toolAdmissionCheck` services and consults every check after the policy decision and before execution; any denial denies ([methods A.3](contracts/session-boundary.md#a3-tool-admission-check)). Accepts a host-source admission (made by ModelProvider for an `approval_ask` stream item) while a model step is open, writing the ordinary `approval/request`, `approval/respond`, `approval/cancelled` facts | Hooks; ExternalAgent |
 | InputQueue | Change | `input/withdrawn {input_id}`; own-source withdrawal service; "withdraw and re-submit as Steer" as one batch; queue state rebuilt from events ([session access A.4](contracts/session-access.md#a4-withdrawal)) | `Ctrl+S`, `/queue`; AcpGateway, Scheduler |
 | Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace; fixed-prefix history read; Session input boundary running `inputAdmissionCheck`s before every write, `input_denied` on denial ([methods A.6](contracts/session-boundary.md#a6-input-admission-check)) | Rpc; process callers; Hooks |
 | ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.7](contracts/session-boundary.md#a7-tool-contribution)) | Non-Rust Session tools |
-| Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides` (Rust binding: `AgentBuilder::session_methods`, `tool_admission_check`, `input_admission_check`); optional Session and branch parts installed per enabled plugin and per `interactive` | All Session plugins |
+| Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides`; optional Session and branch parts installed per enabled plugin and per `interactive` | All Session plugins |
 | Permission | Supplement | Categories `outbound_message`, `persistent_configuration` (allowed under FullAccess); command rules read at use time | Notifications, Scheduler; `/approvals` |
-| ModelProvider | Supplement | Passes `ModelCallScope` (session, branch, request and step ids, `SessionConfig`) with a call-bound approval port | ExternalAgent |
+| ModelProvider | Supplement | Passes `ModelCallScope` (session, branch, request and step ids, `SessionConfig`) to the model kind; admits `approval_ask` stream items through its branch's Approval and returns the outcome with `answerApproval`; cancels the admission on `approval_ask_withdrawn` | ExternalAgent |
 | Prompt, ModelProvider | Supplement | Model parameters (effort, fast mode); switching Agent configuration as one adoption | `/effort`, `/fast`, `/agent` |
 | PromptSources | Supplement | Prompt language source | `/language` |
 | ContextPreparation | Supplement | Usage query; manual compaction; production compaction host with purpose `compaction` | `/usage`, `/compact` |

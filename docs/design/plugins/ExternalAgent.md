@@ -238,10 +238,10 @@ Detection calls `externalAgentNode.detect` at load and on `refresh` (A1); detect
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
-| `invoke` | async, streamed | `{request: ModelRequest data, target: {node, agent}, scope: {session_id, branch_id, turn_id, request_id, call_sequence, cwd, resource_node, interactive, collaboration_role}}` | Stream of items: model chunks (A.4), `{approval_ask: {ask_id, operation_id, call: {name, input}, risk?}}`, `{approval_ask_withdrawn: {ask_id}}`; ends with a stop chunk or an error `{code, origin, transient}` |
-| `answerApproval` | async | `{request_id, ask_id, outcome: allow \| deny \| cancelled}` | `{}`; unknown ask → `{}` (late answers are ignored) |
+| `invoke` | async, streamed | `{request: ModelRequest data, target: {node, agent}, scope: {sessionId, branchId, turnId, requestId, callSequence, cwd, resourceNode, interactive, collaborationRole}}` | Stream of items: model chunks (A.4), `{approvalAsk: {askId, operationId, call: {name, input}, risk?}}`, `{approval_ask_withdrawn: {askId}}`; ends with a stop chunk or an error `{code, origin, transient}` |
+| `answerApproval` | async | `{requestId, askId, outcome: allow \| deny \| cancelled}` | `{}`; unknown ask → `{}` (late answers are ignored) |
 
-Cancellation is a protocol action: the consumer drops the `invoke` stream or sends its cancel request; open asks are then answered `cancelled` internally. `operation_id = "external-agent:<request_id>:<ask_n>"`. ModelProvider supplement: on `approval_ask` it calls its branch's `Approval::admit` with source `Host {operation_id}` and the call, and returns the outcome through ModelHost's `answerApproval`; on `approval_ask_withdrawn` it cancels that admission. Approval supplement: such an admission is accepted while `step/model-start` is open; its facts are the ordinary approval facts, with no model-visible effect. When a request's adopted Provider connection entry `external-agent:<node>:<agent>` exists but no `modelKind` instance with that key is registered, ModelHost fails it before acceptance (transient); other kinds are unaffected.
+Cancellation is a protocol action: the consumer drops the `invoke` stream or sends its cancel request; open asks are then answered `cancelled` internally. `operationId = "external-agent:<requestId>:<askN>"`. ModelProvider supplement: on `approvalAsk` it calls its branch's `Approval::admit` with source `Host {operationId}` and the call, and returns the outcome through ModelHost's `answerApproval`; on `approval_ask_withdrawn` it cancels that admission. Approval supplement: such an admission is accepted while `step/model-start` is open; its facts are the ordinary approval facts, with no model-visible effect. When a request's adopted Provider connection entry `external-agent:<node>:<agent>` exists but no `modelKind` instance with that key is registered, ModelHost fails it before acceptance (transient); other kinds are unaffected.
 
 ### A.3 Bridge service and adapters
 
@@ -292,7 +292,7 @@ Pinned protocol version, generated types per language, transcript-based conforma
 | --- | --- |
 | Request | Loop writes `input/consumed`* and `step/model-start`; ContextPreparation writes `model/call` (`Timeline::append`); ModelProvider consumes it on its Dispatcher, registers the call task, returns |
 | Resolve | In the task: Provider resolves `{kind: external-agent, target}`; ModelHost calls `modelKind[external-agent].invoke` with the call scope |
-| Read | `sessions.history {sessionId, branchId, through: call_sequence}`, events after `scan_from`; a Session that cannot be read fails before acceptance, transient |
+| Read | `sessions.history {sessionId, branchId, after: scan_from, through: call_sequence}`; a Session that cannot be read fails before acceptance, transient |
 | Write-ahead | Persist `in_flight` before sending; on `Accepted` persist cursor, `last_request_id`, `scan_from`, `external_id`; an attempt ending before `Accepted` restores the record |
 | Output | ModelProvider commits chunks (`Timeline::append`) and writes `step/model-output-end` with `append_batch_registered`; `StateCell<ModelProgress>` shows uncommitted text |
 | Approval | ModelProvider admits the `approval_ask`; Approval `append_registered` of `approval/request` (waiter registered in the commit lock); `approval/respond` consumed on the branch Dispatcher; Approval writes `approval/cancelled` on every other end; ModelProvider calls `answerApproval` |
@@ -402,7 +402,6 @@ Flow tests through public interfaces with a scripted ACP agent and a scripted CL
 | Supplement cost | Admitting `approval_ask` items makes ModelProvider depend on its branch's Approval, so an Approval reload reloads ModelProvider (rare, accepted per D3) |
 | External conversation continuation | Overview §9; this design re-initializes (A15) |
 | Agents profile registration | The shape of Agents' profile registration and Provider's connection-entry operations (direct dependencies, ADR 002 D3) is not yet defined |
-| History lower bound | `sessions.history` has no `after` bound; reading from `scan_from` needs one (session-access) or reads the whole local branch |
 | ACP `session/load` | Whether a `ready` record after a process restart should continue via `session/load` rather than initialize |
 
 ## Appendix G. Rust binding
