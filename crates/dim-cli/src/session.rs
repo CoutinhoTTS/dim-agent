@@ -1,9 +1,9 @@
+use crate::wire::{Event, Progress};
 use crate::{
     Result,
     args::{Action, Options},
-    client::{Client, Message, RequestTooLarge},
-    composer::{self, Draft},
-    display::{self, Display, Event, Progress},
+    client::{Client, Message},
+    display::{self, Display},
     export,
     input::Input,
     mcp, permission, permission_command,
