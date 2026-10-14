@@ -5,7 +5,7 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 ## Working conventions
 
 - Set up the toolchain and workspace according to the [build environment](docs/architecture/build.md); it applies to both local development and CI.
-- Write code, comments, documentation and commit messages in English.
+- Write code, comments and commit messages in English. Documentation may be written in English or Chinese; translations live under `docs/zh/`, mirroring `docs/`.
 - Illustrate terminal UI and interaction changes with ASCII diagrams.
 - The corresponding design document is authoritative. When a requirement conflicts with the design, update the document and get confirmation first.
 - After each design or implementation, do an ablation review: check whether every change is necessary and prefer removing abstractions, wrappers, intermediate state and extra branches that do not serve the requirement. Where a simplification is plausible, try it and confirm the result still satisfies the requirement and interface contracts within the affected scope. For structure that is required, state its purpose; do not deliberately revert fixes or manufacture test failures to prove necessity. If nothing can be removed, say so instead of inventing experiments.
