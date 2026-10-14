@@ -66,7 +66,7 @@ classDiagram
   }
   class RunSessionTimeline {
     input/message with dim-scheduler marker
-    input/applied, input/consumed, input/withdrawn
+    input/applied, input/consumed, input/deleted
     turn/start, turn/end, stop/interrupt
   }
   Job "1" --> "0..100" Run
@@ -115,14 +115,14 @@ sequenceDiagram
   Note over R: max_run_minutes elapsed
   alt input not consumed
     R->>S: sessions.withdraw own input
-    R->>ST: timed_out after input/withdrawn
+    R->>ST: deleted gives timed_out, notHeld waits for input/consumed then stops
   else consumed
     R->>S: sessions.stop(main, scheduled run timed out)
     R->>ST: timed_out once turn/end is read
   end
 ```
 
-Each active run has a task that waits on `sessions.idle` and reads history up to the returned cutoff, as Collaboration and Workflow do; Scheduler does not observe Session broadcasts. If the withdrawal finds the input already consumed, the tracker falls back to `stop`. A notice is emitted once, after the terminal record is persisted.
+Each active run has a task that waits on `sessions.idle` and reads history up to the returned cutoff, as Collaboration and Workflow do; Scheduler does not observe Session broadcasts. If the withdrawal replies `notHeld` (InputQueue already applied the input, so it belongs to Loop), the tracker waits for `input/consumed` and then uses `stop`. A notice is emitted once, after the terminal record is persisted.
 
 ### 3.3 Permission of a run
 
@@ -150,19 +150,19 @@ sequenceDiagram
   participant U as User
   participant IQ as InputQueue
   S->>IQ: run input (Queue) at seq n
-  U->>IQ: session.input.withdraw at seq n+1
-  IQ->>IQ: input/withdrawn
-  S->>S: next history read: withdrawn, never consumed
+  U->>IQ: session.input.withdraw writes input/withdraw at seq n+1
+  IQ->>IQ: input still held: input/deleted
+  S->>S: next history read: deleted, never applied
   S->>S: run cancelled (withdrawn)
 ```
 
-Every pending-input decision excludes withdrawn inputs, so a withdrawn run input never leaves the run `submitted` forever.
+Every pending-input decision excludes deleted inputs, so a deleted run input never leaves the run `submitted` forever.
 
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
 | Previous run still active when a window fires | — (storage) | `skipped: overlap` (A4) | Scheduler |
 | User interrupts the run's turn | consumed < `stop/interrupt` < `turn/end` | Run `cancelled` | Loop; Scheduler records |
-| Timeout withdraw vs consumption | consumed < withdraw | Withdraw rejected; `stop` path | InputQueue, Scheduler |
+| Timeout withdraw after apply | `input/applied` < `input/withdraw` | `notHeld`, nothing written; `stop` after `input/consumed` | InputQueue, Scheduler |
 | Agents or Scheduler reload, restart | — | `launching` → lookup: accepted → `submitted`, unknown → `lost`; never resubmitted; tracking resumes | Scheduler |
 | Daemon down over a window | — | `missed`; no catch-up (E5) | Scheduler |
 
@@ -248,10 +248,10 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 | --- | --- |
 | Trigger | Timer task computes the next window per enabled job; at a window applies overlap, capacity (A13), enablement and policy rules; persists `launching` with a fresh `run_id` |
 | Session | `create`: `sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}`; Agents records `createdBy = {kind: "launch", source: "scheduler"}` from the declared source. For a tool-created job `starter` is the creating Session (A15), else absent. `reuse`: the bound `session_id` (an unloaded Session is restored by the call); the first run launches and binds `session_id` |
-| Write | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId: "scheduler:<run_id>", rawBlocks: [marker {kind: "scheduled-run", attrs: [job, run], body: job name}], content: [prompt text]}` → `{inputId}` stored as `input_event_id`; input admission checks run first; `input_denied` → run `failed: input_denied`; persist `submitted` |
+| Write | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId: "scheduler:<run_id>", rawBlocks: [marker {kind: "scheduled-run", attrs: [job, run], body: job name}], content: [prompt text]}` → `{inputId}` stored as `input_event_id`; persist `submitted` |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed { input_id }` and drives the turn |
-| Completion | Tracker task: `sessions.idle {sessionId, branchId: "main"}` → cutoff `C`; `sessions.history {through: C}` pages; `running` once `input/consumed { input_id = input_event_id }` exists; ends at the first `turn/end` after it; `input/withdrawn` before consumption → `cancelled: withdrawn` |
-| Timeout | Not consumed: `sessions.withdraw` of the own input → `timed_out`; consumed: `sessions.stop {sessionId, branchId: "main"}` (turn scope), `timed_out` when `turn/end` is read |
+| Completion | Tracker task: `sessions.idle {sessionId, branchId: "main"}` → cutoff `C`; `sessions.history {through: C}` pages; `running` once `input/consumed { input_id = input_event_id }` exists; ends at the first `turn/end` after it; `input/deleted` → `cancelled: withdrawn` (unless the tracker's own timeout withdraw wrote it: `timed_out`) |
+| Timeout | Not consumed: `sessions.withdraw` of the own input; `deleted` → `timed_out`, `notHeld` → wait for `input/consumed`, then as consumed; consumed: `sessions.stop {sessionId, branchId: "main"}` (turn scope), `timed_out` when `turn/end` is read |
 | Recheck | Before writing, re-read job and run from storage (enabled, revision unchanged, run still `launching`) |
 | Reload or restart | Session parts reload with Scheduler; an in-flight `schedule` call fails with its turn. The new generation settles: `launching` → `sessions.lookup` by `submissionId`: accepted → `submitted`, unknown → `lost` (never resubmitted); `submitted`/`running` resume tracking; passed windows `missed` |
 | Run outcome | After persisting a terminal state, publish `scheduled_run_outcomes` with the A.6 data; nothing is replayed after reload or restart |
@@ -281,8 +281,9 @@ Emitted once per run after its terminal record is persisted (A16, A17). Delivery
 | User interrupts the run's turn | consumed < interrupt < `turn/end` | `cancelled` | Loop |
 | Interrupt before the run input | interrupt < input | Input starts a turn | Loop |
 | Input applied, interrupt before consumption | applied < interrupt | Stays pending; consumed by the next turn; run `submitted` | Loop |
-| User withdraws the run input | input < `input/withdrawn` | Run `cancelled: withdrawn` | InputQueue, Scheduler |
-| Timeout withdraw races consumption | consumed < withdraw request | Withdraw rejected; `stop` then `timed_out` | InputQueue, Scheduler |
+| User withdraws the run input while held | input < `input/withdraw`, no `input/applied` | `input/deleted`; run `cancelled: withdrawn` | InputQueue, Scheduler |
+| User withdraws after apply | `input/applied` < `input/withdraw` | `notHeld`; run continues | InputQueue |
+| Timeout withdraw races apply | `input/applied` < `input/withdraw` | `notHeld`; `stop` after `input/consumed`, then `timed_out` | InputQueue, Scheduler |
 | Branch close or Session closed before the write | — | `failed: session_missing`; reuse binding kept (A6) | Scheduler |
 | Session closed while the run is active | — | History read fails; `failed` | Scheduler |
 | Compaction during the run | — | No effect: `input/consumed` and `turn/end` stay in local history | — |
@@ -293,7 +294,6 @@ Emitted once per run after its terminal record is persisted (A16, A17). Delivery
 | Scheduler reload during a `schedule` call | — | The calling Session part reloads; that turn fails (D3, accepted) | Loop |
 | Daemon down over a window | — | `missed`; no catch-up | Scheduler |
 | Resource node offline at trigger, `create` | — | A launch refused for the unavailable node → `skipped: node_unavailable`, not retried (A6); a launched Session runs and its node-service calls fail `node_unavailable` (row below) | Agents, Scheduler |
-| An input admission check denies the run input | — | Nothing written; run `failed: input_denied` (reason kept in `detail`); not retried | Session input boundary, Scheduler |
 | Resource node offline, `reuse` or mid-run | — | Input commits; the run Session stays loaded (no reload, no Pending); its calls on node services fail `node_unavailable` and the turn ends on its own outcome; timeout applies (requirement on [#5](https://github.com/arcships/dim/issues/5)) | Session's node services, Scheduler |
 | Reuse Session policy above the job's effective policy | — | `skipped: policy` | Scheduler |
 | Pending approval in a run Session | `approval/request` | Waits for `approval.respond` from any client or the timeout | Approval; Scheduler |
@@ -321,8 +321,8 @@ With a controllable clock, through management methods, the `schedule` tool and t
 2. A due `create` job yields a non-interactive Session whose first input carries the marker and prompt; run `completed`; one notice.
 3. Overlap: a window during an active run is `skipped: overlap`.
 4. `reuse` with a busy Session: input queued behind the running turn.
-5. User interrupt → `cancelled`; timeout before consumption → `input/withdrawn` and `timed_out`; after consumption → `stop/interrupt` and `timed_out`.
-6. User withdraws the run input → `cancelled: withdrawn`.
+5. User interrupt → `cancelled`; timeout while held → `input/deleted` and `timed_out`; timeout after apply → `notHeld`, then `stop`; after consumption → `stop/interrupt` and `timed_out`.
+6. User withdraws the run input while held → `input/deleted` and `cancelled: withdrawn`.
 7. Clock jump → one `missed` record, no runs.
 8. Restart with a `launching` run: accepted resumes, unknown → `lost`; no duplicate input.
 9. Agents reload mid-run: Scheduler reloads, the run completes and is tracked to its end.

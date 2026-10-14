@@ -174,7 +174,7 @@ Nothing is re-asked. A reload of the Session part propagates to ToolRegistry and
 | Two clients answer | Second registration fails `AlreadyAnswered` |
 | Client unable to answer (`-p` attached to an interactive Session) | The CLI stops the turn with exit code 3 (A8) |
 | Remote paired device answers | Allowed: paired devices may call Session methods |
-| `input/withdrawn` while pending | No effect on the question |
+| `input/withdraw` / `input/deleted` while pending | No effect on the question |
 | Process restart mid-question | `C` on load; batch settled as not executed; turn Failed |
 
 Full table: Appendix B.
@@ -324,7 +324,7 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 | Answer committed, branch part unloads before consuming | Q < A, unload | `close()` writes C: cancelled; `respond` → `service_reloading` | Questions |
 | Session part reload while pending | — | Propagates to ToolRegistry; batch reload-settled, turn Failed; branch part writes C if it reloads too (D3) | ToolExecutor; Questions |
 | Steer/Queue/Append while pending | Q < input | Consumed only after R (Steer/Append) or `turn/end` (Queue); question continues (A11) | Loop, InputQueue |
-| `input/withdrawn` while pending | Q < withdrawn | No effect; withdrawal concerns unconsumed inputs only | InputQueue |
+| `input/withdraw` / `input/deleted` while pending | Q < withdraw | No effect; withdrawal concerns inputs InputQueue still holds only | InputQueue |
 | Several `ask_user` in one batch | Q1 < Q2 | Answered independently; results published together | Questions; ToolExecutor |
 | Same `call_id` asked twice | — | Second registration fails; error result | Questions |
 | Compaction between Q and R | — | Cannot happen: compaction runs at request preparation, not during a batch | ContextPreparation |
@@ -358,7 +358,7 @@ Flow tests through RPC, tool calls and events:
 5. Two `ask_user` plus a slow tool in one batch: answers held until the single `step/tool-result`.
 6. Branch close and branch-part reload settle pending questions; restart writes "did not survive recovery" and the turn fails; no re-ask.
 7. Detach and re-attach: history shows the pending question; answering after re-attach works; answering from a paired remote device works.
-8. A withdrawn queued input while a question is pending does not affect it.
+8. A deleted queued input (`input/deleted`) while a question is pending does not affect it.
 9. CLI: rendering, deferral, `Ctrl+C`, EOF, `-p` exit code 3.
 
 ## Appendix E. Assumptions

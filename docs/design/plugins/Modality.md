@@ -319,7 +319,7 @@ Invoking an unavailable category prints the same reason as the listing. The firs
 | Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
 | Turn `stop/interrupt` or branch close in any Session | — | No effect; tasks are not branch work | — |
-| Session unload, restore, close; compaction; child branch; Steer/Queue/Append; `input/withdrawn` | — | No effect; no model-visible output | — |
+| Session unload, restore, close; compaction; child branch; Steer/Queue/Append; `input/withdraw`, `input/deleted` | — | No effect; no model-visible output | — |
 | Cancel before start | `queued` < cancel | `cancelled` without contacting the executor | Modality |
 | Cancel races completion | lock order | First terminal write wins | Modality (revision) |
 | Cancel on a terminal task | terminal < cancel | Unchanged record returned | Modality |

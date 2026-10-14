@@ -45,8 +45,8 @@ own scope:
 | Observe a Session's events | the existing Session broadcast, from a Session-scoped plugin |
 | Observe and act on a branch's events in order | the branch Dispatcher, from a branch-scoped plugin |
 | Put content into the model context | Session or branch input (adopted inputs), tool results |
-| Check a tool call before execution | a branch-scoped `toolAdmissionCheck` collected by Approval |
-| Check an input before it is written | a Session-scoped `inputAdmissionCheck` run by the Session input boundary |
+| Act on a write before it is committed | a Timeline before callback registered by a branch-scoped plugin (synchronous, or asynchronous with the runtime supplement: the write keeps its place in order and commits after the callback, which may transform the draft or append events to the same batch) |
+| Withdraw an input before it is applied | the `input/withdraw {input_id}` command event (clients, process callers, or a before callback in the input's own batch); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
 | Expose a client method about a Session | a Session-scoped `sessionMethods` service that Rpc dispatches through the Session |
 | Expose a host management method | a process plugin's `managementMethods` service in Rpc's method table, marked management level; each entry serves the levels it is configured for |
 | Reach other Sessions | Agents' `sessions` service (AgentIndex and the Session public interface), as Collaboration does |
@@ -77,7 +77,7 @@ language-neutral form:
 
 | Element | Form |
 | --- | --- |
-| Identity | Service name (camelCase string), scope (process, Session or branch) and instance key (namespace, check name, tool name) |
+| Identity | Service name (camelCase string), scope (process, Session or branch) and instance key (namespace, tool name, kind) |
 | Methods | Name, `sync` or `async`, request and reply as serializable data (field tables or JSON shapes) |
 | Errors | Data: `{code, message}` with documented codes |
 | Cancellation | A protocol action: a cancel request, or the consumer dropping the call |
@@ -85,8 +85,7 @@ language-neutral form:
 | Rust specifics | Trait signatures, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls are one binding, listed in a "Rust binding" appendix |
 
 Canonical services: `sessionMethods` (Session, per namespace), `managementMethods` (process, per
-namespace), `toolAdmissionCheck` (branch, per check name), `inputAdmissionCheck` (Session, per
-check name), `toolContribution` (Session, per tool name), `sessions` (process) and `modelKind`
+namespace), `toolContribution` (Session, per tool name), `sessions` (process) and `modelKind`
 (process, per kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
 and the owning plugin documents. The runtime's existing typed services (Timeline, Dispatcher,
 ToolHost and others) are unchanged; exposing them by name to non-Rust capability parts is the work
@@ -103,7 +102,7 @@ of issue #4.
 | Web | Session | no state shared across Sessions; it only offers tools |
 | SessionTitle | Session | observes the Session's first input; the title is stored by SessionStore |
 | Notifications | Session | observes the Session's events and offers `notify` |
-| Hooks | Session (rules, Session-start hooks) + branch (pre-tool, post-tool and turn-end hooks; admission check to Approval) | rules apply to a Session; execution happens in a branch |
+| Hooks | Session (rules, Session-start hooks) + branch (before callbacks for prompt-submit and pre-tool hooks; post-tool and turn-end hooks) | rules apply to a Session; execution happens in a branch |
 | Scheduler | process (jobs, triggers) + Session (`schedule` tool) | schedules span Sessions |
 | Workflow | process (runs) + Session (`workflow` tool) | a run spans Sessions |
 | ExternalAgent | process | external agent connections are shared |

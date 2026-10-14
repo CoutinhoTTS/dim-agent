@@ -158,7 +158,7 @@ Every race between remote and local clients is decided by Timeline sequence insi
 | --- | --- | --- |
 | Phone and terminal answer the same approval or question | First consumed fact decides; second fails | Approval, Questions |
 | Phone `session.permission.update` races terminal | Two `permission/changed` facts; later sequence wins | Permission |
-| Phone withdraws an input (`session.input.withdraw`) while it is consumed | `input/consumed` first: withdraw fails; `input/withdrawn` first: never consumed | InputQueue |
+| Phone withdraws an input (`session.input.withdraw`) as it is applied | `input/applied` before `input/withdraw`: `notHeld`, nothing written, consumed normally; `input/withdraw` first: `input/deleted`, never applied | InputQueue |
 | Disconnect with a pending approval | Stays pending; replayed on re-attach; no timeout (A14) | Approval |
 | Revocation while that device's request runs | Connection closed; command continues; reply lost | Rpc |
 
@@ -250,7 +250,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 
 | Step | Path |
 | --- | --- |
-| Writes | None by RemoteGateway. Remote calls reach owners through Rpc like local calls: `session.submit` → Session input boundary (`Timeline::append`), `approval.respond` → branch Approval (`approval/respond`), `session.stop` → `stop/interrupt`, `session.permission.update` → Permission (`permission/changed`), `session.input.withdraw` → InputQueue (`input/withdrawn`) |
+| Writes | None by RemoteGateway. Remote calls reach owners through Rpc like local calls: `session.submit` → Session input boundary (`Timeline::append`), `approval.respond` → branch Approval (`approval/respond`), `session.stop` → `stop/interrupt`, `session.permission.update` → Permission (`permission/changed`), `session.input.withdraw` → InputQueue's withdrawal service (command `input/withdraw`; InputQueue writes `input/deleted` if it still holds the input) |
 | Dispatcher | Not subscribed; devices receive events through their per-connection Session attachment |
 | Concurrent attachers | No exclusive owner (A13); all receive the same events in per-branch order |
 | Reload | Closes the entry: listener and remote connections close (detach); records persist; offers lost; Rpc reloads with it because it collects `managementMethods` (ADR 002 D3, accepted); in-flight calls follow Rpc's reload rules. Transport reload reloads RemoteGateway (it depends on `entryHost`); runtime-settings changes never reload it |
@@ -265,7 +265,7 @@ Compatibility (sources: `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [pro
 | Remote answer before the interrupt | response < interrupt | Accepted; tool may still be stopped before start | Approval, ToolExecutor |
 | Branch-scoped interrupt or branch close while attached | — | Events delivered; later calls on that branch fail | Session owners |
 | Phone Steer while terminal Queue input pending | Timeline order | Applied per mode in sequence order | InputQueue, Loop |
-| Remote withdraw vs consumption of the input | `input/consumed` vs `input/withdrawn` | Earlier fact wins; the other is rejected | InputQueue |
+| Remote withdraw vs apply of the input | `input/applied` vs `input/withdraw` in InputQueue's sequence order | Applied first: `notHeld`, nothing written; withdraw first: `input/deleted`, never applied | InputQueue |
 | Remote submit during an unsettled tool batch | input < `step/tool-result` | Steer/Append after the batch result; Queue after `turn/end` | Loop |
 | Remote `session.permission.update` vs terminal update | sequence | Later `permission/changed` is current; tool admissions use the policy consumed at admission | Permission, Approval |
 | Remote `session.exec.stop` vs exec completion | sequence | Earlier terminal fact wins | WorkspaceTools exec owner |
@@ -308,7 +308,7 @@ Flow tests in the App Server suite over a real WebSocket entry:
 1. `remote.start`/`status`/`stop`; non-loopback without TLS rejected; restart reopens when `enabled`; changing `bind` in the business source reopens the entry without reloading the plugin.
 2. Pairing with valid, expired, reused code and too many attempts; `remote.devices` lists the device.
 3. A paired device calls Session methods including `session.permission.update`, `session.exec.stop`, `session.model.update` and `session.input.withdraw`; every management-level name, including `remote.*` and `daemon.shutdown`, returns `unknown_method`; v1 is rejected.
-4. Two attached clients: both receive events; competing `approval.respond`; interrupt before and after a remote response; remote withdraw racing consumption.
+4. Two attached clients: both receive events; competing `approval.respond`; interrupt before and after a remote response; remote withdraw racing apply (`input/deleted` or `notHeld`).
 5. Disconnect with a pending approval and with a submitted input; re-attach replays; `session.input_lookup` finds the input.
 6. Revoke closes connections and rejects the token; rotation grace window; `remote.rotate_token` forces rotation.
 7. A corrupt device file rejects all upgrades without resetting the file.

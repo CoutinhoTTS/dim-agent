@@ -44,7 +44,7 @@ All dependencies are existing typed services; exposing them and Scheduler's even
 flowchart TB
   subgraph TL["This Session's Timelines (read only)"]
     TE["turn/start, turn/end on main"]
-    IN["input/message, input/consumed, input/withdrawn"]
+    IN["input/message, input/consumed, input/deleted"]
     AP["approval/request, respond, cancelled"]
     QU["question/asked, answered, cancelled"]
   end
@@ -83,7 +83,7 @@ sequenceDiagram
   NP->>CH: HTTPS POST Task completed
 ```
 
-Wall-clock only delays the read; the decision uses facts and sequence. Withdrawn inputs are not pending.
+Wall-clock only delays the read; the decision uses facts and sequence. Deleted inputs (`input/deleted`) are not pending.
 
 ### 3.2 Approval pending
 
@@ -137,11 +137,11 @@ sequenceDiagram
   TL->>TL: input/message Queue at N+1
   NP->>TL: prefix read at check time
   Note over NP: pending Queue input after N, no turn.completed
-  TL->>TL: input/withdrawn for that input
+  TL->>TL: input/deleted for that input
   Note over NP: next turn/end decides
 ```
 
-A pending driving input suppresses `turn.completed`. Withdrawn before the check, it no longer counts; withdrawn after the check, nothing happens until the next `turn/end` (A15).
+A pending driving input suppresses `turn.completed`. Deleted before the check, it no longer counts; deleted after the check, nothing happens until the next `turn/end` (A15).
 
 | Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
@@ -216,7 +216,7 @@ Messages sent by the tool are prefixed `[dim <session label>] ` (A7).
 
 | Event | Trigger | Rule (event triggers require `interactive && collaborationRole = leader`) |
 | --- | --- | --- |
-| `turn/end` on `main` | `turn.completed` / `turn.failed` | `completed` / `failed`; `cancelled` none (A3). Fires only if `N` is the latest `turn/end`, no `turn/start` after it, and no Queue/Steer `input/message` lacks both `input/consumed` and `input/withdrawn` |
+| `turn/end` on `main` | `turn.completed` / `turn.failed` | `completed` / `failed`; `cancelled` none (A3). Fires only if `N` is the latest `turn/end`, no `turn/start` after it, and no Queue/Steer `input/message` lacks both `input/consumed` and `input/deleted` |
 | `approval/request` (any branch) | `approval.pending` | No `approval/respond` or `approval/cancelled` with the same `approval_id` after the delay |
 | `question/asked` (any branch) | `question.pending` | No `question/answered` or `question/cancelled` with the same `call_id` after the delay |
 | Run outcome `{job_id, job_name, run_id, session_id?, state, reason?, ended_at}` with `session_id` = this Session | `schedule.ended` | Every such notice (A17) |
@@ -241,15 +241,15 @@ Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Ta
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
 | Continuation or queued input before the check | `turn/end` N < input | No `turn.completed` | Notifications |
-| That input withdrawn before the check | input < `input/withdrawn` < check | Not pending; sent | Notifications |
-| That input withdrawn after the check | check < `input/withdrawn` | Nothing for N; next `turn/end` decides (A15) | Notifications |
+| That input deleted before the check | input < `input/deleted` < check | Not pending; sent | Notifications |
+| That input deleted after the check | check < `input/deleted` | Nothing for N; next `turn/end` decides (A15) | Notifications |
 | Input after the check | check < input | Sent (accepted) | Notifications |
 | Turn ended by interrupt | `turn/end {cancelled}` | Nothing (A3) | Notifications |
 | Turn failed | `turn/end {failed}` | `turn.failed` if still the latest turn | Notifications |
 | Approval answered or cancelled before the delay | request < respond/cancelled < check | Nothing | Notifications |
 | Approval answered after send | check < respond | Stays sent; no follow-up (A11) | — |
 | Question answered or cancelled before the delay | asked < answered/cancelled | Nothing | Notifications |
-| Concurrent Steer/Queue/Append | Timeline order | Unconsumed, unwithdrawn Queue/Steer suppresses `turn.completed`; Append does not | Notifications |
+| Concurrent Steer/Queue/Append | Timeline order | Unconsumed, undeleted Queue/Steer suppresses `turn.completed`; Append does not | Notifications |
 | Tool batch not settled | approvals inside the batch | Pending approval notified; `turn/end` cannot precede the batch result | Loop |
 | Compaction | — | No effect: checks read facts | — |
 | Child branch | approval in child | Notified; child `turn/end` ignored (A1) | Notifications |
@@ -280,7 +280,7 @@ Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Ta
 
 Flow tests with fake HTTP endpoints and a fake model:
 
-1. Completed `main` turn of an interactive leader Session sends one `turn.completed`; a Queue input before the check suppresses it; the same input withdrawn before the check does not; cancelled sends nothing; failed sends `turn.failed`.
+1. Completed `main` turn of an interactive leader Session sends one `turn.completed`; a Queue input before the check suppresses it; the same input deleted (`input/deleted`) before the check does not; cancelled sends nothing; failed sends `turn.failed`.
 2. Member Sessions and `interactive: false` Sessions send nothing event-triggered.
 3. Approval answered before the delay sends nothing; unanswered sends once; cancelled sends nothing.
 4. `question/asked` with and without an answer; inert without Questions.
@@ -307,7 +307,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 | A12 | Best effort: no persistent outbox, no recovery after restart | Judgment | Process-storage outbox needed |
 | A13 | Sent regardless of attached clients | Judgment | Needs an attachment contract |
 | A14 | Slack via webhook or bot token + channel id; Feishu via custom-bot webhook with optional signing | Feature list; modes are judgment | Other adapters |
-| A15 | A suppressed `turn.completed` is not re-evaluated after a later withdrawal | Judgment | Withdrawal needs its own trigger |
+| A15 | A suppressed `turn.completed` is not re-evaluated after a later `input/deleted` | Judgment | Withdrawal needs its own trigger |
 | A17 | `schedule.ended` is delivered by the run Session's instance using `RunOutcome.session_id`, with job name and state only | Scheduler notice carries `session_id`; judgment | A process part would listen once for all runs |
 
 ## Appendix F. Open questions

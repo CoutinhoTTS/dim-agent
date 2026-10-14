@@ -4,7 +4,7 @@ Status: Draft
 
 This document starts from the [CLI feature list](../feature-list.md), identifies the features that existing plugins do not cover, and places the new plugins in the existing system. Each new plugin is designed in `docs/design/plugins/<Name>.md`. Supplements to existing plugins are listed in [Appendix B](#appendix-b-supplements-to-existing-plugins) and designed by the plugin that owns them.
 
-> **Scope rule** ([ADR 002](../adr/002-plugin-scope.md)): a plugin part lives at the scope that owns its state and lifecycle (process, Session or branch), and parts integrate only through mechanisms the runtime already has. No new mechanism is introduced. Every contract is language-neutral (D5): a named service with a scope, an instance key and data-only methods, so plugins in any language provide or use it ([§3.1](#31-contract-form)). The two contracts describe supplements to existing interfaces: [methods and admission checks](contracts/session-boundary.md) (Rpc, Approval, the Session input boundary, ToolRegistry) and [session access](contracts/session-access.md) (Agents, the Session facade, InputQueue).
+> **Scope rule** ([ADR 002](../adr/002-plugin-scope.md)): a plugin part lives at the scope that owns its state and lifecycle (process, Session or branch), and parts integrate only through mechanisms the runtime already has. No new mechanism is introduced. Every contract is language-neutral (D5): a named service with a scope, an instance key and data-only methods, so plugins in any language provide or use it ([§3.1](#31-contract-form)). The two contracts describe supplements to existing interfaces: [methods and tool contributions](contracts/session-boundary.md) (Rpc, ToolRegistry) and [session access](contracts/session-access.md) (Agents, the Session facade, InputQueue).
 
 The main body covers premises, the scope diagram and assignment, integration, the catalog, key flows, constraints, events, phases and open questions. The appendices cover feature ownership, supplements to existing plugins, the implementation language, the CLI layer and the document template.
 
@@ -49,7 +49,7 @@ flowchart TB
   end
   subgraph BR["Branch"]
     bexist["Loop, InputQueue, Approval, Permission, ModelProvider, Prompt, ContextPreparation, ToolBinding, ToolExecutor, BackgroundExec, CollaborationTimeline, SessionBroadcast"]:::changed
-    bnew["Questions pending, Goal state and continuation, Hooks pre-tool check, post-tool and turn-end"]:::new
+    bnew["Questions pending, Goal state and continuation, Hooks before callbacks, post-tool and turn-end"]:::new
   end
   rn["Resource node: FileStorage, HostPlatform, WorkspaceTools host side"]
 
@@ -69,7 +69,7 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` tool; `session.question.*` methods; not installed in non-interactive Sessions | Pending questions, `question/*` facts, following Approval | A question belongs to a branch's turn |
 | Goal | — | `goal_update` tool; `session.goal.*` methods | Goal state as a keyed raw input block; continuation decided from branch events in order through the Dispatcher; writes branch inputs | A goal belongs to a branch, and continuation follows its events in order |
-| Hooks | — | Rules from business sources; Session-start Hooks; `inputAdmissionCheck` for `user_prompt_submit` | Pre-tool `toolAdmissionCheck` for Approval; post-tool and turn-end Hooks from the Dispatcher | Rules apply to a Session; execution happens in a branch |
+| Hooks | — | Rules from business sources; Session-start Hooks | Before callbacks on `input/message` (`user_prompt_submit`) and `step/tool-call` (`pre_tool_use`); post-tool and turn-end Hooks from the Dispatcher | Rules apply to a Session; execution happens in a branch |
 | ShellInput | — | `shell.*` methods (level management); runs in the Session's workspace and writes its input | — | Commands belong to the Session |
 | Attachments | — | `attachment.put`; Session files through SessionStore | — | Attachments are Session data |
 | Web | — | `web_search`, `web_fetch` tools | — | No state shared across Sessions |
@@ -91,13 +91,12 @@ Plugins never add wiring plugins (ADR 002 D2). Each need maps to a mechanism tha
 
 | Need | Mechanism | Used by |
 | --- | --- | --- |
-| Offer a tool to a Session | Session-scoped `toolContribution` ([methods A.7](contracts/session-boundary.md#a7-tool-contribution)) or `SessionToolSource` ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Notifications, Scheduler, Workflow |
+| Offer a tool to a Session | Session-scoped `toolContribution` ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) or `SessionToolSource` ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Notifications, Scheduler, Workflow |
 | Offer instructions | PromptRegistry prompt sources | Existing |
 | Observe a Session's events | The existing Session broadcast (`session/<id>` channel), from a Session-scoped plugin | SessionTitle, Notifications, Hooks Session-start |
 | Observe and act on a branch's events in order | The branch Dispatcher, from a branch-scoped plugin | Goal, Questions, Hooks post-tool and turn-end |
 | Put content into the model context | Branch input (raw blocks, keyed blocks) or tool results ([session access](contracts/session-access.md#a2-source-input-conventions)) | Goal, Hooks, ShellInput, Scheduler, Workflow |
-| Check a tool call before execution | Branch-scoped `toolAdmissionCheck`, collected by Approval ([methods and admission checks](contracts/session-boundary.md#a3-tool-admission-check)) | Hooks |
-| Check an input before it is written | Session-scoped `inputAdmissionCheck`, run by the Session input boundary ([methods A.6](contracts/session-boundary.md#a6-input-admission-check)) | Hooks `user_prompt_submit` |
+| Act on a write before it is committed | A Timeline before callback registered by a branch-scoped plugin ([single-tree](../architecture/rust-agent/single-tree.md)), asynchronous with the runtime supplement ([Appendix B.1](#b1-session-and-branch-capabilities)); the callback transforms the draft or appends events to the same batch using existing event contracts or its own declared events | Hooks `user_prompt_submit`, `pre_tool_use` |
 | Client method about a Session | `sessionMethods`, which Rpc dispatches through the Session ([A.1](contracts/session-boundary.md#a1-method-contributions)) | Questions, Goal, SessionTitle, Attachments, ShellInput |
 | Host management method | `managementMethods`, collected by Rpc into its method table, level `management` | Existing management methods, Scheduler, Workflow, Hooks, Notifications, ExternalAgent, Modality, PluginManager, RemoteGateway, Web |
 | Reach other Sessions | Agents' `sessions` service (`launch`, `input`, `history`, `idle`, ...), as Collaboration does ([session access](contracts/session-access.md#a1-the-sessions-service)) | Scheduler, Workflow |
@@ -116,11 +115,10 @@ flowchart LR
   subgraph SES["Session"]
     TR["ToolRegistry"]
     BC["Session broadcast"]
-    IB["Session input boundary"]
     SP["Session parts"]:::new
   end
   subgraph BR["Branch"]
-    AP["Approval"]
+    TL["Timeline"]
     DP["Dispatcher"]
     IQ["InputQueue"]
     BP["Branch parts"]:::new
@@ -128,16 +126,15 @@ flowchart LR
   Rpc -->|"collect managementMethods"| MM
   Rpc -->|"sessionMethods"| SP
   TR -->|"collect toolContribution"| SP
-  IB -->|"collect inputAdmissionCheck"| SP
   SP -->|"listen"| BC
-  AP -->|"collect toolAdmissionCheck"| BP
+  BP -->|"before callback"| TL
   BP -->|"subscribe in order"| DP
   BP -->|"input"| IQ
   SchedP -->|"sessions"| Agents
   SP -->|"branch services"| BP
 ```
 
-The arrows are dependency edges, and they point to the same or an enclosing scope (D3). A collector depends on its contributions (ToolRegistry on tools, Approval on checks, Rpc on method owners), so a contributor reload reloads its collector. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
+The arrows are dependency edges, and they point to the same or an enclosing scope (D3). A collector depends on its contributions (ToolRegistry on tools, Rpc on method owners), so a contributor reload reloads its collector. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
 
 ### 3.1 Contract form
 
@@ -147,9 +144,7 @@ Every contract the designs define or use is a named service (ADR 002 D5): servic
 | --- | --- | --- | --- | --- |
 | `sessionMethods` | Session | namespace | `describe(): async -> MethodDecl[]`; `call(MethodCall): async -> MethodReply` | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
 | `managementMethods` | process | namespace | same | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
-| `toolAdmissionCheck` | branch | check name | `check(ToolCallRequest): async -> {verdict, reason?}` | [methods A.3](contracts/session-boundary.md#a3-tool-admission-check) |
-| `inputAdmissionCheck` | Session | check name | `check(InputRequest): async -> {verdict, reason?, blocks?}` | [methods A.6](contracts/session-boundary.md#a6-input-admission-check) |
-| `toolContribution` | Session | tool name | `declaration(): sync -> ToolDeclaration`; `execute(ToolCall): async -> ToolResult` | [methods A.7](contracts/session-boundary.md#a7-tool-contribution) |
+| `toolContribution` | Session | tool name | `declaration(): sync -> ToolDeclaration`; `execute(ToolCall): async -> ToolResult` | [methods A.5](contracts/session-boundary.md#a5-tool-contribution) |
 | `sessions` | process | — | `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle` | [session access A.1](contracts/session-access.md#a1-the-sessions-service) |
 | `modelKind` | process | kind | request and stream as data | [ExternalAgent](plugins/ExternalAgent.md) |
 
@@ -165,7 +160,7 @@ The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others
 | SessionTitle | Session | Title from the first user input; `session.rename` | P1 | TypeScript first | [SessionTitle](plugins/SessionTitle.md) |
 | Goal | Session + branch | Goal as a keyed input block; continuation; `goal_update`; `session.goal.*` | P2 | TypeScript first | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`, `web_fetch` | P2 | TypeScript first | [Web](plugins/Web.md) |
-| Hooks | Session + branch | Command Hooks: Session start, pre-tool admission check, post-tool, turn end | P2 | Rust | [Hooks](plugins/Hooks.md) |
+| Hooks | Session + branch | Command Hooks: Session start, prompt-submit and pre-tool before callbacks, post-tool, turn end | P2 | Rust | [Hooks](plugins/Hooks.md) |
 | Scheduler | Process + Session | Scheduled jobs; `schedule` tool; run-outcome notice | P2 | TypeScript first | [Scheduler](plugins/Scheduler.md) |
 | Workflow | Process + Session | Multi-stage runs across Sessions; `workflow` tool | P2 | TypeScript first | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | Delivery to channels; `notify` tool | P2 | TypeScript first | [Notifications](plugins/Notifications.md) |
@@ -177,27 +172,30 @@ The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others
 
 | Contract | Owner | Defines |
 | --- | --- | --- |
-| [Methods and admission checks](contracts/session-boundary.md) | Rpc, Approval, Session input boundary, ToolRegistry | `sessionMethods`, `managementMethods`, `callChannel`, entry levels, `unknown_method`/`service_reloading`/`input_denied`, migration and compatibility of existing management methods, `toolAdmissionCheck`, `inputAdmissionCheck`, `toolContribution` |
+| [Methods and tool contributions](contracts/session-boundary.md) | Rpc, ToolRegistry | `sessionMethods`, `managementMethods`, `callChannel`, entry levels, `unknown_method`/`service_reloading`, migration and compatibility of existing management methods, `toolContribution` |
 | [Session access](contracts/session-access.md) | Agents, InputQueue | the `sessions` service; `launch` with a capped policy, `SessionConfig` fields `interactive`/`resourceNode`/`createdBy`, source raw blocks, fixed-prefix read, withdrawal |
 
 ## 5. Key flows
 
-### 5.1 Tool call with a Session tool and a branch admission check
+### 5.1 Tool call with a Session tool and a Hooks before callback
 
 ```mermaid
 sequenceDiagram
   participant LP as Loop (branch)
+  participant TL as Timeline
+  participant HK as Hooks before callback (branch)
   participant TE as ToolExecutor
   participant AP as Approval + Permission
-  participant HK as Hooks toolAdmissionCheck
   participant TB as ToolBinding
   participant W as Web toolContribution (Session)
-  participant TL as Timeline
-  LP->>TE: tool call web_fetch
+  LP->>TL: append step/tool-call [web_fetch]
+  TL->>HK: pending write, callback outside the commit lock
+  HK->>HK: pre_tool_use rules read at use time, Hooks allow
+  HK-->>TL: draft unchanged
+  TL->>TL: commit step/tool-call
+  TL-->>TE: step/tool-call through the Dispatcher
   TE->>AP: admit (risk network)
   AP->>AP: policy decision
-  AP->>HK: check (pre_tool_use rules read at use time)
-  HK-->>AP: allow
   AP-->>TE: allowed
   TE->>TB: handler from the request snapshot
   TE->>W: invoke
@@ -205,7 +203,7 @@ sequenceDiagram
   TE->>TL: step/tool-result after the batch settles
 ```
 
-A denial by a check settles like a policy denial. If Hooks reloads during the turn, Approval reloads with it and the turn ends `Failed`, which D3 accepts.
+A call that a Hook denies is removed from the batch and closed in the same atomic batch by a `step/tool-result` without `call_event_id` carrying the Hook's reason; the other calls proceed unchanged ([Hooks](plugins/Hooks.md)). Approval, ToolExecutor and Loop are unchanged. If Hooks unloads while its callback is pending, the write settles by the callback's `on_error`, which for `pre_tool_use` fails the write and the turn ends `Failed`, which D3 accepts.
 
 ### 5.2 Goal continuation from the branch Dispatcher
 
@@ -222,7 +220,7 @@ sequenceDiagram
   IQ->>TL: input/message, then turn/start
 ```
 
-Goal decides only from branch events it has consumed in order, and its pending-input derivation excludes withdrawn inputs. A `stop/interrupt` pauses the goal. If the interrupt lands after the continuation input, at most one extra turn runs, and the model sees the paused block.
+Goal decides only from branch events it has consumed in order, and its pending-input derivation excludes deleted inputs. A `stop/interrupt` pauses the goal. If the interrupt lands after the continuation input, at most one extra turn runs, and the model sees the paused block.
 
 ### 5.3 Observer through the Session broadcast (SessionTitle)
 
@@ -325,10 +323,10 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 7. **Admission**: new tools declare a risk category. The new categories `outbound_message` and `persistent_configuration` are allowed automatically under FullAccess. Sessions started by automation use the starter's policy as an upper bound, which Scheduler jobs and Workflow definitions may narrow. Runs started by a management method default to read-only unless declared, capped by host configuration. `workflow` uses the `agent` tool's risk category.
 8. **Reload cost**: a contributor reload reloads its collector and may fail in-flight turns. This is accepted and documented in each plugin's conflict table, never prevented (D3).
 9. **Management plane**: methods that run commands or change host configuration declare `level: management`. Local RPC serves both levels, RemoteGateway serves `session`, and a rutis link serves `management` only when explicitly exported (host administrator rights). There are no identity tiers. `hello`, `daemon.*`, `agent.*` and the existing `session.*` methods stay Rpc built-ins.
-10. **Remote Session methods**: paired devices may call every `session`-level method, including `session.permission.update` (compatibility change, [methods A.5](contracts/session-boundary.md#a5-migration-and-compatibility)).
+10. **Remote Session methods**: paired devices may call every `session`-level method, including `session.permission.update` (compatibility change, [methods A.4](contracts/session-boundary.md#a4-migration-and-compatibility)).
 11. **In-flight work**: there is no shared registry. Each owner provides its own query and stop, and the CLI aggregates them.
-12. **Withdrawal**: one contract owned by InputQueue: `input/withdrawn {input_id}`, the Rpc built-in `session.input.withdraw`, and own-source withdrawal for plugins. "Withdraw and re-submit as Steer" is one atomic batch. Every pending-input derivation excludes withdrawn inputs.
-13. **Input admission**: every input write passes the Session input boundary, which runs the Session's `inputAdmissionCheck`s; a denial writes nothing and returns `input_denied` to the caller.
+12. **Withdrawal**: one contract owned by InputQueue. `input/withdraw {input_id}` is a command event written by any legitimate producer: clients through the Rpc built-in `session.input.withdraw`, process callers through `sessions.withdraw`, and a before callback in the same atomic batch as the `input/message`. InputQueue consumes it in order; only if it still holds that input unapplied (no `input/applied`) does it write the result fact `input/deleted {input_id}` and never apply the input. Otherwise (unknown, applied or already deleted) nothing is written and the caller's reply is `notHeld`. An applied input cannot be withdrawn, and Loop is unchanged. InputQueue decides adoption only after the whole batch containing an input is dispatched, so a same-batch withdraw always wins. "Withdraw and re-submit as Steer" is one atomic batch. Every pending-input derivation excludes deleted inputs, which never enter model context (their keyed blocks never take effect).
+13. **Acting before commit**: a plugin acts on another owner's write before it is committed only through a Timeline before callback. What the callback writes uses existing public event contracts (for example `input/withdraw` in the same batch) or events the plugin declares itself; the consumers of the write get no plugin-specific changes.
 14. **Low business coupling**: raw-block markers and keys, configuration keys and method namespaces carry the owner's prefix. Purposes passed to shared services are consumer-owned keys (`session-title`, `compaction`, `collaboration.member`, `modality.<category>`). Collectors never name contributors.
 15. **Interactive Sessions**: `session.create` sets `interactive` and `createdBy`. Exec, ACP and automation create non-interactive Sessions, which do not install Questions. Notifications and SessionTitle act only on interactive leader Sessions.
 
@@ -365,17 +363,18 @@ rutis nodes connect through links, export and import services, run plugins on th
 | `question/asked {call_id, turn_id, request_id, questions}` | Questions (branch) | Pending state cannot be derived, because results publish only after the whole batch (precedent Approval) |
 | `question/answered {call_id, answers, declined}` | Questions (branch), through `session.question.respond` | Ordered against interrupts by sequence |
 | `question/cancelled {call_id, reason}` | Questions (branch) | Ends a pending question on interrupt, branch close or reload |
-| `input/withdrawn {input_id}` | InputQueue | Queue state and withdrawability must be rebuildable |
+| `input/withdraw {input_id}` | Clients (Rpc `session.input.withdraw`), process callers (`sessions.withdraw`), before callbacks in the input's batch | A command ordered against adoption by sequence |
+| `input/deleted {input_id}` | InputQueue | Result fact: the held input is never applied; queue state must be rebuildable |
 
 | Idea | Handling | Reason |
 | --- | --- | --- |
 | `goal/*` | Keyed raw blocks, including terminal blocks | Goal state is input |
 | `shell/*` | `!command` result written as Append input | Not branch in-flight work |
-| `hook/*` | Admission denials, injected input, diagnostics | Hooks uses existing mechanisms |
+| `hook/*` | Tool denials as closing `step/tool-result`s, prompt denials as `input/withdraw` (then `input/deleted`), injected input, diagnostics; Hooks declares `hooks/prompt-blocked` itself ([Hooks](plugins/Hooks.md)) | Not a core event |
 | `external_agent/*` | Collaboration facts, member events, approval facts | External agents are model connections |
 | `session/titled` | SessionStore metadata | Does not affect branch behaviour |
 | `workflow/*`, scheduled run outcomes | Tool results, report input, process storage, event notice | Process-level outcomes |
-| Queued message to Steer | `input/withdrawn` + new Steer input in one batch | No separate event |
+| Queued message to Steer | `input/withdraw` + new Steer input in one batch | No separate event |
 
 ## 8. Phases
 
@@ -383,7 +382,7 @@ Prerequisites always land in an earlier phase than their consumers.
 
 | Phase | Content |
 | --- | --- |
-| P0 Foundation | #2 dynamic events; `SessionConfig` fields set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; entry levels; `toolAdmissionCheck` in Approval; `inputAdmissionCheck` in the Session input boundary; `toolContribution` in ToolRegistry; Permission categories; Settings business sources with change notification, credential resolver, host-local approval service; App Server process storage (incl. binary); Provider purpose policy and `AuxiliaryModel`; SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
+| P0 Foundation | #2 dynamic events; `SessionConfig` fields set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; entry levels; asynchronous Timeline before callbacks; `toolContribution` in ToolRegistry; Permission categories; Settings business sources with change notification, credential resolver, host-local approval service; App Server process storage (incl. binary); Provider purpose policy and `AuxiliaryModel`; SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
 | P1 Core interaction | Questions, ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; Collaboration supplements; #4 named exposure of the runtime's typed services for non-Rust Session and branch parts; CLI subcommands, image conversion, `/export`, `exec --json` |
 | P2 Capability extension | Goal, Web, Hooks (user and project sources), Scheduler, Workflow, Notifications; ModelProvider `ModelCallScope` and model-call approvals; Transport `EntryHost`; Mcp OAuth; production compaction host |
 | P3 External integration | ExternalAgent, AcpGateway, RemoteGateway, Modality; PluginManager (#3, #4); resource node import (#5) |
@@ -405,6 +404,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | External conversation continuation | Proposed: re-initialize from the branch history ([ExternalAgent](plugins/ExternalAgent.md)) |
 | Permission preset on fork | Decided: reset on fork (§6.4) |
 | Reload propagation | Decided: accepted cost of rare structural operations ([ADR 002](../adr/002-plugin-scope.md) D3) |
+| Asynchronous before and synchronous writers | Open: writers such as Loop append synchronously today; with a pending before callback the append must return on acceptance and report the commit (or the `on_error: fail` outcome) later, or the writer must await it |
 
 ## Appendix A. Feature ownership
 
@@ -474,10 +474,11 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Approval | Supplement | Collects the branch's `toolAdmissionCheck` services and consults every check after the policy decision and before execution; any denial denies ([methods A.3](contracts/session-boundary.md#a3-tool-admission-check)). Accepts a host-source admission (made by ModelProvider for an `approval_ask` stream item) while a model step is open, writing the ordinary `approval/request`, `approval/respond`, `approval/cancelled` facts | Hooks; ExternalAgent |
-| InputQueue | Change | `input/withdrawn {input_id}`; own-source withdrawal service; "withdraw and re-submit as Steer" as one batch; queue state rebuilt from events ([session access A.4](contracts/session-access.md#a4-withdrawal)) | `Ctrl+S`, `/queue`; AcpGateway, Scheduler |
-| Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace; fixed-prefix history read; Session input boundary running `inputAdmissionCheck`s before every write, `input_denied` on denial ([methods A.6](contracts/session-boundary.md#a6-input-admission-check)) | Rpc; process callers; Hooks |
-| ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.7](contracts/session-boundary.md#a7-tool-contribution)) | Non-Rust Session tools |
+| Timeline (runtime) | Supplement | `Timeline::before` gains asynchronous callbacks. When a branch write matches a registered asynchronous callback, the write keeps its place in sequence order and is committed only after the callback completes; later writes on that branch queue behind it; the commit lock is not held while awaiting. The callback receives the draft (its event id fixed when the write takes its place) and returns a transformed draft and/or events appended to the same atomic batch; synchronous `before` handlers then apply in the commit lock as today, and appended events are not matched again. Registration options, all the registrant's choice: `timeout`; `on_error` (`commit` the draft unchanged, or `fail` the write to its writer) for timeout, callback error, registrant unload or branch close; `cancel_on` (event kinds whose queued write cancels the pending callback). A callback never awaits a write on its own branch. Generic: no business semantics | Hooks |
+| Approval | Supplement | Accepts a host-source admission (made by ModelProvider for an `approval_ask` stream item) while a model step is open, writing the ordinary `approval/request`, `approval/respond`, `approval/cancelled` facts | ExternalAgent |
+| InputQueue | Change | Consumes `input/withdraw {input_id}` in order and writes `input/deleted {input_id}` only for an input it still holds unapplied (else nothing, `notHeld`); adoption decided only after an input's whole batch is dispatched; own-source withdrawal service; "withdraw and re-submit as Steer" as one batch; queue state rebuilt from events ([session access A.4](contracts/session-access.md#a4-withdrawal)) | `Ctrl+S`, `/queue`; AcpGateway, Scheduler |
+| Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace; fixed-prefix history read | Rpc; process callers |
+| ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) | Non-Rust Session tools |
 | Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides`; optional Session and branch parts installed per enabled plugin and per `interactive` | All Session plugins |
 | Permission | Supplement | Categories `outbound_message`, `persistent_configuration` (allowed under FullAccess); command rules read at use time | Notifications, Scheduler; `/approvals` |
 | ModelProvider | Supplement | Passes `ModelCallScope` (session, branch, request and step ids, `SessionConfig`) to the model kind; admits `approval_ask` stream items through its branch's Approval and returns the outcome with `answerApproval`; cancels the admission on `approval_ask_withdrawn` | ExternalAgent |
@@ -491,7 +492,7 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Rpc | Change | Method table: built-ins, then the collected `managementMethods` (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Entry levels per connection. Built-in `session.input.withdraw`. `session.submit` returns `input_denied`. `session.create {interactive, client}`. `title`/`titleSource` in Session lists. Image validation on `session.submit` ([methods](contracts/session-boundary.md)) | All method owners |
+| Rpc | Change | Method table: built-ins, then the collected `managementMethods` (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Entry levels per connection. Built-in `session.input.withdraw`. `session.create {interactive, client}`. `title`/`titleSource` in Session lists. Image validation on `session.submit` ([methods](contracts/session-boundary.md)) | All method owners |
 | Transport, Connection | Change | `EntryHost` with upgrade authenticators; `ConnectionEntry {name, levels, device_id}` | RemoteGateway |
 | Agents | Supplement | The `sessions` service; `SessionConfig` fields; `launch` with a policy capped by the starter; creation from another Session's cut; profiles with an external agent as model ([session access](contracts/session-access.md)) | Scheduler, Workflow, fork, ExternalAgent |
 | Collaboration | Change | Member models by purpose `collaboration.member`; `establish(leader, agent)` from outside a branch; member approvals forwarded to the leader | Workflow; ExternalAgent |
@@ -510,7 +511,7 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | TypeScript first | Rust |
 | --- | --- |
-| Business rules still need validation | Security boundaries and admission: command execution, approval checks, isolation, remote entry |
+| Business rules still need validation | Security boundaries and admission: command execution, approval, before callbacks, isolation, remote entry |
 | Mainly external I/O or protocols | Input and Session method boundary |
 | Not on the turn hot path | Settlement of in-flight tool calls |
 | Failure affects only that feature | Loader and plugin management; base services |
@@ -533,4 +534,4 @@ Plugin and contract documents use this layout:
 - 5 Context mapping.
 - 6 Interfaces (summary).
 - 7 Security.
-- Appendices for interface details, the full conflict table (with an `input/withdrawn` row where inputs are derived), errors and recovery, acceptance, assumptions and open questions.
+- Appendices for interface details, the full conflict table (with an `input/deleted` row where inputs are derived), errors and recovery, acceptance, assumptions and open questions.

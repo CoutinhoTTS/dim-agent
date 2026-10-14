@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first user input on `main` is written, it generates a title from that input's text alone through the Provider `AuxiliaryModel` under the purpose key `session-title`. It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and admission checks](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
+SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first user input on `main` is written, it generates a title from that input's text alone through the Provider `AuxiliaryModel` under the purpose key `session-title`. It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 1. Structure
 
@@ -123,7 +123,7 @@ The revision check is the recheck: a manual title always wins.
 | --- | --- | --- | --- |
 | Member, workflow-stage or other non-interactive Session | `SessionConfig` | Never generated; rename allowed | SessionTitle |
 | Second input before generation finishes | — | Skipped (in flight) | SessionTitle |
-| First input withdrawn | input < `input/withdrawn` | Title still generated (A9) | SessionTitle |
+| First input deleted | input < `input/deleted` | Title still generated (A9) | SessionTitle |
 | Generation failed | — | Next `main` input while untitled retries from the first input (A5) | SessionTitle |
 | Reload or Session unload mid-generation | — | Cancelled, nothing written; next `main` input triggers | Lifecycle |
 
@@ -250,7 +250,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | A6 | `session.rename` with `null` clears the title | Judgment | Manual title permanent |
 | A7 | Session fork does not copy the title | Judgment | Fork shows the source title |
 | A8 | A first user input without text produces no automatic title | Decision: title from first user input | Later inputs or a placeholder |
-| A9 | Withdrawal of the first input does not prevent or remove its title | Judgment (trigger is the write) | Generation waits for consumption |
+| A9 | Deletion of the first input (`input/deleted`) does not prevent or remove its title | Judgment (trigger is the write) | Generation waits for consumption |
 | A10 | "User input" means operator input: `user` content without a source marker | Judgment | Source-written inputs could title a Session |
 
 ## Appendix F. Open questions

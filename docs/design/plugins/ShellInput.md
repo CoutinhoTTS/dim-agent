@@ -131,7 +131,7 @@ Placement is decided by the input owners by sequence; ShellInput has no recheck 
 | --- | --- |
 | Second `!` in the same Session while one runs | `shell_busy` |
 | Branch close during the run | Write fails `BranchMissing`; reply `recorded: null`, output returned |
-| `input/withdrawn` of X before consumption | Never consumed; not re-written |
+| `input/withdraw` of X while InputQueue holds it | `input/deleted`; never applied or consumed; not re-written |
 | Session close, idle unload or reload during the run | Tree terminated; nothing written; caller gets `operation_interrupted` (A10) |
 | Exec shell configuration changed | Running commands keep their shell; the next spawn reads the new value; nothing reloads |
 
@@ -225,7 +225,8 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | Turn interrupt before X | I < X | Run unaffected; X pending until the next turn | Loop |
 | X applied, then interrupt before consumption | X < I | Pending; consumed by the next turn | Loop |
 | X consumed, then interrupt | consumed < I | Stays at its consumed position | Loop |
-| `input/withdrawn` of X | X < withdrawn | Never consumed; not re-written | InputQueue |
+| `input/withdraw` of X while held | X < withdraw < `input/deleted` | Never applied or consumed; not re-written | InputQueue |
+| `input/withdraw` of X after apply | `input/applied` < withdraw | No effect (`notHeld`); X consumed normally | InputQueue |
 | Branch-scoped interrupt or branch close during the run | close < X | Run continues; write fails `BranchMissing`; `recorded: null` | Runtime facade; ShellInput |
 | Session close or idle unload during the run | — | Tree terminated, nothing written (A10) | ShellInput |
 | Concurrent Steer/Queue and X | Timeline order | Each applied by its mode | InputQueue |
@@ -278,7 +279,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 7. Branch close: `recorded: null`. Session close: tree terminated, nothing written.
 8. Session reload and daemon restart mid-run: tree terminated, nothing written, no re-execution.
 9. Offline node: `node_unavailable` for that Session only; ShellInput is not reloaded and a later call succeeds once the node is back.
-10. Withdrawn X is never consumed; remote entry: `unknown_method`.
+10. Deleted X (`input/deleted`) is never consumed; remote entry: `unknown_method`.
 11. Changing the exec shell: the next run uses the new shell without reloading anything.
 
 ## Appendix E. Assumptions

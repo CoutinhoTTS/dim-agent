@@ -302,7 +302,7 @@ Packages live under PluginManager's package root on their node, written through 
 
 | Scenario | Sequence order | Outcome | Owner of the decision |
 | --- | --- | --- | --- |
-| Turn or branch interrupt, branch close, concurrent inputs, `input/withdrawn`, unsettled batch, compaction, child cut | — | No effect on PluginManager; owners' adoption rules apply | Content owners |
+| Turn or branch interrupt, branch close, concurrent inputs, `input/withdraw`/`input/deleted`, unsettled batch, compaction, child cut | — | No effect on PluginManager; owners' adoption rules apply | Content owners |
 | Package disabled while a Session uses its Skill | revision bump < next adoption | Branch keeps its adopted prompt until it re-adopts | Skills / PromptSourcesBranch |
 | Code row revoked or disabled while in use | — | Row unloads; its dependents reload (D3); affected in-flight turns may fail | Loader |
 | Two installs of one id on one node | lock, then Settings revision | Second `plugin_exists` (or `plugin_settings_conflict` across processes) | PluginManager, Settings |

@@ -40,7 +40,7 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 | `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal` (level `session`) |
 | `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, Settings business source (enclosing scope) | `goal` (branch scope; `update`, `set`, `edit`, `pause`, `resume`, `clear`, `get`), used only by the Session part; the goal block and continuation formats under source `goal` |
 
-Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
+Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
 
 ## 2. Data and state
 
@@ -50,7 +50,7 @@ flowchart TB
     GBK["input/message, first raw block key goal:current (goal block)"]
     CI["input/message, Queue, marker kind continuation"]
     OI["operator input/message (user content, no source marker)"]
-    IC["input/consumed, input/withdrawn"]
+    IC["input/consumed, input/deleted"]
     TE["turn/start, turn/end, stop/interrupt"]
   end
   CFG["Settings: goal.maxContinuations"]
@@ -73,7 +73,7 @@ Goal owns no persistent state. The goal of branch `B` is a pure function of the 
 | `interrupted` | A `stop/interrupt {scope: turn}` in `B`'s local events with sequence greater than `G` |
 | `last_operator` | Latest operator input: `input/message` with `user` content not marked by a source (A5) |
 | `count` | Goal continuation inputs with sequence greater than `max(G, last_operator)` |
-| `pending_driving` | Local `input/message` with effective mode Queue or Steer that has neither `input/consumed` nor `input/withdrawn` |
+| `pending_driving` | Local `input/message` with effective mode Queue or Steer that has neither `input/consumed` nor `input/deleted` (session access §2 pending rule) |
 | `turn_open` | A `turn/start` after the latest `turn/end` |
 
 Runtime-only: the view and a branch-local mutex that serializes Dispatcher decisions, tool calls and method calls. Both are rebuilt by the load fold; a new generation never inherits them.
@@ -167,7 +167,7 @@ A reload of either part follows a rare structural operation. A Session part relo
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
 | User Queue/Steer input pending at decision | input < `turn/end` N, unconsumed | C5 fails: no continuation; the user's turn's end decides, count reset | Goal |
-| Driving input withdrawn | input < `input/withdrawn` < N | Not pending; continuation proceeds | InputQueue; Goal |
+| Driving input deleted | input < `input/deleted` < N | Not pending; continuation proceeds | InputQueue; Goal |
 | Another source's Queue follow-up after the same `turn/end` | both after N | Two Queue inputs, two turns in order; at most one continuation per `turn/end` | InputQueue; Goal |
 | Child cut after the goal block | consumed < cut | Child sees the parent's goal as background; no continuation; `goal_update` there returns the owner error | Goal |
 
@@ -259,7 +259,7 @@ On delivery of `turn/end` at sequence `N` on branch `B`, over the events consume
 | C2 | No turn-scoped interrupt on `B` after `G` | Write `paused` (`interrupted`) and stop |
 | C3 | The `turn/end` at `N` is `completed` | `failed`: write `paused` (`turn_failed`) (A6); `cancelled`: handled by C2 |
 | C4 | `N` is the latest `turn/end` and `!turn_open` | Stop (a newer turn's end will trigger) |
-| C5 | `!pending_driving` (includes Goal's own unconsumed continuation; excludes withdrawn inputs) | Stop |
+| C5 | `!pending_driving` (includes Goal's own unconsumed continuation; excludes deleted inputs) | Stop |
 | C6 | `count < maxContinuations` | Write `paused` (`limit`) and stop |
 | — | All hold | Write continuation (Queue) with `count + 1` |
 
@@ -302,9 +302,9 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | Steer during a goal turn | consumed in turn | Same turn; resets count if operator input (A5) | Loop; Goal |
 | Steer after `turn/end`, before its delivery to Goal | `turn/end` < steer | Steer starts a turn; C4 or C5 fails at a later decision; that turn's end decides | Goal |
 | Append input while idle | — | Not driving; continuation proceeds; Append consumed with its first request | Loop |
-| Driving input withdrawn before N | input < `input/withdrawn` < N | Excluded from `pending_driving`; continuation proceeds | InputQueue; Goal |
-| Driving input withdrawn after N | N < `input/withdrawn` | Decision already stopped at C5; the next `turn/end` or `resume` decides; an idle goal waits (A12) | Goal |
-| Goal's own continuation withdrawn by the user | continuation < `input/withdrawn` | Not consumed, not pending; next decision may continue again; count includes it | Goal |
+| Driving input deleted before N | input < `input/deleted` < N | Excluded from `pending_driving`; continuation proceeds | InputQueue; Goal |
+| Driving input deleted after N | N < `input/deleted` | Decision already stopped at C5; the next `turn/end` or `resume` decides; an idle goal waits (A12) | Goal |
+| Goal's own continuation withdrawn by the user while held | continuation < `input/deleted` | Never applied or consumed, not pending; next decision may continue again; count includes it | Goal |
 | Other source's Queue follow-up after the same `turn/end` (e.g. Hooks) | both after N | Two turns in order; at most one continuation per `turn/end`; that input does not reset the count unless it is operator input | InputQueue; Goal |
 | Interrupt before N | interrupt < N | C2: `paused`, no continuation | Goal |
 | Interrupt between N and the continuation | N < interrupt < continuation | One extra turn; then `paused` (E18) | Loop; Goal |
@@ -355,7 +355,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 1. Set on an idle branch starts a turn; normal end writes a continuation; `goal_update completed` ends continuation; the completed block precedes the batch's `step/tool-result`.
 2. Limit: with `maxContinuations = 2`, the third decision writes `paused (limit)`; operator input resets the count; a marked input from another source does not.
 3. Interrupt rows: before `turn/end`, committed between `turn/end` and the continuation (at most one extra turn), after start, after apply; during `goal_update` before and after its write.
-4. Pending Queue/Steer input suppresses continuation; Append does not; a withdrawn input does not suppress it.
+4. Pending Queue/Steer input suppresses continuation; Append does not; a deleted input does not suppress it.
 5. Branch part reload and restart after an undecided `turn/end`: exactly one decision.
 6. Compaction after `completed`: the baseline contains `completed`, not `active`.
 7. Child branch: inherits the block, no continuation, `goal_update` returns the owner error; a goal set on the child is independent.

@@ -279,7 +279,7 @@ Read at each call; a change is a data update with notification, never a reload. 
 | Branch-scoped interrupt or branch close | branch interrupt | As turn interrupt | ToolExecutor |
 | Batch with another long call | Web returned, other call running | Result held until the batch's `step/tool-result` | ToolExecutor |
 | Concurrent Steer/Queue/Append | any | No effect on the call; Steer consumed after the batch result | Loop |
-| `input/withdrawn` of a pending input | any | No effect; Web consumes no inputs | InputQueue |
+| `input/withdraw` / `input/deleted` of a held input | any | No effect; Web consumes no inputs | InputQueue |
 | Compaction after the result | `step/tool-result` < compaction | Text survives only via the summary | ContextPreparation |
 | Child branch cut | cut after `step/tool-result` | Child inherits the result | — |
 | Configuration edit while a call runs | — | Call continues with values read at its start | Web |

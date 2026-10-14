@@ -321,7 +321,7 @@ ExternalAgent itself appends nothing, subscribes to no Dispatcher and owns no Se
 | No answer, no interrupt | — | Waits indefinitely (A17) | — |
 | Steer before any visible chunk | `input/applied` (Steer) during call | ModelProvider replaces the request, cancels; next request delivers the Steer (and earlier inputs if not accepted) | ModelProvider, Bridge |
 | Steer after visible output (incl. permission line) | — | Not replaced; new request in the same turn | Loop |
-| `input/withdrawn` of a queued input | withdrawn before consumption | Never consumed, so never delivered; `scan_from` passes it once consumption moves past | InputQueue, Bridge |
+| `input/withdraw` of a queued input while held | input < withdraw < `input/deleted` | Never applied or consumed, so never delivered; `scan_from` passes it once consumption moves past | InputQueue, Bridge |
 | Concurrent Queue/Append inputs | Timeline order | Delivered in consumption order | Loop, Bridge |
 | Tool batch not settled | — | No dim tool calls in these requests | — |
 | Compaction before a call | `context/compaction` < `model/call` | Continue unaffected; initialize includes the summary | ContextPreparation, Bridge |
@@ -358,7 +358,7 @@ Errors surface as a failed model output; committed text stays. Continuation fail
 
 Flow tests through public interfaces with a scripted ACP agent and a scripted CLI:
 
-1. First call initializes; second delivers only the new input; an Append input is delivered with its consuming request; a withdrawn Queue input is never delivered.
+1. First call initializes; second delivers only the new input; an Append input is delivered with its consuming request; a deleted Queue input (`input/deleted`) is never delivered.
 2. Text, thought and tool activity map to `step/text` and one `step/thinking` block; no `step/tool-use-start`.
 3. Interrupt before and after acceptance; ignored cancel → `uncertain` → next call initializes.
 4. Steer before visible output replaces the request; after output (including a permission line) it becomes a new request.

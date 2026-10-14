@@ -95,7 +95,7 @@ The path is returned only after the file is durable. The model later reads it wi
 | --- | --- |
 | Attachments not enabled | `attachment.put` gets `unknown_method`; images unaffected |
 | Model switched after submit to one without images | Image reaches the new model; its adapter rejects or drops it |
-| `input/withdrawn` of an image input | Never consumed; text files stay with the Session |
+| `input/deleted` of an image input | Never applied or consumed; text files stay with the Session |
 | Fork racing delete of the source | Decided by SessionStore's fork/delete ordering; files shared, never copied |
 | Resource node offline | `attachment.put` fails `node_unavailable`; images unaffected; `read` of a path fails like any `read`; nothing reloads or goes Pending |
 
@@ -160,7 +160,7 @@ The CLI reads images (clipboard, `@`, pasted paths) and sends them as base64 ima
 | --- | --- | --- | --- |
 | Image submitted while a turn runs | input by mode | Applied and consumed like any input | InputQueue, Loop |
 | Turn interrupt before the image input is consumed | applied < I | Pending; consumed by the next turn | Loop |
-| `input/withdrawn` of the input | input < withdrawn | Never consumed; text files stay with the Session | InputQueue |
+| `input/withdraw` of the input while held | input < withdraw < `input/deleted` | Never applied or consumed; text files stay with the Session | InputQueue |
 | Branch close between validation and write | close < write | `Session::input` fails `BranchMissing`; nothing written | Runtime facade |
 | Model switched after submit | input < `context/configured` < consumed | New model's adapter rejects or drops the image | ModelProvider |
 | Concurrent Steer/Queue/Append | Timeline order | Unaffected | InputQueue |

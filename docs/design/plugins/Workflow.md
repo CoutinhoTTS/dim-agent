@@ -73,7 +73,7 @@ classDiagram
     workflow root, format version 1
   }
   class StageSessionTimeline {
-    stage input, input/consumed, input/withdrawn
+    stage input, input/consumed, input/deleted
     turn/end, stop/interrupt
   }
   class StarterTimeline {
@@ -129,7 +129,7 @@ sequenceDiagram
     WF->>ST: delivered, or undeliverable on branch missing or Session closed
   else workflow stop
     WF->>ST: stopping
-    WF->>WF: sessions.withdraw own unconsumed stage inputs, sessions.stop(main) for running stages
+    WF->>WF: sessions.withdraw own unconsumed stage inputs (notHeld: stop once consumed), sessions.stop(main) for running stages
     WF->>ST: stopped, no report
   end
 ```
@@ -178,7 +178,7 @@ Workflow's own reload, a reload of a dependency (Agents, Collaboration) or a res
 | Starter turn interrupt after the tool result | result < interrupt | Run continues | Workflow |
 | Tool batch not settled when the run ends quickly | report < `step/tool-result` | Steer consumed after the batch result; model sees `run_id` first | Loop |
 | `workflow.stop` races a stage's own `turn/end` | `turn/end` < `stop/interrupt` | Stage `completed` with result; run `stopped` | Stage Session order |
-| Stage input withdrawn (user or stop) before consumption | input < `input/withdrawn` | Stage `stopped`; never consumed | InputQueue, Workflow |
+| Stage input withdrawn (user or stop) while held | input < `input/deleted` | Stage `stopped`; never applied or consumed | InputQueue, Workflow |
 | Workflow, Agents or Collaboration reload, or restart | — | Runs `interrupted`, active stages `lost`, nothing relaunched; one report each (E15) | Workflow |
 | Leader branch closed with a member stage running | close < report | Member stage continues; report `undeliverable` | Workflow |
 
@@ -292,7 +292,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | --- | --- | --- |
 | `sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}` (non-interactive; `createdBy = {kind: "launch", source: "workflow"}`) | Agents supplement ([session-access](../contracts/session-access.md)) | Launched stages; Workflow writes the first input itself |
 | `establish {leaderSessionId, agentId}: async -> {sessionId}` | Collaboration supplement, a Collaboration service outside `sessions` | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
-| `sessions.withdraw {sessionId, branchId, inputId}` of an own input; `sessions.lookup` by `submissionId` | session-access (InputQueue) | Withdraw own unconsumed stage inputs on stop |
+| `sessions.withdraw {sessionId, branchId, inputId}` of an own input; `sessions.lookup` by `submissionId` | session-access (InputQueue) | Withdraw own unconsumed stage inputs on stop; reply `deleted` or `notHeld` |
 
 ### A.6 Timeline and capability mechanics
 
@@ -300,12 +300,12 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | --- | --- |
 | Start | Handler or management call validates, checks approval, resolves the policy cap, persists `Run{running}`, spawns the run task on the process part's task tracker and returns. No Timeline write |
 | Stage launch | Recheck in storage (run `running`; approval still valid for the snapshot fingerprint, A12). Persist `launching`; `launch` or `establish`; persist `session_id` and `submission_id = workflow:<uuid>` |
-| Stage input | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId, rawBlocks: [marker {kind: "stage", attrs: [run, stage], body: definition name}], content: [rendered prompt]}` → `{inputId}` stored as `input_event_id`; input admission checks run first (`input_denied` → stage `failed: input_denied`); persist `running` |
+| Stage input | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId, rawBlocks: [marker {kind: "stage", attrs: [run, stage], body: definition name}], content: [rendered prompt]}` → `{inputId}` stored as `input_event_id`; persist `running` |
 | Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
-| Completion | `sessions.idle {sessionId, branchId: "main"}` returns cutoff `C`; `sessions.history {through: C}` pages. Before `input/consumed{input_event_id}`: `input/withdrawn` or a following `stop/interrupt` → `stopped`, else wait again. After consumption: the first `turn/end` after it in `(consumed, C]` decides `completed`/`failed`/`stopped`; that turn's last response text is the result (Collaboration's outcome rule) |
+| Completion | `sessions.idle {sessionId, branchId: "main"}` returns cutoff `C`; `sessions.history {through: C}` pages. Before `input/consumed{input_event_id}`: `input/deleted` or a following `stop/interrupt` → `stopped`, else wait again. After consumption: the first `turn/end` after it in `(consumed, C]` decides `completed`/`failed`/`stopped`; that turn's last response text is the result (Collaboration's outcome rule) |
 | Advance | Persist the stage result; when all stages of a step are terminal, start the next step or end the run; a failed stage stops running siblings and fails the run (A4) |
-| Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `sessions.input` (mode `steer`) with marker `report` on the starter branch; persist `delivered`, or `undeliverable` on a missing branch, closed Session or `input_denied` |
-| Stop | Persist `stopping`; waiting stages `skipped`; unconsumed stage inputs withdrawn (`sessions.withdraw`); running stages `sessions.stop {sessionId, branchId: "main"}`; completion rule reads the outcome; run `stopped`, no report |
+| Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `sessions.input` (mode `steer`) with marker `report` on the starter branch; persist `delivered`, or `undeliverable` on a missing branch or closed Session |
+| Stop | Persist `stopping`; waiting stages `skipped`; unconsumed stage inputs withdrawn (`sessions.withdraw`; `notHeld` means already applied, so the stage is stopped with `sessions.stop` once `input/consumed` is read); running stages `sessions.stop {sessionId, branchId: "main"}`; completion rule reads the outcome; run `stopped`, no report |
 | Reload, restart | Session parts reload with Workflow; an in-flight `workflow` call fails with its turn. On unload the old generation stops running stage turns (bounded wait, A13). The new generation loads runs: `running`/`stopping` → `interrupted`; `launching`/`running` stages → `lost`; nothing relaunched. A `pending` report is looked up with `sessions.lookup` (accepted → `delivered`, unknown → written now); interrupted runs with `report_to` and `report: none` get one report (E15) |
 
 ## Appendix B. Full conflict table
@@ -319,13 +319,13 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | Tool batch not settled when the run ends | report < `step/tool-result` | Steer consumed after the batch result | Loop |
 | Concurrent Steer/Queue on the report branch | Timeline order | Applied by mode; report is an ordinary Steer | InputQueue |
 | Report arrives while the starter is idle | — | Steer starts a turn | InputQueue, Loop |
-| User withdraws the report input | report < `input/withdrawn` | Report counted `delivered`; not rewritten | InputQueue |
+| User withdraws the report input while held | report < `input/deleted` | Report counted `delivered`; not rewritten | InputQueue |
 | Compaction between report write and consumption | input < compaction < consumed | Placed after the summary | ContextPreparation |
 | Child branch cut between report write and consumption | input < cut < consumed | Child does not see it | InputQueue (child) |
-| User stops the stage Session before consumption | input < interrupt | Stage `stopped`; input pending in that Session unless withdrawn | Workflow |
-| Stage input withdrawn | input < `input/withdrawn` | Stage `stopped` | InputQueue, Workflow |
+| User stops the stage Session before consumption | input < interrupt | Stage `stopped`; input pending in that Session unless deleted | Workflow |
+| Stage input withdrawn while held | input < `input/withdraw` < `input/deleted` | Stage `stopped` | InputQueue, Workflow |
 | `workflow.stop` races the stage's `turn/end` | `turn/end` < `stop/interrupt` | Stage `completed`; run `stopped` | Stage Session order |
-| `workflow.stop` races consumption | consumed < withdraw request | Withdraw rejected; `stop` path | InputQueue, Workflow |
+| `workflow.stop` races apply | `input/applied` < `input/withdraw` | `notHeld`, nothing written; `stop` after `input/consumed` | InputQueue, Workflow |
 | `workflow.stop` twice or after the end | — | Idempotent | Workflow |
 | Duplicate `start` | — | Two runs (A15) | Workflow |
 | Member stage, leader `request`s the same member | stage input queued, not started | Both inputs queue in the member Session; `Busy` only once a turn runs; the stage result is the first `turn/end` after its own input's consumption | Collaboration, Workflow |
@@ -336,7 +336,6 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | Stage resource node offline | — | A launch refused for the unavailable node → stage `failed: node_unavailable`; a running stage Session stays loaded (no reload, no Pending), its node-service calls fail `node_unavailable` and its turn ends on its own outcome (requirement on [#5](https://github.com/arcships/dim/issues/5)) | Agents, stage Session |
 | Stage Session capability reload mid-turn | turn ends `Failed` | Stage `failed` | Stage Loop |
 | Starter Session unloaded at report time | — | `sessions.input` restores it, then writes | Agents |
-| An input admission check denies a stage or report input | — | Nothing written; stage `failed: input_denied` (run `failed`), or report `undeliverable` | Session input boundary, Workflow |
 | Process restart mid-run | — | `interrupted`/`lost`; committed unconsumed stage inputs stay in their Sessions | Workflow |
 | Report write uncertain (reload, publication unknown) | — | Lookup before retry; never two reports | Workflow |
 | Project definition edited after start | — | Run keeps its snapshot; next stage launch rechecks the snapshot's fingerprint → `failed: approval_revoked` | Workflow |
@@ -362,7 +361,7 @@ Through the tool, management methods and Session history reads:
 
 1. Sequential and parallel steps; result substitution; forward reference rejected at save.
 2. Tool start returns `run_id`; the report Steer ends a `wait` and arrives after the batch result.
-3. Stop: waiting stages `skipped`, unconsumed input withdrawn, running stage interrupted, run `stopped`, no report; repeated stop idempotent.
+3. Stop: waiting stages `skipped`, held input deleted (`input/deleted`), applied or running stage interrupted, run `stopped`, no report; repeated stop idempotent.
 4. Stop racing a stage `turn/end` keeps the completed result.
 5. Starter turn interrupt does not stop the run; starter branch closed → `undeliverable`.
 6. Project definition in `.dimcode/workflows/`: unapproved → `approval_required`; approve; edit → next stage `approval_revoked`.
