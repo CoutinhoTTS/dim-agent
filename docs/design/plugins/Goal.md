@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.2](../overview.md#4-plugin-catalog). Phase: P2. Language: TypeScript first ([overview F.3](../overview.md#appendix-c-implementation-language)). Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
 
-Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The **branch part** owns the goal: its state exists only as a keyed raw input block on the branch Timeline, and continuation is decided from branch events consumed in order through the branch Dispatcher; it writes branch inputs. The **Session part** offers the `goal_update` tool as a Session-scoped `ToolContribution` and the `session.goal.*` methods as a `SessionMethodContribution` ([session-boundary](../contracts/session-boundary.md)); both resolve the branch part per call. Goal writes no events of its own and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal block, cover the feature-list wording "switch Goal mode".
+Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The **branch part** owns the goal: its state exists only as a keyed raw input block on the branch Timeline, and continuation is decided from branch events consumed in order through the branch Dispatcher; it writes branch inputs. The **Session part** provides the `goal_update` tool as a `toolContribution` service (Session scope, key `goal_update`) and the `session.goal.*` methods through a `sessionMethods` service (Session scope, key `session.goal`) ([session-boundary](../contracts/session-boundary.md)); both resolve the branch part per call. Goal writes no events of its own and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal block, cover the feature-list wording "switch Goal mode". Every contract here is language-neutral (service name, scope, key, methods with data shapes), so a TypeScript implementation satisfies it without a hand-written Rust binding; the Rust form is [Appendix G](#appendix-g-rust-binding). Goal also uses the runtime's typed services (`S:TreeCommands`, `B:Timeline`, `B:Dispatcher`); exposing them by name to non-Rust capability parts is the work of [#4](https://github.com/arcships/dim/issues/4), and Goal starts in Rust until then ([overview §9](../overview.md#9-open-questions)).
 
 ## 1. Structure
 
@@ -13,17 +13,17 @@ flowchart LR
     Settings["Settings business source"]
   end
   subgraph SESS["Session scope"]
-    GS["GoalPlugin: ToolContribution goal_update, SessionMethodContribution session.goal"]:::new
+    GS["GoalPlugin: toolContribution goal_update, sessionMethods session.goal"]:::new
     TR["ToolRegistry"]
     TC["TreeCommands"]
   end
   subgraph BR["Branch scope"]
-    GB["GoalBranchPlugin (B:Goal)"]:::new
+    GB["GoalBranchPlugin (goal)"]:::new
     TL["Timeline + Dispatcher"]
     IQ["InputQueue and Loop"]
   end
-  TR -- "Contributions of ToolContribution" --> GS
-  Rpc -- "resolves the Session, dispatches session.goal.*" --> GS
+  TR -- "collects toolContribution by name" --> GS
+  Rpc -- "resolves the Session, calls sessionMethods session.goal" --> GS
   GS -- "per call: calling or named branch" --> TC
   TC --> GB
   TL -- "turn/end, stop/interrupt, input/* in order" --> GB
@@ -37,10 +37,10 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `GoalPlugin` | Session | `S:TreeCommands` | `S:ToolContribution[goal_update]`; `S:SessionMethodContribution[session.goal]` (level `session`) |
-| `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, Settings business source (enclosing scope) | `B:Goal` (`update`, `set`, `edit`, `pause`, `resume`, `clear`, `get`); the goal block and continuation formats under source `goal` |
+| `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal` (level `session`) |
+| `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, Settings business source (enclosing scope) | `goal` (branch scope; `update`, `set`, `edit`, `pause`, `resume`, `clear`, `get`), used only by the Session part; the goal block and continuation formats under source `goal` |
 
-Both parts are installed only in Sessions where Goal is enabled. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
+Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
 
 ## 2. Data and state
 
@@ -87,11 +87,11 @@ sequenceDiagram
   participant CLI
   participant Rpc
   participant GS as GoalPlugin (Session)
-  participant G as B:Goal
+  participant G as goal (branch)
   participant TL as Branch Timeline
   participant IQ as InputQueue and Loop
   CLI->>Rpc: session.goal.set
-  Rpc->>GS: SessionMethodContribution call
+  Rpc->>GS: sessionMethods call(MethodCall)
   GS->>G: set(objective) on the named branch
   G->>TL: append active block (Queue)
   TL-->>IQ: Dispatcher: input/applied, turn/start, input/consumed
@@ -110,10 +110,10 @@ sequenceDiagram
   participant Model
   participant TE as ToolExecutor
   participant GS as GoalPlugin (Session)
-  participant G as B:Goal
+  participant G as goal (branch)
   participant TL as Branch Timeline
   Model->>TE: goal_update completed, summary
-  TE->>GS: ToolContribution handler
+  TE->>GS: toolContribution execute(ToolCall)
   GS->>G: update(completed) on the calling branch
   Note over G: require C1
   G->>TL: append completed block (Append), committed
@@ -130,7 +130,7 @@ The terminal block precedes the batch's `step/tool-result`, so the goal replayed
 sequenceDiagram
   participant User
   participant TL as Branch Timeline
-  participant G as B:Goal
+  participant G as goal (branch)
   User->>TL: stop/interrupt scope turn at M
   TL-->>G: Dispatcher delivers stop/interrupt M
   Note over G: G active, owner B, G before M
@@ -145,7 +145,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-  participant G as B:Goal
+  participant G as goal (branch)
   participant TL as Branch Timeline
   participant LP as Loop
   TL-->>G: turn/end N delivered (no interrupt consumed)
@@ -188,16 +188,16 @@ Full table: [Appendix B](#appendix-b-full-conflict-table).
 | Non-interactive Sessions | Same mapping; continuations drive turns without a user present |
 | Never visible | `submission_id`, mode, count of operator inputs, diagnostics, other plugins' events |
 
-Exact texts: [Appendix A.4](#a4-model-visible-texts).
+Exact texts: [Appendix A.5](#a5-model-visible-texts).
 
 ## 6. Interfaces (summary)
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `goal_update {status, summary}` | Session `ToolContribution`, risk `session` | Model reports completion or blocking; writes the terminal block |
-| `session.goal.set/edit/pause/resume/clear` | `SessionMethodContribution`, level `session` | User controls the goal; each writes one block |
-| `session.goal.get` | Same contribution | Current `GoalView` of a branch, replaces any "mode" query (A8) |
-| `B:Goal` | Branch service | Goal state, decisions and writes |
+| `goal_update {status, summary}` | `toolContribution` (Session, key `goal_update`), risk `session` | Model reports completion or blocking; writes the terminal block |
+| `session.goal.set/edit/pause/resume/clear` | `sessionMethods` (Session, key `session.goal`), level `session` | User controls the goal; each writes one block |
+| `session.goal.get` | Same service | Current `GoalView` of a branch, replaces any "mode" query (A8) |
+| `goal` | Branch service, internal to Goal | Goal state, decisions and writes |
 | `goal.maxContinuations` | Business configuration (Settings) | Continuation limit, read at each decision |
 
 Details: [Appendix A](#appendix-a-interface-details).
@@ -210,15 +210,19 @@ Goal writes only `input/message` under source `goal` on its own branch; resultin
 
 ### A.1 Tool `goal_update`
 
+Service `toolContribution`, Session scope, key `goal_update`: `declaration(): sync -> ToolDeclaration` (name, the description in A.5, the parameter schema below, risk `session`); `execute(ToolCall): async -> ToolResult`; cancellation is a cancel request on the call.
+
 | Item | Value |
 | --- | --- |
 | Parameters | `{status: "completed" \| "blocked", summary: string}`; `summary` 1..=2000 characters (A10) |
 | Result | `ToolResult.content`: `Goal marked completed.` or `Goal marked blocked.`; errors: `No active goal on this branch.`, `The goal belongs to branch <id>; continue your assigned task without calling goal_update.` (A3) |
 | Risk category | `session` (writes only branch input) (A9) |
 | Offered | In every Session where Goal is enabled, all roles (A9) |
-| Handler | Resolves the calling branch's `B:Goal` through `S:TreeCommands`; under the branch mutex requires C1 (error result otherwise), appends the terminal block in Append mode, awaits commit, returns. On cancellation before the append nothing is written; once appended the write stands |
+| Handler | Resolves the calling branch's `goal` service through `S:TreeCommands` and calls `goal.update`; under the branch mutex requires C1 (error result otherwise), appends the terminal block in Append mode, awaits commit, returns. On cancellation before the append nothing is written; once appended the write stands |
 
 ### A.2 Session methods
+
+Service `sessionMethods`, Session scope, key `session.goal`. `describe()` returns one `MethodDecl` per row with `level: session`, `interruption: report`, `progress: false`, `notifications: []`, `reply: direct`, and `mutating: true` except for `get`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; errors are `MethodError` data (Appendix C).
 
 | Method | Params | Result | Write |
 | --- | --- | --- | --- |
@@ -229,9 +233,23 @@ Goal writes only `input/message` under source `goal` on its own branch; resultin
 | `session.goal.clear` | `{sessionId, branchId?}` | `{sequence}` | Retire block, Append |
 | `session.goal.get` | `{sessionId, branchId?}` | `{goal: GoalView \| null, through}` | None (A8) |
 
-`branchId` defaults to `main` (A13). `GoalView = {status, objective, reason?, summary?, owner, count, limit, sequence}`. Transitions: `set` from any state; `edit` from `active`, `paused`, `blocked`; `pause` from `active`; `resume` from `paused`, `blocked`, `active`; `clear` from any live goal. Rpc resolves the Session (restoring it if unloaded) and dispatches; the handler resolves `B:Goal` of the named branch through `S:TreeCommands`.
+`branchId` defaults to `main` (A13). `GoalView = {status, objective, reason?, summary?, owner, count, limit, sequence}`. Transitions: `set` from any state; `edit` from `active`, `paused`, `blocked`; `pause` from `active`; `resume` from `paused`, `blocked`, `active`; `clear` from any live goal. Rpc resolves the Session (restoring it if unloaded) and sends the call; the handler resolves `goal` of the named branch through `S:TreeCommands`.
 
-### A.3 Continuation decision
+### A.3 Branch service `goal`
+
+Branch scope, no key, provided by `GoalBranchPlugin` and called only by its Session part. All methods are async and serialized by the branch mutex; writing methods return after the write commits.
+
+| Method | Request | Reply | Errors |
+| --- | --- | --- | --- |
+| `update` | `{status: "completed" \| "blocked", summary, callerBranch}` | `{sequence}` | `no_active_goal`, `not_owner {owner}` (tool error texts in A.1) |
+| `set`, `edit` | `{objective}` | `{goal: GoalView, sequence}` | `invalid_params`, `no_goal`, `goal_not_editable` |
+| `pause`, `clear` | `{}` | `{goal?: GoalView, sequence}` | `no_goal`, `goal_not_active` |
+| `resume` | `{}` | `{goal: GoalView, sequence?}` | `no_goal`, `goal_not_editable` |
+| `get` | `{}` | `{goal: GoalView \| null, through}` | — |
+
+A consumer cancels by a cancel request; before the append nothing is written, after it the write stands. During unload calls fail `service_reloading`.
+
+### A.4 Continuation decision
 
 On delivery of `turn/end` at sequence `N` on branch `B`, over the events consumed through `N`:
 
@@ -247,7 +265,7 @@ On delivery of `turn/end` at sequence `N` on branch `B`, over the events consume
 
 Delivery of `stop/interrupt` at `M` (`scope: turn`): if C1 holds and `G < M`, write `paused` (`interrupted`).
 
-### A.4 Model-visible texts
+### A.5 Model-visible texts
 
 Each write is one `input/message` with no `user` content whose only raw block is the marker `<dim-goal kind="..." ...>`, newline, escaped body, newline, `</dim-goal>` (A2).
 
@@ -261,17 +279,17 @@ Each write is one `input/message` with no `user` content whose only raw block is
 
 Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by the user", `limit` "the automatic continuation limit was reached", `turn_failed` "the last turn failed". Tool declaration description: "Report that the current goal is completed or blocked."
 
-### A.5 Timeline mechanics
+### A.6 Timeline mechanics
 
 | Step | Path |
 | --- | --- |
-| Load | Subscribe to the Dispatcher (`"Goal"`), fix `S = committed()` under the gate, fold the prefix through `S` into the view, set `rebuilt = S`, provide `B:Goal`. If the latest `turn/end` has no Goal write after it, take its decision once |
-| Consume | Under the branch mutex, skip `sequence <= rebuilt`, advance the view, decide on `turn/end` and `stop/interrupt` (A.3), append if needed and return |
+| Load | Subscribe to the Dispatcher (`"Goal"`), fix `S = committed()` under the gate, fold the prefix through `S` into the view, set `rebuilt = S`, provide `goal`. If the latest `turn/end` has no Goal write after it, take its decision once |
+| Consume | Under the branch mutex, skip `sequence <= rebuilt`, advance the view, decide on `turn/end` and `stop/interrupt` (A.4), append if needed and return |
 | Write | `input/message` with source `goal`, `submission_id: "goal:<uuid>"`, marker and mode, appended to the branch Timeline (capability inputs are appended directly; the producer guarantees validity, [interrupt](../../architecture/rust-agent/interrupt.md)) |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed`. Goal never writes Steer |
 | Recheck | Decisions use only consumed events ([time-bus](../../architecture/rust-agent/time-bus.md) §4); later facts precede the write in sequence and are resolved by InputQueue and Loop |
 | Tool and method calls | Take the branch mutex, decide on the view, append, await commit, release |
-| Unload | `ctx.effect` disposer ends the subscription; calls waiting on the mutex return `service_reloading` or Cancelled |
+| Unload | Unload disposer ends the subscription; calls waiting on the mutex return `service_reloading` or Cancelled |
 | Restart, Session restore | Same as load; a committed unconsumed continuation is restored with the Session |
 
 ## Appendix B. Full conflict table
@@ -313,7 +331,7 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | Duplicate `set` | — | Each writes a block; count resets | Goal (A12) |
 | Turn failed | `turn/end {failed}` | `paused` (`turn_failed`) (A6) | Goal |
 | Limit reached | count = limit | `paused` (`limit`) | Goal |
-| Resource node offline | Session capabilities Pending | Inputs commit; turns start when capabilities recover | Lifecycle |
+| Resource node offline | calls on the node fail | Goal uses no node service: inputs commit and turns run; workspace tool calls fail `node_unavailable` as tool errors; nothing reloads or goes Pending ([overview §6.3](../overview.md#63-multiple-nodes)) | Goal; WorkspaceTools |
 | Client detach | — | No effect | — |
 
 ## Appendix C. Errors and recovery
@@ -349,7 +367,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A1 | `set`, `resume` and `edit` of an active goal use Queue; other writes use Append | Judgment (overview fixes Queue only for continuation) | Set would not start work on an idle branch, or pause would start a turn |
-| A2 | Exact block formats and texts in Appendix A.4 | Judgment | Text and parsing change together |
+| A2 | Exact block formats and texts in Appendix A.5 | Judgment | Text and parsing change together |
 | A3 | A goal belongs to the branch named in its block; other branches never continue or update it | Judgment from child-branch inheritance | Child branches would continue or complete the parent's goal |
 | A4 | `goal.maxContinuations` default 20, range 1..=1000 | Judgment | Different default |
 | A5 | Count resets on a new goal block and on operator input only: `user` content and no source marker as first raw block | Judgment | Another plugin's automatic input would reset the limit |
@@ -367,3 +385,14 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | Question | Description |
 | --- | --- |
 | Overview "How events enter context" | Goal designs for adopted input only |
+
+## Appendix G. Rust binding
+
+Goal is TypeScript first; a Rust implementation (or a Rust start before #4) binds the neutral contracts as follows.
+
+| Neutral contract | Rust binding |
+| --- | --- |
+| `toolContribution` key `goal_update` | `S:ToolContribution`, collected by ToolRegistry as `Contributions<ToolContribution>` entry `goal_update`; cancel request = batch `CancellationToken`; `cancelled` = `HostError::Cancelled` |
+| `sessionMethods` key `session.goal` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("session.goal")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)` |
+| `goal` | `B:Goal`, key `BranchScope::key::<Goal>()`, async methods returning `Result<_, GoalError>` with one variant per error code of A.3 |
+| Unload disposer | `ctx.effect` |

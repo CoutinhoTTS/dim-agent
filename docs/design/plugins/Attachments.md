@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
-Lets the user attach images and large text to a submission. Images need no plugin: the CLI sends them as image content blocks in `session.submit`, and Rpc validates them at the submission boundary. Attachments is a small Session plugin that contributes one Session method, `attachment.put`, as a `SessionMethodContribution` ([session-boundary](../contracts/session-boundary.md)). The method stores a text attachment (a large paste) as an immutable Session file owned by SessionStore on the Session's resource node and returns its path; the user's text references the path and the model reads the file with `read` when needed. Fork sharing and deletion of those files are SessionStore behavior. No events.
+Lets the user attach images and large text to a submission. Images need no plugin: the CLI sends them as image content blocks in `session.submit`, and Rpc validates them at the submission boundary. Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`) ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file owned by SessionStore on the Session's resource node and returns its path; the user's text references the path and the model reads the file with `read` when needed. Fork sharing and deletion of those files are SessionStore behavior. No events.
 
 ## 1. Structure
 
@@ -14,24 +14,24 @@ flowchart LR
     SS["SessionStore Session files (resource node)"]
   end
   subgraph S["Session scope"]
-    AT["AttachmentsPlugin (SessionMethodContribution attachment)"]:::new
+    AT["AttachmentsPlugin (sessionMethods attachment)"]:::new
     SI["Session input"]
   end
   CLI -- "session.submit with image blocks" --> RPC
   CLI -- "attachment.put" --> RPC
-  RPC -- "resolves the Session, dispatches" --> AT
+  RPC -- "resolves the Session, calls sessionMethods attachment" --> AT
   AT -- "store file" --> SS
   RPC -- "input/message" --> SI
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-Attachments depends only on SessionStore, an enclosing-scope plugin ([ADR 002](../../adr/002-plugin-scope.md) D3); it never writes the Timeline, never sees images and owns no data of its own. It is installed only in Sessions where it is enabled.
+Attachments depends only on SessionStore, an enclosing-scope plugin ([ADR 002](../../adr/002-plugin-scope.md) D3); it never writes the Timeline, never sees images and owns no data of its own. It declares its service in the plugin's `provides` and is installed only in Sessions where it is enabled.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `AttachmentsPlugin` | Session | `S:SessionIdentity`; SessionStore Session-file supplement | `S:SessionMethodContribution[attachment]` (`attachment.put`, level `session`) |
+| `AttachmentsPlugin` | Session | `S:SessionIdentity`; SessionStore Session-file supplement | `sessionMethods` key `attachment` (`attachment.put`, level `session`) |
 
-Contracts depended on: `SessionMethodContribution` (Rpc resolves the Session and dispatches); a SessionStore supplement that stores an immutable file on the Session's resource node, shares it on fork and removes it with the last owning Session (overview Appendix C, SessionStore); Rpc's `session.submit` validation of image blocks (Rpc supplement). Contracts defined here: `attachment.put`, its error codes and limits, the CLI reference format. Attachments names no other plugin's internal type.
+Contracts depended on: `sessionMethods` (Rpc resolves the Session and calls it); a SessionStore supplement that stores an immutable file on the Session's resource node, shares it on fork and removes it with the last owning Session (overview Appendix C, SessionStore); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a store on an offline resource node fails `node_unavailable` while Attachments stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5)); Rpc's `session.submit` validation of image blocks (Rpc supplement). Contracts defined here: `attachment.put`, its error codes and limits, the CLI reference format. Attachments names no other plugin's internal type.
 
 ## 2. Data and state
 
@@ -81,7 +81,7 @@ sequenceDiagram
   participant A as Attachments
   participant SS as SessionStore
   C->>R: attachment.put {sessionId, name, text}
-  R->>A: SessionMethodContribution call (Session resolved by Rpc)
+  R->>A: sessionMethods call(MethodCall) (Session resolved by Rpc)
   A->>SS: store immutable file (Session's resource node)
   A-->>C: {attachmentId, path, bytes, lines}
   C->>R: session.submit text containing the path reference
@@ -97,7 +97,7 @@ The path is returned only after the file is durable. The model later reads it wi
 | Model switched after submit to one without images | Image reaches the new model; its adapter rejects or drops it |
 | `input/withdrawn` of an image input | Never consumed; text files stay with the Session |
 | Fork racing delete of the source | Decided by SessionStore's fork/delete ordering; files shared, never copied |
-| Resource node offline | Images unaffected; `read` of a path fails like any `read` |
+| Resource node offline | `attachment.put` fails `node_unavailable`; images unaffected; `read` of a path fails like any `read`; nothing reloads or goes Pending |
 
 Full table: Appendix B.
 
@@ -105,7 +105,7 @@ Full table: Appendix B.
 
 | Attachment | What the model sees | Placement |
 | --- | --- | --- |
-| Image | `ContentBlock::Image` inside the input's user message (after its raw blocks) | Consumed position (`input/consumed`) |
+| Image | Image content block inside the input's user message (after its raw blocks) | Consumed position (`input/consumed`) |
 | Text attachment | The path inside the user text; content only through a later `read` result | User message at the consumed position; content at that tool result's position |
 
 Compaction keeps neither images nor file contents verbatim, only the summary (a path survives if the summary keeps it; the file stays). Child branches inherit consumed inputs before the cut; forked Sessions inherit the fixed prefix and the shared files stay readable. Inputs written by plugins directly do not pass `session.submit` validation (A8). The model never sees attachment ids, rejected submissions or diagnostics.
@@ -114,7 +114,7 @@ Compaction keeps neither images nor file contents verbatim, only the summary (a 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `attachment.put` | `SessionMethodContribution`, level `session` | Store a text attachment in the Session directory, return its path |
+| `attachment.put` | `sessionMethods` (Session, key `attachment`), level `session` | Store a text attachment in the Session directory, return its path |
 | Image blocks in `session.submit` | Rpc boundary validation (supplement) | Validate format, limits and model capability |
 | `attachment_*` errors | `appError` on `session.submit` and `attachment.put` | Rejection reasons |
 
@@ -129,8 +129,8 @@ Images are decoded only to validate headers and limits. Text attachments are wri
 | Input block | Handling |
 | --- | --- |
 | `Text` | Unchanged |
-| `Image { source: Base64 }` | Decode; sniff the format from magic bytes (declared `media_type` ignored); accept PNG, JPEG, WebP, GIF (feature list); set `media_type`; enforce limits (A2) |
-| `Image { source: Url }` | Rejected `attachment_invalid` (A3) |
+| Image, `source` base64 | Decode; sniff the format from magic bytes (declared `media_type` ignored); accept PNG, JPEG, WebP, GIF (feature list); set `media_type`; enforce limits (A2) |
+| Image, `source` URL | Rejected `attachment_invalid` (A3) |
 | Any image, the adopted model has no image input | Rejected `attachment_unsupported_model` |
 | Any image, capability unknown | Accepted; the model adapter decides (A4) |
 
@@ -138,7 +138,7 @@ Limits (A2): at most 20 images per submission, 5 MiB decoded each, 8000 px per s
 
 ### A.2 `attachment.put`
 
-`attachment.put {sessionId, name?, text}` → `{attachmentId, path, bytes, lines}`.
+Service `sessionMethods`, Session scope, key `attachment`. `describe()` returns one `MethodDecl`: `{name: "attachment.put", level: session, mutating: true, interruption: report, progress: false, notifications: [], reply: direct}`. `call(MethodCall)` with params `{sessionId, name?, text}` replies `{attachmentId, path, bytes, lines}` as `MethodReply`; errors are `MethodError` data.
 
 | Rule | Content |
 | --- | --- |
@@ -148,7 +148,7 @@ Limits (A2): at most 20 images per submission, 5 MiB decoded each, 8000 px per s
 | `path` | Absolute path on the Session's resource node, as `read` resolves it for the Session |
 | Errors | `session_closed`, `attachment_invalid`, `attachment_too_large`, `node_unavailable`, `service_reloading`, `unknown_method` |
 
-Rpc resolves the Session as for any Session method. An in-flight call checks cancellation before SessionStore commits.
+Rpc resolves the Session as for any Session method. A cancel request on an in-flight call is checked before SessionStore commits.
 
 ### A.3 CLI contract
 
@@ -175,6 +175,7 @@ The CLI reads images (clipboard, `@`, pasted paths) and sends them as base64 ima
 | Duplicate or late `attachment.put` | — | New attachment each call (A7) | Attachments |
 | Paired remote device submits | — | Same boundary validation | Rpc |
 | Session unload/restore, client detach | — | No effect | — |
+| Resource node offline at `attachment.put` | — | `node_unavailable`; nothing stored; Attachments stays loaded; a retry succeeds once the node is back (requirement on #5) | SessionStore |
 
 ## Appendix C. Errors and recovery
 
@@ -198,6 +199,7 @@ A rejected submission leaves no fact. A file stored without a later submit is re
 5. Fork then delete source: fork still reads the file; delete fork: file removed; no bytes copied.
 6. Attachments not enabled: `attachment.put` gets `unknown_method`; image submits unaffected.
 7. Interrupt, withdrawal and branch-close rows through public RPC.
+8. Offline resource node: `attachment.put` fails `node_unavailable` without reloading Attachments; it succeeds after the node returns.
 
 ## Appendix E. Assumptions
 
@@ -218,3 +220,12 @@ A rejected submission leaves no fact. A file stored without a later submit is re
 | # | Question | Description |
 | --- | --- | --- |
 | F1 | Image capability at the boundary | Rpc needs the Session's adopted model image capability (published `context/configured` plus the Provider catalog); without it every image is accepted (A4) |
+
+## Appendix G. Rust binding
+
+Attachments is implemented in Rust.
+
+| Neutral contract | Rust binding |
+| --- | --- |
+| `sessionMethods` key `attachment` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("attachment")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)`; cancel request = `CancellationToken` |
+| Image content block | `ContentBlock::Image { source: Base64 \| Url, media_type }` |

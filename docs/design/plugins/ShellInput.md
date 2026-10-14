@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.3](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
-Executes `!command` and `!!command` typed by the user in the Session's workspace on its resource node. The result of `!command` (command and bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client and diagnostics. ShellInput is a Session plugin with no events. It contributes `shell.run`, `shell.stop` and `shell.list` as a `SessionMethodContribution` at level `management` ([session-boundary](../contracts/session-boundary.md)). At most one command runs per Session; a command ends on `shell.stop` or when the Session part ends (Session close or unload, reload, daemon exit).
+Executes `!command` and `!!command` typed by the user in the Session's workspace on its resource node. The result of `!command` (command and bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client and diagnostics. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` through a `sessionMethods` service (Session scope, key `shell`) at level `management` ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session; a command ends on `shell.stop` or when the Session part ends (Session close or unload, reload, daemon exit).
 
 ## 1. Structure
 
@@ -14,7 +14,7 @@ flowchart LR
     DG["Diagnostics channel"]
   end
   subgraph S["Session scope"]
-    SI["ShellInputPlugin (run registry, SessionMethodContribution shell)"]:::new
+    SI["ShellInputPlugin (run registry, sessionMethods shell)"]:::new
     TC["TreeCommands"]
     HP["HostPlatform of the resource node (exec shell read per spawn)"]
   end
@@ -22,7 +22,7 @@ flowchart LR
     IQ["Timeline, InputQueue, Loop"]
   end
   CLI -- "shell.run / stop / list" --> RPC
-  RPC -- "resolves the Session, dispatches" --> SI
+  RPC -- "resolves the Session, calls sessionMethods shell" --> SI
   SI -- "spawn in Session cwd" --> HP
   SI -- "Branch::input (Append)" --> TC
   TC --> IQ
@@ -32,9 +32,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ShellInputPlugin` | Session | `S:SessionConfig` (`cwd`), `S:TreeCommands`, the HostPlatform of the Session's resource node (as WorkspaceTools uses it), diagnostics channel | `S:SessionMethodContribution[shell]` (level `management`) |
+| `ShellInputPlugin` | Session | `S:SessionConfig` (`cwd`), `S:TreeCommands`, the HostPlatform of the Session's resource node (as WorkspaceTools uses it), diagnostics channel | `sessionMethods` key `shell` (level `management`), declared in the plugin's `provides` |
 
-Contracts depended on: `SessionMethodContribution` and the call's progress channel ([session-boundary](../contracts/session-boundary.md)); `Branch::input` with boundary validation ([interrupt](../../architecture/rust-agent/interrupt.md)); `HostPlatform::spawn(ProcessSpec)`, `ProcessTree::{stdout, stderr, wait, terminate}`; the node's exec shell as business configuration read at each spawn ([ADR 002](../../adr/002-plugin-scope.md) "Existing plugins"); isolation (overview Appendix C supplement); shell argv construction of the `exec` tool ([exec.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs), exposed as a HostPlatform helper, A2).
+Contracts depended on: `sessionMethods` and per-call progress ([session-boundary](../contracts/session-boundary.md)); `Branch::input` with boundary validation ([interrupt](../../architecture/rust-agent/interrupt.md)); `HostPlatform::spawn(ProcessSpec)`, `ProcessTree::{stdout, stderr, wait, terminate}`; the node's exec shell as business configuration read at each spawn ([ADR 002](../../adr/002-plugin-scope.md) "Existing plugins"); isolation (overview Appendix C supplement); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a call on an offline resource node fails `node_unavailable` while ShellInput stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5)); shell argv construction of the `exec` tool ([exec.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs), exposed as a HostPlatform helper, A2).
 
 Contracts defined here: the `shell.*` methods, the source marker `dim-shell-input` (kind `command`) and the `submission_id` prefix `shell-input:`.
 
@@ -56,7 +56,7 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-The run registry is memory owned by the plugin generation through `ctx.effect` and is never rebuilt: when the Session part ends, every run is terminated. The only durable result is the existing `input/message`, restored with the Session.
+The run registry is memory owned by the plugin generation through its unload disposer and is never rebuilt: when the Session part ends, every run is terminated. The only durable result is the existing `input/message`, restored with the Session.
 
 Events: none. A run is started by the user, not by a branch turn, so a branch interrupt does not settle it. The only later-relevant outcome of `!command` is the input; `!!command` affects nothing later. Run records go to diagnostics.
 
@@ -72,7 +72,7 @@ sequenceDiagram
   participant HP as HostPlatform (resource node)
   participant TL as Branch Timeline
   C->>R: shell.run {sessionId, runId, command, mode record}
-  R->>SI: SessionMethodContribution call (progress channel)
+  R->>SI: sessionMethods call(MethodCall), progress declared
   SI->>HP: spawn shell argv in Session cwd
   Note over HP: exec shell read at this spawn
   HP-->>SI: stdout/stderr chunks
@@ -97,7 +97,7 @@ sequenceDiagram
     SI->>HP: ProcessTree terminate
     SI->>TL: record partial output, status stopped
   else Session part ends (close, unload, reload)
-    SI->>HP: ctx.effect disposer terminates every tree
+    SI->>HP: unload disposer terminates every tree
     Note over SI: nothing written
   end
 ```
@@ -150,7 +150,7 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `shell.run` | `SessionMethodContribution`, level `management`, progress | Run a command (`record` or `private`), stream output, return the result |
+| `shell.run` | `sessionMethods` (Session, key `shell`), level `management`, progress | Run a command (`record` or `private`), stream output, return the result |
 | `shell.stop` | Same, level `management` | Stop a run by `runId`; idempotent |
 | `shell.list` | Same, level `management` | Running runs of the Session |
 | Marker `dim-shell-input` kind `command` | Input convention | Model-visible recorded result |
@@ -163,6 +163,8 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 ## Appendix A. Interface details
 
 ### A.1 Methods
+
+Service `sessionMethods`, Session scope, key `shell`. `describe()` returns one `MethodDecl` per method with `level: management`, `notifications: []`, `reply: direct`; `shell.run` has `mutating: true`, `interruption: report`, `progress: true`; `shell.stop` has `mutating: true`; `shell.list` has `mutating: false`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; progress items are sent on the call before the reply; errors are `MethodError` data (Appendix C). A dropped call (client gone) does not stop the run (A12).
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -188,15 +190,14 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 
 ### A.3 Recorded input
 
-```rust
-branch.input(InputMessage {
-    submission_id: Some(format!("shell-input:{run_id}")),
-    blocks: vec![marker("dim-shell-input", "command",
-        [("status", status), ("exit", code_or_signal), ("truncated", bool)],
-        format!("$ {command}\n{bounded_output_without_terminal_escapes}"))],
-    user: None, mode: InputMode::Append,
-})
-```
+One input written through the branch's input boundary:
+
+| Field | Value |
+| --- | --- |
+| `submission_id` | `shell-input:<runId>` |
+| `blocks` | One raw block: marker `dim-shell-input`, kind `command`, attributes `status`, `exit` (code or signal), `truncated`; body `$ <command>`, newline, bounded output without terminal escapes |
+| `user` | none |
+| `mode` | `append` |
 
 ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the terminal.
 
@@ -238,7 +239,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | Process restart mid-run | — | Tree dies with the daemon; nothing written | — |
 | Commit, then reply lost | X committed | Retry in the same generation → `duplicate_run`; after restart the client checks `session.input_lookup` for `shell-input:<runId>` (A11) | Client |
 | Session unloaded at start | — | Rpc restores it before dispatch | Rpc, AgentIndex |
-| Resource node offline at start | — | `node_unavailable`; nothing started | ShellInput |
+| Resource node offline at start | — | `node_unavailable`; nothing started; ShellInput stays loaded and other Sessions are unaffected (requirement on #5) | ShellInput |
 | Resource node lost mid-run | — | Status `failed`; for `record`, partial output written with `status="failed"` (A6) | ShellInput |
 | Duplicate or late `stop` | — | `{stopped: false}` | ShellInput |
 | Client detach or disconnect | — | Run continues and is recorded or discarded; progress dropped (A12) | ShellInput |
@@ -256,7 +257,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | `session_closed` / `branch_missing` | Session or branch gone at start |
 | `node_unavailable` | The resource node is unreachable |
 | `unknown_method` | ShellInput not enabled in the Session, or level not dispatched by the entry |
-| `service_reloading` | The contribution is reloading at start |
+| `service_reloading` | The service is reloading at start |
 | `operation_interrupted` | The Session part ended while the call ran |
 
 | Case | Result |
@@ -276,7 +277,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 6. 10 MiB output yields the last 2000 lines within 50 KiB and `truncated="true"`.
 7. Branch close: `recorded: null`. Session close: tree terminated, nothing written.
 8. Session reload and daemon restart mid-run: tree terminated, nothing written, no re-execution.
-9. Offline node: `node_unavailable` for that Session only.
+9. Offline node: `node_unavailable` for that Session only; ShellInput is not reloaded and a later call succeeds once the node is back.
 10. Withdrawn X is never consumed; remote entry: `unknown_method`.
 11. Changing the exec shell: the next run uses the new shell without reloading anything.
 
@@ -305,3 +306,23 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | F1 | Overview §5.3 end conditions | Overview names stop and daemon exit; this design also ends runs when the Session part ends |
 | F2 | Idle unload during a run | Whether AgentIndex treats a running command as activity; otherwise idle unload terminates it (A10) |
 | F3 | Remote node tree termination | Whether an imported HostPlatform kills process trees when the link drops (#5) |
+
+## Appendix G. Rust binding
+
+ShellInput is implemented in Rust.
+
+| Neutral contract | Rust binding |
+| --- | --- |
+| `sessionMethods` key `shell` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("shell")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)`; progress = `CallChannel::progress` |
+| Recorded input (A.3) | `Branch::input` through `S:TreeCommands` |
+| Unload disposer | `ctx.effect` |
+
+```rust
+branch.input(InputMessage {
+    submission_id: Some(format!("shell-input:{run_id}")),
+    blocks: vec![marker("dim-shell-input", "command",
+        [("status", status), ("exit", code_or_signal), ("truncated", bool)],
+        format!("$ {command}\n{bounded_output_without_terminal_escapes}"))],
+    user: None, mode: InputMode::Append,
+})
+```
