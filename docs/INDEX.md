@@ -1,6 +1,7 @@
 # Documentation
 
 - [CLI feature list](feature-list.md)
+- [Overall design for undesigned features](design/overview.md)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
