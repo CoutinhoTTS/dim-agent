@@ -203,16 +203,9 @@ impl ContextPolicy {
                     // not discard a successful summary or repeat model work.
                     if data.through == source.through {
                         let saved = async {
-                            let checkpoint = (self.history.checkpoint)(&context, cursor)?;
-                            let state = serde_json::to_string(&checkpoint)
-                                .map_err(|error| error.to_string())?;
+                            let snapshot = self.history.snapshot(&context, cursor, &event)?;
                             self.timeline
-                                .save_snapshot(RecoverySnapshot {
-                                    sequence: event.sequence,
-                                    event_id: event.id.clone(),
-                                    interpreter: self.history.checkpoint_interpreter.into(),
-                                    state,
-                                })
+                                .save_snapshot(snapshot)
                                 .await
                                 .map_err(|error| error.to_string())
                         }

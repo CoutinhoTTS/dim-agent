@@ -1,6 +1,8 @@
 use crate::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{ContextHistory, Timeline};
 use dim_agent_types::*;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 
 /// Adopt the stable guide together with the renderer's system configuration.
@@ -35,12 +37,56 @@ pub struct HistoryEntry {
 pub type RenderHistory = fn(&ContextHistory) -> Result<Vec<HistoryEntry>, String>;
 pub type BuildProjectionCheckpoint =
     fn(&ContextHistory, &str) -> Result<ProjectionCheckpoint, String>;
+pub type EncodeProjectionCheckpoint =
+    fn(&RecoverySnapshot, &ProjectionCheckpoint) -> Result<String, String>;
 pub struct HistoryRenderer {
     pub render: RenderHistory,
     pub checkpoint: BuildProjectionCheckpoint,
     /// Identifies the saved projection semantics, independently of store format.
     pub checkpoint_interpreter: &'static str,
+    /// Paired codec owned by the interpreter. The encoder receives snapshot
+    /// identity with empty state; custom formats must override both callbacks.
+    /// Builders are trusted to produce replay-equivalent state. Integrity checks
+    /// detect persisted corruption, not incorrect or malicious trusted producers.
+    pub encode_checkpoint: EncodeProjectionCheckpoint,
     pub decode_checkpoint: fn(&RecoverySnapshot) -> Option<ProjectionCheckpoint>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CheckpointEnvelope {
+    payload: String,
+    sha256: String,
+}
+
+fn checkpoint_digest(snapshot: &RecoverySnapshot, payload: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"dim/recovery-snapshot/v1\0");
+    hash.update(snapshot.sequence.to_be_bytes());
+    for value in [&snapshot.event_id, &snapshot.interpreter, payload] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn encode_checkpoint(
+    snapshot: &RecoverySnapshot,
+    checkpoint: &ProjectionCheckpoint,
+) -> Result<String, String> {
+    let payload = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+    serde_json::to_string(&CheckpointEnvelope {
+        sha256: checkpoint_digest(snapshot, &payload),
+        payload,
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn decode_checkpoint(snapshot: &RecoverySnapshot) -> Option<ProjectionCheckpoint> {
+    let envelope: CheckpointEnvelope = serde_json::from_str(&snapshot.state).ok()?;
+    if envelope.sha256 != checkpoint_digest(snapshot, &envelope.payload) {
+        return None;
+    }
+    serde_json::from_str(&envelope.payload).ok()
 }
 
 impl Default for HistoryRenderer {
@@ -48,13 +94,32 @@ impl Default for HistoryRenderer {
         Self {
             render: project_context_history,
             checkpoint: projection_checkpoint,
-            checkpoint_interpreter: "dim/context-projection/v1",
-            decode_checkpoint: |snapshot| serde_json::from_str(&snapshot.state).ok(),
+            checkpoint_interpreter: "dim/context-projection/v2",
+            encode_checkpoint,
+            decode_checkpoint,
         }
     }
 }
 
 impl HistoryRenderer {
+    /// Encode optional state only after the final compaction fact is adopted.
+    pub fn snapshot(
+        &self,
+        context: &ContextHistory,
+        cursor: &str,
+        anchor: &AgentEvent,
+    ) -> Result<RecoverySnapshot, String> {
+        let checkpoint = (self.checkpoint)(context, cursor)?;
+        let mut snapshot = RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: self.checkpoint_interpreter.into(),
+            state: String::new(),
+        };
+        snapshot.state = (self.encode_checkpoint)(&snapshot, &checkpoint)?;
+        Ok(snapshot)
+    }
+
     pub async fn context(
         &self,
         timeline: &Timeline,

@@ -3019,7 +3019,6 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::checkpoint",
       "references": [
-        "path RecoverySnapshot",
         "path checkpoint"
       ]
     },

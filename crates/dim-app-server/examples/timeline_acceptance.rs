@@ -279,8 +279,8 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
     let stop_ms = stop.elapsed().as_secs_f64() * 1000.;
     let connection = Connection::open(directory.join("dimcode.sqlite"))?;
     let checkpoints: i64 = connection.query_row(
-        "SELECT count(*) FROM timeline_snapshots WHERE interpreter = 'dim/context-projection/v1'",
-        [],
+        "SELECT count(*) FROM timeline_snapshots WHERE interpreter = ?1",
+        [HistoryRenderer::default().checkpoint_interpreter],
         |row| row.get(0),
     )?;
     {

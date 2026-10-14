@@ -208,26 +208,34 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         )]
     );
 
-    // Matching custom interpreters can opt in to their own decoder, while
+    // Matching custom interpreters own a paired codec, while
     // Timeline.context remains independent of any cache or renderer.
-    timeline
-        .save_snapshot(RecoverySnapshot {
-            sequence: fact.sequence,
-            event_id: fact.id.clone(),
-            interpreter: "custom/v1".into(),
-            state: serde_json::to_string(&checkpoint).unwrap(),
-        })
-        .await
-        .unwrap();
     let renderer = HistoryRenderer {
+        encode_checkpoint: |_, checkpoint| {
+            serde_json::to_string(checkpoint)
+                .map(|payload| format!("custom:{payload}"))
+                .map_err(|error| error.to_string())
+        },
         decode_checkpoint: |snapshot| {
             assert_eq!(snapshot.interpreter, "custom/v1");
-            serde_json::from_str(&snapshot.state).ok()
+            serde_json::from_str(snapshot.state.strip_prefix("custom:")?).ok()
         },
         ..renderer
     };
+    timeline
+        .save_snapshot(
+            renderer
+                .snapshot(
+                    &timeline.context(through).await.unwrap(),
+                    &consumed.id,
+                    &fact,
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let accelerated = renderer.context(&timeline, fact.sequence).await.unwrap();
-    assert_eq!(accelerated.checkpoint, Some(checkpoint));
+    assert_eq!(accelerated.checkpoint, Some(checkpoint.clone()));
     assert!(accelerated.events.iter().any(|event| event.id == fact.id));
     assert_eq!(
         (renderer.render)(&accelerated).unwrap(),
@@ -237,6 +245,47 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     assert!(full.checkpoint.is_none());
     assert_eq!(full.events, replay.events);
     assert_eq!(full.positions, replay.positions);
+
+    // Integrity binds exact payload bytes and all snapshot identity fields.
+    let renderer = HistoryRenderer::default();
+    let saved = renderer
+        .snapshot(
+            &timeline.context(through).await.unwrap(),
+            &consumed.id,
+            &fact,
+        )
+        .unwrap();
+    assert_eq!((renderer.decode_checkpoint)(&saved), Some(checkpoint));
+    for field in [
+        "sequence",
+        "event_id",
+        "interpreter",
+        "payload",
+        "sha256",
+        "missing",
+        "raw",
+    ] {
+        let mut damaged = saved.clone();
+        let mut envelope: serde_json::Value = serde_json::from_str(&damaged.state).unwrap();
+        match field {
+            "sequence" => damaged.sequence += 1,
+            "event_id" => damaged.event_id.push('x'),
+            "interpreter" => damaged.interpreter.push('x'),
+            "payload" => {
+                envelope["payload"] = format!("{} ", envelope["payload"].as_str().unwrap()).into()
+            }
+            "sha256" => envelope["sha256"] = "00".into(),
+            "missing" => {
+                envelope.as_object_mut().unwrap().remove("sha256");
+            }
+            "raw" => {
+                envelope = serde_json::from_str(envelope["payload"].as_str().unwrap()).unwrap()
+            }
+            _ => unreachable!(),
+        }
+        damaged.state = envelope.to_string();
+        assert!((renderer.decode_checkpoint)(&damaged).is_none(), "{field}");
+    }
     timeline.close().await.unwrap();
 }
 
@@ -737,7 +786,18 @@ fn result_of(entry: &HistoryEntry) -> (&str, &str) {
 fn assert_checkpoints_match(context: &ContextHistory) {
     let whole = project_context_history(context).unwrap();
     for (cut, entry) in whole.iter().enumerate() {
-        let resumed = resume(context, &entry.id);
+        let mut resumed = resume(context, &entry.id);
+        let renderer = HistoryRenderer::default();
+        let anchor = resumed.events.last().unwrap();
+        let mut snapshot = RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: renderer.checkpoint_interpreter.into(),
+            state: String::new(),
+        };
+        snapshot.state =
+            (renderer.encode_checkpoint)(&snapshot, resumed.checkpoint.as_ref().unwrap()).unwrap();
+        resumed.checkpoint = Some((renderer.decode_checkpoint)(&snapshot).unwrap());
         assert_eq!(
             project_context_history(&resumed).unwrap(),
             whole[cut + 1..],

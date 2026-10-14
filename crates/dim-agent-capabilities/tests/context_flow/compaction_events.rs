@@ -2,80 +2,126 @@ use super::*;
 use std::sync::Mutex;
 
 #[tokio::test]
-async fn failed_snapshot_builder_keeps_completed_compaction_for_later_requests() {
-    let store = Arc::new(MemoryTimelineStore::default());
-    let mut builder = builder_with_context(
-        Arc::new(EchoModel),
-        HistoryRenderer {
-            checkpoint: |_, _| Err("snapshot encoder unavailable".into()),
-            ..HistoryRenderer::default()
-        },
-        Context {
-            threshold: Some(900.),
-            ..Context::default()
-        },
-    );
-    builder.timeline_store(store.clone());
-    let agent = builder.build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    let original = "x".repeat(1_500);
-    for input in [&original, "next"] {
-        session
-            .submit(input.into(), InputMode::Queue, "main")
+async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() {
+    for mode in ["builder-failure", "encoder-failure", "custom"] {
+        let store = Arc::new(MemoryTimelineStore::default());
+        let mut renderer = HistoryRenderer::default();
+        match mode {
+            "builder-failure" => {
+                renderer.checkpoint = |_, _| Err("snapshot builder unavailable".into())
+            }
+            "encoder-failure" => {
+                renderer.encode_checkpoint = |_, _| Err("snapshot encoder unavailable".into())
+            }
+            "custom" => {
+                renderer.checkpoint_interpreter = "test/custom/v1";
+                renderer.encode_checkpoint = |_, checkpoint| {
+                    serde_json::to_string(checkpoint)
+                        .map(|payload| format!("custom:{payload}"))
+                        .map_err(|error| error.to_string())
+                };
+                renderer.decode_checkpoint =
+                    |snapshot| serde_json::from_str(snapshot.state.strip_prefix("custom:")?).ok();
+            }
+            _ => unreachable!(),
+        }
+        let interpreter = renderer.checkpoint_interpreter;
+        let decode = renderer.decode_checkpoint;
+        let mut builder = builder_with_context(
+            Arc::new(EchoModel),
+            renderer,
+            Context {
+                threshold: Some(900.),
+                ..Context::default()
+            },
+        );
+        builder.timeline_store(store.clone());
+        let agent = builder.build();
+        let session = agent
+            .create_session(SessionConfig::default())
             .await
             .unwrap();
-        session.idle("main").await.unwrap();
-    }
-    let events = session.history("main", None).await.unwrap();
-    let compactions: Vec<_> = events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::ContextCompaction(data) => Some(&data.outcome),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        matches!(compactions.as_slice(), [ContextCompactionResult::Completed {
+        let original = "x".repeat(1_500);
+        for input in [&original, "next"] {
+            session
+                .submit(input.into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+        }
+        let events = session.history("main", None).await.unwrap();
+        let compactions: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::ContextCompaction(data) => Some(&data.outcome),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(compactions.as_slice(), [ContextCompactionResult::Completed {
         summary, ..
     }] if summary == "short")
-    );
-    assert!(
-        store
+        );
+        let saved = store
             .latest_snapshot(
                 &TimelineKey {
                     session_id: session.id().into(),
                     branch_id: "main".into(),
                 },
                 events.last().unwrap().sequence,
-                "dim/context-projection/v1"
+                interpreter,
             )
             .await
-            .unwrap()
-            .is_none()
-    );
-    let requests: Vec<_> = events
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::ModelCall(data) => Some(&data.request),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(requests.len(), 2);
-    for request in requests {
-        assert_eq!(
-            request.messages[0].as_ref(),
-            &dim_agent_capabilities::history::summary_message("short")
-        );
-        assert!(
-            !request
-                .messages
-                .contains(&Arc::new(Message::text(Role::User, &original)))
-        );
+            .unwrap();
+        if mode == "custom" {
+            let saved = saved.unwrap();
+            assert!(saved.state.starts_with("custom:"));
+            let timeline = Timeline::restore(
+                Ctx::root().unwrap(),
+                TimelineKey {
+                    session_id: session.id().into(),
+                    branch_id: "main".into(),
+                },
+                vec![],
+                store.clone(),
+            )
+            .await
+            .unwrap();
+            let accelerated = timeline
+                .context_with_checkpoint(timeline.sequence(), interpreter, decode)
+                .await
+                .unwrap();
+            assert!(accelerated.checkpoint.is_some());
+            assert_eq!(
+                project_context_history(&accelerated).unwrap(),
+                project_context_history(&timeline.context(timeline.sequence()).await.unwrap())
+                    .unwrap()
+            );
+            timeline.close().await.unwrap();
+        } else {
+            assert!(saved.is_none());
+        }
+        let requests: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(&data.request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(
+                request.messages[0].as_ref(),
+                &dim_agent_capabilities::history::summary_message("short")
+            );
+            assert!(
+                !request
+                    .messages
+                    .contains(&Arc::new(Message::text(Role::User, &original)))
+            );
+        }
+        agent.close().await.unwrap();
     }
-    agent.close().await.unwrap();
 }
 
 #[derive(Clone, Copy, Debug)]

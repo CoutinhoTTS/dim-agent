@@ -7,6 +7,7 @@ type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
 struct CountContextReads {
     memory: MemoryTimelineStore,
     reads: AtomicUsize,
+    earliest_read: std::sync::atomic::AtomicU64,
     fail_at: AtomicUsize,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
@@ -191,6 +192,8 @@ impl TimelineStore for CountContextReads {
         key: &'a TimelineKey,
         range: RangeInclusive<u64>,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        self.earliest_read
+            .fetch_min(*range.start(), Ordering::SeqCst);
         self.memory.read(key, range)
     }
     fn read_segments<'a>(
@@ -198,6 +201,10 @@ impl TimelineStore for CountContextReads {
         session_id: &'a str,
         segments: Vec<(String, RangeInclusive<u64>)>,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        for (_, range) in &segments {
+            self.earliest_read
+                .fetch_min(*range.start(), Ordering::SeqCst);
+        }
         self.memory.read_segments(session_id, segments)
     }
     fn trace<'a>(
@@ -655,14 +662,40 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
                         branch_id: "main".into(),
                     },
                     history.last().unwrap().sequence,
-                    "dim/context-projection/v1",
+                    HistoryRenderer::default().checkpoint_interpreter,
                 )
                 .await
                 .unwrap();
             if fail_snapshot {
                 assert!(snapshot.is_none());
             } else {
-                assert_eq!(snapshot.unwrap().event_id, compaction.id);
+                let snapshot = snapshot.unwrap();
+                assert_eq!(snapshot.event_id, compaction.id);
+                let renderer = HistoryRenderer::default();
+                let checkpoint = (renderer.decode_checkpoint)(&snapshot).unwrap();
+                assert!(checkpoint.resume.sequence > 1);
+                let timeline = Timeline::restore(
+                    Ctx::root().unwrap(),
+                    TimelineKey {
+                        session_id: session.id().into(),
+                        branch_id: "main".into(),
+                    },
+                    vec![],
+                    store.clone(),
+                )
+                .await
+                .unwrap();
+                store.earliest_read.store(u64::MAX, Ordering::SeqCst);
+                let recovered = renderer
+                    .context(&timeline, timeline.sequence())
+                    .await
+                    .unwrap();
+                assert!(recovered.checkpoint.is_some());
+                assert_eq!(
+                    store.earliest_read.load(Ordering::SeqCst),
+                    checkpoint.resume.sequence
+                );
+                timeline.close().await.unwrap();
             }
             assert_eq!(
                 history

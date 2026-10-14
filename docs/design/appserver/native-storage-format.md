@@ -108,7 +108,11 @@ EventDraft = { tags?: string[], type: string, name: string, data: object }
 
 ### 可丢弃恢复快照
 
-`context/compaction` 的 completed 事实仅保存 source through、cursor、summary、baseline 和 diagnostics，不含 snapshot。快照在事实提交后由独立异步操作写入 `timeline_snapshots`，保存失败不影响事实提交。`RecoverySnapshot={sequence,event_id,interpreter,state}`；默认解释器合同为 `dim/context-projection/v1`，其 state 是下列 `ProjectionCheckpoint` 的原始 JSON 字符串，SQLite 将它作为不透明 TEXT 保存。
+`context/compaction` 的 completed 事实仅保存 source through、cursor、summary、baseline 和 diagnostics，不含 snapshot。快照在事实提交后由独立异步操作写入 `timeline_snapshots`，保存失败不影响事实提交。`RecoverySnapshot={sequence,event_id,interpreter,state}`；默认解释器合同为 `dim/context-projection/v2`，其 state 是 `{payload,sha256}` 的 JSON 字符串，payload 是下列完整 `ProjectionCheckpoint` 的原始 JSON 字符串。SQLite 仍将 state 作为不透明 TEXT 保存，数据库格式保持 v13。
+
+摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照直接绕过，不通过补算摘要升级；v2 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
+
+`HistoryRenderer` 同时拥有 `encode_checkpoint` 和 `decode_checkpoint`，自定义格式必须成对提供并管理自己的 interpreter 标识。完整性校验检测编码后发生的损坏，不是认证或生产者语义证明：可信 builder 必须生成与完整事实重放等价的状态，并通过差分测试验证。已知 builder 语义缺陷需要修复并更换解释器版本，不能给错误状态重算摘要。有效快照仍只读取恢复位置以后的事实，不在每次读取时重复完整重放。
 
 候选查询只选择相同 interpreter 且 sequence 不大于固定 through 的最新快照，并连接事件锚点验证 ID、序号和 completed 种类；孤立或元数据不匹配的快照被忽略。Session 恢复不校验可选 state；缺失、不兼容、损坏或越界快照回退事实重放，summary 仍保留。运行时在裁剪前校验解码后的 resume 属于固定祖先链和 source through。`Timeline.context` 默认完整重放；加速显式调用 `context_with_checkpoint`，默认能力使用 `history::read_context`。事实或必需引用损坏仍失败并保留原字节。回滚先删除 snapshots 再删除 events。
 
@@ -174,6 +178,8 @@ ProjectionCheckpoint = {
 ## 完整记录示例（v13）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面两个 hash 可以按上文算法复核。
+
+示例刻意保留旧 `dim/context-projection/v1` 快照，验证 v13 数据库无需迁移：默认 v2 解释器绕过这条无校验缓存，仍从事实恢复相同 summary、保留消息和子分支。新快照使用上节的完整性封装。
 
 ```json
 {

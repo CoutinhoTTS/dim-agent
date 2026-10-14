@@ -80,6 +80,13 @@ content fail explicitly and remain intact. Snapshot candidates are supplied by s
 context interpreter decides compatibility. Exported facts and references must suffice without
 snapshots. Independently verify full replay and accelerated replay agree at a fixed legal prefix.
 
+The default interpreter v2 owns a paired encoder/decoder and an integrity envelope binding the
+exact checkpoint payload to its anchor identity and interpreter. Reject damaged envelopes before
+using their state; bypass unprotected v1 snapshots without migrating the database or rewriting
+facts. This detects corruption after encoding, not malicious writers or semantic bugs in trusted
+checkpoint builders. Builder equivalence is verified against full replay in tests; a known builder
+defect requires a corrected compatibility version. Valid snapshots retain suffix-only reads.
+
 ### Configuration and lifecycle
 
 The loader owns plugin enablement and runtime configuration composed from explicit sources.
