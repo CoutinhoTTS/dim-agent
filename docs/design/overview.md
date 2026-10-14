@@ -521,14 +521,16 @@ flowchart LR
 
 ### 5.9 Hooks
 
+Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机制的适配层：同步 before、Capability 订阅、业务所有者管理的异步准入，以及插件体系。进程内插件需要 Hook 能力时直接使用 before 或订阅，不经本插件。
+
 | 项 | 设计 |
 | --- | --- |
-| 作用域 | 进程（目录、批准、Session 开始与用户提交时的 Hook）+ 分支（工具调用前后、turn 结束、通知时的 Hook） |
-| 职责 | 在生命周期节点执行命令 Hook |
-| 接入 | E：Hook 定义来自用户、项目、插件三种来源。Session 开始与用户提交 Hook 在 RPC 边界执行：用户提交 Hook 可以拒绝提交，或以 raw 块附加内容，结果体现为输入是否写入及其内容。分支 Hook 由分支插件作为自己的工作执行；工具调用前的 Hook 经 Approval 的准入扩展点给出允许或拒绝；需要注入的输出经 B 写入 |
-| 事件 | `hook/started {hook_id, point}`、`hook/ended {hook_id, outcome, output, truncated}`：只用于分支 Hook |
+| 作用域 | 进程（目录、批准、Session 开始与用户提交 Hook）+ 分支（工具调用前后、turn 结束、通知 Hook） |
+| 职责 | 在生命周期节点执行用户、项目、插件来源的命令 Hook |
+| 接入 | 命令 Hook 会启动外部进程，不能放进同步 before（before 在提交锁内运行，不执行 I/O）。各时机的映射：Session 开始与用户提交在 RPC 边界执行，用户提交 Hook 可以拒绝提交或以 raw 块附加内容；工具调用前的 Hook 经 Approval 的准入扩展点异步执行，由业务所有者管理（[单树装配](../architecture/rust-agent/single-tree.md) 同步 before）；工具调用后、turn 结束与通知 Hook 由分支 Capability 订阅对应事件后异步执行；需要注入的输出经 B 写入 |
+| 事件 | 无。拦截决定记录在所有者的事实中（输入是否写入、工具结果为拒绝）；注入的输出本身是输入；执行记录走诊断通道 |
 | 接口 | RPC `hooks.catalog`、`hooks.approve`、`hooks.set_enabled`、`hooks.disable_all`：管理级 |
-| 关系 | Session 开始 Hook 只在创建 Session 时执行，恢复与重载不重新执行。项目与插件来源的 Hook 需要宿主本地批准才能执行，批准绑定配置指纹。准入扩展点上的 Hook 在中断时取消，对应调用以取消结算。插件来源依赖 #3 |
+| 关系 | Session 开始 Hook 只在创建 Session 时执行，恢复与重载不重新执行。观察类 Hook 只由实时分发触发，重载后的新一代从明确位置接手，不补跑。项目与插件来源的 Hook 需要宿主本地批准才能执行，批准绑定配置指纹。准入扩展点上的 Hook 在中断时取消，对应调用以取消结算。插件来源依赖 #3 |
 
 ### 5.10 Scheduler
 
@@ -642,13 +644,12 @@ flowchart LR
 
 ## 6. 新增 Timeline 事件
 
-按共同约束 1 逐个审查后，新增事件共 10 种：
+按共同约束 1 逐个审查后，新增事件共 8 种：
 
 | 事件 | 写入方 | 为什么需要 |
 | --- | --- | --- |
 | `goal/changed` | Goal | 用户对目标的设置、编辑、暂停、恢复、清除是外部输入，决定后续是否继续，无法由其他事实推出 |
 | `shell/started`、`shell/ended` | ShellInput | 命令是有副作用的在途工作，开始事实用于重载时结算；`!!command` 的终端记录也只存在于此 |
-| `hook/started`、`hook/ended` | Hooks（分支） | 分支 Hook 是有副作用的在途工作，开始事实用于重载时结算，防止重复执行 |
 | `workflow/started`、`workflow/ended` | Workflow（分支） | 脱离工作的开始与终态必须写在发起分支 |
 | `external_agent/started`、`external_agent/ended` | ExternalAgent（分支） | 同上 |
 | `input/withdrawn` | InputQueue | 删除尚未采用的排队消息必须成为事实，队列状态才能重建；见第 7 节 |
@@ -662,6 +663,7 @@ flowchart LR
 | `goal/completed`、`goal/blocked` | 用 `goal_update` 的工具结果 | 同上 |
 | 目标因中断或达到上限暂停 | 由 `stop/interrupt` 与继续输入计数推出 | 可由已有事实重建 |
 | `session/titled` | SessionStore 元数据 | 标题不影响分支后续行为 |
+| `hook/*` | 拦截决定记录在所有者事实中，注入内容是输入，执行记录走诊断通道 | Hook 是现有机制上的适配，不是新的事实来源 |
 | `workflow/stage_*`、`external_agent/progress` | 子分支事实与诊断通道 | 过程输出不影响后续行为 |
 | 输入来源 | `input/message` 的 raw 块 | 现有结构已支持，不改冻结事件 |
 | 排队消息转为 Steer | `input/withdrawn` 加新的 Steer 输入，同一批次写入 | 不另设事件 |
