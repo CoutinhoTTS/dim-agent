@@ -1,16 +1,17 @@
 # Session broadcast subscription
 
-Status: Draft. Overall design: [overview §4 plugin catalog](../overview.md#4-plugin-catalog), [§5.3 observer flow](../overview.md#53-observer-through-the-broadcast-subscription-sessiontitle), [§9 open questions](../overview.md#9-open-questions) (adopted: reuse the Session broadcast, decision E7). Phase: P0. Language: Rust.
+Status: Draft. Overall design: [overview §3 dependency direction and ports](../overview.md#3-dependency-direction-and-ports), [§5.3 observer flow](../overview.md#53-observer-through-the-broadcast-subscription-sessiontitle), [§9 open questions](../overview.md#9-open-questions) (adopted: reuse the Session broadcast, decision E7). Phase: P0. Language: Rust.
 
-A supplement of the existing Session broadcast, not a separate plugin: Agents adds a process-level subscription so that a process plugin subscribes once and receives live events of all loaded Sessions, filtered by event type, Session and branch, plus four lifecycle notices: `Created` and `Loaded { restored }` carrying the `SessionConfig` subset, `Ended`, and `Gap`. Delivery is live, unordered across Sessions, non-resumable and lossy under backpressure with an explicit `Gap`. It is an observation trigger only: decisions read the fixed Timeline prefix through [session-access](session-access.md). Consumers include Notifications, SessionTitle, Hooks (session start observes `Created`), Goal, Scheduler and ShellInput.
+A supplement of the existing Session broadcast, not a second bus: a process-level subscription, hosted with [SessionAccess](session-access.md) in the stable plugin `SessionAccessHost` (depends only on `AgentDirectory` and `Loader`), so that a process plugin subscribes once and receives live events of all loaded Sessions, filtered by event type, Session and branch, plus four lifecycle notices: `Created` and `Loaded { restored }` carrying the `SessionConfig` subset, `Ended`, and `Gap`. Delivery is live, unordered across Sessions, non-resumable and lossy under backpressure with an explicit `Gap`. It is an observation trigger only: decisions read the fixed Timeline prefix through [session-access](session-access.md). Consumers include Notifications, SessionTitle, Hooks (session start observes `Created`), Goal, Scheduler, ShellInput and Collaboration (restore). Subscriptions never depend on Agents: AgentIndex registers into the host and announces `Created`/`Loaded` through its registration, so an Agents reload neither reloads subscribers nor ends streams.
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
   subgraph PROC["Process (App Server)"]
+    Dir["AgentDirectory, Loader (stable)"]
     Agents["Agents (AgentIndex, creation and restore)"]
-    SE["SessionEvents subscription (Agents supplement)"]:::new
+    SE["SessionAccessHost: SessionEvents"]:::new
     Coll["Collaboration"]
     Cons["Consumers: Goal, Hooks, Notifications, ..."]
   end
@@ -19,8 +20,9 @@ flowchart LR
     SBE["SessionBroadcastEnd (Session)"]
     Chan["session_channel(session_id)"]
   end
-  Agents -->|"provides; Created, Loaded"| SE
-  Agents -->|"restore hook, restored true"| Coll
+  SE --> Dir
+  Agents -->|"register index; announce Created, Loaded"| SE
+  Coll -->|"subscribe, acts on restored true"| SE
   SB -->|"Event"| Chan
   SBE -->|"Closed"| Chan
   SE -->|"listener per loaded Session"| Chan
@@ -28,17 +30,18 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-The subscription reuses the per-Session broadcast (`SessionBroadcast`, `session_channel`) rather than adding a second bus ([single-tree](../../architecture/rust-agent/single-tree.md), events). Agents emits `Created` and `Loaded` at the points where it registers a Session, so no new creation hook exists; keeping subscriptions alive across an Agents reload is Agents' responsibility.
+The subscription reuses the per-Session broadcast (`SessionBroadcast`, `session_channel`) rather than adding a second bus ([single-tree](../../architecture/rust-agent/single-tree.md), events). AgentIndex announces `Created` and `Loaded` through its registration at the points where it registers a Session, so no new creation hook exists. Every edge points to the stable host, so subscriptions survive an Agents reload by construction.
 
 | Part | Scope | Depends on | Provides | Status |
 | --- | --- | --- | --- | --- |
 | `SessionBroadcast` | Branch | `B:Dispatcher`, `B:TimelineIdentity` | `SessionBroadcastEvent::Event` on `session_channel(session_id)` | Existing ([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)) |
 | `SessionBroadcastEnd` | Session | `S:SessionIdentity` | `SessionBroadcastEvent::Closed` on close (not on idle unload) | Existing |
-| Agents | Process | existing | `SessionEvents` (process subscription); `Created`/`Loaded` at registration, generalizing the crate-private `SessionRestored` | Supplement |
-| Collaboration | Process | existing | restore listener acts on `Loaded { restored: true }` only | Change |
+| `SessionAccessHost` | Process | `AgentDirectory`, `Loader` | `SessionEvents` (process subscription) | New (stable host, shared with SessionAccess) |
+| Agents | Process | `SessionAccessHost` (registration) | `Created`/`Loaded` announcements at registration, generalizing the crate-private `SessionRestored` | Supplement |
+| Collaboration | Process | `SessionAccessHost` | restore handling subscribes and acts on `Loaded { restored: true }` only | Change |
 | Consumers | Process | `Arc<SessionEvents>` | — | Per plugin |
 
-Contracts defined here (owner: Agents): `SessionEvents`, `SessionEventFilter`, `SessionNotice`, `SessionEnd`, `SessionEventStream`, `SubscribeError`, and the delivery guarantees. Contracts depended on: the Session broadcast, `SessionConfig` with the fields proposed in [session-access A.3](session-access.md#a3-sessionconfig-fields), the public data contract of `AgentEvent`/`EventKind::key()`, `Session::closed()`/`is_unloading()`/`failure()`. The provider filters by opaque type keys and never interprets payloads.
+Contracts defined here (owner: Agents side, hosted in `SessionAccessHost`): `SessionEvents`, `SessionEventFilter`, `SessionNotice`, `SessionEnd`, `SessionEventStream`, `SubscribeError`, and the delivery guarantees. Contracts depended on: the Session broadcast, `SessionConfig` with the fields proposed in [session-access A.3](session-access.md#a3-sessionconfig-fields), the public data contract of `AgentEvent`/`EventKind::key()`, `Session::closed()`/`is_unloading()`/`failure()`. The provider filters by opaque type keys and never interprets payloads.
 
 ## 2. Data and state
 
@@ -66,7 +69,7 @@ classDiagram
   Subscription --> SessionNotice : delivers
 ```
 
-Nothing is persisted and nothing is written to a Timeline. Channel listeners are attached when Agents registers a Session and re-attached by enumerating loaded Sessions after an Agents reload; subscriptions belong to their subscribers' contexts.
+Nothing is persisted and nothing is written to a Timeline. Channel listeners are attached when AgentIndex announces a Session and, when a new AgentIndex generation registers, by enumerating loaded Sessions through `AgentDirectory`; subscriptions belong to their subscribers' contexts.
 
 ## 3. Flows
 
@@ -74,13 +77,13 @@ Nothing is persisted and nothing is written to a Timeline. Channel listeners are
 
 ```mermaid
 sequenceDiagram
-  participant A as Agents (registration point)
+  participant A as AgentIndex (registration point)
   participant SE as SessionEvents
   participant C as Consumer (e.g. Hooks)
   participant B as SessionBroadcast (branch)
   participant SA as SessionAccess
   C->>SE: subscribe(filter types turn/end, branches main)
-  A->>SE: attach listener on session_channel(id) (awaited)
+  A->>SE: announce Created: attach listener on session_channel(id) (awaited)
   SE-->>C: Created {session, interactive, role, created_by, node}
   A-->>A: creator receives the Session
   C->>SA: session start input when its rules apply
@@ -89,7 +92,7 @@ sequenceDiagram
   C->>SA: prefix(main, at_least s), decide, write
 ```
 
-Agents attaches the listener before handing out the Session, so no input of a new Session precedes it. `Created` is delivered for every creation path (`session.create`, `launch`, Collaboration member creation including `establish`, fork); consumers select by the subset (Hooks runs session start only for `created_by = Client`, fail-open, decision E10). Restore yields `Loaded { restored: true }` instead.
+AgentIndex awaits the announcement before handing out the Session, so no input of a new Session precedes it. `Created` is delivered for every creation path (`session.create`, `launch`, Collaboration member creation including `establish`, fork); consumers select by the subset (Hooks runs session start only for `created_by = Client`, fail-open, decision E10). Restore yields `Loaded { restored: true }` instead.
 
 ### 3.2 Overflow and resynchronization
 
@@ -115,17 +118,17 @@ A gap is never silent: before the next delivered record the subscriber receives 
 
 ```mermaid
 sequenceDiagram
-  participant A as Agents
-  participant SE as SessionEvents
+  participant A as AgentIndex
+  participant SE as SessionAccessHost
   participant C as Consumer
-  Note over A: Agents reload starts
+  Note over A: Agents reload starts, index unregistered
   Note over SE,C: subscriptions and channel listeners stay, events keep flowing
-  Note over A: new generation active
-  A->>SE: enumerate loaded Sessions, attach missing listeners
+  A->>SE: new generation registers its index
+  SE->>SE: enumerate loaded Sessions via AgentDirectory, attach missing listeners
   SE-->>C: Loaded {restored false} for re-attached Sessions
 ```
 
-Sessions and their channels survive an Agents reload, so live events continue and no Session can be created during the window. If a listener had to be re-attached, the subscriber receives `Loaded { restored: false }` for it and treats events of the window as possibly missed.
+Sessions, their channels and the host survive an Agents reload, so live events continue and no Session can be created during the window. If a listener had to be re-attached, the subscriber receives `Loaded { restored: false }` for it and treats events of the window as possibly missed.
 
 ### 4.2 Other key rows
 
@@ -133,7 +136,7 @@ Sessions and their channels survive an Agents reload, so live events continue an
 | --- | --- | --- | --- |
 | `turn/end` delivered, then interrupt or new input committed | `turn/end` < later facts | Consumer reads to the published head and sees the later facts | Consumer |
 | Input withdrawn before consumption | `input/message` < `input/withdrawn` | Both delivered as events; pending derivations read the prefix ([session-access A.4](session-access.md#a4-withdrawal)) | Consumer |
-| Session restore | `Loaded {restored true}` < `branch/resume` dispatch | `Loaded` then the restored branch's new events; no `Created` | Agents |
+| Session restore | `Loaded {restored true}` < `branch/resume` dispatch | `Loaded` then the restored branch's new events; no `Created` | AgentIndex |
 | Queue full | — | Records dropped; `Gap` precedes the next record | SessionEvents |
 
 Full table: Appendix B.
@@ -157,7 +160,7 @@ Subscribers are trusted in-process plugins and see every Session's events, inclu
 ## Appendix A. Interface details
 
 ```rust
-/// Process service provided by Agents; key TypeKey::of::<SessionEvents>().
+/// Process service of the `SessionAccessHost` plugin; key TypeKey::of::<SessionEvents>().
 impl SessionEvents {
     /// Registers a subscription owned by `ctx`; it ends when the stream drops or `ctx` unloads.
     /// `capacity` bounds queued records (>= 1) (A5).
@@ -188,11 +191,11 @@ impl SessionEventStream {
 
 The subset fields are the `SessionConfig` values of [session-access A.3](session-access.md#a3-sessionconfig-fields); other configuration is read through `SessionAccess::config`. `types` uses `EventKind::key()` strings today and registered type keys once #2 lands. Notices are delivered regardless of `types`; `sessions` and `branches` filters apply to them where they name a Session. `types: Some(empty)` delivers notices only (ShellInput's close detection).
 
-| Notice | Emitted by Agents when |
+| Notice | Emitted by the host when |
 | --- | --- |
-| `Created` | A Session is registered by `session.create`, `launch`, Collaboration member creation (including `establish`) or fork; before the creator receives it |
+| `Created` | AgentIndex announces a Session registered by `session.create`, `launch`, Collaboration member creation (including `establish`) or fork; before the creator receives it |
 | `Loaded { restored: true }` | Restore inside `acquire`; Collaboration's existing restore listener (`collaboration.rs`) acts only on this (A1) |
-| `Loaded { restored: false }` | A listener is re-attached to an already loaded Session after an Agents reload |
+| `Loaded { restored: false }` | A listener is re-attached to an already loaded Session when a new AgentIndex generation registers |
 | `Ended` | `Closed` on the channel, or `Session::closed()` (`Unloaded` if `is_unloading()`, `Failed` if `failure()`) |
 | `Gap` | Records were dropped since the previous delivered record |
 
@@ -216,12 +219,12 @@ Mechanics:
 | Step | Path |
 | --- | --- |
 | Source | Branch `SessionBroadcast` registers `Dispatcher::subscribe_all`; per dispatched event it `emit`s on `session_channel(session_id)` and returns without waiting (existing). No Timeline write |
-| Session discovery | At registration Agents attaches a channel listener with `on(host.ctx, &session_channel(id), listener)` on the Agent host ctx (outlives the Session, so `Closed` arrives; precedent `Connection::attach`) and spawns a task awaiting `Session::closed()` |
+| Session discovery | At AgentIndex's announcement the host attaches a channel listener with `on(host.ctx, &session_channel(id), listener)` on the Agent host ctx (outlives the Session, so `Closed` arrives; precedent `Connection::attach`) and spawns a task awaiting `Session::closed()` |
 | Fan-out | The channel listener matches each record against every subscription's filter and `try_send`s; a full queue increments the dropped count. It never awaits |
-| Subscriber lifecycle | `subscribe` registers the subscription and its removal with the subscriber's `ctx.effect`; the provider's disposer disposes channel listeners, cancels close watchers and ends all streams |
+| Subscriber lifecycle | `subscribe` registers the subscription and its removal with the subscriber's `ctx.effect`; the host's disposer disposes channel listeners, cancels close watchers and ends all streams (the host has only stable dependencies, so this happens only at process shutdown) |
 | StateCell and rebuild | None |
 | Recheck | Consumers only, from a prefix read through session-access |
-| Agents reload | §4.1; no consumer reloads |
+| Agents reload | §4.1; no consumer reloads; announcements resume when the new generation registers |
 | Process restart | Nothing persisted; no replay |
 
 ## Appendix B. Full conflict table
@@ -275,7 +278,7 @@ Flow tests in the App Server test suite:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Agents emits `Created` and `Loaded` where it registers a Session, before the creator receives it | `SessionRestored` precedent; simplification pass | Another hook is needed; first events may be missed |
+| A1 | AgentIndex announces `Created` and `Loaded` where it registers a Session, before the creator receives it | `SessionRestored` precedent; simplification pass | Another hook is needed; first events may be missed |
 | A2 | Per-branch delivery order is guaranteed | Judgment (free from Dispatcher order) | Consumers must not rely on it |
 | A3 | Overflow drops records with a `Gap` instead of closing the subscription | Overview §4 (no ordering guarantee, no resumable reads); policy is judgment | Slow consumers lose the subscription |
 | A4 | Filters are by event type key, Session id and branch id only; Session attributes are filtered by consumers from the `Created`/`Loaded` subset | Judgment | Richer filters added later |

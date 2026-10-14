@@ -1,16 +1,18 @@
 # Session access
 
-Status: Draft. Overall design: [overview §4 plugin catalog](../overview.md#4-plugin-catalog), [§6.1 methods B and E](../overview.md#61-integration-methods), [Appendix C Agents](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins), [§8 phases](../overview.md#8-phases). Phase: P0. Language: Rust.
+Status: Draft. Overall design: [overview §3 dependency direction and ports](../overview.md#3-dependency-direction-and-ports), [§6.1 methods B and E](../overview.md#61-integration-methods), [Appendix C Agents](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins); rules: [ADR 002](../../adr/002-dependency-direction.md) D1–D2. Phase: P0. Language: Rust.
 
-SessionAccess is not a new abstraction and not a new plugin: it is the existing public Session interface (`Session::input/history/local_page/sequence/idle/stop`, `AgentIndex::acquire`, `session.input_lookup` semantics) made reachable from process plugins, as Collaboration already uses it, with source attribution added. The existing Agents plugin provides it as a facade; keeping it stable across an Agents reload (calls in the window return `Reloading`) is Agents' responsibility. This document also defines `SessionAccess::config`, which returns the existing `SessionConfig` with three proposed fields ([A.3](#a3-sessionconfig-fields)), and the process side of the [withdrawal contract](#a4-withdrawal).
+SessionAccess is not a new abstraction: it is the existing public Session interface (`Session::input/history/local_page/sequence/idle/stop`, `AgentIndex::acquire`, `session.input_lookup` semantics) made reachable from process plugins, as Collaboration already uses it, with source attribution added. It is hosted, together with the [broadcast subscription](session-broadcast-subscription.md), in the stable process plugin `SessionAccessHost`, which depends only on `AgentDirectory` and `Loader`. Agents' `AgentIndex` registers into it and is resolved per call, so an Agents reload never reloads a caller: calls that need AgentIndex return `Reloading` while no generation is registered, and leases keep working. Collaboration registers `establish` into the same host, resolved per call by Workflow. This document also defines `SessionAccess::config`, which returns the existing `SessionConfig` with three proposed fields ([A.3](#a3-sessionconfig-fields)), and the process side of the [withdrawal contract](#a4-withdrawal).
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
   subgraph PROC["Process (App Server)"]
+    Dir["AgentDirectory, Loader (stable)"]
+    Host["SessionAccessHost: SessionAccess"]:::contract
     Agents["Agents (AgentIndex)"]
-    SA["SessionAccess facade"]:::contract
+    Coll["Collaboration (establish)"]
     Rpc["Rpc"]
     Callers["Process callers: Goal, Hooks, Scheduler, ..."]
   end
@@ -19,26 +21,30 @@ flowchart LR
     IQ["InputQueue, Loop, WaitBranch"]
     TL["Branch Timeline"]
   end
-  Agents -->|"provides"| SA
-  Callers --> SA
-  Rpc -->|"relay, session.input.withdraw"| SA
-  SA -->|"config()"| SC
-  SA -->|"input/message"| TL
-  SA -->|"withdraw own input"| IQ
+  Host --> Dir
+  Agents -->|"register index"| Host
+  Coll -->|"register establish"| Host
+  Callers --> Host
+  Rpc -->|"relay, session.input.withdraw"| Host
+  Host -->|"config()"| SC
+  Host -->|"input/message"| TL
+  Host -->|"withdraw own input"| IQ
   TL --> IQ
   classDef contract stroke-dasharray:4 3
 ```
 
-Callers inject only `SessionAccess`. Resource-node services are not reached through it: callers read `resource_node` from `SessionConfig` and resolve the node per call through the [`node-services`](extension-registry.md#5-rules-every-point-follows) point.
+All edges point to the stable host: callers inject only `SessionAccess`, and the volatile providers (Agents, Collaboration) register into it. Loaded Sessions and leases are reached through `AgentDirectory`, which outlives Agents reloads; restore, stored reads and creation go through the registered AgentIndex. Resource-node services are not reached through it: callers read `resource_node` from `SessionConfig` and resolve the node per call through the node services port ([overview §6.3](../overview.md#63-multiple-nodes)).
 
 | Part | Scope | Depends on | Provides | Status |
 | --- | --- | --- | --- | --- |
-| Agents | Process | existing | `AgentIndex` (existing); `SessionAccess` facade; proposed `SessionConfig` fields | Supplement |
+| `SessionAccessHost` | Process | `AgentDirectory`, `Loader` | `SessionAccess`, `SessionEvents` | New (stable host) |
+| Agents | Process | existing | `AgentIndex` (existing), registered into `SessionAccessHost` in `apply`; proposed `SessionConfig` fields | Supplement |
+| Collaboration | Process | `SessionAccessHost` | `establish` registration | Change |
 | Runtime `Session` / `Branch` facades | Session / branch | — | `input`, `history`, `local_page`, `sequence`, `publication`, `idle`, `stop`, `branches` | Existing ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) |
 | InputQueue | Branch | existing | consumes `input/message`; owns withdrawal (`input/withdrawn`) | Change (overview Appendix C) |
 | Callers | Process | `Arc<SessionAccess>` | — | Per plugin |
 
-Contracts defined here (owner: Agents): `SessionAccess`, `SourceAccess`, `SessionLease`, `SourceInput`, `RelayInput`, `RelayBlock`, `Marker`, `SourceBlock`, `KeyUse`, `Lookup`, `Withdrawal`, `AccessError`, the proposed `SessionConfig` fields `interactive`, `resource_node`, `created_by: SessionOrigin`, the `interactive` and `client` parameters of `session.create`, and the source marker and key namespace conventions. Contracts depended on: runtime `Session`/`Branch` facades, `AgentIndex` loading, `SessionConfig` ([config.rs](../../../crates/dim-agent-runtime/src/config.rs)), the `input/message` data and consumption contract, InputQueue's `input/withdrawn` data contract and withdrawal service. Callers depend on this contract only; it carries no caller-specific rule.
+Contracts defined here (owner: Agents side, hosted in `SessionAccessHost`): `SessionAccess`, `SessionIndex`, `Establish`, `SourceAccess`, `SessionLease`, `SourceInput`, `RelayInput`, `RelayBlock`, `Marker`, `SourceBlock`, `KeyUse`, `Lookup`, `Withdrawal`, `AccessError`, the proposed `SessionConfig` fields `interactive`, `resource_node`, `created_by: SessionOrigin`, the `interactive` and `client` parameters of `session.create`, and the source marker and key namespace conventions. Contracts depended on: runtime `Session`/`Branch` facades, `AgentIndex` loading, `SessionConfig` ([config.rs](../../../crates/dim-agent-runtime/src/config.rs)), the `input/message` data and consumption contract, InputQueue's `input/withdrawn` data contract and withdrawal service. Callers depend on this contract only; it carries no caller-specific rule.
 
 ## 2. Data and state
 
@@ -118,7 +124,7 @@ sequenceDiagram
   SA-->>Rpc: committed event
 ```
 
-The checker never names its own source: Rpc sets `RelayBlock.source` from the checker's registered name ([session-boundary](session-boundary.md#a3-submission-admission)), so blocks are attributed without a forgeable marker and the user content stays unmarked.
+The checker never names its own source: Rpc sets `RelayBlock.source` from the checker's registered name ([session-boundary](session-boundary.md#a3-submission-admission-port)), so blocks are attributed without a forgeable marker and the user content stays unmarked.
 
 ### 3.3 Withdrawal
 
@@ -151,19 +157,19 @@ The decision between withdrawal and consumption is made under the branch commit 
 ```mermaid
 sequenceDiagram
   participant C as Caller
-  participant SA as SessionAccess (Agents facade)
+  participant SA as SessionAccessHost
   participant A as Agents
   C->>SA: input(...)
-  Note over A: Agents reload starts
-  SA-->>C: Reloading (if not committed) or committed event
+  Note over A: Agents reload starts, index unregistered
+  SA-->>C: committed event (lease path) or Reloading (index path)
   C->>SA: lookup(submission_id)
   SA-->>C: Reloading while the window lasts
-  Note over A: new generation active
+  A->>SA: new generation registers its index
   C->>SA: lookup(submission_id)
   SA-->>C: Accepted or Unknown
 ```
 
-Callers retry after `Reloading` and look up their `submission_id` before re-writing. Sessions and leases survive an Agents reload (existing rule: only directory logic is replaced); how the facade spans the window is Agents' responsibility.
+Callers retry after `Reloading` and look up their `submission_id` before re-writing. Sessions and leases survive an Agents reload (only directory logic is replaced); the host resolves AgentIndex per call, so callers never reload.
 
 ### 4.2 Withdrawal between write and consumption
 
@@ -206,6 +212,8 @@ Compaction: consumed inputs survive only through the summary, except keyed block
 | --- | --- |
 | `SessionAccess::source(name) -> SourceAccess` | Binds source attribution for one caller |
 | `SessionAccess::config(session_id) -> SessionConfig` | Configuration of a loaded or stored Session |
+| `SessionAccess::register_index` | AgentIndex registers its generation; resolved per call |
+| `SessionAccess::register_establish`, `establish` | Collaboration registers `establish`; Workflow resolves it per call |
 | `SourceAccess::get / acquire / stored_page / loaded` | Leases and reads without capability state |
 | `SessionLease::prefix / local_page / head / published / idle / stop` | Reads and turn-scope control |
 | `SessionLease::input` | Source-marked input |
@@ -225,8 +233,15 @@ Only in-process trusted plugins obtain `SessionAccess`; they are not RPC methods
 ### A.1 SessionAccess
 
 ```rust
-/// Process service; key TypeKey::of::<SessionAccess>(). In-process only, never exported as RPC.
+/// Process service of the `SessionAccessHost` plugin (Deps: AgentDirectory, Loader);
+/// key TypeKey::of::<SessionAccess>(). In-process only, never exported as RPC.
 impl SessionAccess {
+    /// Agents' `apply`; removal with `ctx.effect`. At most one registration (A9).
+    pub fn register_index(&self, ctx: &Ctx, index: Arc<dyn SessionIndex>) -> Result<IndexRegistration, PortError>;
+    /// Collaboration's `apply`; removal with `ctx.effect`.
+    pub fn register_establish(&self, ctx: &Ctx, establish: Arc<dyn Establish>) -> Result<(), PortError>;
+    /// Resolved per call; `Unavailable` while Collaboration is not registered.
+    pub async fn establish(&self, request: EstablishRequest) -> Result<SessionRef, AccessError>;
     pub fn source(&self, name: &'static str) -> SourceAccess;            // binds attribution (A1)
     pub async fn config(&self, session_id: &str) -> Result<Arc<SessionConfig>, AccessError>; // loaded or stored
 }
@@ -263,9 +278,25 @@ pub struct RelayInput { pub submission_id: Option<String>, pub user: UserInput,
 pub struct RelayBlock { pub source: String, pub kind: String, pub block: SourceBlock } // source set by Rpc
 pub enum Lookup { Accepted(Arc<AgentEvent>), Unknown }                  // Ambiguous is an error
 pub enum Withdrawal { Withdrawn { sequence: u64 }, NotPending }
+/// Implemented by AgentIndex: what needs directory logic.
+pub trait SessionIndex: Send + Sync + 'static {
+    fn acquire(&self, session_id: &str) -> HostFuture<'_, Result<SessionUse, AgentError>>;
+    fn stored_config(&self, session_id: &str) -> HostFuture<'_, Result<Arc<SessionConfig>, AgentError>>;
+    fn stored_page(&self, session_id: &str, branch: &str, after: u64, limit: usize,
+        through: Option<u64>) -> HostFuture<'_, Result<Page, AgentError>>;
+}
+/// Handle AgentIndex uses to announce `Created`/`Loaded` (broadcast subscription).
+impl IndexRegistration { pub async fn announce(&self, notice: SessionNotice); }
+/// Implemented by Collaboration (member creation from outside a branch).
+pub trait Establish: Send + Sync + 'static {
+    fn establish(&self, request: EstablishRequest) -> HostFuture<'_, Result<SessionRef, AccessError>>;
+}
+pub struct EstablishRequest { pub leader_session: String, pub agent: String, pub source: String }
 ```
 
-**Facade.** Agents provides `SessionAccess`. A `SessionLease` holds the Session's `SessionUse`, which belongs to the Session, not to the Agents generation, so a lease stays valid across an Agents reload; only calls that need AgentIndex itself (`acquire`, `get`, `loaded`, `stored_page`, `config` of an unloaded Session) return `Reloading` during the window.
+`PortError` and the registration mechanics are those of the [tool source port](process-tool-contribution.md#a2-registration-mechanics-shared-by-the-ports-of-these-contracts).
+
+**Per-call resolution.** `get`, `loaded` and every `SessionLease` call read loaded Sessions through `AgentDirectory` (not restartable; Agents and their Sessions register there and outlive an Agents reload). A lease holds the Session's `SessionUse`, which belongs to the Session, not to the Agents generation. Only `acquire` (restore), `stored_page` and `config` of an unloaded Session resolve the registered `SessionIndex` per call and return `Reloading` while none is registered. `establish` resolves Collaboration's registration per call and returns `Unavailable` while none is registered; an establish in flight when Collaboration unloads ends `Unavailable` (its guard is cancelled), never `capability reloading`.
 
 ### A.2 Prefix, marking, keys, relay, submission identity
 
@@ -327,7 +358,8 @@ pub enum SessionOrigin {
 | `SessionUnavailable(reason)` | `AgentError::Storage` from `acquire` | Stored but no available owner, or unreadable |
 | `BranchMissing` | `AgentError::UnknownBranch` | Branch never published or already closed |
 | `NotLoaded` | `get` | Use `acquire` or `stored_page` |
-| `Reloading` | Agents reload window, `AgentError::Reloading` | Retry; after a write, `lookup` first |
+| `Reloading` | No AgentIndex registered (Agents reload window), `AgentError::Reloading` | Retry; after a write, `lookup` first |
+| `Unavailable` | `establish` while Collaboration is not registered or unloads mid-call | Per-call; retry later |
 | `Rejected(reason)` | `InputMessageData::validate`, marker, key, source or own-source rules, `FutureSequence` | Nothing written |
 | `PublicationUnknown` | Committed, publication failed | Outcome uncertain; `lookup` after recovery |
 | `Failed(AgentError)` | Fault, storage failure | Session fault |
@@ -343,7 +375,8 @@ pub enum SessionOrigin {
 | Read | `Session::history` / `local_page`, bounded by the published head; no state read |
 | Recheck | The caller decides on the prefix it read; later facts are ordered before its write and resolved by the input owners |
 | Terminal facts | An input has no terminal fact; its consumption is Loop's, its withdrawal InputQueue's. A caller's own work records its outcome in the caller's process storage |
-| Agents reload | Calls in the window return `Reloading` (Agents' facade); callers and leases are not reloaded; a committed input stays |
+| Agents reload | Index-path calls in the window return `Reloading`; callers and leases are not reloaded (they depend only on the stable host); a committed input stays |
+| Collaboration reload | `establish` returns `Unavailable` until it registers again; callers are not reloaded |
 | InputQueue or Loop reload | The committed input is picked up by the new generation from the Timeline |
 | Restart | Leases vanish; committed inputs are restored with the Session and adopted if neither consumed nor withdrawn; callers look up pending `submission_id`s before retrying |
 
@@ -370,7 +403,8 @@ pub enum SessionOrigin {
 | Retire then reuse a key | retire < new block | New block starts a new live key | History projection |
 | Decision read, then a newer fact, then write | through < fact < write | Write ordered after the fact | Input owners |
 | `Reloading` or restart after commit | committed, reply lost | `lookup` returns `Accepted`; no duplicate | Caller |
-| Agents reload while a caller holds a lease | — | Lease stays valid; AgentIndex calls return `Reloading` until the new generation registers | SessionAccess facade |
+| Agents reload while a caller holds a lease | — | Lease stays valid; index-path calls return `Reloading` until the new generation registers | SessionAccessHost |
+| `establish` while Collaboration unloads | admit < unload | `Unavailable`; Workflow settles that stage per its document | SessionAccessHost |
 | Duplicate submission by a buggy caller | two inputs same id | Both applied; `lookup` returns `Ambiguous` | Caller |
 | Session unload between read and write | lease held | Lease pins the instance; unload refused while in use | AgentIndex |
 | Session not loaded | — | `acquire` restores before writing | AgentIndex |
@@ -393,7 +427,7 @@ Flow tests through public interfaces (App Server test suite):
 6. Relay blocks render with the admission checker's source; user content stays unmarked.
 7. Withdrawal before consumption leaves the input unconsumed; withdrawal racing consumption yields exactly one of the two facts.
 8. `acquire` restores an unloaded Session; `stored_page` and `config` read without loading.
-9. An Agents reload returns `Reloading` to a caller without reloading it; `lookup` then finds the committed input.
+9. An Agents reload returns `Reloading` to an `acquire` without reloading the caller; lease writes keep working; `lookup` then finds the committed input. A Collaboration reload makes `establish` return `Unavailable` without reloading Workflow.
 10. `session.create {interactive: false, client: "acp"}` produces `interactive = false` and `created_by = Client { client: Some("acp") }`, visible through `config`, `S:SessionConfig` and the `Created` notice.
 
 ## Appendix E. Assumptions
@@ -408,6 +442,7 @@ Flow tests through public interfaces (App Server test suite):
 | A6 | `submission_id` format `<source>:<uuid>`; writes never deduplicate | Existing `session.input_lookup`; format is judgment | Write-time deduplication would need registration in the commit lock |
 | A7 | Process plugins may call `stop` (turn scope) and `idle` on a Session | Collaboration precedent; overview B.9 | Callers that stop Sessions they started need another stop path |
 | A8 | Stored Sessions without `interactive` are interactive; `session.create` defaults to interactive | Judgment | Clients must always send the field |
+| A9 | One AgentIndex registration at a time; a second registration is rejected | Agents is a single process plugin | — |
 
 ## Appendix F. Open questions
 
