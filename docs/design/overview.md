@@ -4,7 +4,7 @@ Status: Draft
 
 This document starts from the [CLI feature list](../feature-list.md), identifies the features that existing plugins do not cover, and places the new plugins in the existing system. Each new plugin is designed in `docs/design/plugins/<Name>.md`. Supplements to existing plugins are listed in [Appendix B](#appendix-b-supplements-to-existing-plugins) and designed by the plugin that owns them.
 
-> **Scope rule** ([ADR 002](../adr/002-plugin-scope.md)): a plugin part lives at the scope that owns its state and lifecycle (process, Session or branch), and parts integrate only through mechanisms the runtime already has. No new mechanism is introduced. The two contracts describe supplements to existing interfaces: [methods and admission checks](contracts/session-boundary.md) (Rpc, Approval) and [session access](contracts/session-access.md) (Agents, the Session facade, InputQueue).
+> **Scope rule** ([ADR 002](../adr/002-plugin-scope.md)): a plugin part lives at the scope that owns its state and lifecycle (process, Session or branch), and parts integrate only through mechanisms the runtime already has. No new mechanism is introduced. Every contract is language-neutral (D5): a named service with a scope, an instance key and data-only methods, so plugins in any language provide or use it ([§3.1](#31-contract-form)). The two contracts describe supplements to existing interfaces: [methods and admission checks](contracts/session-boundary.md) (Rpc, Approval, the Session input boundary, ToolRegistry) and [session access](contracts/session-access.md) (Agents, the Session facade, InputQueue).
 
 The main body covers premises, the scope diagram and assignment, integration, the catalog, key flows, constraints, events, phases and open questions. The appendices cover feature ownership, supplements to existing plugins, the implementation language, the CLI layer and the document template.
 
@@ -69,7 +69,7 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` tool; `session.question.*` methods; not installed in non-interactive Sessions | Pending questions, `question/*` facts, following Approval | A question belongs to a branch's turn |
 | Goal | — | `goal_update` tool; `session.goal.*` methods | Goal state as a keyed raw input block; continuation decided from branch events in order through the Dispatcher; writes branch inputs | A goal belongs to a branch, and continuation follows its events in order |
-| Hooks | — | Rules from business sources; Session-start Hooks | Pre-tool `ToolAdmissionCheck` for Approval; post-tool and turn-end Hooks from the Dispatcher | Rules apply to a Session; execution happens in a branch |
+| Hooks | — | Rules from business sources; Session-start Hooks; `inputAdmissionCheck` for `user_prompt_submit` | Pre-tool `toolAdmissionCheck` for Approval; post-tool and turn-end Hooks from the Dispatcher | Rules apply to a Session; execution happens in a branch |
 | ShellInput | — | `shell.*` methods (level management); runs in the Session's workspace and writes its input | — | Commands belong to the Session |
 | Attachments | — | `attachment.put`; Session files through SessionStore | — | Attachments are Session data |
 | Web | — | `web_search`, `web_fetch` tools | — | No state shared across Sessions |
@@ -83,7 +83,7 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 | RemoteGateway | Remote entry, devices | — | — | An external entry |
 | AcpGateway | CLI process | — | — | A client |
 
-Management is not a plugin. Management methods are rows in Rpc's method table with level `management`, and each entry serves the levels it is configured for ([methods](contracts/session-boundary.md)).
+Management is not a plugin. Management methods are `managementMethods` services collected into Rpc's method table with level `management`, and each entry serves the levels it is configured for ([methods](contracts/session-boundary.md)).
 
 ## 3. Integration by existing mechanisms
 
@@ -91,15 +91,16 @@ Plugins never add wiring plugins (ADR 002 D2). Each need maps to a mechanism tha
 
 | Need | Mechanism | Used by |
 | --- | --- | --- |
-| Offer a tool to a Session | Session-scoped `ToolContribution` or `SessionToolSource` ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Notifications, Scheduler, Workflow |
+| Offer a tool to a Session | Session-scoped `toolContribution` ([methods A.7](contracts/session-boundary.md#a7-tool-contribution)) or `SessionToolSource` ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Notifications, Scheduler, Workflow |
 | Offer instructions | PromptRegistry prompt sources | Existing |
 | Observe a Session's events | The existing Session broadcast (`session/<id>` channel), from a Session-scoped plugin | SessionTitle, Notifications, Hooks Session-start |
 | Observe and act on a branch's events in order | The branch Dispatcher, from a branch-scoped plugin | Goal, Questions, Hooks post-tool and turn-end |
 | Put content into the model context | Branch input (raw blocks, keyed blocks) or tool results ([session access](contracts/session-access.md#a2-source-input-conventions)) | Goal, Hooks, ShellInput, Scheduler, Workflow |
-| Check a tool call before execution | Branch-scoped `ToolAdmissionCheck`, collected by Approval ([methods and admission checks](contracts/session-boundary.md#a3-tool-admission-check)) | Hooks |
-| Client method about a Session | `SessionMethodContribution`, which Rpc dispatches through the Session ([A.1](contracts/session-boundary.md#a1-method-contributions)) | Questions, Goal, SessionTitle, Attachments, ShellInput |
-| Host management method | `ManagementMethods`, collected by Rpc as `Contributions<ManagementMethods>`, level `management` | Existing management methods, Scheduler, Workflow, Hooks, Notifications, ExternalAgent, Modality, PluginManager, RemoteGateway, Web |
-| Reach other Sessions | Agents (`AgentIndex::launch`, `acquire`) and the Session facade, as Collaboration does | Scheduler, Workflow |
+| Check a tool call before execution | Branch-scoped `toolAdmissionCheck`, collected by Approval ([methods and admission checks](contracts/session-boundary.md#a3-tool-admission-check)) | Hooks |
+| Check an input before it is written | Session-scoped `inputAdmissionCheck`, run by the Session input boundary ([methods A.6](contracts/session-boundary.md#a6-input-admission-check)) | Hooks `user_prompt_submit` |
+| Client method about a Session | `sessionMethods`, which Rpc dispatches through the Session ([A.1](contracts/session-boundary.md#a1-method-contributions)) | Questions, Goal, SessionTitle, Attachments, ShellInput |
+| Host management method | `managementMethods`, collected by Rpc into its method table, level `management` | Existing management methods, Scheduler, Workflow, Hooks, Notifications, ExternalAgent, Modality, PluginManager, RemoteGateway, Web |
+| Reach other Sessions | Agents' `sessions` service (`launch`, `input`, `history`, `idle`, ...), as Collaboration does ([session access](contracts/session-access.md#a1-the-sessions-service)) | Scheduler, Workflow |
 | React to another process plugin's outcome | An event notice, not a dependency | Scheduler run outcomes |
 
 ```mermaid
@@ -110,11 +111,12 @@ flowchart LR
     Rpc["Rpc"]
     Agents["Agents"]
     SchedP["Scheduler, Workflow"]:::new
-    MM["ManagementMethods owners"]
+    MM["managementMethods owners"]
   end
   subgraph SES["Session"]
     TR["ToolRegistry"]
     BC["Session broadcast"]
+    IB["Session input boundary"]
     SP["Session parts"]:::new
   end
   subgraph BR["Branch"]
@@ -123,18 +125,35 @@ flowchart LR
     IQ["InputQueue"]
     BP["Branch parts"]:::new
   end
-  Rpc -->|"Contributions"| MM
-  Rpc -->|"Session::method"| SP
-  TR -->|"Contributions: ToolContribution"| SP
+  Rpc -->|"collect managementMethods"| MM
+  Rpc -->|"sessionMethods"| SP
+  TR -->|"collect toolContribution"| SP
+  IB -->|"collect inputAdmissionCheck"| SP
   SP -->|"listen"| BC
-  AP -->|"Contributions: ToolAdmissionCheck"| BP
+  AP -->|"collect toolAdmissionCheck"| BP
   BP -->|"subscribe in order"| DP
   BP -->|"input"| IQ
-  SchedP -->|"launch, acquire"| Agents
-  SP -->|"Session::service per branch"| BP
+  SchedP -->|"sessions"| Agents
+  SP -->|"branch services"| BP
 ```
 
 The arrows are dependency edges, and they point to the same or an enclosing scope (D3). A collector depends on its contributions (ToolRegistry on tools, Approval on checks, Rpc on method owners), so a contributor reload reloads its collector. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
+
+### 3.1 Contract form
+
+Every contract the designs define or use is a named service (ADR 002 D5): service name (camelCase), scope, instance key, and methods marked `sync` or `async` whose requests, replies and errors are serializable data. Cancellation is a cancel request or the consumer dropping the call. A plugin declares what it provides in its `provides` and loader row; consumers collect by service name and scope. rutis calls such services across languages (rutis-bridge runtimes, `host_key(name)`, `TypeKey::named`), so a TypeScript or Python part satisfies a contract without a hand-written Rust binding. Rust traits, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls appear only in each document's "Rust binding" appendix.
+
+| Service | Scope | Key | Methods | Defined in |
+| --- | --- | --- | --- | --- |
+| `sessionMethods` | Session | namespace | `describe(): async -> MethodDecl[]`; `call(MethodCall): async -> MethodReply` | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
+| `managementMethods` | process | namespace | same | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
+| `toolAdmissionCheck` | branch | check name | `check(ToolCallRequest): async -> {verdict, reason?}` | [methods A.3](contracts/session-boundary.md#a3-tool-admission-check) |
+| `inputAdmissionCheck` | Session | check name | `check(InputRequest): async -> {verdict, reason?, blocks?}` | [methods A.6](contracts/session-boundary.md#a6-input-admission-check) |
+| `toolContribution` | Session | tool name | `declaration(): sync -> ToolDeclaration`; `execute(ToolCall): async -> ToolResult` | [methods A.7](contracts/session-boundary.md#a7-tool-contribution) |
+| `sessions` | process | — | `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle` | [session access A.1](contracts/session-access.md#a1-the-sessions-service) |
+| `modelKind` | process | kind | request and stream as data | [ExternalAgent](plugins/ExternalAgent.md) |
+
+The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others) stay as they are. Exposing them by name to non-Rust Session and branch parts is the work of [#4](https://github.com/arcships/dim/issues/4); rutis itself already calls across languages.
 
 ## 4. Plugin catalog
 
@@ -158,8 +177,8 @@ The arrows are dependency edges, and they point to the same or an enclosing scop
 
 | Contract | Owner | Defines |
 | --- | --- | --- |
-| [Methods and admission checks](contracts/session-boundary.md) | Rpc, Approval | `SessionMethodContribution`, `ManagementMethods`, entry levels, `unknown_method`/`service_reloading`, migration and compatibility of existing management methods, `ToolAdmissionCheck` |
-| [Session access](contracts/session-access.md) | Agents, InputQueue | `launch` with a capped policy, `SessionConfig` fields `interactive`/`resource_node`/`created_by`, source raw blocks, fixed-prefix read, withdrawal |
+| [Methods and admission checks](contracts/session-boundary.md) | Rpc, Approval, Session input boundary, ToolRegistry | `sessionMethods`, `managementMethods`, `callChannel`, entry levels, `unknown_method`/`service_reloading`/`input_denied`, migration and compatibility of existing management methods, `toolAdmissionCheck`, `inputAdmissionCheck`, `toolContribution` |
+| [Session access](contracts/session-access.md) | Agents, InputQueue | the `sessions` service; `launch` with a capped policy, `SessionConfig` fields `interactive`/`resource_node`/`created_by`, source raw blocks, fixed-prefix read, withdrawal |
 
 ## 5. Key flows
 
@@ -170,9 +189,9 @@ sequenceDiagram
   participant LP as Loop (branch)
   participant TE as ToolExecutor
   participant AP as Approval + Permission
-  participant HK as Hooks ToolAdmissionCheck
+  participant HK as Hooks toolAdmissionCheck
   participant TB as ToolBinding
-  participant W as Web ToolContribution (Session)
+  participant W as Web toolContribution (Session)
   participant TL as Timeline
   LP->>TE: tool call web_fetch
   TE->>AP: admit (risk network)
@@ -231,13 +250,13 @@ sequenceDiagram
   participant CL as Client
   participant Rpc as Rpc
   participant S as Session
-  participant QS as Questions SessionMethodContribution
+  participant QS as Questions sessionMethods
   participant QB as Questions (branch)
   participant TL as Timeline
   CL->>Rpc: session.question.respond {sessionId, branchId, callId, answers}
-  Rpc->>S: acquire, method("session.question")
+  Rpc->>S: acquire, sessionMethods "session.question"
   Rpc->>QS: call
-  QS->>QB: Session::service on branchId, respond
+  QS->>QB: branch service on branchId, respond
   QB->>TL: question/answered (rejected if after the covering stop/interrupt)
   QS-->>CL: result
 ```
@@ -247,11 +266,11 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant SC as Scheduler (process)
-  participant AI as AgentIndex
+  participant AI as Agents sessions
   participant S as Job Session (non-interactive)
   participant NT as Notifications listeners
   SC->>AI: launch {source scheduler, policy capped by the starter}
-  AI-->>SC: lease
+  AI-->>SC: sessionId
   SC->>S: input Queue with dim-scheduler marker
   SC->>S: idle(main)
   S-->>SC: idle at seq N
@@ -300,7 +319,7 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 2. **Ownership**: declaring an event type defines its data contract. Producers use the owner's public service. Whoever starts work writes its start and terminal facts. Decisions use only consumed facts, never another plugin's memory.
 3. **External entry**: RPC never writes events. It calls the owning service, which validates and writes (precedent `approval.respond`). Races are decided by Timeline sequence.
 4. **Reload and side effects**: work that started but did not terminate is settled as "did not survive recovery" and is never re-executed. Resuming observation of an external job by polling a saved handle is allowed.
-5. **Scope**: each part depends only on its own or an enclosing scope (D3). Session and branch parts read `S:SessionConfig`. Process parts read a Session only through Agents and the Session facade.
+5. **Scope**: each part depends only on its own or an enclosing scope (D3). Session and branch parts read `S:SessionConfig`. Process parts read a Session only through Agents' `sessions` service.
 6. **Interrupt**: a plugin cancels in-flight work and releases resources before writing terminal facts ([interrupt](../architecture/rust-agent/interrupt.md)).
 7. **Admission**: new tools declare a risk category. The new categories `outbound_message` and `persistent_configuration` are allowed automatically under FullAccess. Sessions started by automation use the starter's policy as an upper bound, which Scheduler jobs and Workflow definitions may narrow. Runs started by a management method default to read-only unless declared, capped by host configuration. `workflow` uses the `agent` tool's risk category.
 8. **Reload cost**: a contributor reload reloads its collector and may fail in-flight turns. This is accepted and documented in each plugin's conflict table, never prevented (D3).
@@ -308,8 +327,9 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 10. **Remote Session methods**: paired devices may call every `session`-level method, including `session.permission.update` (compatibility change, [methods A.5](contracts/session-boundary.md#a5-migration-and-compatibility)).
 11. **In-flight work**: there is no shared registry. Each owner provides its own query and stop, and the CLI aggregates them.
 12. **Withdrawal**: one contract owned by InputQueue: `input/withdrawn {input_id}`, the Rpc built-in `session.input.withdraw`, and own-source withdrawal for plugins. "Withdraw and re-submit as Steer" is one atomic batch. Every pending-input derivation excludes withdrawn inputs.
-13. **Low business coupling**: raw-block markers and keys, configuration keys and method namespaces carry the owner's prefix. Purposes passed to shared services are consumer-owned keys (`session-title`, `compaction`, `collaboration.member`, `modality.<category>`). Collectors never name contributors.
-14. **Interactive Sessions**: `session.create` sets `interactive` and `created_by`. Exec, ACP and automation create non-interactive Sessions, which do not install Questions. Notifications and SessionTitle act only on interactive leader Sessions.
+13. **Input admission**: every input write passes the Session input boundary, which runs the Session's `inputAdmissionCheck`s; a denial writes nothing and returns `input_denied` to the caller.
+14. **Low business coupling**: raw-block markers and keys, configuration keys and method namespaces carry the owner's prefix. Purposes passed to shared services are consumer-owned keys (`session-title`, `compaction`, `collaboration.member`, `modality.<category>`). Collectors never name contributors.
+15. **Interactive Sessions**: `session.create` sets `interactive` and `created_by`. Exec, ACP and automation create non-interactive Sessions, which do not install Questions. Notifications and SessionTitle act only on interactive leader Sessions.
 
 ### 6.3 Multiple nodes
 
@@ -321,7 +341,7 @@ rutis nodes connect through links, export and import services, run plugins on th
 | Resource node | Where host resources live (files, processes, shell, isolation, local CLIs). Each Session binds one as `SessionConfig.resource_node`, fixed at creation; the default is the control node |
 | Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are resolved through the Session's assembly (imported services for a peer node). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own configuration |
 | Node-bound data | Host-local approvals, isolation configuration and the external agent directory are identified by node and path |
-| Offline | An offline node yields `node_unavailable` for calls on that node only |
+| Offline | A call on an offline resource node fails with `node_unavailable`; dependents do not reload or go Pending. This requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5)) |
 | Authentication | Reuses the rutis link token; the management level is exported only when configured |
 | Future | Cross-control-node collaboration is not designed here |
 
@@ -362,8 +382,8 @@ Prerequisites always land in an earlier phase than their consumers.
 
 | Phase | Content |
 | --- | --- |
-| P0 Foundation | #2 dynamic events; `SessionConfig` fields set by `session.create`; `AgentIndex::launch`; `SessionMethodContribution` dispatch and `Session::method`; `ManagementMethods` in Rpc's table with migration of existing management methods; entry levels; `ToolAdmissionCheck` in Approval; Permission categories; Settings business sources with change notification, credential resolver, host-local approval service; App Server process storage (incl. binary); Provider purpose policy and `AuxiliaryModel`; SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
-| P1 Core interaction | Questions, ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; Collaboration supplements; #4 language-neutral capability port for TypeScript Session parts; CLI subcommands, image conversion, `/export`, `exec --json` |
+| P0 Foundation | #2 dynamic events; `SessionConfig` fields set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; entry levels; `toolAdmissionCheck` in Approval; `inputAdmissionCheck` in the Session input boundary; `toolContribution` in ToolRegistry; Permission categories; Settings business sources with change notification, credential resolver, host-local approval service; App Server process storage (incl. binary); Provider purpose policy and `AuxiliaryModel`; SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
+| P1 Core interaction | Questions, ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; Collaboration supplements; #4 named exposure of the runtime's typed services for non-Rust Session and branch parts; CLI subcommands, image conversion, `/export`, `exec --json` |
 | P2 Capability extension | Goal, Web, Hooks (user and project sources), Scheduler, Workflow, Notifications; ModelProvider `ModelCallScope` and model-call approvals; Transport `EntryHost`; Mcp OAuth; production compaction host |
 | P3 External integration | ExternalAgent, AcpGateway, RemoteGateway, Modality; PluginManager (#3, #4); resource node import (#5) |
 
@@ -376,8 +396,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | How events enter context | Open (maintainer alignment): #2 says registered projection rules; ADR 001 says only input and tool results. This design follows ADR 001 |
 | MCP stdio isolation | Open: whether MCP stdio processes are isolated by default |
 | Remote access trade-offs | Open: authentication, disconnection and TLS deployment, related to [#5](https://github.com/arcships/dim/issues/5) ([RemoteGateway](plugins/RemoteGateway.md)) |
-| `user_prompt_submit` Hooks | Open: there is no submission admission point any more. Proposed: the Hooks branch part handles the user's `input/message` in order and may add context as a raw block; rejecting a prompt is not supported. The [Hooks](plugins/Hooks.md) document decides |
-| TypeScript Session parts | Open: SessionTitle, Goal, Web, Notifications and the Session parts of Scheduler and Workflow are TypeScript first only once #4 provides the language-neutral capability port; otherwise they start in Rust |
+| TypeScript Session parts | Open: SessionTitle, Goal, Web, Notifications and the Session parts of Scheduler and Workflow provide neutral contracts by name; those that also use the runtime's typed services (Timeline, Dispatcher, InputQueue) need #4 to expose them by name, otherwise they start in Rust |
 | Scheduled job outcome for Notifications | Decided: job Sessions are non-interactive, so Scheduler publishes a run-outcome notice that Notifications listens to, with no dependency |
 | Scheduled task liveness | Decided: the daemon must be alive ([Scheduler](plugins/Scheduler.md)) |
 | FullAccess and new categories | Decided: allowed automatically (constraint 7) |
@@ -454,10 +473,11 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Approval | Supplement | Collects `Contributions<ToolAdmissionCheck>` and consults every check after the policy decision and before execution; any denial denies ([methods A.3](contracts/session-boundary.md#a3-tool-admission-check)). Accepts `approval/request` raised through the call-bound approval port while a model step is open | Hooks; ExternalAgent |
+| Approval | Supplement | Collects the branch's `toolAdmissionCheck` services and consults every check after the policy decision and before execution; any denial denies ([methods A.3](contracts/session-boundary.md#a3-tool-admission-check)). Accepts `approval/request` raised through the call-bound approval port while a model step is open | Hooks; ExternalAgent |
 | InputQueue | Change | `input/withdrawn {input_id}`; own-source withdrawal service; "withdraw and re-submit as Steer" as one batch; queue state rebuilt from events ([session access A.4](contracts/session-access.md#a4-withdrawal)) | `Ctrl+S`, `/queue`; AcpGateway, Scheduler |
-| Runtime Session facade | Supplement | `Session::method(namespace)`, a keyed lookup of `SessionMethodContribution`; `Session::prefix(branch, at_least)` | Rpc; process callers |
-| Agent assembly | Supplement | `AgentBuilder::session_methods(namespace)` and `tool_admission_check(name)`; optional Session and branch parts installed per enabled plugin and per `interactive` | All Session plugins |
+| Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace; fixed-prefix history read; Session input boundary running `inputAdmissionCheck`s before every write, `input_denied` on denial ([methods A.6](contracts/session-boundary.md#a6-input-admission-check)) | Rpc; process callers; Hooks |
+| ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.7](contracts/session-boundary.md#a7-tool-contribution)) | Non-Rust Session tools |
+| Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides` (Rust binding: `AgentBuilder::session_methods`, `tool_admission_check`, `input_admission_check`); optional Session and branch parts installed per enabled plugin and per `interactive` | All Session plugins |
 | Permission | Supplement | Categories `outbound_message`, `persistent_configuration` (allowed under FullAccess); command rules read at use time | Notifications, Scheduler; `/approvals` |
 | ModelProvider | Supplement | Passes `ModelCallScope` (session, branch, request and step ids, `SessionConfig`) with a call-bound approval port | ExternalAgent |
 | Prompt, ModelProvider | Supplement | Model parameters (effort, fast mode); switching Agent configuration as one adoption | `/effort`, `/fast`, `/agent` |
@@ -470,16 +490,16 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Rpc | Change | Method table: built-ins, then `Contributions<ManagementMethods>` (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `SessionMethodContribution`s. Entry levels per connection. Built-in `session.input.withdraw`. `session.create {interactive, client}`. `title`/`titleSource` in Session lists. Image validation on `session.submit` ([methods](contracts/session-boundary.md)) | All method owners |
+| Rpc | Change | Method table: built-ins, then the collected `managementMethods` (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Entry levels per connection. Built-in `session.input.withdraw`. `session.submit` returns `input_denied`. `session.create {interactive, client}`. `title`/`titleSource` in Session lists. Image validation on `session.submit` ([methods](contracts/session-boundary.md)) | All method owners |
 | Transport, Connection | Change | `EntryHost` with upgrade authenticators; `ConnectionEntry {name, levels, device_id}` | RemoteGateway |
-| Agents | Supplement | `SessionConfig` fields; `launch` with a policy capped by the starter; creation from another Session's cut; profiles with an external agent as model ([session access](contracts/session-access.md)) | Scheduler, Workflow, fork, ExternalAgent |
+| Agents | Supplement | The `sessions` service; `SessionConfig` fields; `launch` with a policy capped by the starter; creation from another Session's cut; profiles with an external agent as model ([session access](contracts/session-access.md)) | Scheduler, Workflow, fork, ExternalAgent |
 | Collaboration | Change | Member models by purpose `collaboration.member`; `establish(leader, agent)` from outside a branch; member approvals forwarded to the leader | Workflow; ExternalAgent |
 | SessionStore | Supplement | Title metadata with revision checks; deletion and cleanup; fork (copies facts before the cut, resets the permission preset); Session files on the resource node, shared on fork and deleted with the last owner | SessionTitle, Attachments, fork |
 | Settings | Supplement | Business sources with change notification (D4); credential-reference resolver; host-local approval service | Hooks, Workflow, Web, Notifications, ExternalAgent, PluginManager, Mcp |
 | Provider | Supplement | Per-purpose policy with one write path; `AuxiliaryModel::complete(purpose, …)`; non-conversational connections per Modality category; external agent connection type | SessionTitle, compaction, Collaboration, Modality, ExternalAgent |
 | Aimux / ModelHost | Supplement | Provider kinds from other plugins; requests of a kind without a provider fail before acceptance | ExternalAgent |
 | App Server | Supplement | Process storage contract generalizing `pluginFiles` | Scheduler, Workflow, ExternalAgent, Modality, RemoteGateway, PluginManager |
-| Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth plugins | Change | Contribute their existing management methods as `ManagementMethods` (wire-compatible) | Rpc migration |
+| Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth plugins | Change | Provide their existing management methods as `managementMethods` (wire-compatible) | Rpc migration |
 | ManagedProviders | Supplement | Plan usage query | `/usage` |
 | Mcp | Supplement | HTTP/SSE OAuth; configuration from `PluginContents` (`mcp`) | MCP; PluginManager |
 | SkillsCatalog | Supplement | Skill roots from `PluginContents` (`skills`) | PluginManager |
@@ -494,7 +514,7 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | Not on the turn hot path | Settlement of in-flight tool calls |
 | Failure affects only that feature | Loader and plugin management; base services |
 
-TypeScript process plugins run today as loader rows (Node starts only when configured, [App Server](../../crates/dim-app-server/README.md)). TypeScript Session and branch parts need the language-neutral capability port of [#4](https://github.com/arcships/dim/issues/4) and #2 (§9). The API-key baseline does not depend on Node: TypeScript-first features ship with a pinned Node and are explicitly unavailable without it. When a plugin moves from TypeScript to Rust, its contracts, event types, tool and method names and storage formats stay unchanged; the move only swaps the loader row, flow tests pass unchanged, and only one implementation is loaded at a time. Existing-plugin supplements are Rust.
+TypeScript process plugins run today as loader rows (Node starts only when configured, [App Server](../../crates/dim-app-server/README.md)). TypeScript parts provide and use the neutral contracts of [§3.1](#31-contract-form) by name; Session and branch parts that also use the runtime's typed services need [#4](https://github.com/arcships/dim/issues/4) to expose them by name, and #2 (§9). The API-key baseline does not depend on Node: TypeScript-first features ship with a pinned Node and are explicitly unavailable without it. When a plugin moves from TypeScript to Rust, its neutral contracts, event types, tool and method names and storage formats stay unchanged; the move only swaps the loader row, flow tests pass unchanged, and only one implementation is loaded at a time. Existing-plugin supplements are Rust.
 
 ## Appendix D. CLI layer
 

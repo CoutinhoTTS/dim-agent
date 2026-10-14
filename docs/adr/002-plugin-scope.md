@@ -40,15 +40,16 @@ own scope:
 
 | Need | Mechanism |
 | --- | --- |
-| Offer tools to a Session | Session-scoped `ToolContribution` or `SessionToolSource` |
+| Offer tools to a Session | Session-scoped `toolContribution` (named tool service) or `SessionToolSource` |
 | Offer instructions | PromptRegistry prompt sources |
 | Observe a Session's events | the existing Session broadcast, from a Session-scoped plugin |
 | Observe and act on a branch's events in order | the branch Dispatcher, from a branch-scoped plugin |
 | Put content into the model context | Session or branch input (adopted inputs), tool results |
-| Check a tool call before execution | a branch-scoped admission check contributed to Approval |
-| Expose a client method about a Session | a Session-scoped method contribution that Rpc dispatches through the Session |
-| Expose a host management method | a process plugin's method in Rpc's method table, marked management level; each entry serves the levels it is configured for |
-| Reach other Sessions | Agents (AgentIndex) and the Session public interface, as Collaboration does |
+| Check a tool call before execution | a branch-scoped `toolAdmissionCheck` collected by Approval |
+| Check an input before it is written | a Session-scoped `inputAdmissionCheck` run by the Session input boundary |
+| Expose a client method about a Session | a Session-scoped `sessionMethods` service that Rpc dispatches through the Session |
+| Expose a host management method | a process plugin's `managementMethods` service in Rpc's method table, marked management level; each entry serves the levels it is configured for |
+| Reach other Sessions | Agents' `sessions` service (AgentIndex and the Session public interface), as Collaboration does |
 | React to another process plugin's outcomes | an event notice, not a dependency |
 
 ### D3. Dependencies follow scope; rare restarts are accepted
@@ -64,6 +65,32 @@ if needed later, belongs to rutis (issue #6), not to application wiring.
 | --- | --- | --- | --- |
 | Structural plugin configuration | enable or disable, runtime and package paths, node binding, listener addresses | loader rows (issue #3 editable layer) | may reload the row |
 | Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, model purpose policies, MCP server and Skill documents, external agent entries, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
+
+### D5. Contracts are language-neutral
+
+rutis calls plugins and services across languages by name (rutis-bridge runtimes, `host_key(name)`
+with `dyn HostDispatch`, `TypeKey::named` and `TypeKey::dynamic`), and Rust bindings can be
+generated from a named contract. A contract written only as a Rust trait keyed by
+`TypeKey::of<T>()` cannot be satisfied by a TypeScript or Python plugin without a hand-written
+Rust binding. Every contract the plugin designs define or use is therefore specified in a
+language-neutral form:
+
+| Element | Form |
+| --- | --- |
+| Identity | Service name (camelCase string), scope (process, Session or branch) and instance key (namespace, check name, tool name) |
+| Methods | Name, `sync` or `async`, request and reply as serializable data (field tables or JSON shapes) |
+| Errors | Data: `{code, message}` with documented codes |
+| Cancellation | A protocol action: a cancel request, or the consumer dropping the call |
+| Registration | Declared by the plugin (its `provides` and loader row), not by host-side `AgentBuilder` calls; consumers collect by service name and scope |
+| Rust specifics | Trait signatures, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls are one binding, listed in a "Rust binding" appendix |
+
+Canonical services: `sessionMethods` (Session, per namespace), `managementMethods` (process, per
+namespace), `toolAdmissionCheck` (branch, per check name), `inputAdmissionCheck` (Session, per
+check name), `toolContribution` (Session, per tool name), `sessions` (process) and `modelKind`
+(process, per kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
+and the owning plugin documents. The runtime's existing typed services (Timeline, Dispatcher,
+ToolHost and others) are unchanged; exposing them by name to non-Rust capability parts is the work
+of issue #4.
 
 ## Assignment of the new plugins
 
@@ -101,7 +128,7 @@ read once in HostPlatform's `apply`; it should be business configuration read at
 
 ## Consequences
 
-- The design documents are revised to this assignment: the overview, the contracts (only those
+- The design documents are revised to this assignment and to the neutral contract form (D5): the overview, the contracts (only those
   describing supplements of existing plugins remain) and every plugin document.
 - Optional Session and branch plugins are installed only when enabled; they are not placeholders
   in every assembly.
