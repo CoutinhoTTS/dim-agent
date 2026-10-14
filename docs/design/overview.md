@@ -11,11 +11,11 @@
 | 项 | 约定 |
 | --- | --- |
 | 终端形态 | 只设计 scrollback。功能清单中标为“仅全屏 TUI”的项不在范围内 |
-| 多模态 | 只设计图片。功能清单中“仅限特定 Desktop 构建”的命令不在范围内 |
+| 多模态 | 目标设计覆盖全部多模态类别（图片、视频、语音、音乐、音频、3D 资产、动作、实时、OCR）。“仅限特定 Desktop 构建”是构建与打包上的可用性约束，不缩小目标范围；可用性与目标范围分开描述，见 5.14 |
 | 不做 | 功能清单中的 Todo 状态与 `plan` Skill |
 | 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 已完成为前提：插件在运行时注册自己的事件类型（类型名、数据格式），注册随插件生命周期，Timeline 按注册校验写入。新插件不向内核事件枚举增加类型，也不设过渡方案 |
 | 模型上下文 | 按 [ADR 001](../adr/001-harness-foundation.md) 的提议：插件事件不直接投影进模型上下文；给模型看的内容经采用的输入或工具结果进入。#2 中“由注册的投影规则决定”的方案与此不同，见第 13 节 |
-| 配置与插件管理 | 依赖 [#3](https://github.com/arcships/dim/issues/3) 的部分按 ADR 001 的“按来源写入、再发布到根 loader”方案设计，并逐处标注 |
+| 配置与插件管理 | 按 [#3](https://github.com/arcships/dim/issues/3)：用户管理的插件意图（启用、停用、插件配置）经类型化的 Settings 操作写入 loader 可编辑层并持久化，loader 可编辑层是其权威。项目文件（如 `.mcp.json`、项目 Hook、项目工作流）与宿主本地批准保留各自的权威，按 ADR 001 的“按来源写入”处理 |
 | 现有设计 | [时间总线](../architecture/rust-agent/time-bus.md)、[设计规则](../architecture/rust-agent/principles.md)、[单树装配](../architecture/rust-agent/single-tree.md)、[生命周期](../architecture/rust-agent/lifecycle.md)、[事件驱动流程](../architecture/rust-agent/event-driven-flows.md) 与 ADR 001 的信任合同对所有新插件同样适用 |
 
 ## 2. 现有体系
@@ -44,13 +44,13 @@
 共同约束：
 
 1. **事件最少化**：只为影响后续行为的结果新增事件（时间总线第 3 条）。能由已有事实推出的状态不另设事件：工具调用与工具结果、`input/*`、`turn/*`、`stop/interrupt` 都是可消费的事实。过程输出（进度、日志）走诊断通道，不写 Timeline。
-2. **所有权**：插件只写自己声明的事件；发起工作的插件写该工作的开始与终态。状态机只依据自己消费过的事件做决定，不读其他插件的内存状态，但可以消费同样的事件自建视图（时间总线第 2 条）。
-3. **外部入口**：RPC 不直接写事件。RPC 调用所有者插件的服务，所有者在边界校验后写入，先例为 `approval.respond`。与中断等并发时，按序号接受第一个有效的结果。
+2. **所有权**：事件类型的声明方定义数据合同，但不独占写入：合法的生产方经所有者的公开端口写入共享事件，例如任何插件经 Session 输入接口写入 `input/message`（时间总线第 2 条、ADR 001）。发起工作的插件写该工作的开始与终态。状态机只依据自己消费过的事件做决定，不读其他插件的内存状态，但可以消费同样的事件自建视图（时间总线第 2 条）。
+3. **外部入口**：RPC 不直接写事件。RPC 调用所有者插件的服务，所有者在边界校验后写入，先例为 `approval.respond`。与中断等并发时，以 Timeline 序号判定：序号在前的有效事实生效。
 4. **重载与副作用**：开始事实已写、终态未写的工作，在重载或重启时以“未在恢复中存活”结算，不重新执行（时间总线第 5 条）。
 5. **作用域可见性**：进程插件不读取 Session 或分支状态，所需的值由调用方作为参数传入。
 6. **中断**：插件取消自己的在途工作、释放资源后再写终态（[中断](../architecture/rust-agent/interrupt.md)）。
 7. **准入**：新工具声明风险类别，由 Permission 与 Approval 准入；新类别登记在第 7 节。
-8. **管理面**：执行命令或改变宿主配置的方法是管理方法，由插件贡献给 Management 插件（5.16），不直接加入 Rpc。入口挂载了 Management 才能调用管理方法：本机 RPC 入口默认挂载，RemoteGateway 默认不挂载，其他节点经 rutis link 导出 Management 服务后才能使用。授权由装配与 link 配置决定，不另设身份分级。
+8. **管理面**：执行命令或改变宿主配置的方法是管理方法，由插件贡献给 Management 插件（5.16），不直接加入 Rpc。入口挂载了 Management 才能调用管理方法：本机 RPC 入口默认挂载，RemoteGateway 默认不挂载，其他节点经 rutis link 导出 Management 服务后才能使用。授权由装配与 link 配置决定，不另设身份分级或逐方法授权；导出 Management 等于授予宿主管理员权限。
 9. **在途工作**：不建立共享的在途工作登记。每个所有者提供自己的查询与停止，汇总只在 CLI 层显示（[事件驱动流程](../architecture/rust-agent/event-driven-flows.md) §3 “在途工作识别”暂不设计）。
 
 ### 3.1 多节点
@@ -63,7 +63,7 @@ rutis 节点之间经 link 连接，可以导出与导入服务、在对端运�
 | 资源节点 | 文件、进程、shell、隔离、本机安装的 CLI、浏览器等宿主资源所在的节点。每个 Session 在创建配置中绑定一个资源节点，创建后不变；未指定时为控制节点自身，单机时行为与现在相同 |
 | 资源服务 | 访问宿主资源一律经 Session 绑定的资源服务（FileStorage、HostPlatform、WorkspaceTools 的宿主侧）。资源节点不是控制节点时，这些服务由对端导出、按 Session 导入；使用方不区分本机与导入的服务 |
 | 绑定节点的数据 | 宿主本地批准、隔离配置、外部 Agent 目录、附件存放位置都以“节点 + 路径”标识 |
-| 管理面 | 见共同约束 8：是否能管理由 Management 挂载与导出决定 |
+| 管理面 | 见共同约束 8：是否能管理由 Management 挂载与导出决定。向某个节点导出 Management，即把宿主管理员权限交给该节点，包括修改批准与配置、不经审批执行 shell |
 | 离线 | 按生命周期依赖处理：依赖资源服务的插件随依赖进入 Pending，节点恢复后重新装载；在途工作按现有生命周期合同结算，不另设离线状态 |
 | 认证 | 沿用 rutis link 的 token，不另设计；Management 只在显式配置时导出 |
 | 未来扩展 | 跨控制节点协作：Collaboration 的 member 可以是另一个 App Server 上的 Session，本文不设计 |
@@ -84,8 +84,8 @@ Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实�
 
 | 类别 | 新插件与拆分 |
 | --- | --- |
-| Capability | 无。新功能全部由进程插件与现有机制实现 |
-| 进程插件 | Management、Questions、Goal、ShellInput、Attachments、SessionTitle、Web、Hooks、Scheduler、Workflow、Notifications、ExternalAgent、PluginManager、RemoteGateway、Modality。其中 Questions、Goal、Web、Scheduler、Workflow、Notifications 以进程级工具贡献提供工具 |
+| 进程插件 + Capability | Questions（Session：`ask_user` 工具，按调用解析调用方分支的服务，先例为 Wait；分支：待答问题与回答事实，先例为 Approval） |
+| 进程插件 | Management、Goal、ShellInput、Attachments、SessionTitle、Web、Hooks、Scheduler、Workflow、Notifications、ExternalAgent、PluginManager、RemoteGateway、Modality。其中 Goal、Web、Scheduler、Workflow、Notifications 以进程级工具贡献提供工具 |
 | 非 daemon 插件 | AcpGateway（CLI 进程中的协议适配） |
 
 拆分后的命名在各插件需求文档中确定。
@@ -149,7 +149,6 @@ flowchart TB
       HooksP["Hooks"]:::new
       WorkflowP["Workflow"]:::new
       WebP["Web"]:::new
-      QuestionsP["Questions"]:::new
       GoalP["Goal"]:::new
     end
     subgraph PA["Agent 与协作"]
@@ -168,7 +167,7 @@ flowchart TB
 
   subgraph SES["Session（Capability）"]
     direction TB
-    subgraph SEX["现有（无新增）"]
+    subgraph SEX["现有"]
       SessionScope["SessionScope"]
       ToolRegistry["ToolRegistry"]
       TimelineTree["TimelineTree"]
@@ -181,11 +180,14 @@ flowchart TB
       PrepareModelHost["PrepareModelHost"]
       SessionBroadcastEnd["SessionBroadcastEnd"]
     end
+    subgraph SNEW["新增"]
+      QuestionsS["Questions（ask_user）"]:::new
+    end
   end
 
   subgraph BR["分支（Capability）"]
     direction TB
-    subgraph BEX["现有（无新增）"]
+    subgraph BEX["现有"]
       BranchScope["BranchScope"]
       SessionBroadcast["SessionBroadcast"]
       TreeTimeline["TreeTimeline"]
@@ -205,12 +207,15 @@ flowchart TB
       PromptSourcesBranch["PromptSourcesBranch"]
       CollabTimeline["CollaborationTimeline"]
     end
+    subgraph BNEW["新增"]
+      QuestionsB["Questions（待答问题与回答事实）"]:::new
+    end
   end
 
   RN["资源节点（默认即控制节点；可经 rutis link 导入）"]
   CLIP -->|本地 RPC| PROC
   RN -.->|资源服务按 Session 导入| SES
-  WebP & SchedulerP & WorkflowP & NotificationsP & QuestionsP & GoalP -.->|进程级工具贡献| ToolRegistry
+  WebP & SchedulerP & WorkflowP & NotificationsP & GoalP -.->|进程级工具贡献| ToolRegistry
   PROC -->|Agents 装载| SES
   SES -->|TimelineTree 装载| BR
 ```
@@ -265,8 +270,9 @@ flowchart LR
     Rpc["Rpc"]:::changed
   end
 
-  Questions & Goal & Web & Workflow & Scheduler & Notifications -->|A 进程级工具贡献，由 ToolRegistry 直接注入| ToolRegistry
-  Questions -->|回答完成工具调用| ToolExecutor
+  Questions -->|A Session 级工具贡献| ToolRegistry
+  Goal & Web & Workflow & Scheduler & Notifications -->|A 进程级工具贡献，由 ToolRegistry 直接注入| ToolRegistry
+  Questions -->|按序号接受回答后完成工具调用| ToolExecutor
   Goal & ShellInput & Hooks -->|B 写入输入| InputQueue
   ShellInput & Hooks & ExternalAgent -->|启动进程与隔离| HostPlatform
   Approval -->|注入进程级准入服务| Hooks
@@ -299,7 +305,7 @@ flowchart LR
 
 | 新插件 | 进程部分 | Session 部分 | 分支部分 | 挂接的现有插件 |
 | --- | --- | --- | --- | --- |
-| Questions | `ask_user` 工具与等待中的调用 | — | — | ToolRegistry、ToolExecutor |
+| Questions | — | `ask_user` 工具 | 待答问题与回答事实 | ToolRegistry、ToolExecutor、TreeCommands |
 | Goal | `goal_update` 工具、`session.goal.*` 方法与继续 | — | — | ToolRegistry、Session 广播、InputQueue |
 | ShellInput | RPC 边界执行命令 | — | — | HostPlatform（Session 绑定）、InputQueue、Management |
 | Attachments | 提交边界转换与文本附件 | — | — | FileStorage |
@@ -310,15 +316,15 @@ flowchart LR
 | Workflow | 定义、运行与阶段推进；`workflow` 工具 | — | — | Settings、ToolRegistry、Agents、Collaboration、Management |
 | ExternalAgent | 外部 Agent 目录、连接与桥接 | — | — | Provider、Aimux、Agents、Collaboration、HostPlatform |
 | Notifications | 订阅与发送；`notify` 工具 | — | — | Settings、Session 广播、ToolRegistry |
-| PluginManager | 插件市场与安装 | — | — | Settings、rutis-loader、SkillsCatalog、Mcp、Hooks |
+| PluginManager | 插件市场与安装 | — | — | Settings（loader 可编辑层）、rutis-loader、SkillsCatalog、Mcp、Hooks |
 | RemoteGateway | 远程访问 | — | — | Transport、Rpc |
-| Modality | 多模态任务 | — | — | Provider |
+| Modality | 全部多模态类别的任务与实时连接 | — | — | Provider、HostPlatform（OCR） |
 | AcpGateway | CLI 进程 | — | — | Rpc（本地 RPC） |
 | Management | 管理方法的汇集与挂载 | — | — | Rpc、各插件的管理贡献 |
 
 ## 4. 功能归属
 
-“现有”表示由现有插件职责覆盖；“扩展”表示属于现有插件职责但现有设计未写到，见第 7 节；“新”表示第 5 节的新插件；“CLI”表示只在 CLI 层实现，见第 8 节；“范围外”与“不做”见第 1 节。
+“现有”表示由现有插件职责覆盖；“扩展”表示属于现有插件职责但现有设计未写到，见第 7 节；“新”表示第 5 节的新插件；“CLI”表示只在 CLI 层实现，见第 8 节；“范围外”与“不做”见第 1 节。可用性（构建、平台、运行时资源、适配器）不影响归属。
 
 ### Provider 与模型
 
@@ -417,7 +423,8 @@ flowchart LR
 | --- | --- |
 | `image generate`、`image edit`、`image enhance`、`modality`、`modality task` | 新：Modality |
 | `image read` | 现有：视觉模型经 `read` 读取图片 |
-| 视频、语音、音乐、音频、3D、动作、实时、OCR | 范围外（仅 Desktop） |
+| `video`、`speech`、`music`、`audio`、`asset`、`motion`、`realtime` | 新：Modality（服务商执行；当前只随特定 Desktop 构建提供） |
+| `ocr` | 新：Modality（宿主执行；需要 OCR 运行时组件） |
 
 ## 5. 新插件
 
@@ -425,14 +432,16 @@ flowchart LR
 
 ### 5.1 Questions
 
+工具调用“有调用、无结果”不等于“正在等回答”：准入先于处理器，ToolExecutor 在整批调用结束后才发布结果，已回答的问题在此期间仍没有结果。因此待答与已回答必须有自己的事实，流程沿用 Approval。
+
 | 项 | 设计 |
 | --- | --- |
-| 作用域 | 进程 |
+| 作用域 | Session（`ask_user` 工具，按调用解析调用方分支的服务，先例为 Wait）+ 分支（待答问题与回答事实，先例为 Approval） |
 | 职责 | 模型向用户提问并等待回答：单选、多选、多问题、自定义回答 |
-| 接入 | A：以进程级工具贡献提供 `ask_user`；处理器按 `call_id` 持有等待中的调用，回答作为工具结果返回 |
-| 事件 | 无。问题内容是工具调用的参数，回答或取消是工具结果；待答问题即“有调用、无结果”的 `ask_user` |
-| 接口 | Session 方法 `session.question.respond {call_id, answers}`：边界校验后完成对应调用 |
-| 关系 | 中断时 ToolExecutor 取消工具调用，等待随之释放；回答与中断并发时先结算者生效。重载时未完成的调用按现有工具恢复规则结算。非交互 Session（如 `exec`、定时作业创建的 Session）由 ToolRegistry 按 Session 配置不提供 `ask_user`，不依据客户端是否连接来决定 |
+| 接入 | A：工具处理器在准入通过后请求分支服务登记问题并等待；分支写 `question/asked`；回答经 Session 边界写入 `question/answered`；分支按序号消费回答后完成处理器，回答作为工具结果返回 |
+| 事件 | `question/asked {call_id, questions}`：问题进入待答，由分支写入；`question/answered {call_id, answers}`：回答事实，经边界写入，由分支按序号消费；`question/cancelled {call_id, reason}`：待答问题因中断、分支关闭或重载结束，由分支写入 |
+| 接口 | Session 方法 `session.question.respond {call_id, answers}`：调用分支服务，边界校验后写入 `question/answered` |
+| 关系 | 待答问题为已 `asked` 且尚无 `answered` 或 `cancelled` 的问题。回答与中断以序号判定：`question/answered` 序号在覆盖该 turn 的 `stop/interrupt` 之前才被接受，否则问题以 `question/cancelled` 结束。重载时未结束的问题以 `question/cancelled` 结算。非交互 Session（如 `exec`、定时作业创建的 Session）在创建配置中不贡献 `ask_user` |
 
 ### 5.2 Goal
 
@@ -440,10 +449,10 @@ flowchart LR
 | --- | --- |
 | 作用域 | 进程 |
 | 职责 | 设置、编辑、暂停、恢复、清除目标；目标未完成时自动继续；记录完成或受阻 |
-| 接入 | B：目标以带 key 的 raw 输入块表达，设置、编辑、暂停、恢复由 `session.goal.*` 在边界经 Session 输入写入同 key 的新块（内容含目标与状态），清除以 `retire` 结束该 key，目标因此持续留在上下文中。A：以进程级工具贡献提供无状态的 `goal_update`，报告完成或受阻。继续：经进程级实时订阅 Session 广播得知目标所在分支的 `turn/end`，再经 Session 的公开读取接口读取截至该序号的固定前缀做判断，需要继续时经 Session 输入写入 Queue 模式的继续输入，raw 块标明来自目标 |
-| 事件 | 无。目标与其状态由该 key 的输入块推出；完成与受阻由 `goal_update` 的工具结果推出 |
+| 接入 | B：目标以带 key 的 raw 输入块表达，设置、编辑、暂停、恢复由 `session.goal.*` 在边界经 Session 输入写入同 key 的新块（内容含目标与状态），清除以 `retire` 结束该 key，目标因此持续留在上下文中。A：以进程级工具贡献提供 `goal_update`，报告完成或受阻；处理器在返回工具结果前，经 Session 输入写入同 key 的终态块（已完成或受阻，含说明），使压缩后重放的目标块不再是“进行中”。继续：经进程级实时订阅 Session 广播得知目标所在分支的 `turn/end`，再经 Session 的公开读取接口读取截至该序号的固定前缀做判断，需要继续时经 Session 输入写入 Queue 模式的继续输入，raw 块标明来自目标 |
+| 事件 | 无。目标与其状态（含完成与受阻）由该 key 的输入块推出 |
 | 接口 | Session 方法 `session.goal.set/edit/pause/resume/clear` |
-| 关系 | 是否继续只依据读取到的固定前缀中的目标块、`input/*`、`stop/interrupt` 与 `goal_update` 结果，不读 InputQueue 或 Loop 的状态；读取固定前缀即消费这段事实，订阅本身不需要保证顺序。`stop/interrupt` 使目标进入暂停，并写入同 key 的“已暂停”块；连续继续次数由带来源标记的继续输入计数，达到上限即暂停。进程重启期间错过的 `turn/end` 不补，目标保持原状态，由用户恢复或下一次 `turn/end` 时继续。中断与继续输入并发时，继续输入可能排在中断之后并开始一个 turn；此 turn 中模型从目标块看到已暂停并结束，最多多出一个 turn |
+| 关系 | 是否继续只依据读取到的固定前缀中的目标块、`input/*` 与 `stop/interrupt`，不读 InputQueue 或 Loop 的状态；读取固定前缀即消费这段事实，订阅本身不需要保证顺序。`stop/interrupt` 使目标进入暂停，并写入同 key 的“已暂停”块；连续继续次数由带来源标记的继续输入计数，达到上限即暂停。进程重启期间错过的 `turn/end` 不补，目标保持原状态，由用户恢复或下一次 `turn/end` 时继续。中断与继续输入并发时，继续输入可能排在中断之后并开始一个 turn；此 turn 中模型从目标块看到已暂停并结束，最多多出一个 turn |
 
 ### 5.3 ShellInput
 
@@ -537,7 +546,16 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 接入 | E：作为 Provider 目录中的一类连接（每个外部 Agent 一项）；Aimux（ModelHost）按连接类型把请求分派给本插件。Agent profile 选择外部 Agent 为模型时不装配工具，外部 Agent 使用自己的工具 |
 | 事件 | 无。委派沿用 Collaboration 的事实；member Session 内是普通的 turn 与模型输出事件 |
 | 接口 | 管理方法 `external_agents.list/set_enabled/configure`，贡献给 Management |
-| 关系 | 模型请求中只把上次外部调用之后新消费的输入发给外部 Agent，外部会话身份按 dim Session 保存在进程存储中，用于续接。中断取消外部调用。外部 Agent 目录按节点区分，连接身份包含节点；桥接以 `peer:<节点>/<插件>` 行在外部 Agent 所在节点运行，经该节点的 HostPlatform 启动进程并套用隔离配置。外部 Agent 自身的权限请求如何处理见第 13 节 |
+
+| 合同 | 内容 |
+| --- | --- |
+| 分支隔离 | 外部会话身份与输入投递游标按“Session + 分支”保存在进程存储中，不在分支之间共享 |
+| 历史初始化 | 分支第一次调用外部 Agent 时，新建外部会话，把该分支截点之前的可见历史（用户输入、助手回复、工具结果）渲染为文本作为首条内容；子分支从自己继承的历史初始化，不续接、不修改父分支的外部会话。会话中途切换到外部 Agent 时同样按此初始化 |
+| 后续调用 | 只投递游标之后新消费的输入，随后推进游标 |
+| 转发字段 | 转发：用户内容（文本，模型支持时含图片）与 raw 输入块的文本。不转发：dim 的系统提示词、工具声明与采样参数；推理强度等参数仅在外部 Agent 支持时映射 |
+| 重试 | 沿用 ModelProvider 现有的失败策略：外部 Agent 可能在返回任何输出前已执行工具，无法确定是否已被接受时不重试；确定发生在接受之前的失败（启动失败、连接被拒）可以重试 |
+| 节点 | 外部 Agent 目录按节点区分，连接身份包含节点；桥接以 `peer:<节点>/<插件>` 行在外部 Agent 所在节点运行，经该节点的 HostPlatform 启动进程并套用隔离配置 |
+| 中断 | 中断取消外部调用；外部 Agent 自身的权限请求如何处理见第 13 节 |
 
 ### 5.11 Notifications
 
@@ -556,7 +574,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | --- | --- |
 | 作用域 | 进程 |
 | 职责 | 插件市场（Git 来源）的增删与更新；搜索、查看、安装（市场、本地路径、Git URL）、启用、停用、重载、移除插件 |
-| 接入 | E：插件清单声明其内容：Skill、Hook、MCP 配置、工作流、能力插件；安装即写入来源并发布 loader 行，管理操作对应 loader 操作；安装指定目标节点，对端节点上的插件以 `peer:<节点>/<插件>` 行加载 |
+| 接入 | E：插件清单声明其内容：Skill、Hook、MCP 配置、工作流、能力插件；安装、启停与配置经类型化的 Settings 操作写入 loader 可编辑层（#3），管理操作对应 loader 操作；安装指定目标节点，对端节点上的插件以 `peer:<节点>/<插件>` 行加载 |
 | 事件 | 无 Timeline 事件；状态来自 loader 条目 |
 | 接口 | 管理方法 `plugin.marketplace.*`、`plugin.install/remove/set_enabled/reload/list`，贡献给 Management |
 | 关系 | 依赖 #3（loader 管理）；Rust 以外语言的能力插件依赖 #4。插件内容按来源接入 SkillsCatalog、Hooks、Mcp、Workflow。插件内的可执行内容需要宿主本地批准 |
@@ -574,14 +592,37 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 
 ### 5.14 Modality
 
+目标设计覆盖全部类别；构建、平台、运行时资源与适配器的可用性单独报告。声明了能力或命令不代表已有可执行的适配器。
+
 | 项 | 设计 |
 | --- | --- |
 | 作用域 | 进程 |
-| 职责 | 图片生成、编辑（参考图与遮罩）、增强；异步任务的状态查询、等待与取消；查看能力与默认模型 |
-| 接入 | E：经 Provider 调用非对话类模型 |
-| 事件 | 无 Timeline 事件；任务存于进程存储 |
-| 接口 | RPC `modality.capabilities`、`modality.task.*`；CLI `image`、`modality` 子命令 |
-| 关系 | 需要 Provider 支持非对话类模型；默认模型经 Provider 按用途选择 |
+| 职责 | 多模态能力的统一入口：能力查询、默认模型或执行器选择、任务提交与结果、任务状态查询、等待与取消 |
+| 接入 | E：调用服务商的类别经 Provider 调用非对话类模型；在宿主执行的类别（OCR）经 Session 资源节点或指定节点上的宿主运行时组件执行 |
+| 事件 | 无 Timeline 事件；任务与结果存于进程存储 |
+| 接口 | 服务与管理方法 `modality.capabilities`（含各类别的可用性）、`modality.task.submit/status/wait/cancel`；CLI 各类别子命令 |
+| 关系 | 默认模型或执行器经 Provider 按用途（类别）选择。结果为文件或结构化数据，写入调用方指定的输出位置或任务结果 |
+
+| 类别 | CLI 入口 | 操作 | 执行方 | 生命周期 |
+| --- | --- | --- | --- | --- |
+| 图片 | `image` | 生成、编辑（参考图与遮罩）、增强、理解 | 服务商；理解经视觉模型 `read` | 异步任务 |
+| 视频 | `video` | 生成、编辑、增强 | 服务商 | 异步任务 |
+| 语音 | `speech` | 合成、转写 | 服务商 | 异步任务 |
+| 音乐 | `music` | 生成 | 服务商 | 异步任务 |
+| 音频 | `audio` | 生成 | 服务商 | 异步任务 |
+| 3D 资产 | `asset` | 生成 | 服务商 | 异步任务 |
+| 动作 | `motion` | 动作数据生成 | 服务商 | 异步任务 |
+| 实时 | `realtime` | 实时连接 | 服务商 | 连接：建立、收发、关闭，不是任务 |
+| OCR | `ocr` | 图片与 PDF 文字识别 | 宿主运行时组件 | 异步任务 |
+
+| 可用性维度 | 说明 |
+| --- | --- |
+| 构建 | 某些类别只随特定构建（如 Desktop）发布 |
+| 平台 | 宿主执行的类别依赖平台支持 |
+| 运行时资源 | 如 OCR 运行时组件是否安装 |
+| 适配器 | 是否已有对应服务商或执行器的适配器 |
+
+`modality.capabilities` 按以上维度逐类别报告可用性；不可用的类别明确报告原因，不静默隐藏。
 
 ### 5.15 AcpGateway
 
@@ -592,7 +633,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 接入 | 协议适配：ACP 会话对应 dim Session；提示对应提交；更新来自 Session 事件；权限请求对应 `approval.request` |
 | 事件 | 无 |
 | 接口 | ACP 协议 |
-| 关系 | 与 CLI 一样经本地 RPC 连接 daemon，不在 daemon 中另开执行路径。ACP 协议的编解码与 ExternalAgent 的 ACP 客户端共用 |
+| 关系 | 与 CLI 一样经本地 RPC 连接 daemon，不在 daemon 中另开执行路径。ACP 的 schema 与一致性测试与 ExternalAgent 的 ACP 客户端共用；两侧实现可以是不同语言（如 ExternalAgent 先以 TS 实现、AcpGateway 在 Rust CLI 中实现），共享的是协议定义与测试，不是同一份运行时代码，因此迁移语言不影响共享 |
 
 ### 5.16 Management
 
@@ -607,18 +648,18 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 
 ## 6. 新增 Timeline 事件
 
-按共同约束 1 逐个审查后，新增事件只有 1 种：
+按共同约束 1 逐个审查后，新增事件共 4 种：
 
 | 事件 | 写入方 | 为什么需要 |
 | --- | --- | --- |
+| `question/asked`、`question/answered`、`question/cancelled` | Questions（分支；`answered` 经边界写入） | 待答与回答无法由工具调用与结果推出：结果要等整批调用结束才发布；回答必须以序号与中断比较，先例为 Approval |
 | `input/withdrawn` | InputQueue | 撤回尚未采用的排队消息必须成为事实，队列状态才能重建；见第 7 节 |
 
 不设事件的情况与依据：
 
 | 原设想 | 处理 | 依据 |
 | --- | --- | --- |
-| `question/*` | `ask_user` 的工具调用与工具结果 | 问题与回答已是事实 |
-| `goal/*` | 带 key 的 raw 输入块与 `goal_update` 的工具结果 | 目标与状态已是输入事实；中断导致的暂停可由 `stop/interrupt` 推出 |
+| `goal/*` | 带 key 的 raw 输入块，含完成与受阻的终态块 | 目标与状态已是输入事实；中断导致的暂停可由 `stop/interrupt` 推出 |
 | `shell/*` | 在 RPC 边界执行，`!command` 的结果写为输入 | 不是分支内的在途工作 |
 | `hook/*` | 拦截决定记录在所有者事实中，注入内容是输入，执行记录走诊断通道 | Hook 是现有机制上的适配 |
 | `external_agent/*` | Collaboration 的事实与 member Session 内的普通事件 | 外部 Agent 作为模型连接接入 |
@@ -640,7 +681,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 
 | 插件 | 类型 | 内容 | 原因 |
 | --- | --- | --- | --- |
-| ToolRegistry | 补充 | 在 `Deps` 中直接注入进程插件提供的进程级工具贡献，与 Session 级贡献一起组成工具集合；依赖随配置启用，生命周期随依赖；按 Session 配置过滤（如非交互 Session 不提供 `ask_user`） | Questions、Goal、Web、Scheduler、Workflow、Notifications |
+| ToolRegistry | 补充 | 在 `Deps` 中直接注入进程插件提供的进程级工具贡献，与 Session 级贡献一起组成工具集合；依赖随配置启用，生命周期随依赖 | Goal、Web、Scheduler、Workflow、Notifications |
 | InputQueue | 变更 | 新增 `input/withdrawn`：撤回尚未采用的输入，撤回的输入不再采用，队列状态与可撤回性由事件重建；提供撤回、以及“撤回并以 Steer 重新写入”的服务，经 Session 边界调用 | `Ctrl+S`、`/queue`、取回编辑、删除排队消息 |
 | Permission | 补充 | 风险类别“网络”“外发消息”“持久配置”，并规定 FullAccess 是否自动放行各类别；来自 Settings 的跨 Session 规则来源；允许命令清单 | Web、Notifications、Scheduler；`/approvals`、命令规则 |
 | Approval | 补充 | 工具调用前的准入扩展点：在 `Deps` 中注入进程级准入服务（如 Hooks），在策略判定后、执行前异步调用，给出允许或拒绝；中断时取消并以取消结算 | Hooks |
@@ -655,10 +696,10 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 
 | 插件 | 类型 | 内容 | 原因 |
 | --- | --- | --- | --- |
-| Settings | 补充 | 新的配置来源：权限规则、Hook 定义与批准、工作流定义与批准、Web 搜索服务、通知渠道、按用途的模型策略、沙箱配置、外部 Agent、插件市场；统一的凭据引用 | Hooks、Workflow、Web、Notifications、Provider、HostPlatform、ExternalAgent、PluginManager、Permission 规则 |
+| Settings | 补充 | 按 #3 区分权威：用户管理的插件意图与插件配置（插件启停、Web 搜索服务、通知渠道、按用途的模型策略、沙箱配置、外部 Agent、插件市场、跨 Session 权限规则）经类型化的 Settings 操作写入 loader 可编辑层；项目文件（项目 Hook、项目工作流、`.mcp.json`）保留文件权威；宿主本地批准（Hook、工作流、MCP）保留各自的批准文件。凭据只以引用出现 | Hooks、Workflow、Web、Notifications、Provider、HostPlatform、ExternalAgent、PluginManager、Permission 规则 |
 | Rpc | 变更 | 只承载 Session 方法；管理方法改由 Management 贡献与挂载，现有管理方法迁入 Management | Management；RemoteGateway |
-| Transport、Connection | 变更 | 远程连接携带认证后的设备身份；按身份限制可用方法 | RemoteGateway |
-| Provider | 补充 | `ModelSelectionHost` 按用途（子代理、辅助任务、默认多模态）选择模型：继承调用方传入的模型、固定模型与推理强度、由 Agent 选择（仅子代理）；外部 Agent 连接类型；非对话类模型 | 子代理与辅助模型；ExternalAgent；Modality |
+| Transport、Connection | 变更 | 远程连接携带认证后的设备身份，用于 Session 级访问；管理方法不按身份授权，由 Management 是否挂载决定 | RemoteGateway |
+| Provider | 补充 | `ModelSelectionHost` 按用途（子代理、辅助任务、各多模态类别）选择模型：继承调用方传入的模型、固定模型与推理强度、由 Agent 选择（仅子代理）；外部 Agent 连接类型；各多模态类别的非对话类模型 | 子代理与辅助模型；ExternalAgent；Modality |
 | Aimux | 补充 | 按连接类型把模型请求分派给 ExternalAgent 桥接 | ExternalAgent |
 | Agents | 补充 | Session 创建配置包含资源节点，创建后不变；以非交互配置新建或复用 Session 并提交首条输入；从另一 Session 的截点创建 Session；以外部 Agent 为模型、不装配工具的 profile | Scheduler；Session 分叉；ExternalAgent |
 | SessionStore | 补充 | Session 元数据（标题及其来源、分叉来源）与修订检查；删除（先关闭 Session，Loop 未空闲时拒绝）与按时间或数量清理（含预览）；分叉复制来源截点之前的事实及其引用闭包（附件、事件声明），不复制宿主安全设置；附件随 Session 复制与删除 | SessionTitle、Session 分叉与清理、Attachments |
@@ -710,7 +751,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | --- | --- |
 | TS 进程服务插件 | 已可运行：Node 运行时与 `definePlugin` 插件作为 loader 行装载，插件提供异步服务，Rust 侧按服务合同使用；未配置时不启动 Node（[App Server](../../crates/dim-app-server/README.md) 的 managed provider 先例） |
 | TS 能力插件 | 读写 Timeline、贡献工具、订阅分支事件需要 [#4](https://github.com/arcships/dim/issues/4) 的语言中立能力端口，并依赖 #2 |
-| Node 依赖 | API-key 基础流程不依赖 Node。TS 先行只用于可选功能；Node 不可用时这些功能明确不可用 |
+| Node 依赖 | API-key 基础流程不依赖 Node。TS 先行只用于可选功能。交付时 TS 插件以插件包发布，随内置固定 Node 版本的发行版提供（与带账号插件的发行版相同，版本见 `.node-version`）；Node 不可用时这些功能明确不可用 |
 
 ### 11.2 判断标准
 
@@ -726,7 +767,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 插件 | 语言 | 理由 | 前置条件 |
 | --- | --- | --- | --- |
 | ExternalAgent | TS 先行 | ACP 有 TS SDK；各外部 CLI 行为差异大，需要验证 | Aimux 分派到桥接的服务合同 |
-| Modality | TS 先行 | 各服务商图片 API 变化快 | Provider 非对话模型的服务合同 |
+| Modality | TS 先行（服务商类别）；OCR 视运行时组件而定 | 各服务商多模态 API 变化快 | Provider 非对话模型的服务合同 |
 | Notifications | TS 先行 | Slack、飞书 SDK | 进程级订阅 Session 广播；进程级工具贡献的服务合同 |
 | SessionTitle | TS 先行 | 生成策略需要验证 | 进程级订阅；SessionStore 元数据与模型选择的服务合同 |
 | Scheduler | TS 先行 | 调度规则需要验证 | Agents 新建或复用 Session 的服务合同；进程级工具贡献的服务合同 |
@@ -735,7 +776,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | Workflow | TS 先行 | 编排规则需要验证；运行归进程，不需要能力端口 | Agents、Collaboration 与进程级工具贡献的服务合同 |
 | Goal | TS 先行 | 继续策略需要验证；不需要能力端口 | 进程级实时订阅 Session 广播；Session 读取与输入的服务合同；进程级工具贡献的服务合同 |
 | Management | Rust | 管理面骨干 | — |
-| Questions | Rust | 与在途工具调用的结算紧密相关，逻辑简单 | — |
+| Questions | Rust | 分支事实与在途工具调用的结算紧密相关 | — |
 | ShellInput | Rust | 执行命令，属于安全边界 | — |
 | Attachments | Rust | 提交边界 | — |
 | Hooks | Rust | 准入路径与命令执行，属于安全边界 | — |
@@ -757,8 +798,8 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 
 | 阶段 | 内容 |
 | --- | --- |
-| P0 地基 | #2 动态事件；Management 与现有管理方法迁入；Permission 新风险类别 |
-| P1 核心交互 | Questions、ShellInput、Attachments、SessionTitle；InputQueue 撤回、Permission 规则、模型参数、Provider 按用途选择模型、SessionStore 删除清理与分叉；CLI 子命令、`/export` 与 `exec --json` |
+| P0 地基 | #2 动态事件；Management 与现有管理方法迁入；Permission 新风险类别；服务合同：进程级实时订阅 Session 广播、进程级工具贡献、Session 读取与输入 |
+| P1 核心交互 | Questions、ShellInput、Attachments、SessionTitle（依赖 P0 的订阅合同）；InputQueue 撤回、Permission 规则、模型参数、Provider 按用途选择模型、SessionStore 删除清理与分叉；CLI 子命令、`/export` 与 `exec --json` |
 | P2 能力扩展 | Goal、Web、HostPlatform 隔离、Hooks（用户与项目来源）、Scheduler、Workflow、Notifications；Mcp OAuth；生产用压缩宿主 |
 | P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway、Modality；PluginManager（依赖 #3、#4）；资源节点导入（依赖 #5） |
 
