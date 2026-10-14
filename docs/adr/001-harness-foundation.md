@@ -1,17 +1,22 @@
 # 001: Extensible harness foundation
 
-Decision status: Accepted for recovery and configuration work on this branch;
-event registration and dependency-loss refinements remain Proposed for maintainer alignment.
+Decision status: Recovery design adopted for this branch. Configuration is implemented on
+this branch but remains Proposed for maintainer alignment with issue #3. Dynamic-event
+registration, its model-context boundary and dependency-loss refinements remain Proposed
+for issues #2 and #6. This ADR does not supersede those issues' decisions.
 
-Implementation status: In progress; the table below is authoritative for delivery status.
+Implementation status: The recovery, configuration and common-assembly batch is implemented;
+the broader foundation remains incomplete. The delivery table records implementation scope,
+not maintainer approval or completion of the linked issues. Its acceptance column describes
+the required behavior, not a claim that unimplemented units have passed verification.
 
 ## Context
 
 Dim continues the extracted v4 harness as its own mainline. Its execution kernel already
 has typed plugins, scoped services, committed Timeline facts, persistent Sessions and
-generation-owned work. Extension events remain a closed Rust enum, configuration is not
-yet unified under editable loader intent, and general cross-language capabilities are not
-yet implemented. These gaps must be addressed before expanding the domain feature set.
+generation-owned work. Extension events remain a closed Rust enum, general plugin management
+and cross-language capabilities are incomplete, and the configuration authority differs
+from issue #3. Resolve each capability's contract and dependencies before extending it.
 
 The goal is a complete extensible harness, not a replacement event bus or plugin framework.
 Use rutis and its loader. The standalone Rust library remains usable without the App Server,
@@ -89,6 +94,11 @@ defect requires a corrected compatibility version. Valid snapshots retain suffix
 
 ### Configuration and lifecycle
 
+The source-first configuration model below describes this branch's implementation, proposed
+as an alternative to issue #3's editable-layer authority. It is not an accepted replacement
+for that issue. General scope and acknowledgement requirements extend beyond the implemented
+MCP and user Skill configuration paths; see the delivery table and issue alignment below.
+
 The loader owns plugin enablement and runtime configuration composed from explicit sources.
 Management services retain business routing, not independent generation ownership.
 Distinguish user, workspace and Session scopes, source provenance and temporary overrides.
@@ -141,6 +151,11 @@ external outcomes. Use existing rutis lifecycle hooks and the harness fault path
 
 ### Trust and cross-language calls
 
+These are target contracts, not a claim of a complete trust boundary or cross-language
+Capability implementation. Protected-local management and authorized file roots do not
+constitute workspace execution approval. Project MCP discovery can currently launch a
+configured process without a separate workspace-trust decision.
+
 Configuration precedence never overrides host safety limits or workspace trust. Store credential
 references in generic configuration; exclude resolved secrets from management notifications,
 diagnostics, declarations and event history. Trust, authorization and OS isolation are distinct.
@@ -162,24 +177,27 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 
 | Unit | Status | Acceptance |
 | --- | --- | --- |
-| Public contracts and contributor rules | Implemented as documentation | Current and planned behavior remain distinct; no private source content |
-| Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots; native storage v12 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
+| Public contracts and contributor rules | Documented; proposed contracts still require issue alignment | Current and planned behavior remain distinct; no private source content |
+| Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots, introduced in native storage v12; current database format is v13 and default snapshot interpreter is v2 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
+| Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
-| Scoped persisted loader configuration | Implemented for MCP: source-first publication to the root loader; user MCP/Skills authority and import use native storage v13. General content-plugin rows remain future work | Scope isolation, save failure, protected-local management, secret-free rows and diagnostics |
+| Scoped persisted loader configuration | Implemented for MCP: source-first publication to the root loader; user MCP/Skills authority and import use native storage v13. Pending issue #3 alignment. General plugin configuration, Session overrides, unified credential references and complete acknowledgement/status reporting are not implemented | Scope isolation, save failure, protected-local management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
-| Loader-owned MCP instances | Implemented: scoped logical identities, overlapping generation rows, host publication, explicit disconnect and cleanup receipts | Bound tools survive replacement; all generations drain; logical identities survive restart and root reordering |
+| Loader-owned MCP instances | Implemented: scoped logical identities, overlapping generation rows, host publication, explicit disconnect and cleanup receipts. Uses distinct generation rows rather than issue #3's proposed instanced group | Bound tools survive replacement; all generations drain; logical identities survive restart and root reordering |
+| Workspace execution trust and constrained plugins | Not implemented as a workspace approval gate or OS isolation boundary | Unapproved workspace configuration cannot execute; approval, configuration changes and revocation are enforced at host execution boundaries |
 
-Keep implementation on one integration branch with reviewable commits. The persistence format,
-runtime assembly and lifecycle have one coordinated owner. Whole-plugin documentation coverage
-and generated checks may progress alongside implementation; they are not evidence of runtime
-correctness. After these foundations, deliver compression hosts, collaboration, permissions,
-queue controls, questions, scoped rules and file history; then external protocols, plugin
-management and long-running/remote capabilities. TUI implementation and company services remain
-outside this work. Security boundaries apply before exposing untrusted execution.
+Keep this implementation batch on one integration branch with reviewable commits. The persistence
+format, runtime assembly and lifecycle have one coordinated owner. Whole-plugin documentation
+coverage and generated checks are not evidence of runtime correctness. Further work includes
+compression hosts, workspace trust, extensions to existing collaboration and permissions,
+queue controls, questions, scoped rules, file history, external protocols, plugin management
+and long-running/remote capabilities. These are separate delivery scopes, not additions to the
+completed batch. TUI implementation and company services remain outside this work. Security
+boundaries apply before exposing untrusted execution.
 
-Each unit is usable on its declared parent and passes its relevant public-flow tests. Integrated
-boundaries run workspace, lint, graph and packaging-script checks. Review P0–P3 issues and remove
+Each delivered unit must be usable on its declared parent and pass its relevant public-flow tests. Integrated
+boundaries run workspace, lint, graph and packaging-script checks. Review P0 through P3 issues and remove
 unnecessary machinery before committing. Storage compatibility follows actual format changes,
 not a preallocated version shared across incompatible branch commits. Use disposable databases;
 never overwrite a user's existing store to make a test pass.
@@ -195,15 +213,33 @@ never overwrite a user's existing store to make a test pass.
   [#6](https://github.com/arcships/dim/issues/6) tracks typed-dependency questions and startup tests;
   [#7](https://github.com/arcships/dim/issues/7) tracks contributor documentation and graph checks.
 
+### Maintainer alignment required
+
+| Issue | Existing decision or open question | Branch position and merge requirement |
+| --- | --- | --- |
+| #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
+| #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | Implemented alternative: each named source persists first, then a publisher reconciles root-loader layers without an editable target. Distinct rows retain overlapping MCP generations. Obtain maintainer agreement on these differences before merging the configuration implementation; otherwise revise the affected implementation and format decisions |
+| #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
+
+The source-first recommendation preserves shared workspace files and explicit edit targets.
+In rutis 0.10.0, a loader has at most one editable target and applies edits before persistence;
+`Edited` can be emitted after a save failure. A group instance does not pin the old template's
+resources. These constraints motivate this branch's alternative, not permission to replace
+the issue decision without agreement. Revisit the integration if rutis supplies the required
+source and generation semantics; do not introduce another plugin lifecycle manager.
+
 Recovery facts/snapshots and common API-key assembly are additional work, not completion of those
-issues. They and configuration can progress without settling dynamic events. Do not equate this
-branch's accepted implementation direction with maintainer approval of Proposed issue changes.
+issues. The configuration implementation is available for review without settling dynamic
+events, but does not complete #3. Plugin documentation and coverage checks address part of #7;
+they do not resolve all design-document migration and issue-link work. Do not equate implemented
+behavior with maintainer approval of the proposed issue changes.
 
 ## Alternatives and consequences
 
 Continuing to add domain variants to the closed enum would defer extension ownership and force
 another migration for every feature. A universal executable projection language would create a
-second context-adoption mechanism and make history depend on plugin interpreters. Both are rejected.
+second context-adoption mechanism and make history depend on plugin interpreters. This proposal
+rejects both; agreement on issue #2 is still required.
 
 Stable public contracts require cross-crate work and explicit storage compatibility. Snapshots add
 storage maintenance but remain disposable; immutable facts and reference closure remain authoritative.
