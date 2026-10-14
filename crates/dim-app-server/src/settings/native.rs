@@ -1,0 +1,131 @@
+//! User-source SQLite authority. Import commits the document and provenance atomically.
+use super::*;
+use rusqlite::{Connection, OptionalExtension, params};
+
+fn key<D: BusinessDocument>() -> String {
+    format!("user/{}", D::NAMESPACE)
+}
+fn token<D: BusinessDocument>(version: i64) -> String {
+    format!("native:{}:{version}", key::<D>())
+}
+fn read<D: BusinessDocument>(
+    connection: &Connection,
+) -> Result<Option<(i64, SettingsSnapshot<D>)>> {
+    let row: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT version, document FROM settings_documents WHERE source = ?1",
+            [key::<D>()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| SettingsError::Persistence)?;
+    row.map(|(version, body)| {
+        if version <= 0 {
+            return Err(SettingsError::Invalid(
+                "invalid persisted settings revision",
+            ));
+        }
+        let mut snapshot = decode::<D>(Ok(body.into_bytes()))?;
+        snapshot.revision = token::<D>(version);
+        Ok((version, snapshot))
+    })
+    .transpose()
+}
+impl SettingsService {
+    pub(super) async fn native_read<D: BusinessDocument>(
+        &self,
+        path: FilePath,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<D>> {
+        let task = {
+            let _guard = self.gate.lock().unwrap();
+            self.check_open(cancel)?;
+            let db = self
+                .database
+                .as_ref()
+                .expect("native settings binding")
+                .clone();
+            let files = self.files.clone();
+            let cancel = cancel.clone();
+            let stopping = self.stopping.clone();
+            self.updates.spawn(async move {
+                if let Some((_, snapshot)) = db
+                    .run(move |connection| Ok(read::<D>(connection)))
+                    .await
+                    .map_err(|_| SettingsError::Persistence)??
+                {
+                    return Ok(snapshot);
+                }
+                let imported = decode::<D>(files.read(&path, &cancel).await)?;
+                let body = serde_json::to_string(&imported.document)
+                    .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
+                db.run(move |connection| {
+                    let result = (|| {
+                        if stopping.is_cancelled() {
+                            return Err(SettingsError::Closed);
+                        }
+                        if cancel.is_cancelled() {
+                            return Err(SettingsError::Cancelled);
+                        }
+                        let tx = connection.transaction().map_err(|_| SettingsError::Persistence)?;
+                        tx.execute(
+                            "INSERT INTO settings_documents(source, version, document, imported_revision) VALUES (?1, 1, ?2, ?3) ON CONFLICT(source) DO NOTHING",
+                            params![key::<D>(), body, imported.revision],
+                        ).map_err(|_| SettingsError::Persistence)?;
+                        let (_, snapshot) = read::<D>(&tx)?.expect("source inserted or already present");
+                        tx.commit().map_err(|_| SettingsError::Persistence)?;
+                        Ok(snapshot)
+                    })();
+                    Ok(result)
+                }).await.map_err(|_| SettingsError::Persistence)?
+            })
+        };
+        task.await?
+    }
+    pub(super) async fn native_replace<D: BusinessDocument>(
+        self: &Arc<Self>,
+        path: FilePath,
+        expected: String,
+        document: D,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<D>> {
+        self.native_read::<D>(path, cancel).await?;
+        self.check_open(cancel)?;
+        let owner = self.clone();
+        let cancel = cancel.clone();
+        self.database
+            .as_ref()
+            .expect("native settings binding")
+            .run(move |connection| {
+                let result = (|| {
+                    owner.check_open(&cancel)?;
+                    let tx = connection
+                        .transaction()
+                        .map_err(|_| SettingsError::Persistence)?;
+                    let (version, current) = read::<D>(&tx)?.ok_or(SettingsError::Invalid(
+                        "persisted settings source is missing",
+                    ))?;
+                    if current.revision != expected {
+                        return Err(SettingsError::Conflict);
+                    }
+                    let body = serde_json::to_string(&document)
+                        .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
+                    let version = version
+                        .checked_add(1)
+                        .ok_or(SettingsError::Invalid("settings revision overflow"))?;
+                    tx.execute(
+                    "UPDATE settings_documents SET version = ?1, document = ?2 WHERE source = ?3",
+                    params![version, body, key::<D>()],
+                ).map_err(|_| SettingsError::Persistence)?;
+                    tx.commit().map_err(|_| SettingsError::Persistence)?;
+                    let revision = token::<D>(version);
+                    // Publish under the connection gate, in durable commit order.
+                    owner.publish::<D>(SettingsScope::User, &revision);
+                    Ok(SettingsSnapshot { revision, document })
+                })();
+                Ok(result)
+            })
+            .await
+            .map_err(|_| SettingsError::Persistence)?
+    }
+}

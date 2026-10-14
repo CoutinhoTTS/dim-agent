@@ -1050,7 +1050,6 @@
       "file": "crates/dim-app-server/src/lib.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
         "serde_json::json",
         "tracing::error",
         "vec"
@@ -1255,8 +1254,17 @@
       "unexpandedMacros": [
         "matches",
         "tokio::pin",
-        "tokio::select",
-        "unreachable"
+        "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::config",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/config.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
       ]
     },
     {
@@ -1279,8 +1287,7 @@
         "format",
         "json",
         "matches",
-        "tokio::select",
-        "unreachable"
+        "tokio::select"
       ]
     },
     {
@@ -1500,21 +1507,26 @@
       "file": "crates/dim-app-server/src/settings.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
-        "tokio::select",
-        "unreachable",
-        "vec"
+        "tokio::select"
       ]
     },
     {
-      "id": "dim_app_server::settings::mcp_approval",
+      "id": "dim_app_server::settings::approvals",
       "crate": "dim_app_server",
       "parent": "dim_app_server::settings",
-      "file": "crates/dim-app-server/src/settings/mcp_approval.rs",
+      "file": "crates/dim-app-server/src/settings/approvals.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_app_server::settings::native",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::settings",
+      "file": "crates/dim-app-server/src/settings/native.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
-        "tokio::select"
+        "params"
       ]
     },
     {
@@ -1599,32 +1611,6 @@
       "file": "crates/dim-app-server/src/tree_protocol.rs",
       "unexpandedMacros": [
         "serde_json::json"
-      ]
-    },
-    {
-      "id": "dim_app_server::user_configuration",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server",
-      "file": "crates/dim-app-server/src/user_configuration.rs",
-      "unexpandedMacros": [
-        "format",
-        "matches",
-        "params",
-        "serde_json::json",
-        "vec"
-      ]
-    },
-    {
-      "id": "dim_app_server::user_configuration::management",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::user_configuration",
-      "file": "crates/dim-app-server/src/user_configuration/management.rs",
-      "unexpandedMacros": [
-        "matches",
-        "serde_json::json",
-        "tokio::select",
-        "unreachable",
-        "vec"
       ]
     },
     {
@@ -8756,7 +8742,6 @@
       "from": "dim_app_server",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
-        "path dim_agent_capabilities::file_storage::FileStorage",
         "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
       ]
     },
@@ -9057,16 +9042,6 @@
       ]
     },
     {
-      "from": "dim_app_server",
-      "to": "dim_app_server::user_configuration",
-      "references": [
-        "mod user_configuration",
-        "path user_configuration::UserConfigurationPlugin",
-        "path user_configuration::UserPersist::default",
-        "path user_configuration::register_documents"
-      ]
-    },
-    {
       "from": "dim_app_server::@bin:dim-app-server",
       "to": "dim_agent_aimux::config",
       "references": [
@@ -9219,13 +9194,6 @@
         "path dim_app_server::protocol::DaemonProfile::Configured",
         "path dim_app_server::protocol::DaemonProfile::Mock",
         "path dim_app_server::protocol::DaemonProfile::Product"
-      ]
-    },
-    {
-      "from": "dim_app_server::@bin:dim-app-server",
-      "to": "dim_app_server::storage::sqlite",
-      "references": [
-        "path dim_app_server::storage::SqliteStorage::migrate_v13_to_v14"
       ]
     },
     {
@@ -10685,6 +10653,22 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "mod config",
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path McpSettings",
+        "path config::effective",
+        "path config::fingerprint",
+        "path config::grant_key",
+        "use config::McpServerSettings",
+        "use config::McpSettings"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::management",
       "references": [
         "mod management",
@@ -10738,22 +10722,32 @@
       "from": "dim_app_server::mcp",
       "to": "dim_app_server::settings",
       "references": [
-        "path McpServerSettings",
-        "path McpServerSettings::Remote",
-        "path McpServerSettings::Stdio",
-        "path SettingsDocument::Mcp",
         "path SettingsError",
         "path SettingsError::Conflict",
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path SettingsScope::User",
         "path SettingsService",
-        "path SettingsSource",
-        "path SettingsSource::ProjectMcp",
-        "path SettingsSource::Skills",
-        "path SettingsSource::UserMcp",
-        "use crate::settings::McpServerSettings",
-        "use crate::settings::SettingsDocument",
         "use crate::settings::SettingsError",
-        "use crate::settings::SettingsService",
-        "use crate::settings::SettingsSource"
+        "use crate::settings::SettingsScope",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::config",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path Result",
+        "path SettingsError::Invalid",
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path SettingsService",
+        "use crate::settings::BusinessDocument",
+        "use crate::settings::Result",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsScope",
+        "use crate::settings::SettingsService"
       ]
     },
     {
@@ -10768,7 +10762,6 @@
         "path McpError::Cancelled",
         "path McpError::Closed",
         "path McpError::InvalidId",
-        "path McpError::InvalidSource",
         "path McpError::Settings",
         "path McpError::UnknownServer",
         "path McpError::Worker",
@@ -10777,6 +10770,19 @@
         "use super::McpChange",
         "use super::McpError",
         "use super::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path RemoteTransport::Http",
+        "path RemoteTransport::Sse",
+        "use super::config::McpServerSettings",
+        "use super::config::RemoteTransport"
       ]
     },
     {
@@ -10822,27 +10828,18 @@
       "from": "dim_app_server::mcp::management",
       "to": "dim_app_server::settings",
       "references": [
-        "path McpServerSettings::Remote",
-        "path McpServerSettings::Stdio",
-        "path RemoteTransport::Http",
-        "path RemoteTransport::Sse",
-        "path SettingsError::AppliedUnsaved",
         "path SettingsError::Cancelled",
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path SettingsScope::User",
         "path SettingsService",
-        "path SettingsSource",
-        "path SettingsSource::ProjectMcp",
-        "path SettingsSource::Skills",
-        "path SettingsSource::UserMcp",
-        "path crate::settings::McpServerSettings",
-        "use crate::settings::McpServerSettings",
-        "use crate::settings::RemoteTransport",
         "use crate::settings::SettingsError",
-        "use crate::settings::SettingsService",
-        "use crate::settings::SettingsSource"
+        "use crate::settings::SettingsScope",
+        "use crate::settings::SettingsService"
       ]
     },
     {
@@ -10895,6 +10892,24 @@
     },
     {
       "from": "dim_app_server::mcp::publication",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path McpSettings",
+        "path config",
+        "path config::effective",
+        "path config::fingerprint",
+        "path config::grant_key",
+        "path config::workspace",
+        "use super::config",
+        "use super::config::McpServerSettings",
+        "use super::config::McpSettings"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
       "to": "dim_app_server::mcp::publication::tests",
       "references": [
         "mod tests"
@@ -10918,20 +10933,14 @@
       "from": "dim_app_server::mcp::publication",
       "to": "dim_app_server::settings",
       "references": [
-        "path McpServerSettings",
-        "path McpServerSettings::Remote",
-        "path McpServerSettings::Stdio",
-        "path SettingsDocument::Mcp",
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path SettingsScope::User",
         "path SettingsService",
-        "path SettingsSource",
-        "path SettingsSource::ProjectMcp",
-        "path SettingsSource::UserMcp",
         "path crate::settings::SettingsError::Conflict",
         "path crate::settings::SettingsError::Invalid",
-        "use crate::settings::McpServerSettings",
-        "use crate::settings::SettingsDocument",
-        "use crate::settings::SettingsService",
-        "use crate::settings::SettingsSource"
+        "use crate::settings::SettingsScope",
+        "use crate::settings::SettingsService"
       ]
     },
     {
@@ -10975,6 +10984,13 @@
     },
     {
       "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path config"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::mcp::publication",
       "references": [
         "path ConnectionConfig",
@@ -10997,8 +11013,8 @@
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::settings",
       "references": [
-        "path SettingsSource::ProjectMcp",
-        "path SettingsSource::UserMcp",
+        "path SettingsScope::Project",
+        "path SettingsScope::User",
         "path crate::settings::SettingsPlugin::new"
       ]
     },
@@ -11065,6 +11081,22 @@
     },
     {
       "from": "dim_app_server::mcp::server",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path BearerAuth",
+        "path BearerAuth::Bearer",
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path RemoteTransport::Http",
+        "path RemoteTransport::Sse",
+        "use super::config::BearerAuth",
+        "use super::config::McpServerSettings",
+        "use super::config::RemoteTransport"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::server",
       "to": "dim_app_server::mcp::server::sse",
       "references": [
         "mod sse"
@@ -11077,22 +11109,6 @@
         "mod stdio",
         "path stdio::Config",
         "path stdio::Config::new"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::server",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path BearerAuth",
-        "path BearerAuth::Bearer",
-        "path McpServerSettings",
-        "path McpServerSettings::Remote",
-        "path McpServerSettings::Stdio",
-        "path RemoteTransport::Http",
-        "path RemoteTransport::Sse",
-        "use crate::settings::BearerAuth",
-        "use crate::settings::McpServerSettings",
-        "use crate::settings::RemoteTransport"
       ]
     },
     {
@@ -11466,14 +11482,6 @@
     },
     {
       "from": "dim_app_server::protocol",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path crate::settings::SettingsDocument",
-        "path crate::settings::SettingsSource"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
       "to": "dim_app_server::tree_protocol",
       "references": [
         "path crate::tree_protocol::ApprovalCancelled",
@@ -11484,14 +11492,6 @@
         "path crate::tree_protocol::HistoryResult",
         "path crate::tree_protocol::ModelProgressNotice",
         "path crate::tree_protocol::StateNotice"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
-      "to": "dim_app_server::user_configuration",
-      "references": [
-        "path crate::user_configuration::UserConfigurationInfo",
-        "path crate::user_configuration::UserPersistenceStatus"
       ]
     },
     {
@@ -12080,26 +12080,10 @@
         "path FileStorageError::Closed",
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
+        "path dim_agent_capabilities::file_storage::FileLease",
         "use dim_agent_capabilities::file_storage::FilePath",
         "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
-      ]
-    },
-    {
-      "from": "dim_app_server::settings",
-      "to": "dim_agent_capabilities::skill_settings",
-      "references": [
-        "path SettingsVersion",
-        "path SkillSettingsError",
-        "path SkillSettingsError::Invalid",
-        "path SkillSettingsHost",
-        "path SkillSettingsPort",
-        "path SkillSettingsSnapshot",
-        "use dim_agent_capabilities::skill_settings::SettingsVersion",
-        "use dim_agent_capabilities::skill_settings::SkillSettings",
-        "use dim_agent_capabilities::skill_settings::SkillSettingsError",
-        "use dim_agent_capabilities::skill_settings::SkillSettingsHost",
-        "use dim_agent_capabilities::skill_settings::SkillSettingsSnapshot"
       ]
     },
     {
@@ -12125,47 +12109,94 @@
     },
     {
       "from": "dim_app_server::settings",
-      "to": "dim_app_server::settings::mcp_approval",
+      "to": "dim_app_server::settings::approvals",
       "references": [
-        "mod mcp_approval"
+        "mod approvals"
       ]
     },
     {
       "from": "dim_app_server::settings",
-      "to": "dim_app_server::user_configuration",
+      "to": "dim_app_server::settings::native",
       "references": [
-        "path UserConfiguration",
-        "use crate::user_configuration::UserConfiguration"
+        "mod native"
       ]
     },
     {
       "from": "dim_app_server::settings",
-      "to": "dim_app_server::user_configuration::management",
+      "to": "dim_app_server::storage::sqlite",
       "references": [
-        "path crate::user_configuration::management::provide"
+        "path SqliteStorage",
+        "use crate::storage::SqliteStorage"
       ]
     },
     {
-      "from": "dim_app_server::settings::mcp_approval",
+      "from": "dim_app_server::settings::approvals",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path FileStorageError",
-        "path FileStorageError::Io",
-        "path FileStorageError::Locked"
+        "path FileStorageError::Io"
       ]
     },
     {
-      "from": "dim_app_server::settings::mcp_approval",
+      "from": "dim_app_server::settings::approvals",
       "to": "dim_app_server::settings",
       "references": [
-        "path McpServerSettings",
-        "path McpServerSettings::Remote",
-        "path McpServerSettings::Stdio",
         "path Result",
         "path SettingsError::Invalid",
         "path SettingsService",
-        "path SettingsSource",
-        "path SettingsSource::ProjectMcp"
+        "path private_permissions",
+        "path validate_namespace"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::native",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FilePath"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::native",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path Result",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsError::Persistence",
+        "path SettingsScope::User",
+        "path SettingsService",
+        "path SettingsSnapshot",
+        "path decode",
+        "path revision"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "use dim_agent_capabilities::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_agent_capabilities::skill_settings",
+      "references": [
+        "path SettingsVersion",
+        "path SkillSettings",
+        "path SkillSettingsError",
+        "path SkillSettingsError::Conflict",
+        "path SkillSettingsError::Invalid",
+        "path SkillSettingsHost",
+        "path SkillSettingsSnapshot",
+        "use dim_agent_capabilities::skill_settings::SettingsVersion",
+        "use dim_agent_capabilities::skill_settings::SkillSettings",
+        "use dim_agent_capabilities::skill_settings::SkillSettingsError",
+        "use dim_agent_capabilities::skill_settings::SkillSettingsHost",
+        "use dim_agent_capabilities::skill_settings::SkillSettingsSnapshot"
       ]
     },
     {
@@ -12194,7 +12225,6 @@
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "path SkillsCatalog",
-        "path dim_agent_capabilities::skills::SkillsCatalogPlugin",
         "path dim_agent_capabilities::skills::SkillsCatalogPlugin::mount",
         "use dim_agent_capabilities::skills::SkillsCatalog"
       ]
@@ -12241,6 +12271,25 @@
         "use crate::protocol::RpcError",
         "use crate::protocol::canonical_cwd",
         "use crate::protocol::optional_non_null"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path SettingsError",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsScope::User",
+        "path SettingsService",
+        "path crate::settings::Result",
+        "use crate::settings::BusinessDocument",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsScope",
+        "use crate::settings::SettingsService"
       ]
     },
     {
@@ -12363,13 +12412,6 @@
         "path Result",
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::sqlite",
-      "to": "dim_app_server::user_configuration",
-      "references": [
-        "path crate::user_configuration::migrate_envelope"
       ]
     },
     {
@@ -12720,132 +12762,6 @@
         "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileStorage",
-        "path dim_agent_capabilities::file_storage::FileStorageError::Io",
-        "use dim_agent_capabilities::file_storage::FileStorage"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::KeysOf"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration",
-      "to": "dim_agent_runtime::error",
-      "references": [
-        "path dim_agent_runtime::AgentError",
-        "path dim_agent_runtime::AgentError::Storage"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration",
-      "to": "dim_agent_runtime::state",
-      "references": [
-        "path StateCell",
-        "path StateCell::new",
-        "use dim_agent_runtime::StateCell"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path Result",
-        "path SettingsChange",
-        "path SettingsDocument",
-        "path SettingsError::AppliedUnsaved",
-        "path SettingsError::Cancelled",
-        "path SettingsError::Closed",
-        "path SettingsError::Conflict",
-        "path SettingsError::Invalid",
-        "path SettingsError::Persistence",
-        "path SettingsSnapshot",
-        "path SettingsSource",
-        "path SettingsSource::Skills",
-        "path SettingsSource::UserMcp",
-        "path decode",
-        "path validate"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration",
-      "to": "dim_app_server::storage::sqlite",
-      "references": [
-        "path SqliteStorage",
-        "use crate::storage::SqliteStorage"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration",
-      "to": "dim_app_server::user_configuration::management",
-      "references": [
-        "mod management"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration::management",
-      "to": "dim_app_server::methods",
-      "references": [
-        "path Interruption::Drain",
-        "path ManagementMethods::provide",
-        "path MethodDecl::management",
-        "path params",
-        "path reply",
-        "use crate::methods::Interruption",
-        "use crate::methods::ManagementMethods",
-        "use crate::methods::MethodDecl",
-        "use crate::methods::params",
-        "use crate::methods::reply"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration::management",
-      "to": "dim_app_server::protocol",
-      "references": [
-        "path ConfigurationCatalog",
-        "path ConfigurationMutation",
-        "path ConfigurationTarget",
-        "path ConfigurationUpdate",
-        "path Empty",
-        "path RpcError",
-        "path RpcError::app",
-        "path RpcError::invalid",
-        "path RpcError::reloading"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration::management",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsError",
-        "path SettingsError::AppliedUnsaved",
-        "path SettingsError::Cancelled",
-        "path SettingsError::Closed",
-        "path SettingsError::Conflict",
-        "path SettingsError::Invalid",
-        "path SettingsService",
-        "use crate::settings::SettingsError",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::user_configuration::management",
-      "to": "dim_app_server::user_configuration",
-      "references": [
-        "path UserConfiguration",
-        "use crate::user_configuration::UserConfiguration"
       ]
     },
     {
@@ -13378,6 +13294,22 @@
     {
       "module": "dim_app_server::provider::preferences",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::settings",
+      "path": "D::NAMESPACE"
+    },
+    {
+      "module": "dim_app_server::settings",
+      "path": "D::PROJECT_FILE"
+    },
+    {
+      "module": "dim_app_server::settings",
+      "path": "D::USER_FILE"
+    },
+    {
+      "module": "dim_app_server::settings",
+      "path": "D::default"
     },
     {
       "module": "dim_app_server::skills_management",

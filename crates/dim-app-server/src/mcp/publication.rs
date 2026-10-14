@@ -1,10 +1,11 @@
 //! Serialized host authority for source selection and cross-Session retirement.
 //! Connection resources and disposal belong exclusively to loader instances.
+use super::config::{self, McpServerSettings, McpSettings};
 use super::{
     McpConnection, McpError, Result,
     server::{McpServer, McpServerError, McpServerPlugin, McpServerState},
 };
-use crate::settings::{McpServerSettings, SettingsDocument, SettingsService, SettingsSource};
+use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_runtime::{Capability, KeysOf, SessionLoader, StateCell, register_capability};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use rutis_loader::{Builtins, InstanceResult, Loader};
@@ -102,7 +103,7 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     Approval {
-        source: SettingsSource,
+        source: SettingsScope,
         id: String,
         token: Option<String>,
         reply: oneshot::Sender<Result<()>>,
@@ -114,7 +115,7 @@ enum Command {
         reply: oneshot::Sender<Result<Arc<McpConnection>>>,
     },
     Disconnect {
-        source: SettingsSource,
+        source: SettingsScope,
         id: String,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -122,10 +123,10 @@ enum Command {
 pub struct Publication {
     commands: mpsc::Sender<Command>,
     released: watch::Sender<()>,
-    applications: StateCell<BTreeMap<SettingsSource, McpApplication>>,
+    applications: StateCell<BTreeMap<SettingsScope, McpApplication>>,
 }
 impl Publication {
-    pub(super) fn application(&self, source: SettingsSource) -> McpApplication {
+    pub(super) fn application(&self, source: SettingsScope) -> McpApplication {
         self.applications.get().remove(&source).unwrap_or_default()
     }
     pub(super) fn refresh(&self) {
@@ -153,7 +154,7 @@ impl Publication {
     }
     pub(super) async fn approval(
         &self,
-        source: SettingsSource,
+        source: SettingsScope,
         id: String,
         token: Option<String>,
         cancel: &CancellationToken,
@@ -193,7 +194,7 @@ impl Publication {
     }
     pub(super) async fn disconnect(
         &self,
-        source: SettingsSource,
+        source: SettingsScope,
         id: String,
         cancel: &CancellationToken,
     ) -> Result<()> {
@@ -388,7 +389,7 @@ struct Source {
     error: Option<&'static str>,
 }
 struct Generation {
-    source: SettingsSource,
+    source: SettingsScope,
     id: String,
     configuration: McpServerSettings,
     owner: McpOwner,
@@ -398,11 +399,11 @@ struct Generation {
 }
 struct Projection {
     port: Arc<Publication>,
-    sources: BTreeMap<SettingsSource, Source>,
+    sources: BTreeMap<SettingsScope, Source>,
     generations: BTreeMap<String, Generation>,
-    disconnected: BTreeMap<(SettingsSource, String), String>,
-    cleanup_failed: BTreeSet<SettingsSource>,
-    application_failed: BTreeMap<(String, SettingsSource, String), (String, CancellationToken)>,
+    disconnected: BTreeMap<(SettingsScope, String), String>,
+    cleanup_failed: BTreeSet<SettingsScope>,
+    application_failed: BTreeMap<(String, SettingsScope, String), (String, CancellationToken)>,
 }
 impl Projection {
     fn current(&self, generation: &Generation) -> bool {
@@ -417,8 +418,13 @@ impl Projection {
         })
     }
     async fn refresh(&mut self, settings: &SettingsService, cancel: &CancellationToken) {
-        for (source, _) in settings.mcp_sources() {
-            let snapshot = match settings.read(source, cancel).await {
+        for source in std::iter::once(SettingsScope::User).chain(
+            settings
+                .project_sources()
+                .into_iter()
+                .map(|(root, _)| SettingsScope::Project(root)),
+        ) {
+            let snapshot = match settings.read::<McpSettings>(source, cancel).await {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
                     let intent = self.sources.entry(source).or_insert_with(|| Source {
@@ -431,30 +437,32 @@ impl Projection {
                     continue;
                 }
             };
-            let SettingsDocument::Mcp(document) = snapshot.document else {
-                unreachable!("MCP source")
-            };
+            let document = snapshot.document;
             self.disconnected
                 .retain(|(owner, _), revision| *owner != source || *revision == snapshot.revision);
             let configured = document.mcp_servers.keys().cloned().collect();
             let mut current = BTreeMap::new();
             let mut error = None;
             for (id, config) in document.mcp_servers {
-                let Ok(config) = settings.mcp_effective(source, config) else {
+                let Ok(config) = config::effective(settings, source, config) else {
                     error = Some("MCP configuration could not be resolved");
                     continue;
                 };
-                let approved = if matches!(source, SettingsSource::ProjectMcp(_)) {
-                    match settings.mcp_fingerprint(source, &id, &config) {
-                        Ok(token) => match settings.mcp_approved(source, &id, &token, cancel).await
-                        {
-                            Ok(value) => value,
-                            Err(_) => {
-                                error = Some("MCP approval store could not be read");
-                                false
+                let approved = if matches!(source, SettingsScope::Project(_)) {
+                    match (
+                        config::fingerprint(settings, source, &id, &config),
+                        config::grant_key(settings, source, &id),
+                    ) {
+                        (Ok(token), Ok(key)) => {
+                            match settings.approved("mcp", &key, &token, cancel).await {
+                                Ok(value) => value,
+                                Err(_) => {
+                                    error = Some("MCP approval store could not be read");
+                                    false
+                                }
                             }
-                        },
-                        Err(_) => {
+                        }
+                        _ => {
                             error = Some("MCP configuration could not be resolved");
                             false
                         }
@@ -487,7 +495,7 @@ impl Projection {
                             McpServerState::Failed | McpServerState::Closed
                         ))
                     || (!self.current(g)
-                        && (g.source != SettingsSource::UserMcp || g.lease.strong_count() == 0))
+                        && (g.source != SettingsScope::User || g.lease.strong_count() == 0))
             })
             .map(|(reference, _)| reference.clone())
             .collect();
@@ -567,7 +575,7 @@ impl Projection {
         }
         let mut selected = None;
         for source in
-            std::iter::once(SettingsSource::UserMcp).chain(project.map(SettingsSource::ProjectMcp))
+            std::iter::once(SettingsScope::User).chain(project.map(SettingsScope::Project))
         {
             let intent =
                 self.sources
@@ -684,21 +692,20 @@ impl Projection {
     async fn approval(
         &mut self,
         settings: &Arc<SettingsService>,
-        source: SettingsSource,
+        source: SettingsScope,
         id: String,
         token: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        settings.mcp_workspace(source)?;
+        config::workspace(settings, source)?;
         if id.trim().is_empty() {
             return Err(McpError::InvalidId);
         }
         if let Some(expected) = &token {
-            let snapshot = settings.read(source, cancel).await?;
-            let SettingsDocument::Mcp(document) = snapshot.document else {
-                unreachable!("MCP source")
-            };
-            let config = settings.mcp_effective(
+            let snapshot = settings.read::<McpSettings>(source, cancel).await?;
+            let document = snapshot.document;
+            let config = config::effective(
+                settings,
                 source,
                 document
                     .mcp_servers
@@ -706,14 +713,19 @@ impl Projection {
                     .ok_or(McpError::UnknownServer)?
                     .clone(),
             )?;
-            if settings.mcp_fingerprint(source, &id, &config)? != *expected {
+            if config::fingerprint(settings, source, &id, &config)? != *expected {
                 return Err(crate::settings::SettingsError::Conflict.into());
             }
             McpServerPlugin::new(config, TypeKey::of::<McpServer>())?;
         }
         let revoking = token.is_none();
         settings
-            .mcp_set_approval(source, id.clone(), token, cancel)
+            .set_approval(
+                "mcp",
+                config::grant_key(settings, source, &id)?,
+                token,
+                cancel,
+            )
             .await?;
         let result = if revoking {
             self.disconnect(source, id).await
@@ -723,7 +735,7 @@ impl Projection {
         self.refresh(settings, cancel).await;
         result
     }
-    async fn disconnect(&mut self, source: SettingsSource, id: String) -> Result<()> {
+    async fn disconnect(&mut self, source: SettingsScope, id: String) -> Result<()> {
         if let Some(intent) = self.sources.get_mut(&source) {
             self.disconnected
                 .insert((source, id.clone()), intent.revision.clone());
@@ -759,7 +771,7 @@ fn connection(
     Arc::new(McpConnection {
         service: generation.service.clone(),
         released: port.released.clone(),
-        authorization: matches!(generation.source, SettingsSource::ProjectMcp(_))
+        authorization: matches!(generation.source, SettingsScope::Project(_))
             .then(|| (port.clone(), reference.to_owned())),
     })
 }
@@ -1048,7 +1060,7 @@ mod tests {
         assert!(
             fixture
                 .service
-                .application(SettingsSource::UserMcp)
+                .application(SettingsScope::User)
                 .cleanup_error
                 .is_some()
         );
@@ -1065,7 +1077,7 @@ mod tests {
                 .await;
             assert!(matches!(result, Err(McpError::Unavailable)));
             assert_eq!(fixture.faults.cleaned.load(Ordering::SeqCst), 1);
-            let application = fixture.service.application(SettingsSource::UserMcp);
+            let application = fixture.service.application(SettingsScope::User);
             assert!(
                 application.applied_revision.is_none()
                     && application.error.is_some()
@@ -1089,7 +1101,7 @@ mod tests {
         fixture
             .service
             .update(
-                SettingsSource::ProjectMcp(0),
+                SettingsScope::Project(0),
                 catalog.project_revision.unwrap(),
                 "docs".into(),
                 McpChange::Put(serde_json::from_value(json!({"command":"project"})).unwrap()),
@@ -1153,7 +1165,7 @@ mod tests {
         assert!(
             fixture
                 .service
-                .application(SettingsSource::ProjectMcp(0))
+                .application(SettingsScope::Project(0))
                 .cleanup_error
                 .is_some()
         );
@@ -1174,7 +1186,7 @@ mod tests {
         fixture
             .service
             .update(
-                SettingsSource::UserMcp,
+                SettingsScope::User,
                 catalog.user_revision,
                 "docs".into(),
                 McpChange::Put(serde_json::from_value(json!({"command":"second"})).unwrap()),
@@ -1186,7 +1198,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &second) && !Arc::ptr_eq(&first, &other));
         let result = fixture
             .service
-            .disconnect(SettingsSource::UserMcp, "docs".into(), &fixture.stop)
+            .disconnect(SettingsScope::User, "docs".into(), &fixture.stop)
             .await;
         assert!(matches!(
             result,
@@ -1202,7 +1214,7 @@ mod tests {
         assert!(
             fixture
                 .service
-                .application(SettingsSource::UserMcp)
+                .application(SettingsScope::User)
                 .cleanup_error
                 .is_some()
         );
@@ -1232,7 +1244,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             while fixture
                 .service
-                .application(SettingsSource::UserMcp)
+                .application(SettingsScope::User)
                 .cleanup_error
                 .is_none()
             {

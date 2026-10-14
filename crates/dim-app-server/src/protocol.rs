@@ -182,54 +182,6 @@ pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.mcp.refresh",
 ];
 
-/// This boundary cannot name infrastructure, project grants or arbitrary plugins.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ConfigurationSource {
-    UserMcp,
-    Skills,
-}
-impl From<ConfigurationSource> for crate::settings::SettingsSource {
-    fn from(source: ConfigurationSource) -> Self {
-        match source {
-            ConfigurationSource::UserMcp => Self::UserMcp,
-            ConfigurationSource::Skills => Self::Skills,
-        }
-    }
-}
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationTarget {
-    pub source: ConfigurationSource,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ConfigurationUpdate {
-    pub source: ConfigurationSource,
-    pub expected_revision: String,
-    pub document: crate::settings::SettingsDocument,
-}
-impl std::fmt::Debug for ConfigurationUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConfigurationUpdate")
-            .field("source", &self.source)
-            .finish_non_exhaustive()
-    }
-}
-#[derive(Debug, Serialize)]
-pub struct ConfigurationCatalog {
-    pub entries: Vec<crate::user_configuration::UserConfigurationInfo>,
-    pub persistence: crate::user_configuration::UserPersistenceStatus,
-}
-#[derive(Debug, Serialize)]
-pub struct ConfigurationMutation {
-    /// Whether this edit's save completed, not a guarantee about concurrent edits.
-    pub saved: bool,
-    /// Sampled after the edit; another writer may already have replaced it.
-    pub current: crate::user_configuration::UserConfigurationInfo,
-    pub persistence: crate::user_configuration::UserPersistenceStatus,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpStateResult {

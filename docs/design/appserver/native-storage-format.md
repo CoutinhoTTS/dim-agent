@@ -1,22 +1,25 @@
 # Rust 会话存储格式
 
-The current native format is **v14**. It replaces v13 `settings_documents`
-with the root loader's private editable user envelope. Startup strictly rejects
-v13 and older databases without upgrading them. Timeline, profile and provider
-tables are unchanged. Storage versions are independent of RPC versions.
-Private MCP configuration belongs only to the protected envelope, never to
-generic loader rows, schemas, events, diagnostics, Sessions or Timelines.
+The current native format is **v13**, with source-owned `settings_documents`.
+Startup requires the exact v13 SQL schema and a single format marker of 13
+before writable PRAGMAs. Older databases and the removed branch-only v14
+`user_configuration` format are unsupported and preserved, never migrated,
+downgraded or interpreted as v13. No migration API or startup option is provided.
+Existing v13 schemas and document bytes remain compatible. Storage versions are
+independent of RPC versions. Private MCP/Skill business documents do not belong
+in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v14 tables
+## Current v13 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 14)`; exactly one row |
-| `user_configuration.layer` | `TEXT` | No | — | Primary key, `CHECK(layer = 'user')` |
-| `user_configuration.version` | `INTEGER` | No | — | Positive layer CAS version; not a source intent token |
-| `user_configuration.envelope` | `TEXT` | No | — | Private versioned envelope described below |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 13)`; exactly one row |
+| `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp` or `user/skills`; workspace files are not mirrored |
+| `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
+| `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
+| `settings_documents.imported_revision` | `TEXT` | No | — | Original file SHA-256 or `missing`; import provenance, not a CAS token |
 | `provider_imports.kind` | `TEXT` | 否 | — | 联合主键；`provider` 或 `selection` |
 | `provider_imports.id` | `TEXT` | 否 | — | 联合主键；来源业务 ID，删除 Provider 不删除标记 |
 | `provider_imports.source_schema` | `TEXT` | 否 | — | 已检查的来源两表结构 SHA-256 |
@@ -66,61 +69,39 @@ v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、
 
 ### 配置来源与单写者
 
-The envelope has exactly `format: 1`, ordered `patches`, `documents` (opaque
-UUID -> `{source, document}`), and `imports` (typed row ID -> original file
-SHA-256 or `missing`). Documents use `{kind: "mcp" | "skills", document: ...}`.
-Extension fields and disabled IDs not present in the Skill catalog are preserved.
-Snapshots are immutable; loader configs contain only `{reference: UUID}`.
-Only currently referenced snapshots are saved. In memory, pending edits also
-retain their snapshots for CAS replay; superseded credentials are not an audit log.
-Persisted patches may only insert the two root rows `UserMcpDocument` and
-`UserSkillsDocument`, with exactly `id`, matching `name`, and reference `config`.
-No overrides, infrastructure targets, groups, paths, inject, move, disable or
-arbitrary plugin names are accepted. The entire envelope and exact SQL schema
-are validated at the persistence boundary.
+Settings owns each source independently. Original v13 rows under `user/mcp` or
+`user/skills` contain the plain MCP or Skill document JSON, not a tagged envelope.
+Generic Settings persistence retains these exact payload shapes, not loader
+patches or UUID snapshots. Business interpretation and validation belong to the namespace owner.
+Unknown extension fields and disabled Skill IDs are preserved.
 
-Startup first assembles FileStorage, SQLite and UserConfiguration, imports or
-loads outside apply, then reconciles full assembly plus `Editable("user")`.
-Execution profiles import both legacy files atomically before consumers start.
-Account-only profiles do not read execution configuration. Invalid or
-unreadable files now fail startup (rather than a later first source read); no
-empty fallback, deadlock, or authority switch occurs. Originals are retained.
-Project `.mcp.json` and host-local `mcp-approvals.json` retain their contracts.
-Standalone `SettingsPlugin::new` remains file-backed.
+For example, these original v13 rows store `document` as TEXT containing the
+plain payload, not a serialized SettingsDocument wrapper:
 
-User settings mutations serialize the expected-current opaque token check and
-loader update. Loader applies/reconciles before saving. Success acknowledges
-saved state; `SettingsError::AppliedUnsaved` explicitly means current intent is
-live with a queued save. Settings/Skill watch tokens refer to live intent, not a
-durable commit. Consumers reread current intent on invalidation. `LoaderChanged`
-is not persistence acknowledgement. `UserConfiguration::pending_saves` and
-`flush` expose the separate persistence status/retry. CAS conflicts use rutis's
-existing replay queue, not a second reconciler.
-`catalog`/`get` expose only fixed typed row IDs and live opaque tokens; `status`
-exposes the layer base version, pending count and backend availability. `flush`
-owns accepted work even if its waiter disconnects. Restart recovers the last
-saved envelope: live unsaved intent is not durable and must be flushed before
-the process exits if it is to survive restart.
-
-`SqliteStorage::migrate_v13_to_v14(database, home)` is an explicit offline API,
-not called at startup. It holds the same maintenance lock, validates the exact
-v13 schema/version and settings, and replaces only the format/settings tables
-in one transaction. Native v13 documents override stale legacy files; only
-missing native sources import files. All unrelated tables/history/profiles and
-original files are preserved. Invalid input rolls back. Use disposable fixtures
-for verification. To upgrade, stop the daemon, back up the database, then run:
-
-```sh
-dim-app-server --migrate-v13 /path/to/dimcode.sqlite /path/to/configuration-home
+```json
+[
+  {"source":"user/mcp","version":1,"document":"{\"mcpServers\":{}}","imported_revision":"missing"},
+  {"source":"user/skills","version":2,"document":"{\"disabledSkillIds\":[\"example\"]}","imported_revision":"missing"}
+]
 ```
 
-The home must exist. This standalone command rejects daemon options, running
-database owners and repeated upgrades. To roll back a completed upgrade, restore
-the backup with the daemon stopped and use a v13-compatible binary.
+Their CAS tokens are `native:user/mcp:1` and `native:user/skills:2`. Updating
+Skills increments only its version and preserves `imported_revision`.
 
-Invalidations never include document bodies and do not acknowledge persistence,
-connection discovery or cleanup. Session MCP instances are owned and cleaned
-by the loader; retained request bindings follow the Session contract in ADR 002.
+The first successful source read imports its legacy file into SQLite. Document
+and import provenance commit atomically in one row; concurrent imports adopt
+one winner. Invalid files or failed writes create no authoritative row and do
+not fall back to empty settings. Originals remain available for repair/retry.
+After import, SQLite is authoritative: edits CAS the named source revision,
+increment only that source's version, and never rewrite or reread the old file
+as runtime authority. Import provenance does not change on ordinary edits.
+Project `.mcp.json` keeps file authority and content CAS; host-local approvals
+remain separate. Standalone hosts may explicitly use the file backend.
+
+Revision notifications follow successful persistence and contain no business
+document bodies. They certify neither loader adoption nor generation settlement.
+Loader rows represent runtime instances, not the MCP/Skill document authority.
+Importing legacy settings files does not authorize migrating users' databases.
 
 ### 目录与内容
 
@@ -169,7 +150,7 @@ diagnostics, not snapshots. Disposable snapshots commit separately without
 affecting fact durability. `RecoverySnapshot={sequence,event_id,interpreter,state}`;
 the default `dim/context-projection/v2` interpreter encodes `{payload,sha256}`,
 with the complete ProjectionCheckpoint JSON string below as payload. SQLite
-continues to treat state as opaque TEXT; v14 does not change snapshot encoding.
+continues to treat state as opaque TEXT; the database format remains v13.
 
 摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照直接绕过，不通过补算摘要升级；v2 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
 
@@ -236,18 +217,18 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v14）
+## 完整记录示例（v13）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面两个 hash 可以按上文算法复核。
 
 The example retains an old `dim/context-projection/v1` snapshot: the default v2
-interpreter bypasses that unchecked cache and restores from facts. This snapshot
-encoding compatibility is separate from the explicit native v13-to-v14 migration.
+interpreter bypasses that unchecked cache and restores from facts. Existing v13
+databases need no migration for this snapshot interpreter change.
 
 ```json
 {
-  "agent_store_format": [{"version": 14}],
-  "user_configuration": [],
+  "agent_store_format": [{"version": 13}],
+  "settings_documents": [],
   "providers": [],
   "provider_selections": [],
   "provider_imports": [],

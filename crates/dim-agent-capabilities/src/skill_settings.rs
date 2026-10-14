@@ -5,8 +5,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-/// Opaque current-intent revision, not a notification counter. A saved revision
-/// survives restart; an applied-but-unsaved revision does not imply durability.
+/// Opaque source revision, not a notification counter.
 pub type SettingsVersion = String;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +51,7 @@ pub trait SkillSettings: Send + Sync + 'static {
     fn changes(&self) -> watch::Receiver<SettingsVersion>;
 }
 
-/// Process service supplied by the product Settings plugin. Consumers declare
-/// this key in `injects()`; they never depend on the concrete storage owner.
+/// Storage port supplied to the catalog by its embedding host. A standalone
+/// catalog plugin injects this service; a host mounting the catalog may pass it
+/// privately without publishing a separate service or adapter plugin.
 pub struct SkillSettingsHost(pub Arc<dyn SkillSettings>);

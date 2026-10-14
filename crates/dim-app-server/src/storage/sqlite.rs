@@ -11,11 +11,11 @@ use std::{
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 14))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 13))",
     ),
     (
-        "user_configuration",
-        "CREATE TABLE user_configuration (layer TEXT NOT NULL PRIMARY KEY CHECK(layer = 'user'), version INTEGER NOT NULL CHECK(version > 0), envelope TEXT NOT NULL)",
+        "settings_documents",
+        "CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL)",
     ),
     (
         "provider_imports",
@@ -98,7 +98,7 @@ struct Admission {
 }
 // Closing a descriptor alone may leave a flock held by a concurrently spawned
 // child until exec. Release ownership explicitly, including failed opens and
-// offline migration. The connection must always be dropped before this lease.
+// shutdown. The connection must always be dropped before this lease.
 struct DatabaseLease(File);
 impl Drop for DatabaseLease {
     fn drop(&mut self) {
@@ -116,74 +116,6 @@ impl Drop for Operation {
     }
 }
 impl SqliteStorage {
-    /// Explicit offline v13 -> v14 maintenance. No running daemon may own the
-    /// database; exact old schema and documents are checked before any writes.
-    /// `home` supplies legacy files only for sources absent from v13 SQLite.
-    pub fn migrate_v13_to_v14(path: PathBuf, home: PathBuf) -> Result<()> {
-        let path = path.canonicalize().map_err(storage)?;
-        let home = home.canonicalize().map_err(storage)?;
-        if !home.is_dir() {
-            return Err(storage("migration home must be an existing directory"));
-        }
-        let mut lock_path = path.as_os_str().to_os_string();
-        lock_path.push(".lock");
-        let lease = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)
-            .map_err(storage)?;
-        lease
-            .try_lock()
-            .map_err(|_| storage("database maintenance lock unavailable"))?;
-        let _lease = DatabaseLease(lease);
-        let mut connection = Connection::open(&path).map_err(storage)?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(storage)?;
-        let actual = tx
-            .prepare(
-                "SELECT name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
-            )
-            .map_err(storage)?
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(storage)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(storage)?;
-        let expected: Vec<(String, String)> = SCHEMA.iter().map(|(name, sql)| match *name {
-            "agent_store_format" => (name.to_string(), sql.replace("version = 14", "version = 13")),
-            "user_configuration" => ("settings_documents".into(), "CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL)".into()),
-            _ => (name.to_string(), sql.to_string()),
-        }).collect();
-        if actual.len() != expected.len() || actual.iter().any(|row| !expected.contains(row)) {
-            return Err(storage("unsupported v13 schema; database preserved"));
-        }
-        let versions = tx
-            .prepare("SELECT version FROM agent_store_format")
-            .map_err(storage)?
-            .query_map([], |r| r.get::<_, i64>(0))
-            .map_err(storage)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(storage)?;
-        if versions != [13] {
-            return Err(storage("unsupported v13 version; database preserved"));
-        }
-        let envelope = crate::user_configuration::migrate_envelope(&tx, &home)?;
-        tx.execute_batch("DROP TABLE settings_documents; DROP TABLE agent_store_format")
-            .map_err(storage)?;
-        tx.execute_batch(SCHEMA[0].1).map_err(storage)?;
-        tx.execute_batch(SCHEMA[1].1).map_err(storage)?;
-        tx.execute("INSERT INTO agent_store_format VALUES (14)", [])
-            .map_err(storage)?;
-        tx.execute(
-            "INSERT INTO user_configuration VALUES ('user', 1, ?1)",
-            [envelope],
-        )
-        .map_err(storage)?;
-        tx.commit().map_err(storage)?;
-        Ok(())
-    }
     pub fn open(path: PathBuf) -> Result<Arc<Self>> {
         let parent = path
             .parent()
@@ -236,7 +168,7 @@ impl SqliteStorage {
             for (_, sql) in SCHEMA {
                 tx.execute_batch(sql).map_err(storage)?;
             }
-            tx.execute("INSERT INTO agent_store_format VALUES (14)", [])
+            tx.execute("INSERT INTO agent_store_format VALUES (13)", [])
                 .map_err(storage)?;
         } else {
             if actual.len() != SCHEMA.len()
@@ -258,7 +190,7 @@ impl SqliteStorage {
                 .map_err(storage)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(storage)?;
-            if versions != [14] {
+            if versions != [13] {
                 return Err(storage(format!(
                     "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
                     path.display()

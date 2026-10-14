@@ -1,10 +1,10 @@
 # 001: Extensible harness foundation
 
-Superseded in part by [ADR 002](002-loader-plugin-management.md): MCP now uses
-Session-owned instanced groups; user configuration uses the editable
-loader layer. Historical source-first rationale below is not the current target.
+Superseded in part by [ADR 003](003-loader-plugin-management.md): MCP now uses
+Session-owned instanced groups. Business documents retain source-local authority;
+PR #15's ADR 002 D4 reserves loader configuration for structural settings.
 
-Decision status: Recovery design adopted for this branch. ADR 002 records the approved
+Decision status: Recovery design adopted for this branch. ADR 003 records the approved
 configuration scope and its remaining integration work for issue #3. Dynamic-event
 registration, its model-context boundary and dependency-loss refinements remain Proposed
 for issues #2 and #6. This ADR does not supersede those issues' decisions.
@@ -18,9 +18,9 @@ the required behavior, not a claim that unimplemented units have passed verifica
 
 Dim continues the extracted v4 harness as its own mainline. Its execution kernel already
 has typed plugins, scoped services, committed Timeline facts, persistent Sessions and
-generation-owned work. Extension events remain a closed Rust enum, general plugin management
-and cross-language capabilities are incomplete, and the configuration authority differs
-from issue #3. Resolve each capability's contract and dependencies before extending it.
+generation-owned work. Extension events remain a closed Rust enum; general structural plugin
+management and cross-language capabilities are incomplete. Business source authority is
+separate under D4. Resolve each capability's contract and dependencies before extending it.
 
 The goal is a complete extensible harness, not a replacement event bus or plugin framework.
 Use rutis and its loader. The standalone Rust library remains usable without the App Server,
@@ -98,19 +98,19 @@ defect requires a corrected compatibility version. Valid snapshots retain suffix
 
 ### Configuration and lifecycle
 
-The source-first configuration model below describes this branch's implementation, proposed
-as an alternative to issue #3's editable-layer authority. It is not an accepted replacement
-for that issue. General scope and acknowledgement requirements extend beyond the implemented
-MCP and user Skill configuration paths; see the delivery table and issue alignment below.
+Business configuration follows PR #15's D4: MCP and Skill documents belong to
+business sources, not the structural editable layer in issue #3. General scope
+and acknowledgement requirements extend beyond these implemented paths; see
+the delivery table and issue alignment below.
 
-The loader owns plugin enablement and runtime configuration composed from explicit sources.
+The loader owns structural plugin enablement and runtime assembly configuration.
 Management services retain business routing, not independent generation ownership.
 Distinguish user, workspace and Session scopes, source provenance and temporary overrides.
 Each source has an explicit persistence authority and one write path; management edits name their
 target source rather than writing back a merged view. Preserve shared workspace files as sources.
 Import legacy product-home configuration before switching authority, retain originals on failure,
 and do not automatically delete them. Scope row identities and configuration mappings so one
-workspace cannot change another's instances. The loader owns the composed runtime intent; its
+workspace cannot change another's instances. The loader owns structural runtime intent; its
 single editable layer does not itself define multi-scope persistence. Providers are a selection
 dimension, not different harness feature sets.
 
@@ -121,26 +121,21 @@ external effects; runtime convergence can precede a failed save. Notifications t
 refresh, not an assumption of durable success. Stable MCP identity survives process restarts;
 connections and leases remain generation-owned.
 
-The App Server uses source-first persistence: validate and CAS the explicitly named source, then
-publish its composed intent to the existing root loader. A host publisher outside plugin
-apply/dispose serializes publication and retains the immutable assembly layer. Configure that
-loader with no editable layer; do not switch its single editable target between workspaces or
-use its pending-edit queue as a multi-source transaction log. Failed persistence cannot change
-runtime intent; failed application retains persisted intent for an explicit refresh. A mutation
-reply certifies persistence, not loader application or business settlement. Generic loader rows
-reference private revision-bound configuration rather than embedding MCP secrets. Management
-services and leases do not own or shut down these configured rows.
+The App Server validates and CAS-writes the explicitly named business source
+through generic SettingsService BusinessDocument operations, then notifies
+consumers. Failed persistence cannot change runtime intent; failed application
+retains persisted intent. A mutation reply certifies persistence, not discovery,
+model adoption or business settlement. MCP configuration types belong to MCP;
+Skills implements its existing SkillSettingsHost. Full process assembly uses one
+reconcile, without an editable-user bootstrap or configuration management namespace.
 
-User MCP publication uses distinct loader rows for overlapping generations. Replacing a single row
-would dispose the old connection while an accepted model request still holds its tools; a loader
-group instance does not pin its old template. Retire a superseded row when its last binding is
-released. Project generations instead retire on configuration change, disablement or loss of
-execution approval, even with retained bindings. Explicit disconnect removes every generation for
-the selected source and server, waits for loader disposal, and reports cleanup errors even when
-reconciliation itself succeeds.
-The stable part of a row identity hashes the canonical workspace (or user scope) and server id;
-the generation suffix is transient. Private immutable configuration remains available until the
-loader removes its row. Network connection remains lazy and generation-owned.
+MCP generations are private immutable instances within each Session's loader
+subtree. Retained user bindings pin superseded generations until release;
+project changes, disablement or loss of approval retire generations even with
+retained bindings. Disconnect drains every selected source/server generation
+across affected Sessions and reports cleanup errors independently of persistence.
+Ordinary Session closure stops only its own connections. No business document or
+secret enters loader row options; there is no second lifecycle manager.
 
 User MCP and Skill documents have one SQLite authority after a successful lazy import. Store
 the document and import marker atomically, leave originals intact, and permit retry after failed
@@ -163,7 +158,8 @@ selecting FullAccess tool permissions or restoring a Session never grants projec
 Reading configuration is inert: unapproved project entries shadow user entries but cannot start
 stdio processes or connect HTTP/SSE transports, including during automatic tool discovery.
 
-The Settings owner persists host-local grants in `mcp-approvals.json`, format version 1, using
+The Settings owner provides generic namespaced host-local grants; MCP supplies
+scoped identity and configuration fingerprints. MCP grants retain `mcp-approvals.json`, format version 1, using
 FileStorage leases and atomic replacement (0600 on Unix). Native and standalone hosts use the
 same file contract; no native database version change or Session migration is required. The file
 contains only hashed workspace/server identities and configuration fingerprints. Project files,
@@ -203,8 +199,8 @@ files and are not sandboxed by this gate. Constrained plugin execution and OS is
 separate work. Host safety settings do not belong to replayable business facts: replay must never
 restore authority from a Session that once had it.
 
-Configuration precedence never overrides host safety limits or workspace trust. Store credential
-references in generic configuration; exclude resolved secrets from management notifications,
+Configuration precedence never overrides host safety limits or workspace trust. Generic credential
+references and resolution remain future work; exclude resolved secrets from management notifications,
 diagnostics, declarations and event history. Trust, authorization and OS isolation are distinct.
 Native trusted code is not isolated by `Deps`; constrained callers require host checks of caller,
 scope and work ownership. Shared language runtimes are not security sandboxes.
@@ -225,11 +221,11 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Unit | Status | Acceptance |
 | --- | --- | --- |
 | Public contracts and contributor rules | Documented; proposed contracts still require issue alignment | Current and planned behavior remain distinct; no private source content |
-| Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots, introduced in native storage v12; current database format is v14 and default snapshot interpreter is v2 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
+| Recovery facts and snapshots | Implemented: immutable completion facts and separately persisted optional interpreter snapshots, introduced in native storage v12; current database format is v13 and default snapshot interpreter is v2 | Multi-compression, rule replacement/retirement, branch cuts, incompatible/missing snapshots; no new model calls |
 | Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
-| Scoped persisted loader configuration | Native v14 stores a protected editable user layer with private MCP/Skills snapshots; explicit v13 migration is available. See ADR 002. General plugin configuration, Session overrides and unified credential references are not implemented | Scope isolation, save failure, protected-local management, secret-free rows and diagnostics |
+| Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance and generic host-local grants. See ADR 003. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
 | Loader-owned MCP instances | Implemented: Session-owned nested instanced groups with private immutable configuration, automatic replacement, explicit disconnect and cleanup receipts. Session closure stops only its connections; revocation drains all affected Sessions | Bound user-source tools survive replacement; project tools obey current approval; all generations drain; logical identities survive restart and root reordering |
 | Project MCP execution approval | Implemented: host-local scoped configuration grants, protected-local approval/revocation, per-operation checks and generation disposal. General workspace sandboxing and constrained plugins are not implemented | Unapproved project MCP cannot execute or connect; stale configuration, restart, retained tool bindings and revocation respect the grant |
@@ -265,15 +261,14 @@ never overwrite a user's existing store to make a test pass.
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
 | #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
-| #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | ADR 002 implements Session instanced groups, editable persistence and protected-local management for typed user MCP/Skill documents. Generic plugin management and PR #13's unified Management entrypoint remain unimplemented. Project files and host-local approvals remain separate authorities |
+| #3 | Structural plugin configuration uses the persisted editable layer and loader operations; PR #15 ADR 002 D4 separates business sources | ADR 003 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and host-local approvals remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
-The superseded source-first recommendation preserved shared workspace files and explicit edit targets.
-In rutis 0.10.0, a loader has at most one editable target and applies edits before persistence;
-`Edited` can be emitted after a save failure. A group instance does not pin the old template's
-resources. ADR 002 addresses those constraints with explicit applied-unsaved status and
-private immutable instance configuration. Project files retain their own source authority;
-user intent uses the root editable layer. No second plugin lifecycle manager is introduced.
+Source-owned business documents preserve shared workspace files and explicit edit
+targets without using loader edits as persistence transactions. ADR 003 preserves
+the original v13 plain payloads and uses private immutable Session instance
+configuration. Issue #3's editable layer remains structural configuration work;
+business persistence does not create applied-unsaved loader intent.
 
 Recovery facts/snapshots and common API-key assembly are additional work, not completion of those
 issues. The configuration implementation is available for review without settling dynamic

@@ -1,11 +1,10 @@
 //! MCP management wire boundary over the MCP and Settings owners.
+use super::config::{McpServerSettings, RemoteTransport};
 use super::{McpChange, McpError, McpService};
 use crate::{
     methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
     protocol::{RpcError, canonical_cwd, optional_non_null},
-    settings::{
-        McpServerSettings, RemoteTransport, SettingsError, SettingsService, SettingsSource,
-    },
+    settings::{SettingsError, SettingsScope, SettingsService},
 };
 use rutis::{CordisError, Ctx};
 use serde::{Deserialize, Serialize};
@@ -59,7 +58,7 @@ pub struct SaveMcp {
     pub id: String,
     pub source: McpScope,
     pub expected_version: String,
-    pub configuration: crate::settings::McpServerSettings,
+    pub configuration: McpServerSettings,
 }
 impl std::fmt::Debug for SaveMcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,10 +97,7 @@ pub struct McpCatalogEntry {
 pub(crate) fn error(error: McpError) -> RpcError {
     let kind = match &error {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
-        McpError::Settings(SettingsError::AppliedUnsaved) => "mcp_settings_unsaved",
-        McpError::Settings(SettingsError::Invalid(_))
-        | McpError::InvalidSource
-        | McpError::InvalidId => "mcp_invalid_config",
+        McpError::Settings(SettingsError::Invalid(_)) | McpError::InvalidId => "mcp_invalid_config",
         McpError::UnknownServer => "mcp_unknown_server",
         McpError::ApprovalRequired => "mcp_approval_required",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
@@ -139,11 +135,11 @@ async fn project(
         .map_err(|e| error(e.into()))
 }
 
-fn source(scope: McpScope, project: Option<usize>) -> Result<SettingsSource, RpcError> {
+fn source(scope: McpScope, project: Option<usize>) -> Result<SettingsScope, RpcError> {
     match scope {
-        McpScope::User => Ok(SettingsSource::UserMcp),
+        McpScope::User => Ok(SettingsScope::User),
         McpScope::Project => project
-            .map(SettingsSource::ProjectMcp)
+            .map(SettingsScope::Project)
             .ok_or_else(|| RpcError::invalid("Project MCP operations require cwd")),
     }
 }
@@ -181,21 +177,17 @@ pub(super) fn provide(
                         return reply(McpCatalogResult {
                             user_revision: catalog.user_revision,
                             project_revision: catalog.project_revision,
-                            user_application: directory.application(SettingsSource::UserMcp),
-                            project_application: project.map(|root| {
-                                directory.application(SettingsSource::ProjectMcp(root))
-                            }),
+                            user_application: directory.application(SettingsScope::User),
+                            project_application: project
+                                .map(|root| directory.application(SettingsScope::Project(root))),
                             servers: catalog
                                 .servers
                                 .into_iter()
                                 .map(|(id, entry)| McpCatalogEntry {
                                     id,
                                     source: match entry.source {
-                                        SettingsSource::UserMcp => McpScope::User,
-                                        SettingsSource::ProjectMcp(_) => McpScope::Project,
-                                        SettingsSource::Skills => {
-                                            unreachable!("MCP directory excludes Skills")
-                                        }
+                                        SettingsScope::User => McpScope::User,
+                                        SettingsScope::Project(_) => McpScope::Project,
                                     },
                                     enabled: entry.enabled(),
                                     approval: entry.approval,

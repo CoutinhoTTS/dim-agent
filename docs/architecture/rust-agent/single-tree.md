@@ -3,11 +3,11 @@
 Status: single-tree assembly, capability reload settlement, native Timeline storage
 and recovery are implemented. FileStorage, process Aimux, product Provider and
 optional managed-provider bindings are connected. Native user MCP/Skill intent
-uses the root editable layer; MCP connections and Skill content instances belong
+uses source-owned business documents; MCP connections and Skill content instances belong
 to Sessions. Project MCP execution requires host-local approval. See
-[ADR 002](../../adr/002-loader-plugin-management.md) for implemented configuration
+[ADR 003](../../adr/003-loader-plugin-management.md) for implemented configuration
 scope. Rpc collects [management methods](../../design/plugins/management.md)
-as named services from account, provider, MCP, Skills and Settings owners.
+as named services from account, provider, MCP and Skills owners.
 Structural reloads propagate through normal rutis dependencies; business
 configuration changes do not reload those plugins. No Methods or Management
 plugin, registration port or separate management adapter row is required.
@@ -30,7 +30,7 @@ Its plugin declares Settings as a dependency and owns the publication worker in
 an asynchronous effect. Reload and disposal stop admission, settle the current
 operation and retire retained connections before withdrawing the service. The
 process shutdown coordinator neither starts nor joins MCP-specific tasks.
-See [ADR 002](../../adr/002-loader-plugin-management.md).
+See [ADR 003](../../adr/003-loader-plugin-management.md).
 
 `SettingsPlugin` 不作为 `SessionScopePlugin` 的 `Deps` 依赖：Session 创建入口传入已校验的配置快照，既有 Session 的设置变更由受影响能力按业务合同更新（如 McpSession 观察目录修订）。普通配置写入不通过 rutis 重载重建 Session。
 
@@ -71,11 +71,9 @@ rutis root
 
 Groups annotate loader configuration rows; dependency order comes from `Deps`.
 `serve` registers process factories with `register_capability` and owns the static
-assembly rows. Native execution first reconciles the storage/configuration
-bootstrap, loads or imports user intent outside plugin apply, then reconciles the
-full assembly plus the editable user layer and waits for readiness. Other profiles
-reconcile their full assembly directly. Subsequent typed user edits belong to
-UserConfiguration, not a second whole-tree publisher. `RunningServer::restart`
+assembly rows. All profiles reconcile their full assembly directly and wait for
+readiness. Native business documents import lazily per source; subsequent edits
+use Settings source-local CAS, not loader reconciliation. `RunningServer::restart`
 uses `Loader::restart(row_id)`.
 
 `AgentBuilder::install` registers scope plugins, capabilities and Session extension
@@ -115,9 +113,7 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `SqliteStoragePlugin` | 共享数据库连接、事务、原生 schema 门禁、文件维护锁与关停 | `SqliteStorage` | —；启动参数固定数据库路径 |
 | `SessionStorePlugin` | 原生会话目录、Timeline 落盘/恢复及写入任务 | `SessionStore`、`TimelineStore` 持久化端口 | `SqliteStorage` |
 | `FileWriteCoordinatorPlugin` | 跨 Session 的逐路径写入 FIFO 准入域；跨代共享 | `FileWriteCoordinator` | — |
-| `SettingsPlugin` | Typed user MCP/Skill document edits via the root editable layer; project `.mcp.json` content CAS and host-local approvals unchanged; no connections or discovery | `SettingsService`, `SkillSettingsHost` | `FileStorage`, `When<UserConfiguration>` |
-| `UserConfigurationPlugin` | Stable user intent admission and late-bound SQLite Persist port; private snapshots, sanitized invalidations and save retry; no lock-taking loader mutation in apply/dispose | `UserConfiguration` | `SqliteStorage`, `Loader` |
-| `UserMcpDocument`, `UserSkillsDocument` | Protected typed editable adapter rows containing opaque snapshot references only | No required dynamic row service | `UserConfiguration` |
+| `SettingsPlugin` | Generic BusinessDocument sources, per-source CAS and namespaced host-local grants; no domain interpretation, connections or discovery | `SettingsService` | `FileStorage`, `When<SqliteStorage>` |
 | `OpenAICodexOAuthPlugin` / `GrokOAuthPlugin` | 各自账号字段、登录、刷新与终态 | `OpenAICodexOAuthService` / `GrokOAuthService` | `FileStorage` |
 | `ManagedProvidersPlugin` | 可选 managed provider 的当前绑定代次与在途操作；未绑定时请求明确失败 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
@@ -126,7 +122,7 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `McpPublication` | Source selection, approval and retirement across Session-owned instances; no root reconciliation | `Publication` | — |
 | `McpPlugin` | MCP 目录、连接租约与准入复查；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
 | `HostPlatformPlugin` | 平台与 exec shell 设置 | `HostPlatform` | `When<FileStorage>` |
-| `SkillsCatalogPlugin` | Skill 根发现与目录 | `SkillsCatalog` | `HostPlatform`、`SkillSettingsHost` |
+| `SkillsCatalogPlugin` | Skill discovery/catalog and business settings; privately supplies the reusable catalog's SkillSettingsHost | `SkillsCatalog`, Skills management contribution | `HostPlatform`, `SettingsService` |
 | `AgentDirectoryPlugin` | `AgentDirectory`：Agent 表与实例、Session 协议版本与占用、不可用记录、默认 agentId、serverInstanceId；不可重启 | `AgentDirectory` | — |
 | `rutis-loader` | 进程装配的配置行与 `agent` / `session` / `branch` / `trace` instanced 分组的实例 | `Loader` | — |
 | `AgentsPlugin` | `AgentIndex`：目录逻辑、Session 准入、经 loader 创建与关闭 Agent、默认及恢复 Agent 装载入口；进程 builder | `AgentIndex` | `AgentDirectory`、`Loader`；`--database` 另注入 `SqliteStorage`、`SessionStore`，产品 profile 另注入 `SettingsService`、`ModelSelectionHost` |
@@ -136,7 +132,6 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `ConnectionPlugin` | Connection index, admission limits and transport tasks | `ConnectionHub` | `ServerControl` |
 | `RpcPlugin` | Built-in and contributed commands, accepted task drainage and local management notification delivery | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`, `Contributions<ManagementMethods>`; product profile also uses Provider for model selection |
 | Management contributions | Owner-specific declarations, wire validation and business calls, provided by the business plugin itself | Named `ManagementMethods` services; structural reload propagates to Rpc | Each owner's existing business dependencies |
-| Configuration methods | Settings publishes methods and owns coalesced invalidations when native user configuration is available | `ManagementMethods[configuration]` | Settings' existing FileStorage/UserConfiguration dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
 `AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算，最后排空 trace 归档。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算并排空归档，再关闭 Agent 实例；effect 幂等重复这两步。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
@@ -145,19 +140,19 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 
 ### 配置发布与 MCP
 
-Native v14 user settings use the root editable layer described by
-[ADR 002](../../adr/002-loader-plugin-management.md). Bootstrap loads storage and
-configuration first, initializes intent outside apply, then reconciles the full
-assembly plus Editable. Settings depends on stable configuration admission, not
-on changing document rows, so its own accepted edit cannot unload its waiter.
-Live opaque source tokens and invalidations include applied-unsaved intent;
-successful mutations still acknowledge saved state. Persistence status and
-flush remain separate from runtime adoption. Project/approval files and
-standalone file SettingsPlugin retain their existing contracts.
+Native v13 settings retain plain business payloads in `settings_documents` with
+source-local CAS and lazy atomic import, as described by
+[ADR 003](../../adr/003-loader-plugin-management.md). Generic SettingsService
+persists BusinessDocument values; MCP owns its types in `mcp/config.rs`, and
+Skills owns its SkillSettingsHost implementation. Successful persistence precedes
+invalidation; no unsaved loader intent, configuration namespace or flush exists.
+Project files and host-local namespaced approval files retain separate authority.
+Business updates do not reload owners or Rpc. Structural editable configuration
+remains separate issue #3 work.
 
 | 项 | 约定 |
 | --- | --- |
-| Sources and writes | Native user MCP/Skill documents import atomically before consumers start; root loader intent is the sole editable authority and Persist saves its layer. Originals are retained. Project `.mcp.json` remains file-authoritative with content CAS |
+| Sources and writes | Native user MCP/Skill documents import independently on first successful source read; plain v13 payloads and import provenance commit atomically. SQLite then owns that source, with native:source:N CAS tokens. Originals remain intact. Project `.mcp.json` remains file-authoritative with content CAS |
 | Publication | Settings notifications update Session discovery automatically. New bindings use new instances; a persistence acknowledgement does not guarantee discovery, adoption or cleanup |
 | MCP generations | Connections are not shared across Sessions. The declared `SessionLoader` service creates nested instances using private immutable values, never secret-bearing loader options or mutable templates. Retained user bindings keep old generations until release or Session close. Project changes, disablement, unreadable authority and revocation retire old generations even with retained bindings. Disconnect/revoke drains every affected Session instance; cleanup failures are reported separately |
 | 项目 MCP 批准 | 宿主本地批准绑定规范工作区、服务器 ID 与有效配置指纹；未批准的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现。每次连接操作复查当前来源与批准；撤销拒绝经保留绑定的新调用、取消并等待已受理的代次工作、关闭传输后才确认。文件根授权、FullAccess 工具权限与 Session 恢复都不授予批准（AGENTS 规则 11） |

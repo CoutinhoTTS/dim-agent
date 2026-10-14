@@ -24,7 +24,6 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
         "provider.list",
         "mcp.catalog",
         "skills.catalog",
-        "configuration.catalog",
     ] {
         assert!(
             features.as_array().unwrap().contains(&json!(method)),

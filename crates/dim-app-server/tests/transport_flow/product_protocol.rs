@@ -17,7 +17,6 @@ async fn configuration_management_preserves_live_intent_and_separates_save_ackno
     )
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let mut observer = Client::new_version(&server, false, 3).await;
     let mut legacy = Client::new_version(&server, false, 2).await;
     let mut remote = Client::new_version(&server, true, 3).await;
     assert!(
@@ -25,105 +24,95 @@ async fn configuration_management_preserves_live_intent_and_separates_save_ackno
             .features
             .as_array()
             .unwrap()
-            .contains(&json!("configuration.update"))
+            .contains(&json!("mcp.save"))
     );
     assert!(
         !remote
             .features
             .as_array()
             .unwrap()
-            .contains(&json!("configuration.update"))
+            .contains(&json!("mcp.save"))
     );
     assert_eq!(
-        legacy.rpc("configuration.catalog", json!({})).await["error"]["code"],
+        legacy.rpc("mcp.catalog", json!({})).await["error"]["code"],
         -32601
     );
     assert_eq!(
-        remote.rpc("configuration.catalog", json!({})).await["error"]["data"]["appError"],
+        remote.rpc("mcp.catalog", json!({})).await["error"]["data"]["appError"],
         "unknown_method"
     );
-    let before = client
-        .rpc("configuration.get", json!({"source":"userMcp"}))
-        .await;
+    let before = client.rpc("mcp.catalog", json!({"cwd":home})).await;
     assert_ok(&before);
-    for source in ["SqliteStorage", "project", "approvals"] {
-        assert_eq!(
-            client
-                .rpc("configuration.get", json!({"source":source}))
-                .await["error"]["code"],
-            -32602
-        );
-    }
-    let edit = json!({"source":"userMcp", "expectedRevision":before["result"]["revision"],
-        "document":{"kind":"mcp", "document":{"mcpServers":{"private":{"command":"never-start-this-fixture","enabled":false,"env":{"TOKEN":"secret-never-return"}}}}}});
-    let fault = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
-    fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON user_configuration BEGIN SELECT RAISE(ABORT, 'secret-never-return'); END").unwrap();
-    let applied = client.rpc("configuration.update", edit.clone()).await;
-    assert_ok(&applied);
-    assert_eq!(applied["result"]["saved"], false);
-    assert_eq!(applied["result"]["persistence"]["pendingSaves"], 1);
+    let mut edit = json!({"source":"user", "id":"private", "expectedVersion":before["result"]["userRevision"],
+        "configuration":{"command":"never-start-this-fixture","enabled":false,"env":{"TOKEN":"secret-never-return"}}});
+    let mut wrong_source = edit.clone();
+    wrong_source["expectedVersion"] = before["result"]["projectRevision"].clone();
+    assert_eq!(
+        client.rpc("mcp.save", wrong_source).await["error"]["data"]["appError"],
+        "mcp_settings_conflict"
+    );
+    assert_ok(&client.rpc("mcp.save", edit.clone()).await);
+    let saved = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&saved);
     assert_ne!(
-        applied["result"]["current"]["revision"],
-        before["result"]["revision"]
+        saved["result"]["userRevision"],
+        before["result"]["userRevision"]
     );
-    assert!(!applied.to_string().contains("secret-never-return"));
+    assert_eq!(saved["result"]["servers"][0]["id"], "private");
+    assert_eq!(saved["result"]["servers"][0]["enabled"], false);
+    assert!(!saved.to_string().contains("secret-never-return"));
     assert_eq!(
-        observer.notice("configuration.changed").await["params"],
-        json!({})
+        client.rpc("mcp.save", edit.clone()).await["error"]["data"]["appError"],
+        "mcp_settings_conflict"
     );
-    let catalog = client.rpc("mcp.catalog", json!({})).await;
-    assert_ok(&catalog);
-    assert_eq!(catalog["result"]["servers"][0]["id"], "private");
-    assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
-    assert!(!catalog.to_string().contains("secret-never-return"));
+    edit["expectedVersion"] = saved["result"]["userRevision"].clone();
+    edit["configuration"]["enabled"] = json!(true);
+    // Failed persistence is not an applied-but-unsaved edit: both the source
+    // revision and its prior document remain authoritative.
+    let fault = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+    fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON settings_documents BEGIN SELECT RAISE(ABORT, 'secret-never-return'); END").unwrap();
+    let failed = client.rpc("mcp.save", edit.clone()).await;
+    assert_eq!(failed["error"]["data"]["appError"], "mcp_settings_read");
+    assert!(!failed.to_string().contains("secret-never-return"));
+    let unchanged = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&unchanged);
     assert_eq!(
-        client.rpc("configuration.update", edit).await["error"]["data"]["appError"],
-        "configuration_conflict"
+        unchanged["result"]["userRevision"],
+        saved["result"]["userRevision"]
     );
-    assert_eq!(
-        client.rpc("configuration.flush", json!({})).await["error"]["data"]["appError"],
-        "configuration_unsaved"
-    );
+    assert_eq!(unchanged["result"]["servers"], saved["result"]["servers"]);
     fault.execute_batch("DROP TRIGGER fail_save").unwrap();
-    let flushed = client.rpc("configuration.flush", json!({})).await;
-    assert_ok(&flushed);
-    assert_eq!(flushed["result"]["pendingSaves"], 0);
-    let all = client.rpc("configuration.catalog", json!({})).await;
-    assert_ok(&all);
-    assert_eq!(all["result"]["entries"].as_array().unwrap().len(), 2);
-    assert!(!all.to_string().contains("secret-never-return"));
-    let skills = client
-        .rpc("configuration.get", json!({"source":"skills"}))
-        .await;
-    let changed = client
-        .rpc(
-            "configuration.update",
-            json!({"source":"skills", "expectedRevision":skills["result"]["revision"],
-        "document":{"kind":"skills", "document":{"disabledSkillIds":["user:missing"]}}}),
-        )
-        .await;
-    assert_ok(&changed);
-    assert_eq!(changed["result"]["saved"], true);
-    assert_eq!(client.rpc("configuration.update", json!({"source":"skills", "expectedRevision":changed["result"]["current"]["revision"],
-        "document":{"kind":"mcp", "document":{"mcpServers":{}}}})).await["error"]["code"], -32602);
-    // Framework-only lifecycle changes also invalidate; not just settings writes.
-    observer.notices.clear();
-    server.restart("Rpc").await.unwrap();
-    assert_ok(&client.rpc("configuration.catalog", json!({})).await);
-    assert_eq!(
-        observer.notice("configuration.changed").await["params"],
-        json!({})
-    );
-    for excluded in [&mut legacy, &mut remote] {
-        assert_ok(&excluded.rpc("daemon.ping", json!({})).await);
-        assert!(
-            excluded
-                .notices
-                .iter()
-                .all(|n| n["method"] != "configuration.changed")
-        );
-    }
     drop(fault);
+    server.shutdown();
+    server.join().await.unwrap();
+    // Restart reads committed source state, not an in-memory loader edit or a
+    // rewritten legacy file. The failed edit must not become durable later.
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(native),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let restored = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&restored);
+    assert_eq!(
+        restored["result"]["userRevision"],
+        saved["result"]["userRevision"]
+    );
+    assert_eq!(restored["result"]["servers"], saved["result"]["servers"]);
+    // The unchanged revision remains usable for a successful retry.
+    assert_ok(&client.rpc("mcp.save", edit).await);
+    let retried = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&retried);
+    assert_ne!(
+        retried["result"]["userRevision"],
+        saved["result"]["userRevision"]
+    );
+    assert_eq!(retried["result"]["servers"][0]["enabled"], true);
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

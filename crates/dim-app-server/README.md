@@ -25,41 +25,29 @@ cargo run --locked -p dim-app-server -- \
 Configured execution requires `--home` or `--database`; the CLI supplies `--home` automatically.
 Its legacy user settings and shell preference live under the native home (or next to the
 explicit database). The product profile uses product-home for these files. User MCP and Skill
-settings are imported together before execution starts; original files remain intact but are
-no longer read or written after import. Invalid files or failed imports stop startup without
-switching authority; repair the files and restart. Shell preferences remain files.
+settings are imported independently on each source's first successful read; original files
+remain intact but cease to be authority after import. Invalid files or failed imports leave
+that source unimported for repair and retry, without an empty fallback. Shell preferences remain files.
 Workspace `.mcp.json` files remain independent sources. A missing account plugin does not disable
 these public capabilities. Protocol v3 advertises their management methods on local connections.
 Configured model changes validate against the supplied catalog and adopt that model's generation
 settings; model preferences requiring capability declarations are rejected rather than guessed.
 
-### Editable user configuration
+### Business settings
 
-Protected local protocol-v3 execution profiles advertise:
+SettingsService reads and updates generic `BusinessDocument` values with per-source
+CAS. Business owners define and validate their payloads: MCP types live in
+`mcp/config.rs`, and the Skills owner supplies the existing `SkillSettingsHost`.
+Settings owns source persistence and generic namespaced host-local grants, not
+business management methods. There is no `configuration.*` RPC namespace.
 
-- `configuration.catalog {}`: `{entries, persistence}`. Each entry is `{id, revision}`;
-  IDs are `UserMcpDocument` and `UserSkillsDocument`.
-- `configuration.get {source}`: one entry. `source` is `userMcp` or `skills`.
-- `configuration.update {source, expectedRevision, document}`: replace a typed document,
-  with `document: {kind: "mcp" | "skills", document: <existing settings shape>}`.
-  Kind must match the source. The result is `{saved, current, persistence}`.
-  `saved` acknowledges this edit's save attempt. `false` means applied-but-unsaved,
-  not rollback. `current` and `persistence` are sampled after the edit and can
-  already reflect another writer; they are not an atomic snapshot of its acknowledgement.
-- `configuration.flush {}`: retry pending saves and return persistence status;
-  failure returns `configuration_unsaved`, without undoing live intent.
-
-Persistence status is `{baseVersion, pendingSaves, backendAvailable}`; baseVersion
-is an opaque layer CAS token, not a source revision or adoption guarantee.
-Stale writes return `configuration_conflict`. Invalid source/document pairs return
-`invalid_params`. Read results and diagnostics never contain the private documents.
-Existing per-server MCP and Skill enablement methods remain available for partial edits.
-
-`configuration.changed {}` is a coalesced invalidation from LoaderChanged and save
-attempts, delivered only after a protected-local v3 handshake. Refetch state; the
-notice does not certify persistence, connection success or model adoption. Accepted
-writes and save retries are drained on reload even if the client disconnects.
-This API does not install packages or permit arbitrary loader/infrastructure edits.
+Native v13 retains `settings_documents` with `user/mcp` and `user/skills` keys,
+plain payload JSON (not `{kind, document}`), source-local versions and opaque
+`native:<source>:<version>` revision tokens. Import provenance is preserved on
+edits. Successful writes notify consumers after persistence; failed persistence
+does not publish unsaved intent. Business edits do not reload plugins. Structural
+loader configuration and package installation remain separate work. See
+[ADR 003](../../docs/adr/003-loader-plugin-management.md).
 
 ### MCP configuration management
 
@@ -108,13 +96,10 @@ blindly. Use these methods rather than editing imported user files. `skills.set_
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
 
-Native storage v14 persists the editable user layer through SQLite. User revision
-tokens identify current intent, not necessarily a durable commit: a save failure
-can leave a live edit queued for `UserConfiguration::flush`. First import happens
-before execution starts; repair malformed legacy user files and restart rather
-than expecting an empty fallback. Account-only hosts do not import them.
-Existing v13 stores require an explicit offline upgrade after backup:
-`dim-app-server --migrate-v13 DATABASE CONFIGURATION_HOME`. See the
+Native storage remains v13 with lazy source-local import and durable source CAS.
+Existing v13 document bytes remain compatible. Unsupported databases, including
+the removed branch-only v14 representation, are rejected and preserved; there
+is no migration command, save queue or flush operation. See the
 [storage contract](../../docs/design/appserver/native-storage-format.md).
 
 Each Session owns its MCP connections as nested instances in the existing loader.

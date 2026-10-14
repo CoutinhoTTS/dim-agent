@@ -2,12 +2,114 @@
 use crate::{
     methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
     protocol::{RpcError, canonical_cwd, optional_non_null},
+    settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
 use dim_agent_capabilities::skills::{RefreshTarget, SkillStatus, SkillsCatalog, SkillsError};
+use dim_agent_capabilities::{
+    host_platform::HostPlatform,
+    skill_settings::{
+        SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
+        SkillSettingsSnapshot,
+    },
+};
 use dim_agent_runtime::{Capability, KeysOf, scoped};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDocument {
+    disabled_skill_ids: Vec<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
+}
+impl BusinessDocument for SkillDocument {
+    const NAMESPACE: &'static str = "skills";
+    const USER_FILE: &'static str = "skills.json";
+    fn validate(&self) -> crate::settings::Result<()> {
+        if self.extra.contains_key("disabledSkillIds") {
+            return Err(SettingsError::Invalid("reserved Skill configuration field"));
+        }
+        if self
+            .disabled_skill_ids
+            .iter()
+            .any(|id| id.trim().is_empty())
+        {
+            return Err(SettingsError::Invalid("empty Skill id"));
+        }
+        Ok(())
+    }
+}
+
+/// Adapts the owner's business document to the reusable Skill catalog port.
+struct SkillStorage(Arc<SettingsService>);
+impl SkillSettings for SkillStorage {
+    fn skills(
+        &self,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'_, Result<SkillSettingsSnapshot, SkillSettingsError>> {
+        Box::pin(async move {
+            let snapshot = self
+                .0
+                .read::<SkillDocument>(SettingsScope::User, &cancel)
+                .await?;
+            Ok(SkillSettingsSnapshot {
+                version: snapshot.revision,
+                disabled: snapshot.document.disabled_skill_ids.into_iter().collect(),
+            })
+        })
+    }
+    fn update_skills(
+        self: Arc<Self>,
+        expected: SettingsVersion,
+        id: String,
+        enabled: bool,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>> {
+        Box::pin(async move {
+            if id.trim().is_empty() {
+                return Err(SkillSettingsError::Invalid("empty Skill id".into()));
+            }
+            let current = self
+                .0
+                .read::<SkillDocument>(SettingsScope::User, &cancel)
+                .await?;
+            if current.revision != expected {
+                return Err(SkillSettingsError::Conflict);
+            }
+            let mut document = current.document;
+            if document.disabled_skill_ids.contains(&id) != enabled {
+                return Ok(current.revision);
+            }
+            if enabled {
+                document.disabled_skill_ids.retain(|value| value != &id);
+            } else {
+                document.disabled_skill_ids.push(id);
+            }
+            Ok(self
+                .0
+                .update(SettingsScope::User, &expected, document, &cancel)
+                .await?
+                .revision)
+        })
+    }
+    fn changes(&self) -> tokio::sync::watch::Receiver<SettingsVersion> {
+        self.0.subscribe_document::<SkillDocument>()
+    }
+}
+impl From<SettingsError> for SkillSettingsError {
+    fn from(error: SettingsError) -> Self {
+        match error {
+            SettingsError::Conflict => Self::Conflict,
+            SettingsError::Invalid(reason) => Self::Invalid(reason.into()),
+            SettingsError::Closed => Self::Closed,
+            SettingsError::Cancelled => Self::Cancelled,
+            error => Self::Failed(error.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -83,18 +185,22 @@ fn issue(issue: dim_agent_capabilities::skills::SkillIssue) -> SkillIssue {
 
 pub struct SkillsCatalogPlugin;
 impl TypedPlugin for SkillsCatalogPlugin {
-    type Deps = <dim_agent_capabilities::skills::SkillsCatalogPlugin as TypedPlugin>::Deps;
+    type Deps = (Arc<HostPlatform>, Arc<SettingsService>);
     fn name(&self) -> &str {
         "SkillsCatalog"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        deps: Self::Deps,
+        (platform, settings): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let catalog =
-                dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(ctx, deps).await?;
+            let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage(settings))));
+            let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
+                ctx,
+                (platform, settings),
+            )
+            .await?;
             ctx.provide_as(rutis::TypeKey::of::<SkillsCatalog>(), catalog.clone())?;
             ManagementMethods::provide(
                 ctx,

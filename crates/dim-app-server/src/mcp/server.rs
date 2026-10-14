@@ -3,7 +3,7 @@ mod sse;
 mod stdio;
 
 use super::McpService;
-use crate::settings::{BearerAuth, McpServerSettings, RemoteTransport};
+use super::config::{BearerAuth, McpServerSettings, RemoteTransport};
 use dim_agent_runtime::{Capability, KeysOf, StateCell};
 use dim_agent_types::{
     ContentBlock, ImageSource, ImageSourceType, JsonObject, JsonSchema, ToolContent, ToolResult,

@@ -1951,6 +1951,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         let skill = work.join(".agents/skills/review");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "---\nname: review\ndescription: Review changes\n---\nInspect changes.\n").unwrap();
+        std::fs::write(home.join("skills.json"), json!({"disabledSkillIds":["user:absent"],"future":{"keep":7}}).to_string()).unwrap();
         std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"disabled-fixture":{"command":"never-run-this-test-command","enabled":false}}}).to_string()).unwrap();
         std::fs::write(&configuration, json!({"defaultModel":{"providerId":"local","modelId":"native-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"native-model","config":{"maxTokens":4096}},{"id":"alternate","config":{"maxTokens":1536}}]}]}).to_string()).unwrap();
         for restart in [false, true] {
@@ -2017,7 +2018,23 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         assert_ok(&catalog);
         let review = catalog["result"]["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == "review").unwrap();
         assert_eq!(review["enabled"], !restart);
+        let database = rusqlite::Connection::open(home.join("dimcode.sqlite")).unwrap();
+        let read_skills = || database.query_row("SELECT version, document FROM settings_documents WHERE source='user/skills'", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).unwrap();
+        let before = read_skills();
+        let persisted: Value = serde_json::from_str(&before.1).unwrap();
+        assert_eq!(persisted["future"], json!({"keep":7}));
+        assert!(persisted["disabledSkillIds"].as_array().unwrap().contains(&json!("user:absent")));
         assert_ok(&client.rpc("skills.set_enabled", json!({"cwd":work,"id":review["id"],"enabled":false})).await);
+        let saved = read_skills();
+        let persisted: Value = serde_json::from_str(&saved.1).unwrap();
+        assert_eq!(persisted["future"], json!({"keep":7}));
+        assert!(persisted["disabledSkillIds"].as_array().unwrap().contains(&json!("user:absent")));
+        assert!(persisted["disabledSkillIds"].as_array().unwrap().contains(&review["id"]));
+        if restart { assert_eq!(saved, before, "a no-op does not rewrite the native document"); }
+        assert_ok(&client.rpc("skills.set_enabled", json!({"cwd":work,"id":review["id"],"enabled":false})).await);
+        assert_eq!(read_skills(), saved, "repeated no-op preserves revision and bytes");
+        assert!(client.rpc("skills.set_enabled", json!({"cwd":work,"id":"missing-skill","enabled":false})).await.get("error").is_some());
+        assert_eq!(read_skills(), saved, "an unknown skill cannot change settings");
         let catalog = client.rpc("mcp.catalog", json!({"cwd":work})).await;
         assert_ok(&catalog);
         assert_eq!(catalog["result"]["servers"][0]["enabled"], false);

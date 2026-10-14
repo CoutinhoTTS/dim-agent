@@ -142,7 +142,8 @@ impl ManagementMethods {
         Ok(service)
     }
 
-    pub(crate) fn notify(&self, method: &str, params: Value) {
+    /// Publish an owner-declared notification; undeclared names are ignored.
+    pub fn notify(&self, method: &str, params: Value) {
         if self.notifications.iter().any(|declared| declared == method) {
             let _ = self.notices.send(ManagementNotice {
                 method: method.into(),

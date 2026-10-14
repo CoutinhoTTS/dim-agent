@@ -11,9 +11,10 @@ use dim_agent_types::{ContentBlock, ToolContent};
 use dim_app_server::{
     mcp::{
         McpChange, McpError, McpPlugin, McpService,
+        config::McpServerSettings,
         server::{McpServerError, McpServerState},
     },
-    settings::{McpServerSettings, SettingsPlugin, SettingsService, SettingsSource},
+    settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use serde_json::{Value, json};
@@ -357,7 +358,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     let revision = fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::Put(invalid),
@@ -374,7 +375,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             revision,
             "docs".into(),
             McpChange::Put(valid),
@@ -476,7 +477,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
         let mcp = fixture.mcp.clone();
         tokio::spawn(async move {
             mcp.disconnect(
-                SettingsSource::UserMcp,
+                SettingsScope::User,
                 "docs".into(),
                 &CancellationToken::new(),
             )
@@ -511,7 +512,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::SetEnabled(false),
@@ -542,7 +543,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::SetEnabled(true),
@@ -632,7 +633,7 @@ async fn connection_generations_live_until_the_last_lease_and_force_close_togeth
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::Put(config),
@@ -658,7 +659,7 @@ async fn connection_generations_live_until_the_last_lease_and_force_close_togeth
         let mcp = fixture.mcp.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            mcp.disconnect(SettingsSource::UserMcp, "docs".into(), &cancel)
+            mcp.disconnect(SettingsScope::User, "docs".into(), &cancel)
                 .await
         })
     };

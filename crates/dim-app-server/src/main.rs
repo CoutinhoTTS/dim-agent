@@ -22,18 +22,6 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Deliberate offline maintenance; never combine it with daemon startup.
-    if std::env::args().nth(1).as_deref() == Some("--migrate-v13") {
-        let mut args = std::env::args().skip(2);
-        let database = PathBuf::from(args.next().ok_or("--migrate-v13 requires DATABASE HOME")?);
-        let home = PathBuf::from(args.next().ok_or("--migrate-v13 requires DATABASE HOME")?);
-        if args.next().is_some() {
-            return Err("--migrate-v13 cannot be combined with server options".into());
-        }
-        dim_app_server::storage::SqliteStorage::migrate_v13_to_v14(database, home)?;
-        println!("Native storage migrated from v13 to v14. Original settings files preserved.");
-        return Ok(());
-    }
     // The client transport does not acquire daemon locks or load product state.
     if std::env::args().nth(1).as_deref() == Some("--connect-pipe") {
         let mut args = std::env::args().skip(2);
@@ -112,7 +100,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH --node PATH --js-runtime PATH]\n\nOffline upgrade: dim-app-server --migrate-v13 DATABASE HOME\nStop the daemon and back up the database first. This upgrades v13 in place; startup never migrates automatically."
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH --node PATH --js-runtime PATH]"
                 );
                 return Ok(());
             }

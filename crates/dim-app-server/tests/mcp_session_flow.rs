@@ -18,7 +18,7 @@ use dim_agent_runtime::*;
 use dim_agent_types::*;
 use dim_app_server::{
     mcp::{self, McpChange, McpPlugin, McpService, McpSession, McpSourceState},
-    settings::{SettingsPlugin, SettingsService, SettingsSource},
+    settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::Ctx;
 use serde_json::{Value, json};
@@ -317,10 +317,10 @@ impl Env {
             .await
             .unwrap()
     }
-    async fn update(&self, source: SettingsSource, id: &str, change: McpChange) {
+    async fn update(&self, source: SettingsScope, id: &str, change: McpChange) {
         let cancel = CancellationToken::new();
         let catalog = self.directory.catalog(Some(1), &cancel).await.unwrap();
-        let version = if source == SettingsSource::UserMcp {
+        let version = if source == SettingsScope::User {
             catalog.user_revision
         } else {
             catalog.project_revision.unwrap()
@@ -426,7 +426,7 @@ async fn results(session: &Session) -> Vec<String> {
 async fn project_discovery_does_not_connect_without_execution_approval() {
     let env = Env::new().await;
     env.update(
-        SettingsSource::ProjectMcp(1),
+        SettingsScope::Project(1),
         "docs",
         McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
     )
@@ -463,7 +463,7 @@ async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_r
     let env = Env::new().await;
     let cancel = CancellationToken::new();
     env.update(
-        SettingsSource::ProjectMcp(1),
+        SettingsScope::Project(1),
         "docs",
         McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
     )
@@ -621,7 +621,7 @@ async fn bound_model_request_keeps_old_connection_while_next_request_uses_replac
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }));
     env.update(
-        SettingsSource::UserMcp,
+        SettingsScope::User,
         "docs",
         McpChange::Put(serde_json::from_value(configuration(&env.url, "two")).unwrap()),
     )
@@ -673,7 +673,7 @@ async fn bound_model_request_keeps_old_connection_while_next_request_uses_replac
 async fn project_visibility_disable_refresh_failure_and_permission_use_real_sources() {
     let env = Env::new().await;
     env.update(
-        SettingsSource::ProjectMcp(1),
+        SettingsScope::Project(1),
         "docs",
         McpChange::Put(
             serde_json::from_value(json!({"type":"http","url":env.url,"enabled":false})).unwrap(),
@@ -695,7 +695,7 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
     })
     .await
     .unwrap();
-    env.update(SettingsSource::ProjectMcp(1), "docs", McpChange::Remove)
+    env.update(SettingsScope::Project(1), "docs", McpChange::Remove)
         .await;
     ready(&project).await;
     assert_eq!(
@@ -724,12 +724,8 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
         .unwrap()[0]
         .name
         .clone();
-    env.update(
-        SettingsSource::UserMcp,
-        "docs",
-        McpChange::SetEnabled(false),
-    )
-    .await;
+    env.update(SettingsScope::User, "docs", McpChange::SetEnabled(false))
+        .await;
     adopted(&user, None).await;
     env.turn(
         &user,
@@ -756,7 +752,7 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
         &event.kind, EventKind::ModelOutputEnd(end)
         if matches!(&end.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("Tool was not offered"))
     )));
-    env.update(SettingsSource::UserMcp, "docs", McpChange::SetEnabled(true))
+    env.update(SettingsScope::User, "docs", McpChange::SetEnabled(true))
         .await;
     ready(&user).await;
     env.remote.invalid.store(true, Ordering::SeqCst);
@@ -856,7 +852,7 @@ async fn unreadable_catalog_preserves_adopted_tools_until_a_valid_update() {
             // a broken catalog does not keep a dead connection callable.
             env.directory
                 .disconnect(
-                    SettingsSource::UserMcp,
+                    SettingsScope::User,
                     "docs".into(),
                     &CancellationToken::new(),
                 )
@@ -903,7 +899,7 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     let env = Env::new().await;
     env.remote.hold.store(true, Ordering::SeqCst);
     env.update(
-        SettingsSource::UserMcp,
+        SettingsScope::User,
         "slow",
         McpChange::Put(serde_json::from_value(configuration(&env.url, "slow")).unwrap()),
     )
@@ -931,12 +927,8 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     assert!(results(&session).await[0].contains("one:8"));
 
     // A completed list from a cancelled worker must not republish a disabled source.
-    env.update(
-        SettingsSource::UserMcp,
-        "slow",
-        McpChange::SetEnabled(false),
-    )
-    .await;
+    env.update(SettingsScope::User, "slow", McpChange::SetEnabled(false))
+        .await;
     let mut status = view.subscribe();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -995,7 +987,7 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     let calls = env.remote.calls.lock().unwrap().len();
     env.directory
         .disconnect(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             "docs".into(),
             &CancellationToken::new(),
         )

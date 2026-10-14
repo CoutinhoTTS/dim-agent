@@ -1,8 +1,11 @@
 use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
 use dim_agent_runtime::{Capability, KeysOf, capability_plugin, wait_active};
 use dim_app_server::{
-    mcp::{McpChange, McpError, McpPlugin, McpService},
-    settings::{McpServerSettings, SettingsError, SettingsPlugin, SettingsService, SettingsSource},
+    mcp::{
+        McpChange, McpError, McpPlugin, McpService,
+        config::{McpServerSettings, McpSettings},
+    },
+    settings::{SettingsError, SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Gate, TypedPlugin};
 use serde_json::{Value, json};
@@ -135,14 +138,14 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
     assert_eq!(
         fixture
             .mcp
-            .application(SettingsSource::UserMcp)
+            .application(SettingsScope::User)
             .applied_revision,
         Some(catalog.user_revision)
     );
     assert_eq!(
         fixture
             .mcp
-            .application(SettingsSource::ProjectMcp(1))
+            .application(SettingsScope::Project(1))
             .applied_revision,
         catalog.project_revision
     );
@@ -181,7 +184,7 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
     let revision = fixture
         .mcp
         .update(
-            SettingsSource::ProjectMcp(1),
+            SettingsScope::Project(1),
             fixture
                 .mcp
                 .catalog(Some(1), &cancel)
@@ -205,7 +208,7 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
             .await
             .is_err()
     );
-    let application = fixture.mcp.application(SettingsSource::ProjectMcp(1));
+    let application = fixture.mcp.application(SettingsScope::Project(1));
     assert_eq!(application.applied_revision, Some(revision.clone()));
     let entry = fixture
         .mcp
@@ -268,6 +271,7 @@ async fn project_approval_is_persisted_scoped_and_checked_on_retained_connection
         McpApproval,
         server::{McpServerError, McpServerState},
     };
+    use sha2::{Digest, Sha256};
     let fixture = Fixture::new().await;
     let cancel = CancellationToken::new();
     let config =
@@ -294,6 +298,38 @@ async fn project_approval_is_persisted_scoped_and_checked_on_retained_connection
         fixture.mcp.server(Some(1), "shared".into(), &cancel).await,
         Err(McpError::ApprovalRequired)
     ));
+    // Freeze the original execution identity and typed serialization, without
+    // using the new owner's hashing helpers to construct the legacy grant.
+    let workspace = fixture.home.join("project");
+    let key = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(&workspace, "shared")).unwrap())
+    );
+    let effective = format!(
+        r#"{{"command":"approved-server","args":["--first"],"env":{{"SECRET":"do-not-export"}},"cwd":{}}}"#,
+        serde_json::to_string(&workspace).unwrap(),
+    );
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(format!(r#"["dim/mcp-execution/v1","{key}",{effective}]"#))
+    );
+    assert_eq!(token, fingerprint);
+    let legacy_grants = format!(r#"{{"version":1,"approved":{{"{key}":"{fingerprint}"}}}}"#);
+    fs::write(fixture.home.join("mcp-approvals.json"), &legacy_grants).unwrap();
+    assert_eq!(
+        fixture.mcp.catalog(Some(1), &cancel).await.unwrap().servers["shared"].approval,
+        McpApproval::Approved
+    );
+    let mut disabled = config.clone();
+    disabled["enabled"] = json!(false);
+    write(&disabled);
+    let disabled = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert_eq!(
+        disabled.servers["shared"].approval_token.as_ref(),
+        Some(&token)
+    );
+    assert!(!disabled.servers["shared"].executable());
+    write(&config);
     fixture
         .mcp
         .approve(1, "shared".into(), token.clone(), &cancel)
@@ -305,6 +341,7 @@ async fn project_approval_is_persisted_scoped_and_checked_on_retained_connection
         .await
         .unwrap();
     let approved = fs::read_to_string(fixture.home.join("mcp-approvals.json")).unwrap();
+    assert_eq!(approved, legacy_grants);
     assert!(
         !approved.contains("SECRET")
             && !approved.contains("do-not-export")
@@ -465,12 +502,9 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     assert!(user.servers["shared"].enabled());
     let project = mcp.catalog(Some(1), &cancel).await.unwrap();
     assert_eq!(project.servers.len(), 2);
-    assert_eq!(
-        project.servers["shared"].source,
-        SettingsSource::ProjectMcp(1)
-    );
+    assert_eq!(project.servers["shared"].source, SettingsScope::Project(1));
     assert!(!project.servers["shared"].enabled());
-    assert_eq!(project.servers["user-only"].source, SettingsSource::UserMcp);
+    assert_eq!(project.servers["user-only"].source, SettingsScope::User);
     assert!(matches!(
         project.servers["shared"].configuration,
         McpServerSettings::Remote { .. }
@@ -479,7 +513,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     let original_user = fs::read(fixture.home.join("mcp.json")).unwrap();
     let enabled_revision = mcp
         .update(
-            SettingsSource::ProjectMcp(1),
+            SettingsScope::Project(1),
             project.project_revision.unwrap(),
             "shared".into(),
             McpChange::SetEnabled(true),
@@ -504,7 +538,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
 
     // Removing only the project override reveals, rather than deletes, user config.
     mcp.update(
-        SettingsSource::ProjectMcp(1),
+        SettingsScope::Project(1),
         enabled_revision,
         "shared".into(),
         McpChange::Remove,
@@ -513,7 +547,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     .await
     .unwrap();
     let revealed = mcp.catalog(Some(1), &cancel).await.unwrap();
-    assert_eq!(revealed.servers["shared"].source, SettingsSource::UserMcp);
+    assert_eq!(revealed.servers["shared"].source, SettingsScope::User);
     assert!(revealed.servers["shared"].enabled());
 
     // Different edits using one source revision must not both succeed.
@@ -521,14 +555,14 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
         serde_json::from_value(json!({"command":"other", "args":["--read-only"]})).unwrap();
     let (a, b) = tokio::join!(
         mcp.update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             user.user_revision.clone(),
             "shared".into(),
             McpChange::SetEnabled(false),
             &cancel
         ),
         mcp.update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             user.user_revision,
             "new".into(),
             McpChange::Put(new_server),
@@ -562,7 +596,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     .unwrap();
     let revision = mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             saved.user_revision,
             "shared".into(),
             McpChange::Put(replacement),
@@ -583,7 +617,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     let invalid = serde_json::from_value(json!({"command":""})).unwrap();
     assert!(matches!(
         mcp.update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             revision.clone(),
             "shared".into(),
             McpChange::Put(invalid),
@@ -605,18 +639,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     ));
     assert!(matches!(
         mcp.update(
-            SettingsSource::Skills,
-            "missing".into(),
-            "x".into(),
-            McpChange::Remove,
-            &cancel
-        )
-        .await,
-        Err(McpError::InvalidSource)
-    ));
-    assert!(matches!(
-        mcp.update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             revision.clone(),
             "absent".into(),
             McpChange::SetEnabled(false),
@@ -627,7 +650,7 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     ));
     assert!(matches!(
         mcp.update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             revision,
             " ".into(),
             McpChange::Remove,
@@ -720,7 +743,7 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
         tokio::time::timeout(
             Duration::from_millis(50),
             fixture.mcp.update(
-                SettingsSource::UserMcp,
+                SettingsScope::User,
                 snapshot.user_revision,
                 "shared".into(),
                 McpChange::SetEnabled(false),
@@ -743,7 +766,7 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     let lease = fixture.files.lock(&path, &cancel).await.unwrap();
     let cancelled = CancellationToken::new();
     let pending = fixture.mcp.update(
-        SettingsSource::UserMcp,
+        SettingsScope::User,
         snapshot.user_revision.clone(),
         "shared".into(),
         McpChange::SetEnabled(true),
@@ -769,7 +792,7 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     // drains the lock wait and an old service handle cannot start more work.
     let lease = fixture.files.lock(&path, &cancel).await.unwrap();
     let pending = fixture.mcp.update(
-        SettingsSource::UserMcp,
+        SettingsScope::User,
         snapshot.user_revision,
         "shared".into(),
         McpChange::SetEnabled(true),
@@ -797,7 +820,7 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
         fixture
             .mcp
             .update(
-                SettingsSource::UserMcp,
+                SettingsScope::User,
                 "missing".into(),
                 "x".into(),
                 McpChange::Remove,
@@ -810,7 +833,7 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     assert_eq!(fs::read(fixture.home.join("mcp.json")).unwrap(), bytes);
     fixture
         .settings
-        .read(SettingsSource::UserMcp, &cancel)
+        .read::<McpSettings>(SettingsScope::User, &cancel)
         .await
         .unwrap();
     fixture.close().await;

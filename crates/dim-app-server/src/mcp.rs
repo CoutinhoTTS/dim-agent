@@ -1,4 +1,5 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
+pub mod config;
 pub(crate) mod management;
 mod publication;
 pub mod server;
@@ -6,9 +7,8 @@ mod session;
 pub use publication::{McpApplication, McpOwner, McpPublication};
 pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState, install};
 
-use crate::settings::{
-    McpServerSettings, SettingsDocument, SettingsError, SettingsService, SettingsSource,
-};
+use crate::settings::{SettingsError, SettingsScope, SettingsService};
+use config::{McpServerSettings, McpSettings};
 use dim_agent_runtime::{Capability, KeysOf};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use server::{McpServer, McpServerError};
@@ -23,8 +23,6 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub enum McpError {
     #[error(transparent)]
     Settings(#[from] SettingsError),
-    #[error("MCP operations require a user or authorized project source")]
-    InvalidSource,
     #[error("empty MCP server id")]
     InvalidId,
     #[error("MCP server is not configured in this source")]
@@ -57,7 +55,7 @@ pub enum McpApproval {
 /// Server-side configuration, including secrets. Not a wire or logging type.
 #[derive(Clone)]
 pub struct McpServerEntry {
-    pub source: SettingsSource,
+    pub source: SettingsScope,
     pub configuration: McpServerSettings,
     pub approval: McpApproval,
     pub approval_token: Option<String>,
@@ -172,13 +170,10 @@ impl McpService {
     /// Old handles remain closed; a later server() creates a new generation.
     pub async fn disconnect(
         self: &Arc<Self>,
-        source: SettingsSource,
+        source: SettingsScope,
         id: String,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        if source == SettingsSource::Skills {
-            return Err(McpError::InvalidSource);
-        }
         let owner = self.clone();
         self.run(cancel, move |_, cancel| async move {
             owner.publication.disconnect(source, id, &cancel).await
@@ -186,7 +181,7 @@ impl McpService {
         .await
     }
 
-    pub fn application(&self, source: SettingsSource) -> McpApplication {
+    pub fn application(&self, source: SettingsScope) -> McpApplication {
         self.publication.application(source)
     }
 
@@ -203,12 +198,7 @@ impl McpService {
         self.run(cancel, move |_, cancel| async move {
             owner
                 .publication
-                .approval(
-                    SettingsSource::ProjectMcp(project),
-                    id,
-                    Some(token),
-                    &cancel,
-                )
+                .approval(SettingsScope::Project(project), id, Some(token), &cancel)
                 .await
         })
         .await
@@ -224,7 +214,7 @@ impl McpService {
         self.run(cancel, move |_, cancel| async move {
             owner
                 .publication
-                .approval(SettingsSource::ProjectMcp(project), id, None, &cancel)
+                .approval(SettingsScope::Project(project), id, None, &cancel)
                 .await
         })
         .await
@@ -246,38 +236,41 @@ impl McpService {
                 project_revision: None,
                 servers: BTreeMap::new(),
             };
-            for source in std::iter::once(SettingsSource::UserMcp)
-                .chain(project.map(SettingsSource::ProjectMcp))
+            for source in
+                std::iter::once(SettingsScope::User).chain(project.map(SettingsScope::Project))
             {
-                let snapshot = settings.read(source, &cancel).await?;
+                let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
                 match source {
-                    SettingsSource::UserMcp => catalog.user_revision = snapshot.revision,
-                    SettingsSource::ProjectMcp(_) => {
+                    SettingsScope::User => catalog.user_revision = snapshot.revision,
+                    SettingsScope::Project(_) => {
                         catalog.project_revision = Some(snapshot.revision);
                     }
-                    SettingsSource::Skills => unreachable!("only MCP sources are selected"),
                 }
-                let SettingsDocument::Mcp(document) = snapshot.document else {
-                    unreachable!("MCP sources decode to MCP documents")
-                };
+                let document = snapshot.document;
                 for (id, configuration) in document.mcp_servers {
-                    let configuration = settings.mcp_effective(source, configuration)?;
-                    let (approval, approval_token) =
-                        if matches!(source, SettingsSource::ProjectMcp(_)) {
-                            let token = settings.mcp_fingerprint(source, &id, &configuration)?;
-                            let approved =
-                                settings.mcp_approved(source, &id, &token, &cancel).await?;
-                            (
-                                if approved {
-                                    McpApproval::Approved
-                                } else {
-                                    McpApproval::Required
-                                },
-                                Some(token),
+                    let configuration = config::effective(&settings, source, configuration)?;
+                    let (approval, approval_token) = if matches!(source, SettingsScope::Project(_))
+                    {
+                        let token = config::fingerprint(&settings, source, &id, &configuration)?;
+                        let approved = settings
+                            .approved(
+                                "mcp",
+                                &config::grant_key(&settings, source, &id)?,
+                                &token,
+                                &cancel,
                             )
-                        } else {
-                            (McpApproval::NotRequired, None)
-                        };
+                            .await?;
+                        (
+                            if approved {
+                                McpApproval::Approved
+                            } else {
+                                McpApproval::Required
+                            },
+                            Some(token),
+                        )
+                    } else {
+                        (McpApproval::NotRequired, None)
+                    };
                     catalog.servers.insert(
                         id,
                         McpServerEntry {
@@ -298,26 +291,21 @@ impl McpService {
     /// Concurrent edits fail CAS rather than overwriting another server.
     pub async fn update(
         &self,
-        source: SettingsSource,
+        source: SettingsScope,
         expected: String,
         id: String,
         change: McpChange,
         cancel: &CancellationToken,
     ) -> Result<String> {
-        if source == SettingsSource::Skills {
-            return Err(McpError::InvalidSource);
-        }
         if id.trim().is_empty() {
             return Err(McpError::InvalidId);
         }
         self.run(cancel, move |settings, cancel| async move {
-            let snapshot = settings.read(source, &cancel).await?;
+            let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
             if snapshot.revision != expected {
                 return Err(SettingsError::Conflict.into());
             }
-            let SettingsDocument::Mcp(mut document) = snapshot.document else {
-                unreachable!("MCP sources decode to MCP documents")
-            };
+            let mut document = snapshot.document;
             match change {
                 McpChange::Put(configuration) => {
                     document.mcp_servers.insert(id, configuration);
@@ -339,7 +327,7 @@ impl McpService {
                 }
             }
             Ok(settings
-                .update(source, &expected, SettingsDocument::Mcp(document), &cancel)
+                .update(source, &expected, document, &cancel)
                 .await?
                 .revision)
         })

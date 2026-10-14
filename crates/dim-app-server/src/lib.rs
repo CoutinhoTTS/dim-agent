@@ -21,7 +21,6 @@ pub mod storage;
 mod trace;
 mod transport;
 mod tree_protocol;
-pub mod user_configuration;
 
 use agents::{AgentIndex, AgentsPlugin};
 use collaboration::CollaborationPlugin;
@@ -424,7 +423,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
-    let user_persist = Arc::new(user_configuration::UserPersist::default());
     // Account-only hosts do not consume user execution configuration.
     let native_home = execution_root.filter(|_| config.database_path.is_some());
     let files =
@@ -454,13 +452,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_capability(&mut builtins, || {
             storage::SessionStorePlugin
         }));
-        if native_home.is_some() {
-            let port = user_persist.clone();
-            rows.push(register_capability(&mut builtins, move || {
-                user_configuration::UserConfigurationPlugin(port.clone())
-            }));
-            user_configuration::register_documents(&mut builtins);
-        }
     }
     if let Some(home_root) = product_root {
         rows.push(register_capability(&mut builtins, || {
@@ -589,9 +580,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         if execution_root.is_some() {
             methods.extend(["mcp", "skills"]);
         }
-        if native_home.is_some() {
-            methods.push("configuration");
-        }
         let methods: Arc<[String]> = methods.into_iter().map(str::to_owned).collect();
         rows.push(register_capability(&mut builtins, move || {
             RpcPlugin::new(config.clone(), methods.clone())
@@ -637,7 +625,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         resolver,
         rutis_loader::LoaderOptions {
             catalog: service_catalog,
-            persist: user_persist.clone(),
             ..Default::default()
         },
     );
@@ -666,52 +653,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &CancellationToken::new(),
         )
         .await?;
-        let (layers, editable) = if let Some(home) = native_home {
-            let bootstrap_rows = assembly.patches[0]
-                .insert
-                .as_ref()
-                .unwrap()
-                .iter()
-                .filter(|row| {
-                    matches!(
-                        row["name"].as_str(),
-                        Some("FileStorage" | "SqliteStorage" | "UserConfiguration")
-                    )
-                })
-                .cloned()
-                .collect();
-            let report = processes
-                .loader
-                .reconcile(
-                    vec![rutis_loader::Layer::new(
-                        "bootstrap",
-                        vec![rutis_loader::Patch {
-                            insert: Some(bootstrap_rows),
-                            ..Default::default()
-                        }],
-                    )],
-                    None,
-                )
-                .await
-                .map_err(|error| AgentError::Build(error.to_string()))?;
-            if !report.failures.is_empty() || !report.issues.is_empty() {
-                return Err(AgentError::Build("configuration bootstrap failed".into()));
-            }
-            // Reconcile can return with dependency-gated rows still Pending.
-            // Loading files does not imply that the SQLite binding is Active.
-            processes.wait_active(&root, remaining()).await?;
-            let files = root
-                .get::<dim_agent_capabilities::file_storage::FileStorage>()
-                .ok_or_else(|| AgentError::Build("configuration files unavailable".into()))?;
-            let (user, editable) = user_persist
-                .initialize(&files, home)
-                .await
-                .map_err(|error| AgentError::Build(error.to_string()))?;
-            (vec![assembly.clone(), user], Some(editable))
-        } else {
-            (vec![assembly.clone()], None)
-        };
-        let reconcile = processes.loader.reconcile(layers, editable);
+        let reconcile = processes.loader.reconcile(vec![assembly.clone()], None);
         let report = match tokio::time::timeout_at(deadline, reconcile).await {
             Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
             // The deadline has passed: this names the rows not yet Active.
