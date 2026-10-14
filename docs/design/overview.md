@@ -85,7 +85,8 @@ When a feature has characteristics of both sides, it is split into a process plu
 | Category | New plugins and splits |
 | --- | --- |
 | Process plugin + Capability | Questions (Session: `ask_user` tool, which resolves the calling branch's service per call, following Wait; branch: pending questions and answer facts, following Approval) |
-| Process plugin | Management, Goal, ShellInput, Attachments, SessionTitle, Web, Hooks, Scheduler, Workflow, Notifications, ExternalAgent, PluginManager, RemoteGateway, Modality. Of these, Goal, Web, Scheduler, Workflow and Notifications provide tools through process-level tool contributions |
+| Capability | Goal (branch: goal facts, evaluator branches and continuation; Rpc calls it per branch, following Approval) |
+| Process plugin | Management, ShellInput, Attachments, SessionTitle, Web, Hooks, Scheduler, Workflow, Notifications, ExternalAgent, PluginManager, RemoteGateway, Modality. Of these, Web, Scheduler, Workflow and Notifications provide tools through process-level tool contributions |
 | Non-daemon plugin | AcpGateway (protocol adapter in the CLI process) |
 
 Names after splitting are decided in each plugin's requirement document.
@@ -149,7 +150,6 @@ flowchart TB
       HooksP["Hooks"]:::new
       WorkflowP["Workflow"]:::new
       WebP["Web"]:::new
-      GoalP["Goal"]:::new
     end
     subgraph PA["Agents and collaboration"]
       AgentDirectory["AgentDirectory"]
@@ -215,7 +215,7 @@ flowchart TB
   RN["Resource node (the control node by default; can be imported over rutis link)"]
   CLIP -->|Local RPC| PROC
   RN -.->|Resource services imported per Session| SES
-  WebP & SchedulerP & WorkflowP & NotificationsP & GoalP -.->|Process-level tool contribution| ToolRegistry
+  WebP & SchedulerP & WorkflowP & NotificationsP -.->|Process-level tool contribution| ToolRegistry
   PROC -->|Loaded by Agents| SES
   SES -->|Loaded by TimelineTree| BR
 ```
@@ -254,6 +254,7 @@ flowchart LR
     Approval["Approval"]
     Permission["Permission"]
     InputQueue["InputQueue"]:::changed
+    TreeCommands["TreeCommands"]
     HostPlatform["HostPlatform"]
     Collaboration["Collaboration"]:::changed
     Agents["Agents"]
@@ -271,7 +272,8 @@ flowchart LR
   end
 
   Questions -->|A Session-scoped tool contribution| ToolRegistry
-  Goal & Web & Workflow & Scheduler & Notifications -->|A Process-level tool contribution, injected directly by ToolRegistry| ToolRegistry
+  Web & Workflow & Scheduler & Notifications -->|A Process-level tool contribution, injected directly by ToolRegistry| ToolRegistry
+  Goal -->|Evaluator branches| TreeCommands
   Questions -->|Completes the tool call after accepting an answer by sequence number| ToolExecutor
   Goal & ShellInput & Hooks -->|B Write input| InputQueue
   ShellInput & Hooks & ExternalAgent -->|Process launch and isolation| HostPlatform
@@ -293,7 +295,7 @@ flowchart LR
   PluginManager -->|Plugin content| SkillsCatalog
   PluginManager -->|Plugin content| Mcp
   PluginManager -->|Plugin content| Hooks
-  Notifications & SessionTitle & Hooks & Goal -->|Live subscription| SessionBroadcast
+  Notifications & SessionTitle & Hooks -->|Live subscription| SessionBroadcast
   RemoteGateway -->|Authenticated connections| Transport
   RemoteGateway --> Rpc
   AcpGateway -->|Local RPC| Rpc
@@ -306,7 +308,7 @@ flowchart LR
 | New plugin | Process part | Session part | Branch part | Existing plugins it attaches to |
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` tool | Pending questions and answer facts | ToolRegistry, ToolExecutor, TreeCommands |
-| Goal | `goal_update` tool, `session.goal.*` methods and continuation | — | — | ToolRegistry, Session broadcast, InputQueue |
+| Goal | — | — | Goal facts, evaluator branches, continuation; `session.goal.*` reach it through Rpc | InputQueue, TreeCommands |
 | ShellInput | Command execution at the RPC boundary | — | — | HostPlatform (Session-bound), InputQueue, Management |
 | Attachments | Submission-boundary transformation and text attachments | — | — | FileStorage |
 | Web | Search and fetch; `web_search`, `web_fetch` tools | — | — | Settings, ToolRegistry, Permission |
@@ -447,12 +449,12 @@ A tool call that "has a call but no result" does not mean "waiting for an answer
 
 | Item | Design |
 | --- | --- |
-| Scope | Process |
-| Responsibility | Set, edit, pause, resume and clear the goal; continue automatically while the goal is unfinished; record completion or blocking |
-| Integration | B: the goal is expressed as a keyed raw input block; set, edit, pause and resume are handled by `session.goal.*`, which at the boundary writes a new block with the same key through Session input (content includes the goal and its status), and clear ends the key with `retire`, so the goal stays in context. A: provides `goal_update` through a process-level tool contribution to report completion or blocking; before returning the tool result, the handler writes a terminal block with the same key through Session input (completed or blocked, with an explanation), so that the goal block replayed after compaction is no longer "in progress". Continuation: learns of `turn/end` on the goal's branch through a process-level live subscription to the Session broadcast, then reads the fixed prefix up to that sequence number through the Session's public read interface to decide; when continuation is needed it writes a Queue-mode continuation input through Session input, with the raw block marking it as coming from the goal |
-| Events | None. The goal and its status (including completed and blocked) are derived from the input blocks of that key |
-| Interfaces | Session methods `session.goal.set/edit/pause/resume/clear` |
-| Relations | Whether to continue depends only on the goal block, `input/*` and `stop/interrupt` in the fixed prefix that was read, not on InputQueue or Loop state; reading the fixed prefix consumes those facts, so the subscription itself does not need ordering guarantees. `stop/interrupt` pauses the goal and writes a "paused" block with the same key; consecutive continuations are counted by continuation inputs carrying the source marker, and reaching the limit pauses the goal. `turn/end` missed while the process restarts is not replayed; the goal keeps its state and continues when the user resumes it or at the next `turn/end`. When interrupt and continuation input race, the continuation input may be ordered after the interrupt and start a turn; in that turn the model sees from the goal block that it is paused and ends, so at most one extra turn occurs |
+| Scope | Branch |
+| Responsibility | Set, edit, pause, resume and clear the goal; while it is open, evaluate the branch after each turn and continue until the evaluator reports it done or blocked, the user pauses, clears or interrupts, or the continuation limit is reached |
+| Integration | The `session.goal.*` methods call the branch capability through Rpc, as Approval is reached; they only write `goal/*` events and never read the state. At each `turn/end` of an open goal, Goal creates an evaluator child branch at that `turn/end` through `TreeCommands`; it inherits the history and the permission policy at that point, checks the facts and ends with a verdict. Continue: Goal writes a Queue continuation input with the objective and the evaluator's feedback. Done or blocked: Goal closes the goal. All model-visible text is input Goal writes when it consumes its events; no keyed blocks |
+| Events | `goal/open`, `goal/close`, `goal/verdict` (see the [Goal design](plugins/Goal.md)) |
+| Interfaces | Session methods `session.goal.set/edit/pause/resume/clear/get`; no model tool |
+| Relations | The only staleness rule: a verdict for `turn/end` N applies only if no `turn/start` follows N. An interrupt closes the goal at its own sequence. Reaching the limit closes the goal like a blocked one; `resume` reopens it. Details: [Goal](plugins/Goal.md) |
 
 ### 5.3 ShellInput
 
@@ -648,18 +650,18 @@ The target design covers all categories; availability by build, platform, runtim
 
 ## 6. New Timeline events
 
-After reviewing each against common constraint 1, there are 4 new events in total:
+After reviewing each against common constraint 1, there are 7 new events in total:
 
 | Event | Writer | Why it is needed |
 | --- | --- | --- |
 | `question/asked`, `question/answered`, `question/cancelled` | Questions (branch; `answered` is written through the boundary) | Pending and answered cannot be derived from tool calls and results: results are published only after the whole batch of calls finishes; answers must be compared with interrupts by sequence number; precedent Approval |
+| `goal/open`, `goal/close`, `goal/verdict` | Goal (branch) | Whether a goal is open and what its evaluator decided are not facts of any existing event; `goal/verdict` is the terminal fact of the evaluator branch Goal started; see [Goal](plugins/Goal.md) |
 | `input/withdrawn` | InputQueue | Withdrawing a queued message that has not been adopted must become a fact for queue state to be rebuildable; see section 7 |
 
 Cases without events and the reasoning:
 
 | Original idea | Handling | Reasoning |
 | --- | --- | --- |
-| `goal/*` | Keyed raw input blocks, including terminal blocks for completed and blocked | The goal and its status are already input facts; pausing caused by interrupt can be derived from `stop/interrupt` |
 | `shell/*` | Executed at the RPC boundary; the result of `!command` is written as input | Not in-flight work within a branch |
 | `hook/*` | Interception decisions are recorded in the owner's facts, injected content is input, execution records go through the diagnostics channel | Hooks are an adapter over existing mechanisms |
 | `external_agent/*` | Collaboration's facts and ordinary events inside the member Session | External Agents integrate as model connections |
@@ -681,7 +683,7 @@ Declaring all existing event types through the #2 registration mechanism is part
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| ToolRegistry | Supplement | Injects process-level tool contributions provided by process plugins directly in `Deps`, forming the tool set together with Session-scoped contributions; dependencies are enabled by configuration and their lifecycle follows the dependency | Goal, Web, Scheduler, Workflow, Notifications |
+| ToolRegistry | Supplement | Injects process-level tool contributions provided by process plugins directly in `Deps`, forming the tool set together with Session-scoped contributions; dependencies are enabled by configuration and their lifecycle follows the dependency | Web, Scheduler, Workflow, Notifications |
 | InputQueue | Change | Adds `input/withdrawn`: withdraws input not yet adopted; withdrawn input is no longer adopted, and queue state and withdrawability are rebuilt from events; provides withdraw and "withdraw and rewrite as Steer" services, called through the Session boundary | `Ctrl+S`, `/queue`, recall for editing, delete queued messages |
 | Permission | Supplement | Risk categories "network", "outbound message" and "persistent configuration", and whether FullAccess automatically allows each category; a cross-Session rule source from Settings; an allowed-command list | Web, Notifications, Scheduler; `/approvals`, command rules |
 | Approval | Supplement | Admission extension point before tool calls: injects process-level admission services (such as Hooks) in `Deps` and calls them asynchronously after the policy decision and before execution, returning allow or deny; on interrupt they are cancelled and settled as cancelled | Hooks |
@@ -709,7 +711,7 @@ Declaring all existing event types through the #2 registration mechanism is part
 | Mcp | Supplement | OAuth authorization for HTTP/SSE connections; accepts configuration from plugin sources | MCP connections; PluginManager |
 | SkillsCatalog | Supplement | Accepts Skill roots from plugin sources; installation and removal are initiated by PluginManager | PluginManager |
 | Trace | Supplement | Exports model request snapshots for a specified step, with optional filtering of reasoning, tool records and compacted content | Request snapshot export |
-| Session broadcast | To confirm | Process-level live subscription to events of all Sessions (turn end, tool results, pending approval, pending answer, and so on); no ordering guarantee and no resumable reads; users that need correctness read the Timeline fixed prefix | Notifications, SessionTitle, Hooks, Goal |
+| Session broadcast | To confirm | Process-level live subscription to events of all Sessions (turn end, tool results, pending approval, pending answer, and so on); no ordering guarantee and no resumable reads; users that need correctness read the Timeline fixed prefix | Notifications, SessionTitle, Hooks |
 
 ## 8. CLI layer
 
@@ -774,7 +776,7 @@ Each new plugin's requirement document `docs/design/plugins/<name>.md` contains:
 | AcpGateway | TypeScript first | It is only a local RPC client, so the ACP mapping can first be validated as a standalone program and then merged into the Rust CLI | None |
 | Web | TypeScript first | #4 already lists `web` as the first migration target; tools are provided as a process service and do not need the capability port | Service contract for process-level tool contributions |
 | Workflow | TypeScript first | Orchestration rules need validation; runs belong to the process and do not need the capability port | Service contracts for Agents, Collaboration and process-level tool contributions |
-| Goal | TypeScript first | The continuation strategy needs validation; does not need the capability port | Process-level live subscription to the Session broadcast; service contracts for Session read and input; service contract for process-level tool contributions |
+| Goal | Rust | Branch facts and evaluator branches settle with interrupts and reloads | — |
 | Management | Rust | Management plane backbone | — |
 | Questions | Rust | Branch facts are tightly tied to settlement of in-flight tool calls | — |
 | ShellInput | Rust | Executes commands; part of the security boundary | — |
@@ -812,6 +814,6 @@ Each new plugin's requirement document `docs/design/plugins/<name>.md` contains:
 | Remote access | Authentication, disconnection and TLS deployment relate to the open questions in #5 |
 | Isolation coverage | Whether MCP stdio processes are isolated by default |
 | FullAccess and new risk categories | Whether outbound messages and persistent configuration still require asking under FullAccess |
-| Process-level subscription | Whether the cross-Session live subscription needed by Notifications, SessionTitle, Hooks and Goal reuses the Session broadcast |
+| Process-level subscription | Whether the cross-Session live subscription needed by Notifications, SessionTitle and Hooks reuses the Session broadcast |
 | External Agent permissions | Whether the external Agent's own permission requests (such as ACP permission requests) map to dim approval, or are answered automatically according to the configured permission mode |
 | External conversation continuation | When an external Agent does not support continuation or continuation fails, whether to open a new external conversation with a history summary attached, or fail explicitly |
