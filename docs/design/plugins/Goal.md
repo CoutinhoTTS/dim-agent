@@ -1,6 +1,6 @@
 # Goal
 
-Status: Draft. Overall design: [overview §5.2](../overview.md#52-goal). Phase: P2. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
+Status: Draft. Overall design: [overview B.2](../overview.md#b2-goal). Phase: P2. Language: TypeScript first ([overview F.3](../overview.md#f3-assignment)).
 
 Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The goal and its status exist only as a keyed raw input block written through [session-access](../contracts/session-access.md); continuation is decided from a fixed Timeline prefix after a `turn/end` notice from the [broadcast subscription](../contracts/session-broadcast-subscription.md). Goal is a process plugin, writes no events of its own, and has no separate "Goal mode": the feature-list wording "switch Goal mode" is covered by the presence and status of a goal, visible through `session.goal.get` and the goal block.
 
@@ -10,10 +10,10 @@ Goal keeps a standing objective on a branch and continues the branch automatical
 flowchart LR
   subgraph PROC["Process (App Server)"]
     GoalP["Goal"]:::new
-    SE["SessionEvents"]:::contract
+    SE["Session broadcast subscription"]:::contract
     SA["SessionAccess"]:::contract
     PTR["Process tool registry"]:::contract
-    SMC["SessionMethodContribution registry"]:::contract
+    SMC["methods registry (level session)"]:::contract
     Settings["Settings volatile configuration"]
     Rpc["Rpc"]
   end
@@ -39,7 +39,7 @@ Goal depends only on contracts and registries; no Session or branch plugin and n
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Goal` | Process | [`SessionEvents`](../contracts/session-broadcast-subscription.md), [`SessionAccess`](../contracts/session-access.md), Settings volatile configuration, public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end`, `stop/interrupt` | Process tool set `goal` (`goal_update`) mounted into the [process tool registry](../contracts/process-tool-contribution.md); Session methods `session.goal.*` mounted as a [`SessionMethodContribution`](../contracts/session-boundary.md); the goal block and continuation formats under source `goal`; configuration key `goal.maxContinuations` |
+| `Goal` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md), [`SessionAccess`](../contracts/session-access.md), Settings volatile configuration, public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end`, `stop/interrupt` | Process tool set `goal` (`goal_update`) mounted into the [process tool registry](../contracts/process-tool-contribution.md); Session methods `session.goal.*` contributed with `level: session` through the [method contribution](../contracts/session-boundary.md) contract; the goal block and continuation formats under source `goal`; configuration key `goal.maxContinuations` |
 
 Both mounts follow the [extension-registry](../contracts/extension-registry.md) pattern: one mount instance registers in `apply` and unregisters in its `ctx.effect` disposer after settling its own in-flight calls. When Goal is not configured, `session.goal.*` return `method_not_found` and no tool is declared; when configured but inactive, `session.goal.*` return `service_reloading` and `goal_update` is withdrawn (withdraw-only). Goal never names another plugin's types and never reads capability state.
 
@@ -91,9 +91,9 @@ sequenceDiagram
   participant SA as SessionAccess
   participant TL as Branch Timeline
   participant IQ as InputQueue and Loop
-  participant SE as SessionEvents
+  participant SE as Broadcast subscription
   CLI->>Rpc: session.goal.set
-  Rpc->>Goal: SessionMethodContribution call
+  Rpc->>Goal: contributed method call
   Goal->>SA: prefix(B, head), check transition
   Goal->>SA: input(B, active block, Queue)
   SA->>TL: Timeline append (input boundary)
@@ -136,7 +136,7 @@ The terminal block precedes the batch's `step/tool-result`, so the goal replayed
 sequenceDiagram
   participant User
   participant TL as Branch Timeline
-  participant SE as SessionEvents
+  participant SE as Broadcast subscription
   participant Goal
   participant SA as SessionAccess
   User->>TL: stop/interrupt scope turn at M
@@ -220,7 +220,7 @@ Exact texts: [Appendix A.4](#a4-model-visible-texts).
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `goal_update {status, summary}` | Process tool, risk `session` | Model reports completion or blocking; writes the terminal block |
-| `session.goal.set/edit/pause/resume/clear` | Session methods (SessionMethodContribution) | User controls the goal; each writes one block |
+| `session.goal.set/edit/pause/resume/clear` | Session methods (method contribution, `level: session`) | User controls the goal; each writes one block |
 | `session.goal.get` | Session method | Current `GoalView` of a branch, replaces any "mode" query (A8) |
 | `goal.maxContinuations` | Configuration (volatile) | Continuation limit, read at each decision |
 
@@ -241,7 +241,7 @@ Goal writes only `input/message` through session-access under source `goal`; res
 | Risk category | `session` (existing; writes only Session input) (A9) |
 | Requirements | `interactive: false`, `roles: None` (offered to every Session) (A9) |
 | Set key / version | `goal`; version changes only with Goal's generation |
-| Handler input | `SessionFacts` from [session-access](../contracts/session-access.md) plus `ToolExecutionContext` (branch, turn, request ids) |
+| Handler input | The `SessionConfig` subset in the call context ([process tool contribution](../contracts/process-tool-contribution.md)) plus `ToolExecutionContext` (branch, turn, request ids) |
 
 Handler: takes the lane of `(session_id, branch_id)`, reads `prefix(branch, head)`, requires C1 (error result otherwise), writes the terminal block in Append mode, awaits commit, returns. On cancellation before the write it writes nothing; once `input` was called the write is not withdrawn.
 
@@ -256,7 +256,7 @@ Handler: takes the lane of `(session_id, branch_id)`, reads `prefix(branch, head
 | `session.goal.clear` | `{sessionId, branchId?}` | `{sequence}` | Retire block, Append |
 | `session.goal.get` | `{sessionId, branchId?}` | `{goal: GoalView \| null, through}` | None (A8) |
 
-`branchId` defaults to `main` (A15). `GoalView = {status, objective, reason?, summary?, owner, count, limit, sequence}`. Transitions: `set` from any state; `edit` from `active`, `paused`, `blocked`; `pause` from `active`; `resume` from `paused`, `blocked`, `active`; `clear` from any live goal. Methods `acquire` the Session (may restore it); notices never restore (A14). The methods are the keyed service of Goal's [`SessionMethodContribution`](../contracts/session-boundary.md) mount; Rpc validates the envelope and routes by namespace without knowing Goal.
+`branchId` defaults to `main` (A15). `GoalView = {status, objective, reason?, summary?, owner, count, limit, sequence}`. Transitions: `set` from any state; `edit` from `active`, `paused`, `blocked`; `pause` from `active`; `resume` from `paused`, `blocked`, `active`; `clear` from any live goal. Methods `acquire` the Session (may restore it); notices never restore (A14). The methods are Goal's [method contribution](../contracts/session-boundary.md) (namespace `session.goal`, `level: session`); Rpc validates the envelope and routes by namespace without knowing Goal.
 
 ### A.3 Continuation decision
 
@@ -292,7 +292,7 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 
 | Step | Path |
 | --- | --- |
-| Subscribe | In `apply`: `SessionEvents::subscribe(ctx, {types: {"turn/end", "stop/interrupt"}, sessions: None, branches: None}, 256)`; the stream task is registered with `ctx.effect` |
+| Subscribe | In `apply`: Session broadcast `subscribe(ctx, {types: {"turn/end", "stop/interrupt"}, sessions: None, branches: None}, 256)`; the stream task is registered with `ctx.effect` |
 | Trigger | Per notice, enqueue on the `(session, branch)` lane and return to `next()` |
 | Read | `access.source("goal").get(session)` (loaded only), then `lease.prefix(branch, at_least = event.sequence)` |
 | Write | `lease.input(branch, SourceInput {submission_id: "goal:<uuid>", marker, mode})` → `Session::input` → `Branch::input` → `TimelineContext::input` → `Timeline::append` (no registration callback). Goal awaits the committed event and `lease.published` before releasing the lane, so its next read sees its own write |
@@ -407,4 +407,3 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | Question | Description |
 | --- | --- |
 | Overview §13 "How events enter context" | Goal designs for adopted input only |
-| Overview §5.2 interfaces | Overview lists `session.goal.set/edit/pause/resume/clear`; `session.goal.get` is added here (A8) and should be registered |

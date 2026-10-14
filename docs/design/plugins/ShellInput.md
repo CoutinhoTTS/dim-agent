@@ -1,8 +1,8 @@
 # ShellInput
 
-Status: Draft. Overall design: [overview §5.3](../overview.md#53-shellinput). Phase: P1. Language: Rust.
+Status: Draft. Overall design: [overview B.3](../overview.md#b3-shellinput). Phase: P1. Language: Rust.
 
-Executes `!command` and `!!command` typed by the user, at the RPC boundary, on the Session's resource node. The result of `!command` (command and bounded output) is written as an Append input so it enters context with the next model request; the output of `!!command` goes only to the calling client and the diagnostics channel. ShellInput is a process plugin with no events; its `shell.run`, `shell.stop` and `shell.list` methods are a Management contribution. At most one command runs per Session; a command ends on `shell.stop`, Session close, plugin unload or daemon exit.
+Executes `!command` and `!!command` typed by the user, at the RPC boundary, on the Session's resource node. The result of `!command` (command and bounded output) is written as an Append input so it enters context with the next model request; the output of `!!command` goes only to the calling client and the diagnostics channel. ShellInput is a process plugin with no events; its `shell.run`, `shell.stop` and `shell.list` methods are contributed with `level: management`. At most one command runs per Session; a command ends on `shell.stop`, Session close, plugin unload or daemon exit.
 
 ## 1. Structure
 
@@ -10,12 +10,12 @@ Executes `!command` and `!!command` typed by the user, at the RPC boundary, on t
 flowchart LR
   CLI["CLI / client"]
   subgraph P["Process scope (control node)"]
-    MG["Management"]
-    MC["ManagementContribution + progress sink"]:::contract
+    MG["Entry (management level mounted)"]
+    MC["methods registry (level management, progress sink)"]:::contract
     SI["ShellInputPlugin (run registry)"]:::new
     SA["SessionAccess facade"]:::contract
-    SE["SessionEvents facade"]:::contract
-    SR["SessionResources (per call)"]:::contract
+    SE["Session broadcast subscription"]:::contract
+    NS["node-services lookup (per call)"]:::contract
     DG["Diagnostics channel"]
   end
   subgraph N["Resource node"]
@@ -27,8 +27,9 @@ flowchart LR
   CLI -- "shell.run / stop / list" --> MG
   MG --> MC
   SI -- "registers shell namespace" --> MC
-  SI -- "resolve(session) per run" --> SR
-  SR --> HP
+  SI -- "config(session): cwd, resource_node" --> SA
+  SI -- "lookup(resource_node) per run" --> NS
+  NS --> HP
   SI -- "Append input, lookup" --> SA
   SA --> IQ
   SI -- "Ended notices" --> SE
@@ -37,13 +38,13 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-ShellInput touches the Session only through the public SessionAccess/SessionEvents facades and reaches the resource node only through SessionResources resolved per call, so an offline node fails only runs on that node and an Agents reload does not reload ShellInput.
+ShellInput touches the Session only through SessionAccess and the broadcast subscription, and reaches the resource node only through the `node-services` lookup by the node id from `SessionConfig`, per call, so an offline node fails only runs on that node and an Agents reload does not reload ShellInput.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ShellInputPlugin` | Process (App Server) | `SessionAccess`, `SessionResources` ([session-access](../contracts/session-access.md)); `SessionEvents` ([session-broadcast-subscription](../contracts/session-broadcast-subscription.md)); diagnostics channel | `ManagementContribution` keyed `shell` ([Management](Management.md)), mounted per the [extension-registry](../contracts/extension-registry.md) pattern |
+| `ShellInputPlugin` | Process (App Server) | `SessionAccess` ([session-access](../contracts/session-access.md)); [Session broadcast subscription](../contracts/session-broadcast-subscription.md); `node-services` ([extension registry](../contracts/extension-registry.md)); diagnostics channel | Namespace `shell`, `level: management`, in the [method contribution](../contracts/session-boundary.md) contract |
 
-Contracts depended on: `SessionAccess` (`source("shell-input")`, `acquire`, `SessionLease::input`, `lookup`); `SessionResources` (node, cwd, Session-bound `HostPlatform`, isolation; resolved per call); `SessionEvents` (`SessionNotice::Ended`, `Gap`); `ManagementContribution` with the per-call progress sink; `HostPlatform::spawn(ProcessSpec)`, `ProcessTree::{stdout, stderr, wait, terminate}`, `shell: ShellStatus` (existing; isolation parameter is the overview §7.1 supplement); shell argv construction of the `exec` tool ([exec.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs), to be exposed as a HostPlatform helper, A2).
+Contracts depended on: `SessionAccess` (`source("shell-input")`, `acquire`, `config` for `cwd` and `resource_node`, `SessionLease::input`, `lookup`); `node-services` (the node's `HostPlatform` and isolation, resolved per call); the broadcast subscription (`Ended`, `Gap` notices); the method contribution with its per-call progress sink; `HostPlatform::spawn(ProcessSpec)`, `ProcessTree::{stdout, stderr, wait, terminate}`, `shell: ShellStatus` (existing; isolation parameter is the overview §7.1 supplement); shell argv construction of the `exec` tool ([exec.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs), to be exposed as a HostPlatform helper, A2).
 
 Contracts defined here: the `shell.*` management methods, the source marker `dim-shell-input` (kind `command`) and the `submission_id` prefix `shell-input:`. ShellInput never reads Session state or another plugin's internals.
 
@@ -77,16 +78,16 @@ Events: none (overview §6 has no `shell/*`). A run is not in-flight work of a b
 ```mermaid
 sequenceDiagram
   participant C as CLI
-  participant M as Management
+  participant M as Entry (management level)
   participant SI as ShellInput
-  participant SR as SessionResources
+  participant NS as node-services
   participant HP as HostPlatform (node)
   participant SA as SessionAccess
   participant TL as Timeline
   C->>M: shell.run {sessionId, runId, command, mode record}
-  M->>SI: call (progress sink)
-  SI->>SA: acquire(session) -> lease
-  SI->>SR: resolve(session) -> node services
+  M->>SI: contributed call (progress sink)
+  SI->>SA: acquire(session) -> lease, config -> cwd, resource_node
+  SI->>NS: lookup(resource_node) -> node services
   SI->>HP: spawn shell argv in Session cwd
   HP-->>SI: stdout/stderr chunks
   SI-->>C: progress {runId, stream, text}
@@ -104,7 +105,7 @@ The write happens once, after the process tree is released. InputQueue applies t
 sequenceDiagram
   participant C as CLI
   participant SI as ShellInput
-  participant SE as SessionEvents
+  participant SE as Broadcast subscription
   participant HP as HostPlatform
   participant SA as SessionAccess
   alt user Ctrl+C
@@ -184,15 +185,15 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `shell.run` | Management method, `Interruption::Report`, progress sink | Run a command (`record` or `private`), stream output, return the result |
-| `shell.stop` | Management method | Stop a run by `runId`; idempotent |
-| `shell.list` | Management method | Running runs, optionally per Session |
+| `shell.run` | Method, `level: management`, `Interruption::Report`, progress sink | Run a command (`record` or `private`), stream output, return the result |
+| `shell.stop` | Method, `level: management` | Stop a run by `runId`; idempotent |
+| `shell.list` | Method, `level: management` | Running runs, optionally per Session |
 | Marker `dim-shell-input` kind `command` | Input convention | Model-visible recorded result |
 | CLI `!` / `!!` | Client | Maps prefixes to `shell.run` modes |
 
 ## 7. Security
 
-`!` and `!!` execute arbitrary commands as the service user on the resource node without Approval (overview §5.3): authority comes from Management being mounted on the entry, and exporting Management grants host administration (overview §3.1). Paired remote devices may call Session methods but `shell.*` is a management method, available only where Management is mounted. The node's isolation configuration applies (host-local, never from Timeline). For `!`, command text and output are written to the Timeline and replayed to the model; users must avoid printing secrets. The environment is the service's, never forwarded from clients. Diagnostics carry metadata and the bounded tail only (A14).
+`!` and `!!` execute arbitrary commands as the service user on the resource node without Approval (overview §5.3): authority comes from the entry mounting the management level, and exporting it grants host administration (overview §3.1). Paired remote devices may call Session methods but `shell.*` has `level: management`, available only where that level is mounted. The node's isolation configuration applies (host-local, never from Timeline). For `!`, command text and output are written to the Timeline and replayed to the model; users must avoid printing secrets. The environment is the service's, never forwarded from clients. Diagnostics carry metadata and the bounded tail only (A14).
 
 ## Appendix A. Interface details
 
@@ -210,7 +211,7 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 
 | Item | Rule |
 | --- | --- |
-| Node and services | `SessionResources` resolved for the Session at run start; all host access through the returned HostPlatform |
+| Node and services | `resource_node` from `SessionAccess::config` at run start, looked up through `node-services`; all host access through the returned HostPlatform |
 | Shell | `HostPlatform.shell` of that node, argv built as for `exec` (A2) |
 | Working directory | Session cwd; a fresh process per run (A3) |
 | Environment | The node's service environment, never the client's; plus `DIM_SESSION_ID` (A5) |
@@ -238,7 +239,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 
 | Step | Mechanics |
 | --- | --- |
-| Start | Validate; reject `shell_busy`/`duplicate_run`; `SessionAccess::acquire` (restores an unloaded Session) and keep the lease for the run (A10); resolve `SessionResources`; subscribe to `SessionEvents` for this Session (filter `sessions = {id}`, `types = {"input/message"}`, events ignored; `Ended`/`Gap` notices are delivered regardless of `types`); `spawn`; register the run in the generation's tracker |
+| Start | Validate; reject `shell_busy`/`duplicate_run`; `SessionAccess::acquire` (restores an unloaded Session) and keep the lease for the run (A10); read `config`, look up `node-services` for `resource_node`; subscribe to the broadcast for this Session (filter `sessions = {id}`, `types = {"input/message"}`, events ignored; `Ended`/`Gap` notices are delivered regardless of `types`); `spawn`; register the run in the generation's tracker |
 | Run | A task reads both pipes into a bounded tail buffer and forwards chunks to the progress sink; `select!` on exit and `cancel` |
 | Stop | `cancel` → `ProcessTree::terminate` → status `stopped` with partial output |
 | Write (`record`) | After resources are released: `lease.input` → `Session::input` → `Branch::input` → boundary `validate` → `Timeline::append` (no registration callback). Committed sequence returned as `recorded.sequence` |
@@ -246,7 +247,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | Consumption | InputQueue `input/applied {mode: append}`, Loop `input/consumed`; the input lives in InputQueue's `StateCell<InputSnapshot>` until consumed |
 | Recheck | None |
 | Session close | `Ended {Closed}` cancels the run; nothing written. After `Gap`, `SessionAccess::get` is called for each Session with a run; `SessionClosed` cancels it (A11). `Ended {Unloaded}` cannot occur while the lease pins the Session |
-| Agents reload | SessionAccess/SessionEvents are facades: calls return `Reloading`, the subscription reports `Gap`; ShellInput is not reloaded and the run continues |
+| Agents reload | SessionAccess and the broadcast subscription are facades: calls return `Reloading`, the subscription reports `Gap`; ShellInput is not reloaded and the run continues |
 | Unload / restart | Unload disposer cancels all runs, terminates trees, waits for them, writes no input. Restart: trees die with the daemon (`ProcessTree` drop kills the tree); nothing was started on the Timeline, so nothing is settled |
 
 ## Appendix B. Full conflict table
@@ -273,15 +274,15 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | Child branch cut after consumption | consumed < cut | Inherited in the prefix | History projection |
 | `!!` run | — | No Timeline effect | — |
 | Agents reload mid-run | — | Run continues; write retried after the window with `lookup` | ShellInput |
-| ShellInput unload mid-run | — | Tree terminated; nothing written; caller `operation_interrupted` (Report) | ShellInput, Management |
+| ShellInput unload mid-run | — | Tree terminated; nothing written; caller `operation_interrupted` (Report) | ShellInput, method registry |
 | Process restart mid-run | — | Tree dies with the daemon; nothing written | — |
 | Commit, then reply lost | X committed | Retry in the same generation → `duplicate_run`; after restart the client checks `session.input_lookup` for `shell-input:<runId>` (A12) | Client |
 | Session unloaded at start | — | `acquire` restores it; the lease pins it | AgentIndex |
-| Resource node offline at start | — | `node_unavailable`; nothing started; other nodes unaffected | SessionResources |
+| Resource node offline at start | — | `node_unavailable`; nothing started; other nodes unaffected | node-services |
 | Resource node lost mid-run | — | Status `failed`; for `record`, partial output written with `status="failed"` (A6) | ShellInput |
 | Duplicate or late `stop` | — | `{stopped: false}` | ShellInput |
 | Client detach or disconnect | — | Run continues and is recorded or discarded; progress dropped (A13) | ShellInput |
-| Paired remote device | — | `shell.*` unknown unless Management is mounted on that entry | Management |
+| Paired remote device | — | `shell.*` unknown unless the entry mounts the management level | Entry mounting rules |
 
 ## Appendix C. Errors and recovery
 
@@ -292,9 +293,9 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | `duplicate_run` | `runId` already used in this generation |
 | `invalid_params` | Empty command, command over 64 KiB, `runId` not `[A-Za-z0-9-]{1,64}` |
 | `session_closed` / `branch_missing` | From `SessionAccess` at start |
-| `node_unavailable` | `SessionResources` cannot reach the node |
-| `service_reloading` | `shell` namespace inactive (Management registry rule) or an Agents window at start |
-| `operation_interrupted` | ShellInput unloaded while the call ran (Management `Report`) |
+| `node_unavailable` | `node-services` cannot reach the node |
+| `service_reloading` | `shell` namespace inactive (registry rule) or an Agents window at start |
+| `operation_interrupted` | ShellInput unloaded while the call ran (`Report`) |
 
 | Case | Result |
 | --- | --- |
@@ -315,13 +316,13 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 8. Agents reload mid-run: run completes and is recorded once.
 9. ShellInput unload and daemon restart mid-run: tree terminated, nothing written, no re-execution.
 10. Offline node: `node_unavailable` for that Session only; a Session on another node runs.
-11. Withdrawn X is never consumed; remote entry without Management: method unknown.
+11. Withdrawn X is never consumed; remote entry without the management level: method unknown.
 
 ## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Methods `shell.run/stop/list` with `mode` | Overview §5.3 (run, stop; namespace renamed because `session` is reserved by Management); `list` and `mode` are judgment | Method set changes |
+| A1 | Methods `shell.run/stop/list` with `mode` | Overview §5.3 (run, stop); `list` and `mode` are judgment | Method set changes |
 | A2 | Shell and argv as `exec` | Judgment | ShellInput builds its own argv |
 | A3 | Each run is a fresh process | Judgment | A per-Session shell needs lifecycle and state |
 | A4 | One running command per Session | Maintainer decision | Concurrent runs, inputs in completion order |
@@ -329,7 +330,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | A6 | Stopped or failed `!` runs record partial output | Judgment | Only completed runs recorded |
 | A7 | `exec` preview bounds (2000 lines, 50 KiB) | Existing `exec` constants; reuse is judgment | Separate limit |
 | A8 | Terminal escapes stripped from model-visible text | Judgment | Escapes reach the model |
-| A9 | Progress through Management's per-call progress sink, rate-coalesced | [Management](Management.md) contribution contract; coalescing is judgment | Output only at completion |
+| A9 | Progress through the per-call progress sink, rate-coalesced | [Method contribution](../contracts/session-boundary.md); coalescing is judgment | Output only at completion |
 | A10 | The run holds a `SessionLease` | Session-access; judgment | Session may unload; write re-acquires |
 | A11 | Session close ends its run | Maintainer decision; overview §5.3 names stop and daemon exit | Runs outlive the Session and are discarded |
 | A12 | Clients deduplicate by `runId` via `session.input_lookup` | Session-access | Possible duplicate input |
@@ -340,7 +341,6 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 
 | # | Question | Description |
 | --- | --- | --- |
-| F1 | Overview §5.3 method names | Overview says `session.shell.run/stop`; `session` is reserved by Management, so the overview should read `shell.*` |
-| F2 | Overview §5.3 end conditions | Overview names stop and daemon exit; this design also ends runs on Session close and plugin unload |
-| F3 | Remote node tree termination | Whether an imported HostPlatform kills process trees when the link drops (#5) |
-| F4 | Notices-only subscription | The broadcast contract rejects an empty type set; ShellInput uses a one-type filter to receive notices. A notices-only filter would be cleaner |
+| F1 | Overview §5.3 end conditions | Overview names stop and daemon exit; this design also ends runs on Session close and plugin unload |
+| F2 | Remote node tree termination | Whether an imported HostPlatform kills process trees when the link drops (#5) |
+| F3 | Notices-only subscription | The broadcast contract rejects an empty type set; ShellInput uses a one-type filter to receive notices. A notices-only filter would be cleaner |

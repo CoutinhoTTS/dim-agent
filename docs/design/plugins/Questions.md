@@ -1,15 +1,15 @@
 # Questions
 
-Status: Draft. Overall design: [overview §5.1](../overview.md#51-questions). Phase: P1. Language: Rust.
+Status: Draft. Overall design: [overview B.1](../overview.md#b1-questions). Phase: P1. Language: Rust.
 
-The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. A Session part contributes the tool only to interactive Sessions; a branch part records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number (the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern). Questions has no process plugin; its one Session method is a stateless contribution to Rpc.
+The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. A Session part contributes the tool only to interactive Sessions; a branch part records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number (the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern). Questions has no process part: the Session part also contributes the Session method `session.question.respond`.
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
   subgraph S["Session scope"]
-    QP["QuestionsPlugin (tool source)"]:::new
+    QP["QuestionsPlugin (tool source, method)"]:::new
     TR["ToolRegistry"]
   end
   subgraph B["Branch scope"]
@@ -17,35 +17,31 @@ flowchart LR
     TE["ToolExecutor"]
     TL["Timeline + Dispatcher"]
   end
-  subgraph P["Process scope"]
-    RPC["Rpc"]
-    SMC["SessionMethodContribution registry"]:::contract
-    QM["questions method mount (stateless)"]:::new
-  end
-  SF["SessionFacts.interactive"]:::contract
+  RPC["Rpc"]
+  MC["methods registry (level session)"]:::contract
+  SC["SessionConfig.interactive"]:::contract
   STS["SessionToolSource contract"]:::contract
-  SF --> QP
+  SC --> QP
   QP -- "provides" --> STS
   STS --> TR
+  QP -- "contributes session.question.respond" --> MC
+  MC --> RPC
+  QP -- "service::<Questions>(branch)" --> QB
   TE -- "handler call + batch token" --> QB
   QB -- "append_registered / append" --> TL
   TL -- "question/answered (Dispatcher)" --> QB
-  QM -- "registers session.question.*" --> SMC
-  SMC --> RPC
-  QM -- "service::<Questions>(branch)" --> QB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-The tool presence is decided once per Session from `SessionFacts.interactive`; all waiting and ordering lives in the branch part. The method mount holds no state and never reaches branch state except through the public Session facade.
+The tool presence is decided once per Session from `SessionConfig.interactive`; all waiting and ordering lives in the branch part. The method handler holds no state and reaches the branch only through `service::<Questions>(branch)`.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:TreeCommands`, `S:SessionFacts` ([session-access](../contracts/session-access.md)) | `S:SessionToolSource#questions`: one set with `ask_user`, or none |
+| `QuestionsPlugin` | Session | `S:TreeCommands`, `SessionConfig.interactive` | `S:SessionToolSource#questions`: one set with `ask_user`, or none; method `session.question.respond` (`level: session`, [method contribution](../contracts/session-boundary.md)) |
 | `QuestionsBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher` | `B:Questions` (`ask`, `respond`) |
-| `questions` method mount | Process (stateless, [extension registry](../contracts/extension-registry.md) mount) | Rpc `SessionMethodContribution` registry ([session-boundary](../contracts/session-boundary.md)) | Session method `session.question.respond` |
 
-Contracts depended on: the Session tool source contract of [tool contributions](../../architecture/rust-agent/tool-contributions.md); `TreeCommands::get(branch).service::<T>()` (as [Wait](../../architecture/rust-agent/plugins/Wait.md)); Permission risk category `session`; ToolExecutor's batch token and settlement; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md); `SessionFacts` ([session-access](../contracts/session-access.md); `interactive` set by `session.create`); Rpc's `SessionMethodContribution` registry ([session-boundary](../contracts/session-boundary.md)) under the [extension-registry](../contracts/extension-registry.md) pattern; client-visible dynamic events (#2, A10).
+Contracts depended on: the Session tool source contract of [tool contributions](../../architecture/rust-agent/tool-contributions.md); `TreeCommands::get(branch).service::<T>()` (as [Wait](../../architecture/rust-agent/plugins/Wait.md)); Permission risk category `session`; ToolExecutor's batch token and settlement; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md); `SessionConfig.interactive` (proposed Agents supplement, set by `session.create`); the [method contribution](../contracts/session-boundary.md) contract (`methods` point of the [extension registry](../contracts/extension-registry.md)); client-visible dynamic events (#2, A10).
 
 Contracts defined here: the `ask_user` tool, the `question/*` data and consumption contracts, `B:Questions`, `session.question.respond` and its errors. The only write path of `question/answered` is `Questions::respond`. Questions names no other plugin's internal type.
 
@@ -84,9 +80,9 @@ All three events are branch Timeline facts written only by `B:Questions`; the pe
 
 Outcome rule, used by rebuild and by clients reading history: a question is **pending** while it has `asked` and neither `answered` nor `cancelled`; **answered** when an `answered` exists and no `cancelled`; otherwise **cancelled**. `cancelled` always wins because it is written exactly when an answer was not delivered to the handler.
 
-Rebuild on load folds only the branch's local events (a child branch never owns its parent's questions) and writes `question/cancelled` ("did not survive recovery") for every unresolved `asked`. Tool presence is fixed at Session creation from `SessionFacts`.
+Rebuild on load folds only the branch's local events (a child branch never owns its parent's questions) and writes `question/cancelled` ("did not survive recovery") for every unresolved `asked`. Tool presence is fixed at Session creation from `SessionConfig`.
 
-Why the events exist (overview §6): between handler start and `step/tool-result` a call has no fact, and results publish only after the whole batch, so "waiting" and "answered" are not derivable; the answer is user content that must be a fact to be ordered against `stop/interrupt` and to survive until the batch result. `turn_id`, `request_id` and `declined` extend the overview payload (A3, open question F2).
+Why the events exist (overview §6): between handler start and `step/tool-result` a call has no fact, and results publish only after the whole batch, so "waiting" and "answered" are not derivable; the answer is user content that must be a fact to be ordered against `stop/interrupt` and to survive until the batch result. `turn_id`, `request_id` and `declined` extend the overview payload (A3, open question F1).
 
 ## 3. Flows
 
@@ -104,7 +100,7 @@ sequenceDiagram
   TE->>Q: ask(call_id, questions, batch token)
   Q->>TL: append_registered question/asked (callback registers entry)
   TL-->>C: session.event question/asked
-  C->>Q: session.question.respond (via Rpc method mount)
+  C->>Q: session.question.respond (contributed method, via Rpc)
   Q->>TL: append_registered question/answered (callback marks answering)
   TL->>D: deliver question/answered
   D->>Q: consume: token not cancelled, send answer, return
@@ -134,7 +130,7 @@ Ordering closes the attach race: anything dispatched before the listener is in h
 
 ### 3.3 Non-interactive Sessions
 
-`session.create {interactive: false}` (used by `exec`, AcpGateway, Scheduler, Workflow) fixes `SessionFacts.interactive = false`; `QuestionsPlugin` publishes no set and the model never sees `ask_user`. A model calling it by name gets `Unknown tool`.
+`session.create {interactive: false}` (used by `exec`, AcpGateway, Scheduler, Workflow) fixes `SessionConfig.interactive = false`; `QuestionsPlugin` publishes no set and the model never sees `ask_user`. A model calling it by name gets `Unknown tool`.
 
 ## 4. Timing and conflicts
 
@@ -199,7 +195,7 @@ Never visible: `question/*` events, `structured_content`, the CLI rendering. Com
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `ask_user` | Tool, risk `session` | Ask 1–4 questions, wait for the answer |
-| `session.question.respond` | Session method (Rpc contribution) | Answer or decline a pending call |
+| `session.question.respond` | Session method (method contribution, `level: session`) | Answer or decline a pending call |
 | `B:Questions::ask` / `respond` | Branch service | Register and wait; boundary write of the answer |
 | `question/asked`, `question/answered`, `question/cancelled` | Events | Pending state and answer ordering |
 | CLI prompt contract | Client | Rendering, deferral, `Ctrl+C`, attach |
@@ -212,7 +208,7 @@ Never visible: `question/*` events, `structured_content`, the CLI rendering. Com
 
 ### A.1 Tool `ask_user`
 
-`ToolSource::Extension`, risk `session`. Declared only when `SessionFacts.interactive` is true.
+`ToolSource::Extension`, risk `session`. Declared only when `SessionConfig.interactive` is true.
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
@@ -283,7 +279,7 @@ pub enum QuestionRespondError { Unknown, AlreadyAnswered, Cancelled, Invalid(Str
 
 ### A.5 Session method `session.question.respond`
 
-Registered by the stateless `questions` mount in Rpc's `SessionMethodContribution` registry ([session-boundary](../contracts/session-boundary.md)). Rpc acquires the Session as for any Session method; the handler resolves `B:Questions` of the named branch through the public Session facade (`service::<Questions>(branch)`, as `approval.respond` does today).
+Contributed by `QuestionsPlugin` with `level: session` through the [method contribution](../contracts/session-boundary.md) contract. Rpc acquires the Session as for any Session method and routes to that Session's contribution; the handler resolves `B:Questions` of the named branch (`service::<Questions>(branch)`, as `approval.respond` does today).
 
 `{sessionId, branchId?: "main", callId, answers: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`.
 
@@ -293,7 +289,7 @@ Registered by the stateless `questions` mount in Rpc's `SessionMethodContributio
 | `invalid_params` `Question already answered` | `AlreadyAnswered` |
 | `invalid_params` `Question was cancelled` | `Cancelled` |
 | `invalid_params` `<reason>` | `Invalid`: unknown question id, label not offered, several labels without `multiSelect`, `custom` without `allowCustom`, nothing selected and no `custom` while not `declined` |
-| `service_reloading` | `Closed` on a live branch, or the `questions` namespace inactive (registry rule) |
+| `service_reloading` | `Closed` on a live branch, or the contribution inactive (registry rule) |
 | Session closed | `Closed` on a closed Session, mapped like `approval.respond` |
 
 Accepted commands belong to the Session and continue after disconnect.
@@ -344,7 +340,7 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 | Client unable to answer: `-p` CLI on an interactive Session | Q < I | CLI stops the turn; C via the interrupt | CLI; Questions |
 | No client attached ever | Q pending | Stays pending, no timeout (A7); user stops or answers later | User |
 | Paired remote device answers | Q < A | Accepted like any client | Questions |
-| `questions` method mount inactive | — | `session.question.respond` → `service_reloading`; the question stays pending | Rpc registry |
+| Questions contribution inactive (Session part reloading) | — | `session.question.respond` → `service_reloading`; the question stays pending | Rpc registry |
 | Non-interactive Session | — | Tool absent; call by name → `Unknown tool` | ToolRegistry, ToolBinding |
 
 ## Appendix C. Errors and recovery
@@ -376,7 +372,7 @@ Flow tests through RPC, tool calls and events:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | The tool is a `SessionToolSource` whose presence Questions decides from `SessionFacts.interactive` | Overview §5.1; [session-access](../contracts/session-access.md) `SessionFacts`; judgment | Agents puts `ask_user` in the tool list only for interactive Sessions |
+| A1 | The tool is a `SessionToolSource` whose presence Questions decides from `SessionConfig.interactive` | Overview §5.1; [session-access](../contracts/session-access.md) `config`; judgment | Agents puts `ask_user` in the tool list only for interactive Sessions |
 | A2 | `interactive` omitted on `session.create` means interactive | Judgment (existing clients) | Existing Sessions lose the tool |
 | A3 | Payload adds `turn_id`, `request_id`, `declined` | Judgment | Correlation through `step/tool-call`; decline modeled as an answer |
 | A4 | 1..=4 questions, 2..=6 options | Edge-case reference; judgment | Schema limits change |
@@ -392,7 +388,6 @@ Flow tests through RPC, tool calls and events:
 
 | # | Question | Description |
 | --- | --- | --- |
-| F1 | Overview §3.2 category | Overview lists Questions under "Process plugin + Capability"; this design has no process plugin, only a stateless Session-method mount. The row should read "Capability (Session + branch)" |
-| F2 | Overview §6 payloads | `turn_id`, `request_id`, `declined` are not in the overview's `question/*` fields (A3) |
-| F3 | Client visibility of dynamic events | Whether #2 projects plugin events to clients by a declared flag (A10) |
-| F4 | Overview §13 "How events enter context" | Designed for tool results only (ADR 001) |
+| F1 | Overview §6 payloads | `turn_id`, `request_id`, `declined` are not in the overview's `question/*` fields (A3) |
+| F2 | Client visibility of dynamic events | Whether #2 projects plugin events to clients by a declared flag (A10) |
+| F3 | Overview §13 "How events enter context" | Designed for tool results only (ADR 001) |
