@@ -1,377 +1,348 @@
-# Session boundary: method port and submission-admission port
+# Methods and admission checks
 
-Status: Draft. Overall design: [overview §3 dependency direction and ports](../overview.md#3-dependency-direction-and-ports), [§6.1 method E](../overview.md#61-integration-methods), [Appendix C Rpc](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D6. Phase: P1. Language: Rust (ports and entry layer); contributors in any language that provides the contract.
+Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integration-by-existing-mechanisms), [Appendix B Rpc and Approval](../overview.md#appendix-b-supplements-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D3. Phase: P0. Language: Rust.
 
-The entry layer (Rpc) owns two stable registration ports, each hosted in its own plugin and neither naming a contributor. (1) The **method port**: process or Session-scoped plugins register wire methods under their own namespaces; each method declares `level: session | management`, and each entry dispatches the levels its assembly allows. [Management](../plugins/Management.md) is a level-filtered view of this port (level `management`) and keeps the management plane semantics (export, migration, `daemon.shutdown`). (2) The **submission-admission port**: one check of `session.submit`, used by Hooks, that may reject a submission or append attributed raw blocks. It is fail closed only where adopted business configuration requires a check that is not registered (D6). Contributors register in `apply` and unregister in `ctx.effect` with the [shared registration mechanics](process-tool-contribution.md#a2-registration-mechanics-shared-by-the-ports-of-these-contracts); Rpc never reloads because a contributor does.
+This contract defines three contributions, all built on mechanisms the runtime already has: named services collected as `Contributions<T>` and Rpc's existing dispatch through the Session, as `approval.respond` does today.
+
+1. **Session methods.** A Session-scoped plugin contributes `SessionMethodContribution` under its own namespace. Rpc resolves the Session from `sessionId` and dispatches through it.
+2. **Management methods.** A process plugin contributes `ManagementMethods` under its own namespace. Rpc collects them as `Contributions<ManagementMethods>` into its method table, marked `level: management`.
+3. **Tool admission checks.** A branch-scoped plugin contributes `ToolAdmissionCheck`. Approval collects these checks and consults them for every tool call.
+
+Each entry (local RPC, RemoteGateway, an exported rutis link) serves the levels it is configured for. There is no registry, no port and no Management plugin. Contributors are optional plugins installed only when enabled. A contributor reload propagates to its collector, which is the accepted cost of D3.
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
-  subgraph PROC["Process (App Server)"]
-    Rpc["Rpc (entry layer)"]
-    MP["MethodPort (stable host, no Deps)"]:::contract
-    SP["SubmissionAdmissionPort (stable host)"]:::contract
-    Set["Settings business source (stable)"]
-    MC["Method contributors: Mcp, Settings, Provider, Goal, Questions, Attachments, ..."]
-    HC["Admission checker: Hooks"]
-    SA["SessionAccess relay"]:::contract
-  end
   subgraph ENT["Entries"]
-    Local["Local RPC: session and management"]
-    Remote["RemoteGateway: session only"]
-    Link["Exported link: management, explicit export"]
+    Local["Local RPC: session, management"]
+    Remote["RemoteGateway: session"]
+    Link["Exported rutis link: management"]
+  end
+  subgraph PROC["Process"]
+    Rpc["Rpc: built-ins and method table"]
+    MM["ManagementMethods[namespace]: Mcp, Provider, Scheduler, ..."]
+    AI["AgentIndex"]
+  end
+  subgraph SES["Session"]
+    SM["SessionMethodContribution[namespace]: Questions, Goal, SessionTitle, ..."]
+  end
+  subgraph BR["Branch"]
+    AP["Approval"]
+    TC["ToolAdmissionCheck[name]: Hooks"]
+    BS["Branch services: Questions, Goal, InputQueue"]
   end
   Local --> Rpc
   Remote --> Rpc
-  Link -->|"Management view"| MP
-  Rpc -->|"built-ins first, then registered"| MP
-  Rpc -->|"session.submit"| SP
-  Rpc -->|"relay with block attribution"| SA
-  MC -->|"register"| MP
-  HC -->|"register"| SP
-  SP -->|"adopted requirements, read per call"| Set
-  classDef contract stroke-dasharray:4 3
+  Link --> Rpc
+  Rpc -->|"Contributions"| MM
+  Rpc -->|"resolve sessionId"| AI
+  AI -->|"Session::method(namespace)"| SM
+  SM -->|"Session::service per branch"| BS
+  AP -->|"Contributions"| TC
 ```
 
-Rpc depends on AgentIndex, ConnectionHub, ServerControl, `SessionAccess` and the two ports; contributors depend on the ports. Entries differ only in which method levels they dispatch; a contributor never knows which entry calls it. The two ports are separate hosts because Settings registers methods into the method port while the submission-admission port reads Settings.
+| Contribution | Scope | Key | Registered at assembly by | Collected by | Absent |
+| --- | --- | --- | --- | --- | --- |
+| `SessionMethodContribution` | Session | `S:SessionMethodContribution[namespace]` | `AgentBuilder::session_methods(namespace)` when the plugin is installed in the Session | Rpc, through `Session::method(namespace)` | `unknown_method` for that Session |
+| `ManagementMethods` | Process | `ManagementMethods[namespace]` | The owner's loader row, when enabled | Rpc, `Contributions<ManagementMethods>` | `unknown_method` |
+| `ToolAdmissionCheck` | Branch | `B:ToolAdmissionCheck[name]` | `AgentBuilder::tool_admission_check(name)` when the plugin is installed in the branch | Approval, `Contributions<ToolAdmissionCheck>` | No check |
 
-| Port | Host plugin (Deps) | Not registered | Contributors (examples) |
-| --- | --- | --- | --- |
-| Method | `MethodPort` (none) | `-32601` `unknown_method` | Management (`management`, `daemon`), Mcp, Settings, SkillsCatalog, Provider, OAuth, ManagedProviders, Goal (`session.goal`), SessionTitle (`session.rename`), Questions (`session.question`), Attachments (`attachment`) |
-| Submission admission | `SubmissionAdmissionPort` (Settings) | Fail closed only if an adopted requirement matches the submission; otherwise skipped | Hooks (`user_prompt_submit`) |
-
-Contracts defined here: `MethodPort`, `MethodProvider`, `MethodDecl`, `MethodLevel`, `Interruption`, `ReplyMode`, `MethodCall`, `CallOrigin`, `CallReply`, `MethodError`, `CallChannel`, `ConnectionNotifier`, `ChannelError`; `SubmissionAdmissionPort`, `SubmissionChecker`, `SubmissionRequest`, `AdmittedBlock`, `SubmissionRejected`, `RequiredCheck`; the entry dispatch, naming and error rules. Contracts depended on: the registration mechanics of the [tool source port](process-tool-contribution.md#a2-registration-mechanics-shared-by-the-ports-of-these-contracts), [session-access](session-access.md) (`SessionConfig` through `SessionAccess::config`, `relay` with `RelayBlock`), the Settings business source, the Rpc command envelope and `appError` codes.
+Contracts defined here: `SessionMethodContribution`, `ManagementMethods`, `MethodProvider`, `MethodDecl`, `MethodLevel`, `Interruption`, `ReplyMode`, `MethodCall`, `CallOrigin`, `CallReply`, `MethodError`, `CallChannel`, `ConnectionNotifier`; `ToolAdmissionCheck`, `AdmissionRequest`, `AdmissionVerdict`. They also cover entry levels, naming, reserved names, the migration of existing management methods and the compatibility table. Contracts used: `Contributions<T>` and keyed Session and branch services ([tool contributions](../../architecture/rust-agent/tool-contributions.md)), `Session::service`, `SessionConfig` ([session-access](session-access.md#a3-sessionconfig-fields)), the Rpc command envelope, `appError` codes and Approval's decision flow ([Approval](../../architecture/rust-agent/plugins/Approval.md)).
 
 ## 2. Data and state
 
-```mermaid
-flowchart TB
-  subgraph MEM["Process memory"]
-    R1["MethodPort: namespaces, decls with level, state"]
-    R2["SubmissionAdmissionPort: registered checkers"]
-    E["Per connection: dispatched levels from entry assembly"]
-  end
-  subgraph SET["Settings business source"]
-    Req["RequiredCheck records per checker owner"]
-  end
-  subgraph TLB["Branch Timeline"]
-    IM["input/message from relay: user content plus attributed blocks"]
-  end
-  Req -->|"read per submission"| R2
-  R2 -->|"blocks appended by checkers"| IM
-  E -->|"filters dispatch"| R1
-```
-
-Neither port owns a Timeline event. Registrations are memory, rebuilt when contributors register in `apply`. The only persisted state is the requirement records, which belong to the checker owner's business configuration (Hooks' user rules and `disable_all` live in Settings, [ADR 002 D5](../../adr/002-plugin-scope.md#d5-structural-configuration-and-business-configuration-are-separate)) and stay readable while the checker is down. Dispatched levels are recorded per connection at accept time and never derived from identity.
+No contribution owns a Timeline event or persisted state. Method tables are rebuilt when Rpc or a Session loads. The served levels are entry assembly data, recorded on each connection when it is accepted as `ConnectionEntry {name, levels, device_id}`, and are never derived from identity. A link's management export is host-local structural configuration. Admission checks keep no state: their rules are read at use time from the owner's business source.
 
 ## 3. Flows
 
-### 3.1 Registered method on an entry
+### 3.1 Session method
 
 ```mermaid
 sequenceDiagram
   participant CL as Client
-  participant Rpc as Rpc (entry)
-  participant P as MethodPort
-  participant G as Contributor goal
-  participant SA as SessionAccess
-  CL->>Rpc: session.goal.set {sessionId, ...}
-  Rpc->>Rpc: built-in? no
-  Rpc->>P: owner of longest registered namespace session.goal
-  alt registered, open and level dispatched by this entry
-    P-->>Rpc: Registered(goal), CallGuard
-    Rpc->>Rpc: level session: authorize sessionId
-    Rpc->>G: call(MethodCall, CallChannel, cancel)
-    G->>SA: reads and writes as source goal
-    G-->>Rpc: CallReply
-    Rpc-->>CL: result
-  else registered, unloading
-    Rpc-->>CL: -32000 service_reloading
-  else not registered or level not dispatched
-    Rpc-->>CL: -32601 unknown_method
+  participant Rpc as Rpc
+  participant AI as AgentIndex
+  participant S as Session
+  participant Q as SessionMethodContribution questions
+  participant QB as Questions branch service
+  participant TL as Branch Timeline
+  CL->>Rpc: session.question.respond {sessionId, branchId, ...}
+  Rpc->>Rpc: not a built-in, sessionId present, authorize Session access
+  Rpc->>AI: acquire(sessionId)
+  AI-->>Rpc: Session lease
+  Rpc->>S: method("session.question")
+  S-->>Rpc: contribution, decl level session
+  Rpc->>Q: call(MethodCall, CallChannel, cancel)
+  Q->>S: service of Questions on branchId
+  Q->>QB: respond(call_id, answers)
+  QB->>TL: question/answered
+  Q-->>Rpc: CallReply
+  Rpc-->>CL: result
+```
+
+The namespace is resolved by the longest prefix among the namespaces contributed in that Session. If the Session has no such namespace, because the plugin is disabled or the Session is non-interactive and the plugin is not installed, the result is `unknown_method`. A Session-scoped method may declare `level: management` (`shell.*`). It is then dispatched only on entries that serve management.
+
+### 3.2 Management method
+
+```mermaid
+sequenceDiagram
+  participant L as Local client
+  participant D as Paired device
+  participant R as Rpc
+  participant P as ManagementMethods mcp
+  L->>R: mcp.save (local entry, levels session and management)
+  R->>R: table lookup, level management, served
+  R->>P: call(MethodCall, CallChannel, cancel)
+  P-->>L: result
+  D->>R: mcp.save (RemoteGateway entry, level session)
+  R-->>D: -32601 unknown_method
+```
+
+The levels an entry serves are the only check. Serving the management level grants host administrator rights.
+
+### 3.3 Tool admission check
+
+```mermaid
+sequenceDiagram
+  participant TE as ToolExecutor
+  participant AP as Approval
+  participant PM as Permission
+  participant H as ToolAdmissionCheck hooks
+  TE->>AP: admit(call, risk)
+  AP->>PM: policy decision
+  alt policy denies
+    AP-->>TE: denied
+  else allowed, or approved by the user
+    AP->>H: check(AdmissionRequest) concurrently with other checks
+    H-->>AP: Allow or Deny {reason}
+    AP-->>TE: allowed, or denied with the check's reason
   end
 ```
 
-Rpc authorizes Session access from `sessionId` before dispatch for every `session`-level method, exactly as for its built-in Session methods; the contributor validates the remaining params. A `management`-level method has no Session parameter and is reachable only on entries that dispatch the management level.
-
-### 3.2 `session.submit` through admission
-
-```mermaid
-sequenceDiagram
-  participant CL as Client
-  participant Rpc as Rpc
-  participant P as SubmissionAdmissionPort
-  participant S as Settings
-  participant H as Checker hooks
-  participant SA as SessionAccess
-  participant TL as Branch Timeline
-  CL->>Rpc: session.submit {sessionId, branchId, content, mode}
-  Rpc->>Rpc: validate content, images against model capability
-  Rpc->>P: admit(request)
-  P->>S: adopted RequiredCheck records
-  P->>P: required set for this Session, snapshot of registered checkers
-  P->>H: check(request) under CallGuard
-  H-->>P: blocks
-  P-->>Rpc: blocks attributed to hooks
-  Rpc->>SA: relay(branch, RelayInput)
-  SA->>TL: input/message (append)
-  Rpc-->>CL: accepted
-```
-
-Registered checkers always run; requirements only decide what happens when a required checker is not registered. With no matching requirement and no registered checker, `session.submit` relays directly.
+Checks run after the policy decision and before execution. A denial by any check denies the call, and a denied call settles exactly like a policy denial (an error tool result, with no new event). A check that fails maps to its own declared outcome (Hooks `pre_tool_use` defaults to deny).
 
 ## 4. Timing and conflicts
 
-### 4.1 Required checker unavailable
-
-```mermaid
-sequenceDiagram
-  participant CL as Client
-  participant Rpc as Rpc
-  participant P as SubmissionAdmissionPort
-  participant H as Checker hooks
-  CL->>Rpc: session.submit
-  Rpc->>P: admit(request)
-  P->>H: check under CallGuard
-  Note over H: hooks row reloads
-  H-->>P: cancelled by guard
-  P-->>Rpc: unavailable
-  Rpc-->>CL: service_reloading, nothing written
-  CL->>Rpc: session.submit (retry)
-  Rpc->>P: admit(request)
-  P->>P: adopted user_prompt_submit rule matches, hooks not registered
-  P-->>Rpc: unavailable
-  Rpc-->>CL: service_reloading, nothing written
-```
-
-A submission is either admitted by every registered checker and every required checker is present, or nothing is written; the client keeps its draft and retries. A Session whose scope matches no adopted requirement is never blocked by Hooks being down.
-
-### 4.2 Other key rows
-
 | Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Method contributor reloads mid-call | admitted < unload | `Report`: `operation_interrupted`; `Drain`: unload waits | Rpc, port |
-| Method called between unregistration and re-registration | — | `unknown_method` (registration state alone decides) | MethodPort |
-| Two contributors claim one namespace | second registration | Rejected as a whole; first keeps it | MethodPort |
-| `management`-level method on RemoteGateway | — | `unknown_method` (level not dispatched) | Rpc |
-| Checker rejects | — | Its `appError`; nothing written | Rpc |
-| Submit during turn `stop/interrupt` | relay vs interrupt by Timeline order | Per [session-access](session-access.md#4-timing-and-conflicts) rows | InputQueue, Loop |
+| Session-scoped contributor reloads mid-call | call < reload | `Report`: `operation_interrupted`; `Drain`: reload waits | Rpc |
+| Session method while the Session's capabilities reload | — | `service_reloading` | Rpc (from `AgentError::Reloading`) |
+| Session method on a Session without that plugin | — | `unknown_method` | Rpc |
+| Management owner reloads | — | Rpc reloads with it (D3); open connections see the existing Rpc reload behaviour | rutis lifecycle |
+| Management method on a session-only entry | — | `unknown_method` | Rpc |
+| Two contributors claim one namespace | assembly | Assembly fails; namespaces are unique per scope | Assembly |
+| Admission-check plugin reloads during a turn | check < reload | Approval and dependants reload; the in-flight turn ends `Failed` (D3, accepted) | Approval |
+| Check denies while another allows | — | Denied | Approval |
+| Turn `stop/interrupt` during a check | interrupt < verdict | Check cancelled; tool call settled as interrupted | Approval, ToolExecutor |
+| Hooks disabled (structural) | — | Branch assembled without the check; calls proceed | Assembly |
 
-Full table: Appendix B.
+Full table: [Appendix B](#appendix-b-full-conflict-table).
 
 ## 5. Context mapping
 
-| Port | What the model sees |
-| --- | --- |
-| Submission admission | The relayed `input/message`: user content and checker blocks, each rendered as a `<dim-<checker>>` element ([session-access §5](session-access.md#5-context-mapping)), at the input's consumed position |
-| Method | Nothing directly; a method that writes input does so through SessionAccess, whose mapping applies |
-
-Compaction and child branches follow the input rules of session-access. Rejected submissions, unregistered namespaces, progress and notifications never reach the model.
+Methods have no model-visible effect. A method that changes model context does so through its owner's input or Timeline facts, and those owners' mappings apply. An admission denial reaches the model only as the error tool result, carrying the check's public reason.
 
 ## 6. Interfaces (summary)
 
 | Interface | Purpose |
 | --- | --- |
-| `MethodPort::register / lookup / list(level)` | Register wire methods under owned namespaces; dispatch for entries; `list(Management)` is the Management view |
-| `MethodProvider::namespaces/methods/call` | The registered provider |
-| `CallChannel` | Per-call progress sink, connection-bound notifications, reply handoff |
-| `SubmissionAdmissionPort::register / admit` | Register a checker; Rpc admits a submission against registered checkers and adopted requirements |
-| `SubmissionChecker::check` | Reject a client submission or append attributed blocks |
-| `RequiredCheck` | Adopted requirement record in the checker owner's business configuration |
+| `SessionMethodContribution(Arc<dyn MethodProvider>)` | Session-scoped method namespace |
+| `ManagementMethods(Arc<dyn MethodProvider>)` | Process method namespace, collected into Rpc's table |
+| `MethodProvider::namespace / methods / call` | Declarations and execution |
+| `Session::method(namespace)` | Runtime lookup used by Rpc (keyed variant of `Session::session_service`) |
+| `CallChannel` | Per-call progress, connection-bound notifications, reply handoff |
+| `ToolAdmissionCheck(Arc<dyn AdmissionCheck>)` | Branch-scoped check consulted by Approval |
 
 ## 7. Security
 
-Entry assembly is the only authority for methods: an entry reaches exactly the levels it dispatches (RemoteGateway: `session` only, including remote execution Session methods per decision E3; management only on the local entry and on links that export it explicitly). Session-level methods are additionally authorized by Rpc's Session access for `sessionId`. Submission admission cannot be bypassed by making a checker fail while an adopted rule requires it: a missing or unloading required checker rejects the submission. Loader declarations or the mere presence of a configured plugin never deny (D6). Block attribution is set by Rpc from the registered checker name, and users cannot submit blocks at all. Requirement records are business configuration edited through the owner's management methods or Settings; removing them is an explicit user action.
+Entry assembly is the only authority for levels: local RPC serves both levels, RemoteGateway serves `session` (paired devices may call every Session method, decision E3), and a rutis link serves `management` only when it is explicitly exported in host-local link configuration. Rpc authorizes `sessionId` for every Session-scoped method exactly as for its built-ins, and contributors validate the other params. Methods that run commands or change host configuration declare `level: management`. Admission checks can deny but never widen: a check cannot allow a call that the policy or the user denied. Host-local approvals (`mcp.approve`, `hooks.approve`, `plugin.approve`, `workflow.approve`) are management methods.
 
 ## Appendix A. Interface details
 
-### A.1 Method port
+### A.1 Method contributions
 
 ```rust
-/// Process service of the `MethodPort` plugin (Deps: none); key TypeKey::of::<MethodPort>().
-impl MethodPort {
-    /// In the contributor's `apply`; removal with `ctx.effect`.
-    pub fn register(&self, ctx: &Ctx, name: &str, provider: Arc<dyn MethodProvider>) -> Result<(), PortError>;
-    /// Owner of the longest registered namespace that prefixes or equals `method`.
-    pub fn lookup(&self, method: &str) -> MethodLookup;
-    /// Registered methods of one level; `list(Management)` is the Management view.
-    pub fn list(&self, level: MethodLevel) -> Vec<(String, MethodDecl)>;
-    pub fn changed(&self) -> tokio::sync::watch::Receiver<u64>;
-}
-pub enum MethodLookup { Open(Arc<Registered<dyn MethodProvider>>), Unloading, NotRegistered }
+/// Session-scoped; key SessionScope::named_key::<SessionMethodContribution>(namespace).
+pub struct SessionMethodContribution(pub Arc<dyn MethodProvider>);
+impl SessionService for SessionMethodContribution {}
+impl PublicService for SessionMethodContribution {}
+
+/// Process-scoped; collected by Rpc as Contributions<ManagementMethods>.
+pub struct ManagementMethods(pub Arc<dyn MethodProvider>);
+
 pub trait MethodProvider: Send + Sync + 'static {
-    /// Namespaces owned by this contributor; fixed for the registration.
-    fn namespaces(&self) -> Vec<String>;
-    /// Complete method list; each name lies in one of the namespaces.
-    fn methods(&self) -> Vec<MethodDecl>;
-    /// Validates params and executes. `cancel` fires when the caller is gone or the
-    /// contributor unregisters, for `Interruption::Report` methods.
+    fn namespace(&self) -> &str;          // equals the registered name
+    fn methods(&self) -> Vec<MethodDecl>; // each name inside the namespace
     fn call(&self, call: MethodCall, channel: CallChannel, cancel: CancellationToken)
         -> HostFuture<'_, Result<CallReply, MethodError>>;
 }
 pub struct MethodDecl {
     pub name: String,               // full wire name, e.g. "session.goal.set", "mcp.save"
-    pub level: MethodLevel,
-    pub mutating: bool,             // changes host configuration or runs a command
+    pub level: MethodLevel,         // ManagementMethods: always Management
+    pub mutating: bool,
     pub interruption: Interruption,
-    pub progress: bool,             // emits progress through CallChannel
-    pub notifications: Vec<String>, // connection-bound notification names, inside the namespace
+    pub progress: bool,
+    pub notifications: Vec<String>, // inside the namespace
     pub reply: ReplyMode,
 }
 pub enum MethodLevel { Session, Management }
-pub enum Interruption { Report, Drain } // Report: caller gets operation_interrupted; Drain: unload waits
-pub enum ReplyMode { Direct, Handoff }  // Handoff: daemon.shutdown only today
+pub enum Interruption { Report, Drain }  // Report: operation_interrupted; Drain: unload waits
+pub enum ReplyMode { Direct, Handoff }   // Handoff: daemon.shutdown
 pub enum CallReply { Value(serde_json::Value), HandedOff }
 pub struct MethodCall {
     pub method: String,
-    pub session_id: Option<String>, // Some and already authorized for level Session
-    pub params: serde_json::Value,  // raw params, {} when absent
-    pub origin: CallOrigin,         // diagnostics only, never authorization
+    pub session_id: Option<String>, // Some and authorized for Session-scoped contributions
+    pub params: serde_json::Value,
+    pub origin: CallOrigin,         // diagnostics only
 }
-pub enum CallOrigin {
-    Local { connection_id: String },
-    Entry { entry: String, connection_id: String },
-    Link { peer: String },
-}
-pub struct MethodError {
-    pub code: i32,                    // -32602, -32601 or -32000
-    pub app_error: Cow<'static, str>, // [a-z][a-z0-9_]*
-    pub message: String,              // public text; never secrets
-}
+pub enum CallOrigin { Local { connection_id: String }, Entry { entry: String, connection_id: String }, Link { peer: String } }
+pub struct MethodError { pub code: i32, pub app_error: Cow<'static, str>, pub message: String }
 ```
 
 | Rule | Content |
 | --- | --- |
-| Namespace | `<segment>(.<segment>)*`, segments `[a-z][a-z0-9_]*`, chosen by the contributor; a namespace may itself be a method name (`session.rename`) |
-| Method name | Inside one of the contributor's namespaces, at most 128 bytes |
-| Ownership | A name belongs to the longest registered namespace that prefixes or equals it |
-| Reserved for Rpc built-ins | `hello`, `agent`, `approval`, the bare `session` root, and `session.attach`, `session.branch_create`, `session.close`, `session.create`, `session.detach`, `session.history`, `session.idle`, `session.input_lookup`, `session.list`, `session.state`, `session.stop`, `session.submit`, `session.summaries`, `session.exec`, `session.mcp`, `session.model`, `session.permission`, `session.prompt`, `session.skills`, `session.input` (InputQueue withdrawal) |
-| Precedence | Rpc built-ins, then registered methods; one wire name space |
-| Level | `Session`: requires `sessionId` (`-32602` without it), authorized by Rpc. `Management`: no Session parameter |
-| Entry dispatch | Local RPC entry: both levels (management when assembly configures it); RemoteGateway: `Session` only; exported rutis link: `Management` only, by explicit host-local export ([Management](../plugins/Management.md)) |
-| Rejection | A registration violating a rule or colliding with a current one is rejected as a whole; the earlier owner keeps its names |
-| Not registered | Registration state alone decides: no registration owns the name, or the level is not dispatched by this entry → `-32601` `unknown_method`; the owning registration is `Unloading`, or a `Report` call is cancelled by unregistration → `-32000` `service_reloading` (`operation_interrupted` if the call had started). Loader rows and business enablement never change this |
-| Features | `hello.features` (v3) lists the currently registered methods of the levels the connection dispatches |
-| Session-scoped contributors | A Session-scoped plugin (Questions) registers a process-level provider that resolves its branch service per call from `sessionId` and params, as Rpc's `approval.respond` does |
-| Long-running work | Methods return promptly or stream through `CallChannel`; Session results go through Session events or the contributor's own inputs |
+| Namespace | `<segment>(.<segment>)*`, segments `[a-z][a-z0-9_]*`, owned by the contributor; a namespace may itself be a method (`session.rename`) |
+| Ownership | A name belongs to the longest contributed namespace that prefixes or equals it, among the built-ins, the process table and the Session's contributions |
+| Reserved for Rpc built-ins | `hello`, `daemon`, `agent`, `approval`, the bare `session` root and `session.attach`, `session.branch_create`, `session.close`, `session.create`, `session.detach`, `session.history`, `session.idle`, `session.input_lookup`, `session.list`, `session.state`, `session.stop`, `session.submit`, `session.summaries`, `session.exec`, `session.mcp`, `session.model`, `session.permission`, `session.prompt`, `session.skills`, `session.input` (`session.input.withdraw`, served through `Session::service::<InputQueue>(branch)` as `approval.respond` is, because InputQueue is a core branch capability with no Session part) |
+| Precedence | Built-ins, then the process table, then the Session's contributions; one wire name space |
+| Session-scoped call | Requires `sessionId` (`-32602` without it). Rpc authorizes it, acquires the Session through AgentIndex (restoring if needed) and calls `Session::method(namespace)`. The contributor reaches a branch through `Session::service::<T>(branch)` |
+| Not dispatched | Namespace not contributed, or level not served by the entry → `-32601 unknown_method`. Session reloading → `-32000 service_reloading`. A started `Report` call interrupted → `operation_interrupted` |
+| `hello.features` (v3) | Built-ins and process-table methods of the entry's levels. Session-scoped methods are listed per Session in `session.state.methods` |
+| Ready latch | Opens after the loader's initial load settles, so process contributions are present at the first `hello` |
+
+Known Session-scoped namespaces: `session.question` (Questions), `session.goal` (Goal), `session.rename` (SessionTitle), `attachment` (Attachments), `shell` (ShellInput, level management). Each plugin document is authoritative for its methods.
 
 ### A.2 Call channel
 
 ```rust
 impl CallChannel {
-    /// No-op unless the method declared `progress` and the caller has a connection.
-    pub fn progress(&self, data: serde_json::Value);
-    /// Err(Unsupported) for link callers without a sink or when no notifications are declared.
-    pub fn notifier(&self) -> Result<ConnectionNotifier, ChannelError>;
-    /// Only for ReplyMode::Handoff: takes the connection's final-response writer.
-    pub fn take_final_reply(&self) -> Result<FinalReply, ChannelError>;
+    pub fn progress(&self, data: serde_json::Value);                       // no-op unless declared
+    pub fn notifier(&self) -> Result<ConnectionNotifier, ChannelError>;    // Unsupported for links
+    pub fn take_final_reply(&self) -> Result<FinalReply, ChannelError>;   // Handoff only
 }
 impl ConnectionNotifier {
-    pub fn send(&self, method: &str, params: serde_json::Value) -> Result<(), ChannelError>; // Gone after close
-    pub fn closed(&self) -> impl Future<Output = ()>; // disconnect, Rpc reload, entry close
+    pub fn send(&self, method: &str, params: serde_json::Value) -> Result<(), ChannelError>;
+    pub fn closed(&self) -> impl Future<Output = ()>;
 }
 pub enum ChannelError { Unsupported, Undeclared, Gone }
 ```
 
-| Rule | Content |
-| --- | --- |
-| Progress wire form | Notification `management.progress {id, method, data}` for either level; ordered before the response; dropped after disconnect; coalesced to the transport write budget, never dropping the response |
-| Notification names | Declared in `MethodDecl.notifications` and inside the contributor's namespace; others return `Undeclared` |
-| Notifier lifetime | Valid after the call returns until the connection closes; contributors release connection-bound resources on `closed()` |
-| Link callers | Dispatch takes an optional caller sink; without one, progress is dropped and `notifier()` returns `Unsupported` |
+Progress is sent as the notification `management.progress {id, method, data}` for both levels, ordered before the response and dropped after disconnect. Notification names must be declared and lie inside the namespace. A notifier stays valid until the connection closes.
 
-### A.3 Submission-admission port
+### A.3 Tool admission check
 
 ```rust
-/// Process service of the `SubmissionAdmissionPort` plugin (Deps: Settings);
-/// key TypeKey::of::<SubmissionAdmissionPort>().
-impl SubmissionAdmissionPort {
-    pub fn register(&self, ctx: &Ctx, name: &str, checker: Arc<dyn SubmissionChecker>) -> Result<(), PortError>;
-    /// Used by Rpc: requirements, then all registered checkers.
-    pub async fn admit(&self, request: &SubmissionRequest)
-        -> Result<Vec<(String, AdmittedBlock)>, AdmissionDenied>;
+/// Branch-scoped; key BranchScope::named_key::<ToolAdmissionCheck>(name).
+pub struct ToolAdmissionCheck(pub Arc<dyn AdmissionCheck>);
+impl BranchService for ToolAdmissionCheck {}
+
+pub trait AdmissionCheck: Send + Sync + 'static {
+    fn check(&self, request: &AdmissionRequest, cancel: CancellationToken)
+        -> HostFuture<'_, AdmissionVerdict>;
 }
-pub trait SubmissionChecker: Send + Sync + 'static {
-    fn check(&self, request: &SubmissionRequest, cancel: CancellationToken)
-        -> HostFuture<'_, Result<Vec<AdmittedBlock>, SubmissionRejected>>;
-}
-pub struct SubmissionRequest {
+pub struct AdmissionRequest {
     pub session_id: String,
     pub branch_id: String,
-    pub config: Arc<SessionConfig>, // read through SessionAccess::config
-    pub user: UserInput,            // already validated; read-only
-    pub mode: InputMode,
+    pub turn_id: String,
+    pub call_id: String,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+    pub risk: RiskCategory,
+    pub config: Arc<SessionConfig>,
 }
-pub struct AdmittedBlock { pub kind: String, pub block: SourceBlock } // key inside the checker namespace
-pub struct SubmissionRejected {
-    pub app_error: String, // [a-z][a-z0-9_]*, owned by the checker, e.g. "hook_rejected"
-    pub message: String,   // public text
-}
-pub enum AdmissionDenied { Rejected { checker: String, rejection: SubmissionRejected }, Unavailable { checker: String } }
-/// Adopted requirement, stored in the checker owner's Settings section (`<checker>.required`).
-pub struct RequiredCheck { pub checker: String, pub scope: CheckScope }
-pub enum CheckScope { AllSessions, InteractiveSessions, ProjectRoot(PathBuf) } // matched against SessionConfig
+pub enum AdmissionVerdict { Allow, Deny { reason: String } } // reason is public, model-visible
 ```
 
 | Rule | Content |
 | --- | --- |
-| Requirements | Read per submission from the Settings business source; a requirement applies when its scope matches the Session (`ProjectRoot`: `cwd` inside the root). The owner writes them when it adopts business configuration (Hooks: one record per adopted `user_prompt_submit` rule, user rules as `AllSessions`, approved project rules as `ProjectRoot`; none while `disable_all`) |
-| Required but not registered | `AdmissionDenied::Unavailable` → `-32000` `service_reloading`; nothing written; no checker is called |
-| Order | All registered checkers are called concurrently on the same request; blocks are appended in checker-name order |
-| Rejection | Any rejection: `-32000`, `appError` = `SubmissionRejected.app_error`, `data.checker` = name; nothing written |
-| Cancelled | Guard cancelled (checker unload) or Rpc unload: `service_reloading`; nothing written |
-| Relay | Rpc builds `RelayInput { user, blocks: AdmittedBlock → RelayBlock { source: checker name }, mode, submission_id }` and calls `SessionLease::relay` |
-| Content | User content (text and image blocks) is validated by Rpc as today, including images against the branch model's capability; checkers cannot change it |
+| Collection | Approval adds `Contributions<ToolAdmissionCheck>` to its Deps. Names come from assembly, and a name without a provider fails the branch build |
+| Order | Every check runs concurrently after the policy decision; any `Deny` denies, and reasons are joined in name order |
+| Cancellation | Turn interrupt cancels checks; the call settles as interrupted |
+| Failure | Mapped by the check itself to `Allow` or `Deny` |
+| Model-call approvals | Unaffected: checks apply to tool calls only |
 
-Approval's admission-check port (overview Appendix C) uses the same `RequiredCheck` rule for tool calls.
+### A.4 Entry levels and export
+
+| Entry | Levels | Notes |
+| --- | --- | --- |
+| Local protected transport | `{session, management}` | Today's protected-profile rules unchanged |
+| Bare WebSocket, protected profile | as today | Everything but `hello`/`daemon.ping` is `local_transport_required` |
+| RemoteGateway | `{session}` | [RemoteGateway](../plugins/RemoteGateway.md) |
+| Exported rutis link | `{management}` | Only when exported in host-local link configuration. Without a caller sink, progress is dropped and `notifier()` returns `Unsupported` |
+
+### A.5 Migration and compatibility
+
+Sources: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [protocol.rs](../../../crates/dim-app-server/src/protocol.rs); `validate_call` in [connection.rs](../../../crates/dim-app-server/src/connection.rs).
+
+| Methods | Destination | Contributor (namespace) |
+| --- | --- | --- |
+| `account.providers/status/recover/logout`, `account.login.*` | `ManagementMethods` | ManagedProviders (`account`) |
+| `account.codex.*`, `account.grok.*` | `ManagementMethods` | OpenAI Codex OAuth (`account.codex`), Grok OAuth (`account.grok`) |
+| `provider.*` | `ManagementMethods` | Provider (`provider`) |
+| `skills.catalog/set_enabled/refresh` | `ManagementMethods` | SkillsCatalog (`skills`) |
+| `mcp.catalog/set_enabled/save/remove/disconnect/approve/revoke` | `ManagementMethods` | Mcp (`mcp`) |
+| `daemon.shutdown` | Rpc built-in, level management, reply handoff | — |
+| `hello`, `daemon.ping`, `agent.*`, existing `session.*`, `approval.respond`, new `session.input.withdraw` | Rpc built-ins | — |
+| New Session methods | `SessionMethodContribution` | Each owner (A.1) |
+
+Interruption reproduces today's behaviour: `mcp.*` and `skills.*` are `Report`, and `account.*` and `provider.*` are `Drain`. Rpc's `When<ProductServices>` and `When<ExecutionServices>` are replaced by `Contributions<ManagementMethods>`, so Rpc no longer names any owning service.
+
+| Client | Before | After |
+| --- | --- | --- |
+| v1, v2 | Management methods `unknown_method` | Same |
+| v3 local, product profile | `hello.features` has the 33 product names | Same names; params, results, codes and `appError` unchanged |
+| v3 local, execution | `LOCAL_EXECUTION_METHODS` + `MCP_METHODS` | Same names |
+| v3 bare WebSocket, protected profile | `local_transport_required` | Same |
+| v3 RemoteGateway (new) | Did not exist; execution Session methods (`session.permission.get/update`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp`, `session.mcp.refresh`) were local-only | **Compatibility change (E3):** available to paired devices; management names `unknown_method` |
+| v3, MCP disabled | `mcp.*` `unknown_method` | Same, with Rpc's message |
+| v3, Mcp reloading | `service_reloading` | Rpc reloads with Mcp (D3); the client reconnects and retries |
+
+No protocol version is added and persistence formats are unchanged.
 
 ## Appendix B. Full conflict table
 
 | Scenario | Sequence order | Outcome | Owner of the decision |
 | --- | --- | --- | --- |
-| Submit while a required checker is not registered | requirement read | `service_reloading`; nothing written | SubmissionAdmissionPort |
-| Submit with no matching requirement while the checker is down | — | Relayed without that checker | SubmissionAdmissionPort |
-| Checker unloads mid-check | admitted < unload | `service_reloading`; nothing written | SubmissionAdmissionPort |
-| Checker rejects | — | Its `appError`; nothing written | Rpc |
-| Requirement record changed during a submit | read < write | Decision uses the records it read; the next submit sees the change | SubmissionAdmissionPort |
-| Submit during turn `stop/interrupt` | relay vs interrupt by Timeline order | Per session-access rows (input after interrupt starts a turn) | InputQueue, Loop |
-| Submit to a closed branch | — | `SessionClosed`/`BranchMissing` from relay | Runtime facade |
-| Two clients submit concurrently | Timeline order | Each checked independently; inputs ordered by append | InputQueue |
-| Duplicate or late submit (client retry) | — | Relayed twice unless the client uses `submission_id` and `session.input_lookup` | Client |
-| Client detaches mid-submit | — | Submission continues; reply discarded | Rpc |
-| Method contributor unloading | — | `service_reloading` for its namespaces only | MethodPort |
-| Method contributor not registered | — | `unknown_method` | MethodPort |
-| Method contributor reloads mid-call | admitted < unload | `Report`: `operation_interrupted`; `Drain`: waits | Rpc, port |
-| Two contributors claim one namespace | second registration | Rejected; first keeps it | MethodPort |
-| Rpc reload with method calls in flight | — | `Report` interrupted, `Drain` drained; notifiers report `closed()` | Rpc |
-| Level not dispatched by the entry | — | `unknown_method` | Rpc |
-| Process restart mid-submit | — | Committed input stays; client looks up by `submission_id` | Client |
+| Session method during branch `stop/interrupt` | per owner's facts | Decided by the owner's Timeline order (for example, a Questions answer after the interrupt is `question/cancelled`) | Owning plugin |
+| Session method on a closed branch | — | Owner's `BranchMissing` error | Owning plugin |
+| Session method on an unloaded Session | — | Rpc restores through AgentIndex, then dispatches | Rpc |
+| Session-scoped contributor reloads mid-call | admitted < reload | `Report`: `operation_interrupted`; `Drain`: waits | Rpc |
+| Process owner reloads | — | Rpc reloads (D3) | rutis lifecycle |
+| Rpc reload with calls in flight | — | `Report` interrupted, `Drain` drained; notifiers `closed()` | Rpc |
+| Level not served by the entry | — | `unknown_method` | Rpc |
+| Client detaches mid-call | — | Call continues; reply discarded | Rpc |
+| Two clients mutate the same configuration | storage revision | Second gets the contributor's conflict | Contributor |
+| `daemon.shutdown` concurrent with another call | admission | Admission stops, then admitted calls settle per `Interruption` | Process coordinator |
+| Check pending, turn interrupted | interrupt < verdict | Cancelled; tool call settled interrupted | Approval |
+| Check plugin reload with a pending check | — | Turn ends `Failed` with the reload | Approval (D3) |
+| Unsettled tool batch, compaction, child branch cut, `input/withdrawn` | — | No effect on methods or checks | — |
+| Process restart mid-call | — | Reply lost; outcome per contributor persistence; never replayed | Contributor |
 
 ## Appendix C. Errors and recovery
 
 | Case | Wire result |
 | --- | --- |
-| Required checker not registered, or checker cancelled | `-32000`, `service_reloading` |
-| Checker rejection | `-32000`, checker's `appError`, `data.checker` |
-| Namespace owner unloading | `-32000`, `service_reloading` |
-| Method not registered, or level not dispatched | `-32601`, `unknown_method` |
-| Session-level method without `sessionId` | `-32602` |
-| `Report` method interrupted by unload | `-32000`, `operation_interrupted` |
+| Not contributed, or level not served, or v1/v2 | `-32601`, `unknown_method` |
+| Session-scoped method without `sessionId` | `-32602` |
+| Session reloading | `-32000`, `service_reloading` |
+| `Report` call interrupted | `-32000`, `operation_interrupted` |
+| Contributor error | `-32000`, contributor's `appError` |
 
 ## Appendix D. Acceptance
 
-1. A registered method dispatches by longest namespace; a reserved or colliding namespace is rejected; an unregistered namespace returns `unknown_method`, an unloading one `service_reloading`, while others work; Rpc never reloads.
-2. A `management`-level method is reachable on the local entry, `unknown_method` on RemoteGateway, and reachable over a link only when exported; `list(Management)` matches the Management view; a `session`-level method requires and authorizes `sessionId`.
-3. Progress precedes the response; a notifier reports `Gone` after disconnect.
-4. With an adopted `user_prompt_submit` rule and Hooks not registered, `session.submit` returns `service_reloading` and writes nothing; a Session outside the rule's scope submits normally; with no adopted rule, a down Hooks plugin blocks nothing.
-5. Checker blocks are attributed to the checker and rendered with its source; user content is unchanged.
+1. A Session-scoped method dispatches through the Session it names. On a Session without the plugin it returns `unknown_method`, and Rpc never names the contributor.
+2. A management method is reachable on the local entry, returns `unknown_method` on RemoteGateway, and is reachable over a link only when exported. A Session-scoped `shell.*` method follows the same level rule.
+3. A recorded transcript of every migrated management method matches the pre-migration transcript, and `hello.features` is unchanged for v3 local profiles.
+4. On a RemoteGateway test entry, `session.permission.update` and `session.exec.stop` succeed.
+5. With a Hooks check installed, a denied tool call yields an error tool result with the reason. With Hooks disabled, the same call proceeds. Reloading Hooks during a turn ends that turn `Failed`.
+6. Progress precedes the response, and a notifier reports `Gone` after disconnect.
 
 ## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Checkers run concurrently and only append blocks; no phases | Single admission point used by Hooks | Ordered phases return |
-| A2 | Registered namespaces may use roots other than `session` (`attachment`) | Overview Appendix C Rpc row | All Session-level methods live under `session.` |
-| A3 | Progress uses one notification name for both levels | Judgment | A Session-level progress notification is defined |
-| A4 | Requirement scopes are `AllSessions`, `InteractiveSessions` and `ProjectRoot` | Hooks rule sources (user, project) | Richer scopes added to `CheckScope` |
+| A1 | Session-scoped namespaces may use roots other than `session` (`attachment`, `shell`) | Existing wire names | All move under `session.` |
+| A2 | `Session::method(namespace)` is a keyed variant of `Session::session_service` | Existing keyed Session services | Rpc enumerates contributions through a Session service |
+| A3 | Session-scoped methods are listed per Session, not in `hello.features` | They differ per Session | A global list with per-Session availability |
+| A4 | Admission checks run after user approval, not before the prompt | Simplest ordering; checks only deny | Checks run before the prompt and can skip it |

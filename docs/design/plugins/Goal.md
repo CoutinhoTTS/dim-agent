@@ -1,6 +1,6 @@
 # Goal
 
-Status: Draft. Overall design: [overview B.2](../overview.md#b2-goal). Phase: P2. Language: TypeScript first ([overview F.3](../overview.md#f3-assignment)). Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Draft. Overall design: [overview B.2](../overview.md#4-plugin-catalog). Phase: P2. Language: TypeScript first ([overview F.3](../overview.md#appendix-c-implementation-language)). Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
 
 Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The **branch part** owns the goal: its state exists only as a keyed raw input block on the branch Timeline, and continuation is decided from branch events consumed in order through the branch Dispatcher; it writes branch inputs. The **Session part** offers the `goal_update` tool as a Session-scoped `ToolContribution` and the `session.goal.*` methods as a `SessionMethodContribution` ([session-boundary](../contracts/session-boundary.md)); both resolve the branch part per call. Goal writes no events of its own and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal block, cover the feature-list wording "switch Goal mode".
 

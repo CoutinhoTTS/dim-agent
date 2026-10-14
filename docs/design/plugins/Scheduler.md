@@ -1,6 +1,6 @@
 # Scheduler
 
-Status: Draft. Overall design: [overview B.8](../overview.md#b8-scheduler); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first (overview §F.3).
+Status: Draft. Overall design: [overview B.8](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first (overview §F.3).
 
 Scheduler keeps scheduled jobs and their run history in App Server process storage. While the daemon is alive and a window is due, the process part creates a non-interactive Session through Agents `launch` (or reuses one through `AgentIndex`) and writes the job prompt as a Queue input with its own source marker through the Session public interface ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part offers the `schedule` tool (risk `persistent_configuration`) to interactive leader Sessions. Operators use the management-level `schedule.*` methods. Scheduler writes no Timeline event of its own: a run's outcome is read from the run Session's history and published as a run-outcome event notice.
 

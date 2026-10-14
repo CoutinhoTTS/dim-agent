@@ -1,6 +1,6 @@
 # Workflow
 
-Status: Draft. Overall design: [overview §B.9](../overview.md#b9-workflow); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview §F.3](../overview.md#f3-assignment)).
+Status: Draft. Overall design: [overview §B.9](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview §F.3](../overview.md#appendix-c-implementation-language)).
 
 Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own Session, either a new non-interactive Session launched through Agents or a Collaboration member of the starting Session created with Collaboration's `establish`. The process part owns runs and reaches Sessions through Agents (`AgentIndex`) and the Session public interface ([session-access](../contracts/session-access.md)), as Collaboration does. The Session part offers the `workflow` tool to interactive Sessions; operators use management-level `workflow.*` methods. When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
 

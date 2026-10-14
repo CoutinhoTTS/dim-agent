@@ -1,6 +1,6 @@
 # ShellInput
 
-Status: Draft. Overall design: [overview B.3](../overview.md#b3-shellinput). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Draft. Overall design: [overview B.3](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
 Executes `!command` and `!!command` typed by the user in the Session's workspace on its resource node. The result of `!command` (command and bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client and diagnostics. ShellInput is a Session plugin with no events. It contributes `shell.run`, `shell.stop` and `shell.list` as a `SessionMethodContribution` at level `management` ([session-boundary](../contracts/session-boundary.md)). At most one command runs per Session; a command ends on `shell.stop` or when the Session part ends (Session close or unload, reload, daemon exit).
 

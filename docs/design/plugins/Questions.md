@@ -1,6 +1,6 @@
 # Questions
 
-Status: Draft. Overall design: [overview B.1](../overview.md#b1-questions). Phase: P1. Language: Rust. Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Draft. Overall design: [overview B.1](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
 
 The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. The **Session part** offers `ask_user` as a Session-scoped `ToolContribution` and contributes the Session method `session.question.respond` as a `SessionMethodContribution` ([session-boundary](../contracts/session-boundary.md)). It is installed only in interactive Sessions. The **branch part** records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number, following the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern.
 

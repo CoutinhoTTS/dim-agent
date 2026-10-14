@@ -1,6 +1,6 @@
 # ExternalAgent
 
-Status: Draft. Overall design: [overview §B.10](../overview.md#b10-externalagent); scope: [ADR 002](../../adr/002-plugin-scope.md) (process). Phase: P3. Language: TypeScript first ([overview §F.3](../overview.md#f3-assignment)).
+Status: Draft. Overall design: [overview §B.10](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process). Phase: P3. Language: TypeScript first ([overview §F.3](../overview.md#appendix-c-implementation-language)).
 
 ExternalAgent makes locally installed coding agents (Claude Code, Codex, Cursor, OpenCode, ZCode and similar) usable as a kind of model connection. A Session whose model is an external agent runs through Loop and ModelProvider as usual: ExternalAgent registers the connection kind `external-agent` with Aimux's ModelHost (an Aimux supplement), turns each dim model request into one external turn and turns the external stream back into model output chunks. External agents use their own tools; their permission requests become ordinary dim approvals in the Session that runs the call. ExternalAgent writes no Timeline event of its own.
 
@@ -292,7 +292,7 @@ Retry safety: failures before `Accepted` that may be retried (spawn failure, con
 
 ### A.5 Shared ACP schema
 
-Pinned protocol version, generated types per language, transcript-based conformance suite shared with AcpGateway; fixtures cover initialize, new/load, prompt with text and image, streamed updates, cancel during a prompt, a permission request answered allow, reject and cancelled, a permission request during cancel, and process exit mid-prompt. No runtime code is shared ([overview §B.15](../overview.md#b15-acpgateway)).
+Pinned protocol version, generated types per language, transcript-based conformance suite shared with AcpGateway; fixtures cover initialize, new/load, prompt with text and image, streamed updates, cancel during a prompt, a permission request answered allow, reject and cancelled, a permission request during cancel, and process exit mid-prompt. No runtime code is shared ([overview §B.15](../overview.md#4-plugin-catalog)).
 
 ### A.6 Mechanics per step
 

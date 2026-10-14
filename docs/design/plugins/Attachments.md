@@ -1,6 +1,6 @@
 # Attachments
 
-Status: Draft. Overall design: [overview B.4](../overview.md#b4-attachments). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Draft. Overall design: [overview B.4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
 Lets the user attach images and large text to a submission. Images need no plugin: the CLI sends them as image content blocks in `session.submit`, and Rpc validates them at the submission boundary. Attachments is a small Session plugin that contributes one Session method, `attachment.put`, as a `SessionMethodContribution` ([session-boundary](../contracts/session-boundary.md)). The method stores a text attachment (a large paste) as an immutable Session file owned by SessionStore on the Session's resource node and returns its path; the user's text references the path and the model reads the file with `read` when needed. Fork sharing and deletion of those files are SessionStore behavior. No events.
 
