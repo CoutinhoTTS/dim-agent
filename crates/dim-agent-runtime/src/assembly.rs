@@ -704,6 +704,10 @@ impl TypedPlugin for SessionScopePlugin {
         Box::pin(async move {
             let (owner, scope) = (&self.0, self.1);
             ctx.provide_as(
+                scope.key::<crate::SessionLoader>(),
+                Arc::new(crate::SessionLoader::new(owner.loader.clone())),
+            )?;
+            ctx.provide_as(
                 scope.key::<Diagnostics>(),
                 Arc::new(owner.diagnostics.clone()),
             )?;

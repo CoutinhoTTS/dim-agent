@@ -50,6 +50,23 @@ pub trait BranchService: Send + Sync + 'static {}
 /// ```
 pub trait PublicService: Send + Sync + 'static {}
 
+/// The loader that owns this Session's subtree. Not publicly accessible.
+/// Only lock-free instance creation is exposed to Session capabilities.
+pub struct SessionLoader(rutis_loader::Loader);
+impl SessionLoader {
+    pub fn new(loader: rutis_loader::Loader) -> Self {
+        Self(loader)
+    }
+    pub fn create_instance<'a>(
+        &'a self,
+        ctx: &Ctx,
+        group: &str,
+    ) -> rutis_loader::CreateInstance<'a> {
+        self.0.create_instance(ctx, group)
+    }
+}
+impl SessionService for SessionLoader {}
+
 /// Identity of one Session subtree; plugin factories receive it to build keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionScope {

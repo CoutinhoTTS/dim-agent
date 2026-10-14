@@ -2,7 +2,7 @@
 mod publication;
 pub mod server;
 mod session;
-pub use publication::{McpApplication, McpPublication};
+pub use publication::{McpApplication, McpOwner, McpPublication};
 pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState, install};
 
 use crate::settings::{
@@ -149,17 +149,20 @@ pub struct McpService {
     tasks: TaskTracker,
 }
 impl McpService {
-    /// Acquire a connection owner for the effective source. Initialization is
-    /// lazy, outside Plugin apply; user sources are shared across projects.
+    /// Acquire a generation in an explicit owner's loader subtree.
     pub async fn server(
         self: &Arc<Self>,
+        instance_owner: McpOwner,
         project: Option<usize>,
         id: String,
         cancel: &CancellationToken,
     ) -> Result<Arc<McpConnection>> {
         let owner = self.clone();
         self.run(cancel, move |_, cancel| async move {
-            owner.publication.acquire(project, id, &cancel).await
+            owner
+                .publication
+                .acquire(instance_owner, project, id, &cancel)
+                .await
         })
         .await
     }

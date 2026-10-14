@@ -54,7 +54,7 @@ impl Capability for Capture {
 struct Fixture {
     root: Ctx,
     publication: mcp_host::Host,
-    mcp: Arc<McpService>,
+    mcp: mcp_host::Directory,
     home: PathBuf,
 }
 #[path = "fixtures/mcp_host.rs"]
@@ -85,7 +85,7 @@ impl Fixture {
         file.write_all(&serde_json::to_vec(&json!({"mcpServers":{"docs":configuration}})).unwrap())
             .unwrap();
         let root = Ctx::root().unwrap();
-        let (publication, _) = mcp_host::Host::start(&root).await;
+        let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         let views = vec![
             root.plugin(capability_plugin(FileStoragePlugin::new(vec![
@@ -103,10 +103,11 @@ impl Fixture {
         )
         .await
         .unwrap();
+        let mcp = mcp_host::Directory::new(capture.get().unwrap().clone(), &root, loader);
         Self {
             root,
             publication,
-            mcp: capture.get().unwrap().clone(),
+            mcp,
             home,
         }
     }

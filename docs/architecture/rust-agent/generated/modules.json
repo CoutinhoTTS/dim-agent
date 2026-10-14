@@ -1227,8 +1227,7 @@
         "json",
         "matches",
         "tokio::select",
-        "unreachable",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -1241,6 +1240,8 @@
         "assert_eq",
         "format",
         "json",
+        "tokio::select",
+        "unreachable",
         "vec"
       ]
     },
@@ -7516,6 +7517,8 @@
         "path BranchScope",
         "path SessionScope",
         "path SessionService",
+        "path crate::SessionLoader",
+        "path crate::SessionLoader::new",
         "path scope"
       ]
     },
@@ -7951,7 +7954,8 @@
       "from": "dim_agent_runtime::scope",
       "to": "dim_agent_runtime::assembly",
       "references": [
-        "path TimelineFactory"
+        "path TimelineFactory",
+        "path group"
       ]
     },
     {
@@ -10466,9 +10470,11 @@
       "references": [
         "mod publication",
         "path McpApplication",
+        "path McpOwner",
         "path publication",
         "path publication::Publication",
         "use publication::McpApplication",
+        "use publication::McpOwner",
         "use publication::McpPublication"
       ]
     },
@@ -10537,6 +10543,16 @@
     },
     {
       "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionLoader",
+        "path SessionLoader::new",
+        "path dim_agent_runtime::SessionScope",
+        "use dim_agent_runtime::SessionLoader"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
       "to": "dim_agent_runtime::state",
       "references": [
         "path StateCell",
@@ -10550,9 +10566,9 @@
       "references": [
         "path McpConnection",
         "path McpError::ApprovalRequired",
+        "path McpError::Closed",
         "path McpError::Disabled",
         "path McpError::InvalidId",
-        "path McpError::InvalidSource",
         "path McpError::Unavailable",
         "path McpError::UnknownServer",
         "path Result",
@@ -10572,10 +10588,11 @@
       "from": "dim_app_server::mcp::publication",
       "to": "dim_app_server::mcp::server",
       "references": [
+        "path McpServer",
         "path McpServerError::Cleanup",
         "path McpServerPlugin",
         "path McpServerPlugin::new",
-        "path super::server::McpServer",
+        "use super::server::McpServer",
         "use super::server::McpServerError",
         "use super::server::McpServerPlugin",
         "use super::server::McpServerState"
@@ -10620,7 +10637,10 @@
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_agent_runtime::capability",
       "references": [
+        "path Capability",
+        "path KeysOf",
         "path capability_plugin",
+        "path register_capability",
         "use dim_agent_runtime::capability_plugin"
       ]
     },
@@ -10629,6 +10649,7 @@
       "to": "dim_app_server::mcp",
       "references": [
         "path McpChange::Put",
+        "path McpConnection",
         "path McpPlugin",
         "path McpService",
         "use crate::mcp::McpChange",
@@ -10640,22 +10661,27 @@
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::mcp::publication",
       "references": [
+        "path ConnectionConfig",
+        "path ConnectionPlugin",
+        "path ConnectionPlugin::new",
+        "path McpOwner",
+        "path McpOwner::new",
         "path McpPublication::register",
-        "path ServerFactory"
+        "path McpPublication::standalone_template"
       ]
     },
     {
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::mcp::server",
       "references": [
-        "path McpServerError::Cleanup",
-        "path McpServerPlugin"
+        "path McpServerError::Cleanup"
       ]
     },
     {
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::settings",
       "references": [
+        "path SettingsSource::ProjectMcp",
         "path SettingsSource::UserMcp",
         "path crate::settings::SettingsPlugin::new"
       ]
@@ -10843,9 +10869,11 @@
       "to": "dim_agent_runtime::scope",
       "references": [
         "path PublicService",
+        "path SessionLoader",
         "path SessionScope",
         "path SessionService",
         "use dim_agent_runtime::PublicService",
+        "use dim_agent_runtime::SessionLoader",
         "use dim_agent_runtime::SessionScope",
         "use dim_agent_runtime::SessionService"
       ]
@@ -10890,6 +10918,17 @@
         "use super::McpError",
         "use super::McpServerEntry",
         "use super::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::session",
+      "to": "dim_app_server::mcp::publication",
+      "references": [
+        "path super::McpOwner",
+        "path super::McpOwner::in_session",
+        "path super::publication::ConnectionConfig",
+        "path super::publication::ConnectionPlugin::new",
+        "path super::publication::GROUP"
       ]
     },
     {

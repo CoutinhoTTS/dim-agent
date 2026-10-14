@@ -1,26 +1,94 @@
-//! Host-side source publication into the existing loader. Never run this worker
-//! in a plugin's apply/dispose: reconciliation may need to dispose its callers.
+//! Serialized host authority for source selection and cross-Session retirement.
+//! Connection resources and disposal belong exclusively to loader instances.
 use super::{
     McpConnection, McpError, Result,
-    server::{McpServerError, McpServerPlugin, McpServerState},
+    server::{McpServer, McpServerError, McpServerPlugin, McpServerState},
 };
 use crate::settings::{McpServerSettings, SettingsDocument, SettingsService, SettingsSource};
-use dim_agent_runtime::{Capability, KeysOf, StateCell, register_capability};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin, TypedPluginFactory};
-use rutis_loader::{Builtins, Layer, Loader, Patch};
+use dim_agent_runtime::{Capability, KeysOf, SessionLoader, StateCell, register_capability};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis_loader::{Builtins, InstanceResult, Loader};
 use serde::Serialize;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-type Configurations = Arc<Mutex<BTreeMap<String, (SettingsSource, Arc<McpServerSettings>)>>>;
+pub(super) const GROUP: &str = "McpConnections";
 
-/// Loader application is distinct from source persistence and connection state.
+/// Explicit connection owner. Session plugins construct this from their declared
+/// Session loader; standalone hosts must supply their own loader and context.
+#[derive(Clone)]
+pub struct McpOwner {
+    id: String,
+    ctx: Ctx,
+    loader: Arc<SessionLoader>,
+    scope: rutis::InstanceId,
+    closed: CancellationToken,
+}
+impl McpOwner {
+    pub fn new(ctx: Ctx, loader: Loader) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            closed: ctx.cancellation_token(),
+            scope: ctx.instance(),
+            ctx,
+            loader: Arc::new(SessionLoader::new(loader)),
+        }
+    }
+    pub(super) fn in_session(
+        ctx: Ctx,
+        loader: Arc<SessionLoader>,
+        scope: dim_agent_runtime::SessionScope,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            closed: ctx.cancellation_token(),
+            scope: scope.instance,
+            ctx,
+            loader,
+        }
+    }
+}
+
+/// Private immutable instance value. Never encoded in loader options.
+#[derive(Clone)]
+pub(super) struct ConnectionConfig {
+    configuration: McpServerSettings,
+    key: TypeKey,
+}
+pub(super) struct ConnectionPlugin(ConnectionConfig);
+impl ConnectionPlugin {
+    pub(super) fn new(value: &ConnectionConfig) -> Self {
+        Self(value.clone())
+    }
+}
+impl TypedPlugin for ConnectionPlugin {
+    type Deps = <McpServerPlugin as TypedPlugin>::Deps;
+    fn name(&self) -> &str {
+        "McpServer"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        deps: Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let plugin = McpServerPlugin::new(self.0.configuration.clone(), self.0.key.clone())
+                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+            plugin.apply(ctx, deps).await
+        })
+    }
+}
+impl Capability for ConnectionPlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        ((),)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpApplication {
@@ -28,7 +96,6 @@ pub struct McpApplication {
     pub error: Option<&'static str>,
     pub cleanup_error: Option<&'static str>,
 }
-
 enum Command {
     Check {
         reference: String,
@@ -41,6 +108,7 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     Acquire {
+        owner: McpOwner,
         project: Option<usize>,
         id: String,
         reply: oneshot::Sender<Result<Arc<McpConnection>>>,
@@ -51,7 +119,6 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
 }
-
 pub struct Publication {
     commands: mpsc::Sender<Command>,
     binding: watch::Sender<Option<Arc<SettingsService>>>,
@@ -62,27 +129,32 @@ impl Publication {
     pub(super) fn bind(&self, settings: Arc<SettingsService>) {
         self.binding.send_replace(Some(settings));
     }
-
     pub(super) fn application(&self, source: SettingsSource) -> McpApplication {
         self.applications.get().remove(&source).unwrap_or_default()
     }
-
     pub(super) fn refresh(&self) {
         self.released.send_replace(());
     }
-
-    pub(super) async fn check(&self, reference: String, cancel: &CancellationToken) -> Result<()> {
-        let (reply, received) = oneshot::channel();
+    async fn request<T>(
+        &self,
+        command: Command,
+        received: oneshot::Receiver<Result<T>>,
+        cancel: &CancellationToken,
+    ) -> Result<T> {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(McpError::Cancelled),
             result = async {
-                self.commands.send(Command::Check { reference, reply }).await.map_err(|_| McpError::Closed)?;
+                self.commands.send(command).await.map_err(|_| McpError::Closed)?;
                 received.await.map_err(|_| McpError::Closed)?
             } => result,
         }
     }
-
+    pub(super) async fn check(&self, reference: String, cancel: &CancellationToken) -> Result<()> {
+        let (reply, received) = oneshot::channel();
+        self.request(Command::Check { reference, reply }, received, cancel)
+            .await
+    }
     pub(super) async fn approval(
         &self,
         source: SettingsSource,
@@ -91,35 +163,38 @@ impl Publication {
         cancel: &CancellationToken,
     ) -> Result<()> {
         let (reply, received) = oneshot::channel();
-        // Once queued, the host settles persistence and disposal even if the
-        // caller leaves. It never waits for an interactive approval in apply.
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(McpError::Cancelled),
-            result = async {
-                self.commands.send(Command::Approval { source, id, token, reply }).await.map_err(|_| McpError::Closed)?;
-                received.await.map_err(|_| McpError::Closed)?
-            } => result,
-        }
+        self.request(
+            Command::Approval {
+                source,
+                id,
+                token,
+                reply,
+            },
+            received,
+            cancel,
+        )
+        .await
     }
-
     pub(super) async fn acquire(
         &self,
+        owner: McpOwner,
         project: Option<usize>,
         id: String,
         cancel: &CancellationToken,
     ) -> Result<Arc<McpConnection>> {
         let (reply, received) = oneshot::channel();
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(McpError::Cancelled),
-            result = async {
-                self.commands.send(Command::Acquire { project, id, reply }).await.map_err(|_| McpError::Closed)?;
-                received.await.map_err(|_| McpError::Closed)?
-            } => result,
-        }
+        self.request(
+            Command::Acquire {
+                owner,
+                project,
+                id,
+                reply,
+            },
+            received,
+            cancel,
+        )
+        .await
     }
-
     pub(super) async fn disconnect(
         &self,
         source: SettingsSource,
@@ -127,28 +202,16 @@ impl Publication {
         cancel: &CancellationToken,
     ) -> Result<()> {
         let (reply, received) = oneshot::channel();
-        // The host owns an admitted disconnect even if this waiter disappears.
-        // Cancellation must release a disposing plugin that reconcile waits on.
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(McpError::Cancelled),
-            result = async {
-                self.commands.send(Command::Disconnect { source, id, reply }).await.map_err(|_| McpError::Closed)?;
-                received.await.map_err(|_| McpError::Closed)?
-            } => result,
-        }
+        self.request(Command::Disconnect { source, id, reply }, received, cancel)
+            .await
     }
 }
 
-/// Registration is pure. The host starts `run` after its assembly is active and
-/// joins it before shutting down the loader. Standalone hosts can do the same.
 pub struct McpPublication {
     port: Arc<Publication>,
     commands: mpsc::Receiver<Command>,
     binding: watch::Receiver<Option<Arc<SettingsService>>>,
     released: watch::Receiver<()>,
-    configurations: Configurations,
-    module: String,
 }
 impl McpPublication {
     pub fn register(builtins: &mut Builtins) -> (Self, String) {
@@ -161,13 +224,6 @@ impl McpPublication {
             released,
             applications: StateCell::new(BTreeMap::new()),
         });
-        let configurations = Configurations::default();
-        let module = "McpServer".to_owned();
-        builtins.register_raw(
-            module.clone(),
-            rutis::TypedFactory::with_keys(ServerFactory(configurations.clone()), ((),)),
-            None,
-        );
         let host = Host(port.clone());
         let name = register_capability(builtins, move || host.clone());
         (
@@ -176,31 +232,32 @@ impl McpPublication {
                 commands: receiver,
                 binding: bindings,
                 released: releases,
-                configurations,
-                module,
             },
             name,
         )
     }
-
-    pub async fn run(
-        mut self,
-        root: Ctx,
-        loader: Loader,
-        assembly: Layer,
-        stop: CancellationToken,
-    ) {
+    /// Explicit standalone hosts register and install this top-level template.
+    /// Agents instead register the template nested in their Session assembly.
+    pub fn standalone_template(builtins: &mut Builtins) -> serde_json::Value {
+        builtins.register_with::<serde_json::Value, _, _>("StandaloneMcpServer", |build| {
+            let value = build
+                .value::<ConnectionConfig>()
+                .ok_or_else(|| CordisError::PluginFailed("missing MCP instance value".into()))?;
+            Ok(rutis::TypedFactory::with_keys(
+                InstanceFactory((*value).clone()),
+                ((),),
+            ))
+        });
+        json!({"id":GROUP,"group":true,"instanced":true,"config":[{"id":"StandaloneMcpServer","name":"StandaloneMcpServer"}]})
+    }
+    pub async fn run(mut self, stop: CancellationToken) {
         let mut projection = Projection {
-            root,
-            loader,
-            assembly,
             port: self.port.clone(),
-            configurations: self.configurations,
-            module: self.module,
             sources: BTreeMap::new(),
             generations: BTreeMap::new(),
             disconnected: BTreeMap::new(),
             cleanup_failed: BTreeSet::new(),
+            application_failed: BTreeMap::new(),
         };
         let mut changes = watch::channel(0).1;
         let mut settings = None;
@@ -221,13 +278,10 @@ impl McpPublication {
             projection.refresh(settings, &stop).await;
             match command {
                 Some(Command::Check { reference, reply }) => {
-                    let allowed =
-                        projection
-                            .generations
-                            .get(&reference)
-                            .is_some_and(|generation| {
-                                generation.approved && generation.row["disabled"] != true
-                            });
+                    let allowed = projection
+                        .generations
+                        .get(&reference)
+                        .is_some_and(|g| !g.owner.closed.is_cancelled() && projection.current(g));
                     let _ = reply.send(if allowed {
                         Ok(())
                     } else {
@@ -245,12 +299,32 @@ impl McpPublication {
                         .await;
                     let _ = reply.send(result);
                 }
-                Some(Command::Acquire { project, id, reply }) => {
+                Some(Command::Acquire {
+                    owner,
+                    project,
+                    id,
+                    reply,
+                }) => {
                     if reply.is_closed() {
                         continue;
                     }
-                    let result = projection.acquire(settings, project, id, &stop).await;
-                    let _ = reply.send(result);
+                    let result = projection
+                        .acquire(settings, owner, project, id, &stop)
+                        .await;
+                    if let Err(Ok(lease)) = reply.send(result) {
+                        let references = projection
+                            .generations
+                            .iter()
+                            .filter(|(_, g)| {
+                                Arc::ptr_eq(&g.service, &lease.service)
+                                    && g.lease.strong_count() == 1
+                            })
+                            .map(|(reference, _)| reference.clone())
+                            .collect();
+                        drop(lease);
+                        projection.retire(references).await;
+                        projection.publish();
+                    }
                 }
                 Some(Command::Disconnect { source, id, reply }) => {
                     let result = projection.disconnect(source, id).await;
@@ -260,11 +334,18 @@ impl McpPublication {
             }
         }
         self.commands.close();
-        // Dropping queued reply senders rejects waiters. Loader remains the only
-        // owner of plugin disposal, including on process shutdown.
     }
 }
-
+struct InstanceFactory(ConnectionConfig);
+impl rutis::TypedPluginFactory<serde_json::Value> for InstanceFactory {
+    type Plugin = ConnectionPlugin;
+    fn name(&self) -> &str {
+        "McpServer"
+    }
+    fn build(&self, _: &serde_json::Value) -> std::result::Result<Self::Plugin, CordisError> {
+        Ok(ConnectionPlugin::new(&self.0))
+    }
+}
 #[derive(Clone)]
 struct Host(Arc<Publication>);
 impl TypedPlugin for Host {
@@ -287,66 +368,43 @@ impl Capability for Host {
     fn keys(&self) -> KeysOf<Self> {}
 }
 
-struct ServerFactory(Configurations);
-impl TypedPluginFactory<Value> for ServerFactory {
-    type Plugin = McpServerPlugin;
-    fn name(&self) -> &str {
-        "McpServer"
-    }
-    fn build(&self, config: &Value) -> std::result::Result<McpServerPlugin, CordisError> {
-        let reference = config
-            .get("reference")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                CordisError::PluginFailed("invalid MCP configuration reference".into())
-            })?;
-        let configuration = self
-            .0
-            .lock()
-            .unwrap()
-            .get(reference)
-            .map(|(_, configuration)| configuration.clone())
-            .ok_or_else(|| {
-                CordisError::PluginFailed("MCP configuration reference expired".into())
-            })?;
-        McpServerPlugin::new((*configuration).clone(), key(reference))
-            .map_err(|error| CordisError::PluginFailed(Box::new(error)))
-    }
-}
-
-fn key(reference: &str) -> TypeKey {
-    TypeKey::keyed_dynamic::<super::server::McpServer>(reference.to_owned())
-}
-
 struct Source {
     revision: String,
     configured: BTreeSet<String>,
-    current: BTreeMap<String, String>,
+    current: BTreeMap<String, (McpServerSettings, bool)>,
     error: Option<&'static str>,
 }
 struct Generation {
     source: SettingsSource,
     id: String,
-    configuration: Arc<McpServerSettings>,
-    approved: bool,
+    configuration: McpServerSettings,
+    owner: McpOwner,
+    instance: rutis_loader::Instance,
+    service: Arc<McpServer>,
     lease: Weak<McpConnection>,
-    row: Value,
 }
 struct Projection {
-    root: Ctx,
-    loader: Loader,
-    assembly: Layer,
     port: Arc<Publication>,
-    configurations: Configurations,
-    module: String,
     sources: BTreeMap<SettingsSource, Source>,
     generations: BTreeMap<String, Generation>,
     disconnected: BTreeMap<(SettingsSource, String), String>,
     cleanup_failed: BTreeSet<SettingsSource>,
+    application_failed: BTreeMap<(String, SettingsSource, String), (String, CancellationToken)>,
 }
 impl Projection {
+    fn current(&self, generation: &Generation) -> bool {
+        self.sources.get(&generation.source).is_some_and(|source| {
+            source.error.is_none()
+                && source
+                    .current
+                    .get(&generation.id)
+                    .is_some_and(|(config, approved)| {
+                        *approved && *config == generation.configuration && enabled(config)
+                    })
+        })
+    }
     async fn refresh(&mut self, settings: &SettingsService, cancel: &CancellationToken) {
-        for (source, path) in settings.mcp_sources() {
+        for (source, _) in settings.mcp_sources() {
             let snapshot = match settings.read(source, cancel).await {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
@@ -357,30 +415,27 @@ impl Projection {
                         error: None,
                     });
                     intent.error = Some("MCP source could not be read");
-                    if matches!(source, SettingsSource::ProjectMcp(_)) {
-                        intent.current.clear();
-                    }
                     continue;
                 }
             };
             let SettingsDocument::Mcp(document) = snapshot.document else {
                 unreachable!("MCP source")
             };
-            let configured = document.mcp_servers.keys().cloned().collect();
             self.disconnected
                 .retain(|(owner, _), revision| *owner != source || *revision == snapshot.revision);
+            let configured = document.mcp_servers.keys().cloned().collect();
             let mut current = BTreeMap::new();
             let mut error = None;
-            for (id, configuration) in document.mcp_servers {
-                let Ok(configuration) = settings.mcp_effective(source, configuration) else {
+            for (id, config) in document.mcp_servers {
+                let Ok(config) = settings.mcp_effective(source, config) else {
                     error = Some("MCP configuration could not be resolved");
                     continue;
                 };
                 let approved = if matches!(source, SettingsSource::ProjectMcp(_)) {
-                    match settings.mcp_fingerprint(source, &id, &configuration) {
+                    match settings.mcp_fingerprint(source, &id, &config) {
                         Ok(token) => match settings.mcp_approved(source, &id, &token, cancel).await
                         {
-                            Ok(approved) => approved,
+                            Ok(value) => value,
                             Err(_) => {
                                 error = Some("MCP approval store could not be read");
                                 false
@@ -394,64 +449,9 @@ impl Projection {
                 } else {
                     true
                 };
-                if self.disconnected.get(&(source, id.clone())) == Some(&snapshot.revision) {
-                    continue;
+                if !self.disconnected.contains_key(&(source, id.clone())) {
+                    current.insert(id, (config, approved));
                 }
-                if let Some(reference) = self.sources.get(&source).and_then(|s| s.current.get(&id))
-                    && let Some(generation) = self.generations.get(reference)
-                    && *generation.configuration == configuration
-                    && generation.approved == approved
-                {
-                    current.insert(id, reference.clone());
-                    continue;
-                }
-                // A rejected edit followed by restoration can reuse a healthy
-                // generation still retained by accepted bindings.
-                if let Some((reference, _)) =
-                    self.generations.iter().find(|(reference, generation)| {
-                        generation.source == source
-                            && generation.id == id
-                            && *generation.configuration == configuration
-                            && generation.approved == approved
-                            && self
-                                .root
-                                .get_as::<super::server::McpServer>(key(reference))
-                                .is_some_and(|service| {
-                                    !matches!(
-                                        service.state(),
-                                        McpServerState::Closed | McpServerState::Failed
-                                    )
-                                })
-                    })
-                {
-                    current.insert(id, reference.clone());
-                    continue;
-                }
-                // Logical identity is scope-qualified and restart-stable. The
-                // suffix identifies a runtime generation, never a durable source.
-                let scope = path
-                    .as_ref()
-                    .map(|p| p.to_str().expect("validated project path"))
-                    .unwrap_or("user");
-                let logical = format!(
-                    "{:x}",
-                    Sha256::digest(serde_json::to_vec(&(scope, &id)).expect("string tuple"))
-                );
-                let reference = format!("mcp:{logical}:{}", uuid::Uuid::new_v4());
-                let disabled = match &configuration {
-                    McpServerSettings::Stdio { enabled, .. }
-                    | McpServerSettings::Remote { enabled, .. } => !enabled.unwrap_or(true),
-                };
-                let configuration = Arc::new(configuration);
-                self.configurations
-                    .lock()
-                    .unwrap()
-                    .insert(reference.clone(), (source, configuration.clone()));
-                self.generations.insert(reference.clone(), Generation {
-                    source, id: id.clone(), configuration, approved, lease: Weak::new(),
-                    row: json!({"id":reference,"name":self.module,"disabled":disabled || !approved,"config":{"reference":reference}}),
-                });
-                current.insert(id, reference);
             }
             self.sources.insert(
                 source,
@@ -463,82 +463,61 @@ impl Projection {
                 },
             );
         }
-        self.publish().await;
-    }
-
-    async fn publish(&mut self) {
-        self.generations.retain(|reference, generation| {
-            self.sources
-                .get(&generation.source)
-                .and_then(|s| s.current.get(&generation.id))
-                == Some(reference)
-                || (generation.source == SettingsSource::UserMcp
-                    && generation.lease.strong_count() > 0)
-        });
-        let rows = self.generations.values().map(|g| g.row.clone()).collect();
-        let layer = Layer::new(
-            "mcp",
-            vec![Patch {
-                insert: Some(rows),
-                ..Default::default()
-            }],
-        );
-        let layers = vec![self.assembly.clone(), layer];
-        let removed: Vec<_> = self
-            .loader
-            .entries()
-            .into_iter()
-            .filter(|entry| {
-                entry.owner == rutis_loader::Owner::Layer(1)
-                    && !self.generations.contains_key(&entry.id)
+        let retired: Vec<_> = self
+            .generations
+            .iter()
+            .filter(|(_, g)| {
+                g.owner.closed.is_cancelled()
+                    || (g.lease.strong_count() == 0
+                        && matches!(
+                            g.service.state(),
+                            McpServerState::Failed | McpServerState::Closed
+                        ))
+                    || (!self.current(g)
+                        && (g.source != SettingsSource::UserMcp || g.lease.strong_count() == 0))
             })
-            .filter_map(|entry| {
-                let source = self.configurations.lock().unwrap().get(&entry.id)?.0;
-                Some((source, entry.view?))
-            })
+            .map(|(reference, _)| reference.clone())
             .collect();
-        let failed = if self.loader.layers() != layers {
-            self.loader.reconcile(layers, None).await.is_err()
-        } else {
-            false
-        };
-        // Retain immutable private configuration until loader removal completes.
-        let entries = self.loader.entries();
-        self.configurations.lock().unwrap().retain(|reference, _| {
-            self.generations.contains_key(reference)
-                || entries.iter().any(|entry| &entry.id == reference)
-        });
-        // Reconcile drains every removed row but does not return disposal errors.
-        // Observe terminal receipts; never initiate a second shutdown from leases.
-        for (source, view) in removed {
-            let state = view.state();
-            if state.state != rutis::FiberState::Disposed || state.error.is_some() {
-                self.cleanup_failed.insert(source);
-            }
-        }
+        self.retire(retired).await;
+        self.application_failed
+            .retain(|(_, source, _), (revision, closed)| {
+                !closed.is_cancelled()
+                    && self
+                        .sources
+                        .get(source)
+                        .is_some_and(|intent| intent.revision == *revision)
+            });
+        self.publish();
+    }
+    fn publish(&self) {
         self.port.applications.set(
             self.sources
                 .iter()
                 .map(|(source, intent)| {
-                    let applied = !failed
-                        && intent.error.is_none()
-                        && intent.current.values().all(|reference| {
-                            entries.iter().any(|entry| {
-                                entry.id == *reference
-                                    && entry.rejected.is_none()
-                                    && (entry.options["disabled"] == true
-                                        || entry.view.as_ref().is_some_and(|v| {
-                                            v.state().state == rutis::FiberState::Active
-                                        }))
-                            })
-                        });
+                    let inactive = intent.current.values().any(|(configuration, approved)| {
+                        *approved
+                            && enabled(configuration)
+                            && McpServerPlugin::new(
+                                configuration.clone(),
+                                TypeKey::of::<McpServer>(),
+                            )
+                            .is_err()
+                    }) || self.application_failed.keys().any(
+                        |(_, failed_source, id)| {
+                            failed_source == source
+                                && intent.current.get(id).is_some_and(
+                                    |(configuration, approved)| *approved && enabled(configuration),
+                                )
+                        },
+                    );
+                    let error = intent
+                        .error
+                        .or(inactive.then_some("MCP configuration is not active"));
                     (
                         *source,
                         McpApplication {
-                            applied_revision: applied.then(|| intent.revision.clone()),
-                            error: intent
-                                .error
-                                .or((!applied).then_some("MCP configuration is not active")),
+                            applied_revision: error.is_none().then(|| intent.revision.clone()),
+                            error,
                             cleanup_error: self
                                 .cleanup_failed
                                 .contains(source)
@@ -549,16 +528,30 @@ impl Projection {
                 .collect(),
         );
     }
-
+    async fn retire(&mut self, references: Vec<String>) -> bool {
+        let mut failed = false;
+        for reference in references {
+            if let Some(generation) = self.generations.remove(&reference)
+                && (generation.instance.view.shutdown().await.is_err()
+                    || generation.instance.view.state().error.is_some())
+            {
+                self.cleanup_failed.insert(generation.source);
+                failed = true;
+            }
+        }
+        failed
+    }
     async fn acquire(
         &mut self,
         settings: &SettingsService,
+        owner: McpOwner,
         project: Option<usize>,
         id: String,
         cancel: &CancellationToken,
     ) -> Result<Arc<McpConnection>> {
-        // Resolve precedence from the same source snapshots that produced the
-        // rows, not from a catalog read before this request entered the queue.
+        if owner.closed.is_cancelled() {
+            return Err(McpError::Closed);
+        }
         let mut selected = None;
         for source in
             std::iter::once(SettingsSource::UserMcp).chain(project.map(SettingsSource::ProjectMcp))
@@ -577,67 +570,104 @@ impl Projection {
             }
         }
         let source = selected.ok_or(McpError::UnknownServer)?;
-        let failed = self
-            .sources
-            .get(&source)
-            .and_then(|intent| intent.current.get(&id))
-            .and_then(|reference| self.root.get_as::<super::server::McpServer>(key(reference)))
-            .is_some_and(|service| {
-                matches!(
-                    service.state(),
-                    McpServerState::Closed | McpServerState::Failed
-                )
-            });
-        if failed {
-            self.sources
-                .get_mut(&source)
-                .expect("existing source")
-                .current
-                .remove(&id);
-        }
-        if self.disconnected.remove(&(source, id.clone())).is_some() || failed {
+        if self.disconnected.remove(&(source, id.clone())).is_some() {
             self.refresh(settings, cancel).await;
         }
-        let source = self.sources.get(&source).ok_or(McpError::InvalidSource)?;
-        if source.error.is_some() {
-            return Err(McpError::Unavailable);
-        }
-        let reference = source.current.get(&id).ok_or(McpError::UnknownServer)?;
-        let generation = self
-            .generations
-            .get_mut(reference)
-            .expect("current generation");
-        let disabled = match &*generation.configuration {
-            McpServerSettings::Stdio { enabled, .. }
-            | McpServerSettings::Remote { enabled, .. } => *enabled == Some(false),
-        };
-        if disabled {
+        let (configuration, approved) = self
+            .sources
+            .get(&source)
+            .and_then(|s| s.current.get(&id))
+            .ok_or(McpError::UnknownServer)?
+            .clone();
+        if !enabled(&configuration) {
             return Err(McpError::Disabled);
         }
-        if !generation.approved {
+        if !approved {
             return Err(McpError::ApprovalRequired);
         }
-        let Some(service) = self.root.get_as::<super::server::McpServer>(key(reference)) else {
-            // Keep typed, secret-free configuration errors at the public port;
-            // do not downcast or forward arbitrary loader diagnostics.
-            McpServerPlugin::new((*generation.configuration).clone(), key(reference))?;
-            return Err(McpError::Unavailable);
-        };
-        if let Some(lease) = generation.lease.upgrade()
-            && Arc::ptr_eq(&lease.service, &service)
-        {
+        if let Some((reference, generation)) = self.generations.iter_mut().find(|(_, g)| {
+            g.owner.id == owner.id
+                && g.source == source
+                && g.id == id
+                && g.configuration == configuration
+                && !matches!(
+                    g.service.state(),
+                    McpServerState::Closed | McpServerState::Failed
+                )
+        }) {
+            if let Some(lease) = generation.lease.upgrade() {
+                return Ok(lease);
+            }
+            let lease = connection(&self.port, reference, generation);
+            generation.lease = Arc::downgrade(&lease);
             return Ok(lease);
         }
-        let lease = Arc::new(McpConnection {
-            service,
-            released: self.port.released.clone(),
-            authorization: matches!(generation.source, SettingsSource::ProjectMcp(_))
-                .then(|| (self.port.clone(), reference.clone())),
-        });
+        let reference = format!("mcp:{}", uuid::Uuid::new_v4());
+        let key = TypeKey::keyed_dynamic::<McpServer>(reference.clone()).with_instance(owner.scope);
+        // Validate before creation so typed errors, never secret-bearing loader diagnostics,
+        // reach the public boundary. Resource acquisition remains in plugin apply.
+        McpServerPlugin::new(configuration.clone(), key.clone())?;
+        let created = owner
+            .loader
+            .create_instance(&owner.ctx, GROUP)
+            .with(ConnectionConfig {
+                configuration: configuration.clone(),
+                key: key.clone(),
+            })
+            .await;
+        let instance = match created {
+            Ok(instance) => instance,
+            Err(_) => {
+                self.application_failed.insert(
+                    (owner.id.clone(), source, id.clone()),
+                    (self.sources[&source].revision.clone(), owner.closed.clone()),
+                );
+                self.publish();
+                return Err(McpError::Unavailable);
+            }
+        };
+        let service = owner.ctx.get_as::<McpServer>(key);
+        if owner.closed.is_cancelled()
+            || cancel.is_cancelled()
+            || service.is_none()
+            || instance
+                .report
+                .iter()
+                .any(|(_, result)| !matches!(result, InstanceResult::Active))
+        {
+            if instance.view.shutdown().await.is_err() || instance.view.state().error.is_some() {
+                self.cleanup_failed.insert(source);
+            }
+            if !owner.closed.is_cancelled() && !cancel.is_cancelled() {
+                self.application_failed.insert(
+                    (owner.id.clone(), source, id.clone()),
+                    (self.sources[&source].revision.clone(), owner.closed.clone()),
+                );
+            }
+            self.publish();
+            return Err(if owner.closed.is_cancelled() {
+                McpError::Closed
+            } else {
+                McpError::Unavailable
+            });
+        }
+        self.application_failed
+            .remove(&(owner.id.clone(), source, id.clone()));
+        self.publish();
+        let mut generation = Generation {
+            source,
+            id,
+            configuration,
+            owner,
+            instance,
+            service: service.unwrap(),
+            lease: Weak::new(),
+        };
+        let lease = connection(&self.port, &reference, &generation);
         generation.lease = Arc::downgrade(&lease);
+        self.generations.insert(reference, generation);
         Ok(lease)
     }
-
     async fn approval(
         &mut self,
         settings: &Arc<SettingsService>,
@@ -655,61 +685,70 @@ impl Projection {
             let SettingsDocument::Mcp(document) = snapshot.document else {
                 unreachable!("MCP source")
             };
-            let config = document
-                .mcp_servers
-                .get(&id)
-                .ok_or(McpError::UnknownServer)?;
-            let config = settings.mcp_effective(source, config.clone())?;
+            let config = settings.mcp_effective(
+                source,
+                document
+                    .mcp_servers
+                    .get(&id)
+                    .ok_or(McpError::UnknownServer)?
+                    .clone(),
+            )?;
             if settings.mcp_fingerprint(source, &id, &config)? != *expected {
                 return Err(crate::settings::SettingsError::Conflict.into());
             }
-            // Approval must not turn invalid transport intent into an executable row.
-            McpServerPlugin::new(config, key("approval-validation"))?;
+            McpServerPlugin::new(config, TypeKey::of::<McpServer>())?;
         }
         let revoking = token.is_none();
         settings
             .mcp_set_approval(source, id.clone(), token, cancel)
             .await?;
-        if revoking {
-            // Unlike ordinary user-config replacement, revoke every retained handle.
-            self.disconnect(source, id).await?;
-        }
-        // Re-read after persistence: a racing workspace edit cannot inherit the grant.
+        let result = if revoking {
+            self.disconnect(source, id).await
+        } else {
+            Ok(())
+        };
         self.refresh(settings, cancel).await;
-        Ok(())
+        result
     }
-
     async fn disconnect(&mut self, source: SettingsSource, id: String) -> Result<()> {
-        let references: BTreeSet<_> = self
-            .generations
-            .iter()
-            .filter(|(_, generation)| generation.source == source && generation.id == id)
-            .map(|(reference, _)| reference.clone())
-            .collect();
-        let views: Vec<_> = self
-            .loader
-            .entries()
-            .into_iter()
-            .filter(|entry| references.contains(&entry.id))
-            .filter_map(|entry| entry.view)
-            .collect();
         if let Some(intent) = self.sources.get_mut(&source) {
             self.disconnected
                 .insert((source, id.clone()), intent.revision.clone());
             intent.current.remove(&id);
         }
-        self.generations
-            .retain(|_, generation| generation.source != source || generation.id != id);
-        self.publish().await;
-        if views.iter().any(|view| {
-            let state = view.state();
-            state.state != rutis::FiberState::Disposed || state.error.is_some()
-        }) {
+        let references = self
+            .generations
+            .iter()
+            .filter(|(_, g)| g.source == source && g.id == id)
+            .map(|(reference, _)| reference.clone())
+            .collect();
+        let failed = self.retire(references).await;
+        self.publish();
+        if failed {
             Err(McpServerError::Cleanup.into())
         } else {
             Ok(())
         }
     }
+}
+fn enabled(config: &McpServerSettings) -> bool {
+    match config {
+        McpServerSettings::Stdio { enabled, .. } | McpServerSettings::Remote { enabled, .. } => {
+            enabled.unwrap_or(true)
+        }
+    }
+}
+fn connection(
+    port: &Arc<Publication>,
+    reference: &str,
+    generation: &Generation,
+) -> Arc<McpConnection> {
+    Arc::new(McpConnection {
+        service: generation.service.clone(),
+        released: port.released.clone(),
+        authorization: matches!(generation.source, SettingsSource::ProjectMcp(_))
+            .then(|| (port.clone(), reference.to_owned())),
+    })
 }
 
 #[cfg(test)]
@@ -717,15 +756,28 @@ mod tests {
     use super::*;
     use crate::mcp::{McpChange, McpPlugin, McpService};
     use dim_agent_runtime::{capability_plugin, wait_active};
-    use std::time::Duration;
+    use rutis_loader::Layer;
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        time::Duration,
+    };
+    use tokio::sync::Notify;
 
-    // Real OS reap failures are not portable to induce. Inject only the cleanup
-    // fault; configure, replace and disconnect through the public directory.
-    struct CleanupFailure(McpServerPlugin);
-    impl TypedPlugin for CleanupFailure {
-        type Deps = <McpServerPlugin as TypedPlugin>::Deps;
+    // Inject only nonportable cleanup failure / a blocked apply. All selection,
+    // cancellation, replacement and retirement go through the public directory.
+    #[derive(Default)]
+    struct Faults {
+        fail: AtomicBool,
+        block: AtomicBool,
+        entered: Notify,
+        release: Notify,
+        cleaned: AtomicUsize,
+    }
+    struct Probe(ConnectionPlugin, Arc<Faults>);
+    impl TypedPlugin for Probe {
+        type Deps = <ConnectionPlugin as TypedPlugin>::Deps;
         fn name(&self) -> &str {
-            "McpCleanupFailure"
+            "McpServer"
         }
         fn apply<'a>(
             &'a self,
@@ -733,134 +785,362 @@ mod tests {
             deps: Self::Deps,
         ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
             Box::pin(async move {
-                ctx.effect(|| {
-                    Effect::AsyncDisposer(Box::new(|| {
-                        Box::pin(async {
+                let faults = self.1.clone();
+                ctx.effect(move || {
+                    Effect::Disposer(Box::new(move || {
+                        faults.cleaned.fetch_add(1, Ordering::SeqCst);
+                        if faults.fail.load(Ordering::SeqCst) {
                             Err(CordisError::PluginFailed(Box::new(McpServerError::Cleanup)))
-                        })
+                        } else {
+                            Ok(())
+                        }
                     }))
                 })?;
+                if self.1.block.load(Ordering::SeqCst) {
+                    self.1.entered.notify_one();
+                    let cancel = ctx.cancellation_token();
+                    tokio::select! { _ = cancel.cancelled() => return Ok(Effect::Done), _ = self.1.release.notified() => {} }
+                }
                 self.0.apply(ctx, deps).await
             })
         }
     }
-    struct FaultFactory(ServerFactory);
-    impl TypedPluginFactory<Value> for FaultFactory {
-        type Plugin = CleanupFailure;
+    struct ProbeFactory(ConnectionConfig, Arc<Faults>);
+    impl rutis::TypedPluginFactory<serde_json::Value> for ProbeFactory {
+        type Plugin = Probe;
         fn name(&self) -> &str {
-            "McpCleanupFailure"
+            "McpServer"
         }
-        fn build(&self, config: &Value) -> std::result::Result<Self::Plugin, CordisError> {
-            self.0.build(config).map(CleanupFailure)
+        fn build(&self, _: &serde_json::Value) -> std::result::Result<Self::Plugin, CordisError> {
+            Ok(Probe(ConnectionPlugin::new(&self.0), self.1.clone()))
         }
     }
-
+    struct MissingService;
+    struct Waiting;
+    impl TypedPlugin for Waiting {
+        type Deps = rutis::Gate<MissingService>;
+        fn name(&self) -> &str {
+            "Waiting"
+        }
+        fn apply<'a>(
+            &'a self,
+            _: &'a Ctx,
+            _: Self::Deps,
+        ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+            Box::pin(async { unreachable!("the undeclared host service must remain unavailable") })
+        }
+    }
+    impl Capability for Waiting {
+        fn keys(&self) -> KeysOf<Self> {}
+    }
+    struct Fixture {
+        root: Ctx,
+        loader: Loader,
+        owner: McpOwner,
+        service: Arc<McpService>,
+        faults: Arc<Faults>,
+        stop: CancellationToken,
+        worker: tokio::task::JoinHandle<()>,
+        home: std::path::PathBuf,
+    }
+    impl Fixture {
+        async fn new() -> Self {
+            Self::with_extra(None).await
+        }
+        async fn with_extra(extra: Option<&str>) -> Self {
+            let home = std::env::temp_dir().join(format!("mcp-instance-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&home).unwrap();
+            let home = home.canonicalize().unwrap();
+            std::fs::write(
+                home.join("mcp.json"),
+                json!({"mcpServers":{"docs":{"command":"first"}}}).to_string(),
+            )
+            .unwrap();
+            let root = Ctx::root().unwrap();
+            let faults = Arc::new(Faults::default());
+            let mut builtins = Builtins::new();
+            let (publication, name) = McpPublication::register(&mut builtins);
+            let mut template = McpPublication::standalone_template(&mut builtins);
+            if let Some(extra) = extra {
+                let name = if extra == "waiting" {
+                    register_capability(&mut builtins, || Waiting)
+                } else {
+                    "MissingPlugin".to_owned()
+                };
+                template["config"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":"extra","name":name}));
+            }
+            let fault = faults.clone();
+            builtins.register_with::<serde_json::Value, _, _>(
+                "StandaloneMcpServer",
+                move |build| {
+                    let config = build.value::<ConnectionConfig>().unwrap();
+                    Ok(rutis::TypedFactory::with_keys(
+                        ProbeFactory((*config).clone(), fault.clone()),
+                        ((),),
+                    ))
+                },
+            );
+            let plugin = rutis_loader::LoaderPlugin::new(builtins, Default::default());
+            let loader = plugin.handle();
+            let view = root.plugin(plugin);
+            let stop = CancellationToken::new();
+            wait_active(&root, &[view], Duration::from_secs(5), &stop)
+                .await
+                .unwrap();
+            let assembly = Layer::new(
+                "assembly",
+                vec![rutis_loader::Patch {
+                    insert: Some(vec![json!({"id":name,"name":name}), template]),
+                    ..Default::default()
+                }],
+            );
+            loader
+                .reconcile(vec![assembly.clone()], None)
+                .await
+                .unwrap();
+            let owner = McpOwner::new(root.clone(), loader.clone());
+            let worker = tokio::spawn(publication.run(stop.clone()));
+            let views = [
+                root.plugin(capability_plugin(
+                    dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![
+                        home.clone(),
+                    ]),
+                )),
+                root.plugin(capability_plugin(crate::settings::SettingsPlugin::new(
+                    0,
+                    vec![0],
+                ))),
+                root.plugin(capability_plugin(McpPlugin)),
+            ];
+            wait_active(&root, &views, Duration::from_secs(5), &stop)
+                .await
+                .unwrap();
+            let service = root.get::<McpService>().unwrap();
+            Self {
+                root,
+                loader,
+                owner,
+                service,
+                faults,
+                stop,
+                worker,
+                home,
+            }
+        }
+        async fn acquire(&self) -> Arc<McpConnection> {
+            self.service
+                .server(self.owner.clone(), None, "docs".into(), &self.stop)
+                .await
+                .unwrap()
+        }
+        async fn close(self) {
+            self.faults.fail.store(false, Ordering::SeqCst);
+            self.stop.cancel();
+            self.worker.await.unwrap();
+            self.root.shutdown().await.unwrap();
+            std::fs::remove_dir_all(self.home).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn every_failed_or_waiting_instance_row_rejects_and_rolls_back_the_connection() {
+        for extra in ["failed", "waiting"] {
+            let fixture = Fixture::with_extra(Some(extra)).await;
+            fixture.faults.fail.store(true, Ordering::SeqCst);
+            let result = fixture
+                .service
+                .server(fixture.owner.clone(), None, "docs".into(), &fixture.stop)
+                .await;
+            assert!(matches!(result, Err(McpError::Unavailable)));
+            assert_eq!(fixture.faults.cleaned.load(Ordering::SeqCst), 1);
+            let application = fixture.service.application(SettingsSource::UserMcp);
+            assert!(
+                application.applied_revision.is_none()
+                    && application.error.is_some()
+                    && application.cleanup_error.is_some()
+            );
+            assert!(
+                fixture
+                    .loader
+                    .entries()
+                    .iter()
+                    .all(|entry| entry.id != "StandaloneMcpServer" || entry.view.is_none())
+            );
+            fixture.close().await;
+        }
+    }
+    #[tokio::test]
+    async fn revocation_persists_and_drains_all_owners_despite_cleanup_failure() {
+        let fixture = Fixture::new().await;
+        let cancel = &fixture.stop;
+        let catalog = fixture.service.catalog(Some(0), cancel).await.unwrap();
+        fixture
+            .service
+            .update(
+                SettingsSource::ProjectMcp(0),
+                catalog.project_revision.unwrap(),
+                "docs".into(),
+                McpChange::Put(serde_json::from_value(json!({"command":"project"})).unwrap()),
+                cancel,
+            )
+            .await
+            .unwrap();
+        let token = fixture
+            .service
+            .catalog(Some(0), cancel)
+            .await
+            .unwrap()
+            .servers["docs"]
+            .approval_token
+            .clone()
+            .unwrap();
+        fixture
+            .service
+            .approve(0, "docs".into(), token, cancel)
+            .await
+            .unwrap();
+        let first = fixture
+            .service
+            .server(fixture.owner.clone(), Some(0), "docs".into(), cancel)
+            .await
+            .unwrap();
+        let other = fixture
+            .service
+            .server(
+                McpOwner::new(fixture.root.clone(), fixture.loader.clone()),
+                Some(0),
+                "docs".into(),
+                cancel,
+            )
+            .await
+            .unwrap();
+        fixture.faults.fail.store(true, Ordering::SeqCst);
+        let result = fixture.service.revoke(0, "docs".into(), cancel).await;
+        assert!(matches!(
+            result,
+            Err(McpError::Server(McpServerError::Cleanup))
+        ));
+        assert_eq!(fixture.faults.cleaned.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            fixture
+                .service
+                .catalog(Some(0), cancel)
+                .await
+                .unwrap()
+                .servers["docs"]
+                .approval,
+            super::super::McpApproval::Required
+        );
+        for connection in [first, other] {
+            assert_eq!(connection.state(), McpServerState::Closed);
+            assert!(matches!(
+                connection.tools(cancel).await,
+                Err(McpServerError::ApprovalRequired)
+            ));
+        }
+        assert!(
+            fixture
+                .service
+                .application(SettingsSource::ProjectMcp(0))
+                .cleanup_error
+                .is_some()
+        );
+        fixture.close().await;
+    }
     #[tokio::test]
     async fn disconnect_drains_every_generation_after_a_plugin_cleanup_error() {
-        let home = std::env::temp_dir().join(format!("mcp-cleanup-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&home).unwrap();
-        let home = home.canonicalize().unwrap();
-        std::fs::write(
-            home.join("mcp.json"),
-            json!({"mcpServers":{"docs":{"command":"first"}}}).to_string(),
-        )
-        .unwrap();
-        let root = Ctx::root().unwrap();
-        let mut builtins = Builtins::new();
-        let (publication, name) = McpPublication::register(&mut builtins);
-        builtins.register_raw(
-            publication.module.clone(),
-            rutis::TypedFactory::with_keys(
-                FaultFactory(ServerFactory(publication.configurations.clone())),
-                ((),),
-            ),
-            None,
-        );
-        let plugin = rutis_loader::LoaderPlugin::new(builtins, Default::default());
-        let loader = plugin.handle();
-        let view = root.plugin(plugin);
-        let stop = CancellationToken::new();
-        wait_active(&root, &[view], Duration::from_secs(5), &stop)
+        let fixture = Fixture::new().await;
+        fixture.faults.fail.store(true, Ordering::SeqCst);
+        let first = fixture.acquire().await;
+        let other_owner = McpOwner::new(fixture.root.clone(), fixture.loader.clone());
+        let other = fixture
+            .service
+            .server(other_owner, None, "docs".into(), &fixture.stop)
             .await
             .unwrap();
-        let assembly = Layer::new(
-            "assembly",
-            vec![Patch {
-                insert: Some(vec![json!({"id":name,"name":name})]),
-                ..Default::default()
-            }],
-        );
-        loader
-            .reconcile(vec![assembly.clone()], None)
-            .await
-            .unwrap();
-        let worker = tokio::spawn(publication.run(root.clone(), loader, assembly, stop.clone()));
-        let views = [
-            root.plugin(capability_plugin(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            )),
-            root.plugin(capability_plugin(crate::settings::SettingsPlugin::new(
-                0,
-                vec![],
-            ))),
-            root.plugin(capability_plugin(McpPlugin)),
-        ];
-        let cancel = CancellationToken::new();
-        wait_active(&root, &views, Duration::from_secs(5), &cancel)
-            .await
-            .unwrap();
-        let directory = root.get::<McpService>().unwrap();
-        let first = directory
-            .server(None, "docs".into(), &cancel)
-            .await
-            .unwrap();
-        let catalog = directory.catalog(None, &cancel).await.unwrap();
-        directory
+        let catalog = fixture.service.catalog(None, &fixture.stop).await.unwrap();
+        fixture
+            .service
             .update(
                 SettingsSource::UserMcp,
                 catalog.user_revision,
                 "docs".into(),
                 McpChange::Put(serde_json::from_value(json!({"command":"second"})).unwrap()),
-                &cancel,
+                &fixture.stop,
             )
             .await
             .unwrap();
-        let second = directory
-            .server(None, "docs".into(), &cancel)
-            .await
-            .unwrap();
-        assert!(!Arc::ptr_eq(&first, &second));
-        let result = directory
-            .disconnect(SettingsSource::UserMcp, "docs".into(), &cancel)
+        let second = fixture.acquire().await;
+        assert!(!Arc::ptr_eq(&first, &second) && !Arc::ptr_eq(&first, &other));
+        let result = fixture
+            .service
+            .disconnect(SettingsSource::UserMcp, "docs".into(), &fixture.stop)
             .await;
         assert!(matches!(
             result,
             Err(McpError::Server(McpServerError::Cleanup))
         ));
-        assert_eq!(first.state(), McpServerState::Closed);
-        assert_eq!(second.state(), McpServerState::Closed);
+        assert_eq!(fixture.faults.cleaned.load(Ordering::SeqCst), 3);
+        for connection in [first, second, other] {
+            assert_eq!(connection.state(), McpServerState::Closed);
+        }
+        fixture.faults.fail.store(false, Ordering::SeqCst);
+        let replacement = fixture.acquire().await;
+        assert_eq!(replacement.state(), McpServerState::Disconnected);
         assert!(
-            directory
+            fixture
+                .service
                 .application(SettingsSource::UserMcp)
                 .cleanup_error
                 .is_some()
         );
-        let replacement = directory
-            .server(None, "docs".into(), &cancel)
+        fixture.close().await;
+    }
+    #[tokio::test]
+    async fn cancelled_instance_creation_is_rolled_back_and_cleanup_failure_is_visible() {
+        let fixture = Fixture::new().await;
+        fixture.faults.block.store(true, Ordering::SeqCst);
+        fixture.faults.fail.store(true, Ordering::SeqCst);
+        let cancel = CancellationToken::new();
+        let request = {
+            let (service, owner, cancel) = (
+                fixture.service.clone(),
+                fixture.owner.clone(),
+                cancel.clone(),
+            );
+            tokio::spawn(async move { service.server(owner, None, "docs".into(), &cancel).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), fixture.faults.entered.notified())
             .await
             .unwrap();
-        assert!(!Arc::ptr_eq(&first, &replacement) && !Arc::ptr_eq(&second, &replacement));
-        assert_eq!(replacement.state(), McpServerState::Disconnected);
-        // A later successful application must not erase failed cleanup evidence.
-        assert!(
-            directory
+        cancel.cancel();
+        assert!(matches!(request.await.unwrap(), Err(McpError::Cancelled)));
+        fixture.faults.block.store(false, Ordering::SeqCst);
+        fixture.faults.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fixture
+                .service
                 .application(SettingsSource::UserMcp)
                 .cleanup_error
-                .is_some()
+                .is_none()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fixture.faults.cleaned.load(Ordering::SeqCst), 1);
+        assert!(
+            fixture
+                .loader
+                .entries()
+                .iter()
+                .all(|entry| entry.view.is_none() || entry.id != "StandaloneMcpServer")
         );
-        stop.cancel();
-        worker.await.unwrap();
-        let _ = root.shutdown().await;
-        std::fs::remove_dir_all(home).unwrap();
+        fixture.faults.fail.store(false, Ordering::SeqCst);
+        fixture.acquire().await;
+        fixture.close().await;
     }
 }

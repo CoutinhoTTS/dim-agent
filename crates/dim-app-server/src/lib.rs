@@ -701,7 +701,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .get::<ListenAddresses>()
         .ok_or_else(|| ServerError::Configuration("listener addresses missing".into()))?;
     handle.open();
-    let publication = publication.map(|publisher| (publisher, processes.loader.clone(), assembly));
     let task = tokio::spawn(coordinate(root.clone(), handle.clone(), publication));
     startup.armed = false;
     Ok(RunningServer {
@@ -746,15 +745,10 @@ impl dim_agent_runtime::Capability for NodeRows {
 async fn coordinate(
     root: Ctx,
     control: Arc<ServerControl>,
-    publication: Option<(
-        mcp::McpPublication,
-        rutis_loader::Loader,
-        rutis_loader::Layer,
-    )>,
+    publication: Option<mcp::McpPublication>,
 ) -> Result<ShutdownReason> {
-    let publication = publication.map(|(publisher, loader, assembly)| {
-        tokio::spawn(publisher.run(root.clone(), loader, assembly, control.shutdown().clone()))
-    });
+    let publication =
+        publication.map(|publisher| tokio::spawn(publisher.run(control.shutdown().clone())));
     control.shutdown().cancelled().await;
     let hub = root.get::<ConnectionHub>();
     // Taking RPC admission fences the shutdown-request tracker. Every accepted

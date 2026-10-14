@@ -80,22 +80,28 @@ blindly. Use these methods rather than editing imported user files. `skills.set_
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
 
-The host publishes source changes to the existing root loader, preserving the assembly layer.
+Each Session owns its MCP connections as nested instances in the existing loader.
+The host coordinates source selection and retirement without rewriting root layers.
 Catalog reads and connection operations also request refresh of external workspace-file edits;
 there is no background filesystem watcher. A catalog reply is not a refresh-completion barrier.
 Already bound user-source tools retain their connection generation during replacement. After the last old
-binding is released, the publisher removes that generation's row and the loader disposes it.
+binding is released, the coordinator closes that instance through the loader's fiber.
+Session closure drains all its instances, including those retained by old bindings,
+without affecting another Session using the same server configuration.
 Project generations instead close on configuration change, disablement or revoked approval,
 even when a model request retains their tools. Each project operation rechecks current authority.
 Explicit disconnect drains all generations of the selected source/server, without changing its
 configuration; a later acquisition can reconnect. It reports cleanup failure rather than treating
 loader reconciliation as proof of successful cleanup.
 
-Standalone hosts using `McpPlugin` register `McpPublication` with their `Builtins`, include its
-returned row in the immutable assembly, and run its publisher outside the plugin tree after
-assembly activation. Join the publisher before root shutdown. Its typed port is a dependency of
-`McpPlugin`; neither the directory nor connection leases spawn or dispose configured plugins.
-No second loader, editable-layer target or SQLite dependency is required by this port.
+Standalone hosts using `McpPlugin` register `McpPublication` and its
+`standalone_template` with their `Builtins`, include both rows in the immutable
+assembly, and run `publication.run(stop)` outside plugin apply/dispose after
+assembly activation. Pass an explicit `McpOwner::new(ctx, loader)` when acquiring
+connections. Agent hosts instead use `mcp::install` and the declared Session loader.
+Join the publisher before root shutdown. Its typed port is a dependency of
+`McpPlugin`; connection leases never become a second lifecycle engine. No second
+loader, editable-layer target or SQLite dependency is required by this port.
 
 `--mock-model` selects the explicit deterministic test profile. It uses mock model/tool hosts. Product, configured and mock daemons identify themselves in `hello.daemonProfile`:
 

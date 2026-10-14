@@ -1,5 +1,9 @@
 # 001: Extensible harness foundation
 
+Superseded in part by [ADR 002](002-loader-plugin-management.md): MCP now uses
+Session-owned instanced groups; user configuration is moving to the editable
+loader layer. Historical source-first rationale below is not the current target.
+
 Decision status: Recovery design adopted for this branch. Configuration is implemented on
 this branch but remains Proposed for maintainer alignment with issue #3. Dynamic-event
 registration, its model-context boundary and dependency-loss refinements remain Proposed
@@ -225,9 +229,9 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
-| Scoped persisted loader configuration | Implemented for MCP: source-first publication to the root loader; user MCP/Skills authority and import use native storage v13. Pending issue #3 alignment. General plugin configuration, Session overrides, unified credential references and complete acknowledgement/status reporting are not implemented | Scope isolation, save failure, protected-local management, secret-free rows and diagnostics |
+| Scoped persisted loader configuration | User MCP/Skills authority and import use native storage v13; root publication has been removed. Editable user-layer integration follows ADR 002. General plugin configuration, Session overrides, unified credential references and complete acknowledgement/status reporting are not implemented | Scope isolation, save failure, protected-local management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
-| Loader-owned MCP instances | Implemented: scoped logical identities, overlapping generation rows, host publication, explicit disconnect and cleanup receipts. Uses distinct generation rows rather than issue #3's proposed instanced group | Bound user-source tools survive replacement; project tools obey current approval; all generations drain; logical identities survive restart and root reordering |
+| Loader-owned MCP instances | Implemented: Session-owned nested instanced groups with private immutable configuration, automatic replacement, explicit disconnect and cleanup receipts. Session closure stops only its connections; revocation drains all affected Sessions | Bound user-source tools survive replacement; project tools obey current approval; all generations drain; logical identities survive restart and root reordering |
 | Project MCP execution approval | Implemented: host-local scoped configuration grants, protected-local approval/revocation, per-operation checks and generation disposal. General workspace sandboxing and constrained plugins are not implemented | Unapproved project MCP cannot execute or connect; stale configuration, restart, retained tool bindings and revocation respect the grant |
 
 Keep this implementation batch on one integration branch with reviewable commits. The persistence
@@ -261,7 +265,7 @@ never overwrite a user's existing store to make a test pass.
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
 | #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
-| #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | Implemented alternative: each named source persists first, then a publisher reconciles root-loader layers without an editable target. Distinct rows retain overlapping MCP generations. Obtain maintainer agreement on these differences before merging the configuration implementation; otherwise revise the affected implementation and format decisions |
+| #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | ADR 002 adopts this direction for user settings. Session instanced groups are implemented; editable persistence and management remain in progress. Project files and host-local approvals remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
 The source-first recommendation preserves shared workspace files and explicit edit targets.

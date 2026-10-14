@@ -8,7 +8,12 @@
 
 每个进程一个 rutis root。进程级服务、Session 与分支都是这棵树上的 Plugin；所有有状态服务、监听器和长期任务都由 Plugin 提供，依赖全部经 `TypedPlugin::Deps` 声明。`main` 只解析启动参数、建立 Tokio runtime、调用 `serve`、处理进程信号；纯协议解析、序列化与无状态转换是普通函数。
 
-可选的 managed provider 账号插件由外部单独提供：给出 `--plugin-dir`、`--js-runtime` 与 `--node` 时，rutis Node runtime 与该插件作为同一进程树中的独立 loader 行装载，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；插件不可用时其 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#optional-managed-provider)）。MCP 服务器连接由宿主发布协调器 `McpPublication` 在同一 loader 中按作用域与代次建立 `McpServer` 行，见下文[配置发布与 MCP](#配置发布与-mcp)。
+可选的 managed provider 账号插件由外部单独提供：给出 `--plugin-dir`、`--js-runtime` 与 `--node` 时，rutis Node runtime 与该插件作为同一进程树中的独立 loader 行装载，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；插件不可用时其 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#optional-managed-provider)）。
+
+MCP connection generations are nested `McpConnections` group instances owned by
+each Session in the same loader. `McpPublication` serializes source selection,
+authorization and cross-Session retirement; it does not reconcile root layers.
+See [ADR 002](../../adr/002-loader-plugin-management.md).
 
 `SettingsPlugin` 不作为 `SessionScopePlugin` 的 `Deps` 依赖：Session 创建入口传入已校验的配置快照，既有 Session 的设置变更由受影响能力按业务合同更新（如 McpSession 观察目录修订）。普通配置写入不通过 rutis 重载重建 Session。
 
@@ -28,7 +33,6 @@ rutis root
     ├─ ManagedProviderBinding、JS runtime 与账号插件行       （可选，单独提供的插件）
     ├─ Settings                                             （--product-home 或本地执行 Session）
     ├─ McpPublication、Mcp、HostPlatform、SkillsCatalog     （受保护 profile 且执行 Session）
-    ├─ McpServer ⟨每个作用域服务器的代次行⟩                （由 McpPublication 发布与退役）
     ├─ AgentDirectory（Agent 表、Session 协议版本与占用、serverInstanceId）
     ├─ Agents（AgentIndex：目录逻辑与 Agent 管理，经 loader 创建与关闭 Agent）
     ├─ CollaborationDirectory、Collaboration（Team 关系与临时 Agent 归属）
@@ -39,6 +43,8 @@ rutis root
         ├─ AgentScope（Agent 门面；子插件 Sessions 承载监听）
         └─ session ⟨instanced⟩                    实例 Session#1
             ├─ SessionScope、TimelineTree、ToolRegistry …
+            ├─ McpConnections ⟨instanced⟩         Session-local generations
+            │   └─ McpServer
             ├─ trace ⟨instanced⟩                  仅请求 trace 的 Session
             └─ branch ⟨instanced⟩                 实例 Branch（main 等）
                 └─ BranchScope（Timeline / Dispatcher）、InputQueue、Loop、
@@ -85,7 +91,7 @@ rutis root
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
 | `AimuxPlugin`（进程级） | 共享 HTTP 资源、请求/流转换及取消桥接 | `ModelHost`：接收最终请求、已解析连接与取消信号的 request 对象 | 无业务服务依赖；不注入 Provider、ToolRegistry 或 Session |
 | `ConfiguredModelsPlugin` | `--model-config` 的开发模型目录与 resolver | 开发目录与 resolver | — |
-| `McpPublication`（宿主行） | 串行化来源发布、批准与代次变更的发布协调器；在 apply/dispose 之外向根 loader 写入 `McpServer` 行 | `Publication` | — |
+| `McpPublication` | Source selection, approval and retirement across Session-owned instances; no root reconciliation | `Publication` | — |
 | `McpPlugin` | MCP 目录、连接租约与准入复查；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
 | `HostPlatformPlugin` | 平台与 exec shell 设置 | `HostPlatform` | `When<FileStorage>` |
 | `SkillsCatalogPlugin` | Skill 根发现与目录 | `SkillsCatalog` | `HostPlatform`、`SkillSettingsHost` |
@@ -105,13 +111,15 @@ rutis root
 
 ### 配置发布与 MCP
 
-本节描述本分支实现的来源优先配置模型；它是 issue #3 可编辑层方案的替代提案，尚待维护者对齐（[ADR 001](../../adr/001-harness-foundation.md#configuration-and-lifecycle)）。
+User settings currently retain source-first persistence. [ADR 002](../../adr/002-loader-plugin-management.md)
+supersedes that direction with an editable user layer; Session-owned instances
+are implemented independently of that persistence change.
 
 | 项 | 约定 |
 | --- | --- |
 | 来源与写入 | 每个来源一个持久化权威与写入路径：管理操作指明目标来源并按修订 CAS，不回写合成视图。用户 MCP/Skill 首次读取时原子导入 SQLite，失败保留原文件并可重试；工作区 `.mcp.json` 保持文件权威 |
-| 发布 | 来源写入成功后，宿主发布协调器在插件 apply/dispose 之外把合成配置发布到根 loader（无可编辑层）；写入应答只证明持久化，不证明 loader 已采用或旧代已结算 |
-| MCP 代次 | 稳定行身份由规范化工作区（或用户作用域）与服务器 ID 哈希得到，代次后缀是瞬态的。用户来源的旧代行在最后一个绑定释放后退役；项目来源在配置变化、禁用或失去执行批准时退役，即使仍有保留绑定。显式断开移除该来源与服务器的全部代次并等待 loader 清理，清理错误单独报告 |
+| Publication | Settings notifications update Session discovery automatically. New bindings use new instances; a persistence acknowledgement does not guarantee discovery, adoption or cleanup |
+| MCP generations | Connections are not shared across Sessions. The declared `SessionLoader` service creates nested instances using private immutable values, never secret-bearing loader options or mutable templates. Retained user bindings keep old generations until release or Session close. Project changes, disablement, unreadable authority and revocation retire old generations even with retained bindings. Disconnect/revoke drains every affected Session instance; cleanup failures are reported separately |
 | 项目 MCP 批准 | 宿主本地批准绑定规范工作区、服务器 ID 与有效配置指纹；未批准的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现。每次连接操作复查当前来源与批准；撤销拒绝经保留绑定的新调用、取消并等待已受理的代次工作、关闭传输后才确认。文件根授权、FullAccess 工具权限与 Session 恢复都不授予批准（AGENTS 规则 11） |
 
 Session 与分支能力不向进程服务登记自己：RPC 经 `Session::service::<T>(branch)` 调用分支能力（如 [Approval](plugins/Approval.md)）。开发配置的 ModelProvider 已注入进程 resolver 与 `ModelHost`，每次请求解析当前连接，再调用 Aimux；Session 的 ConfiguredModelPlugin 只提供请求准备。产品 profile 的模型选择经 Provider 的 `ModelSelectionHost` 解析；managed provider 的凭据只以请求内租约交给模型请求。

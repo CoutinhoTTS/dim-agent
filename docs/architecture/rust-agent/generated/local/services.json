@@ -2469,6 +2469,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_runtime::scope::SessionLoader@session",
+        "provider": 10,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn dim_agent_runtime::contracts::TimelineTreeControl@session",
         "provider": 13,
         "generation": 1,

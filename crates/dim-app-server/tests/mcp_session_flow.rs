@@ -500,6 +500,10 @@ async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_r
     );
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
 
+    let other = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&other).await;
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
+
     *env.model.actions.lock().unwrap() = VecDeque::from([
         Action::Call {
             pause: true,
@@ -528,7 +532,12 @@ async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_r
         1,
         "retained tool binding bypassed revocation"
     );
-    assert_eq!(env.remote.deletes.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        env.remote.deletes.load(Ordering::SeqCst),
+        2,
+        "revoke drains every Session before returning"
+    );
+    adopted(&other, None).await;
     assert!(results(&session).await.last().unwrap().contains("isError"));
     let mut state = session.session_service::<McpSession>().unwrap().subscribe();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -540,6 +549,46 @@ async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_r
     })
     .await
     .unwrap();
+    env.close().await;
+}
+
+#[tokio::test]
+async fn closing_one_session_drains_only_its_connections_with_retained_requests() {
+    let env = Env::new().await;
+    let first = env.session(false, PermissionPreset::FullAccess).await;
+    let second = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&first).await;
+    ready(&second).await;
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
+    env.turn(
+        &first,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    // Model keeps the request (and its tool binding) alive after Session close.
+    let retained = env.model.requests.lock().unwrap()[0].clone();
+    first.close().await.unwrap();
+    assert_eq!(env.remote.deletes.load(Ordering::SeqCst), 1);
+    assert!(first.session_service::<McpSession>().is_err());
+    env.turn(
+        &second,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(results(&second).await.last().unwrap().contains("one:8"));
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        2,
+        "closing a sibling must not reconnect this Session"
+    );
+    assert_eq!(env.remote.deletes.load(Ordering::SeqCst), 1);
+    drop(retained);
     env.close().await;
 }
 
@@ -651,8 +700,8 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
     ready(&project).await;
     assert_eq!(
         env.remote.initializes.load(Ordering::SeqCst),
-        1,
-        "Sessions share the user connection"
+        2,
+        "Sessions own distinct user connections"
     );
     let denied = env.session(false, PermissionPreset::ReadOnly).await;
     ready(&denied).await;

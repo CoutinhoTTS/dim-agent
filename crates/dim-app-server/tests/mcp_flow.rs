@@ -46,7 +46,7 @@ struct Fixture {
     publication: mcp_host::Host,
     loader: rutis_loader::Loader,
     plugin: FiberView,
-    mcp: Arc<McpService>,
+    mcp: mcp_host::Directory,
     settings: Arc<SettingsService>,
     files: Arc<FileStorage>,
     home: PathBuf,
@@ -98,6 +98,7 @@ impl Fixture {
         .await
         .unwrap();
         let (mcp, settings, files) = capture.get().unwrap().clone();
+        let mcp = mcp_host::Directory::new(mcp, &root, loader.clone());
         Self {
             root,
             publication,
@@ -119,7 +120,6 @@ impl Fixture {
 #[tokio::test]
 async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
     use dim_app_server::mcp::server::McpServerState;
-    use std::collections::BTreeSet;
     let fixture = Fixture::new().await;
     let cancel = CancellationToken::new();
     let user = fixture
@@ -146,24 +146,19 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
             .applied_revision,
         catalog.project_revision
     );
-    let rows = fixture.loader.layers()[1].patches[0]
+    let rows = fixture.loader.layers()[0].patches[0]
         .insert
         .clone()
         .unwrap();
-    assert_eq!(rows.len(), 3);
-    let logical_ids = |rows: &[Value]| -> BTreeSet<String> {
-        rows.iter()
-            .map(|row| {
-                let reference = row["config"]["reference"].as_str().unwrap();
-                assert_eq!(row["id"], reference);
-                reference.rsplit_once(':').unwrap().0.to_owned()
-            })
-            .collect()
-    };
     assert_eq!(
-        logical_ids(&rows).len(),
-        3,
-        "same id in different scopes cannot alias"
+        rows.len(),
+        2,
+        "only the authority and immutable template are root rows"
+    );
+    assert_eq!(
+        fixture.loader.layers().len(),
+        1,
+        "MCP must not replace root layers"
     );
     let public = format!("{:?}", fixture.loader.layers());
     for secret in [
@@ -241,8 +236,8 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
     );
     assert_eq!(user.state(), McpServerState::Disconnected);
 
-    // Restart with different FileStorage indices; logical scope identity must
-    // depend on the canonical workspace, never on process-local root numbers.
+    // Restart with different FileStorage indices. Templates stay immutable;
+    // execution authorization still belongs to the canonical workspace.
     fixture.publication.close().await;
     fixture.root.shutdown().await.unwrap();
     assert_eq!(user.state(), McpServerState::Closed);
@@ -252,15 +247,11 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
         .server(None, "shared".into(), &cancel)
         .await
         .unwrap();
-    let new_rows = restarted.loader.layers()[1].patches[0]
+    let new_rows = restarted.loader.layers()[0].patches[0]
         .insert
         .clone()
         .unwrap();
-    assert_eq!(logical_ids(&rows), logical_ids(&new_rows));
-    assert!(
-        rows.iter()
-            .all(|old| new_rows.iter().all(|new| old["id"] != new["id"]))
-    );
+    assert_eq!(rows, new_rows);
     assert!(
         restarted
             .mcp

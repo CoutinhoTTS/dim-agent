@@ -11,8 +11,8 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionScope,
-    SessionService, StateCell, scoped,
+    AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionLoader,
+    SessionScope, SessionService, StateCell, scoped,
 };
 use dim_agent_types::{ToolCall, ToolDefinition, ToolMetadata, ToolResult, ToolSource};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -28,6 +28,11 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// This registers only the Session part; the host registers McpPlugin at root.
 pub fn install(builder: &mut AgentBuilder) {
     builder
+        .session_extension::<super::publication::ConnectionConfig, _>(
+            super::publication::GROUP,
+            "McpServer",
+            |_, value| super::publication::ConnectionPlugin::new(value),
+        )
         .session_tool_source("mcp")
         .session_plugin(McpSessionPlugin::new);
 }
@@ -50,6 +55,7 @@ pub struct McpSessionState {
 
 /// Management view, without credentials, transport handles or registry access.
 pub struct McpSession {
+    connections: super::McpOwner,
     sets: Mutex<BTreeMap<String, Arc<ToolSourceSet>>>,
     state: StateCell<McpSessionState>,
     changed: watch::Sender<()>,
@@ -127,14 +133,18 @@ impl McpSessionPlugin {
     }
 }
 impl TypedPlugin for McpSessionPlugin {
-    type Deps = (Arc<McpService>, InSession<SessionConfig>);
+    type Deps = (
+        Arc<McpService>,
+        InSession<SessionConfig>,
+        InSession<SessionLoader>,
+    );
     fn name(&self) -> &str {
         "McpSession"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (directory, InSession(config)): Self::Deps,
+        (directory, InSession(config), InSession(loader)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let project = directory.settings.project_root(Path::new(&config.cwd));
@@ -142,6 +152,7 @@ impl TypedPlugin for McpSessionPlugin {
             let settings = directory.settings.subscribe();
             let stopped = ctx.cancellation_token();
             let owner = Arc::new(McpSession {
+                connections: super::McpOwner::in_session(ctx.clone(), loader, self.scope),
                 sets: Mutex::default(),
                 state: StateCell::new(McpSessionState::default()),
                 changed: watch::Sender::new(()),
@@ -152,6 +163,7 @@ impl TypedPlugin for McpSessionPlugin {
             let tasks = TaskTracker::new();
             let cleanup = owner.clone();
             let drain = tasks.clone();
+            let publication = directory.publication.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
@@ -163,6 +175,10 @@ impl TypedPlugin for McpSessionPlugin {
                             ..Default::default()
                         });
                         cleanup.changed.send_replace(());
+                        // Wake eligibility bookkeeping even when stale bindings
+                        // keep every lease alive. Never await the coordinator:
+                        // Session tree disposal already owns these instances.
+                        publication.refresh();
                         Ok(())
                     })
                 }))
@@ -277,7 +293,7 @@ async fn discover(
     cancel: CancellationToken,
 ) {
     let result = async {
-        let connection = directory.server(project, id.clone(), &cancel).await?;
+        let connection = directory.server(owner.connections.clone(), project, id.clone(), &cancel).await?;
         let mut changed = connection.tool_changes();
         let mut state = connection.subscribe();
         let mut previous: Option<Vec<McpTool>> = None;
