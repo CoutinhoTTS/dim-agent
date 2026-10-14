@@ -2,198 +2,286 @@
 
 Status: Draft. Overall design: [overview §5.6](../overview.md#56-sessiontitle). Phase: P1. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
 
-SessionTitle gives each Session a title stored as SessionStore metadata. It generates an automatic title with an auxiliary model after the first normally completed turn on the main branch, observed through the [broadcast subscription](../contracts/session-broadcast-subscription.md), and serves `session.rename` for manual titles. It is the single writer of title metadata, writes no Timeline event and has no model-visible effect on any Session.
+SessionTitle gives each interactive leader Session a title stored as SessionStore metadata. When the first user input on the main branch is written, it generates an automatic title from that input's text alone through the Provider `AuxiliaryModel` port under its purpose key `session-title`, and it serves `session.rename` for manual titles on any Session. It is the single writer of title metadata, writes no Timeline event and has no model-visible effect on any Session.
 
-## 1. User flows
+## 1. Structure
 
-1. The user sends the first message of a new Session; the turn ends with `completed`. SessionTitle receives the `turn/end` notice for `main`, finds no title, reads the excerpt (§9) through [session-access](../contracts/session-access.md), asks the model selected for its purpose key, and stores `{text, source: auto}`. The Session list shows the title.
-2. The first turn is interrupted or fails. Nothing is generated; the next normally completed `main` turn triggers generation.
-3. The user renames the Session from the scrollback panel or `dimcode session rename`. The CLI calls `session.rename`; SessionTitle stores `{text, source: manual}`, also for a Session that is not loaded. An automatic generation in flight loses the revision check and is discarded.
-4. The user clears a manual title (`title: null`) (A6). The next normally completed `main` turn generates an automatic title.
-
-## 2. Scope
-
-| Responsible | Not responsible |
-| --- | --- |
-| Deciding when to generate, the excerpt, the auxiliary request, output normalization | Model selection policy and the model call itself (Provider supplement) |
-| Writing title metadata with source and revision check | Title storage, revision counter, Session list fields (SessionStore supplement, Rpc) |
-| `session.rename` validation | Displaying titles (CLI); internationalization of UI text (CLI) |
-| Its purpose key `session-title` and configuration keys `sessionTitle.*` | Session lifecycle; any Timeline write |
-
-## 3. Scope and dependencies
-
-**Contracts depended on:** [`SessionEvents`](../contracts/session-broadcast-subscription.md) (trigger), [`SessionAccess`](../contracts/session-access.md) (read-only use: `get`, `prefix`; no input is ever written), the public data contracts of `turn/end`, `input/message`, `step/text` and `context/configured`, the SessionStore metadata supplement (overview §7.2) and the Provider purpose-based selection supplement (overview §7.2) plus an auxiliary completion port (proposed, §14). SessionTitle does not know which plugin provides each contract.
-
-**Contracts defined here:** the `SessionTitles` service used by Rpc for `session.rename`, the opaque Provider purpose key `session-title` (A1), and configuration keys `sessionTitle.enabled` and `sessionTitle.maxLength`.
-
-| Part | Scope | Injects | Provides | Status |
-| --- | --- | --- | --- | --- |
-| `SessionTitle` | Process (App Server) | `Arc<SessionEvents>`, `Arc<SessionAccess>`, `Arc<SessionMetadataStore>`, `Arc<ModelSelectionHost>`, `Arc<AuxiliaryModel>` | `SessionTitles` | Proposed |
-| SessionStore | Process | existing | `SessionMetadataStore` (title, source, revision) | Supplement (overview §7.2) |
-| Provider | Process | existing | `ModelSelectionHost`, `AuxiliaryModel` | Supplement (overview §7.2); `AuxiliaryModel` proposed here |
-| Rpc | Process | `When<Arc<SessionTitles>>` | `session.rename`; `title`, `titleSource` in Session list results | Supplement (see §14) |
-
-Depended-on shapes, as this document needs them (authoritative definitions belong to the owners' documents):
-
-```rust
-// SessionStore supplement
-async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
-async fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
-    -> Result<u64, MetadataError>;                    // Conflict | NotFound | Storage
-pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
-pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
-// Provider supplement
-async fn select(&self, purpose: &str, inherit: Option<ModelSelection>) -> Result<ModelSelection, SelectError>;
-async fn complete(&self, model: ModelSelection, request: AuxiliaryRequest, cancel: CancellationToken)
-    -> Result<String, AuxiliaryError>;               // text output only
+```mermaid
+flowchart LR
+  subgraph PROC["Process (App Server)"]
+    ST["SessionTitle"]:::new
+    SE["SessionEvents"]:::contract
+    SA["SessionAccess"]:::contract
+    AUX["AuxiliaryModel (Provider)"]:::contract
+    META["SessionStore title metadata"]:::contract
+    SMC["SessionMethodContribution registry"]:::contract
+    Settings["Settings volatile configuration"]
+    Rpc["Rpc"]
+  end
+  ST -->|"input/message notices on main, Loaded facts"| SE
+  ST -->|"fixed prefix read, facts"| SA
+  ST -->|"complete purpose session-title"| AUX
+  ST -->|"set_title with revision"| META
+  ST -->|"mount: session.rename"| SMC
+  ST -->|"sessionTitle.*"| Settings
+  SMC --> Rpc
+  Rpc -->|"session.list reads title fields"| META
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef contract stroke-dasharray:4 3
 ```
 
-## 4. Events
+SessionTitle touches no Session or branch plugin: it observes through SessionEvents, reads through SessionAccess and writes only SessionStore metadata. Rpc reaches it only through the Session-method registry and reads list fields from SessionStore directly.
 
-None. The title is directory metadata that no branch decision consumes (overview §6 "`session/titled`"). Generation attempts and failures go to the diagnostics channel. Events consumed, all through the prefix or notices:
-
-| Event | Use |
-| --- | --- |
-| `turn/end` on `main` (notice) | Trigger; only `status: completed` |
-| `input/message` | First operator content for the excerpt |
-| `step/text` | Assistant text of the triggering turn |
-| `context/configured` | Latest model selection, passed as `inherit` to Provider |
-
-## 5. State
-
-| State | Owner | Rebuild |
-| --- | --- | --- |
-| Title, source, revision | SessionStore metadata (written only by SessionTitle) | Persistent |
-| In-flight generation per Session | SessionTitle, memory | Not rebuilt; cancelled on unload |
-| Failed attempts per Session | SessionTitle, memory | Not rebuilt; resets on reload or restart (A5) |
-
-Nothing is derived from Timeline into owned state; every decision reads metadata first.
-
-## 6. Interfaces
-
-### Session method
-
-| Method | Params | Result | Errors |
+| Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `session.rename` | `{sessionId, title: string \| null}` | `{title: string \| null, titleSource: "auto" \| "manual" \| null, revision}` | `invalid_params`, `session_not_found`, `service_reloading`, `storage_failed` |
+| `SessionTitle` | Process | [`SessionEvents`](../contracts/session-broadcast-subscription.md) (`Event`, `Loaded` with `SessionFacts`), [`SessionAccess`](../contracts/session-access.md) (`get`, `prefix`, `facts`; never `input`), SessionStore title metadata supplement (overview §7.2), Provider `AuxiliaryModel` port by purpose (decisions R9), Settings volatile configuration, public data contracts of `input/message` and `context/configured` | `session.rename` mounted as a [`SessionMethodContribution`](../contracts/session-boundary.md); the opaque purpose key `session-title`; configuration keys `sessionTitle.enabled`, `sessionTitle.maxLength` |
 
-`title` is trimmed; it must be 1..=`sessionTitle.maxLength` characters after trimming and contain no line breaks or control characters (A3). `null` removes the title (A6). The call works whether or not the Session is loaded and never loads it.
+The mount follows the [extension-registry](../contracts/extension-registry.md) pattern. Not configured: `session.rename` returns `method_not_found`; configured but inactive: `service_reloading`. Provider does not know the purpose key's consumer.
 
-```rust
-/// Process service consumed by Rpc; key TypeKey::of::<SessionTitles>().
-impl SessionTitles {
-    async fn rename(&self, session_id: &str, title: Option<String>) -> Result<SessionMetadata, TitleError>;
-}
+## 2. Data and state
+
+```mermaid
+flowchart TB
+  subgraph TLM["main branch Timeline"]
+    FUI["first operator input/message (user content, no source marker)"]
+    CC["context/configured (adopted model)"]
+  end
+  subgraph STORE["SessionStore metadata (persistent)"]
+    MD["revision, title text, source auto or manual"]
+  end
+  FACTS["SessionFacts: interactive, collaboration_role"]
+  CFG["Settings: sessionTitle.enabled, sessionTitle.maxLength"]
+  POL["Provider per-purpose policy: session-title"]
+  MEM["in-flight generation, failed attempts (memory)"]:::new
+  FUI -->|"text only"| MEM
+  CC -->|"inherit hint"| MEM
+  FACTS --> MEM
+  CFG --> MEM
+  POL --> MEM
+  MEM -->|"set_title, expected revision"| MD
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-Session list (`session.list`, `session.summaries`) reads `title` and `titleSource` from metadata (Rpc and SessionStore supplements).
+Only SessionTitle writes title metadata; SessionStore keeps the revision counter. Nothing is rebuilt from the Timeline into owned state: each decision reads metadata first, then the fixed prefix. In-memory state (in-flight generation per Session, failed attempts per Session) is lost on reload or restart, which only allows another attempt.
 
-Configuration (loader editable layer): `sessionTitle.enabled: bool` default `true`; `sessionTitle.maxLength: u32` default 80, range 10..=200 (A3). Provider policy for purpose `session-title` is configured in Provider's per-purpose policy; unconfigured means inherit (A1). No tools, no management methods. CLI: the scrollback rename panel and `dimcode session rename` call `session.rename`.
+## 3. Flows
 
-## 7. Timeline and capability mechanics
+### 3.1 Automatic title from the first user input
 
-| Step | Path |
-| --- | --- |
-| Subscribe | In `apply`: `subscribe(ctx, {types: {"turn/end"}, sessions: None, branches: {"main"}}, 64)`; the stream task is registered with `ctx.effect` |
-| Trigger | On `Event` with `turn/end {status: completed}` at sequence `N`: skip if disabled, a generation for the Session is in flight, or attempts ≥ 3 (A5); otherwise register a generation task with the plugin's task tracker and return to `next()` |
-| Check | `metadata(session)`: skip if `title` is present (any source); keep `revision = r` |
-| Read | `access.source("session-title").get(session)` (loaded only; skip if not loaded) → `prefix("main", N)`; the lease is dropped right after the read, before the model call |
-| Select | `select("session-title", inherit = model of the latest context/configured in the prefix)` |
-| Generate | `complete(model, request(§9), cancel)` with a 30 s budget (A4); output normalized: first line, surrounding quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` on a character boundary; empty output is a failure |
-| Write | `set_title(session, expected_revision = r, Some({text, auto}))`. `Conflict` (a rename or another write happened) discards the result; `NotFound` (deleted) discards |
-| Rename | `rename` reads `metadata`, then `set_title(expected = revision, {text, manual})`; on `Conflict` it rereads and retries up to 3 times; a manual write always wins because only SessionTitle writes titles and its automatic writes yield on conflict |
-| Timeline writes | None. No Dispatcher registration, no `StateCell` |
-| Recheck | The revision check is the recheck: the automatic title is written only if metadata is unchanged since the check that found no title |
-| Reload / restart | Generation tasks are cancelled through `ctx.effect` (the auxiliary call is aborted); nothing is written. The new generation subscribes afresh; missed notices are not replayed; the next completed `main` turn of an untitled Session triggers generation |
+```mermaid
+sequenceDiagram
+  participant User
+  participant TL as main Timeline
+  participant SE as SessionEvents
+  participant ST as SessionTitle
+  participant SA as SessionAccess
+  participant Meta as SessionStore metadata
+  participant Aux as AuxiliaryModel
+  User->>TL: session.submit writes input/message at N
+  TL-->>SE: broadcast after dispatch
+  SE-->>ST: Event notice input/message N, branch main
+  Note over ST: SessionFacts interactive and leader, enabled, none in flight
+  ST->>Meta: metadata, no title, revision r
+  ST->>SA: prefix(main, at_least N)
+  Note over ST: first operator input text in the prefix
+  ST->>Aux: complete(session-title, text)
+  Aux-->>ST: title text
+  ST->>Meta: set_title(expected r, auto)
+```
 
-## 8. Timing and conflicts
+Generation starts when the input is written, not after the turn; the turn's outcome is irrelevant. Only the text of the first operator input on `main` is sent.
 
-| Scenario | Sequence order | Outcome | Owner of the decision |
+### 3.2 Manual rename
+
+```mermaid
+sequenceDiagram
+  participant CLI
+  participant Rpc
+  participant ST as SessionTitle
+  participant Meta as SessionStore metadata
+  CLI->>Rpc: session.rename sessionId, title
+  Rpc->>ST: SessionMethodContribution call
+  ST->>Meta: metadata, revision r
+  ST->>Meta: set_title(expected r, manual)
+  Meta-->>ST: revision r+1
+  ST-->>Rpc: title, titleSource manual, revision
+```
+
+Rename works on any Session, loaded or not, and never loads it. On `Conflict` it rereads and retries up to 3 times.
+
+## 4. Timing and conflicts
+
+### 4.1 Rename during generation
+
+```mermaid
+sequenceDiagram
+  participant ST as SessionTitle generation
+  participant R as SessionTitle rename
+  participant Meta as SessionStore metadata
+  ST->>Meta: metadata, revision r, no title
+  R->>Meta: set_title(expected r, manual)
+  Meta-->>R: r+1
+  ST->>Meta: set_title(expected r, auto)
+  Meta-->>ST: Conflict
+  Note over ST: automatic title discarded
+```
+
+The revision check is the recheck: an automatic title is written only if metadata is unchanged since the check that found no title, so a manual title always wins.
+
+### 4.2 Other key rows
+
+| Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
-| First turn interrupted | `stop/interrupt` < `turn/end {cancelled}` | No generation | SessionTitle |
-| First turn failed | `turn/end {failed}` | No generation; next completed turn triggers | SessionTitle |
-| Interrupt after a completed `turn/end` | `turn/end` < interrupt | Generation proceeds; it is process work, not turn work | SessionTitle |
-| Rename before the check | rename < check | Title present: skip | SessionTitle (metadata) |
-| Rename during generation | check (r) < rename (r+1) < write | `Conflict`: automatic title discarded | SessionStore revision |
-| Two completed turns before generation finishes | — | Second notice skipped (in flight) | SessionTitle |
-| Concurrent renames | revision order | Last committed rename wins; each returns its revision | SessionStore |
-| Duplicate or late `session.rename` | — | Rewrites the same text; idempotent in effect | SessionTitle |
-| Steer/Queue/Append inputs around the turn | input after `N` | Not in the excerpt (prefix fixed at `N`'s published head; text taken only up to `N`'s turn) | SessionTitle |
-| Tool batch not settled | — | `turn/end` exists only after the batch result; no partial trigger | Loop |
-| Compaction | — | Irrelevant: the excerpt reads facts, not model context | — |
-| Child branch turns | branch filter | Never trigger | SessionEvents filter |
-| Branch-scoped interrupt / Session close during generation | — | Write proceeds (metadata outlives loading); deleted Session gives `NotFound` | SessionStore |
-| Session idle unload during generation | lease already dropped | Generation completes and writes | SessionTitle |
-| Session not loaded when notice handled | — | Skip; a later completed turn triggers | SessionTitle |
-| Session fork | metadata not copied (A7) | Fork untitled; generated after its first completed `main` turn | SessionTitle |
-| SessionTitle reload or process restart mid-generation | — | Cancelled, nothing written; regenerated at the next completed turn | rutis lifecycle |
-| Gap notice | — | Ignored; next `turn/end` triggers | SessionTitle |
-| Provider selection or model unavailable | — | Failure counted; after 3 failures no further attempts in this generation (A5) | SessionTitle |
-| Resource node offline | — | No effect (no host resources used) | — |
-| Client detach | — | No effect | — |
+| Member, workflow-stage or other non-interactive Session | `SessionFacts` | Never generated; rename still allowed | SessionTitle |
+| Second input before generation finishes | — | Skipped (in flight) | SessionTitle |
+| First input withdrawn before consumption | input < `input/withdrawn` | Title still generated from it (A9) | SessionTitle |
+| Generation failed | — | Next `main` input notice while untitled retries with the same first input (A5) | SessionTitle |
+| Reload or restart mid-generation | — | Cancelled, nothing written; next `main` input notice triggers | Lifecycle |
 
-## 9. Context mapping
+Full table: [Appendix B](#appendix-b-full-conflict-table).
 
-No model-visible effect on any Session: SessionTitle writes no input, no tool, no prompt source and no event; the title never enters model context of the Session.
+## 5. Context mapping
 
-The auxiliary request (a separate model call, not part of any Session's context) contains exactly:
+No model-visible effect on any Session: SessionTitle writes no input, tool, prompt source or event, and the title never enters any Session's model context.
+
+The auxiliary request is a separate one-shot call, not part of any Session context, and contains exactly:
 
 | Part | Content |
 | --- | --- |
 | System | `Write a short title for this conversation: at most 8 words, in the language of the user's message, no quotes, no trailing punctuation. Reply with the title only.` (A2) |
-| User message 1 | `User:` + text of the first `input/message` in `main`'s prefix that carries `user` content: its text blocks joined by newlines, each image replaced by `[image]`, cut to 2000 characters (A2) |
-| User message 2 | `Assistant:` + concatenated `step/text` deltas of the last request of the triggering turn (`turn_id` of `turn/end` N), cut to 1000 characters; omitted if empty |
+| User message | Text blocks of the first operator `input/message` on `main`, joined by newlines, cut to 2000 characters (A2) |
 
-Never sent: raw input blocks (rules, state, goals, notices from any source), system prompt, tool calls and results, thinking, images, inputs after the first operator input, events of child branches. Diagnostics record attempt outcome and duration only, never excerpt or output text.
+Never sent: images, raw input blocks of any source, later inputs, assistant output, system prompt, tool calls and results, child-branch events. Compaction and child branches are irrelevant: the excerpt is read from facts on `main`. Diagnostics record outcome and duration only, never excerpt or output text.
 
-## 10. Errors and recovery
+## 6. Interfaces (summary)
+
+| Interface | Kind | Purpose |
+| --- | --- | --- |
+| `session.rename {sessionId, title \| null}` | Session method (SessionMethodContribution) | Set or clear a manual title |
+| `session-title` | Provider purpose key (opaque) | Model policy for title generation; unconfigured inherits |
+| `sessionTitle.enabled`, `sessionTitle.maxLength` | Configuration (volatile) | Turn generation off; title length |
+| `title`, `titleSource` in `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore metadata | Display |
+
+Details: [Appendix A](#appendix-a-interface-details).
+
+## 7. Security
+
+The first input's text is sent to the model chosen for `session-title`; with the default inherit policy that is the Session's provider, and a policy pointing elsewhere is the user's configuration choice. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated at the RPC boundary.
+
+## Appendix A. Interface details
+
+### A.1 `session.rename`
+
+| Params | Result | Errors |
+| --- | --- | --- |
+| `{sessionId, title: string \| null}` | `{title: string \| null, titleSource: "auto" \| "manual" \| null, revision}` | `invalid_params`, `session_not_found`, `service_reloading`, `storage_failed` |
+
+`title` is trimmed; 1..=`sessionTitle.maxLength` characters, no line breaks or control characters (A3). `null` clears the title (A6). Rpc routes the method to SessionTitle's mount without naming it.
+
+### A.2 Depended-on shapes (owners define them)
+
+```rust
+// SessionStore metadata supplement (overview §7.2)
+async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
+async fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
+    -> Result<u64, MetadataError>;                       // Conflict | NotFound | Storage
+pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
+pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
+// Provider AuxiliaryModel port (decisions R9); the inherit hint is SessionTitle's assumption (A1)
+async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
+    request: AuxiliaryRequest, cancel: CancellationToken) -> Result<String, AuxiliaryError>;
+```
+
+### A.3 Configuration
+
+`sessionTitle.enabled: bool` default `true`; `sessionTitle.maxLength: u32` default 80, range 10..=200 (A3). Volatile: read at each decision, never a reload. Provider policy for `session-title` lives in Provider's per-purpose policy storage; unconfigured inherits the Session's model (A1).
+
+### A.4 Mechanics
+
+| Step | Path |
+| --- | --- |
+| Subscribe | In `apply`: `subscribe(ctx, {types: {"input/message"}, sessions: None, branches: {"main"}}, 64)`; stream task registered with `ctx.effect` |
+| Facts | `Loaded` notices carry `SessionFacts`, cached per Session; for a Session loaded before the subscription, `SessionAccess::facts(session_id)` on its first notice. Eligible only if `interactive && collaboration_role = leader` (E14) |
+| Trigger | On `input/message` at `N` with `user` content: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise register a generation task with the plugin's task tracker and return to `next()` |
+| Check | `metadata(session)`: skip if any title exists; keep revision `r` |
+| Read | `access.source("session-title").get(session)` (loaded only; skip if not) → `prefix("main", N)`; pick the first operator input (user content, no source marker; A10) and its text; lease dropped before the model call. No text: no title (A8) |
+| Generate | `complete("session-title", inherit = model of the latest context/configured in the prefix, request, cancel)`, 30 s budget (A4). Normalized: first line, surrounding quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` on a character boundary; empty output is a failure |
+| Write | `set_title(session, r, Some({text, auto}))`; `Conflict` or `NotFound` discards |
+| Timeline | No writes, no Dispatcher registration, no `StateCell` |
+| Reload / restart | Tasks cancelled through `ctx.effect` (auxiliary call aborted); nothing written. New generation subscribes afresh; missed notices not replayed |
+| Agents reload | `SessionAccess` returns `Reloading`: attempt skipped, not counted; next `main` input notice retries |
+
+## Appendix B. Full conflict table
+
+| Scenario | Sequence order | Outcome | Owner |
+| --- | --- | --- | --- |
+| First input's turn interrupted or failed | input < `stop/interrupt` | Generation proceeds; it depends only on the written input | SessionTitle |
+| Inputs without `user` content (Goal blocks, other sources' markers) | — | Not operator input; never trigger and never used | SessionTitle |
+| First user input carries only images | — | No text: no automatic title (A8) | SessionTitle |
+| Rename before the check | rename < check | Title present: skip | SessionTitle |
+| Rename during generation | check (r) < rename (r+1) < write | `Conflict`: automatic title discarded | SessionStore revision |
+| Concurrent renames | revision order | Last committed rename wins | SessionStore |
+| Duplicate or late `session.rename` | — | Rewrites the same text; idempotent in effect | SessionTitle |
+| Steer/Queue/Append inputs after the first | input after the first | Never in the excerpt | SessionTitle |
+| First input withdrawn | input < `input/withdrawn` | Title generated from it anyway (A9) | SessionTitle |
+| Tool batch, compaction | — | Irrelevant: only the input fact is read | — |
+| Child branch inputs | branch filter | Never trigger | SessionEvents filter |
+| Member, stage, scheduled or ACP Session | `SessionFacts` | Never generated (E14) | SessionTitle |
+| Branch close or Session close during generation | — | Write proceeds; deleted Session gives `NotFound` | SessionStore |
+| Session idle unload during generation | lease dropped | Generation completes and writes | SessionTitle |
+| Session not loaded when the notice is handled | — | Skip; a later input triggers | SessionTitle |
+| Session fork | metadata not copied (A7) | Fork untitled; first new input on its `main` triggers generation from the first operator input in its prefix | SessionTitle |
+| SessionTitle reload or restart mid-generation | — | Cancelled, nothing written | Lifecycle |
+| Agents reload | facade `Reloading` | Attempt skipped, not counted | SessionTitle |
+| Gap notice | — | Ignored; next input triggers | SessionTitle |
+| Model or policy unavailable | — | Failure counted; after 3 no further attempts in this generation (A5) | SessionTitle |
+| Resource node offline | — | No effect (no host resources used) | — |
+| Client detach | — | No effect | — |
+
+## Appendix C. Errors and recovery
 
 | Case | Result |
 | --- | --- |
-| Selection fails, model error, timeout, empty output | No write; diagnostic; failure counted |
-| `set_title` `Conflict` on automatic write | Discarded silently (diagnostic) |
+| Model error, timeout, empty output, unavailable purpose policy | No write; diagnostic; failure counted |
+| `set_title` `Conflict` on automatic write | Discarded (diagnostic) |
 | `set_title` `Storage` | Automatic: failure counted; rename: `storage_failed` |
 | Unknown Session on rename | `session_not_found` |
-| SessionTitle reloading | Rpc returns `service_reloading`; the rename did not happen |
+| SessionTitle mount inactive | `service_reloading`; the rename did not happen |
 | Cancellation | Auxiliary call aborted before any write; no partial title |
 
-## 11. Security
-
-The excerpt is user and assistant text sent to the model chosen for `session-title`. With the default inherit policy it goes to the same provider as the Session; a policy pointing at another provider sends it there, which is the user's configuration choice and documented in Provider's settings. Titles are stored in SessionStore and returned to every client that can list Sessions; they may contain user content. No credentials, host settings or tool output enter the request. Rename input is validated at the RPC boundary (§6).
-
-## 12. Acceptance
+## Appendix D. Acceptance
 
 Flow tests through `session.create`/`session.submit`, `session.rename`, `session.list` and a fake auxiliary model:
 
-1. First completed `main` turn produces an `auto` title; the request contains only the parts in §9 (no raw blocks, no tool output).
-2. Interrupted or failed first turn produces no title; the next completed turn does.
-3. Rename during generation (fake model held): manual title kept, automatic discarded.
-4. A titled Session is never regenerated; clearing the title allows regeneration.
-5. Rename of an unloaded Session succeeds without loading it.
-6. Child branch turns never trigger; a non-loaded Session is skipped.
-7. Reload during generation writes nothing; the next completed turn generates.
-8. Three model failures stop attempts until reload.
-9. Invalid rename inputs (empty, too long, line breaks) return `invalid_params`.
+1. The first `session.submit` on an interactive leader Session produces an `auto` title before the turn ends; the request contains only the system text and that input's text.
+2. Interrupting or failing the first turn does not prevent the title.
+3. Member Sessions and Sessions created with `interactive: false` get no title; rename works on them.
+4. Rename during generation (fake model held): manual kept, automatic discarded.
+5. A titled Session is never regenerated; clearing allows regeneration at the next input, still from the first input's text.
+6. Rename of an unloaded Session succeeds without loading it.
+7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title.
+8. Reload during generation writes nothing; the next input generates. Three failures stop attempts until reload.
+9. Invalid rename inputs return `invalid_params`; mount inactive returns `service_reloading`.
 
-## 13. Assumptions
+## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Purpose key `session-title`, owned by SessionTitle; unconfigured policy inherits the Session's model | Overview §3 constraint 10 (consumer-defined purposes); overview §5.6 names "auxiliary" (§14) | Shares the `auxiliary` key with compaction |
-| A2 | Instruction text, 8-word target, excerpt parts and limits (2000/1000 characters) | Judgment | Different prompt or excerpt |
+| A1 | `AuxiliaryModel::complete` accepts an inherit hint; SessionTitle passes the model of the latest `context/configured` | Judgment; purpose key per decisions R9/E8 | Provider resolves inheritance itself |
+| A2 | Instruction text, 8-word target, 2000-character excerpt | Judgment | Different prompt or excerpt |
 | A3 | Title length default 80 (10..=200), single line | Judgment | Other limits |
 | A4 | 30 s generation budget | Judgment | Other timeout |
-| A5 | At most 3 failed attempts per Session per plugin generation; retries only on later completed turns | Judgment | More retries, or none |
-| A6 | `session.rename` with `null` clears the title | Judgment | Clearing impossible; manual title permanent |
-| A7 | Session fork does not copy the title | Judgment (overview §7.2 copies facts, not metadata) | Fork shows the source title |
-| A8 | Titles are generated for every Session, including non-interactive ones, unless `sessionTitle.enabled` is false | Judgment | Some Sessions excluded by a configuration attribute |
+| A5 | At most 3 failed attempts per Session per generation; retries on later `main` input notices, always from the first input's text | Judgment | More retries, or none |
+| A6 | `session.rename` with `null` clears the title | Judgment | Manual title permanent |
+| A7 | Session fork does not copy the title | Judgment (fork copies facts, not metadata) | Fork shows the source title |
+| A8 | A first user input without text produces no automatic title | Judgment from "first user input only" | Later inputs or a placeholder would be used |
+| A9 | Withdrawal of the first input does not prevent or remove its title | Judgment (trigger is the write) | Generation would wait for consumption |
+| A10 | "User input" means operator input: `user` content without a source marker as first raw block | Judgment from session-access marker rule | Source-written inputs with user content could title a Session |
 
-## 14. Open questions
+## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| Purpose key vs overview | Overview §5.6 says the model is selected for the "auxiliary" purpose; per overview §3 constraint 10 purposes are consumer-defined keys, so this design uses `session-title`. Maintainers confirm |
-| Auxiliary completion port | Overview §7.2 adds purpose-based selection to Provider but no one-shot completion callable by process plugins; `AuxiliaryModel::complete` is proposed here and should be registered as a Provider supplement (compaction's production host has a similar need) |
-| Session-method contribution | `session.rename` makes Rpc inject `When<SessionTitles>`; a generic Session-method contribution point would remove the named dependency (same question as Goal) |
-| Session list fields | Adding `title`/`titleSource` to `SessionSummary` is an Rpc protocol change not listed in overview §7.2 |
-| Overview §13 "Process-level subscription" | Depends on the subscription contract's answer |
+| Overview §5.6 trigger and purpose | Overview says "after the first turn ... ends normally" and purpose "auxiliary"; this design follows decisions (first user input written; key `session-title`). Overview needs the update |
+| Method name | `session.rename` is a single method rather than a `session.<namespace>.*` family; the [session-boundary](../contracts/session-boundary.md) contract must accept it as SessionTitle's contributed name |
+| Session list fields | `title`/`titleSource` in `SessionSummary` are an Rpc protocol change to register in overview §7.2 |

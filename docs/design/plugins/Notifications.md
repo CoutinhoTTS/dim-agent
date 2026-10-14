@@ -2,69 +2,191 @@
 
 Status: Draft. Overall design: [overview §5.11](../overview.md#511-notifications). Phase: P2. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
 
-Notifications delivers messages to configured external channels (Slack, Feishu) when a task completes or fails, an approval is pending or a question awaits an answer, and lets the model send a message through the process-level `notify` tool. It observes Sessions only through the [broadcast subscription](../contracts/session-broadcast-subscription.md) and public event data contracts, confirms each trigger against a fixed prefix read through [session-access](../contracts/session-access.md), and writes nothing to any Timeline.
+Notifications delivers messages to configured external channels (Slack, Feishu) when a task on an interactive leader Session completes or fails, an approval is pending or a question awaits an answer, and lets the model send a message through the process tool `notify`. It observes Sessions only through the [broadcast subscription](../contracts/session-broadcast-subscription.md), confirms each trigger against a fixed prefix read through [session-access](../contracts/session-access.md), and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI.
 
-## 1. User flows
+## 1. Structure
 
-1. The user configures a Slack channel (incoming webhook stored as a credential reference) with triggers `turn.completed` and `approval.pending`.
-2. A long task on `main` ends normally and nothing else is pending. After the settle delay, Notifications reads the prefix, confirms the branch has no newer turn and no pending driving input, and posts "Task completed" with the Session reference.
-3. A tool call waits for approval. If it is still pending after the pending delay, the channel receives "Approval needed: <tool name>". An approval answered in time sends nothing.
-4. The model calls `notify {message, channel?}`; after admission under "outbound message", the message is posted and the result says where it went.
-5. Delivery fails (network, 5xx); Notifications retries with backoff, then records the failure in diagnostics. The Session is unaffected.
-6. In-terminal reminders (bell, focus) are the CLI's, not this plugin's (overview §5.11).
+```mermaid
+flowchart LR
+  subgraph PROC["Process (App Server, control node)"]
+    NP["Notifications"]:::new
+    SE["SessionEvents"]:::contract
+    SA["SessionAccess"]:::contract
+    PTR["Process tool registry"]:::contract
+    MGR["ManagementContribution registry"]:::contract
+    CRED["Settings credential-reference resolver"]:::contract
+    Settings["Settings volatile configuration"]
+    META["SessionStore title metadata"]:::contract
+  end
+  EXT["Slack / Feishu HTTPS endpoints"]
+  NP -->|"turn/end, approval/request, question/asked, Loaded facts"| SE
+  NP -->|"prefix, stored_page, facts"| SA
+  NP -->|"mount: notify"| PTR
+  NP -->|"mount: notifications.test"| MGR
+  NP -->|"resolve refs at send time"| CRED
+  NP -->|"notifications document"| Settings
+  NP -.->|"When: label"| META
+  NP --> EXT
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef contract stroke-dasharray:4 3
+```
 
-## 2. Scope
+No Session or branch plugin depends on Notifications; both of its contributions are mounts into stable registries, so its reload never reloads ToolRegistry or Management. Delivery uses the control node's network, never Session-bound resource services.
 
-| Responsible | Not responsible |
+| Part | Scope | Depends on | Provides |
+| --- | --- | --- | --- |
+| `Notifications` | Process | [`SessionEvents`](../contracts/session-broadcast-subscription.md) (`Loaded` with `SessionFacts`), [`SessionAccess`](../contracts/session-access.md) (`get`, `prefix`, `stored_page`, `facts`; never `input`), Settings typed volatile configuration and credential-reference resolver (decisions R10, R12), Permission category `outbound_message` (overview §7.1), public data contracts of `turn/start`, `turn/end`, `input/message`, `input/consumed`, `input/withdrawn`, `step/text`, `approval/request`, `approval/respond`, `approval/cancelled`, and `question/asked`, `question/answered`, `question/cancelled` (consumed only when registered), optionally (`When`) SessionStore title metadata | Process tool set `notifications` (`notify`) via the [process tool registry](../contracts/process-tool-contribution.md); management method `notifications.test` via `ManagementContribution` ([Management](Management.md)); trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`; configuration document `notifications` |
+
+Both mounts follow the [extension-registry](../contracts/extension-registry.md) pattern; configuration changes are volatile updates (a new tool set version), never reloads.
+
+## 2. Data and state
+
+```mermaid
+flowchart TB
+  subgraph TL["Session Timelines (read only)"]
+    TE["turn/start, turn/end on main"]
+    IN["input/message, input/consumed, input/withdrawn"]
+    AP["approval/request, respond, cancelled"]
+    QU["question/asked, answered, cancelled"]
+  end
+  FACTS["SessionFacts per Session (Loaded notice or facts)"]
+  CFG["Settings: notifications document (user scope)"]
+  CRED["credential references"]
+  MEM["delayed checks, dedup set, rate windows (memory)"]:::new
+  DIAG["diagnostics: delivery records, no bodies"]
+  TE --> MEM
+  IN --> MEM
+  AP --> MEM
+  QU --> MEM
+  FACTS --> MEM
+  CFG --> MEM
+  MEM -->|"resolve at send"| CRED
+  MEM --> DIAG
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+```
+
+Notifications owns no persistent state and derives nothing from the Timeline into owned state: every trigger is checked against a fresh prefix. Memory state (delayed checks, deliveries in flight, dedup set `(session, branch, trigger, id)`, rate windows, cached `SessionFacts`) is not rebuilt; a new generation starts empty, and since notices are never replayed there are no cross-generation duplicates.
+
+## 3. Flows
+
+### 3.1 Task completed
+
+```mermaid
+sequenceDiagram
+  participant TL as main Timeline
+  participant SE as SessionEvents
+  participant NP as Notifications
+  participant SA as SessionAccess
+  participant CH as Channel endpoint
+  TL-->>SE: turn/end completed at N
+  SE-->>NP: Event notice
+  Note over NP: SessionFacts interactive and leader, channel wants turn.completed
+  NP->>NP: register delayed check (settle delay)
+  NP->>SA: prefix(main, at_least N)
+  Note over NP: N latest turn/end, no open turn, no pending Queue or Steer input
+  NP->>CH: HTTPS POST Task completed
+```
+
+Wall-clock only delays the read; the decision uses facts and sequence. Withdrawn inputs are not pending.
+
+### 3.2 Approval pending
+
+```mermaid
+sequenceDiagram
+  participant TL as Branch Timeline
+  participant SE as SessionEvents
+  participant NP as Notifications
+  participant SA as SessionAccess
+  participant CH as Channel endpoint
+  TL-->>SE: approval/request id X
+  SE-->>NP: Event notice
+  NP->>NP: delayed check (pending delay)
+  NP->>SA: prefix(branch, at_least seq)
+  alt no respond or cancelled for X
+    NP->>CH: Approval needed: tool name
+  else resolved
+    NP->>NP: nothing sent
+  end
+```
+
+`question.pending` works the same with `question/asked` and `call_id`; it is inert when no plugin registers those event types.
+
+### 3.3 Model sends a message
+
+```mermaid
+sequenceDiagram
+  participant Model
+  participant TE as ToolExecutor
+  participant AP as Approval and Permission
+  participant NP as Notifications notify handler
+  participant CH as Channel endpoint
+  Model->>TE: notify message, channel
+  TE->>AP: admit, risk outbound_message
+  AP-->>TE: allowed (FullAccess) or asked
+  TE->>NP: execute(SessionFacts, call, cancel)
+  NP->>CH: HTTPS POST
+  NP-->>TE: Notification sent to channel.
+```
+
+The model can choose only among user-configured channels, never a URL.
+
+## 4. Timing and conflicts
+
+### 4.1 Input arrives during the settle delay
+
+```mermaid
+sequenceDiagram
+  participant TL as main Timeline
+  participant NP as Notifications
+  TL->>TL: turn/end completed at N
+  TL->>TL: input/message Queue at N+1 (continuation or user)
+  NP->>TL: prefix read at check time
+  Note over NP: pending Queue input after N, no turn.completed
+  TL->>TL: input/withdrawn for that input
+  Note over NP: no later trigger from N, next turn/end decides
+```
+
+A pending driving input suppresses `turn.completed`. If it is withdrawn before the check, it no longer counts and the notification is sent; if withdrawn after the check, nothing more happens until the next `turn/end`, which is accepted (A15).
+
+### 4.2 Other key rows
+
+| Scenario | Order | Outcome | Owner |
+| --- | --- | --- | --- |
+| Member, workflow-stage, scheduled or ACP Session | `SessionFacts` not interactive leader | No event-triggered notification (E14) | Notifications |
+| Approval answered or cancelled before the delay | request < respond < check | Nothing sent | Notifications |
+| Interrupt during `notify` after sending | send < cancel | `Cancelled; delivery may have occurred.` | Notifications |
+| Notifications reload mid-`notify` | — | That call gets "tool provider unavailable"; batch and turn continue; never resent | Registry; Notifications |
+
+Full table: [Appendix B](#appendix-b-full-conflict-table).
+
+## 5. Context mapping
+
+Event-triggered notifications have no model-visible effect: nothing is written to any Session and channel messages never return to the model.
+
+| What the model sees | Form and position |
 | --- | --- |
-| Trigger evaluation from public events and prefix facts | Meaning of other plugins' facts beyond their public data contracts |
-| Channel adapters (Slack, Feishu), message formatting, retries, rate limits | In-terminal reminders and desktop OS notifications (CLI) |
-| `notify` tool | Approval or answering through a channel (no inbound messages) |
-| Channel configuration schema under `notifications.*` | Storage of credentials (secret store) and of configuration (Settings) |
-| Delivery records in diagnostics | Scheduler job state (§14) |
+| `notify` declaration | Name, description `Send a short message to one of the user's configured notification channels.`, schema with the channel enum, in the adopted `context/configured`; only while at least one channel allows the tool |
+| `notify` outcome | `ToolResult.content` at the tool-result position of its batch; survives compaction only through the summary; child branches inherit results before their cut |
+| Non-interactive Sessions | Same declaration and results (the tool is offered to every Session) |
+| Never visible | Channel targets, credential references, delivery records, retry state, other Sessions' triggers, diagnostics, other plugins' events |
 
-## 3. Scope and dependencies
+## 6. Interfaces (summary)
 
-**Contracts depended on:** [`SessionEvents`](../contracts/session-broadcast-subscription.md), [`SessionAccess`](../contracts/session-access.md) (read-only: `get`, `prefix`, `stored_page`; never `input`), [`ProcessToolSource`](../contracts/process-tool-contribution.md), the public data contracts of `turn/start`, `turn/end`, `input/message`, `input/consumed`, `step/text`, `approval/request`, `approval/respond`, `approval/cancelled` (`crates/dim-agent-types/src/events.rs`) and `question/asked`, `question/answered`, `question/cancelled` (declared by the owner of overview §5.1; consumed only when registered), the Settings typed configuration for the loader editable layer (overview §7.2), a credential-reference resolver (§14), the Permission risk category `outbound_message` (overview §7.1), the Management contribution contract (overview §5.16), and optionally (`When`) SessionStore title metadata (overview §7.2) for message labels.
-
-**Contracts defined here:** the `notify` tool, trigger names (`turn.completed`, `turn.failed`, `approval.pending`, `question.pending`), the configuration document `notifications`, and management method `notifications.test`.
-
-| Part | Scope | Injects | Provides | Status |
-| --- | --- | --- | --- | --- |
-| `Notifications` | Process (App Server) | `Arc<SessionEvents>`, `Arc<SessionAccess>`, Settings configuration, credential resolver, `When<Arc<SessionMetadataStore>>` | `ProcessToolSource` named `notifications`; Management contribution `notifications.test` | Proposed |
-| Permission | Branch | existing | category `outbound_message` | Supplement (overview §7.1) |
-| Settings | Process | existing | `notifications` configuration document | Supplement (overview §7.2) |
-
-Delivery runs on the control node (overview §3.1): it uses the control node's network, not Session-bound resource services.
-
-## 4. Events
-
-None (overview §5.11). Notifications decides nothing that a branch consumes later. Delivery attempts, outcomes and drops are diagnostics records `{channel, trigger, session, branch, sequence, outcome, attempts}` without message bodies. A `notify` call and its outcome are the existing `step/tool-call` and `step/tool-result`.
-
-Events consumed:
-
-| Event | Role | Rule |
+| Interface | Kind | Purpose |
 | --- | --- | --- |
-| `turn/end` (notice, `branch = main`) | Trigger | `completed` → `turn.completed`; `failed` → `turn.failed`; `cancelled` → none (A3) |
-| `approval/request` (notice, any branch) | Trigger | `approval.pending` if no `approval/respond` or `approval/cancelled` with the same `approval_id` in the prefix read after the delay |
-| `question/asked` (notice, any branch) | Trigger | `question.pending` if no `question/answered` or `question/cancelled` with the same `call_id` in the prefix read after the delay |
-| `turn/start`, `turn/end`, `input/message`, `input/consumed` (prefix) | Check | Turn triggers fire only when `N` is the latest `turn/end`, no turn is open after it and no Queue/Steer input is unconsumed |
-| `step/text` (prefix) | Content | Optional excerpt of the turn's last request (`includeContent`) |
+| `notify {message, channel?}` | Process tool, risk `outbound_message` | Model-initiated message to a configured channel |
+| `notifications.test {channel}` | Management method | Send a fixed test text (A9) |
+| `notifications` document | Settings configuration, user scope, volatile | Channels, triggers, delays |
 
-## 5. State
+Details: [Appendix A](#appendix-a-interface-details).
 
-| State | Owner | Rebuild |
-| --- | --- | --- |
-| Channel configuration | Settings (loader editable layer) | Persistent; watched for changes |
-| Delayed checks and deliveries in flight | Notifications, memory | Not rebuilt; cancelled on unload |
-| Dedup set `(session, branch, trigger, id)` for this generation | Notifications, memory | Not rebuilt (no replay exists, so no duplicates across generations) |
-| Rate-limit windows per channel | Notifications, memory | Not rebuilt |
+## 7. Security
 
-No state is derived from Timeline into owned state; every trigger is checked against a fresh prefix.
+`notify` is admitted per call under `outbound_message`: FullAccess allows it automatically (decision E1); other presets do not allow it without the user (Permission's mapping). Channels come only from the user scope of Settings, never from project files or plugins (A8), so a repository cannot define an exfiltration target. Credentials are references resolved through Settings at send time and never logged, returned to the model or placed in diagnostics. Event-triggered messages carry no Session content unless `includeContent` is enabled per channel. Subscribers see all Sessions' events; Notifications forwards only template fields.
 
-## 6. Interfaces
+## Appendix A. Interface details
 
-### Configuration (`notifications` document, user scope only, A8)
+### A.1 Configuration (`notifications` document, user scope only, A8)
 
 ```text
 notifications.channels: [{
@@ -82,136 +204,135 @@ notifications.pendingDelaySeconds: u32  // default 10, 0..=3600 (A2)
 notifications.defaultChannel: string?   // used by `notify` without `channel`
 ```
 
-`*Ref` fields are credential references; webhook URLs are treated as credentials. Configuration is changed only through typed Settings operations; Notifications reads it and reacts to changes.
+`*Ref` fields are credential references resolved by the Settings resolver; webhook URLs are treated as credentials. Changes only through typed Settings operations; validated at that boundary.
 
-### Tool `notify`
+### A.2 Tool `notify`
 
 | Item | Value |
 | --- | --- |
 | Parameters | `{message: string (1..=4000), channel?: string}`; `channel` is an enum of channels with `allowTool && enabled` (A6) |
-| Result | `ToolResult.content`: `Notification sent to <channel>.`; errors: `Unknown channel <name>.`, `No notification channel is configured.`, `Delivery failed: <fixed reason>.`, `Rate limit reached for <channel>.`, `Cancelled; delivery may have occurred.` |
-| Risk category | `outbound_message` (overview §5.11) |
+| Result | `Notification sent to <channel>.`; errors: `Unknown channel <name>.`, `No notification channel is configured.`, `Delivery failed: <fixed reason>.`, `Rate limit reached for <channel>.`, `Cancelled; delivery may have occurred.` |
+| Risk category | `outbound_message` |
 | Requirements | `interactive: false`, `roles: None` |
-| Set | key `notifications`; offered only when at least one channel allows the tool; version changes with the channel list |
+| Set | key `notifications`; offered only while a channel allows the tool; version changes with the channel list |
+| Handler input | `SessionFacts` (label) plus `ToolExecutionContext` |
 
 Messages sent by the tool are prefixed `[dim <session label>] ` (A7).
 
-### Management method
+### A.3 Management method
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `notifications.test` | `{channel}` | `{ok, error?}`; sends a fixed test text (A9) |
+| `notifications.test` | `{channel}` | `{ok, error?}`; error codes `unknown_channel`, `credential_unavailable`, `delivery_failed`, `rate_limited` |
 
-No Session methods, no CLI command beyond Settings and `notifications.test`.
+### A.4 Trigger rules
 
-## 7. Timeline and capability mechanics
+| Event | Trigger | Rule (Session must be `interactive && collaboration_role = leader`) |
+| --- | --- | --- |
+| `turn/end` on `main` | `turn.completed` / `turn.failed` | `completed` / `failed`; `cancelled` none (A3). Fires only if `N` is the latest `turn/end`, no `turn/start` after it, and no Queue/Steer `input/message` lacks both `input/consumed` and `input/withdrawn` |
+| `approval/request` (any branch) | `approval.pending` | No `approval/respond` or `approval/cancelled` with the same `approval_id` in the prefix read after the delay |
+| `question/asked` (any branch) | `question.pending` | No `question/answered` or `question/cancelled` with the same `call_id` after the delay |
+| `step/text` | Content | Optional excerpt of the turn's last request (`includeContent`) |
+
+Templates (to channels, not to the model): `[dim <label>] Task completed.`, `[dim <label>] Task failed.`, `[dim <label>] Approval needed: <tool name>.`, `[dim <label>] The agent is waiting for your answer.` With `includeContent`: turn triggers append up to 500 characters of the last request's `step/text`; `approval.pending` the request `reason`; `question.pending` the question texts up to 500 characters (A5). Approval inputs are never sent.
+
+### A.5 Mechanics
 
 | Step | Path |
 | --- | --- |
-| Subscribe | In `apply`: one subscription `{types: {"turn/end", "approval/request", "question/asked"}, sessions: None, branches: None}`, capacity 256; `turn/end` notices from branches other than `main` are dropped by Notifications (A1). Types whose owner is not registered simply never arrive |
-| Trigger | For a notice matching an enabled channel's trigger and not in the dedup set: register a delayed check (settle delay for turn triggers, pending delay for pending triggers) with the plugin's task tracker; return to `next()` |
-| Check | After the delay: `get(session)` → `prefix(branch, at_least = sequence)`; if not loaded, `stored_page(session, branch, after = sequence - 1, ...)` for local facts (A4). Apply the rule of §4 to the facts read. Wall-clock only delays the read; the decision is by facts and sequence |
-| Format | Fixed templates (§9); optional content excerpt; label = metadata title when available, otherwise the Session id (A7) |
-| Deliver | Resolve credential references at send time; HTTPS POST; retry on network error, 429 and 5xx with 1 s, 4 s, 16 s backoff (3 attempts); no retry on other 4xx (A10). Rate limit 20 messages per minute per channel; excess dropped with a diagnostic (A10) |
-| Timeline writes | None. No Dispatcher registration, no `StateCell` |
-| Tool call | ToolExecutor admits via Approval/Permission (`outbound_message`), then calls the handler with `ProcessToolSession` and a `CancellationToken`; the handler delivers synchronously and returns. Settlement belongs to ToolExecutor |
-| Recheck | The prefix read after the delay is the recheck for event triggers; nothing else is written |
-| Reload / restart | Delayed checks and deliveries are cancelled through `ctx.effect`; a request already sent may or may not have been delivered and is never resent by the new generation (time bus §5). Notices missed while down are not replayed; pending approvals at restart are settled by Approval's recovery and need no notice |
+| Subscribe | In `apply`: `{types: {"turn/end", "approval/request", "question/asked"}, sessions: None, branches: None}`, capacity 256; stream task under `ctx.effect`. Types whose owner is not registered never arrive |
+| Facts | `Loaded` notices carry `SessionFacts`, cached; for Sessions loaded earlier, `SessionAccess::facts` on first notice. Ineligible Sessions are dropped before any work (E14) |
+| Trigger | For a matching enabled channel trigger not in the dedup set: register a delayed check with the plugin's task tracker; return to `next()` |
+| Check | After the delay: `get(session)` → `prefix(branch, at_least = sequence)`; if not loaded, `stored_page(session, branch, after = sequence - 1, ...)` (A4). `Reloading`: retry after 1 s, 2 s, 4 s, then drop with a diagnostic (A16) |
+| Format | Templates above; label = metadata title when available, else Session id (A7) |
+| Deliver | Resolve references at send time; HTTPS POST; retry on network error, 429, 5xx with 1 s, 4 s, 16 s (3 attempts); no retry on other 4xx; 20 messages per minute per channel, excess dropped with a diagnostic (A10) |
+| Timeline | No writes, no Dispatcher registration, no `StateCell` |
+| Tool call | ToolExecutor admits via Approval/Permission, then calls the handler with a `CancellationToken`; the handler delivers and returns; settlement is ToolExecutor's |
+| Reload / restart | Delayed checks and deliveries cancelled via `ctx.effect`; a request already sent is never resent ([time bus §5](../../architecture/rust-agent/time-bus.md)); in-flight `notify` calls get "tool provider unavailable" (turn continues). Notices missed while down are not replayed |
 
-## 8. Timing and conflicts
+## Appendix B. Full conflict table
 
-| Scenario | Sequence order | Outcome | Owner of the decision |
+| Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Turn ends, continuation or queued input follows before the check | `turn/end` N < input | Pending driving input or newer turn: no `turn.completed` | Notifications |
-| Turn ends, input arrives after the check | check < input | Notification sent; work continues (accepted) | Notifications |
-| Turn ended by interrupt | `turn/end {cancelled}` | No notification (user-initiated) (A3) | Notifications |
+| Continuation or queued input before the check | `turn/end` N < input | No `turn.completed` | Notifications |
+| That input withdrawn before the check | input < `input/withdrawn` < check | Not pending; notification sent | Notifications |
+| That input withdrawn after the check | check < `input/withdrawn` | Nothing sent for N; next `turn/end` decides (A15) | Notifications |
+| Input after the check | check < input | Sent; work continues (accepted) | Notifications |
+| Turn ended by interrupt | `turn/end {cancelled}` | Nothing (A3) | Notifications |
 | Turn failed | `turn/end {failed}` | `turn.failed` if still the latest turn | Notifications |
-| Approval answered before the delay | request < respond < check | Nothing sent | Notifications |
-| Approval cancelled by interrupt or branch close | request < `approval/cancelled` | Nothing sent | Notifications |
-| Approval answered after send | check < respond | Message stays sent; no follow-up (A11) | — |
-| Question answered or cancelled before the delay | asked < answered/cancelled | Nothing sent | Notifications |
-| Question events not registered (owner absent) | — | Trigger inert | — |
-| Concurrent Steer/Queue/Append | Timeline order | Queue/Steer unconsumed at check suppresses `turn.completed`; Append does not | Notifications |
+| Approval answered before the delay | request < respond < check | Nothing | Notifications |
+| Approval cancelled by interrupt or branch close | request < `approval/cancelled` | Nothing | Notifications |
+| Approval answered after send | check < respond | Stays sent; no follow-up (A11) | — |
+| Question answered or cancelled before the delay | asked < answered/cancelled | Nothing | Notifications |
+| Question event types not registered | — | Trigger inert | — |
+| Concurrent Steer/Queue/Append | Timeline order | Unconsumed, unwithdrawn Queue/Steer suppresses `turn.completed`; Append does not | Notifications |
 | Tool batch not settled | approvals inside the batch | Pending approval notified; `turn/end` cannot precede the batch result | Notifications; Loop |
 | Compaction | — | No effect: checks read facts | — |
-| Child branch | approval in child | Notified (any branch); child `turn/end` ignored (A1) | Notifications |
-| Branch close during the delay | — | `BranchMissing`: nothing sent | Notifications |
-| Session unloaded during the delay | — | `stored_page` reads local facts; decision as usual (A4) | Notifications |
-| Session closed or deleted | — | `SessionClosed`/not found: nothing sent | Notifications |
+| Child branch of a leader Session | approval in child | Notified; child `turn/end` ignored (A1) | Notifications |
+| Member, workflow-stage, scheduled or ACP Session | facts | Nothing event-triggered (E14); `notify` still available | Notifications |
+| Branch close during the delay | — | `BranchMissing`: nothing | Notifications |
+| Session unloaded during the delay | — | `stored_page` reads local facts (A4) | Notifications |
+| Session closed or deleted | — | Nothing | Notifications |
 | Duplicate notice, resubscribe | — | Dedup set within the generation | Notifications |
-| Gap notice | — | Missed triggers are not recovered (best effort) (A12) | Notifications |
-| Interrupt during `notify` before sending | cancel < send | No request; result `Cancelled` | Notifications; ToolExecutor |
-| Interrupt during `notify` after sending | send < cancel | Request aborted; result `Cancelled; delivery may have occurred.` | Notifications |
-| Notifications reload or restart mid-delivery | — | Cancelled; never resent; in-flight `notify` batches settled as reload by ToolExecutor; restart settles committed calls without re-execution | ToolExecutor; Notifications |
-| Configuration changes during the delay | — | Channel set and triggers read at check time | Notifications |
+| Gap notice | — | Missed triggers not recovered (A12) | Notifications |
+| Interrupt during `notify` before sending | cancel < send | No request; `Cancelled` | Notifications; ToolExecutor |
+| Interrupt during `notify` after sending | send < cancel | Request aborted; `Cancelled; delivery may have occurred.` | Notifications |
+| Notifications reload mid-delivery or mid-`notify` | — | Cancelled, never resent; `notify` gets "tool provider unavailable"; turn continues | Registry; Notifications |
+| Process restart | — | Committed `notify` calls settled by ToolExecutor recovery without re-execution | ToolExecutor |
+| Agents reload | facade `Reloading` | Check retried (A16); no Notifications reload | Notifications |
+| Configuration change during the delay | — | Channels and triggers read at check time; tool set version changes | Notifications |
 | Credential reference unresolvable | — | Delivery fails; diagnostic | Notifications |
 | Resource node offline | — | No effect (control node delivers); the Session's events may pause | — |
-| Client detach | — | No effect; notifications are sent regardless of attachment (A13) | — |
+| Client detach | — | No effect (A13) | — |
 
-## 9. Context mapping
-
-Event-triggered notifications have no model-visible effect: nothing is written to any Session, and channel messages never return to the model.
-
-| What the model sees | Form and position |
-| --- | --- |
-| `notify` declaration | Name, description `Send a short message to one of the user's configured notification channels.`, schema with the channel enum, in the adopted `context/configured`; only while at least one channel allows the tool |
-| `notify` outcome | `ToolResult.content` (§6) at the tool-result position of its batch; survives compaction only through the summary; child branches inherit results before their cut |
-| Non-interactive Sessions | Same declaration and results |
-| Never visible | Channel targets, credential references, delivery records, retry state, other Sessions' triggers, diagnostics, other plugins' events |
-
-Message templates (text sent to channels, not to the model): `turn.completed`: `[dim <label>] Task completed.`; `turn.failed`: `[dim <label>] Task failed.`; `approval.pending`: `[dim <label>] Approval needed: <tool name>.`; `question.pending`: `[dim <label>] The agent is waiting for your answer.` With `includeContent`: turn triggers append up to 500 characters of the last request's `step/text`; `approval.pending` appends the request `reason`; `question.pending` appends the question texts up to 500 characters (A5). Approval inputs are never sent.
-
-## 10. Errors and recovery
+## Appendix C. Errors and recovery
 
 | Case | Result |
 | --- | --- |
-| Invalid configuration | Rejected by Settings validation at the write boundary; Notifications keeps the last valid document |
-| Delivery failure after retries | Diagnostic; no Session effect; tool returns an error result |
+| Invalid configuration | Rejected by Settings at the write boundary; last valid document kept |
+| Delivery failure after retries | Diagnostic; tool returns an error result; no Session effect |
 | Cancellation (interrupt, reload) | Outstanding requests aborted; resources released before the tool returns |
-| `notifications.test` | Returns fixed error codes `unknown_channel`, `credential_unavailable`, `delivery_failed`, `rate_limited` |
+| Mount inactive | `notifications.test` returns `service_reloading`; `notify` withdrawn |
 | Process exit | In-memory checks lost; no persistent queue (A12) |
 
-## 11. Security
+## Appendix D. Acceptance
 
-`notify` is admitted per call under `outbound_message`; under the default presets it asks (FullAccess behavior is overview §13). The model can choose only among user-configured channels, never a URL. Channels come only from the user scope of Settings, not from project files or plugins (A8), so a repository cannot define an exfiltration target. Credentials are references resolved at send time and never logged, returned to the model or placed in diagnostics. Event-triggered messages carry no Session content unless `includeContent` is enabled per channel. Feishu signing uses the referenced secret when configured. Subscribers see all Sessions' events (subscription contract §11); Notifications forwards only the template fields above.
+Flow tests with fake HTTP endpoints and a fake model:
 
-## 12. Acceptance
+1. Completed `main` turn of an interactive leader Session sends one `turn.completed`; a Queue input before the check suppresses it; the same input withdrawn before the check does not; cancelled sends nothing; failed sends `turn.failed`.
+2. Member Sessions and `interactive: false` Sessions send nothing event-triggered.
+3. Approval answered before the delay sends nothing; unanswered sends once; cancelled sends nothing.
+4. `question/asked` with and without an answer (when registered); inert otherwise.
+5. `notify`: not declared without channels; sends and returns the result; FullAccess allows `outbound_message`, other presets ask; interrupt before and during delivery.
+6. Retry on 5xx, none on 400, rate-limit drop, credential failure.
+7. Reload during a `notify` call: "tool provider unavailable", turn not failed, no resend; restart settles a committed call without re-execution.
+8. `includeContent: false` messages contain no Session text; diagnostics contain no bodies or URLs.
 
-Flow tests with fake HTTP endpoints and a fake model, through public interfaces:
-
-1. Completed `main` turn with nothing pending sends one `turn.completed`; a Queue input committed before the check suppresses it; a cancelled turn sends nothing; a failed turn sends `turn.failed`.
-2. Approval answered before the pending delay sends nothing; unanswered sends once; cancelled by interrupt sends nothing.
-3. `question/asked` with and without an answer before the delay (when Questions is registered); inert otherwise.
-4. `notify` without channels is not declared; with one channel it sends and returns the result; Permission asks under `outbound_message`; interrupt before and during delivery.
-5. Retry on 5xx, no retry on 400, rate limit drop, credential failure.
-6. Reload during a delivery: no resend after reload; restart settles a committed `notify` call without re-execution.
-7. `includeContent: false` messages contain no Session text; diagnostics contain no bodies or URLs.
-
-## 13. Assumptions
+## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Turn triggers only on `main`; approval and question triggers on any branch | Judgment | Child-branch work would notify on every sub-task |
-| A2 | Settle delay 3 s and pending delay 10 s defaults | Judgment | Earlier or later messages |
-| A3 | Interrupted turns do not notify | Judgment (the user stopped it) | Interrupts notify too |
-| A4 | Unloaded Sessions are checked through `stored_page` | Judgment | Triggers for unloaded Sessions are dropped |
-| A5 | Event messages carry no Session content unless `includeContent`; excerpt limit 500 characters | Judgment (overview §9 sensitive data) | Content always or never included |
+| A1 | Turn triggers only on `main`; approval and question triggers on any branch of an eligible Session | Judgment | Child-branch work would notify on every sub-task |
+| A2 | Settle delay 3 s, pending delay 10 s | Judgment | Earlier or later messages |
+| A3 | Interrupted turns do not notify | Judgment | Interrupts notify too |
+| A4 | Unloaded Sessions are checked through `stored_page` | Judgment | Triggers for unloaded Sessions dropped |
+| A5 | No Session content unless `includeContent`; excerpt 500 characters | Judgment (overview §9 sensitive data) | Content always or never included |
 | A6 | `notify` parameters and channel enum | Judgment | Different schema |
-| A7 | Messages are labeled with the metadata title if available, else Session id | Judgment | Other labels |
-| A8 | Channels are configurable only in user scope | Judgment from overview §9 Trust | Project channels would need host-local approval |
-| A9 | `notifications.test` management method | Judgment | Users test by triggering real events |
-| A10 | Retry 3 attempts (1 s/4 s/16 s) and 20 messages per minute per channel | Judgment | Other policies |
-| A11 | No follow-up message when a pending item resolves after notification | Judgment | Extra resolved messages |
-| A12 | Delivery is best effort: no persistent queue, no recovery after Gap or restart | Overview §5.11 (no events); judgment | A process-storage outbox is needed |
-| A13 | Notifications are sent regardless of attached clients | Judgment (detach is not close) | Suppression requires an attachment contract |
-| A14 | Slack via incoming webhook or bot token + channel id; Feishu via custom-bot webhook with optional signing | Feature list "Slack and Feishu"; modes are judgment | Other adapters |
+| A7 | Label = metadata title if available, else Session id | Judgment | Other labels |
+| A8 | Channels configurable only in user scope | Judgment from overview §9 Trust | Project channels need host-local approval |
+| A9 | `notifications.test` management method exists | Judgment (overview §5.11 names only Settings configuration) | Users test with real events |
+| A10 | Retry 3 attempts (1/4/16 s); 20 messages per minute per channel | Judgment | Other policies |
+| A11 | No follow-up when a pending item resolves after notification | Judgment | Extra messages |
+| A12 | Best effort: no persistent outbox, no recovery after Gap or restart | Overview §5.11; judgment | Process-storage outbox needed |
+| A13 | Sent regardless of attached clients | Judgment (detach is not close) | Needs an attachment contract |
+| A14 | Slack via webhook or bot token + channel id; Feishu via custom-bot webhook with optional signing | Feature list "Slack and Feishu"; modes are judgment | Other adapters |
+| A15 | A suppressed `turn.completed` is not re-evaluated when the suppressing input is later withdrawn | Judgment | Withdrawal would need its own trigger |
+| A16 | On `AccessError::Reloading` a check retries three times (1/2/4 s) | Judgment from decisions §1 | Notifications lost during Agents reloads |
 
-## 14. Open questions
+## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| Scheduled job end | Overview §5.11 lists "a scheduled job ends". Job Sessions produce `turn/end`, which covers it as `turn.completed`/`turn.failed`; a job-level notice would need a public contract from the scheduler's owner rather than interpretation of its internals |
-| Credential resolution | The existing resolver (`ResolveProviderSecret`) is Provider-specific; a generic credential-reference resolver should be a Settings supplement |
-| Overview §13 "FullAccess and new risk categories" | Whether `outbound_message` asks under FullAccess |
-| Overview §13 "Process-level subscription" | Depends on the subscription contract's answer |
-| Inbound actions | Answering approvals or questions from Slack/Feishu is out of scope; it would need RemoteGateway-level authentication |
+| Scheduled job end | Overview §5.11 lists "a scheduled job ends", but job Sessions are non-interactive and excluded by E14. A job-level notice needs a public run-outcome contract owned by Scheduler (Scheduler A16 leaves it to Notifications); until then it is not delivered |
+| `notifications.test` | Not in overview §5.11 (A9); to be registered or dropped |
+| Inbound actions | Answering approvals or questions from Slack/Feishu is out of scope (E23) |
