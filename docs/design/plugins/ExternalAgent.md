@@ -11,16 +11,16 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   subgraph proc["Process, control node"]
     EA["ExternalAgent"]:::new
+    Bridge["Bridges: one per node with an enabled agent (internal)"]:::new
     MM["managementMethods key external_agents"]:::new
     Aimux["Aimux ModelHost (routes modelKind by kind, supplement)"]
     Rpc["Rpc method table"]
-    Store["Process storage: records, external_agents config"]
-    Agents["Agents: profiles, sessions"]
-    Settings["Settings: credential resolver, typed loader operations"]
-    Provider["Provider: connection entries"]
+    Store["Process storage: pluginFiles (extended), records"]
+    Agents["Agents: profile write operation (proposed), sessions"]
+    Settings["Settings: business source external_agents, credential resolver"]
+    Provider["Provider: connection-entry write operation (proposed)"]
   end
-  subgraph node["Process, each node with an enabled agent"]
-    Bridge["ExternalAgentBridge row: externalAgentNode key node"]:::new
+  subgraph node["Each node (control node local, peer imported)"]
     HP["HostPlatform (launch, isolation)"]
   end
   subgraph branch["Branch of the calling Session"]
@@ -35,20 +35,19 @@ flowchart LR
   EA -->|"sessions.history"| Agents
   EA --> Store
   EA --> Settings
-  EA -->|"connection entries"| Provider
-  EA -->|"profiles"| Agents
-  EA -->|"collects externalAgentNode by node"| Bridge
-  Bridge --> HP
+  EA -->|"typed write"| Provider
+  EA -->|"typed write"| Agents
+  EA -->|"starts and stops"| Bridge
+  Bridge -->|"spawn agent process on its node"| HP
 ```
 
-External agent connections, records and per-node processes are shared across Sessions, so ExternalAgent is a process plugin ([ADR 002](../../adr/002-plugin-scope.md) D1). It depends on Aimux, Agents, Provider and Settings at the same scope. Routing by kind is an Aimux supplement: ModelHost collects `modelKind` services by name and routes requests whose resolved connection has kind `external-agent` to the instance with that key. Dependencies follow scope (D3): an Aimux, Agents, Provider or Settings reload reloads ExternalAgent, failing its in-flight external calls; this rare structural cost is accepted and documented. ModelProvider does not depend on ExternalAgent: while no `modelKind` instance with key `external-agent` is registered, requests for the kind fail before acceptance (transient) and other kinds are unaffected. Each `ExternalAgentBridge` is a structural loader row bound to one node, present only while at least one agent is enabled on that node; it depends on its node's HostPlatform and declares `externalAgentNode` with key `<node>` in its `provides`, which ExternalAgent collects by name. ExternalAgent adds and removes bridge rows through Settings' loader-row operations when enablement changes (D4). A peer bridge is imported over the rutis link; while the link is down the import stays registered and its calls fail `node_unavailable`, so nothing reloads and only the calls targeting that node fail (requirement on [#5](https://github.com/arcships/dim/issues/5)). ExternalAgent never reaches Approval: ModelProvider admits the approval asks the stream carries.
+External agent connections, records and per-node processes are shared across Sessions, so ExternalAgent is a process plugin ([ADR 002](../../adr/002-plugin-scope.md) D1). It depends on Aimux, Agents, Provider and Settings at the same scope. Routing by kind is an Aimux supplement: ModelHost collects `modelKind` services by name and routes requests whose resolved connection has kind `external-agent` to the instance with that key. Dependencies follow scope (D3): an Aimux, Agents, Provider or Settings reload reloads ExternalAgent, failing its in-flight external calls; this rare structural cost is accepted and documented. ModelProvider does not depend on ExternalAgent: while no `modelKind` instance with key `external-agent` is registered, requests for the kind fail before acceptance (transient) and other kinds are unaffected. Bridges are business configuration, not structure (D4): a bridge is an internal component of the ExternalAgent process plugin, one per node with at least one enabled agent, which ExternalAgent starts and stops itself when enablement changes; enabling an agent adds no loader row and reloads nothing. A bridge runs agent processes on its node through that node's `HostPlatform` (the control node's own, or a peer node's imported over the rutis link; [overview §6.3](../overview.md#63-multiple-nodes)) and speaks ACP or the CLI protocol over their standard streams. While a peer link is down the imported `HostPlatform` stays registered and its calls fail `node_unavailable`, so nothing reloads and only the calls targeting that node fail (requirement on [#5](https://github.com/arcships/dim/issues/5), stated in §9.1). ExternalAgent never reaches Approval: ModelProvider admits the approval asks the stream carries.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ExternalAgent` | Process, control node | Aimux (ModelHost routing by kind), Agents (profile registration, `sessions` for history reads), Provider connection-entry operations, Settings (credential resolver, loader-row operations for bridge rows), App Server process storage (records and `external_agents.*` business configuration) | `modelKind` key `external-agent`; `managementMethods` key `external_agents`; collects `externalAgentNode` |
-| `ExternalAgentBridge` | Process, one structural row per node with an enabled agent: local row, `peer:<node>/ExternalAgentBridge` elsewhere ([overview §6.3](../overview.md#63-multiple-nodes)) | That node's `HostPlatform` | `externalAgentNode` key `<node>`, exported over the link |
+| `ExternalAgent` | Process, control node | Aimux (ModelHost routing by kind), Agents (profile write operation, proposed; `sessions` for history reads), Provider (connection-entry write operation, proposed), Settings (business source `external_agents`, credential resolver), each node's `HostPlatform` (used by its bridge), `pluginFiles` (extended) for conversation records | `modelKind` key `external-agent`; `managementMethods` key `external_agents`; internal bridges, one per node with an enabled agent |
 
-**Contracts depended on**: the Aimux supplement (ModelHost collects `modelKind` by name and routes by kind with the call scope, A.2); two further supplements: **ModelProvider** admits `approval_ask` stream items through its branch's Approval and answers them with `answerApproval`, and **Approval** accepts a `Host`-source admission while a model step is open, reusing `approval/request`, `approval/respond` and `approval/cancelled` (no new event); the model chunk and failure data of the existing model contract ([host.rs](../../../crates/dim-agent-capabilities/src/host.rs)) and ModelProvider's failure policy ([recovery.rs](../../../crates/dim-agent-capabilities/src/model_provider/recovery.rs)); Approval's `admit` ([Approval](../../architecture/rust-agent/plugins/Approval.md)); the Collaboration supplement "member approval forwarded to the leader" (decisions E6); `sessions` ([session-access](../contracts/session-access.md)); `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)); App Server process storage and Settings (existing typed services, reachable by name from a TypeScript part once [#4](https://github.com/arcships/dim/issues/4) exposes them). **Contracts defined here**: `modelKind` key `external-agent` and its target `{node, agent}`; `externalAgentNode`; the conversation record; the approval call shape `external_agent.<kind>`; business configuration `external_agents.*`; methods `external_agents.*`; the ACP schema and conformance suite shared with [AcpGateway](AcpGateway.md) (client side). Provider, Agents, Approval and Collaboration never name this plugin.
+**Contracts depended on**: the Aimux supplement (ModelHost collects `modelKind` by name and routes by kind with the call scope, A.2); two further supplements: **ModelProvider** admits `approval_ask` stream items through its branch's Approval and answers them with `answerApproval`, and **Approval** accepts a `Host`-source admission while a model step is open, reusing `approval/request`, `approval/respond` and `approval/cancelled` (no new event); the model chunk and failure data of the existing model contract ([host.rs](../../../crates/dim-agent-capabilities/src/host.rs)) and ModelProvider's failure policy ([recovery.rs](../../../crates/dim-agent-capabilities/src/model_provider/recovery.rs)); Approval's `admit` ([Approval](../../architecture/rust-agent/plugins/Approval.md)); the Collaboration supplement "member approval forwarded to the leader" (decisions E6); `sessions` ([session-access](../contracts/session-access.md)); `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)); [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (a TypeScript part uses it natively); Settings' typed write operations and change notification for the business source `external_agents` ([ADR 002 D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)); Provider's connection-entry write operation and Agents' profile write operation (both proposed, owned and shaped by those plugins; Appendix F); each node's `HostPlatform` (overview Appendix B supplement). Existing typed services are reached by name from a TypeScript part once [#4](https://github.com/arcships/dim/issues/4) exposes them ([session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)). **Contracts defined here**: `modelKind` key `external-agent` and its target `{node, agent}`; the conversation record; the approval call shape `external_agent.<kind>`; business configuration `external_agents.*`; methods `external_agents.*`; the ACP schema and conformance suite shared with [AcpGateway](AcpGateway.md) (client side). Provider, Agents, Approval and Collaboration never name this plugin.
 
 ## 2. Data and state
 
@@ -56,23 +55,23 @@ External agent connections, records and per-node processes are shared across Ses
 flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
-  Cfg["Business configuration external_agents.node.agent.* (process storage)"]:::new
-  Row["Loader row peer:node/ExternalAgentBridge (structural)"]
+  Cfg["Business configuration external_agents.node.agent.* (Settings business source)"]:::new
+  Br["Running bridge per node (ExternalAgent memory)"]:::new
   Conn["Provider connection entry external-agent:node:agent"]
   Prof["Agents profile: Agent (node), no tools"]
   Rec["ConversationRecord per Session + branch (process storage)"]:::new
   Cat["Per-node catalog (bridge memory)"]:::new
   Live["Live ACP connections and CLI processes (bridge)"]:::new
   TL["Branch Timeline: model/call, step/*, input/*, approval/*"]:::contract
-  Cfg -->|"reconciled on apply and set_enabled"| Conn
-  Cfg -->|"reconciled"| Prof
-  Cfg -->|"row present while an agent is enabled on the node"| Row
+  Cfg -->|"Provider typed write, on apply and change"| Conn
+  Cfg -->|"Agents typed write"| Prof
+  Cfg -->|"started while an agent is enabled on the node"| Br
   TL -->|"pages read through sessions.history"| Rec
   Rec -->|"selects Continue or New"| Live
   Cat -->|"external_agents.list"| Cfg
 ```
 
-The `external_agents.*` entries are business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4) kept in ExternalAgent's process storage, read at use time; a change is a data update plus notification, never a reload. They are the source of truth for enablement; connection entries, profiles and bridge rows are reconciled from them through their owners' typed operations, so they are rebuildable. Only the bridge rows are structural, and adding or removing one reloads only that bridge. Conversation records hold only the delivery cursor and external identity; every delivery decision is recomputed from Timeline pages plus the record. The bridge holds nothing that must survive.
+The `external_agents.*` entries are business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4) kept in ExternalAgent's Settings business source, with a schema ExternalAgent declares, written only through Settings' typed operations and read at use time; a change is a data update plus notification, never a reload. They are the source of truth for enablement. ExternalAgent requests the matching connection entries and profiles only through Provider's and Agents' public typed write operations; those owners validate and store them, and when a client must show the change the owner emits its own Session broadcast notice. ExternalAgent never writes their state in any other way, so entries and profiles are rebuildable from the configuration. Bridges are started and stopped by ExternalAgent on change; nothing structural changes. Conversation records hold only the delivery cursor and external identity; every delivery decision is recomputed from Timeline pages plus the record. The bridge holds nothing that must survive.
 
 ```text
 ConversationRecord {
@@ -86,7 +85,7 @@ ConversationRecord {
 }
 ```
 
-Records live in App Server process storage under this plugin's root (atomic replace, format version). At `apply`, every `in_flight` record becomes `uncertain`; records are kept 30 days after last use (A12).
+Records live in `pluginFiles` (extended) under this plugin's root (atomic replace, binary-safe, format version). At `apply`, every `in_flight` record becomes `uncertain`; records are kept 30 days after last use (A12).
 
 ## 3. Flows
 
@@ -99,14 +98,14 @@ sequenceDiagram
   participant MH as Aimux ModelHost
   participant EA as ExternalAgent
   participant SA as Calling Session (via sessions)
-  participant BR as Bridge (agent node)
+  participant BR as Bridge (spawns on the agent node)
   TL->>MP: model/call (Dispatcher handler registers call task, returns)
   MP->>MH: invoke(request, connection, call scope, cancel)
   MH->>EA: modelKind[external-agent].invoke
   EA->>SA: sessions.history(branch, after scan_from, through call_sequence)
   EA->>EA: decide New or Continue (record + pages only)
   EA->>EA: persist in_flight (process storage)
-  EA->>BR: externalAgentNode[node].turn(TurnSpec)
+  EA->>BR: bridge[node].turn(TurnSpec)
   BR-->>EA: Accepted, Text, Thought, ToolActivity, End
   EA->>EA: persist cursor, external_id, ready
   EA-->>MP: model chunk stream
@@ -185,8 +184,8 @@ Answer versus interrupt is decided by Dispatcher order of sequence numbers on th
 | External agent withdraws its request or ends its prompt while dim asks | bridge `permission_withdrawn` | ExternalAgent ends the ask with an `approval_ask_withdrawn` stream item; ModelProvider cancels the admission; Approval writes `approval/cancelled`; a late answer returns Unknown | ExternalAgent, Approval |
 | Leader unavailable (unloaded, turn ended, its request to the member stopped) | per Collaboration | Collaboration's supplement decides delivery or fallback to the user; stopping the member request interrupts the member turn (row above) | Collaboration |
 | Steer while an approval is pending | `input/applied` after the thinking line | Not a replacement (visible output exists); Loop delivers the Steer in the next request | Loop |
-| ExternalAgent reload with a pending approval | — | Call gets "provider unavailable" (not `capability reloading`); ask cancelled; turn stream dropped, so the bridge cancels and kills the process; record `uncertain`; bridges do not reload | ExternalAgent, ModelProvider |
-| Agent node offline | link down; the bridge import stays registered | Calls for that node fail before acceptance `node_unavailable` (transient); nothing reloads; other nodes unaffected (requirement on #5) | ExternalAgent |
+| ExternalAgent reload with a pending approval | — | Call gets "provider unavailable" (not `capability reloading`); ask cancelled; its bridges stop, cancelling and killing their processes; record `uncertain` | ExternalAgent, ModelProvider |
+| Agent node offline | link down; the node's `HostPlatform` import stays registered | Calls for that node fail before acceptance `node_unavailable` (transient); nothing reloads; other nodes unaffected (requirement on #5) | ExternalAgent |
 | Process restart mid-call | `model/call` and `approval/request` unended | Approval recovery writes `approval/cancelled`; ModelProvider fails the call without invoking; record `uncertain`; nothing re-sent | Approval, ModelProvider |
 
 All other rows: [Appendix B](#appendix-b-full-conflict-table).
@@ -208,19 +207,52 @@ Keyed blocks are delivered once at consumption; "in effect" and retirement have 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `external_agents.list` / `set_enabled` / `configure` | `managementMethods` (process, key `external_agents`), level `management` | Per-node detection, enablement, configuration ([A.1](#a1-methods-level-management)) |
+| `external_agents.list` / `set_enabled` / `configure` | `managementMethods` (process, key `external_agents`) | Per-node detection, enablement, configuration ([A.1](#a1-management-methods)) |
 | `modelKind` key `external-agent`, target `{node, agent}` | Process service routed by Aimux's ModelHost (Aimux supplement) | Model calls for external profiles ([A.2](#a2-provider-registration-and-call-scope)) |
-| `externalAgentNode` key `<node>` | Provided by each bridge row, collected by ExternalAgent | `detect`, `turn` with answerable permission asks ([A.3](#a3-bridge-service-and-adapters)) |
 | Approval call `external_agent.<kind>` | Approval admission (Host source) by ModelProvider | External permission requests |
 | ACP schema and conformance suite | Shared with AcpGateway | Client side ([A.5](#a5-shared-acp-schema)) |
 
 ## 7. Security
 
-External agents run with their own accounts and tools; dim admits their actions only where they ask, through the calling Session's policy and Approval, and cannot stop actions the agent takes without asking: the node's HostPlatform isolation is the enforcement boundary, and replay or fork never widens it. `*_always` is never selected. Credentials are environment values resolved from references by Settings' resolver at launch and never written to records, Timeline, diagnostics or replies. Enabling an agent is host configuration through `management`-level methods only; the model cannot enable agents. Executables are resolved on the node, never from project files.
+External agents run with their own accounts and tools; dim admits their actions only where they ask, through the calling Session's policy and Approval, and cannot stop actions the agent takes without asking: the node's HostPlatform isolation is the enforcement boundary, and replay or fork never widens it. `*_always` is never selected. Credentials are environment values resolved from references by Settings' resolver at launch and never written to records, Timeline, diagnostics or replies. Enabling an agent is host configuration through management methods only (process plugins, never served to paired remote devices); the model cannot enable agents. Executables are resolved on the node, never from project files.
+
+## 8. Rule check
+
+Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md) D1–D5.
+
+| Rule | How this document complies |
+| --- | --- |
+| §4.1 Command events for others' state | ExternalAgent writes no Timeline event; approvals are written by Approval from ModelProvider's admission, and Provider entries and Agents profiles change only through their owners' typed write operations (rule 9). |
+| §4.2 No take-back after hand-off | Only consumed inputs are delivered; a withdrawn input never reaches `input/consumed`, and after hand-off only the call's cancellation (`stop/interrupt`) applies. |
+| §4.3 Intervene only through before callbacks | Not applicable: ExternalAgent adds no entry check and no before callback. |
+| §4.4 Core mechanisms carry no business meaning | The ModelProvider, Approval and Aimux supplements are generic (a model kind by name, `approval_ask` stream items, a host-source admission) and name no plugin. |
+| §4.5 Read the whole batch before deciding | The delivery decision reads facts up to `call_sequence`, which is dispatched and a batch boundary (§3.1). |
+| §4.6 Model context holds only handed-over events | The external agent receives only consumed inputs and the projected history (§5). |
+| §4.7 Only public events and services | ExternalAgent reads history through `sessions`, uses owners' public write operations and never reads another plugin's memory. |
+| §4.8 Requirements to mechanism owners | #5 is stated in §9.1; #4 in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
+| §4.9 Only facts later decisions use enter the Timeline | Configuration, Provider entries, Agents profiles and conversation records stay out of the Timeline and change through typed operations; the owners notify clients. |
+| §1 Capability and App Server boundary | ExternalAgent is a process plugin, not a Capability; storage is the `pluginFiles` plugin. |
+| ADR 002 D1 | Connections, records and agent processes are shared across Sessions, so the plugin is process-scoped. |
+| ADR 002 D2 | No wiring module: ModelHost collects `modelKind` and Rpc collects `managementMethods` by name. |
+| ADR 002 D3 | Aimux, Agents, Provider and Settings reloads reload ExternalAgent, an accepted, documented cost. |
+| ADR 002 D4 | Enablement, adapter settings and bridges are business configuration applied without reload; no loader row depends on them. |
+| ADR 002 D5 | `modelKind`, the methods, the approval call and the chunks are given as named services and data; Rust forms are in Appendix G. |
+
+## 9. Requirements raised to mechanism owners
+
+### 9.1 Imported services stay registered while a link is down (#5)
+
+| Item | Content |
+| --- | --- |
+| Blocked by | ADR 002 D3 and overview §6.3 (offline rule): a peer node's `HostPlatform` (and other node services) is imported over a rutis link; if the import is withdrawn when the link drops, every dependent (ExternalAgent, Sessions bound to that node, Hooks, PluginManager code rows) reloads or goes Pending, so one offline node disturbs unrelated work. |
+| Existing mechanisms considered | Loader rows per node toggled by plugins: rejected, business state would drive structure (D4). A plugin-side proxy that catches missing imports: rejected, it is an adapter around the mechanism (§4.8). Reconnect-and-reload: rejected, reloads fail in-flight work on other nodes. |
+| Generic capability | A service imported over a rutis link stays registered while the link is down; calls fail at once with `node_unavailable` and succeed again after reconnection; no business meaning. |
+| Sequence, batch, interrupt, reload | No Timeline effect: a failed call becomes an ordinary failed tool result or model failure in its own batch; interrupts work as usual; no dependent reloads or goes Pending; processes started over the link before it dropped are the owner's to end (e.g. HostPlatform tree kill). |
+| Owner and issue | rutis (links and imports), [#5](https://github.com/arcships/dim/issues/5). Other documents link here. |
 
 ## Appendix A. Interface details
 
-### A.1 Methods (level `management`)
+### A.1 Management methods
 
 `managementMethods` key `external_agents`: `describe(): async -> MethodDecl[]` lists the methods below; `call(MethodCall): async -> MethodReply` dispatches them with JSON params and results.
 
@@ -230,7 +262,7 @@ External agents run with their own accounts and tools; dim admits their actions 
 | `external_agents.set_enabled` | `node`, `agent`, `enabled` | New state | yes |
 | `external_agents.configure` | `node`, `agent`, `executable?`, `args?`, `env?: {name: credential reference}`, `reasoning?` | New configuration | yes |
 
-Detection calls `externalAgentNode.detect` at load and on `refresh` (A1); detected agents stay disabled until enabled (A3). `set_enabled` and `configure` update the business configuration in process storage and notify; they never reload ExternalAgent. Enabling the first agent on a node adds that node's bridge row, disabling the last removes it. Enabling `(node, agent)` reconciles, through Provider's typed connection-entry operation, the entry `external-agent:<node>:<agent>` with one model `default` (A2) and target `{node, agent}`, and, through Agents' profile registration, a profile `{ name: "<Agent> (<node>)", system_prompt: "", tools: [], model: { provider_id: "external-agent:<node>:<agent>", model_id: "default" } }`. Disabling removes both; existing Sessions keep their adopted model and fail their next call with `external_agent_disabled`. Profiles are listed by Agents like any Agent, so Collaboration's `agent` tool can request them.
+Detection runs each adapter's probe through the node's `HostPlatform` at load and on `refresh` (A1); detected agents stay disabled until enabled (A3). `set_enabled` and `configure` write the business configuration through Settings' typed operations into ExternalAgent's business source; ExternalAgent applies the change notification without a reload. Enabling the first agent on a node starts that node's bridge, disabling the last stops it; no loader row is added or removed. Enabling `(node, agent)` requests, through Provider's public connection-entry write operation (proposed), the entry `external-agent:<node>:<agent>` with one model `default` (A2) and target `{node, agent}`, and, through Agents' public profile write operation (proposed), a profile `{ name: "<Agent> (<node>)", system_prompt: "", tools: [], model: { provider_id: "external-agent:<node>:<agent>", model_id: "default" } }`. Disabling requests removal of both through the same operations; Provider and Agents decide and emit their own notices; existing Sessions keep their adopted model and fail their next call with `external_agent_disabled`. Profiles are listed by Agents like any Agent, so Collaboration's `agent` tool can request them.
 
 ### A.2 Provider registration and call scope
 
@@ -238,22 +270,22 @@ Detection calls `externalAgentNode.detect` at load and on `refresh` (A1); detect
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
-| `invoke` | async, streamed | `{request: ModelRequest data, target: {node, agent}, scope: {sessionId, branchId, turnId, requestId, callSequence, cwd, resourceNode, interactive, collaborationRole}}` | Stream of items: model chunks (A.4), `{approval_ask: {askId, operationId, call: {name, input}, risk?}}`, `{approval_ask_withdrawn: {askId}}`; ends with a stop chunk or an error `{code, origin, transient}` |
+| `invoke` | async, streamed | `{request: model request (serialized form of the existing model request contract), target: {node, agent}, scope: {sessionId, branchId, turnId, requestId, callSequence, cwd, resourceNode, interactive, collaborationRole}}` | Stream of items: model chunks (A.4), `{approval_ask: {askId, operationId, call: {name, input}, risk?}}`, `{approval_ask_withdrawn: {askId}}`; ends with a stop chunk or an error `{code, origin, transient}` |
 | `answerApproval` | async | `{requestId, askId, outcome: allow \| deny \| cancelled}` | `{}`; unknown ask → `{}` (late answers are ignored) |
 
 Cancellation is a protocol action: the consumer drops the `invoke` stream or sends its cancel request; open asks are then answered `cancelled` internally. `operationId = "external-agent:<requestId>:<ask_n>"`. ModelProvider supplement: on `approval_ask` it calls its branch's `Approval::admit` with source `Host {operationId}` and the call, and returns the outcome through ModelHost's `answerApproval`; on `approval_ask_withdrawn` it cancels that admission. Approval supplement: such an admission is accepted while `step/model-start` is open; its facts are the ordinary approval facts, with no model-visible effect. When a request's adopted Provider connection entry `external-agent:<node>:<agent>` exists but no `modelKind` instance with that key is registered, ModelHost fails it before acceptance (transient); other kinds are unaffected.
 
-### A.3 Bridge service and adapters
+### A.3 Bridge and adapters
 
-`externalAgentNode`, process scope, key = node; provided by the bridge row of that node and collected by ExternalAgent.
+The bridge is internal to ExternalAgent, not a named service: one per node with an enabled agent, started and stopped by ExternalAgent on configuration change. Its interface is listed for the conversation logic and tests only.
 
-| Method | Mode | Request | Reply |
+| Operation | Mode | Request | Reply |
 | --- | --- | --- | --- |
 | `detect` | async | `{}` | `[{agent, executable, version, protocol: acp \| cli}]` |
 | `turn` | async, streamed | `TurnSpec {turn_id, agent, config, cwd, conversation: {new} \| {continue: {external_id}}, prompt: PromptBlock[]}` | Stream of `TurnUpdate`: `{accepted: {external_id}}`, `{text}`, `{thought}`, `{tool_activity: {id, title, status}}`, `{permission_asked: {ask_id, title, kind, raw_input?, options}}`, `{permission_withdrawn: {ask_id}}`, `{usage}`, `{end: reason}`; or an error `{code, transient}` |
 | `answer` | async | `{turn_id, ask_id, answer: allow \| reject \| cancelled}` | `{}` |
 
-Cancellation: the consumer drops the `turn` stream or sends its cancel request; the bridge then runs the adapter's cancel path below. While the node's link is down, every call fails `node_unavailable`.
+Cancellation: the consumer drops the `turn` stream or sends its cancel request; the bridge then runs the adapter's cancel path below. While the node's link is down, every `HostPlatform` call fails `node_unavailable`, so every bridge operation for that node fails the same way.
 
 | Adapter | Open | Turn | Cancel |
 | --- | --- | --- | --- |
@@ -264,21 +296,23 @@ One ACP process per conversation, closed after 10 min idle (A5). Adapter definit
 
 ### A.4 Stream mapping and request fields
 
-| External | `ModelChunk` |
-| --- | --- |
-| `Accepted` | `MessageStart { message_id: "<external_id>:<request_id>" }` |
-| Message chunk / CLI text | `Text(delta)`; an open thinking block is closed first |
-| Thought chunk / CLI reasoning | `Thinking(delta)`; an open text block is closed first with `TextEnd` |
-| `tool_call`, `tool_call_update` status change | `Thinking("[tool] <title>: <status>")` (A9); never `ToolStart` (no tools offered; ModelProvider rejects unoffered calls) |
-| Permission asked / decided | `Thinking("[permission] <title>: asked")`, then `allowed`, `denied` or `cancelled` |
-| `plan`, `available_commands_update`, `current_mode_update`, history replayed by `session/load` | Not forwarded; diagnostics |
-| Usage reported by the adapter | `Usage` (A10) |
-| End `end_turn` | Close open block, `MessageStop { reason: EndTurn }` |
-| End `max_tokens` | `MessageStop { reason: MaxTokens }` |
-| End `max_turn_requests`, `refusal`, CLI non-zero exit | Failure, non-transient (A11) |
-| End `cancelled` after our cancel | Stream ends without `MessageStop`; ModelProvider reports `Cancelled` |
+Model chunks are given in neutral form (`kind` plus data, the serialized form of the existing model chunk contract); the Rust variants are in Appendix G.
 
-`ModelChunk::Content` is not emitted. Request fields: `messages` only at initialization; `system`, `tools`, sampling fields, `provider_options`, `metadata`, `capability_snapshot` not forwarded.
+| External | Model chunk |
+| --- | --- |
+| `Accepted` | `message_start {message_id: "<external_id>:<request_id>"}` |
+| Message chunk / CLI text | `text {delta}`; an open thinking block is closed first |
+| Thought chunk / CLI reasoning | `thinking {delta}`; an open text block is closed first with `text_end` |
+| `tool_call`, `tool_call_update` status change | `thinking {delta: "[tool] <title>: <status>"}` (A9); never `tool_start` (no tools offered; ModelProvider rejects unoffered calls) |
+| Permission asked / decided | `thinking {delta: "[permission] <title>: asked"}`, then `allowed`, `denied` or `cancelled` |
+| `plan`, `available_commands_update`, `current_mode_update`, history replayed by `session/load` | Not forwarded; diagnostics |
+| Usage reported by the adapter | `usage` (A10) |
+| End `end_turn` | Close open block, `message_stop {reason: end_turn}` |
+| End `max_tokens` | `message_stop {reason: max_tokens}` |
+| End `max_turn_requests`, `refusal`, CLI non-zero exit | Failure, non-transient (A11) |
+| End `cancelled` after our cancel | Stream ends without `message_stop`; ModelProvider reports `Cancelled` |
+
+`content` chunks are not emitted. Request fields (of the serialized model request): `messages` only at initialization; `system`, `tools`, sampling fields, `provider_options`, `metadata`, `capability_snapshot` not forwarded.
 
 Retry safety: failures before `Accepted` that may be retried (spawn failure, connection refused, `node_unavailable`) are failures with `{origin: transport, transient: true}`; every other failure is non-transient. ModelProvider stops on non-transient errors and once a non-`MessageStart` chunk arrived, so a turn the agent may have started is never sent twice. The record is unchanged before `Accepted`, so a retry computes the same delta.
 
@@ -297,7 +331,7 @@ Pinned protocol version, generated types per language, transcript-based conforma
 | Output | ModelProvider commits chunks (`Timeline::append`) and writes `step/model-output-end` with `append_batch_registered`; `StateCell<ModelProgress>` shows uncommitted text |
 | Approval | ModelProvider admits the `approval_ask`; Approval `append_registered` of `approval/request` (waiter registered in the commit lock); `approval/respond` consumed on the branch Dispatcher; Approval writes `approval/cancelled` on every other end; ModelProvider calls `answerApproval` |
 | End | External end or confirmed cancel → `ready`; kill or lost link after `Accepted` → `uncertain` |
-| Reload | On unload ExternalAgent ends its open asks `cancelled`, drops its `turn` streams (the bridges cancel and kill the processes) and its `modelKind` instance leaves; each call ends with a provider-unavailable failure, never `CAPABILITY_RELOADING`; bridges do not reload |
+| Reload | On unload ExternalAgent ends its open asks `cancelled`, stops its bridges (they cancel and kill their processes) and its `modelKind` instance leaves; each call ends with a provider-unavailable failure, never `CAPABILITY_RELOADING` |
 | Restart | ModelProvider rebuild fails unended `model/call`s; Approval rebuild cancels unmatched requests; `apply` marks `in_flight` records `uncertain` |
 
 ExternalAgent itself appends nothing, subscribes to no Dispatcher and owns no Session state.
@@ -329,14 +363,15 @@ ExternalAgent itself appends nothing, subscribes to no Dispatcher and owns no Se
 | Branch interrupt or close mid-call | branch interrupt | As interrupt; Approval close cancels asks | ModelProvider, Approval |
 | Native model in between | foreign outputs after cursor | Re-initialize | Bridge |
 | Pre-acceptance transient failure | — | Retried with the same delta | ModelProvider |
-| ExternalAgent reload mid-call | — | Provider-unavailable failure; killed; `uncertain`; ModelProvider and bridges not reloaded | ExternalAgent |
+| ExternalAgent reload mid-call | — | Provider-unavailable failure; killed; `uncertain`; ModelProvider not reloaded | ExternalAgent |
 | Agents, Aimux, Provider or Settings reload | — | ExternalAgent reloads (D3, accepted); in-flight external calls fail as on its own reload | ExternalAgent |
 | Process restart mid-call | unended facts | Settled by rebuilds; `uncertain`; nothing re-sent | ModelProvider, Approval |
 | Session unload and restore | — | Records persist; ACP process closed by idle; reopen with `session/load` or initialize | Bridge |
-| Agent node offline | link down; import stays registered | `node_unavailable` transient before acceptance, retried within bound, then `Failed`; nothing reloads; other nodes unaffected (requirement on #5) | ExternalAgent |
+| Agent node offline | link down; `HostPlatform` import stays registered | `node_unavailable` transient before acceptance, retried within bound, then `Failed`; nothing reloads; other nodes unaffected (requirement on #5) | ExternalAgent |
 | Link lost after `Accepted` | — | Non-transient failure; asks cancelled; `uncertain` | Bridge |
 | Session resource node differs from agent node | — | `external_agent_wrong_node`, non-transient (A13) | ExternalAgent |
 | Duplicate `set_enabled` | — | Idempotent | ExternalAgent |
+| Enable or disable while calls run on that node | configuration change notice | No reload; enabling starts the node's bridge; disabling stops new calls (`external_agent_disabled`) and the bridge stops once its open turns end | ExternalAgent |
 | Client detach | — | No effect; pending approvals wait for another client or the leader | — |
 
 ## Appendix C. Errors and recovery
@@ -346,7 +381,7 @@ ExternalAgent itself appends nothing, subscribes to no Dispatcher and owns no Se
 | `external_agent_not_installed` | yes, non-transient | Executable not found on the node |
 | `external_agent_auth_required` | yes, non-transient | Agent needs its own login; presentation names the command |
 | `external_agent_launch_failed` | yes, transient | Spawn or connection failure |
-| `node_unavailable` | yes, transient | Agent enabled on the node but the node's link is down; the bridge import fails the call |
+| `node_unavailable` | yes, transient | Agent enabled on the node but the node's link is down; the imported `HostPlatform` fails the call |
 | `external_agent_disabled`, `external_agent_wrong_node`, `external_agent_no_input` | yes, non-transient | A.1, §3.3, §3.1 |
 | `external_agent_protocol` | either | Malformed output; killed; `uncertain` if after acceptance |
 | `external_agent_exited` | no | Process exited or link lost mid-turn; `uncertain` |
@@ -371,6 +406,7 @@ Flow tests through public interfaces with a scripted ACP agent and a scripted CL
 11. Interrupt racing `approval.respond` in both orders; external withdrawal cancels the approval; ExternalAgent reload cancels it without reloading ModelProvider.
 12. One offline peer node fails only its calls; other nodes and native connections continue.
 13. Shared ACP conformance suite passes on the client side.
+14. Enabling and disabling agents adds or removes no loader row and reloads nothing; the connection entry and profile change only through Provider's and Agents' write operations.
 
 ## Appendix E. Assumptions
 
@@ -401,7 +437,7 @@ Flow tests through public interfaces with a scripted ACP agent and a scripted CL
 | --- | --- |
 | Supplement cost | Admitting `approval_ask` items makes ModelProvider depend on its branch's Approval, so an Approval reload reloads ModelProvider (rare, accepted per D3) |
 | External conversation continuation | Overview §9; this design re-initializes (A15) |
-| Agents profile registration | The shape of Agents' profile registration and Provider's connection-entry operations (direct dependencies, ADR 002 D3) is not yet defined |
+| Owners' write operations | Agents' profile write operation and Provider's connection-entry write operation are proposed here (ExternalAgent writes their state only through them, principles §4 rule 9); their shapes and notices are for those owners to define |
 | ACP `session/load` | Whether a `ready` record after a process restart should continue via `session/load` rather than initialize |
 
 ## Appendix G. Rust binding
@@ -413,12 +449,14 @@ One binding of the neutral contracts, for a Rust implementation; a TypeScript im
 | `modelKind` key `external-agent` | Provider registered with ModelHost in `apply`, unregistered in `ctx.effect`; `invoke(Arc<ModelRequest>, ConnectionTarget, ModelCallScope, CancellationToken) -> HostFuture<ModelStream>`; approval asks as `ModelChunk` extension items; `answer_approval(request_id, ask_id, outcome)` |
 | Model chunk and failure data | `ModelChunk`, `HostError::Failed` with `ModelFailureFacts { origin: Transport, transient }`, `ModelOutputOutcome::Failed` ([host.rs](../../../crates/dim-agent-capabilities/src/host.rs)) |
 | ModelProvider admission | `B:Approval` `admit(AdmitCall { source: BranchSource::Host { operation_id }, call }, risk, cancel)` |
-| `externalAgentNode` key `<node>` | Trait below, provided by the bridge row, exported over the link |
+| Bridge (internal) | Trait below, implemented inside ExternalAgent per node over that node's `HostPlatform` |
+| Model chunks (A.4) | `ModelChunk::{MessageStart, Text, Thinking, TextEnd, Usage, MessageStop}` |
+| Process storage | `pluginFiles` (extended) scope opened in `apply` |
 | `sessions.history` | `AgentIndex` get, then `Session::local_page(branch_id, after, limit, through)` |
 | `managementMethods` key `external_agents` | Entry of `Contributions<ManagementMethods>` collected by Rpc |
 
 ```rust
-trait ExternalAgentNode {
+trait Bridge { // internal, not exported
     async fn detect(&self) -> Vec<Detected>;
     async fn turn(&self, spec: TurnSpec, cancel: CancellationToken) -> Result<TurnStream, BridgeError>;
 }

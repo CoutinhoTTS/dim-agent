@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.1](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
 
-The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. The **Session part** provides the `ask_user` tool as a `toolContribution` service (Session scope, key `ask_user`) and the Session method `session.question.respond` through a `sessionMethods` service (Session scope, key `session.question`) ([session-boundary](../contracts/session-boundary.md)). It is installed only in interactive Sessions. The **branch part** records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number, following the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern.
+The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. The **Session part** provides the `ask_user` tool as a `toolContribution` service (Session scope, key `ask_user`) and the Session method `session.question.respond` through a `sessionMethods` service (Session scope, key `session.question`) ([session-boundary](../contracts/session-boundary.md)). It is installed only in interactive Sessions. The **branch part** records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number from the `stop/interrupt` events it consumes itself, following the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern.
 
 ## 1. Structure
 
@@ -27,7 +27,7 @@ flowchart LR
   TC --> QB
   TE -- "execute(ToolCall), cancel on batch token" --> QS
   QB -- "append_registered / append" --> TL
-  TL -- "question/answered (Dispatcher)" --> QB
+  TL -- "question/answered, stop/interrupt (Dispatcher)" --> QB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
@@ -35,12 +35,12 @@ Both Session services hold no state; they resolve the `questions` service of the
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:TreeCommands` | `toolContribution` key `ask_user`; `sessionMethods` key `session.question` (`session.question.respond`, level `session`) |
+| `QuestionsPlugin` | Session | `S:TreeCommands` | `toolContribution` key `ask_user`; `sessionMethods` key `session.question` (`session.question.respond`) |
 | `QuestionsBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher` | `questions` (branch scope; `ask`, `respond`), used only by the Session part |
 
 Installation: both parts declare their services in the plugin's `provides`; the Session part's row is conditioned on `SessionConfig.interactive`, so Agents installs it, and lists `ask_user` in `SessionConfig.tools`, only in interactive Sessions (set by `session.create`; ACP, `exec`, Scheduler and Workflow Sessions are non-interactive). The branch part is installed with it. ToolRegistry and Rpc collect the services by name and scope.
 
-Contracts depended on: `toolContribution` (ToolRegistry accepts named tool services, [tool contribution](../../architecture/rust-agent/tool-contributions.md) supplement); ToolExecutor's batch token and settlement; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md) (typed runtime services; Questions is Rust); `SessionConfig.interactive` ([session-access](../contracts/session-access.md)); `sessionMethods` ([session-boundary](../contracts/session-boundary.md)); client-visible dynamic events (#2, A10); Permission risk category `session`.
+Contracts depended on: `toolContribution` (ToolRegistry accepts named tool services, [tool contribution](../../architecture/rust-agent/tool-contributions.md) supplement); ToolExecutor's batch token (handler cancellation only) and settlement; the `stop/interrupt` data contract; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md) (typed runtime services; Questions is Rust); `SessionConfig.interactive` ([session-access](../contracts/session-access.md)); `sessionMethods` ([session-boundary](../contracts/session-boundary.md)); client-visible dynamic events (#2, A10; requirement in [§9](#9-requirements-raised-to-mechanism-owners)); Permission risk category `session`.
 
 Contracts defined here: the `ask_user` tool, the `question/*` data and consumption contracts, the `questions` branch service, `session.question.respond` and its errors. The only write path of `question/answered` is `questions.respond`.
 
@@ -65,7 +65,8 @@ classDiagram
   }
   class PendingRegistry {
     entries in asked order
-    batch token per entry
+    batch token per entry (handler cancellation)
+    interrupt consumed after asked
     answering marker
     closed
     rebuilt sequence
@@ -73,6 +74,7 @@ classDiagram
   question_asked --> PendingRegistry : rebuild folds local events
   question_answered --> PendingRegistry : consumed by Dispatcher
   question_cancelled --> PendingRegistry : rebuild folds local events
+  stop_interrupt --> PendingRegistry : consumed by Dispatcher
 ```
 
 All three events are branch Timeline facts written only by the `questions` service; the pending registry is memory under a `Mutex` (no `StateCell`, like Approval) and is never carried across generations.
@@ -143,14 +145,15 @@ sequenceDiagram
   participant Q as questions (branch)
   Note over TL: Q = asked, I = stop/interrupt, A = answered, C = cancelled
   TL->>D: I (seq n)
-  D->>TE: cancel batch token synchronously
+  D->>Q: consume I, take pending entries, resolve waiters Cancelled
+  Q->>TL: append C for each taken entry
+  D->>TE: cancel batch token (handler cancellation)
   TL->>D: A (seq n+1)
-  D->>Q: consume A: token already cancelled
-  Q->>TL: append C
+  D->>Q: consume A, entry no longer pending
   Q-->>Q: respond returns Cancelled
 ```
 
-The Dispatcher delivers each event to every subscriber before the next, so a token cancelled at consumption of `A` means an interrupt with a lower sequence was consumed. If `A` precedes `I`, the answer is kept as a completed result; the turn still ends cancelled after `step/tool-result`.
+Questions subscribes to `stop/interrupt` (turn and branch scope) and decides from its own consumption, not from ToolExecutor's batch token: on consuming `I` it takes every pending entry, writes `question/cancelled {reason: "interrupted"}` and resolves the waiter as Cancelled; on consuming `A` it accepts the answer only if the entry is still pending, which means no interrupt with a lower sequence was consumed after its `Q`. `A` is written alone, so its whole batch is read before the decision. If `A` precedes `I`, the answer is kept as a completed result; the turn still ends cancelled after `step/tool-result`. ToolExecutor's batch token only stops the handler; it decides nothing about the answer.
 
 ### 4.2 Reload and restart
 
@@ -194,7 +197,7 @@ Never visible: `question/*` events, `structuredContent`, the CLI rendering. Comp
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `ask_user` | `toolContribution` (Session, key `ask_user`), risk `session` | Ask 1–4 questions, wait for the answer |
-| `session.question.respond` | `sessionMethods` (Session, key `session.question`), level `session` | Answer or decline a pending call |
+| `session.question.respond` | `sessionMethods` (Session, key `session.question`) | Answer or decline a pending call |
 | `questions.ask` / `respond` | Branch service `questions`, internal to Questions | Register and wait; boundary write of the answer |
 | `question/asked`, `question/answered`, `question/cancelled` | Events | Pending state and answer ordering |
 | CLI prompt contract | Client | Rendering, deferral, `Ctrl+C`, attach |
@@ -202,6 +205,49 @@ Never visible: `question/*` events, `structuredContent`, the CLI rendering. Comp
 ## 7. Security
 
 `ask_user` uses no host resource and is `session` risk (allowed under every preset; `disallowed_tools` still applies). Answers are user content written as facts and replayed to the model; clients must not put secrets in them. `session.question.respond` is available to any client with Session access, including paired remote devices ([RemoteGateway](RemoteGateway.md)); it confers no authority beyond answering. Questions never widens permissions; replay never re-asks.
+
+## 8. Rule check
+
+Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md) D1–D5.
+
+| Rule | How this document complies |
+| --- | --- |
+| §4.1 Command events for others' state | Questions writes only its own `question/*` facts; the call's terminal fact stays ToolExecutor's `step/tool-result`. |
+| §4.2 No recall after handoff | The answer is handed to the waiting call once, at consumption of `question/answered`; it is never withdrawn afterwards. |
+| §4.3 Only before callbacks, never block | Not applicable: Questions registers no before callback and adds no entry check; `respond` validates only its own parameters. |
+| §4.4 No business meaning in core | Questions needs no change to Timeline, Dispatcher, ToolExecutor or Rpc; its events are its own declared events. |
+| §4.5 Read the whole batch | `question/answered` is written alone and decided after its batch is consumed; `stop/interrupt` is applied in sequence order. |
+| §4.6 Context only from handed-off events | Answers reach the model only through ToolExecutor's `step/tool-result`; `question/*` events are never projected. |
+| §4.7 Public events and services only | Answer versus interrupt is decided from `stop/interrupt` that Questions consumes itself, not from ToolExecutor's batch token or memory. |
+| §4.8 Requirements to mechanism owners | Client-visible dynamic events and conditional installation are raised in §9. |
+| §1 Capability and App Server boundary | Both parts are Capabilities in their own crate; Rpc only dispatches `sessionMethods` and holds no Questions logic. |
+| ADR 002 D1 Scope | The tool and method are Session services; pending questions are branch state. |
+| ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect the services by name and scope; nothing names Questions. |
+| ADR 002 D3 Scope dependencies | The Session part depends on Session services only; a reload cancels pending questions, which is accepted. |
+| ADR 002 D4 Configuration | Not applicable: Questions has no configuration; installation follows `SessionConfig.interactive`. |
+| ADR 002 D5 Language-neutral contracts | Tool, method, branch service and events are given in neutral form; Appendix G is one binding. |
+
+## 9. Requirements raised to mechanism owners
+
+### R1. Client-visible dynamic events (#2, runtime)
+
+| Item | Content |
+| --- | --- |
+| Blocked by | Principles §4 rule 4 and overview constraint 3: Rpc must not gain Questions-specific notifications, yet clients must see `question/*` live to show and close the prompt. |
+| Existing mechanisms considered | Dedicated Rpc notifications like `approval.request` (Questions-specific code in Rpc); clients polling `session.history` (no live prompt); a Session method returning pending questions (still needs a live signal). |
+| Generic capability | #2 dynamic event registration with a declared client-visible flag; Connection forwards every event so declared as `session.event`, without knowing its meaning. |
+| Effect on sequence, batch, interrupt, reload | None on sequence or batch: notices are published after commit like other events. Interrupt and reload: unchanged; history replay plus live notices merge by event identity. |
+| Owner and issue | Runtime and Rpc owner; [#2](https://github.com/arcships/dim/issues/2). |
+
+### R2. Optional parts installed per `interactive` (Agent assembly)
+
+| Item | Content |
+| --- | --- |
+| Blocked by | ADR 002 D2 (no wiring modules) and principles §4 rule 4: non-interactive Sessions must not offer `ask_user`, and no assembly code may name Questions. |
+| Existing mechanisms considered | Hiding the tool by Permission (the tool would still be declared); failing the call at run time (non-interactive Sessions would block or error); a Questions check in Agents (names a plugin). |
+| Generic capability | A plugin's `provides` row may carry a condition on `SessionConfig` fields (here `interactive`); Agents installs the part only when it holds. |
+| Effect on sequence, batch, interrupt, reload | None: decided at Session assembly from `SessionConfig`; a reload re-evaluates it. |
+| Owner and issue | Agent assembly owner (runtime and App Server); listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities); no issue filed yet. |
 
 ## Appendix A. Interface details
 
@@ -236,8 +282,8 @@ A declined call yields `User declined to answer the question(s).` (A6). `structu
 | Type | Payload | Write path | Consumers |
 | --- | --- | --- | --- |
 | `question/asked` | `call_id, turn_id, request_id: string`, `questions: Question[]` | `questions.ask`, `append_registered`; callback registers the entry under the lock (fails if closed or `call_id` already pending) | Rebuild; clients show the prompt |
-| `question/answered` | `call_id: string`, `answers: Answer[]`, `declined: boolean` | `questions.respond`, `append_registered`; callback fails `Closed`/`Cancelled`/`AlreadyAnswered`, else sets `answering` and stores the waiter by event id | Dispatcher subscription `"Questions"`, under the rebuild gate, skipping `sequence <= rebuilt`; accepted only if the entry is pending and its token is not cancelled. Clients close the prompt |
-| `question/cancelled` | `call_id, reason: string` | `questions` only, `append`: ask future on cancel, consumer, `close()`, rebuild | Rebuild; clients close the prompt |
+| `question/answered` | `call_id: string`, `answers: Answer[]`, `declined: boolean` | `questions.respond`, `append_registered`; callback fails `Closed`/`Cancelled`/`AlreadyAnswered`, else sets `answering` and stores the waiter by event id | Dispatcher subscription `"Questions"` (with `stop/interrupt`), under the rebuild gate, skipping `sequence <= rebuilt`; accepted only if the entry is still pending, that is, no `stop/interrupt` was consumed after its `asked`. Clients close the prompt |
+| `question/cancelled` | `call_id, reason: string` | `questions` only, `append`: consumption of `stop/interrupt`, ask future on cancel, consumer, `close()`, rebuild | Rebuild; clients close the prompt |
 
 All three are declared through #2 registration as client-visible and are never rendered into model history.
 
@@ -266,15 +312,16 @@ Cancellation of `ask` is a cancel request on the call; the Session part sends it
 | Ask | Token already cancelled: return Cancelled, write nothing. Else `append_registered(question/asked)`; on commit failure remove the entry and return Cancelled or an error |
 | Wait | `select! biased { response, cancel.cancelled() }`. On cancel: take the entry under the lock; if taken, write `question/cancelled {reason: "Tool execution cancelled"}` after releasing the lock; return Cancelled. Dropped sender: Cancelled with `capability reloading` |
 | Respond | Pre-check pending and validate against the entry's `asked` data; `append_registered(question/answered)`; await the dispatch result |
-| Consume | Take the entry; token cancelled: send `None`, reply `Cancelled`, write `question/cancelled`; else send the answer, reply `Ok`. Missing entry: `Unknown` |
-| Recheck | Only the batch token, which reflects interrupts ToolExecutor already consumed ([time-bus](../../architecture/rust-agent/time-bus.md) §4) |
+| Consume `stop/interrupt` | Take every pending entry of the branch; for each, write `question/cancelled {reason: "interrupted"}`, resolve its waiter Cancelled and reply `Cancelled` to a respond waiter |
+| Consume `question/answered` | Entry still pending: take it, send the answer, reply `Ok`. Entry taken by an earlier consumed interrupt or cancel: reply `Cancelled`. Missing entry: `Unknown` |
+| Recheck | Only `stop/interrupt` events Questions has consumed itself ([time-bus](../../architecture/rust-agent/time-bus.md) §4); the batch token is used only to stop the handler and to skip `ask` when ToolExecutor already cancelled the call |
 | Terminal facts | `asked`/`cancelled` by Questions, `answered` is the boundary fact; the call's terminal fact is ToolExecutor's `step/tool-result` |
 | Unload | Unload disposer: set `closed`, drop respond waiters (`Closed`), take all entries, write `question/cancelled {reason: "capability reloading"}`, drop senders. A closing Timeline may reject the write; that branch is not restored |
 | Load / restart | Subscribe, fix `S = committed()` under the gate, fold `local(..=S)`, cancel unresolved, set `rebuilt`, provide `questions` |
 
 ### A.5 Session method `session.question.respond`
 
-Service `sessionMethods`, Session scope, key `session.question`. `describe()` returns one `MethodDecl`: `{name: "session.question.respond", level: session, mutating: true, interruption: report, progress: false, notifications: [], reply: direct}`. Rpc resolves the Session and sends `call(MethodCall)`; the handler resolves `questions` of the named branch through `S:TreeCommands`.
+Service `sessionMethods`, Session scope, key `session.question`. `describe()` returns one `MethodDecl`: `{name: "session.question.respond", mutating: true, interruption: report, progress: false, notifications: [], reply: direct}`. Rpc resolves the Session and sends `call(MethodCall)`; the handler resolves `questions` of the named branch through `S:TreeCommands`.
 
 `params`: `{sessionId, branchId?: "main", callId, answers: [{questionId, selected: [label], custom?}], declined?: false}` → `MethodReply` value `{}`. Errors are `MethodError` data:
 
@@ -314,11 +361,11 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 | Interrupt before the batch is dispatched | I < `step/tool-call` consumed | No `Q`; call not executed | ToolExecutor |
 | Interrupt before the question is registered | I consumed, then `ask` | Token cancelled; nothing written | Questions (token check) |
 | Answer, then interrupt | Q < A < I | Answer accepted; result kept as completed; turn ends cancelled after R | Questions; ToolExecutor |
-| Interrupt, then answer committed before cancel | Q < I < A < C | `respond` → `Cancelled`; `C` written | Questions |
+| Interrupt, then answer committed before Questions consumes I | Q < I < A < C | Consuming I writes C; consuming A finds no pending entry; `respond` → `Cancelled` | Questions |
 | Interrupt, cancel written, then answer | Q < I < C | Registration fails `Cancelled`; nothing written | Questions |
 | Two clients answer concurrently | Q < A1 (A2 rejected) | `AlreadyAnswered`; first decides | Questions (registration lock) |
 | Duplicate or late RPC | after resolution | `Unknown` or `Cancelled`; nothing written | Questions |
-| Branch-scoped interrupt, branch close | Q < branch I | Token cancelled → C; close settles the rest with C | Questions; ToolExecutor |
+| Branch-scoped interrupt, branch close | Q < branch I | Questions consumes I → C; close settles the rest with C | Questions; ToolExecutor |
 | Answered, other calls of the batch running | Q < A < R | Answer held in the handler result until R | ToolExecutor |
 | Answered, then reload before R | Q < A < reload | Batch reload-settled, turn Failed; question outcome answered | ToolExecutor |
 | Answer committed, branch part unloads before consuming | Q < A, unload | `close()` writes C: cancelled; `respond` → `service_reloading` | Questions |
@@ -382,7 +429,6 @@ Flow tests through RPC, tool calls and events:
 | # | Question | Description |
 | --- | --- | --- |
 | F1 | Overview §7 payloads | `turn_id`, `request_id`, `declined` are not in the overview's `question/*` fields (A3) |
-| F2 | Client visibility of dynamic events | Whether #2 projects plugin events to clients by a declared flag (A10) |
 
 ## Appendix G. Rust binding
 
@@ -392,7 +438,7 @@ Questions is implemented in Rust; this binding is one realization of the neutral
 | --- | --- |
 | `toolContribution` key `ask_user` | `S:ToolContribution`, collected by ToolRegistry as `Contributions<ToolContribution>` entry `ask_user`; `execute` maps to the handler `HostFuture<Result<ToolResult, HostError>>`, cancel request to the batch `CancellationToken`, `cancelled` to `HostError::Cancelled` |
 | `sessionMethods` key `session.question` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("session.question")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)` |
-| `questions` | `B:Questions`, key `BranchScope::key::<Questions>()` |
+| `questions` | `B:Questions`, key `BranchScope::key::<Questions>()`; Dispatcher subscription `"Questions"` on `question/answered` and `stop/interrupt` |
 
 ```rust
 pub struct Question { pub id: String, pub header: Option<String>, pub question: String,

@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.8](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first (overview §F.3).
 
-Scheduler keeps scheduled jobs and their run history in App Server process storage. While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part offers the `schedule` tool (risk `persistent_configuration`) to interactive leader Sessions as a `toolContribution`. Operators use the management-level `schedule.*` methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: a run's outcome is read from the run Session's history and published as a run-outcome event notice.
+Scheduler keeps scheduled jobs and their run history in its process storage, [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage). While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part offers the `schedule` tool (risk `persistent_configuration`) to interactive leader Sessions as a `toolContribution`. Operators use the `schedule.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: a run's outcome is read from the run Session's history and published as a run-outcome event notice.
 
 ## 1. Structure
 
@@ -14,8 +14,8 @@ flowchart LR
     Out["Run-outcome event scheduled_run_outcomes"]
     Agents["Agents: sessions (launch, input, history, idle, stop, withdraw)"]
     Rpc["Rpc method table"]
-    Store["Process storage (App Server)"]
-    Listen["Listeners, e.g. Notifications (no dependency)"]
+    Store["Process storage: pluginFiles (extended)"]
+    Listen["Listeners: Notifications instance of the run Session (no dependency)"]
   end
   subgraph SESS["Interactive leader Session"]
     Tool["SchedulerSession: toolContribution key schedule"]
@@ -35,14 +35,14 @@ flowchart LR
   class Sched,MM,Out,Tool new
 ```
 
-Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The Session part depends on the process part (enclosing scope). The process part depends on Agents (service `sessions`) and App Server process storage; it reaches run Sessions only through `sessions`. Dependencies follow scope (D3): an Agents reload reloads Scheduler, and a Scheduler reload reloads its Session parts, failing their in-flight turns; both are rare structural events and an accepted, documented cost. Job edits are business configuration (D4): a data update plus notification, never a reload.
+Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The Session part depends on the process part (enclosing scope). The process part depends on Agents (service `sessions`) and `pluginFiles` (extended); it reaches run Sessions only through `sessions`. Dependencies follow scope (D3): an Agents reload reloads Scheduler, and a Scheduler reload reloads its Session parts, failing their in-flight turns; both are rare structural events and an accepted, documented cost. Job edits are business configuration (D4): a data update plus notification, never a reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Scheduler` | Process (control node) | `sessions` (Agents; `launch` with `policy`), App Server process storage | Job store, timer, run tracker; `managementMethods` key `schedule`; process event `scheduled_run_outcomes` |
-| `SchedulerSession` | Session, installed when Scheduler is enabled | `Scheduler`, Session configuration | `toolContribution` key `schedule`, declared only when `interactive` and not a Collaboration member |
+| `Scheduler` | Process (control node) | `sessions` (Agents; `launch` with `policy`), `pluginFiles` (extended) | Job store, timer, run tracker; `scheduleJobs` (the tool's access to the job store, A.2); `managementMethods` key `schedule`; process event `scheduled_run_outcomes` |
+| `SchedulerSession` | Session, installed when Scheduler is enabled | `scheduleJobs` (`Scheduler`), Session configuration | `toolContribution` key `schedule`, declared only when `interactive` and not a Collaboration member |
 
-**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields `interactive`/`resourceNode`/`createdBy`, `input` with source raw blocks, fixed-prefix `history`, `idle`, `stop`, `withdraw`), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)), Permission category `persistent_configuration` (FullAccess allows it, E1), App Server process storage (R8; an existing typed service, reachable by name from a TypeScript part once [#4](https://github.com/arcships/dim/issues/4) exposes it), the [single-tree event contract](../../architecture/rust-agent/single-tree.md). **Contracts defined here**: job and run formats, the `schedule` tool, the `schedule.*` methods, the run-outcome event (A.6), source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
+**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields `interactive`/`resourceNode`/`createdBy`, `input` with source raw blocks, fixed-prefix `history`, `idle`, `stop`, `withdraw`), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)), Permission category `persistent_configuration` (FullAccess allows it, E1), [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (R8: binary read and write and a format version are added to the existing trusted plugin storage; a TypeScript part uses it natively, a Rust part through the same named service), the [single-tree event contract](../../architecture/rust-agent/single-tree.md). **Contracts defined here**: job and run formats, the `schedule` tool, the `scheduleJobs` service, the `schedule.*` methods, the run-outcome event (A.6), source name `scheduler` (marker `dim-scheduler`, submission ids `scheduler:<run_id>`).
 
 ## 2. Data and state
 
@@ -192,6 +192,40 @@ Run Sessions are non-interactive: no `ask_user`, no `schedule` tool. Prior runs 
 
 `schedule` is admitted by Approval and Permission as `persistent_configuration`; FullAccess allows it (E1), other presets ask or deny. A run only writes input; its tools are admitted under the run Session's policy, capped as in 3.3, and approvals are not pre-granted. Tool-created jobs record `created_by` and are visible for review. Jobs store no credentials. The run Session uses only its own resource node's services; Scheduler touches none. Anyone with management access can read job prompts.
 
+## 8. Rule check
+
+Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md) D1–D5.
+
+| Rule | How this document complies |
+| --- | --- |
+| §4.1 Command events for others' state | Scheduler changes run Sessions only through `sessions` (input, `withdraw` writing `input/withdraw`, `stop` writing `stop/interrupt`); InputQueue and Loop decide and write the results. |
+| §4.2 No take-back after hand-off | Before `input/applied` the run input is withdrawn; after it (`notHeld`) Scheduler only uses `stop` once `input/consumed` is read (§3.2). |
+| §4.3 Intervene only through before callbacks | Not applicable: Scheduler adds no entry check and no before callback; job validation is the owner's own boundary validation of its methods and tool. |
+| §4.4 Core mechanisms carry no business meaning | Scheduler needs no runtime change carrying its meaning; the run-outcome event is its own process event. |
+| §4.5 Read the whole batch before deciding | Run decisions read history up to the `sessions.idle` cutoff, which is a batch boundary (A.5). |
+| §4.6 Model context holds only handed-over events | The run prompt reaches the model only as a consumed Queue input; a withdrawn input is deleted and never seen. |
+| §4.7 Only public events and services | Scheduler uses `sessions`, `pluginFiles` (extended) and its own `scheduleJobs`; Notifications listens to its public event without a dependency. |
+| §4.8 Requirements to mechanism owners | Named process events across languages are raised in §9; the offline-node behaviour relies on #5 ([ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)). |
+| §4.9 Only facts later decisions use enter the Timeline | Scheduler writes no Timeline event; jobs and runs stay in process storage and the run outcome is a process event notice. |
+| §1 Capability and App Server boundary | Jobs and runs are process-level, not a Capability; storage is the `pluginFiles` plugin, not an App Server service. |
+| ADR 002 D1 | Jobs span Sessions (process part); the tool belongs to a Session (Session part). |
+| ADR 002 D2 | No wiring module: Rpc collects `managementMethods`, ToolRegistry collects `toolContribution`, listeners subscribe to the event by name. |
+| ADR 002 D3 | Agents and Scheduler reloads propagate by scope and are accepted and documented (§1). |
+| ADR 002 D4 | Job edits and the run limit are business data read at use time; nothing structural changes. |
+| ADR 002 D5 | `scheduleJobs`, the tool, the methods and the event are named services with data shapes; Rust forms are in Appendix G. |
+
+## 9. Requirements raised to mechanism owners
+
+### 9.1 Named process events across languages
+
+| Item | Content |
+| --- | --- |
+| Blocked by | ADR 002 D5 and principles §4.7: the run-outcome event must be public and language-neutral, but a process event today is a typed Rust `EventKey<T>`; a TypeScript Scheduler cannot emit it and a TypeScript Notifications cannot listen to it by name. |
+| Existing mechanisms considered | A Timeline event: rejected, the outcome is process-level and has no branch to live on (§4.1, time-bus). A named service called by Scheduler: rejected, it makes Scheduler depend on its listeners (D2). rutis event forwarding between nodes: it forwards typed events and does not define a name-and-data form. |
+| Generic capability | Emit and listen to a process event identified by a name with serializable data, from any language, with the same live, non-resumable delivery as typed process events; no business meaning. |
+| Sequence, batch, interrupt, reload | No Timeline sequence or batch is involved; delivery is live; a listener unloaded or reloading misses events, the emitter is unaffected; no reload follows from listening. |
+| Owner and issue | rutis (event bus and rutis-bridge runtimes); no issue yet, to be filed with [#4](https://github.com/arcships/dim/issues/4) as the related exposure work. |
+
 ## Appendix A. Interface details
 
 ### A.1 Records
@@ -205,7 +239,9 @@ Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `
 
 ### A.2 Tool `schedule`
 
-`toolContribution` key `schedule`, registered by `SchedulerSession` only in Sessions whose configuration has `interactive: true` and no member role (A9), so run Sessions and members never see it and a run cannot schedule further runs. `declaration(): sync -> ToolDeclaration` returns the parameters below with risk `persistent_configuration` for all actions (A10); `execute(ToolCall): async -> ToolResult` calls the process part. Cancellation is the consumer dropping the call.
+`toolContribution` key `schedule`, registered by `SchedulerSession` only in Sessions whose configuration has `interactive: true` and no member role (A9), so run Sessions and members never see it and a run cannot schedule further runs. `declaration(): sync -> ToolDeclaration` returns the parameters below with risk `persistent_configuration` for all actions (A10); `execute(ToolCall): async -> ToolResult` calls the process part's `scheduleJobs` service. Cancellation is the consumer dropping the call.
+
+`scheduleJobs`, process scope, no key, defined here: `call(JobRequest): async -> JobReply`, where `JobRequest = {action, job_id?, job?, enabled?, limit?, caller: {sessionId, cwd, resourceNode}}` uses the parameters below and `JobReply = {content: string, records: JSON}` or an error `{code}` from Appendix C. Cancellation is the consumer dropping the call; a save already persisted stays.
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
@@ -219,7 +255,7 @@ Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy), `
 
 ### A.3 Management methods
 
-`managementMethods` key `schedule`: `describe(): async -> MethodDecl[]` lists the methods below (level `management`, `mutating` for all but `list` and `history`); `call(MethodCall): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are codes from Appendix C.
+`managementMethods` key `schedule`: `describe(): async -> MethodDecl[]` lists the methods below (`mutating` for all but `list` and `history`); `call(MethodCall): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are codes from Appendix C.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -258,7 +294,7 @@ Granularity one minute (A1). A window fires only if observed within 60 s of its 
 
 ### A.6 Run-outcome event (public contract)
 
-Process event named `scheduled_run_outcomes`; listeners subscribe by name and form no dependency on Scheduler. Data:
+Process event named `scheduled_run_outcomes`; listeners subscribe by name and form no dependency on Scheduler. Emitting and listening by name from a TypeScript or Rust part is the requirement in §9. The listener that reports a run is the Notifications instance of the run Session (`session_id`), which sends `schedule.ended` ([Notifications](Notifications.md)). Data:
 
 | Field | Type |
 | --- | --- |
@@ -268,7 +304,7 @@ Process event named `scheduled_run_outcomes`; listeners subscribe by name and fo
 | `reason` | string, optional; fixed reason text, never Session content |
 | `ended_at` | RFC 3339 instant |
 
-Emitted once per run after its terminal record is persisted (A16, A17). Delivery is live and non-resumable; a listener that is not loaded misses the notice. The notice carries no prompt or Session content; `schedule.history` is the durable record.
+Emitted once per run after its terminal record is persisted (A16, A17). Delivery is live and non-resumable; a listener that is not loaded misses the notice. In particular, when the run Session is unloaded at the time of the notice, no `schedule.ended` is sent and the notice is lost; this is accepted, and `schedule.history` is the durable record (A18). The notice carries no prompt or Session content; `schedule.history` is the durable record.
 
 ## Appendix B. Full conflict table
 
@@ -349,8 +385,9 @@ With a controllable clock, through management methods, the `schedule` tool and t
 | A15 | The cap of a tool-created job is captured at save | Judgment within E2 | Re-resolve per run |
 | A16 | Run outcomes are a live, non-resumable notice | Overview §5.11; judgment | Persistent outbox per listener |
 | A17 | Only runs that reached `launching` produce a notice | Judgment | Listeners see every window |
+| A18 | `schedule.ended` is delivered only by the run Session's Notifications instance; lost if that Session is unloaded | User decision (process-level delivery not added) | A process-level listener delivers every notice |
 
-Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), process storage (R8), withdrawal (R7), scope ([ADR 002](../../adr/002-plugin-scope.md)).
+Decided: run policy (E2), FullAccess allows `persistent_configuration` (E1), daemon liveness (E5), process storage in `pluginFiles` (extended) (R8), withdrawal (R7), scope ([ADR 002](../../adr/002-plugin-scope.md)).
 
 ## Appendix F. Open questions
 
@@ -369,6 +406,8 @@ One binding of the neutral contracts above, for a Rust implementation; a TypeScr
 | `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
 | `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` lease, then `Session::input`, `local_page`, `idle`, `stop`, `service::<InputQueue>(branch).withdraw` |
 | `scheduled_run_outcomes` | `pub fn scheduled_run_outcomes() -> EventKey<RunOutcome>` in Scheduler's public types crate; `emit(host_ctx, &key, Arc::new(outcome))`, listeners `on(host_ctx, &key, listener)` |
+| `scheduleJobs` | Process-scoped named service provided by `Scheduler`, consumed by `SchedulerSession` |
+| Process storage | `pluginFiles` (extended) scope opened in `apply` |
 | Timer task | Spawned in `ctx.effect` |
 
 ```rust

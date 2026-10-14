@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview B.8](../overview.md)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（overview §F.3）。
 
-Scheduler 把定时任务及其运行历史保存在 App Server 进程存储中。守护进程存活且某个窗口到期时，进程部分通过 `sessions.launch` 创建一个非交互 Session（或复用一个），并通过 `sessions.input`（[session-access](../contracts/session-access.md)）把任务提示词写成带自身来源标记的 Queue 输入，方式与 Collaboration 访问其成员相同。Session 部分以 `toolContribution` 向交互式 leader Session 提供 `schedule` 工具（风险 `persistent_configuration`）。运维方使用管理级 `schedule.*` 方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。Scheduler 不写自己的 Timeline 事件：一次运行的结果从运行 Session 的历史中读取，并作为运行结果事件通知发布。
+Scheduler 把定时任务及其运行历史保存在自己的进程存储 [`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage) 中。守护进程存活且某个窗口到期时，进程部分通过 `sessions.launch` 创建一个非交互 Session（或复用一个），并通过 `sessions.input`（[session-access](../contracts/session-access.md)）把任务提示词写成带自身来源标记的 Queue 输入，方式与 Collaboration 访问其成员相同。Session 部分以 `toolContribution` 向交互式 leader Session 提供 `schedule` 工具（风险 `persistent_configuration`）。运维方使用 `schedule.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。Scheduler 不写自己的 Timeline 事件：一次运行的结果从运行 Session 的历史中读取，并作为运行结果事件通知发布。
 
 ## 1. 结构
 
@@ -14,8 +14,8 @@ flowchart LR
     Out["运行结果事件 scheduled_run_outcomes"]
     Agents["Agents：sessions（launch、input、history、idle、stop、withdraw）"]
     Rpc["Rpc 方法表"]
-    Store["进程存储（App Server）"]
-    Listen["监听方，如 Notifications（无依赖）"]
+    Store["进程存储：pluginFiles（扩展）"]
+    Listen["监听方：运行 Session 的 Notifications 实例（无依赖）"]
   end
   subgraph SESS["交互式 leader Session"]
     Tool["SchedulerSession：toolContribution key schedule"]
@@ -35,14 +35,14 @@ flowchart LR
   class Sched,MM,Out,Tool new
 ```
 
-任务和窗口跨越多个 Session，因此属于进程（[ADR 002](../../adr/002-plugin-scope.md) D1）；向 Session 提供工具是 Session 部分的职责（D2）。Session 部分依赖进程部分（外层作用域）。进程部分依赖 Agents（服务 `sessions`）和 App Server 进程存储；它只通过 `sessions` 访问运行 Session。依赖遵循作用域（D3）：Agents 重载会重载 Scheduler，Scheduler 重载会重载其 Session 部分，并使其在途轮次失败；两者都是罕见的结构性事件，属于已接受并有文档记录的代价。任务编辑属于业务配置（D4）：数据更新加通知，绝不重载。
+任务和窗口跨越多个 Session，因此属于进程（[ADR 002](../../adr/002-plugin-scope.md) D1）；向 Session 提供工具是 Session 部分的职责（D2）。Session 部分依赖进程部分（外层作用域）。进程部分依赖 Agents（服务 `sessions`）和 `pluginFiles`（扩展）；它只通过 `sessions` 访问运行 Session。依赖遵循作用域（D3）：Agents 重载会重载 Scheduler，Scheduler 重载会重载其 Session 部分，并使其在途轮次失败；两者都是罕见的结构性事件，属于已接受并有文档记录的代价。任务编辑属于业务配置（D4）：数据更新加通知，绝不重载。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Scheduler` | 进程（控制节点） | `sessions`（Agents；`launch` 带 `policy`）、App Server 进程存储 | 任务存储、定时器、运行跟踪器；`managementMethods` key `schedule`；进程事件 `scheduled_run_outcomes` |
-| `SchedulerSession` | Session，Scheduler 启用时安装 | `Scheduler`、Session 配置 | `toolContribution` key `schedule`，仅在 `interactive` 且非 Collaboration 成员时声明 |
+| `Scheduler` | 进程（控制节点） | `sessions`（Agents；`launch` 带 `policy`）、`pluginFiles`（扩展） | 任务存储、定时器、运行跟踪器；`scheduleJobs`（工具访问任务存储的服务，A.2）；`managementMethods` key `schedule`；进程事件 `scheduled_run_outcomes` |
+| `SchedulerSession` | Session，Scheduler 启用时安装 | `scheduleJobs`（`Scheduler`）、Session 配置 | `toolContribution` key `schedule`，仅在 `interactive` 且非 Collaboration 成员时声明 |
 
-**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段 `interactive`/`resourceNode`/`createdBy`、带来源 raw 块的 `input`、固定前缀 `history`、`idle`、`stop`、`withdraw`）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、Permission 类别 `persistent_configuration`（FullAccess 允许，E1）、App Server 进程存储（R8；现有的类型化服务，待 [#4](https://github.com/arcships/dim/issues/4) 暴露后可由 TypeScript 部分按名称访问）、[单树事件契约](../../../architecture/rust-agent/single-tree.md)。**此处定义的契约**：任务和运行格式、`schedule` 工具、`schedule.*` 方法、运行结果事件（A.6）、来源名 `scheduler`（标记 `dim-scheduler`，提交 id `scheduler:<run_id>`）。
+**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段 `interactive`/`resourceNode`/`createdBy`、带来源 raw 块的 `input`、固定前缀 `history`、`idle`、`stop`、`withdraw`）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、Permission 类别 `persistent_configuration`（FullAccess 允许，E1）、[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（R8：在现有的受信插件存储上增加二进制读写和格式版本；TypeScript 部分直接使用，Rust 部分通过同名服务使用）、[单树事件契约](../../../architecture/rust-agent/single-tree.md)。**此处定义的契约**：任务和运行格式、`schedule` 工具、`scheduleJobs` 服务、`schedule.*` 方法、运行结果事件（A.6）、来源名 `scheduler`（标记 `dim-scheduler`，提交 id `scheduler:<run_id>`）。
 
 ## 2. 数据与状态
 
@@ -192,6 +192,40 @@ sequenceDiagram
 
 `schedule` 由 Approval 和 Permission 按 `persistent_configuration` 准入；FullAccess 允许（E1），其他预设询问或拒绝。运行只写入输入；其工具在运行 Session 的 policy 下准入，上限如 3.3 所述，审批不预先授予。工具创建的任务记录 `created_by`，可供审查。任务不存储凭据。运行 Session 只使用自身资源节点的服务；Scheduler 不触及任何节点服务。任何具有管理访问权限的人都能读取任务提示词。
 
+## 8. 规则检查
+
+规则：[principles §1 与 §4](../../../architecture/rust-agent/principles.md)，[ADR 002](../../adr/002-plugin-scope.md) D1–D5。
+
+| 规则 | 本文如何符合 |
+| --- | --- |
+| §4.1 改别的模块拥有的状态时写指令事件 | Scheduler 只通过 `sessions` 改动运行 Session（输入、写 `input/withdraw` 的 `withdraw`、写 `stop/interrupt` 的 `stop`）；结果由 InputQueue 和 Loop 决定并写入。 |
+| §4.2 交接后不能撤回 | `input/applied` 之前撤回运行输入；之后（`notHeld`）Scheduler 只在读到 `input/consumed` 后使用 `stop`（§3.2）。 |
+| §4.3 只用 before 回调在写入前干预 | 不适用：Scheduler 不加入口检查，也不注册 before 回调；任务校验是它对自己方法和工具的边界校验。 |
+| §4.4 核心机制不带业务含义 | Scheduler 不需要带有自身含义的运行时改动；运行结果事件是它自己的进程事件。 |
+| §4.5 决定前读完整个批次 | 运行决定读取到 `sessions.idle` 截止点为止的历史，截止点是批次边界（A.5）。 |
+| §4.6 模型上下文只含交接后被读取的事件 | 运行提示词只作为已消费的 Queue 输入到达模型；被撤回的输入被删除，模型看不到。 |
+| §4.7 插件之间只通过公开事件和服务交互 | Scheduler 使用 `sessions`、`pluginFiles`（扩展）和自己的 `scheduleJobs`；Notifications 监听其公开事件，不形成依赖。 |
+| §4.8 向机制所有者提通用需求 | 跨语言命名进程事件在 §9 中提出；离线节点行为依赖 #5（[ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)）。 |
+| §4.9 只有后续决定要用的事实才进 Timeline | Scheduler 不写 Timeline 事件；任务和运行留在进程存储，运行结果是进程事件通知。 |
+| §1 Capability 与 App Server 边界 | 任务和运行是进程级的，不是 Capability；存储是 `pluginFiles` 插件，不是 App Server 服务。 |
+| ADR 002 D1 作用域跟随状态所有者 | 任务跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
+| ADR 002 D2 不设接线模块 | Rpc 收集 `managementMethods`，ToolRegistry 收集 `toolContribution`，监听方按名称订阅事件；没有接线模块。 |
+| ADR 002 D3 依赖跟随作用域 | Agents 和 Scheduler 的重载按作用域传播，是已接受并有记录的代价（§1）。 |
+| ADR 002 D4 结构性配置与业务配置分离 | 任务编辑和运行上限是使用时读取的业务数据；没有结构性变化。 |
+| ADR 002 D5 合同语言中立 | `scheduleJobs`、工具、方法和事件都是带数据形状的命名服务；Rust 形式见附录 G。 |
+
+## 9. 向机制所有者提出的需求
+
+### 9.1 跨语言的命名进程事件
+
+| 项 | 内容 |
+| --- | --- |
+| 被哪条规则挡住 | ADR 002 D5 与 principles §4.7：运行结果事件必须公开且语言中立，但进程事件目前是类型化的 Rust `EventKey<T>`；TypeScript 实现的 Scheduler 无法发出它，TypeScript 实现的 Notifications 也无法按名称监听。 |
+| 考虑过的现有机制 | Timeline 事件：不行，结果是进程级的，没有所属分支（§4.1，time-bus）。由 Scheduler 调用的命名服务：不行，会使 Scheduler 依赖其监听方（D2）。节点间的 rutis 事件转发：只转发类型化事件，不定义名称加数据的形式。 |
+| 需要的通用能力 | 用名称加可序列化数据标识进程事件，任何语言都能发出和监听，投递方式与类型化进程事件相同（实时、不可恢复）；不带业务含义。 |
+| 对序号、批次、中断、重载的影响 | 不涉及 Timeline 序号或批次；投递是实时的；未加载或正在重载的监听方会错过事件，发出方不受影响；监听不引起重载。 |
+| 由谁实现，对应 issue | rutis（事件总线与 rutis-bridge 运行时）；尚无 issue，待提出，相关的暴露工作见 [#4](https://github.com/arcships/dim/issues/4)。 |
+
 ## 附录 A. 接口细节
 
 ### A.1 记录
@@ -205,7 +239,9 @@ sequenceDiagram
 
 ### A.2 工具 `schedule`
 
-`toolContribution` key `schedule`，仅由 `SchedulerSession` 在配置为 `interactive: true` 且无成员角色的 Session 中注册（A9），因此运行 Session 和成员永远看不到它，运行也无法调度更多运行。`declaration(): sync -> ToolDeclaration` 返回下列参数，所有动作的风险均为 `persistent_configuration`（A10）；`execute(ToolCall): async -> ToolResult` 调用进程部分。取消即消费方丢弃该调用。
+`toolContribution` key `schedule`，仅由 `SchedulerSession` 在配置为 `interactive: true` 且无成员角色的 Session 中注册（A9），因此运行 Session 和成员永远看不到它，运行也无法调度更多运行。`declaration(): sync -> ToolDeclaration` 返回下列参数，所有动作的风险均为 `persistent_configuration`（A10）；`execute(ToolCall): async -> ToolResult` 调用进程部分的 `scheduleJobs` 服务。取消即消费方丢弃该调用。
+
+`scheduleJobs`，进程作用域，无 key，在此定义：`call(JobRequest): async -> JobReply`，其中 `JobRequest = {action, job_id?, job?, enabled?, limit?, caller: {sessionId, cwd, resourceNode}}` 使用下列参数，`JobReply = {content: string, records: JSON}`，或附录 C 中的错误 `{code}`。取消即消费方丢弃该调用；已持久化的保存保留。
 
 | 参数 | 类型 | 规则 |
 | --- | --- | --- |
@@ -219,7 +255,7 @@ sequenceDiagram
 
 ### A.3 管理方法
 
-`managementMethods` key `schedule`：`describe(): async -> MethodDecl[]` 列出下列方法（级别 `management`，除 `list` 和 `history` 外均为 `mutating`）；`call(MethodCall): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为附录 C 中的代码。
+`managementMethods` key `schedule`：`describe(): async -> MethodDecl[]` 列出下列方法（除 `list` 和 `history` 外均为 `mutating`）；`call(MethodCall): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为附录 C 中的代码。
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
@@ -258,7 +294,7 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 
 ### A.6 运行结果事件（公共契约）
 
-名为 `scheduled_run_outcomes` 的进程事件；监听方按名称订阅，不形成对 Scheduler 的依赖。数据：
+名为 `scheduled_run_outcomes` 的进程事件；监听方按名称订阅，不形成对 Scheduler 的依赖。在 TypeScript 或 Rust 部分中按名称发出和监听，是 §9 中提出的需求。报告一次运行的监听方是运行 Session（`session_id`）的 Notifications 实例，由它发送 `schedule.ended`（[Notifications](Notifications.md)）。数据：
 
 | 字段 | 类型 |
 | --- | --- |
@@ -268,7 +304,7 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | `reason` | string，可选；固定的原因文本，绝不包含 Session 内容 |
 | `ended_at` | RFC 3339 时刻 |
 
-每次运行在其终态记录持久化后发出一次（A16、A17）。投递是实时且不可恢复的；未加载的监听方会错过该通知。通知不携带提示词或 Session 内容；`schedule.history` 是持久记录。
+每次运行在其终态记录持久化后发出一次（A16、A17）。投递是实时且不可恢复的；未加载的监听方会错过该通知。特别是，发出通知时运行 Session 未加载，就不会发送 `schedule.ended`，该通知丢失；这一点已接受，`schedule.history` 是持久记录（A18）。通知不携带提示词或 Session 内容；`schedule.history` 是持久记录。
 
 ## 附录 B. 完整冲突表
 
@@ -349,8 +385,9 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | A15 | 工具创建任务的上限在保存时捕获 | 在 E2 范围内的判断 | 每次运行重新解析 |
 | A16 | 运行结果是实时、不可恢复的通知 | Overview §5.11；判断 | 每个监听方的持久发件箱 |
 | A17 | 只有到达 `launching` 的运行才产生通知 | 判断 | 监听方看到每个窗口 |
+| A18 | `schedule.ended` 只由运行 Session 的 Notifications 实例投递；该 Session 未加载时丢失 | 用户决定（不增加进程级投递） | 由进程级监听方投递每个通知 |
 
-已决定：运行 policy（E2）、FullAccess 允许 `persistent_configuration`（E1）、守护进程存活（E5）、进程存储（R8）、撤回（R7）、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
+已决定：运行 policy（E2）、FullAccess 允许 `persistent_configuration`（E1）、守护进程存活（E5）、进程存储使用 `pluginFiles`（扩展）（R8）、撤回（R7）、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 ## 附录 F. 待对齐问题
 
@@ -369,6 +406,8 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
 | `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` 租约，然后 `Session::input`、`local_page`、`idle`、`stop`、`service::<InputQueue>(branch).withdraw` |
 | `scheduled_run_outcomes` | Scheduler 公共类型 crate 中的 `pub fn scheduled_run_outcomes() -> EventKey<RunOutcome>`；`emit(host_ctx, &key, Arc::new(outcome))`，监听方 `on(host_ctx, &key, listener)` |
+| `scheduleJobs` | 由 `Scheduler` 提供、由 `SchedulerSession` 使用的进程级命名服务 |
+| 进程存储 | 在 `apply` 中打开的 `pluginFiles`（扩展）作用域 |
 | 定时器任务 | 在 `ctx.effect` 中 spawn |
 
 ```rust

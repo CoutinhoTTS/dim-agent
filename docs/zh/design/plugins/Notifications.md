@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview](../overview.md)（Notifications）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-Notifications 是一个 Session 插件。当其交互式 leader Session 上的任务完成或失败、有审批待处理或有问题等待回答时，它向已配置的外部渠道（Slack、飞书）投递消息；它依据 Scheduler 的运行结果事件通知，报告在其 Session 中结束的定时运行；并以 key 为 `notify` 的 Session 级 `toolContribution` 服务向模型提供 `notify` 工具。它只通过既有的 Session 广播观察其 Session，以分支的固定前缀确认每个触发，不向任何 Timeline 写入。终端内提醒（响铃、聚焦）属于 CLI。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+Notifications 是一个 Session 插件。当其交互式 leader Session 上的任务完成或失败、有审批待处理或有问题等待回答时，它向已配置的外部渠道（Slack、飞书）投递消息；它依据 Scheduler 的运行结果事件通知，报告在其 Session 中结束的定时运行；以 key 为 `notify` 的 Session 级 `toolContribution` 服务向模型提供 `notify` 工具；并通过 key 为 `notifications` 的 Session 级 `sessionMethods` 服务提供 `notifications.test`（[session-boundary](../contracts/session-boundary.md)）。它只通过既有的 Session 广播观察其 Session，以分支的固定前缀确认每个触发，不向任何 Timeline 写入。终端内提醒（响铃、聚焦）属于 CLI。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 1. 结构
 
@@ -13,6 +13,7 @@ flowchart LR
     CRED["Settings 凭据引用解析器"]
     Settings["notifications 文档（Settings 业务来源）"]
     META["SessionStore 标题元数据"]
+    RPC["Rpc"]
   end
   subgraph SESS["Session"]
     NP["Notifications"]:::new
@@ -29,14 +30,15 @@ flowchart LR
   NP -->|"使用时读取"| Settings
   NP -->|"标签"| META
   NP --> EXT
+  RPC -->|"notifications.test 经 Session 分派"| NP
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Notifications` | Session（仅启用时安装） | 其所在 Session 的 Session 广播、TimelineTree、`SessionConfig`；进程服务 Settings 业务来源与凭据解析器、SessionStore 标题元数据；监听（不依赖）Scheduler 的 `scheduled_run_outcomes` 事件 | `toolContribution` key `notify`（风险 `outbound_message`），在其 `provides` 中声明；触发名 `turn.completed`、`turn.failed`、`approval.pending`、`question.pending`、`schedule.ended`；业务文档 `notifications` |
+| `Notifications` | Session（仅启用时安装） | 其所在 Session 的 Session 广播、TimelineTree、`SessionConfig`；进程服务 Settings 业务来源与凭据解析器、SessionStore 标题元数据；监听（不依赖）Scheduler 的 `scheduled_run_outcomes` 事件 | `toolContribution` key `notify`（风险 `outbound_message`）和 `sessionMethods` key `notifications`（`notifications.test`），在其 `provides` 中声明；触发名 `turn.completed`、`turn.failed`、`approval.pending`、`question.pending`、`schedule.ended`；业务文档 `notifications` |
 
-所有依赖都是既有的类型化服务；将它们以及 Scheduler 的事件按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作。运行结果以事件通知到达，而非依赖（[ADR 002 D2](../../adr/002-plugin-scope.md)）：没有 Scheduler 时 `schedule.ended` 触发不起作用。Settings 或 SessionStore 重载会重载 Notifications，并经 `notify` 重载 ToolRegistry 及其依赖方；这是可接受的（[D3](../../adr/002-plugin-scope.md)）。`notifications` 文档属于业务配置（[D4](../../adr/002-plugin-scope.md)）：使用时读取，从不触发重载。
+所有依赖都是既有的类型化服务；将它们以及 Scheduler 的事件按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。运行结果以事件通知到达，而非依赖（[ADR 002 D2](../../adr/002-plugin-scope.md)）：没有 Scheduler 时 `schedule.ended` 触发不起作用。Settings 或 SessionStore 重载会重载 Notifications，并经 `notify` 重载 ToolRegistry 及其依赖方；这是可接受的（[D3](../../adr/002-plugin-scope.md)）。`notifications` 文档属于业务配置（[D4](../../adr/002-plugin-scope.md)）：使用时读取，从不触发重载。
 
 ## 2. 数据与状态
 
@@ -108,7 +110,7 @@ sequenceDiagram
 
 ### 3.3 定时运行结束
 
-Scheduler 为每次结束的运行发出一个 `RunOutcome`。运行所在 Session（通知中的 `session_id`）的 Notifications 实例对其格式化并投递；其他 Session 的实例忽略它。无需读取前缀，非交互排除规则也不适用（A17）。
+Scheduler 为每次结束的运行发出一个 `RunOutcome`。运行所在 Session（通知中的 `session_id`）的 Notifications 实例对其格式化并投递；其他 Session 的实例忽略它。无需读取前缀，非交互排除规则也不适用。如果发出通知时运行 Session 未加载，该通知丢失；这是可接受的，`schedule.history` 仍是记录（A17）。
 
 ### 3.4 模型发送消息
 
@@ -126,6 +128,10 @@ sequenceDiagram
 ```
 
 模型只能在用户配置的渠道中选择，从不能指定 URL。
+
+### 3.5 渠道测试
+
+客户端调用 `notifications.test {sessionId, channel?}`；Rpc 与任何 Session 方法一样经 Session 分派。Notifications 通过正常投递路径（发送时解析引用、重试、速率窗口）向该渠道发送固定文本 `[dim <label>] Test notification.`，回复 `{channel, delivered: true}` 或错误（A.5）。不向任何 Timeline 写入。
 
 ## 4. 时序与冲突
 
@@ -168,14 +174,39 @@ sequenceDiagram
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
 | `notify {message, channel?}` | `toolContribution`（Session，key `notify`），风险 `outbound_message` | 模型发起的、发往已配置渠道的消息 |
+| `notifications.test {sessionId, channel?}` | `sessionMethods`（Session，key `notifications`） | 向已配置渠道发送一条固定的测试消息 |
 | `scheduled_run_outcomes` | 被监听的进程事件（Scheduler 的契约；无依赖） | `schedule.ended` 触发 |
 | `notifications` 文档 | 业务配置，Settings 用户作用域，使用时读取 | 渠道、触发、延迟 |
 
-没有方法。渠道通过 `notify` 或真实触发发送来测试（A9）。
+渠道用 `notifications.test` 测试，它是 Session 方法，不是管理方法（A9）。
 
 ## 7. 安全
 
-`notify` 在 `outbound_message` 下逐次准入：FullAccess 允许；其他预设询问。渠道只来自 Settings 的用户作用域，从不来自项目文件或插件（A8），因此仓库无法定义外泄目标。凭据是在发送时解析的引用，从不记录或返回。事件触发的消息不携带 Session 内容，除非按渠道启用 `includeContent`。每个实例只看到自己 Session 的事件。
+`notify` 在 `outbound_message` 下逐次准入：FullAccess 允许；其他预设询问。渠道只来自 Settings 的用户作用域，从不来自项目文件或插件（A8），因此仓库无法定义外泄目标。凭据是在发送时解析的引用，从不记录或返回。事件触发的消息不携带 Session 内容，除非按渠道启用 `includeContent`。每个实例只看到自己 Session 的事件。`notifications.test` 只向用户配置的渠道发送固定文本；已配对的远程设备可以像调用任何 Session 方法一样调用它。
+
+## 8. 规则检查
+
+| 规则 | 本文如何遵守 |
+| --- | --- |
+| 原则 §4 第 1 条（改别人的状态写指令） | Notifications 不改其他模块的状态；`notify` 的结果由其所有者 ToolExecutor 写入。 |
+| 原则 §4 第 2 条（交接） | 不适用：Notifications 不接手任何对象，只读取事实。 |
+| 原则 §4 第 3 条（只用 before 回调） | 不在写入前干预；`notifications.test` 在自己的方法中检查自己的参数。 |
+| 原则 §4 第 4 条（核心不带业务含义） | 不改核心；触发是 Notifications 自己对公开事实的解读。 |
+| 原则 §4 第 5 条（读完整个批次） | 每次检查在延迟后读取固定前缀，读到触发事件所在批次的末尾。 |
+| 原则 §4 第 6 条（上下文只含交接后的事件） | 事件触发的消息不向上下文添加内容；`notify` 的结果只以 `step/tool-result` 事实进入。 |
+| 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、Settings、凭据解析器、SessionStore 标题元数据和 Scheduler 公开的事件通知。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 没有新需求；#4（含按名字获取 Scheduler 的事件）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。 |
+| 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Notifications 不写事件；投递记录只是诊断。 |
+| 原则 §1（Capability 与 App Server 边界） | Notifications 是放在自己插件包中的 Session Capability；`notifications.test` 是 Session 方法，不是管理方法。 |
+| ADR 002 D1（作用域跟随状态） | Session 作用域：触发属于 Session；未加载 Session 的运行结果通知丢失，这是可接受的（A17）。 |
+| ADR 002 D2（不设接线模块） | 没有接线模块；Scheduler 的结果通知被监听，不形成依赖。 |
+| ADR 002 D3（依赖跟随作用域） | Settings 和 SessionStore 位于外层作用域；它们重载会重载 Notifications，这是可接受的。 |
+| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`notifications` 文档是其自己 Settings 来源中的业务配置，使用时读取。 |
+| ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
+
+## 9. 向机制所有者提出的需求
+
+无。#4（运行时类型化服务和进程事件按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
 
 ## 附录 A. 接口细节
 
@@ -197,7 +228,7 @@ notifications.pendingDelaySeconds: u32  // default 10, 0..=3600 (A2)
 notifications.defaultChannel: string?   // used by `notify` without `channel`
 ```
 
-`*Ref` 字段是凭据引用；webhook URL 按凭据对待。只能经类型化的 Settings 操作变更；在那里校验；每次检查与发送时读取。
+`*Ref` 字段是凭据引用；webhook URL 按凭据对待。只通过 Settings 的类型化操作写入 Notifications 的业务来源，其 schema 由 Notifications 声明；在那里校验；每次检查与发送时读取。
 
 ### A.2 工具 `notify`
 
@@ -230,11 +261,21 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | --- | --- |
 | 监听 | 应用时：为 `turn/end`、`approval/request`、`question/asked` 注册 Session 广播监听器；为 `scheduled_run_outcomes` 注册过滤到本 Session 的监听器；二者在卸载时移除 |
 | 触发 | 对匹配的已启用渠道触发且不在去重集合中：启动一个归属插件生命周期的延迟检查 |
-| 检查 | 延迟后读取分支的固定前缀（`at_least` 事件序号）；分支已不存在 → 不做任何事 |
+| 检查 | 延迟后读取分支的固定前缀，读到触发事件所在批次的末尾；分支已不存在 → 不做任何事 |
 | 格式化 | 标签 = 有元数据标题时取标题，否则取 Session id（A7） |
 | 投递 | 发送时解析引用；HTTPS POST；网络错误、429、5xx 时以 1 s、4 s、16 s 重试；其他 4xx 不重试；每个 Session 每个渠道每分钟 20 条消息，超出部分丢弃并记诊断（A10） |
 | Timeline | 不写入，不登记 Dispatcher，无 `StateCell` |
 | 重载 / Session 卸载 | 延迟检查与投递随插件取消；已发出的请求从不重发（[时间总线](../../../architecture/rust-agent/time-bus.md)）；停机期间错过的事件不重放 |
+
+### A.5 `notifications.test`
+
+经 `sessionMethods`（Session，key `notifications`）提供：`describe()` 返回一个声明 `{name: "notifications.test", mutating: true}`；`call(MethodCall)` 处理它。
+
+| 参数 | 结果 | 错误 |
+| --- | --- | --- |
+| `{sessionId, channel?: string}`；没有 `channel` 时用 `notifications.defaultChannel` | `{channel, delivered: true}` | `invalid_params`、`unknown_channel`、`no_channel`、`delivery_failed`、`rate_limited`、`service_reloading`；分派错误见 [session-boundary](../contracts/session-boundary.md) |
+
+任何已配置的渠道都可以测试，不论 `allowTool` 和 `enabled` 的值。消息不含 Session 内容。取消请求会中止未完成的请求；投递可能已经发生，从不重发。
 
 ## 附录 B. 完整冲突表
 
@@ -254,7 +295,7 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | 压缩 | — | 无影响：检查读取事实 | — |
 | 子分支 | 子分支中的审批 | 会被通知；子分支的 `turn/end` 被忽略（A1） | Notifications |
 | 定时运行在本 Session 中结束 | 终态记录 < 通知 | 一个 `schedule.ended` | Scheduler；Notifications |
-| 无 Session 的运行（`session_id` 缺省）或运行 Session 未加载 | — | 不报告；`schedule.history` 仍是记录（A12） | — |
+| 无 Session 的运行（`session_id` 缺省）或运行 Session 未加载 | — | 不报告：通知丢失（可接受，A17）；`schedule.history` 仍是记录（A12） | — |
 | Scheduler 重载或不存在 | 无依赖 | 通知停止；Notifications 不受影响 | — |
 | 延迟期间分支关闭 | — | 不发送 | Notifications |
 | 延迟期间 Session 卸载或关闭 | — | 检查随插件取消（A4） | Lifecycle |
@@ -263,6 +304,8 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | 投递中途 Notifications 或依赖重载 | — | 取消，从不重发；`notify` 以 reloaded 结算（D3） | ToolExecutor |
 | 进程重启 | — | 已提交的 `notify` 调用不重新执行而结算 | ToolExecutor |
 | 延迟期间配置变更 | — | 在检查时读取 | Notifications |
+| Notifications 重载期间调用 `notifications.test` | — | `service_reloading`；不发送 | Rpc |
+| 发送后取消 `notifications.test` | send < cancel | 投递可能已经发生；从不重发 | Notifications |
 | 凭据引用无法解析 | — | 投递失败；诊断 | Notifications |
 | 资源节点离线 | — | 无影响 | — |
 | 客户端断开 | — | 无影响（A13） | — |
@@ -284,10 +327,11 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 2. 成员 Session 与 `interactive: false` 的 Session 不发送事件触发的通知。
 3. 延迟前已回应的审批不发送；未回应的发送一次；已取消的不发送。
 4. 有回答与无回答的 `question/asked`；没有 Questions 时不起作用。
-5. 完成、失败或超时的定时运行只从其运行 Session 发送一条 `schedule.ended`；没有 Scheduler 时该触发不起作用。
+5. 完成、失败或超时的定时运行只从其运行 Session 发送一条 `schedule.ended`；运行 Session 未加载时不发送；没有 Scheduler 时该触发不起作用。
 6. `notify`：未知渠道或无渠道时报错；发送并返回；FullAccess 允许 `outbound_message`，其他预设询问；投递前与投递期间中断。
 7. 5xx 重试，400 不重试，速率限制丢弃，凭据失败。
 8. `includeContent: false` 的消息不含 Session 文本；诊断不含正文或 URL。
+9. `notifications.test` 向指定或默认渠道发送一条固定消息；未知渠道返回 `unknown_channel`；已配对的远程设备可以调用它。
 
 ## 附录 E. 假设
 
@@ -301,14 +345,14 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | A6 | `notify` 参数 | 判断 | 不同的 schema |
 | A7 | 标签 = 有元数据标题时取标题，否则取 Session id | 判断 | 其他标签 |
 | A8 | 渠道只能在用户作用域配置 | 判断 | 项目渠道需要宿主本地批准 |
-| A9 | 没有测试方法 | ADR 002（无进程部件） | 管理方法需要进程部件 |
+| A9 | 渠道测试是 Session 方法 `notifications.test`，不是管理方法 | 维护者决定 | 管理方法需要进程部件 |
 | A10 | 重试 3 次（1/4/16 s）；每个 Session 每个渠道每分钟 20 条消息 | 判断 | 其他策略 |
 | A11 | 通知后待处理项被解决时不发后续消息 | 判断 | 额外消息 |
 | A12 | 尽力而为：无持久发件箱，重启后不恢复 | 判断 | 需要进程存储发件箱 |
 | A13 | 不论是否有客户端连接都发送 | 判断 | 需要连接契约 |
 | A14 | Slack 经 webhook 或 bot token + channel id；飞书经自定义机器人 webhook，可选签名 | 功能列表；模式为判断 | 其他适配器 |
 | A15 | 被抑制的 `turn.completed` 在之后出现 `input/deleted` 时不再重新评估 | 判断 | 撤回需要自己的触发 |
-| A17 | `schedule.ended` 由运行 Session 的实例依据 `RunOutcome.session_id` 投递，只含作业名与状态 | Scheduler 通知携带 `session_id`；判断 | 由一个进程部件统一监听所有运行 |
+| A17 | `schedule.ended` 由运行 Session 的实例依据 `RunOutcome.session_id` 投递，只含作业名与状态；该 Session 未加载时通知丢失 | Scheduler 通知携带 `session_id`；维护者决定（接受丢失） | 由一个进程部件统一监听所有运行 |
 
 ## 附录 F. 待对齐问题
 
@@ -316,13 +360,14 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | --- | --- |
 | 入站操作 | 从 Slack/飞书回答审批或问题不在范围内 |
 | 无 Session 的运行 | 在启动 Session 之前失败的运行不报告（A12） |
-| 按名称获取服务 | TypeScript 实现需要 Session 广播、固定前缀读取、SessionStore 元数据、Settings 与 Scheduler 的事件按名称暴露（[#4](https://github.com/arcships/dim/issues/4)） |
+| 按名称获取服务 | TypeScript 实现需要 Session 广播、固定前缀读取、SessionStore 元数据、Settings 与 Scheduler 的事件按名称暴露（[#4](https://github.com/arcships/dim/issues/4)，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)） |
 
 ## 附录 G. Rust 绑定
 
 | 语言中立 | Rust |
 | --- | --- |
 | `toolContribution` key `notify` | Session `ToolContribution`，以 `AgentBuilder::session_tool("notify")` 注册；ToolRegistry 收集 `Contributions<ToolContribution>`；经 `CancellationToken` 取消 |
+| `sessionMethods` key `notifications` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，位于 `SessionScope::named_key::<SessionMethodContribution>("notifications")` |
 | Session 广播监听器 | `session_channel(session_id)` 上的监听器，由 `ctx.effect` 移除 |
 | `scheduled_run_outcomes` | `on(host_ctx, &scheduled_run_outcomes(), listener)`，使用 `EventKey<RunOutcome>`（[Scheduler](Scheduler.md)） |
 | 延迟检查、投递 | `ctx.effect` 下的任务 |

@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.3](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
-Executes `!command` and `!!command` typed by the user in the Session's workspace on its resource node. The result of `!command` (command and bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client and diagnostics. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` through a `sessionMethods` service (Session scope, key `shell`) at level `management` ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session; a command ends on `shell.stop` or when the Session part ends (Session close or unload, reload, daemon exit).
+Executes `!command` and `!!command` typed by the user in the Session's workspace on its resource node. The result of `!command` (command and bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client and diagnostics. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` through a `sessionMethods` service (Session scope, key `shell`) as ordinary Session methods ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session; a command ends on `shell.stop` or when the Session part ends (Session close or unload, reload, daemon exit).
 
 ## 1. Structure
 
@@ -10,7 +10,7 @@ Executes `!command` and `!!command` typed by the user in the Session's workspace
 flowchart LR
   CLI["CLI / client"]
   subgraph P["Process"]
-    RPC["Rpc (entry dispatches level management)"]
+    RPC["Rpc (dispatches sessionMethods)"]
     DG["Diagnostics channel"]
   end
   subgraph S["Session scope"]
@@ -32,9 +32,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ShellInputPlugin` | Session | `S:SessionConfig` (`cwd`), `S:TreeCommands`, the HostPlatform of the Session's resource node (as WorkspaceTools uses it), diagnostics channel | `sessionMethods` key `shell` (level `management`), declared in the plugin's `provides` |
+| `ShellInputPlugin` | Session | `S:SessionConfig` (`cwd`), `S:TreeCommands`, the HostPlatform of the Session's resource node (as WorkspaceTools uses it), diagnostics channel | `sessionMethods` key `shell`, declared in the plugin's `provides` |
 
-Contracts depended on: `sessionMethods` and per-call progress ([session-boundary](../contracts/session-boundary.md)); `Branch::input` with boundary validation ([interrupt](../../architecture/rust-agent/interrupt.md)); `HostPlatform::spawn(ProcessSpec)`, `ProcessTree::{stdout, stderr, wait, terminate}`; the node's exec shell as business configuration read at each spawn ([ADR 002](../../adr/002-plugin-scope.md) "Existing plugins"); isolation (overview Appendix C supplement); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a call on an offline resource node fails `node_unavailable` while ShellInput stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5)); shell argv construction of the `exec` tool ([exec.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs), exposed as a HostPlatform helper, A2).
+Contracts depended on: `sessionMethods` and per-call progress ([session-boundary](../contracts/session-boundary.md)); `Branch::input` with boundary validation ([interrupt](../../architecture/rust-agent/interrupt.md)); the HostPlatform process service (start a process tree, read its output, wait for exit, terminate the tree; Rust names in Appendix G); the node's exec shell as business configuration read at each spawn ([ADR 002](../../adr/002-plugin-scope.md) "Existing plugins"); isolation (overview Appendix C supplement); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a call on an offline resource node fails `node_unavailable` while ShellInput stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement on [#5](https://github.com/arcships/dim/issues/5), stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)); shell argv construction of the `exec` tool ([exec.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs), exposed as a HostPlatform helper, A2).
 
 Contracts defined here: the `shell.*` methods, the source marker `dim-shell-input` (kind `command`) and the `submissionId` prefix `shell-input:`.
 
@@ -150,21 +150,56 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `shell.run` | `sessionMethods` (Session, key `shell`), level `management`, progress | Run a command (`record` or `private`), stream output, return the result |
-| `shell.stop` | Same, level `management` | Stop a run by `runId`; idempotent |
-| `shell.list` | Same, level `management` | Running runs of the Session |
+| `shell.run` | `sessionMethods` (Session, key `shell`), progress | Run a command (`record` or `private`), stream output, return the result |
+| `shell.stop` | Same | Stop a run by `runId`; idempotent |
+| `shell.list` | Same | Running runs of the Session |
 | Marker `dim-shell-input` kind `command` | Input convention | Model-visible recorded result |
 | CLI `!` / `!!` | Client | Maps prefixes to `shell.run` modes |
 
 ## 7. Security
 
-`!` and `!!` execute arbitrary commands as the service user on the resource node without Approval (overview §5.3). Authority comes from the entry dispatching level `management`; exporting it grants host administration. Paired remote devices may call Session methods, but `shell.*` is level `management` and RemoteGateway does not dispatch it. The node's isolation applies (host-local, never from the Timeline). For `!`, command text and output are written to the Timeline and replayed to the model; users must avoid printing secrets. The environment is the service's, never forwarded from clients. Diagnostics carry metadata and the bounded tail only (A13).
+`!` and `!!` execute arbitrary commands as the service user on the resource node without Approval (overview §5.3). `shell.*` are ordinary Session methods: any client with access to the Session may call them, including paired remote devices (decision E3), so pairing a device or granting Session access grants command execution on that Session's resource node. Session methods have no level; only management methods are withheld from paired devices ([session-boundary](../contracts/session-boundary.md)). The node's isolation applies (host-local, never from the Timeline). For `!`, command text and output are written to the Timeline and replayed to the model; users must avoid printing secrets. The environment is the service's, never forwarded from clients. Diagnostics carry metadata and the bounded tail only (A13).
+
+## 8. Rule check
+
+Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md) D1–D5.
+
+| Rule | How this document complies |
+| --- | --- |
+| §4.1 Command events for others' state | ShellInput changes no other module's state; its only Timeline effect is an ordinary input that InputQueue and Loop handle. |
+| §4.2 No recall after handoff | The recorded input is written once and never re-written; withdrawal goes through InputQueue's own command. |
+| §4.3 Only before callbacks, never block | Not applicable: ShellInput registers no before callback and adds no entry check; it validates only its own parameters. |
+| §4.4 No business meaning in core | Rpc, InputQueue and Loop need no change; the marker is an ordinary raw block. |
+| §4.5 Read the whole batch | Not applicable: ShellInput reads no Timeline event. |
+| §4.6 Context only from handed-off events | The output reaches the model only after InputQueue adopts and Loop consumes the input; `!!` output never does. |
+| §4.7 Public events and services only | ShellInput uses only `Branch::input`, `S:TreeCommands`, `SessionConfig` and HostPlatform. |
+| §4.8 Requirements to mechanism owners | Run-as-activity for idle unload is raised in §9; #5 is linked. |
+| §1 Capability and App Server boundary | ShellInput is a Session Capability in its own crate; Rpc only dispatches `sessionMethods`. |
+| ADR 002 D1 Scope | A run is Session work on the Session's resource node, so the plugin is Session scoped. |
+| ADR 002 D2 No wiring modules | Rpc reaches `shell.*` through the Session's `sessionMethods` by name; nothing names ShellInput. |
+| ADR 002 D3 Scope dependencies | Dependencies are Session services; a reload terminates runs, which is accepted. |
+| ADR 002 D4 Configuration | The exec shell is business configuration read at each spawn; nothing reloads on change. |
+| ADR 002 D5 Language-neutral contracts | Methods, marker and recorded input are neutral; Appendix G is the Rust binding. |
+
+## 9. Requirements raised to mechanism owners
+
+### R1. Session work reported as activity for idle unload (Agents)
+
+| Item | Content |
+| --- | --- |
+| Blocked by | ADR 002 D1 (a run is Session work and ends with the Session part) and lifecycle rule "detaching a client is not closing a Session": after the caller disconnects, nothing keeps the Session from idle unload, which terminates a long `!` run. |
+| Existing mechanisms considered | The per-call `SessionUse` lease Rpc holds (released when the call is dropped, A12); a running turn (a `!` run is not a turn); a process-level owner for runs (moves Session work out of its scope, D1). |
+| Generic capability | A Session part can hold an activity handle on its own Session; Agents does not idle-unload a Session while any handle is held. The handle carries no business meaning and is released by `ctx.effect`. |
+| Effect on sequence, batch, interrupt, reload | None on sequence or batch. Interrupt: unchanged (runs ignore turn interrupts). Reload: the handle is released with the part; close still terminates runs. |
+| Owner and issue | Agents (`AgentIndex`, App Server) with the runtime Session facade; no issue filed yet. |
+
+Linked: #5, including termination of an imported HostPlatform's process trees when the link drops ([ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)).
 
 ## Appendix A. Interface details
 
 ### A.1 Methods
 
-Service `sessionMethods`, Session scope, key `shell`. `describe()` returns one `MethodDecl` per method with `level: management`, `notifications: []`, `reply: direct`; `shell.run` has `mutating: true`, `interruption: report`, `progress: true`; `shell.stop` has `mutating: true`; `shell.list` has `mutating: false`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; progress items are sent on the call before the reply; errors are `MethodError` data (Appendix C). A dropped call (client gone) does not stop the run (A12).
+Service `sessionMethods`, Session scope, key `shell`. `describe()` returns one `MethodDecl` per method with `notifications: []`, `reply: direct`; `shell.run` has `mutating: true`, `interruption: report`, `progress: true`; `shell.stop` has `mutating: true`; `shell.list` has `mutating: false`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; progress items are sent on the call before the reply; errors are `MethodError` data (Appendix C). A dropped call (client gone) does not stop the run (A12).
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -244,7 +279,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | Resource node lost mid-run | — | Status `failed`; for `record`, partial output written with `status="failed"` (A6) | ShellInput |
 | Duplicate or late `stop` | — | `{stopped: false}` | ShellInput |
 | Client detach or disconnect | — | Run continues and is recorded or discarded; progress dropped (A12) | ShellInput |
-| Paired remote device | — | `unknown_method`: RemoteGateway does not dispatch level `management` | Rpc |
+| Paired remote device | — | Allowed like any client with Session access (E3); the run behaves as from a local client | ShellInput |
 | Exec shell changed mid-run | — | Run keeps its shell; next spawn reads the new value | HostPlatform |
 
 ## Appendix C. Errors and recovery
@@ -257,7 +292,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | `invalid_params` | Empty command, command over 64 KiB, `runId` not `[A-Za-z0-9-]{1,64}` |
 | `session_closed` / `branch_missing` | Session or branch gone at start |
 | `node_unavailable` | The resource node is unreachable |
-| `unknown_method` | ShellInput not enabled in the Session, or level not dispatched by the entry |
+| `unknown_method` | ShellInput not enabled in the Session |
 | `service_reloading` | The service is reloading at start |
 | `operation_interrupted` | The Session part ended while the call ran |
 
@@ -279,7 +314,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 7. Branch close: `recorded: null`. Session close: tree terminated, nothing written.
 8. Session reload and daemon restart mid-run: tree terminated, nothing written, no re-execution.
 9. Offline node: `node_unavailable` for that Session only; ShellInput is not reloaded and a later call succeeds once the node is back.
-10. Deleted X (`input/deleted`) is never consumed; remote entry: `unknown_method`.
+10. Deleted X (`input/deleted`) is never consumed; a paired remote device can run and stop a command.
 11. Changing the exec shell: the next run uses the new shell without reloading anything.
 
 ## Appendix E. Assumptions
@@ -295,7 +330,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | A7 | `exec` preview bounds (2000 lines, 50 KiB) | Existing `exec` constants | Separate limit |
 | A8 | Terminal escapes stripped from model-visible text | Judgment | Escapes reach the model |
 | A9 | Progress through the call's progress channel, rate-coalesced | [session-boundary](../contracts/session-boundary.md); coalescing is judgment | Output only at completion |
-| A10 | A run is Session work: it ends with the Session part (close, idle unload, reload) | ADR 002 D1 (Session scope), D3 | Runs would need a process owner |
+| A10 | A run is Session work: it ends with the Session part (close, reload, and idle unload until R1 in §9 exists) | ADR 002 D1 (Session scope), D3 | Runs would need a process owner |
 | A11 | Clients deduplicate by `runId` via `session.input_lookup` | Session public interface | Possible duplicate input |
 | A12 | Client disconnect does not stop a run | Lifecycle ("connection close keeps Session work") | Disconnect stops runs |
 | A13 | Diagnostics carry only metadata and the bounded tail | Judgment | Full output in diagnostics |
@@ -305,8 +340,6 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 | # | Question | Description |
 | --- | --- | --- |
 | F1 | Overview §5.3 end conditions | Overview names stop and daemon exit; this design also ends runs when the Session part ends |
-| F2 | Idle unload during a run | Whether AgentIndex treats a running command as activity; otherwise idle unload terminates it (A10) |
-| F3 | Remote node tree termination | Whether an imported HostPlatform kills process trees when the link drops (#5) |
 
 ## Appendix G. Rust binding
 
@@ -317,6 +350,7 @@ ShellInput is implemented in Rust.
 | `sessionMethods` key `shell` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("shell")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)`; progress = `CallChannel::progress` |
 | Recorded input (A.3) | `Branch::input` through `S:TreeCommands` |
 | Unload disposer | `ctx.effect` |
+| Process service | `HostPlatform::spawn(ProcessSpec)` returning `ProcessTree` with `stdout`, `stderr`, `wait`, `terminate` |
 
 ```rust
 branch.input(InputMessage {

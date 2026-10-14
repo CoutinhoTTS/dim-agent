@@ -29,7 +29,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `Web` | Session（仅启用时安装） | Settings 业务来源（`web` 段）与凭据引用解析器；诊断通道 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
 
-**依赖的契约：** `toolContribution`（附录 A.1）；Settings 业务来源与凭据引用解析器；由 Permission 读取的 `ToolDefinition.risk = "network"`（既有，[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。**本文定义的契约：** 工具名称、参数与结果格式；`web.*` 业务配置。Settings 与诊断通道是既有的类型化服务；将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作。
+**依赖的契约：** `toolContribution`（附录 A.1）；Settings 业务来源与凭据引用解析器；由 Permission 读取的 `ToolDefinition.risk = "network"`（既有，[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。**本文定义的契约：** 工具名称、参数与结果格式；`web.*` 业务配置。Settings 与诊断通道是既有的类型化服务；将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
 
 **重载。** Web 只依赖外层作用域（Settings）。启用、禁用或升级 Web，或 Settings 重载，会重载 Web，并经被收集的 `toolContribution` 服务重载 ToolRegistry 及其依赖方；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
@@ -153,7 +153,7 @@ sequenceDiagram
 | `web_fetch` | `toolContribution`（Session，key `web_fetch`），风险 `network` | 抓取一个公开的 `http(s)` URL；带分页的有界文本切片 |
 | `web.*` 配置 | Settings 来源中的业务配置，使用时读取 | 搜索服务、私有主机例外、代理 |
 
-没有方法，也没有 CLI 子命令：配置经 Settings 的类型化操作与 `/settings` 完成。细节见附录 A。
+没有 Session 方法、没有 `managementMethods`，也没有 CLI 子命令：配置经 Settings 的类型化操作与 `/settings` 完成。细节见附录 A。
 
 ## 7. 安全
 
@@ -163,6 +163,30 @@ sequenceDiagram
 - 凭据：引用在每次调用时解析；从不出现在声明、结果、`structuredContent`、诊断或错误中。
 - 经 URL 外泄是 `network` 类别的固有风险，由准入控制。
 - 使用 `web.proxy` 时，由代理自行解析名称；此时私有地址保护依赖代理（需向用户说明）。
+
+## 8. 规则检查
+
+| 规则 | 本文如何遵守 |
+| --- | --- |
+| 原则 §4 第 1 条（改别人的状态写指令） | Web 不改其他模块的状态；工具结果由其所有者 ToolExecutor 写入。 |
+| 原则 §4 第 2 条（交接） | 不适用：Web 不接手任何对象，只执行 ToolExecutor 交给它的调用。 |
+| 原则 §4 第 3 条（只用 before 回调） | 不在写入前干预；参数检查在工具处理函数内部。 |
+| 原则 §4 第 4 条（核心不带业务含义） | 不改核心；工具使用通用的 `toolContribution` 合同。 |
+| 原则 §4 第 5 条（读完整个批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
+| 原则 §4 第 6 条（上下文只含交接后的事件） | 结果只以 ToolExecutor 写入的 `step/tool-result` 事实进入模型。 |
+| 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolContribution`、Settings 业务来源和凭据解析器。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 没有新需求；#4 写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。 |
+| 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Web 不写事件；抓取缓存只在内存中。 |
+| 原则 §1（Capability 与 App Server 边界） | Web 是放在自己插件包中的 Session Capability；App Server 不含它的代码。 |
+| ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
+| ADR 002 D2（不设接线模块） | 没有接线模块；搜索适配器是内置的（A1）。 |
+| ADR 002 D3（依赖跟随作用域） | 唯一依赖 Settings 位于外层作用域；Settings 重载会重载 Web，这是可接受的。 |
+| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`web.*` 是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
+| ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
+
+## 9. 向机制所有者提出的需求
+
+无。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
 
 ## 附录 A. 接口细节
 
@@ -255,7 +279,7 @@ Characters: <start>-<end> of <total>
 | `web.fetch.allow_private_hosts` | string[] | `[]` |
 | `web.proxy` | string（URL） | 缺省 |
 
-每次调用时读取；变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。凭据只以 `secretRef` 出现。
+每次调用时读取；只通过 Settings 的类型化操作写入 Web 的业务来源，其 schema 由 Web 声明；变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。凭据只以 `secretRef` 出现。
 
 ### A.6 Timeline 与 Capability 机制
 
@@ -350,7 +374,7 @@ Characters: <start>-<end> of <total>
 
 | 问题 | 描述 |
 | --- | --- |
-| 按名称获取 Settings | TypeScript 实现需要 Settings 业务来源、凭据引用解析器与诊断通道按名称暴露（[#4](https://github.com/arcships/dim/issues/4)）；`toolContribution` 本身是语言中立的 |
+| 按名称获取 Settings | TypeScript 实现需要 Settings 业务来源、凭据引用解析器与诊断通道按名称暴露（[#4](https://github.com/arcships/dim/issues/4)，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）；`toolContribution` 本身是语言中立的 |
 
 ## 附录 G. Rust 绑定
 

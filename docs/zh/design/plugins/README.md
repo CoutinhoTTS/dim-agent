@@ -19,7 +19,7 @@
 | [Scheduler](Scheduler.md) | 作业、触发、历史 | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 定义、运行 | `workflow` 工具 | — | P2 |
 | [ExternalAgent](ExternalAgent.md) | 连接、ModelHost 连接类型 | — | — | P3 |
-| [AcpGateway](AcpGateway.md) | CLI 进程（客户端） | — | — | P3 |
+| [AcpGateway](AcpGateway.md) | —（CLI 进程中的客户端，不是守护进程插件） | — | — | P3 |
 | [RemoteGateway](RemoteGateway.md) | 远程入口、设备 | — | — | P3 |
 | [Modality](Modality.md) | 任务、实时连接 | — | — | P3 |
 | [PluginManager](PluginManager.md) | 插件市场、插件包 | — | — | P3 |
@@ -28,6 +28,6 @@
 
 | 作用域 | 部分 |
 | --- | --- |
-| 进程插件 | Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 运行在 CLI 进程 |
+| 进程插件 | Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
 | Session Capability | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Hooks、Notifications、Scheduler、Workflow |
 | 分支 Capability | Questions、Goal、Hooks |

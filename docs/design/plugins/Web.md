@@ -29,7 +29,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `Web` | Session (installed only when enabled) | Settings business source (section `web`) and credential-reference resolver; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
 
-**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web.*` business configuration. Settings and the diagnostics channel are existing typed services; exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work.
+**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web.*` business configuration. Settings and the diagnostics channel are existing typed services; exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
 
 **Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web and, through the collected `toolContribution` services, ToolRegistry and its dependents; in-flight calls are settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
 
@@ -153,7 +153,7 @@ Full table in Appendix B.
 | `web_fetch` | `toolContribution` (Session, key `web_fetch`), risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
 | `web.*` configuration | Business configuration in a Settings source, read at use | Search service, private-host exceptions, proxy |
 
-No methods and no CLI subcommand: configuration goes through Settings' typed operations and `/settings`. Details in Appendix A.
+No Session methods, no `managementMethods` and no CLI subcommand: configuration goes through Settings' typed operations and `/settings`. Details in Appendix A.
 
 ## 7. Security
 
@@ -163,6 +163,30 @@ No methods and no CLI subcommand: configuration goes through Settings' typed ope
 - Credentials: references resolved per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
 - With `web.proxy`, the proxy resolves names itself; private-address protection then depends on the proxy (stated to the user).
+
+## 8. Rule check
+
+| Rule | How this document complies |
+| --- | --- |
+| Principles §4 rule 1 (commands for others' state) | Web changes no other module's state; tool results are written by ToolExecutor, their owner. |
+| Principles §4 rule 2 (handover) | Not applicable: Web takes over no object; it only runs calls ToolExecutor hands it. |
+| Principles §4 rule 3 (before callbacks only) | No intervention before a write; argument checks are inside the tool handler. |
+| Principles §4 rule 4 (no business meaning in core) | No core change; the tools use the generic `toolContribution` contract. |
+| Principles §4 rule 5 (read the whole batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
+| Principles §4 rule 6 (context from handed-over events) | Results reach the model only as `step/tool-result` facts written by ToolExecutor. |
+| Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution`, the Settings business source and the credential resolver. |
+| Principles §4 rule 8 (requirements to mechanism owners) | No new requirement; #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
+| Principles §4 rule 9 (only facts later decisions use) | Web writes no event; its fetch cache is memory only. |
+| Principles §1 (Capability and App Server boundary) | Web is a Session Capability in its own plugin package; App Server holds none of its code. |
+| ADR 002 D1 (scope follows state) | Session scope: Web holds no state shared across Sessions. |
+| ADR 002 D2 (no wiring modules) | No wiring module; search adapters are built in (A1). |
+| ADR 002 D3 (dependencies follow scope) | Its only dependency, Settings, is in the enclosing scope; a Settings reload reloads Web, which is accepted. |
+| ADR 002 D4 (structural vs business configuration) | Enabling is structural; `web.*` is business configuration in Web's own Settings source, read at each call. |
+| ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
+
+## 9. Requirements raised to mechanism owners
+
+None. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
 
 ## Appendix A. Interface details
 
@@ -255,7 +279,7 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 | `web.fetch.allow_private_hosts` | string[] | `[]` |
 | `web.proxy` | string (URL) | absent |
 
-Read at each call; a change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
+Read at each call; written only through Settings typed operations into Web's business source, whose schema Web declares; a change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
 
 ### A.6 Timeline and capability mechanics
 
@@ -350,7 +374,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | Question | Description |
 | --- | --- |
-| Settings by name | The TypeScript implementation needs the Settings business source, credential-reference resolver and diagnostics channel exposed by name ([#4](https://github.com/arcships/dim/issues/4)); `toolContribution` itself is neutral |
+| Settings by name | The TypeScript implementation needs the Settings business source, credential-reference resolver and diagnostics channel exposed by name ([#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)); `toolContribution` itself is neutral |
 
 ## Appendix G. Rust binding
 

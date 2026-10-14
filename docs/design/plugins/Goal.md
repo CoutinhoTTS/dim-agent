@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.2](../overview.md#4-plugin-catalog). Phase: P2. Language: TypeScript first ([overview F.3](../overview.md#appendix-c-implementation-language)). Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
 
-Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The **branch part** owns the goal: its state exists only as a keyed raw input block on the branch Timeline, and continuation is decided from branch events consumed in order through the branch Dispatcher; it writes branch inputs. The **Session part** provides the `goal_update` tool as a `toolContribution` service (Session scope, key `goal_update`) and the `session.goal.*` methods through a `sessionMethods` service (Session scope, key `session.goal`) ([session-boundary](../contracts/session-boundary.md)); both resolve the branch part per call. Goal writes no events of its own and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal block, cover the feature-list wording "switch Goal mode". Every contract here is language-neutral (service name, scope, key, methods with data shapes), so a TypeScript implementation satisfies it without a hand-written Rust binding; the Rust form is [Appendix G](#appendix-g-rust-binding). Goal also uses the runtime's typed services (`S:TreeCommands`, `B:Timeline`, `B:Dispatcher`); exposing them by name to non-Rust capability parts is the work of [#4](https://github.com/arcships/dim/issues/4), and Goal starts in Rust until then ([overview §9](../overview.md#9-open-questions)).
+Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The **branch part** owns the goal: its state exists only as a keyed raw input block on the branch Timeline, and continuation is decided from branch events consumed in order through the branch Dispatcher; it writes branch inputs. The **Session part** provides the `goal_update` tool as a `toolContribution` service (Session scope, key `goal_update`) and the `session.goal.*` methods through a `sessionMethods` service (Session scope, key `session.goal`) ([session-boundary](../contracts/session-boundary.md)); both resolve the branch part per call. Goal writes no events of its own and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal block, cover the feature-list wording "switch Goal mode". Every contract here is language-neutral (service name, scope, key, methods with data shapes), so a TypeScript implementation satisfies it without a hand-written Rust binding; the Rust form is [Appendix G](#appendix-g-rust-binding). Goal also uses the runtime's typed services (`S:TreeCommands`, `B:Timeline`, `B:Dispatcher`); exposing them by name to non-Rust capability parts is the work of [#4](https://github.com/arcships/dim/issues/4) (requirement stated in [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)), and Goal starts in Rust until then. Goal writes its inputs through the branch's public input entry `Branch::input`.
 
 ## 1. Structure
 
@@ -27,7 +27,7 @@ flowchart LR
   GS -- "per call: calling or named branch" --> TC
   TC --> GB
   TL -- "turn/end, stop/interrupt, input/* in order" --> GB
-  GB -- "append input/message (source goal)" --> TL
+  GB -- "Branch::input: input/message (source goal)" --> TL
   GB -- "goal.maxContinuations per decision" --> Settings
   TL --> IQ
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
@@ -37,7 +37,7 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal` (level `session`) |
+| `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal` |
 | `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, Settings business source (enclosing scope) | `goal` (branch scope; `update`, `set`, `edit`, `pause`, `resume`, `clear`, `get`), used only by the Session part; the goal block and continuation formats under source `goal` |
 
 Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
@@ -73,10 +73,10 @@ Goal owns no persistent state. The goal of branch `B` is a pure function of the 
 | `interrupted` | A `stop/interrupt {scope: turn}` in `B`'s local events with sequence greater than `G` |
 | `last_operator` | Latest operator input: `input/message` with `user` content not marked by a source (A5) |
 | `count` | Goal continuation inputs with sequence greater than `max(G, last_operator)` |
-| `pending_driving` | Local `input/message` with effective mode Queue or Steer that has neither `input/consumed` nor `input/deleted` (session access §2 pending rule) |
+| `pending_driving` | Local `input/message` with effective mode Queue or Steer that has neither `input/consumed` nor `input/deleted` (session access §2 pending rule). Goal does not interpret `input/withdraw`, InputQueue's command; only InputQueue's result `input/deleted` removes an input |
 | `turn_open` | A `turn/start` after the latest `turn/end` |
 
-Runtime-only: the view and a branch-local mutex that serializes Dispatcher decisions, tool calls and method calls. Both are rebuilt by the load fold; a new generation never inherits them.
+Runtime-only: the view, a per-branch worker queue and a branch-local mutex. The Dispatcher handler only enqueues the delivered event and returns; it never takes the mutex or awaits. Goal's own worker task takes the mutex, advances the view and decides; tool and method calls take the same mutex, so decisions and writes stay serialized while only Goal's own tasks wait. All are rebuilt by the load fold; a new generation never inherits them.
 
 ## 3. Flows
 
@@ -93,15 +93,15 @@ sequenceDiagram
   CLI->>Rpc: session.goal.set
   Rpc->>GS: sessionMethods call(MethodCall)
   GS->>G: set(objective) on the named branch
-  G->>TL: append active block (Queue)
+  G->>TL: Branch::input active block (Queue)
   TL-->>IQ: Dispatcher: input/applied, turn/start, input/consumed
   IQ->>TL: turn/end completed at N
   TL-->>G: Dispatcher delivers turn/end N
   Note over G: C1..C6 over events consumed through N
-  G->>TL: append continuation (Queue)
+  G->>TL: Branch::input continuation (Queue)
 ```
 
-The continuation is appended from Goal's Dispatcher handler after the decision; InputQueue and Loop consume it through their own subscriptions. The handler appends and returns without awaiting dispatch.
+The continuation is written by Goal's worker after the decision; InputQueue and Loop consume it through their own subscriptions. The Dispatcher handler only enqueues and returns.
 
 ### 3.2 Completion through `goal_update`
 
@@ -116,7 +116,7 @@ sequenceDiagram
   TE->>GS: toolContribution execute(ToolCall)
   GS->>G: update(completed) on the calling branch
   Note over G: require C1
-  G->>TL: append completed block (Append), committed
+  G->>TL: Branch::input completed block (Append), committed
   GS-->>TE: ToolResult Goal marked completed.
   TE->>TL: step/tool-result after the whole batch
   Note over TL: next turn/end sees status completed, no continuation
@@ -134,7 +134,7 @@ sequenceDiagram
   User->>TL: stop/interrupt scope turn at M
   TL-->>G: Dispatcher delivers stop/interrupt M
   Note over G: G active, owner B, G before M
-  G->>TL: append paused block reason interrupted (Append)
+  G->>TL: Branch::input paused block reason interrupted (Append)
 ```
 
 `scope: branch` interrupts are ignored: the branch is closing.
@@ -168,6 +168,7 @@ A reload of either part follows a rare structural operation. A Session part relo
 | --- | --- | --- | --- |
 | User Queue/Steer input pending at decision | input < `turn/end` N, unconsumed | C5 fails: no continuation; the user's turn's end decides, count reset | Goal |
 | Driving input deleted | input < `input/deleted` < N | Not pending; continuation proceeds | InputQueue; Goal |
+| Driving input deleted after N (for example a prompt withdrawn by a Hook in its own batch) | input < N < `input/deleted` | C5 stopped at N; consuming `input/deleted` takes N's decision again; continuation if C1–C6 hold | InputQueue; Goal |
 | Another source's Queue follow-up after the same `turn/end` | both after N | Two Queue inputs, two turns in order; at most one continuation per `turn/end` | InputQueue; Goal |
 | Child cut after the goal block | consumed < cut | Child sees the parent's goal as background; no continuation; `goal_update` there returns the owner error | Goal |
 
@@ -195,7 +196,7 @@ Exact texts: [Appendix A.5](#a5-model-visible-texts).
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `goal_update {status, summary}` | `toolContribution` (Session, key `goal_update`), risk `session` | Model reports completion or blocking; writes the terminal block |
-| `session.goal.set/edit/pause/resume/clear` | `sessionMethods` (Session, key `session.goal`), level `session` | User controls the goal; each writes one block |
+| `session.goal.set/edit/pause/resume/clear` | `sessionMethods` (Session, key `session.goal`) | User controls the goal; each writes one block |
 | `session.goal.get` | Same service | Current `GoalView` of a branch, replaces any "mode" query (A8) |
 | `goal` | Branch service, internal to Goal | Goal state, decisions and writes |
 | `goal.maxContinuations` | Business configuration (Settings) | Continuation limit, read at each decision |
@@ -205,6 +206,33 @@ Details: [Appendix A](#appendix-a-interface-details).
 ## 7. Security
 
 Goal writes only `input/message` under source `goal` on its own branch; resulting turns run under the Session's Permission and Approval policy, and a goal grants no authority. Users cannot forge goal blocks: `session.submit` accepts no raw blocks and the marker renderer escapes the objective. `goal_update` is admitted under `session`. Diagnostics record Session id, branch id, decision and reason, never objective text.
+
+## 8. Rule check
+
+Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md) D1–D5.
+
+| Rule | How this document complies |
+| --- | --- |
+| §4.1 Command events for others' state | Goal writes only its own inputs; it never deletes or applies inputs, and it relies on InputQueue's `input/deleted` rather than reading `input/withdraw`. |
+| §4.2 No recall after handoff | Goal never withdraws its continuation; a continuation applied after an interrupt runs one extra turn and the later `paused` block ends the goal. |
+| §4.3 Only before callbacks, never block | Not applicable: Goal registers no before callback and adds no entry check. |
+| §4.4 No business meaning in core | Goal needs no change to Timeline, Dispatcher, InputQueue or Loop; its markers are ordinary raw blocks. |
+| §4.5 Read the whole batch | Decisions on `turn/end`, `stop/interrupt` and `input/deleted` are taken after the whole batch is consumed. |
+| §4.6 Context only from handed-off events | Goal blocks and continuations reach the model only after adoption; deleted inputs never do. |
+| §4.7 Public events and services only | Goal reads only public `input/*`, `turn/*` and `stop/interrupt` contracts and writes through `Branch::input`. |
+| §4.8 Requirements to mechanism owners | The only requirement, #4, is stated in [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
+| §1 Capability and App Server boundary | Both parts are Capabilities in their own package; Rpc only dispatches `sessionMethods`. |
+| ADR 002 D1 Scope | The tool and methods are Session services; the goal and its decisions are branch state. |
+| ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect Goal's services by name and scope; nothing names Goal. |
+| ADR 002 D3 Scope dependencies | The branch part depends on branch services and the enclosing Settings source; reloads refold the view and are accepted. |
+| ADR 002 D4 Configuration | `goal.maxContinuations` is business configuration read at each decision. |
+| ADR 002 D5 Language-neutral contracts | Tool, methods, branch service and block formats are neutral; Appendix G is one binding. |
+
+## 9. Requirements raised to mechanism owners
+
+| Requirement | Owner | Five items |
+| --- | --- | --- |
+| Runtime services exposed by name to non-Rust capability parts | Runtime, [#4](https://github.com/arcships/dim/issues/4) | See [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); Goal needs `S:TreeCommands`, `B:Timeline`, `B:Dispatcher` and `Branch::input` for a TypeScript implementation and starts in Rust until then |
 
 ## Appendix A. Interface details
 
@@ -218,11 +246,11 @@ Service `toolContribution`, Session scope, key `goal_update`: `declaration(): sy
 | Result | `ToolResult.content`: `Goal marked completed.` or `Goal marked blocked.`; errors: `No active goal on this branch.`, `The goal belongs to branch <id>; continue your assigned task without calling goal_update.` (A3) |
 | Risk category | `session` (writes only branch input) (A9) |
 | Offered | In every Session where Goal is enabled, all roles (A9) |
-| Handler | Resolves the calling branch's `goal` service through `S:TreeCommands` and calls `goal.update`; under the branch mutex requires C1 (error result otherwise), appends the terminal block in Append mode, awaits commit, returns. On cancellation before the append nothing is written; once appended the write stands |
+| Handler | Resolves the calling branch's `goal` service through `S:TreeCommands` and calls `goal.update`; under the branch mutex requires C1 (error result otherwise), writes the terminal block in Append mode through `Branch::input`, awaits commit, returns. On cancellation before the append nothing is written; once appended the write stands |
 
 ### A.2 Session methods
 
-Service `sessionMethods`, Session scope, key `session.goal`. `describe()` returns one `MethodDecl` per row with `level: session`, `interruption: report`, `progress: false`, `notifications: []`, `reply: direct`, and `mutating: true` except for `get`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; errors are `MethodError` data (Appendix C).
+Service `sessionMethods`, Session scope, key `session.goal`. `describe()` returns one `MethodDecl` per row with `interruption: report`, `progress: false`, `notifications: []`, `reply: direct`, and `mutating: true` except for `get`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; errors are `MethodError` data (Appendix C).
 
 | Method | Params | Result | Write |
 | --- | --- | --- | --- |
@@ -251,7 +279,7 @@ A consumer cancels by a cancel request; before the append nothing is written, af
 
 ### A.4 Continuation decision
 
-On delivery of `turn/end` at sequence `N` on branch `B`, over the events consumed through `N`:
+After the whole atomic batch containing `turn/end` at sequence `N` on branch `B` is consumed, over the events consumed through that batch:
 
 | # | Condition | If false |
 | --- | --- | --- |
@@ -263,7 +291,9 @@ On delivery of `turn/end` at sequence `N` on branch `B`, over the events consume
 | C6 | `count < maxContinuations` | Write `paused` (`limit`) and stop |
 | — | All hold | Write continuation (Queue) with `count + 1` |
 
-Delivery of `stop/interrupt` at `M` (`scope: turn`): if C1 holds and `G < M`, write `paused` (`interrupted`).
+Delivery of `stop/interrupt` at `M` (`scope: turn`), after its whole batch: if C1 holds and `G < M`, write `paused` (`interrupted`).
+
+Delivery of `input/deleted` for an input that made the decision of the latest `turn/end` stop at C5: take that decision again over the events consumed so far (C4 and C5 deduplicate; no continuation was written by the stopped decision).
 
 ### A.5 Model-visible texts
 
@@ -284,11 +314,11 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | Step | Path |
 | --- | --- |
 | Load | Subscribe to the Dispatcher (`"Goal"`), fix `S = committed()` under the gate, fold the prefix through `S` into the view, set `rebuilt = S`, provide `goal`. If the latest `turn/end` has no Goal write after it, take its decision once |
-| Consume | Under the branch mutex, skip `sequence <= rebuilt`, advance the view, decide on `turn/end` and `stop/interrupt` (A.4), append if needed and return |
-| Write | `input/message` with source `goal`, `submissionId: "goal:<uuid>"`, marker and mode, appended to the branch Timeline (capability inputs are appended directly; the producer guarantees validity, [interrupt](../../architecture/rust-agent/interrupt.md)) |
+| Consume | The Dispatcher handler enqueues the event and returns. The worker, under the branch mutex, skips `sequence <= rebuilt`, advances the view, and after each whole batch decides on `turn/end`, `stop/interrupt` and `input/deleted` (A.4), writing if needed |
+| Write | `input/message` with source `goal`, `submissionId: "goal:<uuid>"`, marker and mode, written through `Branch::input`, the branch's public input entry, which validates at the boundary and appends the `input/message` ([interrupt](../../architecture/rust-agent/interrupt.md)) |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed`. Goal never writes Steer |
-| Recheck | Decisions use only consumed events ([time-bus](../../architecture/rust-agent/time-bus.md) §4); later facts precede the write in sequence and are resolved by InputQueue and Loop |
-| Tool and method calls | Take the branch mutex, decide on the view, append, await commit, release |
+| Recheck | Decisions use only consumed events, each read after its whole batch ([time-bus](../../architecture/rust-agent/time-bus.md) §4); later facts precede the write in sequence and are resolved by InputQueue and Loop |
+| Tool and method calls | Take the branch mutex, decide on the view, write through `Branch::input`, await commit, release. Only Goal's worker and calls wait on the mutex; the Dispatcher handler never does |
 | Unload | Unload disposer ends the subscription; calls waiting on the mutex return `service_reloading` or Cancelled |
 | Restart, Session restore | Same as load; a committed unconsumed continuation is restored with the Session |
 
@@ -303,7 +333,8 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | Steer after `turn/end`, before its delivery to Goal | `turn/end` < steer | Steer starts a turn; C4 or C5 fails at a later decision; that turn's end decides | Goal |
 | Append input while idle | — | Not driving; continuation proceeds; Append consumed with its first request | Loop |
 | Driving input deleted before N | input < `input/deleted` < N | Excluded from `pending_driving`; continuation proceeds | InputQueue; Goal |
-| Driving input deleted after N | N < `input/deleted` | Decision already stopped at C5; the next `turn/end` or `resume` decides; an idle goal waits (A12) | Goal |
+| Driving input deleted after N | N < `input/deleted` | C5 stopped at N; consuming `input/deleted` takes N's decision again: continuation if C1–C6 hold | Goal |
+| Prompt withdrawn by a Hook in its own batch, `input/deleted` after N | input + `input/withdraw` < N < `input/deleted` | Same as above: Goal ignores the command and re-decides on InputQueue's `input/deleted` | InputQueue; Goal |
 | Goal's own continuation withdrawn by the user while held | continuation < `input/deleted` | Never applied or consumed, not pending; next decision may continue again; count includes it | Goal |
 | Other source's Queue follow-up after the same `turn/end` (e.g. Hooks) | both after N | Two turns in order; at most one continuation per `turn/end`; that input does not reset the count unless it is operator input | InputQueue; Goal |
 | Interrupt before N | interrupt < N | C2: `paused`, no continuation | Goal |
@@ -355,7 +386,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 1. Set on an idle branch starts a turn; normal end writes a continuation; `goal_update completed` ends continuation; the completed block precedes the batch's `step/tool-result`.
 2. Limit: with `maxContinuations = 2`, the third decision writes `paused (limit)`; operator input resets the count; a marked input from another source does not.
 3. Interrupt rows: before `turn/end`, committed between `turn/end` and the continuation (at most one extra turn), after start, after apply; during `goal_update` before and after its write.
-4. Pending Queue/Steer input suppresses continuation; Append does not; a deleted input does not suppress it.
+4. Pending Queue/Steer input suppresses continuation; Append does not; a deleted input does not suppress it; an input deleted after the `turn/end` it suppressed triggers that decision again.
 5. Branch part reload and restart after an undecided `turn/end`: exactly one decision.
 6. Compaction after `completed`: the baseline contains `completed`, not `active`.
 7. Child branch: inherits the block, no continuation, `goal_update` returns the owner error; a goal set on the child is independent.
@@ -396,3 +427,5 @@ Goal is TypeScript first; a Rust implementation (or a Rust start before #4) bind
 | `sessionMethods` key `session.goal` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("session.goal")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)` |
 | `goal` | `B:Goal`, key `BranchScope::key::<Goal>()`, async methods returning `Result<_, GoalError>` with one variant per error code of A.3 |
 | Unload disposer | `ctx.effect` |
+| Worker | One task per branch fed by the Dispatcher handler's queue |
+| Writes | `Branch::input` through `S:TreeCommands` |

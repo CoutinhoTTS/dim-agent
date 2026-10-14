@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview B.1](../overview.md)。阶段：P1。语言：Rust。作用域：Session + 分支（[ADR 002](../../adr/002-plugin-scope.md)）。
 
-模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `ask_user`）提供 `ask_user` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.question`）提供 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。它只安装在交互 Session 中。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并按序号判定回答与中断，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
+模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `ask_user`）提供 `ask_user` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.question`）提供 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。它只安装在交互 Session 中。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并依据自己消费到的 `stop/interrupt` 按序号判定回答与中断，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
 
 ## 1. 结构
 
@@ -27,7 +27,7 @@ flowchart LR
   TC --> QB
   TE -- "execute(ToolCall)，按批次 token 取消" --> QS
   QB -- "append_registered / append" --> TL
-  TL -- "question/answered（Dispatcher）" --> QB
+  TL -- "question/answered、stop/interrupt（Dispatcher）" --> QB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
@@ -35,12 +35,12 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:TreeCommands` | `toolContribution` key `ask_user`；`sessionMethods` key `session.question`（`session.question.respond`，级别 `session`） |
+| `QuestionsPlugin` | Session | `S:TreeCommands` | `toolContribution` key `ask_user`；`sessionMethods` key `session.question`（`session.question.respond`） |
 | `QuestionsBranchPlugin` | 分支 | `B:Timeline`、`B:Dispatcher` | `questions`（分支作用域；`ask`、`respond`），仅供 Session 部分使用 |
 
 安装：两个部分都在插件的 `provides` 中声明各自的服务；Session 部分那一行以 `SessionConfig.interactive` 为条件，因此 Agents 只在交互 Session 中安装它，并在 `SessionConfig.tools` 中列出 `ask_user`（由 `session.create` 设置；ACP、`exec`、Scheduler 和 Workflow 的 Session 都是非交互的）。分支部分随之安装。ToolRegistry 和 Rpc 按名称和作用域收集这些服务。
 
-依赖的契约：`toolContribution`（ToolRegistry 接受按名称提供的工具服务，[工具贡献](../../../architecture/rust-agent/tool-contributions.md)补充）；ToolExecutor 的批次 token 与结算；[single-tree](../../../architecture/rust-agent/single-tree.md) 的 `Timeline` 追加契约和 Dispatcher 协议（类型化运行时服务；Questions 用 Rust 实现）；`SessionConfig.interactive`（[session-access](../contracts/session-access.md)）；`sessionMethods`（[session-boundary](../contracts/session-boundary.md)）；客户端可见的动态事件（#2，A10）；Permission 风险类别 `session`。
+依赖的契约：`toolContribution`（ToolRegistry 接受按名称提供的工具服务，[工具贡献](../../../architecture/rust-agent/tool-contributions.md)补充）；ToolExecutor 的批次 token（只用于取消处理器）与结算；`stop/interrupt` 数据契约；[single-tree](../../../architecture/rust-agent/single-tree.md) 的 `Timeline` 追加契约和 Dispatcher 协议（类型化运行时服务；Questions 用 Rust 实现）；`SessionConfig.interactive`（[session-access](../contracts/session-access.md)）；`sessionMethods`（[session-boundary](../contracts/session-boundary.md)）；客户端可见的动态事件（#2，A10；需求见 [§9](#9-向机制所有者提出的需求)）；Permission 风险类别 `session`。
 
 本文定义的契约：`ask_user` 工具、`question/*` 的数据与消费契约、`questions` 分支服务、`session.question.respond` 及其错误。`question/answered` 唯一的写入路径是 `questions.respond`。
 
@@ -65,7 +65,8 @@ classDiagram
   }
   class PendingRegistry {
     按提问顺序排列的条目
-    每个条目的批次 token
+    每个条目的批次 token（取消处理器）
+    提问后已消费的中断
     answering 标记
     closed
     rebuilt 序号
@@ -73,6 +74,7 @@ classDiagram
   question_asked --> PendingRegistry : 重建时折叠本地事件
   question_answered --> PendingRegistry : 由 Dispatcher 消费
   question_cancelled --> PendingRegistry : 重建时折叠本地事件
+  stop_interrupt --> PendingRegistry : 由 Dispatcher 消费
 ```
 
 三个事件都是只由 `questions` 服务写入的分支 Timeline 事实；待回答注册表是 `Mutex` 下的内存（不用 `StateCell`，与 Approval 相同），从不跨代保留。
@@ -143,14 +145,15 @@ sequenceDiagram
   participant Q as questions（分支）
   Note over TL: Q = asked，I = stop/interrupt，A = answered，C = cancelled
   TL->>D: I（序号 n）
-  D->>TE: 同步取消批次 token
+  D->>Q: 消费 I，取出待回答条目，以 Cancelled 结束等待方
+  Q->>TL: 为每个取出的条目追加 C
+  D->>TE: 取消批次 token（取消处理器）
   TL->>D: A（序号 n+1）
-  D->>Q: 消费 A：token 已取消
-  Q->>TL: 追加 C
+  D->>Q: 消费 A，条目已不再待回答
   Q-->>Q: respond 返回 Cancelled
 ```
 
-Dispatcher 把每个事件投递给所有订阅者之后才处理下一个，因此消费 `A` 时 token 已取消，意味着一个序号更小的中断已被消费。若 `A` 在 `I` 之前，回答作为已完成结果保留；轮次仍在 `step/tool-result` 之后以取消结束。
+Questions 订阅 `stop/interrupt`（turn 级与分支级），依据自己的消费做决定，不看 ToolExecutor 的批次 token：消费 `I` 时取出每个待回答条目，写 `question/cancelled {reason: "interrupted"}`，并以 Cancelled 结束等待方；消费 `A` 时只有条目仍待回答才接受回答，这表示在其 `Q` 之后没有消费到序号更小的中断。`A` 单独写入，因此决定前已读完它所在的整个批次。若 `A` 在 `I` 之前，回答作为已完成结果保留；轮次仍在 `step/tool-result` 之后以取消结束。ToolExecutor 的批次 token 只用于停止处理器，不决定回答的去留。
 
 ### 4.2 重载与重启
 
@@ -194,7 +197,7 @@ sequenceDiagram
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
 | `ask_user` | `toolContribution`（Session，key `ask_user`），风险 `session` | 提出 1–4 个问题，等待回答 |
-| `session.question.respond` | `sessionMethods`（Session，key `session.question`），级别 `session` | 回答或拒绝一个待回答的调用 |
+| `session.question.respond` | `sessionMethods`（Session，key `session.question`） | 回答或拒绝一个待回答的调用 |
 | `questions.ask` / `respond` | 分支服务 `questions`，Questions 内部使用 | 注册并等待；回答的边界写入 |
 | `question/asked`、`question/answered`、`question/cancelled` | 事件 | 待回答状态与回答排序 |
 | CLI 提示契约 | 客户端 | 渲染、延后、`Ctrl+C`、附着 |
@@ -202,6 +205,49 @@ sequenceDiagram
 ## 7. 安全
 
 `ask_user` 不使用任何宿主资源，属于 `session` 风险（在所有预设下都允许；`disallowed_tools` 仍然适用）。回答是作为事实写入并重放给模型的用户内容；客户端不得在其中放入机密。任何具有 Session 访问权的客户端都可以调用 `session.question.respond`，包括已配对的远程设备（[RemoteGateway](RemoteGateway.md)）；它除回答之外不授予任何权限。Questions 从不放宽权限；重放从不重新提问。
+
+## 8. 规则检查
+
+规则：[principles §1 与 §4](../../../architecture/rust-agent/principles.md)，[ADR 002](../../adr/002-plugin-scope.md) D1–D5。
+
+| 规则 | 本文如何符合 |
+| --- | --- |
+| §4.1 改别的模块拥有的状态时写指令事件 | Questions 只写自己的 `question/*` 事实；调用的终态事实仍是 ToolExecutor 的 `step/tool-result`。 |
+| §4.2 交接后不能撤回 | 回答在消费 `question/answered` 时交给等待的调用，只交一次，之后不撤回。 |
+| §4.3 只用 before 回调在写入前干预 | 不适用：Questions 不注册 before 回调，也不加入口检查；`respond` 只校验自己的参数。 |
+| §4.4 核心机制不带业务含义 | Questions 不要求 Timeline、Dispatcher、ToolExecutor 或 Rpc 改动；它的事件是自己声明的事件。 |
+| §4.5 决定前读完整个批次 | `question/answered` 单独写入，读完其批次后才决定；`stop/interrupt` 按序号顺序处理。 |
+| §4.6 模型上下文只含交接后被读取的事件 | 回答只经 ToolExecutor 的 `step/tool-result` 进入模型；`question/*` 事件从不投影。 |
+| §4.7 插件之间只通过公开事件和服务交互 | 回答与中断依据 Questions 自己消费的 `stop/interrupt` 判定，不依据 ToolExecutor 的批次 token 或内存。 |
+| §4.8 向机制所有者提通用需求 | 客户端可见的动态事件与按条件安装见 §9。 |
+| §1 Capability 与 App Server 边界 | 两个部分都是各自包中的 Capability；Rpc 只分派 `sessionMethods`，不含 Questions 逻辑。 |
+| ADR 002 D1 作用域跟随状态所有者 | 工具与方法是 Session 服务；待回答的问题是分支状态。 |
+| ADR 002 D2 不设接线模块 | ToolRegistry 与 Rpc 按名字和作用域收集服务；没有模块指名 Questions。 |
+| ADR 002 D3 依赖跟随作用域 | Session 部分只依赖 Session 服务；重载会取消待回答的问题，可接受。 |
+| ADR 002 D4 结构性配置与业务配置分离 | 不适用：Questions 没有配置；是否安装取决于 `SessionConfig.interactive`。 |
+| ADR 002 D5 合同语言中立 | 工具、方法、分支服务与事件以中立形式给出；附录 G 只是一种绑定。 |
+
+## 9. 向机制所有者提出的需求
+
+### R1. 客户端可见的动态事件（#2，运行时）
+
+| 项 | 内容 |
+| --- | --- |
+| 被哪条规则挡住 | principles §4 第 4 条与 overview 约束 3：Rpc 不能为 Questions 增加专门通知，但客户端必须实时看到 `question/*` 才能显示和关闭提示。 |
+| 考虑过的现有机制 | 像 `approval.request` 那样的专用 Rpc 通知（Rpc 中出现 Questions 专用代码）；客户端轮询 `session.history`（没有实时提示）；返回待回答问题的 Session 方法（仍需实时信号）。 |
+| 需要的通用能力 | #2 动态事件登记时可声明“客户端可见”；Connection 把所有如此声明的事件作为 `session.event` 转发，不理解其含义。 |
+| 对序号、批次、中断、重载的影响 | 对序号与批次无影响：通知与其他事件一样在提交后发布。中断与重载不变；历史重放与实时通知按事件身份合并。 |
+| 由谁实现，对应 issue | 运行时与 Rpc 所有者；[#2](https://github.com/arcships/dim/issues/2)。 |
+
+### R2. 按 `interactive` 安装可选部件（Agent 装配）
+
+| 项 | 内容 |
+| --- | --- |
+| 被哪条规则挡住 | ADR 002 D2（不设接线模块）与 principles §4 第 4 条：非交互 Session 不能提供 `ask_user`，装配代码又不能指名 Questions。 |
+| 考虑过的现有机制 | 用 Permission 隐藏工具（工具仍被声明）；运行时让调用失败（非交互 Session 会阻塞或报错）；在 Agents 中检查 Questions（指名插件）。 |
+| 需要的通用能力 | 插件的 `provides` 行可以带 `SessionConfig` 字段上的条件（这里是 `interactive`）；条件成立时 Agents 才安装该部件。 |
+| 对序号、批次、中断、重载的影响 | 无：在 Session 装配时依据 `SessionConfig` 决定；重载时重新判断。 |
+| 由谁实现，对应 issue | Agent 装配所有者（运行时与 App Server）；列于 [overview 附录 B.1](../overview.md)；尚未建 issue。 |
 
 ## 附录 A. 接口细节
 
@@ -236,8 +282,8 @@ User answered:
 | 类型 | 载荷 | 写入路径 | 消费方 |
 | --- | --- | --- | --- |
 | `question/asked` | `call_id, turn_id, request_id: string`，`questions: Question[]` | `questions.ask`，`append_registered`；回调在锁内注册条目（已关闭或 `call_id` 已在待回答中时失败） | 重建；客户端显示提示 |
-| `question/answered` | `call_id: string`，`answers: Answer[]`，`declined: boolean` | `questions.respond`，`append_registered`；回调以 `Closed`/`Cancelled`/`AlreadyAnswered` 失败，否则设置 `answering` 并按事件 id 保存等待方 | Dispatcher 订阅 `"Questions"`，在重建闸门下，跳过 `sequence <= rebuilt`；仅当条目待回答且其 token 未取消时接受。客户端关闭提示 |
-| `question/cancelled` | `call_id, reason: string` | 仅 `questions`，`append`：取消时的 ask future、消费方、`close()`、重建 | 重建；客户端关闭提示 |
+| `question/answered` | `call_id: string`，`answers: Answer[]`，`declined: boolean` | `questions.respond`，`append_registered`；回调以 `Closed`/`Cancelled`/`AlreadyAnswered` 失败，否则设置 `answering` 并按事件 id 保存等待方 | Dispatcher 订阅 `"Questions"`（同时订阅 `stop/interrupt`），在重建闸门下，跳过 `sequence <= rebuilt`；仅当条目仍待回答、即其 `asked` 之后没有消费到 `stop/interrupt` 时接受。客户端关闭提示 |
+| `question/cancelled` | `call_id, reason: string` | 仅 `questions`，`append`：消费 `stop/interrupt`、取消时的 ask future、消费方、`close()`、重建 | 重建；客户端关闭提示 |
 
 三者都通过 #2 注册声明为客户端可见，从不渲染进模型历史。
 
@@ -266,15 +312,16 @@ User answered:
 | 提问 | token 已取消：返回 Cancelled，不写任何内容。否则 `append_registered(question/asked)`；提交失败时移除条目并返回 Cancelled 或错误 |
 | 等待 | `select! biased { response, cancel.cancelled() }`。取消时：在锁内取出条目；若取到，释放锁后写 `question/cancelled {reason: "Tool execution cancelled"}`；返回 Cancelled。发送端被丢弃：带 `capability reloading` 的 Cancelled |
 | 回答 | 预先检查待回答状态，并按条目的 `asked` 数据校验；`append_registered(question/answered)`；等待分发结果 |
-| 消费 | 取出条目；token 已取消：发送 `None`，回复 `Cancelled`，写 `question/cancelled`；否则发送回答，回复 `Ok`。条目不存在：`Unknown` |
-| 复核 | 只看批次 token，它反映 ToolExecutor 已消费的中断（[time-bus](../../../architecture/rust-agent/time-bus.md) §4） |
+| 消费 `stop/interrupt` | 取出该分支每个待回答条目；对每个条目写 `question/cancelled {reason: "interrupted"}`，以 Cancelled 结束其等待方，并向回答等待方回复 `Cancelled` |
+| 消费 `question/answered` | 条目仍待回答：取出，发送回答，回复 `Ok`。条目已被先消费的中断或取消取出：回复 `Cancelled`。条目不存在：`Unknown` |
+| 复核 | 只看 Questions 自己已消费的 `stop/interrupt`（[time-bus](../../../architecture/rust-agent/time-bus.md) §4）；批次 token 只用于停止处理器，以及在 ToolExecutor 已取消调用时跳过 `ask` |
 | 终态事实 | `asked`/`cancelled` 由 Questions 写入，`answered` 是边界事实；调用的终态事实是 ToolExecutor 的 `step/tool-result` |
 | 卸载 | 卸载清理函数：设置 `closed`，丢弃回答等待方（`Closed`），取出所有条目，写 `question/cancelled {reason: "capability reloading"}`，丢弃发送端。正在关闭的 Timeline 可能拒绝写入；该分支不会恢复 |
 | 加载 / 重启 | 订阅，在闸门下固定 `S = committed()`，折叠 `local(..=S)`，取消未解决的问题，设置 `rebuilt`，提供 `questions` |
 
 ### A.5 Session 方法 `session.question.respond`
 
-服务 `sessionMethods`，Session 作用域，key `session.question`。`describe()` 返回一个 `MethodDecl`：`{name: "session.question.respond", level: session, mutating: true, interruption: report, progress: false, notifications: [], reply: direct}`。Rpc 解析 Session 并发送 `call(MethodCall)`；处理器通过 `S:TreeCommands` 解析指定分支的 `questions`。
+服务 `sessionMethods`，Session 作用域，key `session.question`。`describe()` 返回一个 `MethodDecl`：`{name: "session.question.respond", mutating: true, interruption: report, progress: false, notifications: [], reply: direct}`。Rpc 解析 Session 并发送 `call(MethodCall)`；处理器通过 `S:TreeCommands` 解析指定分支的 `questions`。
 
 `params`：`{sessionId, branchId?: "main", callId, answers: [{questionId, selected: [label], custom?}], declined?: false}` → `MethodReply` 值 `{}`。错误为 `MethodError` 数据：
 
@@ -314,11 +361,11 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 | 批次分发前中断 | I < `step/tool-call` 被消费 | 没有 `Q`；调用未执行 | ToolExecutor |
 | 问题注册前中断 | I 已消费，然后 `ask` | token 已取消；不写任何内容 | Questions（token 检查） |
 | 先回答，后中断 | Q < A < I | 接受回答；结果作为已完成保留；轮次在 R 之后以取消结束 | Questions；ToolExecutor |
-| 中断后，回答在取消前提交 | Q < I < A < C | `respond` → `Cancelled`；写入 `C` | Questions |
+| 中断后，回答在 Questions 消费 I 之前提交 | Q < I < A < C | 消费 I 时写 C；消费 A 时没有待回答条目；`respond` → `Cancelled` | Questions |
 | 中断，已写取消，然后回答 | Q < I < C | 注册失败 `Cancelled`；不写任何内容 | Questions |
 | 两个客户端并发回答 | Q < A1（A2 被拒绝） | `AlreadyAnswered`；第一个决定结果 | Questions（注册锁） |
 | 重复或迟到的 RPC | 在解决之后 | `Unknown` 或 `Cancelled`；不写任何内容 | Questions |
-| 分支级中断、分支关闭 | Q < 分支 I | token 已取消 → C；关闭以 C 结算其余问题 | Questions；ToolExecutor |
+| 分支级中断、分支关闭 | Q < 分支 I | Questions 消费 I → C；关闭以 C 结算其余问题 | Questions；ToolExecutor |
 | 已回答，批次中其他调用仍在运行 | Q < A < R | 回答保存在处理器结果中，直到 R | ToolExecutor |
 | 已回答，然后在 R 前重载 | Q < A < 重载 | 批次重载结算，轮次 Failed；问题结果为已回答 | ToolExecutor |
 | 回答已提交，分支部分在消费前卸载 | Q < A，卸载 | `close()` 写 C：已取消；`respond` → `service_reloading` | Questions |
@@ -382,7 +429,6 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 | # | 问题 | 说明 |
 | --- | --- | --- |
 | F1 | 总体设计 §7 的载荷 | `turn_id`、`request_id`、`declined` 不在总体设计的 `question/*` 字段中（A3） |
-| F2 | 动态事件的客户端可见性 | #2 是否按声明的标志把插件事件投影给客户端（A10） |
 
 ## 附录 G. Rust 绑定
 
@@ -392,7 +438,7 @@ Questions 用 Rust 实现；本绑定是上述中立契约的一种实现。
 | --- | --- |
 | `toolContribution` key `ask_user` | `S:ToolContribution`，由 ToolRegistry 作为 `Contributions<ToolContribution>` 的条目 `ask_user` 收集；`execute` 映射到处理器 `HostFuture<Result<ToolResult, HostError>>`，取消请求映射到批次 `CancellationToken`，`cancelled` 映射到 `HostError::Cancelled` |
 | `sessionMethods` key `session.question` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，key `SessionScope::named_key::<SessionMethodContribution>("session.question")`；`describe` = `methods()`，`call` = `call(MethodCall, CallChannel, CancellationToken)` |
-| `questions` | `B:Questions`，key `BranchScope::key::<Questions>()` |
+| `questions` | `B:Questions`，key `BranchScope::key::<Questions>()`；Dispatcher 订阅 `"Questions"`，订阅 `question/answered` 与 `stop/interrupt` |
 
 ```rust
 pub struct Question { pub id: String, pub header: Option<String>, pub question: String,

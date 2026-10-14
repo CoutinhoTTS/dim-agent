@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview §B.9](../overview.md)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview §F.3](../overview.md)）。
 
-Workflow 拥有工作流定义和运行。一次运行推进一个固定的步骤列表；每个阶段在自己的 Session 中运行，要么是通过 Agents 启动的新非交互 Session，要么是用 Collaboration 的 `establish` 创建的、起始 Session 的 Collaboration 成员。进程部分拥有运行，并通过进程服务 `sessions`（[session-access](../contracts/session-access.md)）访问 Session，方式与 Collaboration 相同。Session 部分以 `toolContribution` 向交互 Session 提供 `workflow` 工具；运维方使用管理级 `workflow.*` 方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。运行结束时，其结果以 Steer 输入向起始分支报告一次。Workflow 不写自己的 Timeline 事件。
+Workflow 拥有工作流定义和运行。一次运行推进一个固定的步骤列表；每个阶段在自己的 Session 中运行，要么是通过 Agents 启动的新非交互 Session，要么是起始 Session 的 Collaboration 成员。进程部分拥有运行，并通过进程服务 `sessions`（[session-access](../contracts/session-access.md)）访问启动的 Session，方式与 Collaboration 相同；它只通过 Collaboration 的公开接口（`establish` 和提议的分支外成员请求，A.5）访问成员，从不自己写入成员 Session。Session 部分以 `toolContribution` 向交互 Session 提供 `workflow` 工具；运维方使用 `workflow.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。运行结束时，其结果以 Steer 输入向起始分支报告一次。Workflow 不写自己的 Timeline 事件。
 
 ## 1. 结构
 
@@ -12,11 +12,11 @@ flowchart LR
     WF["Workflow：定义、运行引擎、阶段执行器"]
     MM["managementMethods key workflow"]
     Agents["Agents：sessions"]
-    Coll["Collaboration：establish"]
+    Coll["Collaboration：establish、成员请求（提议）"]
     Prov["Provider：purpose workflow.stage"]
     Set["Settings：用户与项目来源、宿主本地批准"]
     PC["PluginContents：类型 workflows"]
-    Store["进程存储（App Server）"]
+    Store["进程存储：pluginFiles（扩展）"]
     Rpc["Rpc 方法表"]
   end
   subgraph SESS["交互 Session（起始方）"]
@@ -43,10 +43,10 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Workflow` | 进程（控制节点） | `sessions`（Agents；`launch` 带 `policy`）、Collaboration（`establish`）、Provider 模型选择、Settings 用户/项目来源及宿主本地批准服务、`PluginContents`（可选，类型 `workflows`）、App Server 进程存储 | 运行引擎；`managementMethods` key `workflow` |
-| `WorkflowSession` | Session，Workflow 启用时安装 | `Workflow`、Session 配置 | `toolContribution` key `workflow`，仅在 `interactive` 时声明 |
+| `Workflow` | 进程（控制节点） | `sessions`（Agents；`launch` 带 `policy`）、Collaboration（`establish`、成员请求）、Provider 模型选择、Settings 用户/项目来源及宿主本地批准服务、`PluginContents`（可选，类型 `workflows`）、`pluginFiles`（扩展） | 运行引擎；`workflowRuns`（工具访问运行的服务，A.2）；`managementMethods` key `workflow` |
+| `WorkflowSession` | Session，Workflow 启用时安装 | `workflowRuns`（`Workflow`）、Session 配置 | `toolContribution` key `workflow`，仅在 `interactive` 时声明 |
 
-**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段、带来源 raw 块的 `input`、`history`、`idle`、`stop`、`withdraw`）、Collaboration `establish`（Collaboration 补充，A.5）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）；以及现有的类型化服务：Provider purpose 策略、App Server 进程存储（R8）、Settings 来源和宿主本地批准服务（R11），待 [#4](https://github.com/arcships/dim/issues/4) 暴露后 TypeScript 部分可按名称访问。**此处定义的契约**：定义格式 `dim.workflow/v1`、`workflow` 工具、`workflow.*` 方法、来源名 `workflow`（标记类型 `stage` 和 `report`）、purpose key `workflow.stage`、内容类型 key `workflows`、运行记录。
+**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段、带来源 raw 块的 `input`、`history`、`idle`、`stop`、`withdraw`）、Collaboration `establish` 和分支外成员请求（Collaboration 补充，提议，A.5）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（R8；TypeScript 部分直接使用）；以及现有的类型化服务：Provider purpose 策略、Settings 来源和宿主本地批准服务（R11），待 [#4](https://github.com/arcships/dim/issues/4) 暴露后 TypeScript 部分可按名称访问（[session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）。**此处定义的契约**：定义格式 `dim.workflow/v1`、`workflow` 工具、`workflowRuns` 服务、`workflow.*` 方法、来源名 `workflow`（标记类型 `stage` 和 `report`）、purpose key `workflow.stage`、内容类型 key `workflows`、运行记录。
 
 ## 2. 数据与状态
 
@@ -98,14 +98,14 @@ sequenceDiagram
   participant M as Model (starter branch)
   participant WF as Workflow
   participant ST as Process storage
-  participant AG as sessions.launch or Collaboration establish
+  participant AG as sessions.launch（启动的阶段）
   participant SS as Stage Session
   M->>WF: workflow start（WorkflowSession 的工具处理器）
   WF->>WF: 校验、审批检查、取起始方 policy 上限
   WF->>ST: 持久化 Run running
   WF-->>M: ToolResult run_id（批次结果）
   WF->>ST: 持久化阶段 launching
-  WF->>AG: launch（非交互，受上限 policy）或 establish（leader, agent）
+  WF->>AG: launch（非交互，受上限 policy）
   AG-->>WF: sessionId
   WF->>SS: sessions.input main Queue，标记 stage，渲染后的提示词
   WF->>ST: 持久化阶段 running 及 input_event_id
@@ -114,7 +114,7 @@ sequenceDiagram
   WF->>ST: 阶段 completed 或 failed，下一步
 ```
 
-处理器持久化运行后立即返回；阶段推进在进程部分的任务跟踪器上运行。完成状态只根据阶段 Session 中直到 `idle` 截止点的事实判定。
+处理器持久化运行后立即返回；阶段推进在进程部分的任务跟踪器上运行。启动的阶段的完成状态只根据阶段 Session 中直到 `idle` 截止点的事实判定。`member` 阶段则调用 Collaboration 的 `establish`，再调用其成员请求（A.5）：Collaboration 写入成员输入，应用其 Team 规则，并按自己的结果规则返回结果；Workflow 持久化该结果，从不自己写入或读取成员 Session。
 
 ### 3.2 报告与停止
 
@@ -129,7 +129,7 @@ sequenceDiagram
     WF->>ST: delivered；分支缺失或 Session 关闭时 undeliverable
   else workflow stop
     WF->>ST: stopping
-    WF->>WF: sessions.withdraw 自己未消费的阶段输入（notHeld：消费后 stop），对运行中阶段 sessions.stop(main)
+    WF->>WF: 启动的阶段：sessions.withdraw 自己未消费的输入（notHeld：消费后 stop），sessions.stop(main)。成员阶段：取消成员请求
     WF->>ST: stopped，无报告
   end
 ```
@@ -178,7 +178,7 @@ Workflow 自身重载、依赖（Agents、Collaboration）重载或重启都会�
 | 工具结果之后起始方轮次中断 | result < interrupt | 运行继续 | Workflow |
 | 运行很快结束时工具批次尚未结算 | report < `step/tool-result` | Steer 在批次结果之后消费；模型先看到 `run_id` | Loop |
 | `workflow.stop` 与阶段自身的 `turn/end` 竞争 | `turn/end` < `stop/interrupt` | 阶段 `completed` 并带结果；运行 `stopped` | 阶段 Session 顺序 |
-| 阶段输入在被持有时被撤回（用户或 stop） | input < `input/deleted` | 阶段 `stopped`；从未应用或消费 | InputQueue、Workflow |
+| 阶段输入在被持有时被撤回（用户或 stop） | input < `input/withdraw` < `input/deleted` | 阶段 `stopped`；从未应用或消费 | InputQueue、Workflow |
 | Workflow、Agents 或 Collaboration 重载，或重启 | — | 运行 `interrupted`，活动阶段 `lost`，不重新启动；各一份报告（E15） | Workflow |
 | member 阶段运行中 leader 分支关闭 | close < report | member 阶段继续；报告 `undeliverable` | Workflow |
 
@@ -202,12 +202,46 @@ Workflow 自身重载、依赖（Agents、Collaboration）重载或重启都会�
 | `workflow`（`list`、`start`、`status`、`stop`） | `toolContribution`（Session，key `workflow`），风险类别同 Collaboration 的 `agent` 工具 | 模型运行工作流 |
 | `workflow.list/save/start/status/stop/approve/revoke` | `managementMethods`（进程，key `workflow`） | 运维方管理定义和运行 |
 | `/workflow`、`/workflow:save` | CLI | 调用管理方法 |
-| `sessions`、Collaboration `establish` | 依赖 | 创建阶段 Session；input、history、idle、stop、withdraw |
+| `sessions`、Collaboration `establish` 和成员请求 | 依赖 | 启动的阶段：创建、input、history、idle、stop、withdraw；成员阶段：通过 Collaboration 创建和请求 |
 | `dim.workflow/v1` | 此处定义 | 定义格式（附录 A） |
 
 ## 7. 安全
 
-项目和插件定义是可执行内容：`start` 和每次阶段启动都需要 Settings 宿主本地批准服务中的授权，记录 `{owner: workflow, node, workspace, source, id: name, fingerprint}`，fingerprint = 规范化定义文档的 SHA-256（R11）。授权只来自在服务 `management` 级别的入口上调用的 `workflow.approve`；工具、Timeline 事实、重放和 fork 永不授权。用户定义无需审批。阶段 policy 遵循 3.3，定义只能收窄它。member 阶段内发起的审批由 Collaboration 转发给 leader（E6），而非 Workflow。阶段 Session 只使用自身资源节点的服务。参数和结果会成为阶段 Session 和报告 Session 的 Timeline 内容；定义不得携带凭据。
+项目和插件定义是可执行内容：`start` 和每次阶段启动都需要 Settings 宿主本地批准服务中的授权，记录 `{owner: workflow, node, workspace, source, id: name, fingerprint}`，fingerprint = 规范化定义文档的 SHA-256（R11）。授权只来自 `workflow.approve` 管理方法（只由进程插件提供，从不提供给配对的远程设备）；工具、Timeline 事实、重放和 fork 永不授权。用户定义无需审批。阶段 policy 遵循 3.3，定义只能收窄它。member 阶段内发起的审批由 Collaboration 转发给 leader（E6），而非 Workflow。阶段 Session 只使用自身资源节点的服务。参数和结果会成为阶段 Session 和报告 Session 的 Timeline 内容；定义不得携带凭据。
+
+## 8. 规则检查
+
+规则：[principles §1 与 §4](../../../architecture/rust-agent/principles.md)，[ADR 002](../../adr/002-plugin-scope.md) D1–D5。
+
+| 规则 | 本文如何符合 |
+| --- | --- |
+| §4.1 改别的模块拥有的状态时写指令事件 | 启动的阶段只通过 `sessions` 改动（输入、`input/withdraw`、`stop/interrupt`），成员只通过 Collaboration 的请求改动；结果由所有者写入。 |
+| §4.2 交接后不能撤回 | 阶段输入只在 `input/applied` 之前撤回；得到 `notHeld` 后，Workflow 在读到 `input/consumed` 后使用 `stop`。 |
+| §4.3 只用 before 回调在写入前干预 | 不适用：Workflow 不加入口检查，也不注册 before 回调；定义校验是它自己的边界校验。 |
+| §4.4 核心机制不带业务含义 | 运行时不为 Workflow 增加任何内容；它需要的 Collaboration 请求是通用的成员投递（§9.1）。 |
+| §4.5 决定前读完整个批次 | 启动的阶段的决定读取到 `sessions.idle` 截止点为止的历史，截止点是批次边界（A.6）。 |
+| §4.6 模型上下文只含交接后被读取的事件 | 阶段任务和报告只作为已消费的输入到达模型；被撤回的输入被删除，模型看不到。 |
+| §4.7 插件之间只通过公开事件和服务交互 | Workflow 使用 `sessions`、Collaboration 的公开接口、Provider、Settings 和 `pluginFiles`（扩展）；从不写入 Collaboration 成员。 |
+| §4.8 向机制所有者提通用需求 | 分支外成员请求在 §9.1 中提出；#4 见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)，#5 见 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)。 |
+| §4.9 只有后续决定要用的事实才进 Timeline | Workflow 不写 Timeline 事件；运行留在进程存储，只有模型要消费的阶段任务和报告作为输入进入 Timeline。 |
+| §1 Capability 与 App Server 边界 | 运行是进程级的，不是 Capability；存储是 `pluginFiles` 插件，不是 App Server 服务。 |
+| ADR 002 D1 作用域跟随状态所有者 | 运行跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
+| ADR 002 D2 不设接线模块 | Rpc 收集 `managementMethods`，ToolRegistry 收集 `toolContribution`；没有接线模块。 |
+| ADR 002 D3 依赖跟随作用域 | Agents、Collaboration 和 Workflow 的重载按作用域传播；运行结算为 `interrupted`，是已接受的代价（§4）。 |
+| ADR 002 D4 结构性配置与业务配置分离 | 定义和审批是使用时读取的业务数据；没有结构性变化。 |
+| ADR 002 D5 合同语言中立 | `workflowRuns`、工具、方法和定义格式都是命名服务或数据；Rust 形式见附录 G。 |
+
+## 9. 向机制所有者提出的需求
+
+### 9.1 Collaboration：从分支外发出的成员请求
+
+| 项 | 内容 |
+| --- | --- |
+| 被哪条规则挡住 | principles §4.1 与 §4.7：成员 Session 的输入和 Team 状态属于 Collaboration，Workflow 不得把阶段输入写入成员；而 Collaboration 的请求协议目前只能由 leader 轮次的工具调用发起（`collaboration/request` 带 `turn_id` 和 `call_id`）。 |
+| 考虑过的现有机制 | 用 `sessions.input` 写入成员：不行，绕过 Collaboration 的 Team 规则（§4.7）。在 leader 分支上写 `collaboration/request`：不行，Workflow 不是 leader 轮次，会在合同之外写 Collaboration 的指令。改为启动非成员 Session：失去 `member` 执行器所需的 leader Team、cwd 和审批转发。 |
+| 需要的通用能力 | Collaboration 服务上的一个方法，从分支外把任务交给指定 leader 的已有成员（`memberRequest`，A.5），按 Collaboration 的结果规则返回结果；丢弃调用即取消，可按 `submissionId` 查询；不带 Workflow 的含义。 |
+| 对序号、批次、中断、重载的影响 | 成员输入由 Collaboration 写入，并按其自身规则与 leader 请求排序（`busy`）；中断成员轮次使请求以 `stopped` 结束；Collaboration 重载会重载 Workflow（D3），请求结束，Workflow 把阶段结算为 `lost`。 |
+| 由谁实现，对应 issue | Collaboration（App Server 进程插件），作为 [overview 附录 B](../overview.md#附录-b-现有插件的补充) 中 Collaboration 补充的一部分；尚无 issue。 |
 
 ## 附录 A. 接口细节
 
@@ -247,7 +281,9 @@ steps:
 
 ### A.2 工具 `workflow`
 
-`toolContribution` key `workflow`，仅由 `WorkflowSession` 在配置为 `interactive: true` 的 Session 中注册（A8）。`declaration(): sync -> ToolDeclaration` 返回下列动作；`execute(ToolCall): async -> ToolResult` 调用进程部分；取消即消费方丢弃该调用。风险：Collaboration 的 `agent` 工具所声明的类别（目前没有，因此未分类：ReadOnly 拒绝，WorkspaceWrite 询问，FullAccess 允许；E2）。
+`toolContribution` key `workflow`，仅由 `WorkflowSession` 在配置为 `interactive: true` 的 Session 中注册（A8）。`declaration(): sync -> ToolDeclaration` 返回下列动作；`execute(ToolCall): async -> ToolResult` 调用进程部分的 `workflowRuns` 服务；取消即消费方丢弃该调用。风险：Collaboration 的 `agent` 工具所声明的类别（目前没有，因此未分类：ReadOnly 拒绝，WorkspaceWrite 询问，FullAccess 允许；E2）。
+
+`workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd, resourceNode}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code}`。
 
 | 动作 | 参数 | `ToolResult.content` |
 | --- | --- | --- |
@@ -260,7 +296,7 @@ steps:
 
 ### A.3 管理方法
 
-`managementMethods` key `workflow`：`describe(): async -> MethodDecl[]` 列出下列方法（级别 `management`，`mutating` 如表所示）；`call(MethodCall): async -> MethodReply` 以 JSON 参数和结果分派它们。
+`managementMethods` key `workflow`：`describe(): async -> MethodDecl[]` 列出下列方法（`mutating` 如表所示）；`call(MethodCall): async -> MethodReply` 以 JSON 参数和结果分派它们。
 
 | 方法 | 参数 | 结果 | `mutating` |
 | --- | --- | --- | --- |
@@ -292,6 +328,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | --- | --- | --- |
 | `sessions.launch {agent, cwd, resourceNode?, model?, policy?, starter?}` → `{sessionId}`（非交互；`createdBy = {kind: "launch", source: "workflow"}`） | Agents 补充（[session-access](../contracts/session-access.md)） | 启动的阶段；第一个输入由 Workflow 自己写入 |
 | `establish {leaderSessionId, agentId}: async -> {sessionId}` | Collaboration 补充，`sessions` 之外的一个 Collaboration 服务 | member 阶段；Collaboration 维持 Team 规则（单一 leader、`Busy`），应用 leader 的 cwd 和 policy，并把 member 的审批转发给 leader |
+| `memberRequest {leaderSessionId, memberSessionId, submissionId, rawBlocks, content}: async -> {inputId, outcome: completed \| failed \| stopped, resultText?, reason?}`；错误 `busy`、`member_not_found`、`member_closed`。丢弃调用即取消请求；`memberRequestLookup {leaderSessionId, submissionId}` → 已接受或未知 | Collaboration 补充，提议（§9.1） | member 阶段任务；Collaboration 写入成员输入，应用 Team 规则（成员已有请求或轮次在运行时返回 `busy`），按自己的结果规则决定结果；Workflow 从不写入或读取成员 Session |
 | 对自己的输入执行 `sessions.withdraw {sessionId, branchId, inputId}`；按 `submissionId` 执行 `sessions.lookup` | session-access（InputQueue） | 停止时撤回自己未消费的阶段输入；回复 `deleted` 或 `notHeld` |
 
 ### A.6 Timeline 与 Capability 机制
@@ -300,13 +337,13 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | --- | --- |
 | 启动 | 处理器或管理调用进行校验、检查审批、解析 policy 上限、持久化 `Run{running}`，在进程部分的任务跟踪器上 spawn 运行任务并返回。不写 Timeline |
 | 阶段启动 | 在存储中复查（运行为 `running`；审批对快照指纹仍然有效，A12）。持久化 `launching`；`launch` 或 `establish`；持久化 `session_id` 和 `submission_id = workflow:<uuid>` |
-| 阶段输入 | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId, rawBlocks: [marker {kind: "stage", attrs: [run, stage], body: definition name}], content: [rendered prompt]}` → `{inputId}`，存为 `input_event_id`；持久化 `running` |
+| 阶段输入 | 启动的阶段：`sessions.input {sessionId, branchId: "main", mode: "queue", submissionId, rawBlocks: [marker {kind: "stage", attrs: [run, stage], body: definition name}], content: [rendered prompt]}` → `{inputId}`，存为 `input_event_id`；持久化 `running`。成员阶段：持久化 `running`，然后用相同标记和提示词调用 `memberRequest` |
 | 消费 | 阶段 Session 的 InputQueue 和 Loop 在各自的 Dispatcher 上（`input/applied`、`input/consumed`），然后是轮次 |
-| 完成 | `sessions.idle {sessionId, branchId: "main"}` 返回截止点 `C`；按页读取 `sessions.history {through: C}`。在 `input/consumed{input_event_id}` 之前：`input/deleted` 或其后的 `stop/interrupt` → `stopped`，否则再次等待。消费之后：`(consumed, C]` 中其后的第一个 `turn/end` 决定 `completed`/`failed`/`stopped`；该轮次的最后一条回复文本即结果（Collaboration 的结果规则） |
+| 完成 | 成员阶段：`memberRequest` 的回复决定 `completed`/`failed`/`stopped` 并带回结果；`busy` → `failed: member_busy`（A17）。启动的阶段：`sessions.idle {sessionId, branchId: "main"}` 返回截止点 `C`；按页读取 `sessions.history {through: C}`。在 `input/consumed{input_event_id}` 之前：`input/deleted` 或其后的 `stop/interrupt` → `stopped`，否则再次等待。消费之后：`(consumed, C]` 中其后的第一个 `turn/end` 决定 `completed`/`failed`/`stopped`；该轮次的最后一条回复文本即结果（Collaboration 的结果规则） |
 | 推进 | 持久化阶段结果；某一步的所有阶段都到达终态时，启动下一步或结束运行；失败的阶段会停止运行中的同组阶段并使运行失败（A4） |
 | 报告 | 在 `completed`、`failed` 或 `interrupted` 且有 `report_to` 时：持久化 `pending{submission_id}`，在起始分支上以标记 `report` 执行 `sessions.input`（模式 `steer`）；持久化 `delivered`，或在分支缺失或 Session 已关闭时持久化 `undeliverable` |
-| 停止 | 持久化 `stopping`；等待中的阶段 `skipped`；撤回未消费的阶段输入（`sessions.withdraw`；`notHeld` 表示已应用，因此读到 `input/consumed` 后用 `sessions.stop` 停止该阶段）；对运行中的阶段执行 `sessions.stop {sessionId, branchId: "main"}`；由完成规则读取结果；运行 `stopped`，无报告 |
-| 重载、重启 | Session 部分随 Workflow 重载；在途的 `workflow` 调用随其轮次失败。卸载时旧一代停止运行中的阶段轮次（有界等待，A13）。新一代加载运行：`running`/`stopping` → `interrupted`；`launching`/`running` 阶段 → `lost`；不重新启动任何内容。`pending` 报告用 `sessions.lookup` 查询（已接受 → `delivered`，未知 → 现在写入）；带 `report_to` 且 `report: none` 的 interrupted 运行获得一份报告（E15） |
+| 停止 | 持久化 `stopping`；等待中的阶段 `skipped`；成员阶段：丢弃 `memberRequest` 调用，由 Collaboration 按自己的规则取消；启动的阶段：撤回未消费的阶段输入（`sessions.withdraw`；`notHeld` 表示已应用，因此读到 `input/consumed` 后用 `sessions.stop` 停止该阶段）；对运行中的阶段执行 `sessions.stop {sessionId, branchId: "main"}`；由完成规则读取结果；运行 `stopped`，无报告 |
+| 重载、重启 | Session 部分随 Workflow 重载；在途的 `workflow` 调用随其轮次失败。卸载时旧一代停止运行中的阶段轮次（启动的阶段：`sessions.stop`；成员阶段：丢弃 `memberRequest` 调用）（有界等待，A13）。新一代加载运行：`running`/`stopping` → `interrupted`；`launching`/`running` 阶段 → `lost`；不重新启动任何内容。`pending` 报告用 `sessions.lookup` 查询（已接受 → `delivered`，未知 → 现在写入）；带 `report_to` 且 `report: none` 的 interrupted 运行获得一份报告（E15） |
 
 ## 附录 B. 完整冲突表
 
@@ -319,7 +356,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | 运行结束时工具批次尚未结算 | report < `step/tool-result` | Steer 在批次结果之后消费 | Loop |
 | 报告分支上并发 Steer/Queue | Timeline 顺序 | 按模式应用；报告是普通的 Steer | InputQueue |
 | 起始方空闲时报告到达 | — | Steer 启动一个轮次 | InputQueue、Loop |
-| 用户在报告输入被持有时撤回它 | report < `input/deleted` | 报告计为 `delivered`；不重写 | InputQueue |
+| 用户在报告输入被持有时撤回它 | report < `input/withdraw` < `input/deleted` | 报告计为 `delivered`；不重写 | InputQueue |
 | 报告写入与消费之间发生压缩 | input < compaction < consumed | 放在摘要之后 | ContextPreparation |
 | 报告写入与消费之间切出子分支 | input < cut < consumed | 子分支看不到它 | InputQueue（子分支） |
 | 消费前用户停止阶段 Session | input < interrupt | 阶段 `stopped`；除非已删除，输入在该 Session 中保持待处理 | Workflow |
@@ -328,9 +365,9 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | `workflow.stop` 与应用竞争 | `input/applied` < `input/withdraw` | `notHeld`，不写入任何内容；`input/consumed` 之后 `stop` | InputQueue、Workflow |
 | 两次 `workflow.stop` 或结束后 stop | — | 幂等 | Workflow |
 | 重复 `start` | — | 两次运行（A15） | Workflow |
-| member 阶段，leader 对同一 member `request` | 阶段输入已排队，尚未开始 | 两个输入都在 member Session 中排队；只有轮次运行后才 `Busy`；阶段结果是其自身输入被消费后的第一个 `turn/end` | Collaboration、Workflow |
+| member 阶段，leader 对同一 member `request` | Collaboration 对两个请求的排序 | 由 Collaboration 的 Team 规则决定：后到的请求得到 `busy`；若后到的是阶段，阶段 `failed: member_busy`（A17）；Workflow 不写入成员 | Collaboration、Workflow |
 | member 阶段进行中 leader 分支关闭 | close < 阶段结束 | member 阶段继续；报告 `undeliverable` | Workflow |
-| member 阶段进行中 leader Session 关闭 | — | member 由 Collaboration 关闭 → 阶段 `failed: session_closed`；运行 `failed` | Collaboration、Workflow |
+| member 阶段进行中 leader Session 关闭 | — | member 由 Collaboration 关闭；`memberRequest` 以 `member_closed` 失败 → 阶段 `failed: session_closed`；运行 `failed` | Collaboration、Workflow |
 | Agents 或 Collaboration 重载 | — | Workflow 重载；运行 `interrupted`，各一份报告 | Workflow |
 | `workflow` 调用期间 Workflow 重载 | — | 调用方 Session 部分重载；该轮次失败（D3，已接受） | Loop |
 | 阶段资源节点离线 | — | 因节点不可用而被拒的 launch → 阶段 `failed: node_unavailable`；运行中的阶段 Session 保持加载（不重载，不进入 Pending），其节点服务调用失败为 `node_unavailable`，轮次按自身结果结束（对 [#5](https://github.com/arcships/dim/issues/5) 的要求） | Agents、阶段 Session |
@@ -367,7 +404,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 6. `.dimcode/workflows/` 中的项目定义：未审批 → `approval_required`；批准；编辑 → 下一阶段 `approval_revoked`。
 7. 重启、Workflow 重载和 Agents 重载：`interrupted`/`lost`，不重新启动，恰好一份报告。
 8. Policy：WorkspaceWrite 下工具启动 → 阶段最多 WorkspaceWrite；管理启动 → 默认 ReadOnly；ReadOnly 下 `workflow` 被拒。
-9. `member` 执行器：member 出现在 leader 的 Team 中；leader 请求与已排队阶段输入竞争时按附录 B 处理。
+9. `member` 执行器：member 出现在 leader 的 Team 中；阶段任务经 Collaboration 的成员请求发出；与之竞争的 leader 请求按附录 B 得到或引起 `busy`。
 10. 非交互阶段 Session 没有 `workflow` 工具。
 
 ## 附录 E. 假设
@@ -388,8 +425,9 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | A13 | 卸载最多等待 10 s 以停止阶段 | 判断 | 其他上限 |
 | A15 | `start` 不去重 | 判断 | 幂等键 |
 | A16 | 报告预览 ≤ 4 KiB | 判断；`dim-agent-report` 先例 | 其他上限 |
+| A17 | 遇到 `busy` 的 member 阶段失败（`member_busy`），不重试 | 判断；由 Collaboration 的 Team 规则决定 | 等待后重试 |
 
-已决定：工具风险和阶段 policy 上限（E2）、`.dimcode/`（E11）、重启后报告一次（E15）、由 Collaboration 转发 member 审批（E6）、`establish`（decisions §2）、进程存储（R8）、撤回（R7）、宿主本地批准服务（R11）、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
+已决定：工具风险和阶段 policy 上限（E2）、`.dimcode/`（E11）、重启后报告一次（E15）、由 Collaboration 转发 member 审批（E6）、`establish`（decisions §2）、成员只经 Collaboration 的公开接口访问（用户决定）、进程存储使用 `pluginFiles`（扩展）（R8）、撤回（R7）、宿主本地批准服务（R11）、作用域（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 ## 附录 F. 待对齐问题
 
@@ -408,4 +446,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
 | `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` 租约，然后 `Session::input`、`local_page`、`idle`、`stop`、`service::<InputQueue>(branch).withdraw` |
 | Collaboration `establish` | `Collaboration::establish(leader_session_id, agent_id) -> SessionUse` |
+| Collaboration `memberRequest`（提议） | Collaboration 进程服务上的方法；丢弃回复 future 即取消 |
+| `workflowRuns` | 由 `Workflow` 提供、由 `WorkflowSession` 使用的进程级命名服务 |
+| 进程存储 | 在 `apply` 中打开的 `pluginFiles`（扩展）作用域 |
 | 运行任务 | 在 `ctx.effect` 持有的 `TaskTracker` 上 spawn |

@@ -19,7 +19,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Scheduler](Scheduler.md) | jobs, triggers, history | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | definitions, runs | `workflow` tool | — | P2 |
 | [ExternalAgent](ExternalAgent.md) | connections, ModelHost kind | — | — | P3 |
-| [AcpGateway](AcpGateway.md) | CLI process (client) | — | — | P3 |
+| [AcpGateway](AcpGateway.md) | — (a client in the CLI process, not a daemon plugin) | — | — | P3 |
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |
 | [Modality](Modality.md) | tasks, realtime connections | — | — | P3 |
 | [PluginManager](PluginManager.md) | marketplaces, packages | — | — | P3 |
@@ -28,6 +28,6 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 
 | Scope | Parts |
 | --- | --- |
-| Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway runs in the CLI process |
+| Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
 | Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Hooks, Notifications, Scheduler, Workflow |
 | Branch Capabilities | Questions, Goal, Hooks |

@@ -46,9 +46,9 @@ own scope:
 | Observe and act on a branch's events in order | the branch Dispatcher, from a branch-scoped plugin |
 | Put content into the model context | Session or branch input (adopted inputs), tool results |
 | Act on a write before it is committed | a Timeline before callback registered by a branch-scoped plugin (synchronous, or asynchronous with the runtime supplement: the write keeps its place in order and commits after the callback, which may transform the draft or append events to the same batch) |
-| Withdraw an input before it is applied | the `input/withdraw {input_id}` command event (clients, process callers, or a before callback in the input's own batch); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
+| Withdraw an input before it is applied | the `input/withdraw {input_id, reason?}` command event (clients, process callers, or a before callback in the input's own batch); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
 | Expose a client method about a Session | a Session-scoped `sessionMethods` service that Rpc dispatches through the Session |
-| Expose a host management method | a process plugin's `managementMethods` service in Rpc's method table, marked management level; each entry serves the levels it is configured for |
+| Expose a host management method | a process plugin's `managementMethods` service in Rpc's method table; connections from paired devices are never served management methods |
 | Reach other Sessions | Agents' `sessions` service (AgentIndex and the Session public interface), as Collaboration does |
 | React to another process plugin's outcomes | an event notice, not a dependency |
 
@@ -63,8 +63,8 @@ if needed later, belongs to rutis (issue #6), not to application wiring.
 
 | Kind | Examples | Location | On change |
 | --- | --- | --- | --- |
-| Structural plugin configuration | enable or disable, runtime and package paths, node binding, listener addresses | loader rows (issue #3 editable layer) | may reload the row |
-| Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, model purpose policies, MCP server and Skill documents, external agent entries, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
+| Structural plugin configuration | enable or disable, runtime and package paths, node binding | loader rows (issue #3 editable layer) | may reload the row |
+| Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, model purpose policies, MCP server and Skill documents, external agent entries and bridges, gateway listener settings, OCR component path, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
 
 ### D5. Contracts are language-neutral
 
@@ -111,8 +111,8 @@ of issue #4.
 | RemoteGateway | process | an external entry |
 | AcpGateway | CLI process | a client |
 
-Management is not a plugin: management methods live in Rpc's method table with a level, and
-entries serve levels.
+Management is not a plugin: management methods live in Rpc's method table, and connections from
+paired devices are never served them.
 
 ## Withdrawn
 

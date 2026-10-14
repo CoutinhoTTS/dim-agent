@@ -8,12 +8,12 @@
 | --- | --- | --- |
 | `sessions` 服务：按名称、纯数据地访问 Session | Agents | Scheduler、Workflow 进程部分 |
 | 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow、Collaboration `establish` |
-| `SessionConfig` 字段 `interactive`、`resourceNode`、`createdBy` | Agents | 所有作用域：`S:SessionConfig`、`Session::config()` |
+| `SessionConfig` 字段 `interactive`、`resourceNode`、`createdBy` | Agents | 所有作用域，通过所属 Session 的 `SessionConfig` |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 与 Hooks 分支部分写入相同形式 |
-| 固定前缀读取 | 运行时门面 | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
-| 撤回（指令 `input/withdraw`、结果 `input/deleted`、`session.input.withdraw`、自有来源撤回） | InputQueue | 客户端、Hooks、AcpGateway、Scheduler、Workflow |
+| 固定前缀读取 | 运行时门面（需求，§9） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
+| 撤回（带可选 `reason` 的指令 `input/withdraw`、结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`、自有来源撤回） | InputQueue | 客户端、Hooks、AcpGateway、Scheduler、Workflow |
 
-Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用 `S:`/`B:` 服务、分支 Dispatcher 和 Session 广播。
+Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用所属 Session 与分支的服务、分支 Dispatcher 和 Session 广播。
 
 ## 1. 结构
 
@@ -27,7 +27,7 @@ flowchart LR
     Rpc["Rpc"]
   end
   subgraph SESS["Session"]
-    SC["S:SessionConfig"]
+    SC["SessionConfig"]
     Fac["Session 门面：input, history, idle, stop, service"]
   end
   subgraph BR["分支"]
@@ -52,11 +52,11 @@ flowchart LR
 | --- | --- | --- |
 | `sessions`（Agents） | 进程 | 补充；映射到现有的 `acquire` 与门面，外加 `launch` |
 | `SessionConfig` 字段 | Session 记录 | 补充 |
-| Session 门面（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)） | Session、分支 | 已存在；输入归属是补充 |
+| Session 门面（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)） | Session、分支 | 已存在；输入归属是补充（§9） |
 | InputQueue | 分支 | 变更：消费 `input/withdraw`，写入 `input/deleted`；撤回服务 |
-| Collaboration `establish(leader, agent)` | 进程 | 变更：从分支外部创建成员 |
+| Collaboration `establish(leader, agent)`、`memberRequest`、`memberRequestLookup` | 进程 | 变更：从分支外部创建成员和发起成员请求（提议） |
 
-本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`WithdrawRequest` 与 `SessionsError`；`SessionOrigin` 与三个 `SessionConfig` 字段；`session.create` 的 `interactive` 与 `client` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、`context_block::element`、Session 输入路径（`Session::input`），以及 Timeline before 回调（运行时补充，[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
+本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`WithdrawRequest` 与 `SessionsError`；`SessionOrigin` 与三个 `SessionConfig` 字段；`session.create` 的 `interactive` 与 `client` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、Session 输入路径，以及 Timeline before 回调（运行时补充，[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
 
 ## 2. 数据与状态
 
@@ -117,7 +117,7 @@ sequenceDiagram
   end
 ```
 
-`input/withdraw { input_id }` 是指令事件，`input/deleted { input_id }` 是 InputQueue 的结果事实。合法生产方写入该指令：客户端经 Rpc 内建方法 `session.input.withdraw`（[session-boundary](session-boundary.md#a1-方法贡献)），进程调用方经 `sessions.withdraw`，以及与该输入位于同一原子批次中的 Timeline before 回调（例如 Hooks）。InputQueue 按序号顺序消费指令，且只依据自身的决策状态做决定（[时间总线 §4](../../../architecture/rust-agent/time-bus.md#4-写入前的复核归各状态机)）：只有当 InputQueue 仍持有该 `input/message` 且尚未应用时，指令才生效。一旦 InputQueue 为某输入写入了 `input/applied`，该输入就归 Loop 所有，无法再撤回；Loop 无需改动。InputQueue 只在包含输入的整个原子批次分发之后才决定是否采纳它们，因此该输入自身批次中的撤回总是生效。对于一个输入，`input/applied` 与 `input/deleted` 至多存在其一。
+`input/withdraw { input_id, reason? }` 是指令事件，`input/deleted { input_id }` 是 InputQueue 的结果事实。合法生产方写入该指令：客户端经 InputQueue 通过 `sessionMethods` 提供的 `session.input.withdraw`（[session-boundary](session-boundary.md#a1-方法贡献)），进程调用方经 `sessions.withdraw`，以及与该输入位于同一原子批次中的 Timeline before 回调（例如 Hooks）。InputQueue 按序号顺序消费指令，且只依据自身的决策状态做决定（[时间总线 §4](../../../architecture/rust-agent/time-bus.md#4-写入前的复核归各状态机)）：只有当 InputQueue 仍持有该 `input/message` 且尚未应用时，指令才生效。一旦 InputQueue 为某输入写入了 `input/applied`，该输入就归 Loop 所有，无法再撤回；Loop 无需改动。InputQueue 只在包含输入的整个原子批次分发之后才决定是否采纳它们，因此该输入自身批次中的撤回总是生效。对于一个输入，`input/applied` 与 `input/deleted` 至多存在其一。
 
 ## 4. 时序与冲突
 
@@ -155,16 +155,81 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | `sessions.input(InputWrite) -> {inputId, sequence}` | async | 写入带来源 raw 块的输入 |
 | `sessions.lookup({sessionId, branchId, submissionId}) -> LookupReply` | async | 在结果不确定后查找已提交的输入 |
 | `sessions.history(HistoryRequest) -> HistoryPage` | async | 读取历史，可选为以已发布 head 为界的固定前缀 |
+| `session.input.withdraw {sessionId, branchId, inputId, reason?}` | RPC | 客户端撤回；InputQueue 的 `sessionMethods`（命名空间 `session.input`） |
 | `sessions.withdraw(WithdrawRequest) -> WithdrawReply` | async | 为调用方自有来源的输入写入 `input/withdraw`，并返回 InputQueue 的决定 |
 | `sessions.stop({sessionId, branchId}) -> {sequence}` | async | 中断该分支的 turn |
 | `sessions.idle({sessionId, branchId}) -> {sequence}` | async | 等待分支空闲 |
 | `SessionConfig` 字段 | 数据 | 创建时配置（`interactive`、`resourceNode`、`createdBy`） |
 | `session.create {interactive, client}` | RPC | 非交互创建与客户端来源 |
-| Collaboration `establish(leader, agent)` | — | 从分支外部创建成员（Workflow）；属于 Collaboration 服务，不在 `sessions` 中 |
+| Collaboration `establish({leader, agent})`、`memberRequest`、`memberRequestLookup` | async | 从分支外部创建成员和发起成员请求（Workflow）；属于 Collaboration 服务（提议），不在 `sessions` 中。其他插件只通过 Collaboration 的公共接口管理成员；需求见 [Workflow §9](../plugins/Workflow.md#9-向机制所有者提出的需求) |
 
 ## 7. 安全
 
 只有控制节点进程中的插件持有 `sessions`，它从不经 RPC 入口或 rutis 链接导出。标记、key 与 `submissionId` 都按来源划分作用域。Agents 依据调用方的插件身份固定其来源，因此调用方无法以其他来源写入或撤回。进程调用方只能撤回自己的输入，客户端通过 Rpc 的 Session 授权撤回。写入输入不授予任何权限，因为由此产生的工具调用由 Approval 与 Permission 按该 Session 的策略准入。输入会重放进模型上下文，因此调用方不得把凭据或宿主安全设置放入其中。
+
+## 8. 规则检查
+
+| 规则 | 本文如何遵守 |
+| --- | --- |
+| §4 第 1 条（指令事件） | 撤回是指令 `input/withdraw`；只有 InputQueue 写结果 `input/deleted`，没有生效的撤回不写入任何内容，回复 `notHeld`。 |
+| §4 第 2 条（交接） | `input/applied` 把输入从 InputQueue 交给 Loop；之后输入不能撤回，只能用 `stop/interrupt` 中断。 |
+| §4 第 3 条（只用 before 回调） | 入口只检查参数格式、授权和调用方的自有来源；before 回调对输入的处理只有向其批次追加 `input/withdraw`。 |
+| §4 第 4 条（核心不带业务含义） | `reason`、标记、key 和 `submissionId` 是通用数据；InputQueue 与 Agents 从不解释来源。 |
+| §4 第 5 条（整个批次） | InputQueue 只在输入的整个批次分发后才决定是否采纳，因此同批次的撤回总是生效。 |
+| §4 第 6 条（模型上下文） | 被删除的输入从不进入上下文；已消费的输入放在其消费位置（§5）。 |
+| §4 第 7 条（公开事件与服务） | 进程调用方只通过 `sessions` 访问 Session，只通过 Collaboration 的公共接口（`establish`、`memberRequest`）访问其成员。 |
+| §4 第 8 条（需求） | #4、固定前缀读取、由插件身份确定调用方来源、可选部分的装配，在 §9 提出。 |
+| §4 第 9 条（只有决定用的事实进 Timeline） | `SessionConfig`、租约和调用方进度不进 Timeline；只有输入以及撤回的指令和结果是事件。 |
+| §1（Capability 与 App Server 边界） | Agents 只提供访问；调用方的业务逻辑留在各自插件中。 |
+| ADR 002 D1 | `sessions` 是 Agents 的进程服务；InputQueue 的撤回留在其分支部分，由其 Session 部分提供给客户端。 |
+| ADR 002 D2 | 没有访问宿主或门面插件；调用方像 Collaboration 一样使用 Agents。 |
+| ADR 002 D3 | 依赖 Agents 的调用方随其重载，并用 `lookup` 解决结果不确定的写入。 |
+| ADR 002 D4 | `SessionConfig` 字段是 Session 记录的创建数据，不是插件配置。 |
+| ADR 002 D5 | `sessions` 是具名服务，方法与错误都是纯数据；Rust 类型只出现在附录 E。 |
+
+## 9. 向机制所有者提出的需求
+
+### 9.1 运行时服务按名称暴露（#4）
+
+| 项 | 内容 |
+| --- | --- |
+| 被什么挡住 | ADR 002 D5：非 Rust 的 Session 与分支部分（SessionTitle、Goal、Web、Notifications，以及 Scheduler 与 Workflow 的 Session 部分）需要在没有手写 Rust 绑定的情况下使用运行时的类型化服务（Timeline、Dispatcher、InputQueue、Session 广播、SessionStore 元数据、Settings、`AuxiliaryModel`）。 |
+| 考虑过的现有机制 | rutis 具名服务（`TypeKey::named`、`host_key`）：只对按名称注册的服务有效，而运行时按 Rust 类型注册这些服务。每个插件手写绑定：D5 不允许。先用 Rust 实现：在此需求落地前的退路。 |
+| 需要的通用能力 | 运行时把每个公开的类型化服务也以稳定的服务名和纯数据方法形式注册，作用域与 key 不变。 |
+| 对序号、批次、中断、重载的影响 | 无：按名称调用沿用类型化服务的顺序、批次和中断规则；具名服务随其所有者重载。 |
+| 由谁实现、对应 issue | 运行时与 rutis；[#4](https://github.com/arcships/dim/issues/4)。 |
+
+### 9.2 固定前缀读取
+
+| 项 | 内容 |
+| --- | --- |
+| 被什么挡住 | §4 第 5 条和时间总线 §4：依据历史做决定的进程调用方，必须读到一个已知的已发布序号为止，不能用未提交或未消费的尾部。 |
+| 考虑过的现有机制 | `Session::history`：不保证读到的头部不低于某个序号，可能漏掉触发读取的事件。订阅 Dispatcher：进程调用方没有分支部分。 |
+| 需要的通用能力 | 读取分支已发布的历史，至少到给定序号；头部低于该序号时以 `future_sequence` 失败（A.5）。 |
+| 对序号、批次、中断、重载的影响 | 只读；返回的头部是整个批次的边界。重载时读取以 `reloading` 失败。 |
+| 由谁实现、对应 issue | 运行时（Session 门面，`Session::prefix`）；issue 待开。 |
+
+### 9.3 由插件身份确定调用方来源
+
+| 项 | 内容 |
+| --- | --- |
+| 被什么挡住 | §7：调用方不能以其他来源写入或撤回，Agents 不能信任请求中传入的来源。 |
+| 考虑过的现有机制 | 来源参数：可伪造。由接线插件为每个调用方创建服务实例：D2 不允许。 |
+| 需要的通用能力 | 服务调用携带 loader 分配的调用插件身份，提供方可以读取。 |
+| 对序号、批次、中断、重载的影响 | 无。 |
+| 由谁实现、对应 issue | 运行时门面与 rutis 插件身份；issue 待开。 |
+
+### 9.4 按启用状态与 `interactive` 安装可选部分
+
+| 项 | 内容 |
+| --- | --- |
+| 被什么挡住 | ADR 002 后果：可选的 Session 与分支部分只在启用时安装；非交互 Session 不安装 Questions（A.3）。 |
+| 考虑过的现有机制 | 全部安装、在部分内部检查：这是 ADR 不允许的占位。每个插件在宿主侧调用 `AgentBuilder`：不是语言中立的（D5）。 |
+| 需要的通用能力 | Agent 装配收集每个已安装插件在 `provides` 中声明的具名服务，只在插件启用且其声明的 `SessionConfig` 条件成立时安装该部分。 |
+| 对序号、批次、中断、重载的影响 | 在 Session 装载时决定；启用插件只影响之后装载的 Session。 |
+| 由谁实现、对应 issue | 运行时（Agent 装配）；issue 待开。 |
+
+§3.1 用到的异步 before 回调在 [Hooks §9](../plugins/Hooks.md#9-向机制所有者提出的需求) 提出；离线相关行用到的 #5 在 [ExternalAgent §9](../plugins/ExternalAgent.md#9-向机制所有者提出的需求) 提出。
 
 ## 附录 A. 接口细节
 
@@ -208,7 +273,8 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 // HistoryPage
 { "through": 0, "events": [ { "sequence": 0, "branchId": "string", "type": "turn/end", "data": {} } ] }
 // WithdrawRequest
-{ "sessionId": "string", "branchId": "string", "inputId": "string" }
+{ "sessionId": "string", "branchId": "string", "inputId": "string",
+  "reason?": "string" }                 // 复制到 input/withdraw，由客户端显示
 // WithdrawReply
 { "status": "deleted", "sequence": 0 }   // input/deleted 的序号
 | { "status": "notHeld" }                  // 未知、已应用或已删除；InputQueue 未写入任何内容
@@ -224,7 +290,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 | 项目 | 规则 |
 | --- | --- |
-| 标记 | 第一个 raw 块是 `context_block::element("dim-<source>", [("kind", kind), attrs..], body)`。来源只从第一个 raw 块的第一行识别。来源名为 `[a-z][a-z0-9-]*`，由生产方插件拥有且保持稳定。名称 `rule`、`state`、`agent-message`、`agent-report` 和 `branch-task` 为保留名 |
+| 标记 | 第一个 raw 块是现有上下文块格式中的元素 `<dim-<source> kind="..." ...>body</dim-<source>>`。来源只从第一个 raw 块的第一行识别。来源名为 `[a-z][a-z0-9-]*`，由生产方插件拥有且保持稳定。名称 `rule`、`state`、`agent-message`、`agent-report` 和 `branch-task` 为保留名 |
 | Key | `RawBlock.key`，`use` 为 `live` 或 `retire`，存储为 `<source>:<name>`，按分支 Timeline 区分。无法产生 Prompt 的 `rule:`/`state:` 前缀 |
 | 提交标识 | `<source>:<uuid>`，每次逻辑提交生成一个。写入不去重；`sessions.lookup`（与 `session.input_lookup` 语义相同）查找已提交的输入（`accepted`、`unknown`，错误 `ambiguous`） |
 | 绝不可能 | 写入 `input/message`、经 `withdraw` 的 `input/withdraw` 和经 `stop` 的 `stop/interrupt` 之外的事件；写入 `input/deleted`；编辑历史；使用其他来源的标记、key 或 id |
@@ -249,15 +315,15 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 | 项目 | 内容 |
 | --- | --- |
-| 指令 | `input/withdraw { input_id }`，一个分支指令事件；生产方：撤回服务（客户端、进程调用方），以及该输入自身批次中的 Timeline before 回调。它本身从不是关于该输入的事实 |
+| 指令 | `input/withdraw { input_id, reason? }`，一个分支指令事件。`reason` 是通用可选文本，不带业务含义，由客户端为被删除的输入显示；不带它的事件不变。生产方：撤回服务（客户端、进程调用方），以及该输入自身批次中的 Timeline before 回调。它本身从不是关于该输入的事实 |
 | 结果事实 | `input/deleted { input_id }`，只由 InputQueue 写入，且只在它消费 `input/withdraw` 时仍持有该输入、尚未应用的情况下写入 |
 | 持有 | InputQueue 从某输入的 `input/message` 起持有它，直到为其写入 `input/applied` 或 `input/deleted`。只在包含该输入的整个原子批次分发之后才决定是否采纳它 |
-| 无效果 | 未知 id、输入已应用或已删除：InputQueue 不写入任何内容；调用方收到的回复为 `notHeld` |
-| 客户端路径 | Rpc 内建方法 `session.input.withdraw {sessionId, branchId, inputId}` → `{status: "deleted", sequence}` 或 `{status: "notHeld"}` |
+| 无效果 | 未知 id、输入已应用或已删除：InputQueue 不写入任何内容，也没有失败事件；调用方收到的回复为 `notHeld` |
+| 客户端路径 | `session.input.withdraw {sessionId, branchId, inputId, reason?}`，由 InputQueue 经 `sessionMethods` 提供（命名空间 `session.input`；提议的 InputQueue Session 级部分，调用分支的撤回服务），因此 Rpc 不点名任何所属服务 → `{status: "deleted", sequence}` 或 `{status: "notHeld"}` |
 | 进程与分支部分路径 | 进程调用方使用 `sessions.withdraw`，分支部分使用 InputQueue 的分支撤回服务：只限标记为调用方来源的输入；否则 `foreign_source`，不写入任何内容 |
 | 写入路径 | 该服务追加 `input/withdraw`，然后以 InputQueue 对该指令的决定作答。InputQueue 的复核只使用其自身的决策状态（持有集合），从不对另一所有者的事实加锁 |
 | 撤回并作为 Steer 重新提交 | 一个原子批次：针对旧输入的 `input/withdraw` 加新的 Steer `input/message`。撤回只在旧输入仍被持有时生效；新输入无论如何都会写入 |
-| 在输入自身批次中撤回 | `input/message` 上的 Timeline before 回调可以向其批次追加针对该输入的 `input/withdraw`；此时 InputQueue 总是写入 `input/deleted`，且从不应用它。针对哪些输入以及原因，由回调所有者的规则决定（例如 [Hooks](../plugins/Hooks.md) `user_prompt_submit`） |
+| 在输入自身批次中撤回 | `input/message` 上的 Timeline before 回调可以向其批次追加针对该输入的 `input/withdraw`（带其 `reason`）；此时 InputQueue 总是写入 `input/deleted`，且从不应用它。针对哪些输入以及原因，由回调所有者的规则决定（例如 [Hooks](../plugins/Hooks.md) `user_prompt_submit`） |
 | 应用之后 | 已应用的输入无法撤回；Loop 照常消费它，无需改动 |
 
 ### A.5 固定前缀读取
@@ -270,7 +336,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | --- | --- |
 | `session_closed`、`branch_missing` | 未写入任何内容 |
 | `reloading` | Agents 或该 Session 的 Capability 正在重载；先 `lookup` 再重试 |
-| `rejected` | 校验、标记或 key 规则；未写入任何内容 |
+| `rejected` | 参数格式、标记或 key 规则（只做外部边界检查）；未写入任何内容 |
 | `foreign_source` | 撤回其他来源的输入；未写入任何内容。未知 id 不是错误：回复为 `notHeld` |
 | `future_sequence` | 固定前缀读取超出已发布 head |
 | `ambiguous` | `lookup` 匹配到多个输入 |

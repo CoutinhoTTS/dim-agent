@@ -42,9 +42,9 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 |
 | 把内容放入模型上下文 | Session 或分支输入（被采纳的输入）、工具结果 |
 | 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调（同步，或借助运行时补充异步执行：该写入保持其在顺序中的位置，并在回调之后提交；回调可以变换草稿，或向同一批次追加事件） |
-| 在输入被应用前撤回它 | `input/withdraw {input_id}` 指令事件（由客户端、进程内调用方，或该输入所在批次中的 before 回调发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
+| 在输入被应用前撤回它 | `input/withdraw {input_id, reason?}` 指令事件（由客户端、进程内调用方，或该输入所在批次中的 before 回调发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
 | 暴露关于某个 Session 的客户端方法 | Session 级 `sessionMethods` 服务，由 Rpc 经该 Session 分发 |
-| 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的 `managementMethods` 服务，标记为管理级；每个入口服务其配置的级别 |
+| 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的 `managementMethods` 服务；已配对设备的连接不会获得管理方法 |
 | 访问其他 Session | Agents 的 `sessions` 服务（AgentIndex 和 Session 公共接口），与 Collaboration 的做法相同 |
 | 响应另一个进程插件的结果 | 事件通知，而非依赖 |
 
@@ -58,8 +58,8 @@ rutis（issue #6），而不属于应用层接线。
 
 | 类别 | 示例 | 位置 | 变更时 |
 | --- | --- | --- | --- |
-| 结构性插件配置 | 启用或禁用、运行时与包路径、节点绑定、监听地址 | loader 行（issue #3 可编辑层） | 可能重载该行 |
-| 业务配置 | 搜索服务、通知渠道、Hook 规则、定时任务、工作流定义、模型用途策略、MCP 服务器与 Skill 文档、外部 Agent 条目、exec shell | 所属插件的业务来源（Settings 来源或插件自有存储） | 数据更新并通知；使用时读取；不重载 |
+| 结构性插件配置 | 启用或禁用、运行时与包路径、节点绑定 | loader 行（issue #3 可编辑层） | 可能重载该行 |
+| 业务配置 | 搜索服务、通知渠道、Hook 规则、定时任务、工作流定义、模型用途策略、MCP 服务器与 Skill 文档、外部 Agent 条目与桥接、网关监听设置、OCR 组件路径、exec shell | 所属插件的业务来源（Settings 来源或插件自有存储） | 数据更新并通知；使用时读取；不重载 |
 
 ### D5. 合同语言中立
 
@@ -103,7 +103,7 @@ issue #4 的工作。
 | RemoteGateway | 进程 | 一个外部入口 |
 | AcpGateway | CLI 进程 | 一个客户端 |
 
-管理不是插件：管理方法带级别存在于 Rpc 的方法表中，由各入口按级别提供服务。
+管理不是插件：管理方法存在于 Rpc 的方法表中，已配对设备的连接不会获得这些方法。
 
 ## 撤回
 
