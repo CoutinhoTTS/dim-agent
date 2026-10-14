@@ -1,5 +1,6 @@
 # Documentation
 
+- [CLI feature list](feature-list.md)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
