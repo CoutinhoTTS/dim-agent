@@ -1,38 +1,24 @@
 #![allow(dead_code)] // TODO: remove once the TUI is wired to the App Server
 
-mod approvals_panel;
 mod args;
-mod attachments;
 mod browser;
 mod client;
-mod composer;
 mod display;
 mod event_order;
 mod export;
 mod images;
 mod input;
 mod json_ord;
-mod list_panel;
 mod login;
 mod mcp;
-mod models_panel;
-mod oauth_view;
+mod model;
 mod permission;
 mod permission_command;
 mod projection;
-mod prompts;
-mod providers_panel;
-mod render;
 mod session;
 mod session_host;
-mod sessions_panel;
-mod terminal;
-mod theme;
-mod theme_panel;
-mod transcript;
-mod tui;
+mod ui;
 mod usage;
-mod view;
 mod wire;
 
 use args::{Action, Options};
@@ -47,9 +33,14 @@ fn main() {
         if matches!(options.action, Action::Chat)
             && options.prompt.is_none()
             && !options.no_tui
-            && tui::is_interactive()
+            && ui::tui::is_interactive()
         {
-            return Ok(tui::run(options));
+            let env = ui::Env {
+                home: options.home.clone(),
+                workspace: options.cwd.clone(),
+            };
+            let host = session_host::SessionHost::start(options);
+            return Ok(ui::tui::run(Box::new(host), env));
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
