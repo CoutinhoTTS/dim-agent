@@ -1,8 +1,8 @@
 # AcpGateway
 
-Status: Draft. Overall design: [overview §B.15](../overview.md#b15-acpgateway). Phase: P3. Language: TypeScript first as a standalone program, then merged into the Rust CLI ([overview §F.3](../overview.md#f3-assignment)).
+Status: Draft. Overall design: [overview §B.15](../overview.md#b15-acpgateway); scope: [ADR 002](../../adr/002-plugin-scope.md) (CLI process). Phase: P3. Language: TypeScript first as a standalone program, then merged into the Rust CLI ([overview §F.3](../overview.md#f3-assignment)).
 
-`dimcode acp` serves the Agent Client Protocol (ACP) over standard input and output so that editors can drive dim. It is a protocol adapter in the CLI process: it connects to the daemon over local RPC exactly like the CLI, maps each ACP session to a non-interactive dim Session, each ACP prompt to a `session.submit`, Session events to ACP `session/update` notifications, and dim approval requests to ACP permission requests. It opens no execution path in the daemon, writes nothing except through existing or registered Session methods, and declares no event.
+`dimcode acp` serves the Agent Client Protocol (ACP) over standard input and output so that editors can drive dim. It is a protocol adapter in the CLI process: it connects to the daemon over local RPC exactly like the CLI, maps each ACP session to a non-interactive dim Session, each ACP prompt to a `session.submit`, Session events to ACP `session/update` notifications, and dim approval requests to ACP permission requests. It opens no execution path in the daemon, writes nothing except through Rpc's built-in Session methods and Session method contributions (`SessionMethodContribution`, dispatched by Rpc through the Session), and declares no event.
 
 ## 1. Structure
 
@@ -20,7 +20,7 @@ flowchart LR
     Agents["Agents: session.create with interactive and client label"]
     IQ["InputQueue: session.input.withdraw"]
     Appr["Approval: approval.respond"]
-    Att["Attachments: attachment.put (level session)"]
+    Att["Attachments: attachment.put (Session method contribution)"]
   end
   Editor <-->|"ACP JSON-RPC over stdio"| GW
   GW --- Schema
@@ -35,7 +35,7 @@ The gateway depends on public RPC only; no daemon plugin knows it exists, and re
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `dimcode acp` | CLI process (not a daemon plugin) | Local RPC protocol v3 ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)): `hello`, `session.create` (with `interactive` and `client`, Agents supplement), `session.attach`/`detach`, `session.submit`, `session.input_lookup`, `session.history`, `session.stop`, `session.permission.update`, `approval.respond`; `session.input.withdraw` (InputQueue, decisions R7); `attachment.put` ([Attachments](Attachments.md)); notifications `session.event`, `session.state`, `session.model.progress`, `approval.request`, `approval.cancelled`, `session.closed`; CLI daemon discovery | ACP agent on stdio; the ACP↔dim mapping of this document |
+| `dimcode acp` | CLI process (not a daemon plugin) | Local RPC protocol v3 ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)): `hello`, `session.create` (with `interactive` and `client`, Agents supplement), `session.attach`/`detach`, `session.submit`, `session.input_lookup`, `session.history`, `session.stop`, `session.permission.update`, `approval.respond`; `session.input.withdraw` (InputQueue, decisions R7) and `attachment.put` ([Attachments](Attachments.md)), Session method contributions ([session-boundary](../contracts/session-boundary.md)); notifications `session.event`, `session.state`, `session.model.progress`, `approval.request`, `approval.cancelled`, `session.closed`; CLI daemon discovery | ACP agent on stdio; the ACP↔dim mapping of this document |
 
 ## 2. Data and state
 
@@ -71,7 +71,7 @@ sequenceDiagram
   G-->>E: sessionId, modes (mcpServers ignored)
   E->>G: session/prompt {prompt}
   G->>R: session.submit {branchId main, submissionId, user, mode queue}
-  R->>TL: submission admission, then relay through Session input boundary, Timeline append input/message
+  R->>TL: Session::input (validate at the boundary), Timeline append input/message
   R-->>G: committed event: input_event_id
   TL-->>G: input/applied, turn/start, input/consumed {input_event_id}
   TL-->>G: progress, step/text, step/tool-use-*, step/tool-result
@@ -171,7 +171,7 @@ The gateway writes no raw blocks, keys, prompt sources or tool declarations. Its
 
 ## 7. Security
 
-The gateway has the authority of a local CLI client: the local socket's ownership checks apply, and it calls only Session methods plus `session.create`, never management methods, so editors cannot change host configuration (isolation, host-local approvals, plugins). ACP modes change the Session's permission preset, which is Session configuration (`permission/changed`, decisions E4), bounded by what a local client may already do and reset on fork. Permission answers go through `approval.respond`, where Approval rechecks current policy; `allow_always` is never offered. Client-supplied `mcpServers` are never started, so an editor cannot make the daemon run commands (documented ACP conformance deviation, E13). Embedded resources become user content and follow Timeline rules.
+The gateway has the authority of a local CLI client: the local socket's ownership checks apply, and it calls only Session methods plus `session.create`, never the management-level methods in Rpc's method table, so editors cannot change host configuration (isolation, host-local approvals, plugins). ACP modes change the Session's permission preset, which is Session configuration (`permission/changed`, decisions E4), bounded by what a local client may already do and reset on fork. Permission answers go through `approval.respond`, where Approval rechecks current policy; `allow_always` is never offered. Client-supplied `mcpServers` are never started, so an editor cannot make the daemon run commands (documented ACP conformance deviation, E13). Embedded resources become user content and follow Timeline rules.
 
 ## Appendix A. Interface details
 
@@ -215,13 +215,13 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` → submission admission ([session-boundary](../contracts/session-boundary.md), submission-admission port; fail closed only when a `RequiredCheck` record matching the Session names a checker that is not registered ([ADR 002](../../adr/002-plugin-scope.md) D6): `service_reloading`, nothing written) → `SessionLease::relay` → Session input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
+| Prompt write | `session.submit` → `Session::input` (user content, no blocks) → input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` → InputQueue validates (own branch, not adopted) and writes `input/withdrawn` |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |
 | Approval | `approval.respond` → Approval validates, writes `approval/respond`, consumes it by sequence |
 | State | No `StateCell`, no Dispatcher; gateway memory only |
-| Daemon reload | Calls return `service_reloading`; the gateway retries with the same `submissionId` after `session.input_lookup` (`accepted` → no resubmission) |
+| Daemon reload | Calls return `service_reloading` (a Session method contribution reloading with its Session plugin, or a structural reload); the gateway retries with the same `submissionId` after `session.input_lookup` (`accepted` → no resubmission) |
 | Restart or lost connection | Reconnect, re-attach each mapped Session, read `session.history` after the last seen sequence; an in-flight prompt is resolved from those facts |
 | Gateway exit (stdin EOF) | `session.detach` for each Session; running turns continue; nothing is stopped |
 
@@ -249,7 +249,6 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | Branch interrupt or Session close | `session.closed` | In-flight prompt `cancelled`; later `session_not_found` | Gateway |
 | Session idle-unload while attached | — | Attachment keeps it loaded | AgentIndex |
 | Resource node offline | capabilities Pending | Prompt waits; `turn/end` decides | rutis lifecycle |
-| A matching `RequiredCheck` record's checker is not registered (D6) | — | `service_reloading`, nothing written; retried after `input_lookup` | Rpc |
 | Daemon reload mid-submit | — | `input_lookup` decides resubmission | Gateway |
 | Daemon restart mid-turn | turn settled `Failed` | `turn_failed` after catch-up | Loop |
 | Duplicate `session/prompt` | — | `prompt_in_progress` | Gateway |
