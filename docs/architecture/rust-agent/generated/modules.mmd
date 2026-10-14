@@ -138,14 +138,14 @@ flowchart LR
   m134["dim_app_server::provider::secrets"]
   m135["dim_app_server::settings"]
   m136["dim_app_server::settings::mcp_approval"]
-  m137["dim_app_server::settings::native"]
-  m138["dim_app_server::storage"]
-  m139["dim_app_server::storage::codec"]
-  m140["dim_app_server::storage::sqlite"]
-  m141["dim_app_server::storage::timeline"]
-  m142["dim_app_server::trace"]
-  m143["dim_app_server::transport"]
-  m144["dim_app_server::tree_protocol"]
+  m137["dim_app_server::storage"]
+  m138["dim_app_server::storage::codec"]
+  m139["dim_app_server::storage::sqlite"]
+  m140["dim_app_server::storage::timeline"]
+  m141["dim_app_server::trace"]
+  m142["dim_app_server::transport"]
+  m143["dim_app_server::tree_protocol"]
+  m144["dim_app_server::user_configuration"]
   m145["dim_cli::@bin:dimcode"]
   m146["dim_cli::@bin:dimcode::args"]
   m147["dim_cli::@bin:dimcode::client"]
@@ -852,12 +852,13 @@ flowchart LR
   m101 --> m127
   m101 --> m128
   m101 --> m135
-  m101 -.-> m138
+  m101 -.-> m137
+  m101 --> m139
   m101 --> m140
   m101 --> m141
   m101 --> m142
-  m101 --> m143
-  m101 -.-> m144
+  m101 -.-> m143
+  m101 --> m144
   m102 --> m1
   m102 --> m3
   m102 --> m4
@@ -876,9 +877,10 @@ flowchart LR
   m102 --> m108
   m102 --> m116
   m102 --> m127
+  m102 --> m139
   m104 --> m80
   m104 --> m96
-  m104 --> m140
+  m104 --> m139
   m105 --> m28
   m105 --> m69
   m105 --> m70
@@ -894,9 +896,9 @@ flowchart LR
   m105 --> m104
   m105 --> m127
   m105 --> m135
+  m105 --> m139
   m105 --> m140
   m105 --> m141
-  m105 --> m142
   m106 --> m16
   m106 --> m69
   m106 --> m80
@@ -959,7 +961,7 @@ flowchart LR
   m109 --> m128
   m109 --> m132
   m109 --> m135
-  m109 --> m144
+  m109 --> m143
   m110 --> m53
   m110 --> m69
   m110 --> m105
@@ -980,14 +982,14 @@ flowchart LR
   m111 --> m109
   m111 --> m110
   m111 --> m127
-  m111 --> m144
+  m111 --> m143
   m112 --> m27
   m112 --> m74
   m112 --> m80
   m112 --> m91
   m112 --> m109
   m112 --> m127
-  m112 --> m144
+  m112 --> m143
   m113 --> m72
   m113 --> m101
   m114 --> m23
@@ -1062,7 +1064,7 @@ flowchart LR
   m127 --> m130
   m127 --> m132
   m127 --> m135
-  m127 --> m144
+  m127 --> m143
   m128 --> m28
   m128 --> m72
   m128 --> m80
@@ -1081,7 +1083,7 @@ flowchart LR
   m128 --> m132
   m128 --> m133
   m128 --> m134
-  m128 --> m140
+  m128 --> m139
   m129 --> m28
   m129 --> m124
   m129 --> m131
@@ -1110,53 +1112,58 @@ flowchart LR
   m135 --> m72
   m135 --> m84
   m135 -.-> m136
-  m135 -.-> m137
-  m135 --> m140
+  m135 --> m144
   m136 --> m23
   m136 --> m135
-  m137 --> m135
-  m138 -.-> m139
-  m138 --> m140
-  m138 --> m141
-  m139 --> m78
+  m137 -.-> m138
+  m137 --> m139
+  m137 --> m140
+  m138 --> m78
+  m138 --> m80
+  m138 --> m86
+  m138 --> m89
+  m138 --> m91
+  m138 --> m93
+  m138 --> m99
+  m138 --> m139
+  m139 --> m72
   m139 --> m80
-  m139 --> m86
-  m139 --> m89
-  m139 --> m91
-  m139 --> m93
-  m139 --> m99
-  m139 --> m140
+  m139 --> m144
   m140 --> m72
+  m140 --> m73
+  m140 --> m74
+  m140 --> m78
   m140 --> m80
-  m141 --> m72
+  m140 --> m86
+  m140 --> m88
+  m140 --> m91
+  m140 --> m96
+  m140 --> m127
+  m140 --> m138
+  m140 --> m139
+  m141 --> m54
+  m141 --> m55
+  m141 --> m69
+  m141 --> m70
   m141 --> m73
-  m141 --> m74
-  m141 --> m78
-  m141 --> m80
-  m141 --> m86
-  m141 --> m88
-  m141 --> m91
-  m141 --> m96
+  m141 --> m105
   m141 --> m127
-  m141 --> m139
-  m141 --> m140
-  m142 --> m54
-  m142 --> m55
-  m142 --> m69
-  m142 --> m70
-  m142 --> m73
-  m142 --> m105
+  m142 --> m72
+  m142 --> m101
+  m142 --> m109
+  m142 --> m113
+  m142 --> m125
   m142 --> m127
-  m143 --> m72
-  m143 --> m101
-  m143 --> m109
-  m143 --> m113
-  m143 --> m125
-  m143 --> m127
-  m143 --> m140
-  m144 --> m71
-  m144 --> m74
-  m144 --> m91
+  m142 --> m139
+  m143 --> m71
+  m143 --> m74
+  m143 --> m91
+  m144 --> m23
+  m144 --> m72
+  m144 --> m80
+  m144 --> m84
+  m144 --> m135
+  m144 --> m139
   m145 --> m146
   m145 --> m147
   m145 -.-> m148

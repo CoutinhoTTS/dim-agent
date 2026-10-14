@@ -12,6 +12,7 @@ use tokio::sync::watch;
 pub(super) fn error(error: McpError) -> RpcError {
     let kind = match &error {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
+        McpError::Settings(SettingsError::AppliedUnsaved) => "mcp_settings_unsaved",
         McpError::Settings(SettingsError::Invalid(_))
         | McpError::InvalidSource
         | McpError::InvalidId => "mcp_invalid_config",

@@ -68,7 +68,7 @@ this batch. Update the delivery status as each complete unit lands.
 | Unit | Status |
 | --- | --- |
 | Session-owned MCP instances | Implemented; independent connections, Session close, retained bindings, cross-Session revocation and cleanup failures covered by public flows |
-| Editable user persistence and management | In progress; native settings still use the v13 source-first format |
+| Editable user persistence and management | v14 editable user document persistence implemented; management RPC integration remains separate |
 | Skill content rows | Not implemented |
 
 Public-flow checks cover two Sessions using one configured server, closing only
@@ -76,3 +76,39 @@ one Session, automatic replacement with a retained old binding, cancellation
 during instance creation, cross-Session project revocation, failed cleanup,
 restart/import behavior and secret-free management output. Run the workspace
 tests, Clippy, architecture checks and regenerated graph checks before completion.
+
+## Native user layer implementation
+
+Native v14 replaces source-first settings CAS with a private version-1 envelope
+containing ordered user-layer patches, immutable typed document snapshots and
+import provenance. The editable rows are protected `UserMcpDocument` and
+`UserSkillsDocument` configuration adapters, not a generic marketplace. Their
+configs/schemas/events contain only opaque references. Persisted patches reject
+all infrastructure targeting and all fields other than those typed root rows.
+Management must submit typed document edits through SettingsService, not expose
+raw loader operations or arbitrary row names.
+
+UserConfigurationPlugin declares SQLite and Loader in Deps, and binds a
+late-bound Persist port in apply with effect-owned invalidation. Startup loads
+only storage/configuration capabilities first, initializes intent outside
+apply, then reconciles full assembly plus Editable. Settings declares the
+stable UserConfiguration service, never the changing document adapter rows.
+No loader mutation is performed in apply/dispose and an unbound backend fails
+promptly. Settings mutations retain their accepted-task ownership and serialize
+the expected-current token check with loader submission.
+
+SettingsSnapshot.revision and SkillSettings.version remain opaque equality
+tokens but now identify **live loader intent**, including applied-unsaved edits.
+Watch invalidation likewise describes live intent. Successful legacy mutations
+still acknowledge saved state; save failure is explicitly applied-but-unsaved,
+not rollback. Flush retries the framework queue and persistence status is
+separate from LoaderChanged and runtime adoption.
+
+Both legacy files import before full consumer assembly, atomically preserving
+originals and extension fields. Thus invalid/unreadable legacy documents now
+fail eager startup, instead of surfacing on their first consumer read. Repair
+and restart is required; no empty fallback is permitted. Project and approval
+files remain unchanged. Startup rejects v13; the explicit offline
+SqliteStorage::migrate_v13_to_v14 API checks exact old schema under the maintenance
+lock and replaces only format/settings tables in one transaction. Native v13
+settings beat stale files. See the native storage format for the exact contract.

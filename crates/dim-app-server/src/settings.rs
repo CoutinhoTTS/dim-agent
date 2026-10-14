@@ -1,8 +1,7 @@
 //! Source-targeted settings. No MCP connections or Skill discovery.
 mod mcp_approval;
-mod native;
 
-use crate::storage::SqliteStorage;
+use crate::user_configuration::UserConfiguration;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
 use dim_agent_capabilities::skill_settings::{
     SettingsVersion, SkillSettings as SkillSettingsPort, SkillSettingsError, SkillSettingsHost,
@@ -33,6 +32,8 @@ pub enum SettingsError {
     Cancelled,
     #[error("settings persistence failed; read the current revision before retrying")]
     Persistence,
+    #[error("settings applied but unsaved; current intent is live; retry flush")]
+    AppliedUnsaved,
     #[error("settings worker failed: {0}")]
     Worker(#[from] tokio::task::JoinError),
 }
@@ -126,7 +127,13 @@ pub struct SkillSettings {
 
 /// Contains server-side secrets (MCP headers/env); never serialize this snapshot
 /// directly into client notifications or diagnostic logs.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "document",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum SettingsDocument {
     Mcp(McpSettings),
     Skills(SkillSettings),
@@ -137,14 +144,14 @@ pub struct SettingsSnapshot {
     pub document: SettingsDocument,
 }
 
-enum SettingsChange {
+pub(crate) enum SettingsChange {
     Replace(SettingsDocument),
     SkillEnabled { id: String, enabled: bool },
 }
 
 pub struct SettingsService {
     files: Arc<FileStorage>,
-    database: Option<Arc<SqliteStorage>>,
+    configuration: Option<Arc<UserConfiguration>>,
     home_root: usize,
     projects: Arc<Mutex<BTreeMap<PathBuf, usize>>>,
     stopping: CancellationToken,
@@ -239,16 +246,16 @@ impl SettingsService {
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot> {
         self.check_open(cancel)?;
-        if self.database.is_some()
+        if let Some(configuration) = &self.configuration
             && matches!(source, SettingsSource::UserMcp | SettingsSource::Skills)
         {
-            return self.native_read(source, cancel).await;
+            return configuration.read(source);
         }
         decode(source, self.files.read(&self.path(source)?, cancel).await)
     }
 
-    /// CAS is checked in the source's write transaction or file lease, not against
-    /// an in-memory counter. Workspace edits made outside this service are detected.
+    /// Native tokens identify current loader intent; checking and submission
+    /// serialize at UserConfiguration. File sources check CAS under their lease.
     pub async fn update(
         self: &Arc<Self>,
         source: SettingsSource,
@@ -297,11 +304,12 @@ impl SettingsService {
         change: SettingsChange,
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot> {
-        if self.database.is_some()
+        self.check_open(cancel)?;
+        if let Some(configuration) = &self.configuration
             && matches!(source, SettingsSource::UserMcp | SettingsSource::Skills)
         {
-            return self
-                .native_replace(source, expected_revision, change, cancel)
+            return configuration
+                .change(source, expected_revision, change, cancel)
                 .await;
         }
         let mut lease = loop {
@@ -349,7 +357,7 @@ impl SettingsService {
 }
 
 impl SettingsChange {
-    fn apply(self, current: &SettingsDocument) -> Option<SettingsDocument> {
+    pub(crate) fn apply(self, current: &SettingsDocument) -> Option<SettingsDocument> {
         match self {
             Self::Replace(document) => Some(document),
             Self::SkillEnabled { id, enabled } => {
@@ -439,7 +447,7 @@ fn revision(bytes: Option<&[u8]>) -> String {
     }
 }
 
-fn decode(
+pub(crate) fn decode(
     source: SettingsSource,
     read: std::result::Result<Vec<u8>, FileStorageError>,
 ) -> Result<SettingsSnapshot> {
@@ -473,7 +481,7 @@ fn decode(
     })
 }
 
-fn validate(source: SettingsSource, document: &SettingsDocument) -> Result<()> {
+pub(crate) fn validate(source: SettingsSource, document: &SettingsDocument) -> Result<()> {
     match (source, document) {
         (SettingsSource::Skills, SettingsDocument::Skills(settings)) => {
             if settings.extra.contains_key("disabledSkillIds") {
@@ -567,8 +575,8 @@ impl SettingsPlugin {
         }
     }
 
-    /// SQLite owns user documents after their first successful import. Workspace
-    /// files remain authoritative; legacy user files are retained but never dual-written.
+    /// Requires the stable UserConfiguration service and initialized editable
+    /// root intent. Workspace files remain authoritative; originals are retained.
     pub fn native(home_root: usize, project_roots: Vec<usize>) -> Self {
         Self {
             native: true,
@@ -577,14 +585,14 @@ impl SettingsPlugin {
     }
 }
 impl TypedPlugin for SettingsPlugin {
-    type Deps = (Arc<FileStorage>, When<Arc<SqliteStorage>>);
+    type Deps = (Arc<FileStorage>, When<Arc<UserConfiguration>>);
     fn name(&self) -> &str {
         "Settings"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (files, When(database)): Self::Deps,
+        (files, When(configuration)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             for root in &self.project_roots {
@@ -600,14 +608,19 @@ impl TypedPlugin for SettingsPlugin {
             }
             let service = Arc::new(SettingsService {
                 files,
-                database,
+                configuration: configuration.clone(),
                 home_root: self.home_root,
                 projects: self.projects.clone(),
                 stopping: CancellationToken::new(),
                 gate: Mutex::new(()),
                 updates: TaskTracker::new(),
-                changed: StateCell::new(0),
-                skills_changed: StateCell::new("unread".into()),
+                changed: configuration
+                    .as_ref()
+                    .map_or_else(|| StateCell::new(0), |owner| owner.changed.clone()),
+                skills_changed: configuration.as_ref().map_or_else(
+                    || StateCell::new("unread".into()),
+                    |owner| owner.skills_changed.clone(),
+                ),
             });
             let owner = service.clone();
             ctx.effect(move || {

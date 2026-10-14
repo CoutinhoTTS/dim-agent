@@ -9,6 +9,120 @@ use rusqlite::{Connection, params};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 const INTERPRETER: &str = "dim/context-projection/v2";
+#[tokio::test]
+async fn explicit_v13_migration_preserves_history_and_native_authority() {
+    let database = Database::new();
+    let home = database.0.parent().unwrap().to_path_buf();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("migration", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("migration", "main"),
+        vec![text(1, "preserved history")],
+    )
+    .await
+    .unwrap();
+    assert!(SqliteStorage::migrate_v13_to_v14(database.0.clone(), home.clone()).is_err());
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    connection.execute_batch("DROP TABLE user_configuration; DROP TABLE agent_store_format;
+        CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 13));
+        INSERT INTO agent_store_format VALUES (13);
+        CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL);").unwrap();
+    connection
+        .execute(
+            "INSERT INTO settings_documents VALUES ('user/mcp', 9, ?1, 'missing')",
+            [r#"{"mcpServers":{},"extension":"native wins"}"#],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO settings_documents VALUES ('user/skills', 4, ?1, 'missing')",
+            [r#"{"disabledSkillIds":["missing-id"],"extension":true}"#],
+        )
+        .unwrap();
+    std::fs::write(home.join("mcp.json"), b"stale and invalid").unwrap();
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let history: String = connection
+        .query_row("SELECT body FROM timeline_events", [], |r| r.get(0))
+        .unwrap();
+    // Invalid native documents fail atomically; startup must never auto-upgrade.
+    connection
+        .execute(
+            "UPDATE settings_documents SET document = 'invalid' WHERE source = 'user/skills'",
+            [],
+        )
+        .unwrap();
+    assert!(SqliteStorage::migrate_v13_to_v14(database.0.clone(), home.clone()).is_err());
+    assert_eq!(
+        connection
+            .query_row("SELECT version FROM agent_store_format", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    connection
+        .execute(
+            "UPDATE settings_documents SET document = ?1 WHERE source = 'user/skills'",
+            [r#"{"disabledSkillIds":["missing-id"],"extension":true}"#],
+        )
+        .unwrap();
+    let command = || {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"));
+        command.arg("--migrate-v13").arg(&database.0).arg(&home);
+        command
+    };
+    let rejected = command().arg("--mock-model").output().unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(
+        connection
+            .query_row("SELECT version FROM agent_store_format", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        13
+    );
+    let migrated = command().output().unwrap();
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&migrated.stdout).contains("v13 to v14"));
+    assert!(
+        !command().output().unwrap().status.success(),
+        "repeating an upgrade must not rewrite v14"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT body FROM timeline_events", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        history
+    );
+    let envelope: String = connection
+        .query_row("SELECT envelope FROM user_configuration", [], |r| r.get(0))
+        .unwrap();
+    assert!(envelope.contains("native wins") && envelope.contains("missing-id"));
+    assert_eq!(
+        std::fs::read(home.join("mcp.json")).unwrap(),
+        b"stale and invalid"
+    );
+    drop(connection);
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    assert_eq!(
+        store.read(&key("migration", "main"), 1..=1).await.unwrap()[0].event,
+        text(1, "preserved history").event
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
         sequence,
@@ -114,7 +228,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .unwrap();
     for table in [
         "agent_store_format",
-        "settings_documents",
+        "user_configuration",
         "providers",
         "provider_selections",
         "provider_imports",

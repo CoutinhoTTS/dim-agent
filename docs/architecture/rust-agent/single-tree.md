@@ -85,7 +85,9 @@ rutis root
 | `SqliteStoragePlugin` | 共享数据库连接、事务、原生 schema 门禁、文件维护锁与关停 | `SqliteStorage` | —；启动参数固定数据库路径 |
 | `SessionStorePlugin` | 原生会话目录、Timeline 落盘/恢复及写入任务 | `SessionStore`、`TimelineStore` 持久化端口 | `SqliteStorage` |
 | `FileWriteCoordinatorPlugin` | 跨 Session 的逐路径写入 FIFO 准入域；跨代共享 | `FileWriteCoordinator` | — |
-| `SettingsPlugin` | 按来源的配置写入：用户 MCP/Skill 文档（导入后以 SQLite `settings_documents` 为权威，带修订检查）、工作区 `.mcp.json`（文件权威与内容 CAS）、宿主本地项目 MCP 批准 `mcp-approvals.json`；不建立 MCP 连接或发现 Skill | `SettingsService`、`SkillSettingsHost` | `FileStorage`、`When<SqliteStorage>` |
+| `SettingsPlugin` | Typed user MCP/Skill document edits via the root editable layer; project `.mcp.json` content CAS and host-local approvals unchanged; no connections or discovery | `SettingsService`, `SkillSettingsHost` | `FileStorage`, `When<UserConfiguration>` |
+| `UserConfigurationPlugin` | Stable user intent admission and late-bound SQLite Persist port; private snapshots, sanitized invalidations and save retry; no lock-taking loader mutation in apply/dispose | `UserConfiguration` | `SqliteStorage`, `Loader` |
+| `UserMcpDocument`, `UserSkillsDocument` | Protected typed editable adapter rows containing opaque snapshot references only | No required dynamic row service | `UserConfiguration` |
 | `OpenAICodexOAuthPlugin` / `GrokOAuthPlugin` | 各自账号字段、登录、刷新与终态 | `OpenAICodexOAuthService` / `GrokOAuthService` | `FileStorage` |
 | `ManagedProvidersPlugin` | 可选 managed provider 的当前绑定代次与在途操作；未绑定时请求明确失败 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
@@ -111,13 +113,19 @@ rutis root
 
 ### 配置发布与 MCP
 
-User settings currently retain source-first persistence. [ADR 002](../../adr/002-loader-plugin-management.md)
-supersedes that direction with an editable user layer; Session-owned instances
-are implemented independently of that persistence change.
+Native v14 user settings use the root editable layer described by
+[ADR 002](../../adr/002-loader-plugin-management.md). Bootstrap loads storage and
+configuration first, initializes intent outside apply, then reconciles the full
+assembly plus Editable. Settings depends on stable configuration admission, not
+on changing document rows, so its own accepted edit cannot unload its waiter.
+Live opaque source tokens and invalidations include applied-unsaved intent;
+successful mutations still acknowledge saved state. Persistence status and
+flush remain separate from runtime adoption. Project/approval files and
+standalone file SettingsPlugin retain their existing contracts.
 
 | 项 | 约定 |
 | --- | --- |
-| 来源与写入 | 每个来源一个持久化权威与写入路径：管理操作指明目标来源并按修订 CAS，不回写合成视图。用户 MCP/Skill 首次读取时原子导入 SQLite，失败保留原文件并可重试；工作区 `.mcp.json` 保持文件权威 |
+| Sources and writes | Native user MCP/Skill documents import atomically before consumers start; root loader intent is the sole editable authority and Persist saves its layer. Originals are retained. Project `.mcp.json` remains file-authoritative with content CAS |
 | Publication | Settings notifications update Session discovery automatically. New bindings use new instances; a persistence acknowledgement does not guarantee discovery, adoption or cleanup |
 | MCP generations | Connections are not shared across Sessions. The declared `SessionLoader` service creates nested instances using private immutable values, never secret-bearing loader options or mutable templates. Retained user bindings keep old generations until release or Session close. Project changes, disablement, unreadable authority and revocation retire old generations even with retained bindings. Disconnect/revoke drains every affected Session instance; cleanup failures are reported separately |
 | 项目 MCP 批准 | 宿主本地批准绑定规范工作区、服务器 ID 与有效配置指纹；未批准的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现。每次连接操作复查当前来源与批准；撤销拒绝经保留绑定的新调用、取消并等待已受理的代次工作、关闭传输后才确认。文件根授权、FullAccess 工具权限与 Session 恢复都不授予批准（AGENTS 规则 11） |

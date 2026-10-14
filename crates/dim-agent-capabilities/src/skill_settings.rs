@@ -5,7 +5,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-/// Opaque persistent revision, not a process-local notification counter.
+/// Opaque current-intent revision, not a notification counter. A saved revision
+/// survives restart; an applied-but-unsaved revision does not imply durability.
 pub type SettingsVersion = String;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,9 +46,9 @@ pub trait SkillSettings: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>>;
 
     /// Subscribe before reading `skills()`, then read again after notifications.
-    /// Starts at `unread`, then carries committed Skill revisions; use skills()
-    /// for the authoritative version. Notifications may coalesce. Does not
-    /// watch writes by other processes.
+    /// Starts at `unread`, then carries current Skill intent revisions; use
+    /// skills() for the authoritative version. Notifications may coalesce and
+    /// do not certify persistence. Does not watch writes by other processes.
     fn changes(&self) -> watch::Receiver<SettingsVersion>;
 }
 

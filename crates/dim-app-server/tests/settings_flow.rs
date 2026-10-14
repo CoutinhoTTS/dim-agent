@@ -27,7 +27,7 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
     let a = a.canonicalize().unwrap();
     let b = b.canonicalize().unwrap();
     let database = home.join("settings.sqlite");
-    let legacy = br#"{"mcpServers":{},"marker":"original"}"#;
+    let legacy = br#"{"mcpServers":{"private":{"command":"unused","args":["secret-argument"],"env":{"TOKEN":"secret-environment"},"custom":"secret-extension"}},"marker":"original"}"#;
     fs::write(home.join("mcp.json"), legacy).unwrap();
     fs::write(home.join("skills.json"), b"broken").unwrap();
     fs::write(a.join(".mcp.json"), br#"{"mcpServers":{},"marker":"a"}"#).unwrap();
@@ -43,17 +43,105 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
         } else {
             vec![home.clone(), a.clone(), b.clone()]
         };
+        let port = Arc::new(dim_app_server::user_configuration::UserPersist::default());
+        let mut builtins = rutis_loader::Builtins::new();
+        dim_app_server::user_configuration::register_documents(&mut builtins);
+        let loader_plugin = rutis_loader::LoaderPlugin::new(
+            builtins,
+            rutis_loader::LoaderOptions {
+                persist: port.clone(),
+                ..Default::default()
+            },
+        );
+        let loader = loader_plugin.handle();
         let views = [
+            root.plugin(loader_plugin),
             root.plugin(capability_plugin(FileStoragePlugin::new(roots))),
             root.plugin(capability_plugin(SqliteStoragePlugin::new(
                 database.clone(),
             ))),
-            root.plugin(capability_plugin(SettingsPlugin::native(0, vec![1, 2]))),
+            root.plugin(capability_plugin(
+                dim_app_server::user_configuration::UserConfigurationPlugin(port.clone()),
+            )),
         ];
         wait_active(&root, &views, Duration::from_secs(5), &cancel)
             .await
             .unwrap();
+        let files = root.get::<FileStorage>().unwrap();
+        if !restarted {
+            assert!(port.initialize(&files, 0).await.is_err());
+            assert_eq!(fs::read(home.join("skills.json")).unwrap(), b"broken");
+            fs::write(
+                home.join("skills.json"),
+                br#"{"disabledSkillIds":[],"custom":"retain"}"#,
+            )
+            .unwrap();
+        } else {
+            let fault = rusqlite::Connection::open(&database).unwrap();
+            let body: String = fault
+                .query_row("SELECT envelope FROM user_configuration", [], |r| r.get(0))
+                .unwrap();
+            let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+            for target in [
+                "SqliteStorage",
+                "Settings",
+                "Rpc",
+                "Transport",
+                "McpConnections",
+                "ManagedProviderPlugin",
+            ] {
+                let mut malicious = envelope.clone();
+                malicious["patches"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":target,"disabled":true}));
+                fault
+                    .execute(
+                        "UPDATE user_configuration SET envelope = ?1",
+                        [malicious.to_string()],
+                    )
+                    .unwrap();
+                assert!(port.initialize(&files, 0).await.is_err());
+            }
+            fault
+                .execute("UPDATE user_configuration SET envelope = ?1", [body])
+                .unwrap();
+        }
+        let (layer, editable) = port.initialize(&files, 0).await.unwrap();
+        loader.reconcile(vec![layer], Some(editable)).await.unwrap();
+        let projection = serde_json::to_string(
+            &loader
+                .entries()
+                .into_iter()
+                .map(|entry| entry.options)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(!projection.contains("secret-"));
+        assert!(
+            !loader
+                .schema_of("UserMcpDocument")
+                .await
+                .unwrap()
+                .unwrap()
+                .to_string()
+                .contains("secret-")
+        );
+        let view = root.plugin(capability_plugin(SettingsPlugin::native(0, vec![1, 2])));
+        wait_active(&root, &[view], Duration::from_secs(5), &cancel)
+            .await
+            .unwrap();
         let settings = root.get::<SettingsService>().unwrap();
+        let configuration = root
+            .get::<dim_app_server::user_configuration::UserConfiguration>()
+            .unwrap();
+        assert!(
+            !serde_json::to_string(&configuration.catalog().unwrap())
+                .unwrap()
+                .contains("secret-")
+        );
+        assert!(configuration.status().backend_available);
+        assert_eq!(configuration.status().pending_saves, 0);
         let source_a = SettingsSource::ProjectMcp(settings.project_root(&a).unwrap());
         let source_b = SettingsSource::ProjectMcp(settings.project_root(&b).unwrap());
         let current_a = settings.read(source_a, &cancel).await.unwrap();
@@ -80,16 +168,6 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
                 matches!(&current_a.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "a-updated")
             );
         } else {
-            assert!(matches!(
-                settings.read(SettingsSource::Skills, &cancel).await,
-                Err(SettingsError::Invalid(_))
-            ));
-            assert_eq!(fs::read(home.join("skills.json")).unwrap(), b"broken");
-            fs::write(
-                home.join("skills.json"),
-                br#"{"disabledSkillIds":[],"custom":"retain"}"#,
-            )
-            .unwrap();
             let skills = root.get::<SkillSettingsHost>().unwrap().0.clone();
             let snapshot = skills.skills(cancel.clone()).await.unwrap();
             skills
@@ -103,17 +181,8 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
             );
 
             let fault = rusqlite::Connection::open(&database).unwrap();
-            fault.execute_batch("CREATE TRIGGER fail_import BEFORE INSERT ON settings_documents BEGIN SELECT RAISE(ABORT, 'secret-not-for-diagnostics'); END").unwrap();
-            let error = settings
-                .read(SettingsSource::UserMcp, &cancel)
-                .await
-                .err()
-                .unwrap();
-            assert!(matches!(error, SettingsError::Persistence));
-            assert!(!error.to_string().contains("secret-not-for-diagnostics"));
             assert_eq!(fs::read(home.join("mcp.json")).unwrap(), legacy);
-            fault.execute_batch("DROP TRIGGER fail_import").unwrap();
-            // Failed imports must not switch authority or seed an empty row.
+            // Loader intent, not later legacy file edits, is authoritative.
             fs::write(
                 home.join("mcp.json"),
                 br#"{"mcpServers":{},"marker":"repaired"}"#,
@@ -124,7 +193,7 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
                 .await
                 .unwrap();
             assert!(
-                matches!(&current.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "repaired")
+                matches!(&current.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "original")
             );
             let mut changed = settings.subscribe();
             let mut next = current.document.clone();
@@ -132,7 +201,7 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
                 unreachable!()
             };
             doc.extra.insert("marker".into(), json!("native"));
-            fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON settings_documents BEGIN SELECT RAISE(ABORT, 'save failed'); END").unwrap();
+            fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON user_configuration BEGIN SELECT RAISE(ABORT, 'save failed'); END").unwrap();
             assert!(matches!(
                 settings
                     .update(
@@ -142,25 +211,36 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
                         &cancel
                     )
                     .await,
-                Err(SettingsError::Persistence)
+                Err(SettingsError::AppliedUnsaved)
             ));
-            assert!(
-                settings
-                    .read(SettingsSource::UserMcp, &cancel)
-                    .await
-                    .unwrap()
-                    == current
-            );
-            assert!(!changed.has_changed().unwrap());
+            let applied = settings
+                .read(SettingsSource::UserMcp, &cancel)
+                .await
+                .unwrap();
+            assert!(applied.document == next);
+            assert!(applied.revision != current.revision);
+            assert!(changed.has_changed().unwrap());
+            assert_eq!(loader.pending().len(), 1);
             fault.execute_batch("DROP TRIGGER fail_save").unwrap();
+            root.get::<dim_app_server::user_configuration::UserConfiguration>()
+                .unwrap()
+                .flush()
+                .await
+                .unwrap();
+            assert!(loader.pending().is_empty());
+            // A concurrent layer version change exercises the framework's CAS
+            // replay with the private snapshot belonging to the accepted edit.
+            fault
+                .execute("UPDATE user_configuration SET version = version + 1", [])
+                .unwrap();
             let (first, second) = tokio::join!(
                 settings.update(
                     SettingsSource::UserMcp,
-                    &current.revision,
+                    &applied.revision,
                     next.clone(),
                     &cancel
                 ),
-                settings.update(SettingsSource::UserMcp, &current.revision, next, &cancel),
+                settings.update(SettingsSource::UserMcp, &applied.revision, next, &cancel),
             );
             let winner = match (first, second) {
                 (Ok(snapshot), Err(SettingsError::Conflict))
@@ -176,7 +256,33 @@ async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
                     .unwrap()
                     == winner
             );
-            saved = Some(winner);
+            let mut removed = winner.document.clone();
+            let SettingsDocument::Mcp(doc) = &mut removed else {
+                unreachable!()
+            };
+            doc.mcp_servers.clear();
+            saved = Some(
+                settings
+                    .update(SettingsSource::UserMcp, &winner.revision, removed, &cancel)
+                    .await
+                    .unwrap(),
+            );
+            let persisted: String = fault
+                .query_row("SELECT envelope FROM user_configuration", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert!(
+                !persisted.contains("secret-"),
+                "deleted credentials must not survive as old private snapshots"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&persisted).unwrap()["documents"]
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                2
+            );
             assert_eq!(
                 fs::read(home.join("mcp.json")).unwrap(),
                 br#"{"mcpServers":{},"marker":"repaired"}"#
@@ -300,6 +406,31 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
         builder.session_plugin(move |_| ProcessSettings(capture.clone()));
+        fs::write(home.join("skills.json"), b"invalid-private-document").unwrap();
+        let failed = tokio::time::timeout(
+            Duration::from_secs(2),
+            serve(
+                builder.clone(),
+                ServerConfig {
+                    product_home: Some(home.clone()),
+                    target_home: Some(home.join("runtime")),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let error = match failed {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("invalid eager import must reject startup"),
+        };
+        assert!(error.contains("invalid legacy skills.json"));
+        assert!(!error.contains("invalid-private-document"));
+        assert_eq!(
+            fs::read(home.join("skills.json")).unwrap(),
+            b"invalid-private-document"
+        );
+        fs::remove_file(home.join("skills.json")).unwrap();
         let server = serve(
             builder,
             ServerConfig {

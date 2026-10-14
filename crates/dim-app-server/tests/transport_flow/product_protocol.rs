@@ -530,8 +530,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             loop {
                 // Prompt delivered the current view's list, which names the
                 // Skill or not. The Session follows the catalog after the
-                // RPC returns, so its view may still be the one created from
-                // the broken skills.json.
+                // RPC returns, so its view may still contain the previous list.
                 let Ok(view) = session
                     .service::<dim_agent_capabilities::skills::SkillsBranch>("main")
                     .unwrap()
@@ -593,7 +592,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         "---\nname: product-check\ndescription: Product fixture\n---\nProduct skill body\n",
     )
     .unwrap();
-    std::fs::write(home.join("skills.json"), b"{broken").unwrap();
+    std::fs::write(home.join("skills.json"), br#"{"disabledSkillIds":[]}"#).unwrap();
+    std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"docs":{"type":"http","url":"https://example.invalid/private-secret","headers":{"Authorization":"private-secret"},"enabled":true}}}).to_string()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install_local_execution(
         &mut builder,
@@ -628,7 +628,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     .unwrap();
     // A shared daemon must authorize a workspace opened after startup. Catalog
     // reads preserve intent and never expose connection configuration secrets.
-    std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"docs":{"type":"http","url":"https://example.invalid/private-secret","headers":{"Authorization":"private-secret"},"enabled":true}}}).to_string()).unwrap();
     std::fs::write(work.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":["private-secret"],"env":{"TOKEN":"private-secret"},"enabled":false}},"extension":"preserved"}).to_string()).unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     for method in [
@@ -836,12 +835,9 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             .rpc("session.mcp.refresh", json!({"sessionId":sid}))
             .await,
     );
-    assert_eq!(
-        client.rpc("session.skills", branch.clone()).await["error"]["data"]["appError"],
-        "skills_unavailable"
-    );
-    assert_eq!(std::fs::read(home.join("skills.json")).unwrap(), b"{broken");
-    std::fs::write(home.join("skills.json"), br#"{"disabledSkillIds":[]}"#).unwrap();
+    // After import, even corrupt legacy user files cannot replace loader intent.
+    std::fs::write(home.join("skills.json"), b"{broken").unwrap();
+    assert_ok(&client.rpc("session.skills", branch.clone()).await);
     assert_ok(&client.rpc("skills.refresh", json!({"cwd":work})).await);
     let skills = client.rpc("skills.catalog", json!({"cwd":work})).await;
     assert_ok(&skills);

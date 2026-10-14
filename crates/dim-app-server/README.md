@@ -70,8 +70,8 @@ environment are not. This is configuration approval, not an OS sandbox; see the
 
 Successful configuration mutations return `{}` after persistence, not after connection/tool
 adoption. The catalog also returns `userApplication` and optional `projectApplication`, each with
-`appliedRevision`, `error` and `cleanupError`. Application confirms that the published rows are
-active or deliberately disabled; it does not confirm a network connection or tool adoption.
+`appliedRevision`, `error` and `cleanupError`. Application describes source eligibility
+and instance creation failures; it does not confirm a network connection or tool adoption.
 An application error leaves persisted intent intact. Cleanup errors remain visible for that
 source during this publisher's lifetime, including after later successful application.
 Read `session.mcp` for runtime state. A conflict requires rereading the source;
@@ -79,6 +79,15 @@ interruption may follow an already committed write, so never retry
 blindly. Use these methods rather than editing imported user files. `skills.set_enabled` likewise
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
+
+Native storage v14 persists the editable user layer through SQLite. User revision
+tokens identify current intent, not necessarily a durable commit: a save failure
+can leave a live edit queued for `UserConfiguration::flush`. First import happens
+before execution starts; repair malformed legacy user files and restart rather
+than expecting an empty fallback. Account-only hosts do not import them.
+Existing v13 stores require an explicit offline upgrade after backup:
+`dim-app-server --migrate-v13 DATABASE CONFIGURATION_HOME`. See the
+[storage contract](../../docs/design/appserver/native-storage-format.md).
 
 Each Session owns its MCP connections as nested instances in the existing loader.
 The host coordinates source selection and retirement without rewriting root layers.
