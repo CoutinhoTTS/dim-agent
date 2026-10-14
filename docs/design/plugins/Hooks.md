@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.7](../overview.md#b7-hooks). Phase: P2 (user and project sources); plugin source after #3. Language: Rust.
 
-Hooks is an adapter that maps command Hook configuration onto extension points that other owners define; it adds no extension mechanism and no Timeline event. Pre-tool Hooks implement Approval's admission check and user-submit Hooks implement the single [`submission-admission`](../contracts/session-boundary.md) point; Session-start, post-tool, turn-end and notification Hooks run after notices of the live [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (Session start after the `Created` notice). Every command runs on the Session's resource node (`SessionConfig.resource_node`), whose services are looked up per call through the `node-services` point of the [extension registry](../contracts/extension-registry.md); output enters context only as input.
+Hooks is an adapter that maps command Hook configuration onto extension points that other owners define; it adds no extension mechanism and no Timeline event. Pre-tool Hooks register into Approval's admission-check port and user-submit Hooks into Rpc's [submission-admission port](../contracts/session-boundary.md); Session-start, post-tool, turn-end and notification Hooks run after notices of the live [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (Session start after the `Created` notice). Every command runs on the Session's resource node (`SessionConfig.resource_node`), whose services are looked up per call through the stable node-services port ([ADR 002 D2](../../adr/002-dependency-direction.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)); output enters context only as input.
 
 ## 1. Structure
 
@@ -12,20 +12,20 @@ flowchart LR
     Catalog["Catalog and matcher"]
     Runner["Command runner"]
     Observer["Observation workers per branch"]
-    Mounts["Registry mounts: admission check, submission admission, methods"]
+    Regs["Registrations: admission check, submission admission, methods"]
   end
-  AdmReg["Admission check registry (Approval)"]
-  FilterReg["submission-admission point"]
-  MgmtReg["Method contribution registry, level management"]
+  AdmReg["Admission-check port (Approval side)"]
+  FilterReg["Submission-admission port (Rpc side)"]
+  MgmtReg["Method port (Rpc side), level management"]
   Events["Session broadcast subscription: Created and events"]
   Access["SessionAccess, config"]
-  Res["node-services by node id (per call)"]
+  Res["node-services port by node id (per call)"]
   Approvals["Host-local approval service (Settings)"]
-  Settings["Typed Settings operations"]
-  Contents["PluginContents type hooks"]
-  Mounts --> AdmReg
-  Mounts --> FilterReg
-  Mounts --> MgmtReg
+  Settings["Hooks business source (Settings)"]
+  Contents["PluginContents type hooks (stable registry)"]
+  Regs --> AdmReg
+  Regs --> FilterReg
+  Regs --> MgmtReg
   Observer --> Events
   Observer --> Access
   Runner --> Res
@@ -35,23 +35,23 @@ flowchart LR
   Catalog --> Res
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
-  class Catalog,Runner,Observer,Mounts new
+  class Catalog,Runner,Observer,Regs new
   class AdmReg,FilterReg,MgmtReg,Events,Access,Res,Approvals,Contents contract
 ```
 
-Hooks only contributes to registries owned by their consumers ([extension-registry](../contracts/extension-registry.md)); Approval and Rpc never inject Hooks and never reload because of it. Project files and process execution go through the node services of the Session's resource node, resolved per call, so an offline node affects only calls on that node.
+Hooks only registers into ports owned by their consumers ([ADR 002 D2](../../adr/002-dependency-direction.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)): it registers in `apply` and unregisters in `ctx.effect`; Approval and Rpc never inject Hooks and never reload because of it. Every dependency of Hooks is stable (the Session access plugin, which depends only on AgentDirectory and Loader, the node-services port, Settings, the `PluginContents` registry), so its lifetime is independent of Agents: an Agents reload only makes Session access return `Reloading`. Project files and process execution go through the node services of the Session's resource node, resolved per call, so an offline node affects only calls on that node.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `HooksPlugin` | Process | Session broadcast subscription, `SessionAccess` (`config`, prefix reads, writes), `node-services` lookup, Settings typed operations and host-local approval service, `When<PluginContents>` (type key `hooks`) | Mount instances: admission check `hooks` (Approval registry), submission admission `hooks` ([session-boundary](../contracts/session-boundary.md)), method namespace `hooks` at level `management` |
+| `HooksPlugin` | Process | Session broadcast subscription, `SessionAccess` (`config`, prefix reads, writes), node-services port, its business source in Settings and the host-local approval service, `When<PluginContents>` (stable registry, type key `hooks`) | Registrations: admission check `hooks` (Approval's admission-check port), submission admission `hooks` (Rpc's submission-admission port, [session-boundary](../contracts/session-boundary.md)), method namespace `hooks` at level `management` (Rpc's method port) |
 
-**Contracts depended on** (none names Hooks): the admission check registry (Approval; [extension-registry](../contracts/extension-registry.md)), the `submission-admission` point and the method contribution ([session-boundary](../contracts/session-boundary.md)), [session-access](../contracts/session-access.md) (`SessionAccess`, `config`, per-block relay attribution), [session-broadcast-subscription](../contracts/session-broadcast-subscription.md) (`Created` notice), `node-services` ([extension-registry](../contracts/extension-registry.md)), Settings typed operations and host-local approval service (overview §7.2), `PluginContents` (PluginManager, optional). **Contracts defined here**: the Hook configuration format, the command protocol, the `hooks.*` management methods, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks does not define the admission contracts; it only implements them.
+**Contracts depended on** (none names Hooks): Approval's admission-check port ([ADR 002 D2](../../adr/002-dependency-direction.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer), [D6](../../adr/002-dependency-direction.md#d6-fail-closed-requirements-come-from-adopted-business-configuration)), the submission-admission and method ports ([session-boundary](../contracts/session-boundary.md)), [session-access](../contracts/session-access.md) (`SessionAccess`, `config`, per-block relay attribution), [session-broadcast-subscription](../contracts/session-broadcast-subscription.md) (`Created` notice), the node-services port, Settings typed operations and host-local approval service (overview §7.2), `PluginContents` (PluginManager, optional). **Contracts defined here**: the Hook configuration format, the command protocol, the `hooks.*` management methods, source name `hooks` (marker `dim-hooks`, key namespace `hooks:`). Hooks does not define the admission ports; it only registers into them.
 
 ## 2. Data and state
 
 ```mermaid
 flowchart TB
-  UserCfg["User Hooks and disable flags (loader editable layer)"]
+  UserCfg["User Hooks and disable_all (Hooks business source, Settings)"]
   ProjFile[".dimcode/hooks.json on the resource node"]
   PlugCfg["PluginContents entries type hooks"]
   Grants["Host-local approvals, owner namespace hooks"]
@@ -68,7 +68,7 @@ flowchart TB
   class Catalog new
 ```
 
-Hooks owns no `StateCell` and rebuilds nothing from the Timeline. The catalog is recomputed from its sources at each execution point (A6); grants are read per execution and never cached as authority; follow-up counters are derived from the fixed prefix. Running processes live in memory under `ctx.effect` and are never re-run after reload or restart. Outcomes are recorded only as other owners' facts (Appendix A.5).
+User Hooks and `disable_all` are business configuration ([D5](../../adr/002-dependency-direction.md#d5-structural-configuration-and-business-configuration-are-separate)): read at each execution point, changed by a data update with notification, never a reload; enabling the plugin stays a loader row. Hooks owns no `StateCell` and rebuilds nothing from the Timeline. The catalog is recomputed from its sources at each execution point (A6); grants are read per execution and never cached as authority; follow-up counters are derived from the fixed prefix. Running processes live in memory under `ctx.effect` and are never re-run after reload or restart. Outcomes are recorded only as other owners' facts (Appendix A.5).
 
 ## 3. Flows
 
@@ -78,13 +78,13 @@ Hooks owns no `StateCell` and rebuilds nothing from the Timeline. The catalog is
 sequenceDiagram
   participant TE as ToolExecutor (branch)
   participant AP as Approval (branch)
-  participant REG as Admission registry
+  participant REG as Admission-check port
   participant HK as Hooks
   participant RES as node-services
   TE->>TE: Dispatcher consumes step/tool-call, registers batch task, returns
   TE->>AP: admit(call) after step/tool-start
   AP->>AP: Permission decision (Ask path via append_registered)
-  AP->>REG: run configured checks in order
+  AP->>REG: run registered checks in order
   REG->>HK: check(request with config subset, cancel)
   HK->>RES: HostPlatform of resource_node, this call
   HK->>HK: run matching pre_tool_use Hooks serially
@@ -93,7 +93,7 @@ sequenceDiagram
   TE->>TE: one step/tool-result for the whole batch
 ```
 
-Hooks runs outside every commit lock and Dispatcher handler and writes nothing; ToolExecutor writes the terminal fact. A Hook error applies `on_error`, whose default for `pre_tool_use` is `deny` (E9). If the Hooks mount is configured but inactive, Approval itself denies with a retryable reason; a cancelled check returns deny (extension-registry).
+Hooks runs outside every commit lock and Dispatcher handler and writes nothing; ToolExecutor writes the terminal fact. A Hook error applies `on_error`, whose default for `pre_tool_use` is `deny` (E9). If no `hooks` checker is registered, Approval denies with a retryable reason only when an adopted `pre_tool_use` rule matches the call ([D6](../../adr/002-dependency-direction.md#d6-fail-closed-requirements-come-from-adopted-business-configuration), A.4); otherwise the call proceeds. A cancelled check returns deny.
 
 ### 3.2 User submit and Session start
 
@@ -119,7 +119,7 @@ sequenceDiagram
   SA->>TL: Timeline::append
 ```
 
-Submission admission is fail closed (inactive → `service_reloading`, nothing written). Session start is observe-only and fail open: it runs only for a `Created` notice with `created_by = Client` (E10), never on restore (`Loaded`), and its context reaches the next model request after it is written (A24).
+Submission admission is fail closed only for adopted rules: with no checker registered and an adopted enabled `user_prompt_submit` rule, Rpc returns `service_reloading` and writes nothing; without such a rule the submission proceeds. Session start is observe-only and fail open: it runs only for a `Created` notice with `created_by = Client` (E10), never on restore (`Loaded`), and its context reaches the next model request after it is written (A24).
 
 ### 3.3 Observation Hooks
 
@@ -163,8 +163,8 @@ An interrupt after `step/tool-start` always wins over a finished Hook: output is
 | --- | --- | --- | --- |
 | Turn-end follow-up vs user input or Goal continuation | `turn/end` < other input < Hook write | Recheck sees the input: not written. If both read before either writes, both Queue inputs stand (at most one extra turn each) | Hooks, InputQueue |
 | Follow-up withdrawn by the user | follow-up < `input/withdrawn` | Not consumed; not counted as a follow-up and not rewritten | InputQueue, Hooks |
-| Hooks inactive (reload, Pending, disabled) | — | Approval denies checks (retryable); `session.submit` → `service_reloading`; no Session-start or observation Hooks run | Approval, Rpc |
-| Agents reload | — | `SessionAccess` and the broadcast subscription return `Reloading`; Hooks does not reload; writes `lookup` before one retry | Hooks |
+| Hooks not registered (reload, Pending, disabled) | — | Only calls or submissions matched by an adopted rule are denied (retryable) or get `service_reloading`; others proceed; no Session-start or observation Hooks run | Approval, Rpc |
+| Agents reload | — | `SessionAccess` and the broadcast subscription return `Reloading`; Hooks does not reload and its checkers stay registered; writes `lookup` before one retry | Hooks |
 | Resource node offline | per call | That call's Hook errors: pre-tool → `on_error` (deny), observation → diagnostic; other nodes unaffected | Hooks |
 
 Full table: Appendix B.
@@ -186,8 +186,8 @@ Non-interactive Sessions: identical, except that Session-start Hooks run only fo
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| Admission check `hooks` | Implements Approval's registry contract | Run `pre_tool_use` Hooks; deny or allow |
-| Submission admission `hooks` | Implements the `submission-admission` point | Run `user_prompt_submit` Hooks; reject or append attributed blocks |
+| Admission check `hooks` | Registered into Approval's admission-check port | Run `pre_tool_use` Hooks; deny or allow |
+| Submission admission `hooks` | Registered into Rpc's submission-admission port | Run `user_prompt_submit` Hooks; reject or append attributed blocks |
 | `Created` notice | Consumed from the broadcast subscription | Run `session_start` Hooks for Client-created Sessions |
 | `hooks.catalog`, `hooks.approve`, `hooks.revoke`, `hooks.set_enabled`, `hooks.disable_all` | Methods, level `management` | Inspect, approve, enable/disable |
 | `dimcode hooks`, `/hooks` | CLI | Call the management methods |
@@ -197,13 +197,13 @@ No tools, no Session methods.
 
 ## 7. Security
 
-User Hooks run without approval. Project and plugin Hooks run only with a grant in the Settings host-local approval service, record `{owner: hooks, node, workspace, source, id, fingerprint}`, fingerprint = SHA-256 over the canonical entry without `enabled` (R11); reading configuration grants nothing, and replay, fork and restore never restore grants. Grants, overrides and isolation never enter Timeline. Commands run on the Session's resource node with that node's isolation applied by HostPlatform; a Hook is not admitted by Permission (it is not a tool) and never widens authority: no outcome admits a call that Permission or the user denied, and no output edits tool input. stdin may contain prompts and tool input; diagnostics keep only Hook id, exit status, duration and a bounded stderr excerpt.
+User Hooks run without approval. Project and plugin Hooks run only with a grant in the Settings host-local approval service, record `{owner: hooks, node, workspace, source, id, event, tools, fingerprint}`, fingerprint = SHA-256 over the canonical entry without `enabled` (R11); reading configuration grants nothing, and replay, fork and restore never restore grants. Grants, overrides and isolation never enter Timeline. Commands run on the Session's resource node with that node's isolation applied by HostPlatform; a Hook is not admitted by Permission (it is not a tool) and never widens authority: no outcome admits a call that Permission or the user denied, and no output edits tool input. stdin may contain prompts and tool input; diagnostics keep only Hook id, exit status, duration and a bounded stderr excerpt.
 
 ## Appendix A. Interface details
 
 ### A.1 Configuration format
 
-One JSON document per source, the same shape for user configuration (plugin configuration key `hooks`, loader editable layer), project file `.dimcode/hooks.json` (E11) and plugin content type `hooks`:
+One JSON document per source, the same shape for user configuration (document `hooks` in Hooks' business source in Settings, not the loader editable layer), project file `.dimcode/hooks.json` (E11) and plugin content type `hooks`:
 
 ```json
 {
@@ -227,7 +227,7 @@ One JSON document per source, the same shape for user configuration (plugin conf
 | `on_error` | `allow` \| `deny` | Only blocking events; default `deny` for `pre_tool_use` (E9), `allow` for `user_prompt_submit` (A11) |
 | `enabled` | bool | Default `true` |
 
-Invalid entries are listed `invalid` and never run; other entries of the same document are unaffected. No `env` field (credentials only as references; Hooks resolves none). Execution order per event: user, project, plugin sources (by plugin id), then document order (A12). Plugin Hooks are taken only from `PluginContents` entries installed on the Session's resource node (A23). Configuration changes are volatile updates, never reloads (R12).
+Invalid entries are listed `invalid` and never run; other entries of the same document are unaffected. No `env` field (credentials only as references; Hooks resolves none). Execution order per event: user, project, plugin sources (by plugin id), then document order (A12). Plugin Hooks are taken only from `PluginContents` entries installed on the Session's resource node (A23). Configuration changes are data updates with notification, never reloads (D5).
 
 ### A.2 Command protocol
 
@@ -252,17 +252,19 @@ Event fields: `user_prompt_submit {prompt: text of the user content, images: cou
 | `turn_end` | — | Not supported | Ignored | Queue input, bounded (A14) |
 | `notification` | — | Not supported | Ignored | Ignored |
 
-### A.4 Implementation of the registry contracts
+### A.4 Port registrations
 
 | Contract (owner, file) | Hooks' implementation |
 | --- | --- |
-| Admission check (Approval, [extension-registry](../contracts/extension-registry.md)) | Reads the `SessionConfig` subset from the request; runs matching `pre_tool_use` Hooks in order; block, or error with `on_error: deny`, → deny; on cancel terminates the process tree, awaits release, returns the cancelled outcome (Approval settles it as deny) |
-| `submission-admission` ([session-boundary](../contracts/session-boundary.md)) | Runs `user_prompt_submit` Hooks on the submission; appends raw blocks attributed to source `hooks`; rejection → `hook_rejected` |
-| Method contribution, level `management` ([session-boundary](../contracts/session-boundary.md)) | Methods of A.6 |
+| Admission-check port (Approval) | Reads the `SessionConfig` subset from the request; runs matching `pre_tool_use` Hooks in order; block, or error with `on_error: deny`, → deny; on cancel terminates the process tree, awaits release, returns the cancelled outcome (Approval settles it as deny) |
+| Submission-admission port (Rpc, [session-boundary](../contracts/session-boundary.md)) | Runs `user_prompt_submit` Hooks on the submission; appends raw blocks attributed to source `hooks`; rejection → `hook_rejected` |
+| Method port, level `management` ([session-boundary](../contracts/session-boundary.md)) | Methods of A.6 |
 
-Session start is not a registry: Hooks ignores `Created` notices unless `created_by = Client`, then runs `session_start` Hooks and writes one Append input through `SessionAccess`.
+Session start is not a port: Hooks ignores `Created` notices unless `created_by = Client`, then runs `session_start` Hooks and writes one Append input through `SessionAccess`.
 
-Each mount registers in `apply` and unregisters in its `ctx.effect` disposer after terminating its running processes; Hooks never uses the `capability reloading` reason.
+Each registration is made in `apply` and removed in its `ctx.effect` disposer after terminating its running processes; in-flight checks end "provider unavailable", never `capability reloading`.
+
+Fail-closed rule ([D6](../../adr/002-dependency-direction.md#d6-fail-closed-requirements-come-from-adopted-business-configuration)), applied by the consumer while no `hooks` checker is registered: Approval reads the adopted configuration without Hooks (the user document from Hooks' Settings source, and grants of approved project and plugin Hooks, which record `event` and `tools`), honours `disable_all` and host-local overrides, and denies with a retryable reason only if an enabled, valid `pre_tool_use` rule matches the tool; Rpc returns `service_reloading` only if an adopted enabled `user_prompt_submit` rule exists. Loader rows and plugin presence never deny by themselves.
 
 ### A.5 Where outcomes are recorded (no events)
 
@@ -283,20 +285,20 @@ No later behavior depends on a Hook run except through these facts, so a Hook ev
 | `hooks.approve` | `{cwd, node?, source, id, approvalToken}` | Persists the grant; stale token → `hooks_settings_conflict` |
 | `hooks.revoke` | `{cwd, node?, source, id}` | Removes the grant (A19) |
 | `hooks.set_enabled` | `{source, id, cwd?, enabled}` | User source edits the entry; project/plugin source writes a host-local override (A9) |
-| `hooks.disable_all` | `{disabled: bool}` | Global switch in the loader editable layer |
+| `hooks.disable_all` | `{disabled: bool}` | Global switch in Hooks' business source (D5) |
 
 ### A.7 Timeline and capability mechanics
 
 | Path | Mechanics |
 | --- | --- |
-| Pre-tool | ToolExecutor consumes `step/tool-call`, registers the batch task and returns; per call appends `step/tool-start` (`Timeline::append`) and awaits `Approval::admit`, which after its own `append_registered` request path (if Ask) awaits the registry checks. Hooks writes nothing |
+| Pre-tool | ToolExecutor consumes `step/tool-call`, registers the batch task and returns; per call appends `step/tool-start` (`Timeline::append`) and awaits `Approval::admit`, which after its own `append_registered` request path (if Ask) awaits the registered checks. Hooks writes nothing |
 | User submit | Submission admission, then `SessionAccess::relay` → `Session::input` → `TimelineContext::input` → `Timeline::append` (no registration callback). InputQueue's Dispatcher subscription appends `input/applied`; Loop appends `input/consumed` |
 | Session start | `Created` notice handled by the stream task like an event (worker per Session `main`); Hooks writes one Append input with marker and keyed blocks; Agents never waits for it |
 | Observation | Broadcast `subscribe` with `types = {step/tool-result, turn/end, approval/request, question/asked}` (notices always delivered); the stream task (`ctx.effect`) enqueues per `(session, branch)` and returns; one worker per branch runs serially in sequence order (A20) |
 | Fixed prefix | `lease.prefix(branch, at_least = event.sequence)`; `post_tool_use` resolves names and inputs from the `step/tool-call` named by `call_event_id`; never reads capability state |
 | Recheck | Before writing: branch exists; for `post_tool_use`, no `stop/interrupt` after the tool result; for `turn_end`, no `stop/interrupt` and no non-withdrawn `input/message` after the `turn/end`, and fewer than N consecutive non-withdrawn follow-ups since the last input with another source or user content (A14). Later facts precede the write in sequence and are resolved by InputQueue and Loop |
 | Writes | `SourceAccess` bound to `hooks`; `submission_id = hooks:<uuid>`; on `Reloading`/`PublicationUnknown`, `lookup` before one retry |
-| Own reload | Mounts unregister after their processes are terminated; consumers apply their inactive rule; the subscription ends and the new generation subscribes from now on, skipping the window |
+| Own reload | Registrations are removed after their processes are terminated; consumers apply the D6 rule; the subscription ends and the new generation subscribes from now on, skipping the window |
 | Restart | As reload; no Hook is re-run; pending follow-ups are lost |
 
 ## Appendix B. Full conflict table
@@ -325,15 +327,15 @@ No later behavior depends on a Hook run except through these facts, so a Hook ev
 | Duplicate or retried `session.submit` | two calls | Hooks run per call (A21); retry after uncertainty is the client's (`session.input_lookup`) | Rpc, client |
 | Duplicate `hooks.approve` | — | Idempotent for the same token; stale token rejected | Hooks |
 | Grant revoked or file edited while a Hook runs | — | Running process finishes; later executions not run | Hooks |
-| Hooks mount inactive (reload, Pending, disabled) | — | Approval denies every call reaching the check stage with retryable reason; in-flight check → deny; `session.submit` → `service_reloading`, nothing written; `Created` notices in the window are missed (fail open) | Approval, Rpc |
+| Hooks not registered (reload, Pending, disabled) | — | Calls matched by an adopted `pre_tool_use` rule denied (retryable), others proceed; in-flight check → provider unavailable, settled as deny; `session.submit` → `service_reloading` only with an adopted `user_prompt_submit` rule; `Created` notices in the window are missed (fail open) | Approval, Rpc |
 | Approval reload mid-check | — | Token cancelled; Hook terminated; Approval's own reload settlement | ToolExecutor |
-| Agents reload | — | Facades return `Reloading`; Hooks stays loaded; writes `lookup` then one retry | Hooks |
+| Agents reload | — | Facades return `Reloading`; Hooks stays loaded and registered; writes `lookup` then one retry | Hooks |
 | Session unload during a worker | — | Lease pins for read and write; afterwards `get` returns none and work is dropped | AgentIndex, Hooks |
 | Session restore | `Loaded {restored: true}` | `session_start` does not run | Hooks |
 | Session created by launch, Collaboration or fork | `created_by` ≠ `Client` | `session_start` does not run (E10) | Hooks |
 | First user input before the Session-start write | `input/message` < Hooks Append | Context applies from the next model request; not inserted before the first input (A24) | InputQueue |
 | `Created` notice lost (`Gap`) | — | `session_start` not run; diagnostic (fail open) | Hooks |
-| Resource node offline | `node-services` returns `node_unavailable` for that call | Pre-tool: error → `on_error` (default deny); user-submit: `on_error` (default allow); project file unreadable → project Hooks of that call skipped, diagnostic; observation: diagnostic; other nodes unaffected | Hooks |
+| Resource node offline | node-services port returns `node_unavailable` for that call | Pre-tool: error → `on_error` (default deny); user-submit: `on_error` (default allow); project file unreadable → project Hooks of that call skipped, diagnostic; observation: diagnostic; other nodes unaffected | Hooks |
 | Client detach | — | No effect; a pending `session.submit` completes its admission | — |
 
 ## Appendix C. Errors and recovery
@@ -357,7 +359,7 @@ Through management methods, `session.create`/`session.submit`, tools and events:
 1. Each exit-code and stdout case of A.2 per event, including timeout and both `on_error` defaults.
 2. Pre-tool deny in a three-call batch: one error result, others executed, single `step/tool-result`.
 3. Interrupt during a pre-tool Hook: process terminated before the result; result cancelled.
-4. Hooks disabled or reloading: tool calls denied with a retryable reason; `session.submit` returns `service_reloading`; `session.create` succeeds; no Session reloads.
+4. Hooks reloading: tool calls matched by an adopted `pre_tool_use` rule denied with a retryable reason, unmatched calls run; `session.submit` returns `service_reloading` only with an adopted `user_prompt_submit` rule; `session.create` succeeds; no Session, Approval or Rpc reloads; an Agents reload leaves Hooks registered.
 5. Project Hook in `.dimcode/hooks.json`: not run before approval; runs after; stops after the file changes.
 6. User-submit context appears as `<dim-hooks kind="user-prompt-submit">` before the user content.
 7. Session-start context survives compaction; not run on restore or for launched/member Sessions.
@@ -370,7 +372,7 @@ Through management methods, `session.create`/`session.submit`, tools and events:
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A1 | Versioned JSON document per source | Judgment | Format changes |
-| A3 | User Hooks are plugin configuration in the loader editable layer | Overview §7.2 (#3) | Separate user file |
+| A3 | User Hooks and `disable_all` are a `hooks` document in Hooks' Settings business source | ADR 002 D5 | Separate user file |
 | A4 | Six events: session start, user submit, pre/post tool, turn end, notification | Overview §5.7 timing points; names are judgment | Names change |
 | A5 | Tool name patterns with `*` glob only | Edge-case reference; judgment | Regex matching |
 | A6 | Project file re-read at each execution point (no watcher) | ADR 001 MCP precedent | A watcher is needed |
@@ -396,6 +398,6 @@ Decided items formerly listed as assumptions: project path `.dimcode/hooks.json`
 | Question | Description |
 | --- | --- |
 | Overview §13 "How events enter context" | This design uses adopted input only (E12) |
-| Overview wording | Overview §5.7 and §7.1 Approval still say Approval injects the admission service in `Deps`; this document follows the registry pattern (decisions R2) |
-| Remote resource nodes | `node-services` on a peer node depends on #5 |
+| Overview wording | Overview §5.7 and §7.1 Approval still say Approval injects the admission service in `Deps`; this document follows the port pattern (ADR 002 D2) |
+| Remote resource nodes | The node-services port for a peer node depends on #5 |
 | Plugin source | Depends on #3 and `PluginContents` |

@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.11](../overview.md#b11-notifications). Phase: P2. Language: TypeScript first ([overview F.3](../overview.md#f3-assignment)).
 
-Notifications delivers messages to configured external channels (Slack, Feishu) when a task on an interactive leader Session completes or fails, an approval is pending, a question awaits an answer or a scheduled job run ends, and lets the model send a message through the process tool `notify`. It observes Sessions only through the [broadcast subscription](../contracts/session-broadcast-subscription.md), confirms each trigger against a fixed prefix read through [session-access](../contracts/session-access.md), takes run ends from Scheduler's public run-outcome notice, and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI.
+Notifications delivers messages to configured external channels (Slack, Feishu) when a task on an interactive leader Session completes or fails, an approval is pending, a question awaits an answer or a scheduled job run ends, and lets the model send a message through the process tool `notify`. It observes Sessions only through the [broadcast subscription](../contracts/session-broadcast-subscription.md), confirms each trigger against a fixed prefix read through [session-access](../contracts/session-access.md), takes run ends from Scheduler's run-outcome event notice, and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI.
 
 ## 1. Structure
 
@@ -12,34 +12,34 @@ flowchart LR
     NP["Notifications"]:::new
     SE["Session broadcast subscription"]:::contract
     SA["SessionAccess"]:::contract
-    PTR["Process tool registry"]:::contract
-    MGR["Method contribution registry"]:::contract
-    RO["ScheduledRunOutcomes (Scheduler)"]:::contract
+    PTR["Tool source port (ToolRegistry side)"]:::contract
+    MGR["Method port (Rpc side)"]:::contract
+    RO["Run-outcome event key (Scheduler)"]:::contract
     CRED["Settings credential-reference resolver"]:::contract
-    Settings["Settings volatile configuration"]
+    Settings["Notifications business source (Settings)"]
     META["SessionStore title metadata"]:::contract
   end
   EXT["Slack / Feishu HTTPS endpoints"]
   NP -->|"turn/end, approval/request, question/asked, Loaded config"| SE
   NP -->|"prefix, stored_page, config"| SA
-  NP -->|"mount: notify"| PTR
-  NP -->|"mount: notifications.test, level management"| MGR
-  NP -.->|"When: run outcomes"| RO
+  NP -->|"register: notify"| PTR
+  NP -->|"register: notifications.test, level management"| MGR
+  NP -.->|"listen: run outcomes, no Deps edge"| RO
   NP -->|"resolve refs at send time"| CRED
-  NP -->|"notifications document"| Settings
+  NP -->|"notifications document, read at use"| Settings
   NP -.->|"When: label"| META
   NP --> EXT
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-No Session or branch plugin depends on Notifications; both of its contributions are mounts into stable registries, so its reload never reloads ToolRegistry or Rpc. The run-outcome dependency is optional: without Scheduler the `schedule.ended` trigger is inert. Delivery uses the control node's network, never Session-bound resource services.
+No Session or branch plugin depends on Notifications; both of its contributions are registrations into stable ports owned by their consumers ([ADR 002 D2](../../adr/002-dependency-direction.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)), so its reload never reloads ToolRegistry or Rpc. Run outcomes arrive as an event notice ([D4](../../adr/002-dependency-direction.md#d4-peer-notices-use-events-not-dependencies)), not a dependency: without Scheduler, or while it reloads, the `schedule.ended` trigger is inert and Notifications stays loaded. Delivery uses the control node's network, never Session-bound resource services.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Notifications` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (`Loaded` with its `SessionConfig` subset), [`SessionAccess`](../contracts/session-access.md) (`get`, `prefix`, `stored_page`, `config`; never `input`), `When<ScheduledRunOutcomes>` ([Scheduler A.7](Scheduler.md#a7-run-outcome-notice-public-contract)), Settings typed volatile configuration and credential-reference resolver (decisions R10, R12), Permission category `outbound_message` (overview §7.1), public data contracts of `turn/start`, `turn/end`, `input/message`, `input/consumed`, `input/withdrawn`, `step/text`, `approval/request`, `approval/respond`, `approval/cancelled`, and `question/asked`, `question/answered`, `question/cancelled` (consumed only when registered), optionally (`When`) SessionStore title metadata | Process tool set `notifications` (`notify`) via the [process tool registry](../contracts/process-tool-contribution.md); method `notifications.test` at level `management` via the [method contribution](../contracts/session-boundary.md) contract; trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; configuration document `notifications` |
+| `Notifications` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (`Loaded` with its `SessionConfig` subset), [`SessionAccess`](../contracts/session-access.md) (`get`, `prefix`, `stored_page`, `config`; never `input`), the run-outcome event key ([Scheduler A.7](Scheduler.md#a7-run-outcome-notice-public-contract); listener only, no `Deps` edge), its business source in Settings and the credential-reference resolver (decision R10), Permission category `outbound_message` (overview §7.1), public data contracts of `turn/start`, `turn/end`, `input/message`, `input/consumed`, `input/withdrawn`, `step/text`, `approval/request`, `approval/respond`, `approval/cancelled`, and `question/asked`, `question/answered`, `question/cancelled` (consumed only when registered), optionally (`When`) SessionStore title metadata | Process tool set `notifications` (`notify`) registered into the [tool source port](../contracts/process-tool-contribution.md); method `notifications.test` at level `management` registered into Rpc's [method port](../contracts/session-boundary.md); trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business configuration document `notifications` |
 
-Both mounts follow the [extension-registry](../contracts/extension-registry.md) pattern; configuration changes are volatile updates (a new tool set version), never reloads.
+The `notifications` document is business configuration ([D5](../../adr/002-dependency-direction.md#d5-structural-configuration-and-business-configuration-are-separate)) in Notifications' Settings source, not the loader editable layer: read at use time; a change is a data update with notification (a new tool set version), never a reload.
 
 ## 2. Data and state
 
@@ -53,7 +53,7 @@ flowchart TB
   end
   FACTS["SessionConfig subset per Session (Loaded notice or config)"]
   RO["Scheduler RunOutcome notices (live)"]
-  CFG["Settings: notifications document (user scope)"]
+  CFG["Business source: notifications document (Settings, user scope)"]
   CRED["credential references"]
   MEM["delayed checks, dedup set, rate windows (memory)"]:::new
   DIAG["diagnostics: delivery records, no bodies"]
@@ -161,7 +161,7 @@ A pending driving input suppresses `turn.completed`. If it is withdrawn before t
 | Member, workflow-stage, scheduled or ACP Session | config not interactive leader | No event-triggered notification (E14); job runs reported only via `schedule.ended` | Notifications |
 | Approval answered or cancelled before the delay | request < respond < check | Nothing sent | Notifications |
 | Interrupt during `notify` after sending | send < cancel | `Cancelled; delivery may have occurred.` | Notifications |
-| Notifications reload mid-`notify` | — | That call gets "tool provider unavailable"; batch and turn continue; never resent | Registry; Notifications |
+| Notifications reload mid-`notify` | — | That call gets "tool provider unavailable"; batch and turn continue; never resent | Tool source port; Notifications |
 
 Full table: [Appendix B](#appendix-b-full-conflict-table).
 
@@ -182,8 +182,8 @@ Event-triggered notifications have no model-visible effect: nothing is written t
 | --- | --- | --- |
 | `notify {message, channel?}` | Process tool, risk `outbound_message` | Model-initiated message to a configured channel |
 | `notifications.test {channel}` | Method, level `management` | Send a fixed test text (A9) |
-| `ScheduledRunOutcomes` | Consumed (Scheduler's contract, `When`) | `schedule.ended` trigger |
-| `notifications` document | Settings configuration, user scope, volatile | Channels, triggers, delays |
+| `scheduled_run_outcomes()` | Event key listened to (Scheduler's contract; no `Deps` edge) | `schedule.ended` trigger |
+| `notifications` document | Business configuration, Settings user scope, read at use | Channels, triggers, delays |
 
 Details: [Appendix A](#appendix-a-interface-details).
 
@@ -211,7 +211,7 @@ notifications.pendingDelaySeconds: u32  // default 10, 0..=3600 (A2)
 notifications.defaultChannel: string?   // used by `notify` without `channel`
 ```
 
-`*Ref` fields are credential references resolved by the Settings resolver; webhook URLs are treated as credentials. Changes only through typed Settings operations; validated at that boundary.
+`*Ref` fields are credential references resolved by the Settings resolver; webhook URLs are treated as credentials. Changes only through typed Settings operations on Notifications' business source; validated at that boundary; read at each check, send and tool declaration.
 
 ### A.2 Tool `notify`
 
@@ -250,7 +250,7 @@ Templates (to channels, not to the model): `[dim <label>] Task completed.`, `[di
 | --- | --- |
 | Subscribe | In `apply`: `{types: {"turn/end", "approval/request", "question/asked"}, sessions: None, branches: None}`, capacity 256; stream task under `ctx.effect`. Types whose owner is not registered never arrive |
 | Config | `Loaded` notices carry the `SessionConfig` subset, cached; for Sessions loaded earlier, `SessionAccess::config` on first notice. Ineligible Sessions are dropped before any work (E14) |
-| Run outcomes | When Scheduler is present: `ScheduledRunOutcomes::subscribe(ctx, 64)` in `apply`, stream task under `ctx.effect`; each notice goes straight to delivery; `Gap` → diagnostic |
+| Run outcomes | In `apply`: `on(host_ctx, &scheduled_run_outcomes(), listener)`, removed under `ctx.effect`; each notice goes straight to delivery; none arrive while Scheduler is absent |
 | Trigger | For a matching enabled channel trigger not in the dedup set: register a delayed check with the plugin's task tracker; return to `next()` |
 | Check | After the delay: `get(session)` → `prefix(branch, at_least = sequence)`; if not loaded, `stored_page(session, branch, after = sequence - 1, ...)` (A4). `Reloading`: retry after 1 s, 2 s, 4 s, then drop with a diagnostic (A16) |
 | Format | Templates above; label = metadata title when available, else Session id (A7) |
@@ -280,8 +280,8 @@ Templates (to channels, not to the model): `[dim <label>] Task completed.`, `[di
 | Child branch of a leader Session | approval in child | Notified; child `turn/end` ignored (A1) | Notifications |
 | Member, workflow-stage, scheduled or ACP Session | config | Nothing event-triggered (E14); `notify` still available | Notifications |
 | Scheduled run ends | Scheduler persists terminal state < notice | One `schedule.ended` per run; no prefix read | Scheduler; Notifications |
-| Run-outcome `Gap` or Notifications down at run end | — | That run not reported; `schedule.history` remains the record (A12) | Notifications |
-| Scheduler reload | `When` dependency | Notifications reloads with it; in-flight `notify` gets "tool provider unavailable"; outcomes during the window lost | Loader; Notifications |
+| Notifications down at run end | — | That run not reported; `schedule.history` remains the record (A12) | Notifications |
+| Scheduler reload or absent | event notice, no dependency | Notifications stays loaded; `notify` unaffected; runs ending in the window are not reported | Notifications |
 | Branch close during the delay | — | `BranchMissing`: nothing | Notifications |
 | Session unloaded during the delay | — | `stored_page` reads local facts (A4) | Notifications |
 | Session closed or deleted | — | Nothing | Notifications |
@@ -289,7 +289,7 @@ Templates (to channels, not to the model): `[dim <label>] Task completed.`, `[di
 | Gap notice | — | Missed triggers not recovered (A12) | Notifications |
 | Interrupt during `notify` before sending | cancel < send | No request; `Cancelled` | Notifications; ToolExecutor |
 | Interrupt during `notify` after sending | send < cancel | Request aborted; `Cancelled; delivery may have occurred.` | Notifications |
-| Notifications reload mid-delivery or mid-`notify` | — | Cancelled, never resent; `notify` gets "tool provider unavailable"; turn continues | Registry; Notifications |
+| Notifications reload mid-delivery or mid-`notify` | — | Cancelled, never resent; `notify` gets "tool provider unavailable"; turn continues | Tool source port; Notifications |
 | Process restart | — | Committed `notify` calls settled by ToolExecutor recovery without re-execution | ToolExecutor |
 | Agents reload | facade `Reloading` | Check retried (A16); no Notifications reload | Notifications |
 | Configuration change during the delay | — | Channels and triggers read at check time; tool set version changes | Notifications |
@@ -304,7 +304,7 @@ Templates (to channels, not to the model): `[dim <label>] Task completed.`, `[di
 | Invalid configuration | Rejected by Settings at the write boundary; last valid document kept |
 | Delivery failure after retries | Diagnostic; tool returns an error result; no Session effect |
 | Cancellation (interrupt, reload) | Outstanding requests aborted; resources released before the tool returns |
-| Mount inactive | `notifications.test` returns `service_reloading`; `notify` withdrawn |
+| Not registered (reload) | `notifications.test` returns `service_reloading`; `notify` withdrawn |
 | Process exit | In-memory checks lost; no persistent queue (A12) |
 
 ## Appendix D. Acceptance
@@ -314,7 +314,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 1. Completed `main` turn of an interactive leader Session sends one `turn.completed`; a Queue input before the check suppresses it; the same input withdrawn before the check does not; cancelled sends nothing; failed sends `turn.failed`.
 2. Member Sessions and `interactive: false` Sessions send nothing event-triggered.
 3. Approval answered before the delay sends nothing; unanswered sends once; cancelled sends nothing.
-4. `question/asked` with and without an answer (when registered); inert otherwise. A scheduled run that completes, fails or times out sends one `schedule.ended`; without Scheduler the trigger is inert.
+4. `question/asked` with and without an answer (when registered); inert otherwise. A scheduled run that completes, fails or times out sends one `schedule.ended`; without Scheduler the trigger is inert; a Scheduler reload does not reload Notifications.
 5. `notify`: not declared without channels; sends and returns the result; FullAccess allows `outbound_message`, other presets ask; interrupt before and during delivery.
 6. Retry on 5xx, none on 400, rate-limit drop, credential failure.
 7. Reload during a `notify` call: "tool provider unavailable", turn not failed, no resend; restart settles a committed call without re-execution.

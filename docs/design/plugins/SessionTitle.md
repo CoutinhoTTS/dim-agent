@@ -14,29 +14,29 @@ flowchart LR
     SA["SessionAccess"]:::contract
     AUX["AuxiliaryModel (Provider)"]:::contract
     META["SessionStore title metadata"]:::contract
-    SMC["Method contribution registry"]:::contract
-    Settings["Settings volatile configuration"]
+    SMC["Method port (Rpc side, stable)"]:::contract
+    Settings["SessionTitle business configuration (Settings source)"]
     Rpc["Rpc"]
   end
   ST -->|"input/message notices on main, Loaded config subset"| SE
   ST -->|"fixed prefix read, config"| SA
   ST -->|"complete purpose session-title"| AUX
   ST -->|"set_title with revision"| META
-  ST -->|"mount: session.rename, level session"| SMC
-  ST -->|"sessionTitle.*"| Settings
-  SMC --> Rpc
+  ST -->|"register: session.rename, level session"| SMC
+  ST -->|"sessionTitle.* read at use"| Settings
+  Rpc -->|"route by registration"| SMC
   Rpc -->|"session.list reads title fields"| META
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-SessionTitle touches no Session or branch plugin: it observes through the Session broadcast subscription, reads through SessionAccess and writes only SessionStore metadata. Rpc reaches it only through the method-contribution registry and reads list fields from SessionStore directly.
+SessionTitle touches no Session or branch plugin: it observes through the Session broadcast subscription, reads through SessionAccess and writes only SessionStore metadata. Rpc reaches it only through its method port and reads list fields from SessionStore directly; SessionTitle registers `session.rename` in `apply` and unregisters in `ctx.effect` ([ADR 002 D2](../../adr/002-dependency-direction.md#d2-contributors-register-into-a-stable-port-owned-by-the-consumer)), so a SessionTitle reload never reloads Rpc.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (`Event`, `Loaded` with its `SessionConfig` subset), [`SessionAccess`](../contracts/session-access.md) (`get`, `prefix`, `config`; never `input`), SessionStore title metadata supplement (overview §7.2), Provider `AuxiliaryModel` port by purpose (decisions R9), Settings volatile configuration, public data contracts of `input/message` and `context/configured` | `session.rename` mounted as a [method contribution](../contracts/session-boundary.md) with `level: session`; the opaque purpose key `session-title`; configuration keys `sessionTitle.enabled`, `sessionTitle.maxLength` |
+| `SessionTitle` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md) (`Event`, `Loaded` with its `SessionConfig` subset), [`SessionAccess`](../contracts/session-access.md) (`get`, `prefix`, `config`; never `input`), SessionStore title metadata supplement (overview §7.2), Provider `AuxiliaryModel` port by purpose (decisions R9), its own business configuration in a Settings source, public data contracts of `input/message` and `context/configured` | `session.rename` registered into Rpc's method port ([session-boundary](../contracts/session-boundary.md)) with `level: session`; the opaque purpose key `session-title`; business configuration keys `sessionTitle.enabled`, `sessionTitle.maxLength` |
 
-The mount follows the [extension-registry](../contracts/extension-registry.md) pattern. Not configured: `session.rename` returns `method_not_found`; configured but inactive: `service_reloading`. Provider does not know the purpose key's consumer.
+Registration state alone decides the error while SessionTitle is absent: never registered → `method_not_found`; registered earlier and now unregistered (reload) → `service_reloading`. Provider does not know the purpose key's consumer.
 
 ## 2. Data and state
 
@@ -50,7 +50,7 @@ flowchart TB
     MD["revision, title text, source auto or manual"]
   end
   CONF["SessionConfig: interactive, collaboration_role"]
-  CFG["Settings: sessionTitle.enabled, sessionTitle.maxLength"]
+  CFG["Business config (Settings source): sessionTitle.enabled, sessionTitle.maxLength"]
   POL["Provider per-purpose policy: session-title"]
   MEM["in-flight generation, failed attempts (memory)"]:::new
   FUI -->|"text only"| MEM
@@ -159,7 +159,7 @@ Never sent: images, raw input blocks of any source, later inputs, assistant outp
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | Method contribution, level `session` | Set or clear a manual title |
 | `session-title` | Provider purpose key (opaque) | Model policy for title generation; unconfigured inherits |
-| `sessionTitle.enabled`, `sessionTitle.maxLength` | Configuration (volatile) | Turn generation off; title length |
+| `sessionTitle.enabled`, `sessionTitle.maxLength` | Business configuration (Settings source) | Turn generation off; title length |
 | `title`, `titleSource` in `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore metadata | Display |
 
 Details: [Appendix A](#appendix-a-interface-details).
@@ -176,7 +176,7 @@ The first input's text is sent to the model chosen for `session-title`; with the
 | --- | --- | --- |
 | `{sessionId, title: string \| null}` | `{title: string \| null, titleSource: "auto" \| "manual" \| null, revision}` | `invalid_params`, `session_not_found`, `service_reloading`, `storage_failed` |
 
-`title` is trimmed; 1..=`sessionTitle.maxLength` characters, no line breaks or control characters (A3). `null` clears the title (A6). Rpc routes the method to SessionTitle's mount without naming it.
+`title` is trimmed; 1..=`sessionTitle.maxLength` characters, no line breaks or control characters (A3). `null` clears the title (A6). Rpc routes the method to SessionTitle's registration without naming it.
 
 ### A.2 Depended-on shapes (owners define them)
 
@@ -194,7 +194,7 @@ async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
 
 ### A.3 Configuration
 
-`sessionTitle.enabled: bool` default `true`; `sessionTitle.maxLength: u32` default 80, range 10..=200 (A3). Volatile: read at each decision, never a reload. Provider policy for `session-title` lives in Provider's per-purpose policy storage; unconfigured inherits the Session's model (A1).
+`sessionTitle.enabled: bool` default `true`; `sessionTitle.maxLength: u32` default 80, range 10..=200 (A3). Business configuration ([ADR 002 D5](../../adr/002-dependency-direction.md#d5-structural-configuration-and-business-configuration-are-separate)) in a Settings source owned by SessionTitle, not the loader editable layer: read at each decision; a change is a data update with notification, never a reload. Enabling the plugin itself stays a loader row. Provider policy for `session-title` lives in Provider's per-purpose policy storage; unconfigured inherits the Session's model (A1).
 
 ### A.4 Mechanics
 
@@ -208,7 +208,7 @@ async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
 | Generate | `complete("session-title", inherit = model of the latest context/configured in the prefix, request, cancel)`, 30 s budget (A4). Normalized: first line, surrounding quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` on a character boundary; empty output is a failure |
 | Write | `set_title(session, r, Some({text, auto}))`; `Conflict` or `NotFound` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
-| Reload / restart | Tasks cancelled through `ctx.effect` (auxiliary call aborted); nothing written. New generation subscribes afresh; missed notices not replayed |
+| Reload / restart | Registration removed and tasks cancelled through `ctx.effect` (auxiliary call aborted); nothing written; Rpc does not reload. New generation subscribes afresh; missed notices not replayed |
 | Agents reload | `SessionAccess` returns `Reloading`: attempt skipped, not counted; next `main` input notice retries |
 
 ## Appendix B. Full conflict table
@@ -246,7 +246,7 @@ async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
 | `set_title` `Conflict` on automatic write | Discarded (diagnostic) |
 | `set_title` `Storage` | Automatic: failure counted; rename: `storage_failed` |
 | Unknown Session on rename | `session_not_found` |
-| SessionTitle mount inactive | `service_reloading`; the rename did not happen |
+| SessionTitle not registered (reload) | `service_reloading`; the rename did not happen |
 | Cancellation | Auxiliary call aborted before any write; no partial title |
 
 ## Appendix D. Acceptance
@@ -261,7 +261,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 6. Rename of an unloaded Session succeeds without loading it.
 7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title.
 8. Reload during generation writes nothing; the next input generates. Three failures stop attempts until reload.
-9. Invalid rename inputs return `invalid_params`; mount inactive returns `service_reloading`.
+9. Invalid rename inputs return `invalid_params`; while SessionTitle reloads, `session.rename` returns `service_reloading` and Rpc does not reload.
 
 ## Appendix E. Assumptions
 
