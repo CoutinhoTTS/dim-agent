@@ -52,6 +52,7 @@ Common constraints:
 7. **Admission**: new tools declare a risk category and are admitted by Permission and Approval; new categories are registered in section 7.
 8. **Management plane**: methods that execute commands or change host configuration are management methods; plugins contribute them to the Management plugin (5.16) instead of adding them directly to Rpc. Management methods are callable only on entries where Management is mounted: the local RPC entry mounts it by default, RemoteGateway does not by default, and other nodes can use it only after Management is exported as a service over a rutis link. Authorization is decided by assembly and link configuration; there are no separate identity tiers or per-method authorization. Exporting Management is equivalent to granting host administrator rights.
 9. **In-flight work**: there is no shared registry of in-flight work. Each owner provides its own query and stop; aggregation is shown only in the CLI layer ("in-flight work identification" in [event-driven flows](../architecture/rust-agent/event-driven-flows.md) §3 is not designed for now).
+10. **Low business coupling**: plugins depend on contracts, never on another plugin's internals or business knowledge. Dependencies are declared on service contracts, so any provider satisfying a contract can replace another. An extension point's contract is defined by its consumer (Approval defines admission, ToolRegistry defines tool contribution, ModelHost defines provider registration by connection kind), and provider-specific knowledge stays in the provider. Consuming another plugin's events uses only their public data contract, without inferring its internal state. Raw-block keys, source markers, configuration keys and management method names are namespaced by their owner. Optional dependencies are explicit (`When`); without them the feature is off. Purposes passed to shared services are opaque keys defined by the consumer.
 
 ### 3.1 Multiple nodes
 
@@ -279,9 +280,10 @@ flowchart LR
   Web & Notifications & Scheduler -.->|New risk categories| Permission
   Workflow -->|Stage Sessions and reports| Agents
   Workflow -->|Stage members| Collaboration
-  Collaboration -->|External Agents as members| Agents
+  Collaboration -->|Member Sessions by Agent profile| Agents
+  ExternalAgent -->|External Agent profiles| Agents
   ExternalAgent -->|External Agent connections and directory| Provider
-  Aimux -->|Dispatch by connection type| ExternalAgent
+  ExternalAgent -->|Registers as ModelHost provider for its connection kind| Aimux
   SessionTitle -->|Title metadata| SessionStore
   SessionTitle -->|Auxiliary model| Provider
   Modality -->|Non-conversational models| Provider
@@ -290,9 +292,7 @@ flowchart LR
   Hooks & Scheduler & Web & Notifications & Workflow & ExternalAgent -->|Configuration sources| Settings
   PluginManager -->|Sources and loader rows| Settings
   PluginManager --> Loader
-  PluginManager -->|Plugin content| SkillsCatalog
-  PluginManager -->|Plugin content| Mcp
-  PluginManager -->|Plugin content| Hooks
+  SkillsCatalog & Mcp & Hooks & Workflow -.->|Discover plugin-content sources| PluginManager
   Notifications & SessionTitle & Hooks & Goal -->|Live subscription| SessionBroadcast
   RemoteGateway -->|Authenticated connections| Transport
   RemoteGateway --> Rpc
@@ -314,9 +314,9 @@ flowchart LR
 | Hooks | Directory, approval and execution at every timing point | — | — | Settings, Approval, Session broadcast, HostPlatform, InputQueue |
 | Scheduler | Jobs and triggers; `schedule` tool | — | — | Settings, Agents, ToolRegistry, Management |
 | Workflow | Definitions, runs and stage advancement; `workflow` tool | — | — | Settings, ToolRegistry, Agents, Collaboration, Management |
-| ExternalAgent | External Agent directory, connections and bridging | — | — | Provider, Aimux, Agents, Collaboration, HostPlatform |
+| ExternalAgent | External Agent directory, connections and bridging | — | — | Provider, Aimux (ModelHost provider registration), Agents (profiles), HostPlatform |
 | Notifications | Subscription and delivery; `notify` tool | — | — | Settings, Session broadcast, ToolRegistry |
-| PluginManager | Plugin marketplace and installation | — | — | Settings (loader editable layer), rutis-loader, SkillsCatalog, Mcp, Hooks |
+| PluginManager | Plugin marketplace and installation; typed plugin-content sources | — | — | Settings (loader editable layer), rutis-loader; content owners discover its sources |
 | RemoteGateway | Remote access | — | — | Transport, Rpc |
 | Modality | Tasks and realtime connections for all multimodal categories | — | — | Provider, HostPlatform (OCR) |
 | AcpGateway | CLI process | — | — | Rpc (local RPC) |
@@ -543,7 +543,7 @@ External Agents get no separate runtime; they integrate as a kind of model conne
 | --- | --- |
 | Scope | Process |
 | Responsibility | Detect installed Claude Code, Codex, Cursor, OpenCode and others per node; enable, disable and configure them; bridge model calls to the external Agent: those that support ACP connect through an ACP client, the rest are invoked as non-interactive CLIs |
-| Integration | E: acts as a kind of connection in the Provider directory (one entry per external Agent); Aimux (ModelHost) dispatches requests to this plugin by connection type. When an Agent profile selects an external Agent as its model, no tools are assembled; the external Agent uses its own tools |
+| Integration | E: acts as a kind of connection in the Provider directory (one entry per external Agent) and registers itself as the ModelHost provider for its connection kind; ModelHost routes requests by connection kind without knowing this plugin. When an Agent profile selects an external Agent as its model, no tools are assembled; the external Agent uses its own tools |
 | Events | None. Delegation reuses Collaboration's facts; inside the member Session there are ordinary turn and model output events |
 | Interfaces | Management methods `external_agents.list/set_enabled/configure`, contributed to Management |
 
@@ -577,7 +577,7 @@ External Agents get no separate runtime; they integrate as a kind of model conne
 | Integration | E: the plugin manifest declares its content: Skills, Hooks, MCP configuration, workflows, capability plugins; install, enable/disable and configuration are written to the loader editable layer through typed Settings operations (#3), and management operations map to loader operations; installation specifies a target node, and plugins on a peer node are loaded as `peer:<node>/<plugin>` rows |
 | Events | No Timeline events; state comes from loader entries |
 | Interfaces | Management methods `plugin.marketplace.*` and `plugin.install/remove/set_enabled/reload/list`, contributed to Management |
-| Relations | Depends on #3 (loader management); capability plugins in languages other than Rust depend on #4. Plugin content is integrated by source into SkillsCatalog, Hooks, Mcp and Workflow. Executable content in plugins needs host-local approval |
+| Relations | Depends on #3 (loader management); capability plugins in languages other than Rust depend on #4. PluginManager installs packages and publishes typed plugin-content sources; consumers (Skill, Hook, MCP and workflow owners) discover the content types they understand through that generic contract, and PluginManager does not know them. Executable content in plugins needs host-local approval |
 
 ### 5.13 RemoteGateway
 
@@ -699,12 +699,11 @@ Declaring all existing event types through the #2 registration mechanism is part
 | Settings | Supplement | Separates authority per #3: user-managed plugin intent and plugin configuration (plugin enable/disable, Web search service, notification channels, per-purpose model policy, sandbox configuration, external Agents, plugin marketplaces, cross-Session permission rules) is written to the loader editable layer through typed Settings operations; project files (project Hooks, project workflows, `.mcp.json`) keep file authority; host-local approvals (Hooks, workflows, MCP) keep their own approval files. Credentials appear only as references | Hooks, Workflow, Web, Notifications, Provider, HostPlatform, ExternalAgent, PluginManager, Permission rules |
 | Rpc | Change | Carries only Session methods; management methods are instead contributed to and mounted by Management, and existing management methods move into Management | Management; RemoteGateway |
 | Transport, Connection | Change | Remote connections carry the authenticated device identity, used for Session-level access; management methods are not authorized by identity but by whether Management is mounted | RemoteGateway |
-| Provider | Supplement | `ModelSelectionHost` selects models by purpose (sub-agent, auxiliary tasks, each multimodal category): inherit the model passed by the caller, a fixed model and reasoning effort, or selection by the Agent (sub-agents only); external Agent connection type; non-conversational models for each multimodal category | Sub-agent and auxiliary models; ExternalAgent; Modality |
-| Aimux | Supplement | Dispatches model requests to the ExternalAgent bridge by connection type | ExternalAgent |
+| Provider | Supplement | `ModelSelectionHost` selects models by purpose, an opaque key defined by the consumer (for example Collaboration's sub-agent purpose or Modality's category purposes); Provider stores and resolves a policy per key without enumerating consumers. Policies: inherit the model passed by the caller, a fixed model and reasoning effort, or selection by the Agent (sub-agents only); external Agent connection type; non-conversational models for each multimodal category | Sub-agent and auxiliary models; ExternalAgent; Modality |
+| Aimux | Supplement | Generic ModelHost provider registration by connection kind: requests for a kind are routed to its registered provider; Aimux remains the provider for native connections and knows no other provider | ExternalAgent |
 | Agents | Supplement | The Session creation configuration includes the resource node, which does not change after creation; creates or reuses a Session with a non-interactive configuration and submits the first input; creates a Session from another Session's cut point; a profile with an external Agent as its model and no assembled tools | Scheduler; Session fork; ExternalAgent |
 | SessionStore | Supplement | Session metadata (title and its source, fork source) and revision checks; deletion (closes the Session first, rejected when Loop is not idle) and cleanup by time or count (with preview); fork copies the facts before the source cut point and their reference closure (attachments, event declarations), without copying host security settings; attachments are copied and deleted with the Session | SessionTitle, Session fork and cleanup, Attachments |
 | Collaboration | Change | Sub-agent models are instead selected by Provider for the "sub-agent" purpose, with the caller passing the model already adopted by the main Session | Sub-agent models |
-| Collaboration | Supplement | External Agents can be member targets and are listed in `list` and `inspect` | ExternalAgent |
 | ManagedProviders | Supplement | Query plan usage; explicitly unavailable when not provided | `/usage` |
 | Mcp | Supplement | OAuth authorization for HTTP/SSE connections; accepts configuration from plugin sources | MCP connections; PluginManager |
 | SkillsCatalog | Supplement | Accepts Skill roots from plugin sources; installation and removal are initiated by PluginManager | PluginManager |
@@ -766,7 +765,7 @@ Each new plugin's requirement document `docs/design/plugins/<name>.md` contains:
 
 | Plugin | Language | Rationale | Prerequisites |
 | --- | --- | --- | --- |
-| ExternalAgent | TypeScript first | ACP has a TS SDK; external CLIs differ widely and need validation | Service contract for Aimux dispatching to the bridge |
+| ExternalAgent | TypeScript first | ACP has a TS SDK; external CLIs differ widely and need validation | ModelHost provider registration contract |
 | Modality | TypeScript first (provider categories); OCR depends on the runtime component | Providers' multimodal APIs change quickly | Service contract for Provider non-conversational models |
 | Notifications | TypeScript first | Slack and Feishu SDKs | Process-level subscription to the Session broadcast; service contract for process-level tool contributions |
 | SessionTitle | TypeScript first | The generation strategy needs validation | Process-level subscription; service contracts for SessionStore metadata and model selection |
