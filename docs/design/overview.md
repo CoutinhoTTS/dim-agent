@@ -80,13 +80,12 @@ Capability 经 Session 级或 Timeline（分支）级工厂注册到 Agent 实�
 | 资源 | 自己发起的在途工作 | 宿主资源：存储、隔离、网络服务、外部协议端口、外部进程 |
 | 生命周期 | 随 Session 或分支：中断、重载、关闭 | 随进程或 loader |
 
-功能同时具备两侧特征时，拆为进程插件与 Capability，沿用 SkillsCatalog（进程）、Skills（Session）、SkillsBranch（分支）的分法。
+功能同时具备两侧特征时，拆为进程插件与 Capability，沿用 SkillsCatalog（进程）、Skills（Session）、SkillsBranch（分支）的分法。只有必须按序消费并写入本分支 Timeline 的部分才放在分支级；工具可以由进程级贡献提供，Session 状态能由 Timeline 推出时不设 Session 部分。
 
 | 类别 | 新插件与拆分 |
 | --- | --- |
-| Capability | Questions（Session：工具；分支：待答问题）、Goal（Session：工具；分支：目标状态与继续） |
-| 进程插件 + Capability | Hooks（进程：目录、批准与边界 Hook；分支：订阅与执行） |
-| 进程插件 | Management、ShellInput、Attachments、SessionTitle、Web、Scheduler、Workflow、Notifications、ExternalAgent、PluginManager、RemoteGateway、Modality。其中 Web、Scheduler、Workflow、Notifications 以进程级工具贡献提供工具 |
+| Capability | Goal（分支：目标继续） |
+| 进程插件 | Management、Questions、ShellInput、Attachments、SessionTitle、Web、Hooks、Scheduler、Workflow、Notifications、ExternalAgent、PluginManager、RemoteGateway、Modality。其中 Questions、Web、Scheduler、Workflow、Notifications 与 Goal 的 `goal_update` 以进程级工具贡献提供工具 |
 | 非 daemon 插件 | AcpGateway（CLI 进程中的协议适配） |
 
 拆分后的命名在各插件需求文档中确定。
@@ -147,9 +146,11 @@ flowchart TB
       Mcp["Mcp"]
       McpServer["McpServer（按代次）"]
       SkillsCatalog["SkillsCatalog"]
-      HooksP["Hooks（目录、批准、边界 Hook）"]:::new
+      HooksP["Hooks"]:::new
       WorkflowP["Workflow"]:::new
       WebP["Web"]:::new
+      QuestionsP["Questions"]:::new
+      GoalP["Goal（工具与方法）"]:::new
     end
     subgraph PA["Agent 与协作"]
       AgentDirectory["AgentDirectory"]
@@ -167,7 +168,7 @@ flowchart TB
 
   subgraph SES["Session（Capability）"]
     direction TB
-    subgraph SEX["现有"]
+    subgraph SEX["现有（无新增）"]
       SessionScope["SessionScope"]
       ToolRegistry["ToolRegistry"]
       TimelineTree["TimelineTree"]
@@ -179,10 +180,6 @@ flowchart TB
       CollabCap["CollaborationCapability"]
       PrepareModelHost["PrepareModelHost"]
       SessionBroadcastEnd["SessionBroadcastEnd"]
-    end
-    subgraph SNEW["新增：工具贡献"]
-      QuestionsS["Questions（ask_user）"]:::new
-      GoalS["Goal（goal_update）"]:::new
     end
   end
 
@@ -208,24 +205,22 @@ flowchart TB
       PromptSourcesBranch["PromptSourcesBranch"]
       CollabTimeline["CollaborationTimeline"]
     end
-    subgraph BNEW["新增：状态与 Hook"]
-      QuestionsB["Questions（待答问题）"]:::new
+    subgraph BNEW["新增"]
       GoalB["Goal（目标与继续）"]:::new
-      HooksB["Hooks（分支 Hook）"]:::new
     end
   end
 
   RN["资源节点（默认即控制节点；可经 rutis link 导入）"]
   CLIP -->|本地 RPC| PROC
   RN -.->|资源服务按 Session 导入| SES
-  WebP & SchedulerP & WorkflowP & NotificationsP -.->|进程级工具贡献| ToolRegistry
+  WebP & SchedulerP & WorkflowP & NotificationsP & QuestionsP & GoalP -.->|进程级工具贡献| ToolRegistry
   PROC -->|Agents 装载| SES
   SES -->|TimelineTree 装载| BR
 ```
 
 #### 新插件接入关系
 
-箭头表示“使用”或“接入”，标注对应第 3 节的接入方式。拆分插件除 Hooks 外按插件整体画出，各部分见下表。
+箭头表示“使用”或“接入”，标注对应第 3 节的接入方式。拆分插件按插件整体画出，各部分见下表。
 
 ```mermaid
 flowchart LR
@@ -236,8 +231,7 @@ flowchart LR
     Questions["Questions"]:::new
     Goal["Goal"]:::new
     ShellInput["ShellInput"]:::new
-    HooksB["Hooks（分支）"]:::new
-    HooksP["Hooks（进程）"]:::new
+    Hooks["Hooks"]:::new
     Workflow["Workflow"]:::new
     ExternalAgent["ExternalAgent"]:::new
     Web["Web"]:::new
@@ -274,12 +268,11 @@ flowchart LR
     Rpc["Rpc"]:::changed
   end
 
-  Questions & Goal -->|A Session 级工具贡献| ToolRegistry
-  Web & Workflow & Scheduler & Notifications -->|A 进程级工具贡献，由 ToolRegistry 直接注入| ToolRegistry
+  Questions & Goal & Web & Workflow & Scheduler & Notifications -->|A 进程级工具贡献，由 ToolRegistry 直接注入| ToolRegistry
   Questions -->|回答完成工具调用| ToolExecutor
-  Goal & ShellInput & HooksB -->|B 写入输入| InputQueue
-  ShellInput & HooksB & ExternalAgent -->|启动进程与隔离| HostPlatform
-  HooksB -->|准入扩展点| Approval
+  Goal & ShellInput & Hooks -->|B 写入输入| InputQueue
+  ShellInput & Hooks & ExternalAgent -->|启动进程与隔离| HostPlatform
+  Approval -->|注入进程级准入服务| Hooks
   Web & Notifications & Scheduler -.->|新风险类别| Permission
   Workflow -->|阶段 Session 与回报| Agents
   Workflow -->|阶段 member| Collaboration
@@ -291,17 +284,17 @@ flowchart LR
   Modality -->|非对话模型| Provider
   Scheduler -->|新建或复用 Session| Agents
   Attachments --> FileStorage
-  HooksP & Scheduler & Web & Notifications & Workflow & ExternalAgent -->|配置来源| Settings
+  Hooks & Scheduler & Web & Notifications & Workflow & ExternalAgent -->|配置来源| Settings
   PluginManager -->|来源与 loader 行| Settings
   PluginManager --> Loader
   PluginManager -->|插件内容| SkillsCatalog
   PluginManager -->|插件内容| Mcp
-  PluginManager -->|插件内容| HooksP
-  Notifications & SessionTitle -->|订阅| SessionBroadcast
+  PluginManager -->|插件内容| Hooks
+  Notifications & SessionTitle & Hooks -->|订阅| SessionBroadcast
   RemoteGateway -->|认证连接| Transport
   RemoteGateway --> Rpc
   AcpGateway -->|本地 RPC| Rpc
-  ShellInput & HooksP & Scheduler & Workflow & ExternalAgent & PluginManager & RemoteGateway -->|贡献管理方法| Management
+  ShellInput & Hooks & Scheduler & Workflow & ExternalAgent & PluginManager & RemoteGateway -->|贡献管理方法| Management
   Management -->|挂载到本机入口| Rpc
 ```
 
@@ -309,13 +302,13 @@ flowchart LR
 
 | 新插件 | 进程部分 | Session 部分 | 分支部分 | 挂接的现有插件 |
 | --- | --- | --- | --- | --- |
-| Questions | — | `ask_user` 工具 | 待答问题 | ToolRegistry、ToolExecutor |
-| Goal | — | `goal_update` 工具 | 目标状态与继续 | ToolRegistry、InputQueue |
+| Questions | `ask_user` 工具与等待中的调用 | — | — | ToolRegistry、ToolExecutor |
+| Goal | `goal_update` 工具与 `session.goal.*` 方法 | — | 目标继续 | ToolRegistry、InputQueue |
 | ShellInput | RPC 边界执行命令 | — | — | HostPlatform（Session 绑定）、InputQueue、Management |
 | Attachments | 提交边界转换与文本附件 | — | — | FileStorage |
 | Web | 搜索与抓取；`web_search`、`web_fetch` 工具 | — | — | Settings、ToolRegistry、Permission |
 | SessionTitle | 订阅与标题生成 | — | — | Session 广播、Provider、SessionStore |
-| Hooks | 目录、批准、Session 开始与用户提交 Hook | — | 工具调用前后、turn 结束、通知 Hook | Settings、Approval、HostPlatform、InputQueue |
+| Hooks | 目录、批准与全部时机的执行 | — | — | Settings、Approval、Session 广播、HostPlatform、InputQueue |
 | Scheduler | 作业与触发；`schedule` 工具 | — | — | Settings、Agents、ToolRegistry、Management |
 | Workflow | 定义、运行与阶段推进；`workflow` 工具 | — | — | Settings、ToolRegistry、Agents、Collaboration、Management |
 | ExternalAgent | 外部 Agent 目录、连接与桥接 | — | — | Provider、Aimux、Agents、Collaboration、HostPlatform |
@@ -437,23 +430,23 @@ flowchart LR
 
 | 项 | 设计 |
 | --- | --- |
-| 作用域 | Session（工具贡献）+ 分支（待答问题） |
+| 作用域 | 进程 |
 | 职责 | 模型向用户提问并等待回答：单选、多选、多问题、自定义回答 |
-| 接入 | A：工具 `ask_user`；等待回答是该工具调用的在途工作，回答作为工具结果返回 |
+| 接入 | A：以进程级工具贡献提供 `ask_user`；处理器按 `call_id` 持有等待中的调用，回答作为工具结果返回 |
 | 事件 | 无。问题内容是工具调用的参数，回答或取消是工具结果；待答问题即“有调用、无结果”的 `ask_user` |
-| 接口 | RPC `session.question.respond {call_id, answers}` 调用分支服务，边界校验后完成工具调用 |
-| 关系 | 中断时以取消结束工具调用；回答与中断并发时按序号先到者生效。重载时未完成的调用按现有工具恢复规则结算。非交互 Session（如 `exec`、定时作业创建的 Session）在创建配置中不贡献 `ask_user`，不依据客户端是否连接来决定 |
+| 接口 | Session 方法 `session.question.respond {call_id, answers}`：边界校验后完成对应调用 |
+| 关系 | 中断时 ToolExecutor 取消工具调用，等待随之释放；回答与中断并发时先结算者生效。重载时未完成的调用按现有工具恢复规则结算。非交互 Session（如 `exec`、定时作业创建的 Session）由 ToolRegistry 按 Session 配置不提供 `ask_user`，不依据客户端是否连接来决定 |
 
 ### 5.2 Goal
 
 | 项 | 设计 |
 | --- | --- |
-| 作用域 | Session（工具贡献）+ 分支（目标状态与继续） |
+| 作用域 | 进程（工具与方法）+ 分支（目标继续） |
 | 职责 | 设置、编辑、暂停、恢复、清除目标；目标未完成时自动继续；记录完成或受阻 |
-| 接入 | B：目标以带 key 的 raw 输入块表达，设置、编辑、暂停、恢复写入同 key 的新块（内容含目标与状态），清除以 `retire` 结束该 key，目标因此持续留在上下文中；继续时写入 Queue 模式的继续输入。A：工具 `goal_update` 报告完成或受阻 |
+| 接入 | B：目标以带 key 的 raw 输入块表达，设置、编辑、暂停、恢复由 `session.goal.*` 在边界经 Session 输入写入同 key 的新块（内容含目标与状态），清除以 `retire` 结束该 key，目标因此持续留在上下文中。A：以进程级工具贡献提供无状态的 `goal_update`，报告完成或受阻。分支 Capability 在需要时写入 Queue 模式的继续输入 |
 | 事件 | 无。目标与其状态由该 key 的输入块推出；完成与受阻由 `goal_update` 的工具结果推出 |
-| 接口 | RPC `session.goal.set/edit/pause/resume/clear` 调用分支服务，由 Goal 写入输入 |
-| 关系 | `stop/interrupt` 使目标进入暂停，由消费中断推出，并写入同 key 的“已暂停”块；连续继续次数由本插件写入的继续输入计数，达到上限即暂停。是否继续只依据本插件消费过的 `turn/end`、`input/*`、`stop/interrupt`，不读 InputQueue 或 Loop 的状态。中断与继续输入并发时，继续输入可能排在中断之后并开始一个 turn；此 turn 中模型从目标块看到已暂停并结束，最多多出一个 turn |
+| 接口 | Session 方法 `session.goal.set/edit/pause/resume/clear` |
+| 关系 | 分支 Capability 按序消费本分支的 `turn/end`、`input/*`、`stop/interrupt` 与 `goal_update` 结果，决定是否继续，不读 InputQueue 或 Loop 的状态。`stop/interrupt` 使目标进入暂停，并写入同 key 的“已暂停”块；连续继续次数由本插件写入的继续输入计数，达到上限即暂停。中断与继续输入并发时，继续输入可能排在中断之后并开始一个 turn；此 turn 中模型从目标块看到已暂停并结束，最多多出一个 turn |
 
 ### 5.3 ShellInput
 
@@ -501,16 +494,16 @@ flowchart LR
 
 ### 5.7 Hooks
 
-Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机制的适配层：同步 before、Capability 订阅、业务所有者管理的异步准入，以及插件体系。进程内插件需要 Hook 能力时直接使用 before 或订阅，不经本插件。
+Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机制的适配层：同步 before、准入扩展点、Session 广播订阅、Session 输入与插件体系。进程内插件需要 Hook 能力时直接使用 before 或订阅，不经本插件。
 
 | 项 | 设计 |
 | --- | --- |
-| 作用域 | 进程（目录、批准、Session 开始与用户提交 Hook）+ 分支（工具调用前后、turn 结束、通知 Hook） |
+| 作用域 | 进程 |
 | 职责 | 在生命周期节点执行用户、项目、插件来源的命令 Hook |
-| 接入 | 命令 Hook 会启动外部进程，不能放进同步 before（before 在提交锁内运行，不执行 I/O）。各时机的映射：Session 开始与用户提交在 RPC 边界执行，用户提交 Hook 可以拒绝提交或以 raw 块附加内容；工具调用前的 Hook 经 Approval 的准入扩展点异步执行，由业务所有者管理（[单树装配](../architecture/rust-agent/single-tree.md) 同步 before）；工具调用后、turn 结束与通知 Hook 由分支 Capability 订阅对应事件后异步执行；需要注入的输出经 B 写入。命令一律在 Session 的资源节点上经 Session 绑定的 HostPlatform 执行 |
+| 接入 | 命令 Hook 会启动外部进程，不能放进同步 before（before 在提交锁内运行，不执行 I/O）。各时机的映射：Session 开始与用户提交在 RPC 边界执行，用户提交 Hook 可以拒绝提交或以 raw 块附加内容；工具调用前的 Hook 作为进程级准入服务，由 Approval 在 `Deps` 中注入并异步调用，由业务所有者管理（[单树装配](../architecture/rust-agent/single-tree.md) 同步 before）；工具调用后、turn 结束与通知 Hook 经进程级订阅 Session 广播后异步执行；需要注入的输出经 Session 输入写入。命令一律在 Session 的资源节点上经 Session 绑定的 HostPlatform 执行 |
 | 事件 | 无。拦截决定记录在所有者的事实中（输入是否写入、工具结果为拒绝）；注入的输出本身是输入；执行记录走诊断通道 |
 | 接口 | 管理方法 `hooks.catalog`、`hooks.approve`、`hooks.set_enabled`、`hooks.disable_all`，贡献给 Management |
-| 关系 | Session 开始 Hook 只在创建 Session 时执行，恢复与重载不重新执行。观察类 Hook 只由实时分发触发，重载后的新一代从明确位置接手，不补跑。项目与插件来源的 Hook 需要宿主本地批准才能执行，批准绑定节点、工作区与配置指纹。准入扩展点上的 Hook 在中断时取消，对应调用以取消结算。插件来源依赖 #3 |
+| 关系 | Session 开始 Hook 只在创建 Session 时执行，恢复与重载不重新执行。观察类 Hook 只由实时广播触发，不补跑。项目与插件来源的 Hook 需要宿主本地批准才能执行，批准绑定节点、工作区与配置指纹。准入服务上的 Hook 在中断时取消，对应调用以取消结算。插件来源依赖 #3 |
 
 ### 5.8 Scheduler
 
@@ -650,10 +643,10 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 
 | 插件 | 类型 | 内容 | 原因 |
 | --- | --- | --- | --- |
-| ToolRegistry | 补充 | 在 `Deps` 中直接注入进程插件提供的进程级工具贡献，与 Session 级贡献一起组成工具集合；依赖随配置启用，生命周期随依赖 | Web、Scheduler、Workflow、Notifications |
+| ToolRegistry | 补充 | 在 `Deps` 中直接注入进程插件提供的进程级工具贡献，与 Session 级贡献一起组成工具集合；依赖随配置启用，生命周期随依赖；按 Session 配置过滤（如非交互 Session 不提供 `ask_user`） | Questions、Goal、Web、Scheduler、Workflow、Notifications |
 | InputQueue | 变更 | 新增 `input/withdrawn`：撤回尚未采用的输入，撤回的输入不再采用，队列状态与可撤回性由事件重建；提供撤回、以及“撤回并以 Steer 重新写入”的服务，经 Session 边界调用 | `Ctrl+S`、`/queue`、取回编辑、删除排队消息 |
 | Permission | 补充 | 风险类别“网络”“外发消息”“持久配置”，并规定 FullAccess 是否自动放行各类别；来自 Settings 的跨 Session 规则来源；允许命令清单 | Web、Notifications、Scheduler；`/approvals`、命令规则 |
-| Approval | 补充 | 工具调用前的准入扩展点：已登记的准入方（如 Hooks）在策略判定后、执行前异步给出允许或拒绝，中断时取消并以取消结算 | Hooks |
+| Approval | 补充 | 工具调用前的准入扩展点：在 `Deps` 中注入进程级准入服务（如 Hooks），在策略判定后、执行前异步调用，给出允许或拒绝；中断时取消并以取消结算 | Hooks |
 | Prompt、ModelProvider | 补充 | 模型参数（推理强度、快速模式）随模型配置采用，并传入模型请求 | `/effort`、`/fast` |
 | Prompt | 补充 | 在 Session 内切换 Agent 配置（提示词、模型、工具集）作为一次配置采用 | `/agent` |
 | PromptSources | 补充 | 提示词语言来源 | `/language` |
@@ -678,7 +671,7 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | Mcp | 补充 | HTTP/SSE 连接的 OAuth 授权；接受插件来源的配置 | MCP 连接；PluginManager |
 | SkillsCatalog | 补充 | 接受插件来源的 Skill 根；安装与移除由 PluginManager 发起 | PluginManager |
 | Trace | 补充 | 导出指定步骤的模型请求快照，可过滤推理、工具记录与压缩内容 | 请求快照导出 |
-| Session 广播 | 待确认 | 进程级订阅所有 Session 的结束、待审批、待回答等事件 | Notifications、SessionTitle |
+| Session 广播 | 待确认 | 进程级订阅所有 Session 的事件（turn 结束、工具结果、待审批、待回答等） | Notifications、SessionTitle、Hooks |
 
 ## 8. CLI 层
 
@@ -781,6 +774,6 @@ Hooks 不是新的扩展机制，而是把命令 Hook 配置映射到现有机�
 | 远程访问 | 认证、断线与 TLS 部署与 #5 的待定问题相关 |
 | 隔离的覆盖面 | MCP stdio 进程是否默认受隔离 |
 | FullAccess 与新风险类别 | 外发消息与持久配置是否在 FullAccess 下仍需询问 |
-| 进程级订阅 | Notifications 与 SessionTitle 所需的跨 Session 订阅是否复用 Session 广播 |
+| 进程级订阅 | Notifications、SessionTitle 与 Hooks 所需的跨 Session 订阅是否复用 Session 广播 |
 | 外部 Agent 的权限 | 外部 Agent 自身的权限请求（如 ACP 的权限请求）映射为 dim 审批，还是按配置的权限模式自动应答 |
 | 外部会话续接 | 外部 Agent 不支持续接或续接失败时，是新开外部会话并附带历史摘要，还是明确失败 |
