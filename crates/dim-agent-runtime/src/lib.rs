@@ -7,6 +7,7 @@ mod contracts;
 pub mod core;
 mod diagnostics;
 mod error;
+pub mod extension_registry;
 mod lifecycle;
 mod memory_timeline_store;
 mod scope;

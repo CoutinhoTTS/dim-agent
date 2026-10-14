@@ -884,6 +884,19 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::extension_registry",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/extension_registry.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_runtime::lifecycle",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -7284,6 +7297,13 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::extension_registry",
+      "references": [
+        "mod extension_registry"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::lifecycle",
       "references": [
         "mod lifecycle"
@@ -7952,6 +7972,18 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::extension_registry",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path register_capability",
+        "use crate::Capability",
+        "use crate::KeysOf",
+        "use crate::register_capability"
       ]
     },
     {
@@ -12770,6 +12802,18 @@
     {
       "module": "dim_agent_runtime::capability",
       "path": "D::scoped"
+    },
+    {
+      "module": "dim_agent_runtime::extension_registry",
+      "path": "P::POINT"
+    },
+    {
+      "module": "dim_agent_runtime::extension_registry",
+      "path": "P::Service"
+    },
+    {
+      "module": "dim_agent_runtime::extension_registry",
+      "path": "P::validate"
     },
     {
       "module": "dim_agent_types",
