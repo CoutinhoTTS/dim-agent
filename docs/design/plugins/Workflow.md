@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §B.9](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview §F.3](../overview.md#appendix-c-implementation-language)).
 
-Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own Session, either a new non-interactive Session launched through Agents or a Collaboration member of the starting Session created with Collaboration's `establish`. The process part owns runs and reaches Sessions through Agents (`AgentIndex`) and the Session public interface ([session-access](../contracts/session-access.md)), as Collaboration does. The Session part offers the `workflow` tool to interactive Sessions; operators use management-level `workflow.*` methods. When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
+Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own Session, either a new non-interactive Session launched through Agents or a Collaboration member of the starting Session created with Collaboration's `establish`. The process part owns runs and reaches Sessions through the process service `sessions` ([session-access](../contracts/session-access.md)), as Collaboration does. The Session part offers the `workflow` tool to interactive Sessions as a `toolContribution`; operators use management-level `workflow.*` methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
 
 ## 1. Structure
 
@@ -10,8 +10,8 @@ Workflow owns workflow definitions and runs. A run advances a fixed list of step
 flowchart LR
   subgraph PROC["Process (control node)"]
     WF["Workflow: definitions, run engine, stage runners"]
-    MM["ManagementMethods: workflow.*"]
-    Agents["Agents: launch, AgentIndex"]
+    MM["managementMethods key workflow"]
+    Agents["Agents: sessions"]
     Coll["Collaboration: establish"]
     Prov["Provider: purpose workflow.stage"]
     Set["Settings: user and project sources, host-local approvals"]
@@ -20,7 +20,7 @@ flowchart LR
     Rpc["Rpc method table"]
   end
   subgraph SESS["Interactive Session (starter)"]
-    Tool["WorkflowSession: ToolContribution workflow"]
+    Tool["WorkflowSession: toolContribution key workflow"]
   end
   subgraph STG["Stage Sessions"]
     TL["main Timeline"]
@@ -33,20 +33,20 @@ flowchart LR
   WF -.->|"optional"| PC
   WF --> Store
   WF --> MM
-  Rpc -->|"Contributions of ManagementMethods"| MM
-  Agents -->|"Session public interface"| TL
+  Rpc -->|"collects managementMethods by name"| MM
+  Agents -->|"sessions calls"| TL
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   class WF,MM,Tool new
 ```
 
-A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); the tool is offered by a Session-scoped `ToolContribution` (D2). The Session part depends on the process part; the process part depends on Agents, Collaboration, Provider and Settings at the same scope. Dependencies follow scope (D3): an Agents or Collaboration reload reloads Workflow, which settles its runs `interrupted` (A.6), and a Workflow reload reloads its Session parts, failing their in-flight turns. These are rare structural events and an accepted, documented cost. Definition edits and approvals are business configuration (D4): read at use time, never a reload.
+A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); the tool is offered by a Session-scoped `toolContribution` (D2). The Session part depends on the process part; the process part depends on Agents, Collaboration, Provider and Settings at the same scope. Dependencies follow scope (D3): an Agents or Collaboration reload reloads Workflow, which settles its runs `interrupted` (A.6), and a Workflow reload reloads its Session parts, failing their in-flight turns. These are rare structural events and an accepted, documented cost. Definition edits and approvals are business configuration (D4): read at use time, never a reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Workflow` | Process (control node) | Agents (`launch` with `policy`, `AgentIndex`), Collaboration (`establish`), Provider model selection, Settings user/project sources and host-local approval service, `PluginContents` (optional, type `workflows`), App Server process storage | Run engine; `ManagementMethods` entry `workflow.*` collected by Rpc |
-| `WorkflowSession` | Session, installed when Workflow is enabled | `Workflow`, `S:SessionConfig` | Session-scoped `ToolContribution` `workflow`, contributed only when `interactive` |
+| `Workflow` | Process (control node) | `sessions` (Agents; `launch` with `policy`), Collaboration (`establish`), Provider model selection, Settings user/project sources and host-local approval service, `PluginContents` (optional, type `workflows`), App Server process storage | Run engine; `managementMethods` key `workflow` |
+| `WorkflowSession` | Session, installed when Workflow is enabled | `Workflow`, Session configuration | `toolContribution` key `workflow`, declared only when `interactive` |
 
-**Contracts depended on**: [session-access](../contracts/session-access.md) (Agents `launch` with a starter-capped `policy`, `SessionConfig` fields, input with source raw blocks, history reads, withdrawal), Collaboration `establish(leader, agent)` (Collaboration supplement), Provider purpose policy, Session-scoped `ToolContribution` ([tool contributions](../../architecture/rust-agent/tool-contributions.md)), management-level methods in Rpc's method table ([session-boundary](../contracts/session-boundary.md)), App Server process storage (R8), Settings sources and host-local approval service (R11). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
+**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields, `input` with source raw blocks, `history`, `idle`, `stop`, `withdraw`), Collaboration `establish` (Collaboration supplement, A.5), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)); and existing typed services: Provider purpose policy, App Server process storage (R8), Settings sources and host-local approval service (R11), which a TypeScript part reaches by name once [#4](https://github.com/arcships/dim/issues/4) exposes them. **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
 
 ## 2. Data and state
 
@@ -98,7 +98,7 @@ sequenceDiagram
   participant M as Model (starter branch)
   participant WF as Workflow
   participant ST as Process storage
-  participant AG as Agents launch or Collaboration establish
+  participant AG as sessions.launch or Collaboration establish
   participant SS as Stage Session
   M->>WF: workflow start (tool handler of WorkflowSession)
   WF->>WF: validate, approval check, policy cap from starter
@@ -106,11 +106,11 @@ sequenceDiagram
   WF-->>M: ToolResult run_id (batch result)
   WF->>ST: persist stage launching
   WF->>AG: launch(non-interactive, capped policy) or establish(leader, agent)
-  AG-->>WF: Session use (lease)
-  WF->>SS: input main Queue, marker stage, rendered prompt
+  AG-->>WF: sessionId
+  WF->>SS: sessions.input main Queue, marker stage, rendered prompt
   WF->>ST: persist stage running with input_event_id
   SS->>SS: Dispatcher: input/applied, input/consumed, turn
-  WF->>SS: idle(main) then local pages up to cutoff
+  WF->>SS: sessions.idle(main), then sessions.history up to cutoff
   WF->>ST: stage completed or failed, next step
 ```
 
@@ -122,16 +122,14 @@ The handler persists the run and returns at once; stage advancement runs on the 
 sequenceDiagram
   participant WF as Workflow
   participant ST as Process storage
-  participant AI as AgentIndex
   participant STB as Starter branch
   alt run completed, failed or interrupted, with report_to
     WF->>ST: report pending(submission_id)
-    WF->>AI: acquire(starter)
-    WF->>STB: input Steer, marker report
+    WF->>STB: sessions.input Steer, marker report
     WF->>ST: delivered, or undeliverable on branch missing or Session closed
   else workflow stop
     WF->>ST: stopping
-    WF->>WF: withdraw own unconsumed stage inputs, stop(main) for running stages
+    WF->>WF: sessions.withdraw own unconsumed stage inputs, sessions.stop(main) for running stages
     WF->>ST: stopped, no report
   end
 ```
@@ -166,7 +164,7 @@ sequenceDiagram
   participant A as Agents
   participant WF2 as Workflow (new generation)
   participant ST as Process storage
-  WF->>WF: stage running, waiting in idle(main)
+  WF->>WF: stage running, waiting in sessions.idle(main)
   A->>A: Agents reload (structural)
   WF->>WF: unload: stop running stage turns (bounded wait)
   WF2->>ST: load runs: running to interrupted, active stages lost
@@ -201,10 +199,10 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `workflow` (`list`, `start`, `status`, `stop`) | Session-scoped `ToolContribution`, risk category of Collaboration's `agent` tool | Model runs workflows |
-| `workflow.list/save/start/status/stop/approve/revoke` | Management-level methods (`ManagementMethods`) | Operators manage definitions and runs |
+| `workflow` (`list`, `start`, `status`, `stop`) | `toolContribution` (Session, key `workflow`), risk category of Collaboration's `agent` tool | Model runs workflows |
+| `workflow.list/save/start/status/stop/approve/revoke` | `managementMethods` (process, key `workflow`) | Operators manage definitions and runs |
 | `/workflow`, `/workflow:save` | CLI | Call the management methods |
-| Agents `launch`, Collaboration `establish` | Depended on | Create stage Sessions |
+| `sessions`, Collaboration `establish` | Depended on | Create stage Sessions; input, history, idle, stop, withdraw |
 | `dim.workflow/v1` | Defined here | Definition format (Appendix A) |
 
 ## 7. Security
@@ -249,7 +247,7 @@ Validation happens at the external boundary (file read, `workflow.save`, `start`
 
 ### A.2 Tool `workflow`
 
-Contributed by `WorkflowSession` only in Sessions whose `SessionConfig` has `interactive: true` (A8); the handler calls the process part. Risk: the category Collaboration's `agent` tool declares (today none, so unclassified: ReadOnly denies, WorkspaceWrite asks, FullAccess allows; E2).
+`toolContribution` key `workflow`, registered by `WorkflowSession` only in Sessions whose configuration has `interactive: true` (A8). `declaration(): sync -> ToolDeclaration` returns the actions below; `execute(ToolCall): async -> ToolResult` calls the process part; cancellation is the consumer dropping the call. Risk: the category Collaboration's `agent` tool declares (today none, so unclassified: ReadOnly denies, WorkspaceWrite asks, FullAccess allows; E2).
 
 | Action | Parameters | `ToolResult.content` |
 | --- | --- | --- |
@@ -258,9 +256,11 @@ Contributed by `WorkflowSession` only in Sessions whose `SessionConfig` has `int
 | `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
 | `stop` | `run_id` | Final state after propagation |
 
-`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the calling Session's `SessionConfig`, and `policy_cap` from the starter (resolved by Agents). Errors: `definition_not_found`, `invalid_definition`, `invalid_parameters`, `approval_required`, `run_not_found`, `limit_exceeded` (A11).
+`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the calling Session's configuration, and `policy_cap` from the starter (resolved by Agents). Errors: `definition_not_found`, `invalid_definition`, `invalid_parameters`, `approval_required`, `run_not_found`, `limit_exceeded` (A11).
 
 ### A.3 Management methods
+
+`managementMethods` key `workflow`: `describe(): async -> MethodDecl[]` lists the methods below (level `management`, `mutating` as shown); `call(MethodCall): async -> MethodReply` dispatches them with JSON params and results.
 
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
@@ -277,7 +277,7 @@ An admitted call completes if the caller disconnects. While Workflow reloads, Rp
 
 ```text
 Run { run_id, name, source: user|project|plugin, fingerprint, definition (snapshot),
-      params, cwd, resource_node, policy_cap, report_to: Option<{session_id, branch_id}>,
+      params, cwd, resource_node, policy_cap, report_to?: {session_id, branch_id},
       started_by: tool{session_id, branch_id, call_id} | management,
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
@@ -290,23 +290,23 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 
 | Contract | Owner | Use |
 | --- | --- | --- |
-| `launch` with `interactive: false`, `resource_node`, `policy`; `created_by: Launch { source: "workflow" }` | Agents supplement ([session-access](../contracts/session-access.md)) | Launched stages; Workflow writes the first input itself |
-| `establish(leader_session_id, agent_id)` | Collaboration supplement | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
-| Withdrawal of an own input | session-access (InputQueue) | Withdraw own unconsumed stage inputs on stop |
+| `sessions.launch {agent, cwd, resourceNode?, policy?, starter?}` → `{sessionId}` (non-interactive; `createdBy = {kind: "launch", source: "workflow"}`) | Agents supplement ([session-access](../contracts/session-access.md)) | Launched stages; Workflow writes the first input itself |
+| `establish {leaderSessionId, agentId}: async -> {sessionId}` | Collaboration supplement, a Collaboration service outside `sessions` | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
+| `sessions.withdraw {sessionId, branchId, inputId}` of an own input; `sessions.lookup` by `submissionId` | session-access (InputQueue) | Withdraw own unconsumed stage inputs on stop |
 
 ### A.6 Timeline and capability mechanics
 
 | Step | Path |
 | --- | --- |
-| Start | Handler or management call validates, checks approval, resolves the policy cap, persists `Run{running}`, spawns the run task on the process part's `TaskTracker` (`ctx.effect`) and returns. No Timeline write |
+| Start | Handler or management call validates, checks approval, resolves the policy cap, persists `Run{running}`, spawns the run task on the process part's task tracker and returns. No Timeline write |
 | Stage launch | Recheck in storage (run `running`; approval still valid for the snapshot fingerprint, A12). Persist `launching`; `launch` or `establish`; persist `session_id` and `submission_id = workflow:<uuid>` |
-| Stage input | `Session::input` on `main`: marker `{kind: "stage", attrs: [run, stage], body: definition name}`, rendered prompt, mode Queue → `Timeline::append`; persist `running` with `input_event_id` |
+| Stage input | `sessions.input {sessionId, branchId: "main", mode: "queue", submissionId, rawBlocks: [marker {kind: "stage", attrs: [run, stage], body: definition name}], content: [rendered prompt]}` → `{inputId}` stored as `input_event_id`; input admission checks run first (`input_denied` → stage `failed: input_denied`); persist `running` |
 | Consumption | Stage Session's InputQueue and Loop on their Dispatchers (`input/applied`, `input/consumed`), then turns |
-| Completion | `Session::idle("main")` returns cutoff `C`; read local pages up to `C`. Before `input/consumed{input_event_id}`: `input/withdrawn` or a following `stop/interrupt` → `stopped`, else wait again. After consumption: the first `turn/end` after it in `(consumed, C]` decides `completed`/`failed`/`stopped`; that turn's last response text is the result (Collaboration's outcome rule) |
+| Completion | `sessions.idle {sessionId, branchId: "main"}` returns cutoff `C`; `sessions.history {through: C}` pages. Before `input/consumed{input_event_id}`: `input/withdrawn` or a following `stop/interrupt` → `stopped`, else wait again. After consumption: the first `turn/end` after it in `(consumed, C]` decides `completed`/`failed`/`stopped`; that turn's last response text is the result (Collaboration's outcome rule) |
 | Advance | Persist the stage result; when all stages of a step are terminal, start the next step or end the run; a failed stage stops running siblings and fails the run (A4) |
-| Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `AgentIndex::acquire`, Steer input with marker `report`; persist `delivered` or `undeliverable` |
-| Stop | Persist `stopping`; waiting stages `skipped`; unconsumed stage inputs withdrawn; running stages `Session::stop("main", "workflow stopped")`; completion rule reads the outcome; run `stopped`, no report |
-| Reload, restart | Session parts reload with Workflow; an in-flight `workflow` call fails with its turn. On unload the old generation stops running stage turns (bounded wait, A13). The new generation loads runs: `running`/`stopping` → `interrupted`; `launching`/`running` stages → `lost`; nothing relaunched. A `pending` report is looked up (accepted → `delivered`, unknown → written now); interrupted runs with `report_to` and `report: none` get one report (E15) |
+| Report | On `completed`, `failed` or `interrupted` with `report_to`: persist `pending{submission_id}`, `sessions.input` (mode `steer`) with marker `report` on the starter branch; persist `delivered`, or `undeliverable` on a missing branch, closed Session or `input_denied` |
+| Stop | Persist `stopping`; waiting stages `skipped`; unconsumed stage inputs withdrawn (`sessions.withdraw`); running stages `sessions.stop {sessionId, branchId: "main"}`; completion rule reads the outcome; run `stopped`, no report |
+| Reload, restart | Session parts reload with Workflow; an in-flight `workflow` call fails with its turn. On unload the old generation stops running stage turns (bounded wait, A13). The new generation loads runs: `running`/`stopping` → `interrupted`; `launching`/`running` stages → `lost`; nothing relaunched. A `pending` report is looked up with `sessions.lookup` (accepted → `delivered`, unknown → written now); interrupted runs with `report_to` and `report: none` get one report (E15) |
 
 ## Appendix B. Full conflict table
 
@@ -333,9 +333,10 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 | Leader Session closed with a member stage | — | Member closed by Collaboration → stage `failed: session_closed`; run `failed` | Collaboration, Workflow |
 | Agents or Collaboration reload | — | Workflow reloads; runs `interrupted`, one report each | Workflow |
 | Workflow reload during a `workflow` call | — | The calling Session part reloads; that turn fails (D3, accepted) | Loop |
-| Stage resource node offline | capabilities Pending | `launch` fails at deadline → `failed: node_unavailable`; a running stage waits in `idle` | Agents, rutis lifecycle |
+| Stage resource node offline | — | A launch refused for the unavailable node → stage `failed: node_unavailable`; a running stage Session stays loaded (no reload, no Pending), its node-service calls fail `node_unavailable` and its turn ends on its own outcome (requirement on [#5](https://github.com/arcships/dim/issues/5)) | Agents, stage Session |
 | Stage Session capability reload mid-turn | turn ends `Failed` | Stage `failed` | Stage Loop |
-| Starter Session unloaded at report time | — | `acquire` restores, then writes | AgentIndex |
+| Starter Session unloaded at report time | — | `sessions.input` restores it, then writes | Agents |
+| An input admission check denies a stage or report input | — | Nothing written; stage `failed: input_denied` (run `failed`), or report `undeliverable` | Session input boundary, Workflow |
 | Process restart mid-run | — | `interrupted`/`lost`; committed unconsumed stage inputs stay in their Sessions | Workflow |
 | Report write uncertain (reload, publication unknown) | — | Lookup before retry; never two reports | Workflow |
 | Project definition edited after start | — | Run keeps its snapshot; next stage launch rechecks the snapshot's fingerprint → `failed: approval_revoked` | Workflow |
@@ -396,4 +397,17 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 | Question | Description |
 | --- | --- |
 | Overview method list | Overview §B.9 lists `workflow.list/save/start/status/stop`; this design adds `workflow.approve/revoke` (D11) |
-| Launch contract | The Agents supplement must define `launch` with `policy` and the starter-policy resolution |
+| Launch contract | The Agents supplement must define `sessions.launch` with `policy` and the starter-policy resolution; `LaunchRequest` has no `model` field, so `stage.model` needs one (or a profile per model) |
+
+## Appendix G. Rust binding
+
+One binding of the neutral contracts, for a Rust implementation; a TypeScript implementation uses the same names and data through its rutis-bridge runtime.
+
+| Neutral | Rust |
+| --- | --- |
+| `toolContribution` key `workflow` | Session-scoped `ToolContribution` registered in `WorkflowSession`'s `provides` |
+| `managementMethods` key `workflow` | Entry of `Contributions<ManagementMethods>` collected by Rpc |
+| `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
+| `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` lease, then `Session::input`, `local_page`, `idle`, `stop`, `service::<InputQueue>(branch).withdraw` |
+| Collaboration `establish` | `Collaboration::establish(leader_session_id, agent_id) -> SessionUse` |
+| Run task | Spawned on the `TaskTracker` held by `ctx.effect` |
