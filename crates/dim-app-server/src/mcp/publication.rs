@@ -30,6 +30,16 @@ pub struct McpApplication {
 }
 
 enum Command {
+    Check {
+        reference: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Approval {
+        source: SettingsSource,
+        id: String,
+        token: Option<String>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     Acquire {
         project: Option<usize>,
         id: String,
@@ -59,6 +69,38 @@ impl Publication {
 
     pub(super) fn refresh(&self) {
         self.released.send_replace(());
+    }
+
+    pub(super) async fn check(&self, reference: String, cancel: &CancellationToken) -> Result<()> {
+        let (reply, received) = oneshot::channel();
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(McpError::Cancelled),
+            result = async {
+                self.commands.send(Command::Check { reference, reply }).await.map_err(|_| McpError::Closed)?;
+                received.await.map_err(|_| McpError::Closed)?
+            } => result,
+        }
+    }
+
+    pub(super) async fn approval(
+        &self,
+        source: SettingsSource,
+        id: String,
+        token: Option<String>,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let (reply, received) = oneshot::channel();
+        // Once queued, the host settles persistence and disposal even if the
+        // caller leaves. It never waits for an interactive approval in apply.
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(McpError::Cancelled),
+            result = async {
+                self.commands.send(Command::Approval { source, id, token, reply }).await.map_err(|_| McpError::Closed)?;
+                received.await.map_err(|_| McpError::Closed)?
+            } => result,
+        }
     }
 
     pub(super) async fn acquire(
@@ -178,6 +220,31 @@ impl McpPublication {
             let Some(settings) = &settings else { continue };
             projection.refresh(settings, &stop).await;
             match command {
+                Some(Command::Check { reference, reply }) => {
+                    let allowed =
+                        projection
+                            .generations
+                            .get(&reference)
+                            .is_some_and(|generation| {
+                                generation.approved && generation.row["disabled"] != true
+                            });
+                    let _ = reply.send(if allowed {
+                        Ok(())
+                    } else {
+                        Err(McpError::ApprovalRequired)
+                    });
+                }
+                Some(Command::Approval {
+                    source,
+                    id,
+                    token,
+                    reply,
+                }) => {
+                    let result = projection
+                        .approval(settings, source, id, token, &stop)
+                        .await;
+                    let _ = reply.send(result);
+                }
                 Some(Command::Acquire { project, id, reply }) => {
                     if reply.is_closed() {
                         continue;
@@ -261,6 +328,7 @@ struct Generation {
     source: SettingsSource,
     id: String,
     configuration: Arc<McpServerSettings>,
+    approved: bool,
     lease: Weak<McpConnection>,
     row: Value,
 }
@@ -282,15 +350,16 @@ impl Projection {
             let snapshot = match settings.read(source, cancel).await {
                 Ok(snapshot) => snapshot,
                 Err(_) => {
-                    self.sources
-                        .entry(source)
-                        .or_insert_with(|| Source {
-                            revision: String::new(),
-                            configured: BTreeSet::new(),
-                            current: BTreeMap::new(),
-                            error: None,
-                        })
-                        .error = Some("MCP source could not be read");
+                    let intent = self.sources.entry(source).or_insert_with(|| Source {
+                        revision: String::new(),
+                        configured: BTreeSet::new(),
+                        current: BTreeMap::new(),
+                        error: None,
+                    });
+                    intent.error = Some("MCP source could not be read");
+                    if matches!(source, SettingsSource::ProjectMcp(_)) {
+                        intent.current.clear();
+                    }
                     continue;
                 }
             };
@@ -301,19 +370,37 @@ impl Projection {
             self.disconnected
                 .retain(|(owner, _), revision| *owner != source || *revision == snapshot.revision);
             let mut current = BTreeMap::new();
-            for (id, mut configuration) in document.mcp_servers {
-                if let (Some(path), McpServerSettings::Stdio { cwd, .. }) =
-                    (&path, &mut configuration)
-                    && cwd.is_none()
-                {
-                    *cwd = Some(path.to_str().expect("validated project path").to_owned());
-                }
+            let mut error = None;
+            for (id, configuration) in document.mcp_servers {
+                let Ok(configuration) = settings.mcp_effective(source, configuration) else {
+                    error = Some("MCP configuration could not be resolved");
+                    continue;
+                };
+                let approved = if matches!(source, SettingsSource::ProjectMcp(_)) {
+                    match settings.mcp_fingerprint(source, &id, &configuration) {
+                        Ok(token) => match settings.mcp_approved(source, &id, &token, cancel).await
+                        {
+                            Ok(approved) => approved,
+                            Err(_) => {
+                                error = Some("MCP approval store could not be read");
+                                false
+                            }
+                        },
+                        Err(_) => {
+                            error = Some("MCP configuration could not be resolved");
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
                 if self.disconnected.get(&(source, id.clone())) == Some(&snapshot.revision) {
                     continue;
                 }
                 if let Some(reference) = self.sources.get(&source).and_then(|s| s.current.get(&id))
                     && let Some(generation) = self.generations.get(reference)
                     && *generation.configuration == configuration
+                    && generation.approved == approved
                 {
                     current.insert(id, reference.clone());
                     continue;
@@ -325,6 +412,7 @@ impl Projection {
                         generation.source == source
                             && generation.id == id
                             && *generation.configuration == configuration
+                            && generation.approved == approved
                             && self
                                 .root
                                 .get_as::<super::server::McpServer>(key(reference))
@@ -360,8 +448,8 @@ impl Projection {
                     .unwrap()
                     .insert(reference.clone(), (source, configuration.clone()));
                 self.generations.insert(reference.clone(), Generation {
-                    source, id: id.clone(), configuration, lease: Weak::new(),
-                    row: json!({"id":reference,"name":self.module,"disabled":disabled,"config":{"reference":reference}}),
+                    source, id: id.clone(), configuration, approved, lease: Weak::new(),
+                    row: json!({"id":reference,"name":self.module,"disabled":disabled || !approved,"config":{"reference":reference}}),
                 });
                 current.insert(id, reference);
             }
@@ -371,7 +459,7 @@ impl Projection {
                     revision: snapshot.revision,
                     configured,
                     current,
-                    error: None,
+                    error,
                 },
             );
         }
@@ -384,7 +472,8 @@ impl Projection {
                 .get(&generation.source)
                 .and_then(|s| s.current.get(&generation.id))
                 == Some(reference)
-                || generation.lease.strong_count() > 0
+                || (generation.source == SettingsSource::UserMcp
+                    && generation.lease.strong_count() > 0)
         });
         let rows = self.generations.values().map(|g| g.row.clone()).collect();
         let layer = Layer::new(
@@ -518,8 +607,15 @@ impl Projection {
             .generations
             .get_mut(reference)
             .expect("current generation");
-        if generation.row["disabled"] == true {
+        let disabled = match &*generation.configuration {
+            McpServerSettings::Stdio { enabled, .. }
+            | McpServerSettings::Remote { enabled, .. } => *enabled == Some(false),
+        };
+        if disabled {
             return Err(McpError::Disabled);
+        }
+        if !generation.approved {
+            return Err(McpError::ApprovalRequired);
         }
         let Some(service) = self.root.get_as::<super::server::McpServer>(key(reference)) else {
             // Keep typed, secret-free configuration errors at the public port;
@@ -535,9 +631,52 @@ impl Projection {
         let lease = Arc::new(McpConnection {
             service,
             released: self.port.released.clone(),
+            authorization: matches!(generation.source, SettingsSource::ProjectMcp(_))
+                .then(|| (self.port.clone(), reference.clone())),
         });
         generation.lease = Arc::downgrade(&lease);
         Ok(lease)
+    }
+
+    async fn approval(
+        &mut self,
+        settings: &Arc<SettingsService>,
+        source: SettingsSource,
+        id: String,
+        token: Option<String>,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        settings.mcp_workspace(source)?;
+        if id.trim().is_empty() {
+            return Err(McpError::InvalidId);
+        }
+        if let Some(expected) = &token {
+            let snapshot = settings.read(source, cancel).await?;
+            let SettingsDocument::Mcp(document) = snapshot.document else {
+                unreachable!("MCP source")
+            };
+            let config = document
+                .mcp_servers
+                .get(&id)
+                .ok_or(McpError::UnknownServer)?;
+            let config = settings.mcp_effective(source, config.clone())?;
+            if settings.mcp_fingerprint(source, &id, &config)? != *expected {
+                return Err(crate::settings::SettingsError::Conflict.into());
+            }
+            // Approval must not turn invalid transport intent into an executable row.
+            McpServerPlugin::new(config, key("approval-validation"))?;
+        }
+        let revoking = token.is_none();
+        settings
+            .mcp_set_approval(source, id.clone(), token, cancel)
+            .await?;
+        if revoking {
+            // Unlike ordinary user-config replacement, revoke every retained handle.
+            self.disconnect(source, id).await?;
+        }
+        // Re-read after persistence: a racing workspace edit cannot inherit the grant.
+        self.refresh(settings, cancel).await;
+        Ok(())
     }
 
     async fn disconnect(&mut self, source: SettingsSource, id: String) -> Result<()> {

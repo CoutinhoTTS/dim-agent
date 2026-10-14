@@ -1974,7 +1974,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         assert!(!catalog.to_string().contains("never-run-this-test-command"));
         let expected = catalog["result"]["userRevision"].clone();
         if restart {
-            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http"}]));
+            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http","approval":"notRequired","approvalToken":null}]));
             assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"managed-fixture","expectedVersion":expected})).await);
             let empty = client.rpc("mcp.catalog", json!({})).await;
             assert_ok(&empty);

@@ -1,4 +1,5 @@
 //! Source-targeted settings. No MCP connections or Skill discovery.
+mod mcp_approval;
 mod native;
 
 use crate::storage::SqliteStorage;

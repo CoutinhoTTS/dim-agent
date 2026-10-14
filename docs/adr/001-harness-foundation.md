@@ -127,11 +127,13 @@ reply certifies persistence, not loader application or business settlement. Gene
 reference private revision-bound configuration rather than embedding MCP secrets. Management
 services and leases do not own or shut down these configured rows.
 
-MCP publication uses distinct loader rows for overlapping generations. Replacing a single row
+User MCP publication uses distinct loader rows for overlapping generations. Replacing a single row
 would dispose the old connection while an accepted model request still holds its tools; a loader
 group instance does not pin its old template. Retire a superseded row when its last binding is
-released. Explicit disconnect removes every generation for the selected source and server,
-waits for loader disposal, and reports cleanup errors even when reconciliation itself succeeds.
+released. Project generations instead retire on configuration change, disablement or loss of
+execution approval, even with retained bindings. Explicit disconnect removes every generation for
+the selected source and server, waits for loader disposal, and reports cleanup errors even when
+reconciliation itself succeeds.
 The stable part of a row identity hashes the canonical workspace (or user scope) and server id;
 the generation suffix is transient. Private immutable configuration remains available until the
 loader removes its row. Network connection remains lazy and generation-owned.
@@ -151,10 +153,51 @@ external outcomes. Use existing rutis lifecycle hooks and the harness fault path
 
 ### Trust and cross-language calls
 
-These are target contracts, not a claim of a complete trust boundary or cross-language
-Capability implementation. Protected-local management and authorized file roots do not
-constitute workspace execution approval. Project MCP discovery can currently launch a
-configured process without a separate workspace-trust decision.
+Project MCP execution approval is implemented at the host boundary. It is not a complete
+workspace sandbox or a cross-language Capability implementation. Authorizing a FileStorage root,
+selecting FullAccess tool permissions or restoring a Session never grants project MCP execution.
+Reading configuration is inert: unapproved project entries shadow user entries but cannot start
+stdio processes or connect HTTP/SSE transports, including during automatic tool discovery.
+
+The Settings owner persists host-local grants in `mcp-approvals.json`, format version 1, using
+FileStorage leases and atomic replacement (0600 on Unix). Native and standalone hosts use the
+same file contract; no native database version change or Session migration is required. The file
+contains only hashed workspace/server identities and configuration fingerprints. Project files,
+Timeline history and portable Session data cannot carry grants. Missing grants deny execution;
+unreadable or corrupt stores fail closed without silently resetting existing records.
+
+A grant binds a canonical workspace path, server ID and effective typed configuration. The
+versioned fingerprint includes transport, command, arguments, environment overrides, resolved cwd,
+URL, headers and authentication; it excludes enablement. Relative project stdio cwd resolves from
+the workspace, never the daemon cwd. A disabled server remains disabled after approval. Changes to
+executable configuration require a matching grant; identical configuration can reuse its grant.
+User configuration remains a separate trusted local source and cannot confer approval on a
+project entry with the same ID.
+
+Protected-local protocol v3 management exposes `mcp.approve {cwd,id,approvalToken}` and
+`mcp.revoke {cwd,id}`. `mcp.catalog` exposes `approval` (`notRequired`, `required`, `approved`) and
+`approvalToken`, not executable configuration or credentials. The token is a configuration digest,
+not a bearer credential or evidence of human consent. Approval compares the supplied token with
+current intent, persists first, and re-reads before publication. An active Session may discover an
+approved server immediately; callers must review configuration before approving. A stale token
+returns `mcp_settings_conflict`. WebSocket callers cannot use these management methods.
+
+The existing publication actor serializes host approval and generation changes; the loader still
+owns disposal. Every project connection operation rechecks current source and grants before
+admission. Revocation removes the persisted grant, rejects new calls through retained bindings,
+cancels and joins accepted generation work, and closes transports before successful acknowledgement.
+Cleanup failure is reported separately from persisted revocation; callers must inspect state after
+interruption rather than assuming rollback. External file edits are observed on refresh or the
+next connection operation, not by a filesystem watcher. Revocation settles this host's connections;
+other independent hosts sharing the file observe it on their next read. Prior remote side effects
+are not undone.
+
+This approves configuration, not immutable executable bytes: modifying a referenced script or
+binary, inherited environment, DNS or remote server behavior does not change the fingerprint.
+Trusted native plugins, explicitly permitted shell tools and same-user processes can access host
+files and are not sandboxed by this gate. Constrained plugin execution and OS isolation remain
+separate work. Host safety settings do not belong to replayable business facts: replay must never
+restore authority from a Session that once had it.
 
 Configuration precedence never overrides host safety limits or workspace trust. Store credential
 references in generic configuration; exclude resolved secrets from management notifications,
@@ -184,13 +227,13 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
 | Scoped persisted loader configuration | Implemented for MCP: source-first publication to the root loader; user MCP/Skills authority and import use native storage v13. Pending issue #3 alignment. General plugin configuration, Session overrides, unified credential references and complete acknowledgement/status reporting are not implemented | Scope isolation, save failure, protected-local management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
-| Loader-owned MCP instances | Implemented: scoped logical identities, overlapping generation rows, host publication, explicit disconnect and cleanup receipts. Uses distinct generation rows rather than issue #3's proposed instanced group | Bound tools survive replacement; all generations drain; logical identities survive restart and root reordering |
-| Workspace execution trust and constrained plugins | Not implemented as a workspace approval gate or OS isolation boundary | Unapproved workspace configuration cannot execute; approval, configuration changes and revocation are enforced at host execution boundaries |
+| Loader-owned MCP instances | Implemented: scoped logical identities, overlapping generation rows, host publication, explicit disconnect and cleanup receipts. Uses distinct generation rows rather than issue #3's proposed instanced group | Bound user-source tools survive replacement; project tools obey current approval; all generations drain; logical identities survive restart and root reordering |
+| Project MCP execution approval | Implemented: host-local scoped configuration grants, protected-local approval/revocation, per-operation checks and generation disposal. General workspace sandboxing and constrained plugins are not implemented | Unapproved project MCP cannot execute or connect; stale configuration, restart, retained tool bindings and revocation respect the grant |
 
 Keep this implementation batch on one integration branch with reviewable commits. The persistence
 format, runtime assembly and lifecycle have one coordinated owner. Whole-plugin documentation
 coverage and generated checks are not evidence of runtime correctness. Further work includes
-compression hosts, workspace trust, extensions to existing collaboration and permissions,
+compression hosts, broader workspace isolation, extensions to existing collaboration and permissions,
 queue controls, questions, scoped rules, file history, external protocols, plugin management
 and long-running/remote capabilities. These are separate delivery scopes, not additions to the
 completed batch. TUI implementation and company services remain outside this work. Security
