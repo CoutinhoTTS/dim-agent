@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview B.2](../overview.md#b2-goal). Phase: P2. Language: TypeScript first ([overview F.3](../overview.md#f3-assignment)).
 
-Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The goal and its status exist only as a keyed raw input block written through [session-access](../contracts/session-access.md); continuation is decided from a fixed Timeline prefix after a `turn/end` notice from the [broadcast subscription](../contracts/session-broadcast-subscription.md). Goal is a process plugin, writes no events of its own, and has no separate "Goal mode": the feature-list wording "switch Goal mode" is covered by the presence and status of a goal, visible through `session.goal.get` and the goal block.
+Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses or interrupts, or a continuation limit is reached. The goal and its status exist only as a keyed raw input block written through the stable [Session access port](../contracts/session-access.md); continuation is decided from a fixed Timeline prefix after a `turn/end` notice from the [broadcast subscription](../contracts/session-broadcast-subscription.md). Goal is a process plugin, writes no events of its own, and has no separate "Goal mode": the feature-list wording "switch Goal mode" is covered by the presence and status of a goal, visible through `session.goal.get` and the goal block.
 
 ## 1. Structure
 
@@ -11,10 +11,10 @@ flowchart LR
   subgraph PROC["Process (App Server)"]
     GoalP["Goal"]:::new
     SE["Session broadcast subscription"]:::contract
-    SA["SessionAccess"]:::contract
-    PTR["Process tool registry"]:::contract
-    SMC["methods registry (level session)"]:::contract
-    Settings["Settings volatile configuration"]
+    SA["Session access port (stable plugin)"]:::contract
+    PTR["tool source port"]:::contract
+    SMC["method port (level session)"]:::contract
+    Settings["Settings source (business configuration)"]
     Rpc["Rpc"]
   end
   subgraph SESS["Session / branch"]
@@ -24,24 +24,24 @@ flowchart LR
   end
   GoalP -->|"turn/end, stop/interrupt notices"| SE
   GoalP -->|"prefix reads, input writes as source goal"| SA
-  GoalP -->|"mount: goal_update"| PTR
-  GoalP -->|"mount: session.goal.*"| SMC
-  GoalP -->|"goal.maxContinuations"| Settings
-  SMC --> Rpc
-  PTR --> ToolRegistry
+  GoalP -->|"registers goal_update"| PTR
+  GoalP -->|"registers session.goal.*"| SMC
+  GoalP -->|"reads goal.maxContinuations per decision"| Settings
+  Rpc --> SMC
+  ToolRegistry --> PTR
   SA -->|"input/message"| TL
   TL --> InputQueue
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-Goal depends only on contracts and registries; no Session or branch plugin and not Rpc depends on Goal, so a Goal reload never reloads them. All model-visible effects are `input/message` facts consumed by the existing InputQueue and Loop.
+Goal depends only on stable ports ([ADR 002](../../adr/002-dependency-direction.md) D2); no Session or branch plugin and not Rpc depends on Goal, so a Goal reload never reloads them. All model-visible effects are `input/message` facts consumed by the existing InputQueue and Loop.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Goal` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md), [`SessionAccess`](../contracts/session-access.md), Settings volatile configuration, public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end`, `stop/interrupt` | Process tool set `goal` (`goal_update`) mounted into the [process tool registry](../contracts/process-tool-contribution.md); Session methods `session.goal.*` contributed with `level: session` through the [method contribution](../contracts/session-boundary.md) contract; the goal block and continuation formats under source `goal`; configuration key `goal.maxContinuations` |
+| `Goal` | Process | [Session broadcast subscription](../contracts/session-broadcast-subscription.md) and [Session access port](../contracts/session-access.md) (stable plugin, AgentIndex resolved per call), [tool source port](../contracts/process-tool-contribution.md), [method port](../contracts/session-boundary.md), Settings source (business configuration), public data contracts of `input/message`, `input/consumed`, `input/withdrawn`, `turn/start`, `turn/end`, `stop/interrupt` | Tool set `goal` (`goal_update`) registered into the tool source port; Session methods `session.goal.*` registered with `level: session` into the method port; the goal block and continuation formats under source `goal`; business configuration key `goal.maxContinuations` |
 
-Both mounts follow the [extension-registry](../contracts/extension-registry.md) pattern: one mount instance registers in `apply` and unregisters in its `ctx.effect` disposer after settling its own in-flight calls. When Goal is not configured, `session.goal.*` return `method_not_found` and no tool is declared; when configured but inactive, `session.goal.*` return `service_reloading` and `goal_update` is withdrawn (withdraw-only). Goal never names another plugin's types and never reads capability state.
+Goal registers both in `apply` and unregisters in its `ctx.effect` disposer after settling its own in-flight calls. While Goal is not registered, no tool is declared and `session.goal.*` get the method port's outcome for an unregistered method. `goal.maxContinuations` is business configuration in the Settings source ([ADR 002](../../adr/002-dependency-direction.md) D5): read at each decision, changed by a data update, never a reload. Goal never names another plugin's types and never reads capability state.
 
 ## 2. Data and state
 
@@ -54,7 +54,7 @@ flowchart TB
     IC["input/consumed, input/withdrawn"]
     TE["turn/start, turn/end, stop/interrupt"]
   end
-  CFG["Settings: goal.maxContinuations"]
+  CFG["Settings source: goal.maxContinuations"]
   VIEW["GoalView, recomputed per decision"]:::new
   GB --> VIEW
   CI --> VIEW
@@ -119,7 +119,7 @@ sequenceDiagram
   participant SA as SessionAccess
   participant TL as Branch Timeline
   Model->>TE: goal_update completed, summary
-  TE->>Goal: handler via process tool registry
+  TE->>Goal: handler via tool source port
   Goal->>SA: prefix(B, head), require C1
   Goal->>SA: input(B, completed block, Append)
   SA->>TL: Timeline append, committed
@@ -174,8 +174,8 @@ Decided by sequence, not wall-clock: the continuation precedes no earlier interr
 ```mermaid
 sequenceDiagram
   participant TE as ToolExecutor
-  participant Mount as Goal tool mount
-  participant Reg as Process tool registry
+  participant Mount as Goal
+  participant Reg as tool source port
   participant TL as Branch Timeline
   TE->>Mount: goal_update in flight
   Mount->>Mount: ctx.effect disposer cancels handler
@@ -185,7 +185,7 @@ sequenceDiagram
   Note over TL: no turn/end failed, so no paused turn_failed
 ```
 
-Because the registry is withdraw-only and the per-call outcome is not `capability reloading`, a Goal reload never fails a turn. A terminal block committed before cancellation stands; otherwise the goal stays `active`.
+Because unregistering only withdraws the tool and the per-call outcome is not `capability reloading`, a Goal reload never fails a turn. A terminal block committed before cancellation stands; otherwise the goal stays `active`.
 
 ### 4.3 Other key rows
 
@@ -222,13 +222,13 @@ Exact texts: [Appendix A.4](#a4-model-visible-texts).
 | `goal_update {status, summary}` | Process tool, risk `session` | Model reports completion or blocking; writes the terminal block |
 | `session.goal.set/edit/pause/resume/clear` | Session methods (method contribution, `level: session`) | User controls the goal; each writes one block |
 | `session.goal.get` | Session method | Current `GoalView` of a branch, replaces any "mode" query (A8) |
-| `goal.maxContinuations` | Configuration (volatile) | Continuation limit, read at each decision |
+| `goal.maxContinuations` | Business configuration (Settings source) | Continuation limit, read at each decision |
 
 Details: [Appendix A](#appendix-a-interface-details).
 
 ## 7. Security
 
-Goal writes only `input/message` through session-access under source `goal`; resulting turns run under the Session's Permission and Approval policy, and a goal grants no authority. Users cannot forge goal blocks: `session.submit` accepts no raw blocks and `context_block` escapes the objective. `goal_update` is admitted under `session`. Diagnostics record Session id, branch id, decision and reason, never objective text.
+Goal writes only `input/message` through the Session access port under source `goal`; resulting turns run under the Session's Permission and Approval policy, and a goal grants no authority. Users cannot forge goal blocks: `session.submit` accepts no raw blocks and `context_block` escapes the objective. `goal_update` is admitted under `session`. Diagnostics record Session id, branch id, decision and reason, never objective text.
 
 ## Appendix A. Interface details
 
@@ -300,8 +300,8 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | StateCell | None owned; InputQueue's `StateCell<InputSnapshot>` and Loop's `LoopSnapshot` are never read by Goal |
 | Recheck | Every write is preceded, inside the lane, by a prefix read; decisions use only facts in that prefix ([time bus §4](../../architecture/rust-agent/time-bus.md)). Later facts precede the write in sequence and are resolved by InputQueue and Loop |
 | Terminal facts | A decision commits one input or none; `completed`/`blocked` are written by the `goal_update` handler before it returns |
-| `Reloading` from SessionAccess | During an Agents reload the facade returns `Reloading`; before any write Goal retries the read and decision after 1 s, 2 s and 4 s, then gives up until the next trigger (A16) |
-| Goal reload | The stream, lanes and mounts end; in-flight `goal_update` calls return "tool provider unavailable" (per [extension-registry](../contracts/extension-registry.md)); `session.goal.*` return `service_reloading`. The new generation subscribes in `apply`, takes over from the next notice it receives and never retries an earlier decision. An uncertain write either committed (a fact, deduplicated by C5) or did not |
+| `Reloading` from Session access | During an Agents reload the port, which resolves AgentIndex per call, returns `Reloading`; before any write Goal retries the read and decision after 1 s, 2 s and 4 s, then gives up until the next trigger (A16) |
+| Goal reload | The stream, lanes and registrations end; in-flight `goal_update` calls return "tool provider unavailable" (per the [tool source port](../contracts/process-tool-contribution.md)); `session.goal.*` get the method port's unregistered outcome. The new generation subscribes in `apply`, takes over from the next notice it receives and never retries an earlier decision. An uncertain write either committed (a fact, deduplicated by C5) or did not |
 | Restart | Same as reload. Missed `turn/end` notices are not replayed; an active goal waits for the next `turn/end`, `resume` or Gap re-evaluation. Committed unconsumed continuations are restored with the Session |
 
 ## Appendix B. Full conflict table
@@ -337,9 +337,9 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | Goal set on a child branch | — | Independent key on the child's Timeline | History projection |
 | Session fork | facts copied | Fork's `main` owns the copied goal (A12) | Goal |
 | Goal reload during a decision | — | Write committed or not; no retry; C5 deduplicates | Goal |
-| Goal reload during `goal_update` | — | "tool provider unavailable" result; turn continues; committed block stands | Registry, ToolExecutor |
-| Goal reload while a goal turn runs | — | Turn not failed (withdraw-only registry); its `turn/end` may be missed; Gap or the next trigger re-evaluates | Goal |
-| Agents reload | facade `Reloading` | Decision retried (A16); no Goal reload | Goal |
+| Goal reload during `goal_update` | — | "tool provider unavailable" result; turn continues; committed block stands | Tool source port, ToolExecutor |
+| Goal reload while a goal turn runs | — | Turn not failed (registrations only withdrawn); its `turn/end` may be missed; Gap or the next trigger re-evaluates | Goal |
+| Agents reload | Session access port `Reloading` | Decision retried (A16); no Goal reload | Goal |
 | Process restart | `turn/end` missed | Not replayed; goal stays `active` until the next trigger | Goal |
 | Session idle unload | `Ended {Unloaded}` | Lanes dropped; methods `acquire` before writing | AgentIndex; Goal |
 | Session close | `Ended {Closed}` | Methods return `session_closed` | Goal |
@@ -360,7 +360,7 @@ Reason phrases: `interrupted` "the user interrupted the turn", `user` "paused by
 | `goal_not_active` | `pause` on a non-active goal |
 | `goal_not_editable` | `edit` or `resume` on `completed` (use `set`) |
 | `session_closed`, `session_unavailable`, `branch_missing` | Mapped from `AccessError` |
-| `service_reloading` | `AccessError::Reloading` or Goal's mount inactive; the write did not happen or is found by `get` |
+| `service_reloading` | `AccessError::Reloading`; the write did not happen or is found by `get` |
 | `write_uncertain` | `PublicationUnknown`; `get` after recovery shows whether the block is in effect |
 
 Goal never retries a write on its own except after `lookup(submission_id)` returns `Unknown` within the same generation. Process exit leaves only committed facts.
@@ -378,7 +378,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 7. Child branch: inherits the block, no continuation, `goal_update` returns the owner error; a goal set on the child is independent.
 8. Duplicate `turn/end` (resubscribe) writes at most one continuation; Gap re-evaluation continues a stalled goal.
 9. Restart with an active idle goal: no continuation until a trigger; a committed unconsumed continuation is adopted after restore.
-10. Unloaded Session: `session.goal.pause` restores it and writes; notices never restore. Goal not configured: `method_not_found`; configured but inactive: `service_reloading`.
+10. Unloaded Session: `session.goal.pause` restores it and writes; notices never restore. Goal not registered: the method port's unregistered outcome. Changing `goal.maxContinuations` takes effect at the next decision without reloading Goal.
 11. `edit`, `clear` (retired key not replayed), forged `</dim-goal>` in an objective is escaped; `session.goal.get` reflects every status.
 
 ## Appendix E. Assumptions
@@ -400,7 +400,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | A13 | `resume` on an active idle goal restarts work; duplicate `set` is not deduplicated | Judgment (overview §5.2 "continues when the user resumes") | Restarted goals need `set` again |
 | A14 | Notices never restore unloaded Sessions; Session methods do | Judgment | Background continuation would restore Sessions |
 | A15 | `branchId` defaults to `main`; any branch may hold a goal | Judgment | Goal limited to `main` |
-| A16 | On `AccessError::Reloading` before a write, Goal retries the read and decision three times (1 s, 2 s, 4 s) | Judgment from decisions §1 (facade returns `Reloading`) | Goals stall after an Agents reload until the next trigger |
+| A16 | On `AccessError::Reloading` before a write, Goal retries the read and decision three times (1 s, 2 s, 4 s) | Judgment; the Session access port returns `Reloading` while AgentIndex reloads | Goals stall after an Agents reload until the next trigger |
 
 ## Appendix F. Open questions
 

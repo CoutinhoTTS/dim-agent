@@ -2,31 +2,31 @@
 
 Status: Draft. Overall design: [overview B.1](../overview.md#b1-questions). Phase: P1. Language: Rust.
 
-The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. A Session part contributes the tool only to interactive Sessions; a branch part records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number (the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern). Questions has no process part: the Session part also contributes the Session method `session.question.respond`.
+The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. A process part registers the tool into ToolRegistry's [tool source port](../contracts/process-tool-contribution.md), where it is offered per call only to interactive Sessions, and registers the Session method `session.question.respond` into Rpc's [method port](../contracts/session-boundary.md). A branch part records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number (the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern); it is the only scoped part because it writes the branch Timeline ([ADR 002](../../adr/002-dependency-direction.md) D3).
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
+  subgraph P["Process scope"]
+    QP["QuestionsPlugin (ask_user, method)"]:::new
+    PT["tool source port"]:::contract
+    MP["method port (level session)"]:::contract
+    RPC["Rpc"]
+  end
   subgraph S["Session scope"]
-    QP["QuestionsPlugin (tool source, method)"]:::new
-    TR["ToolRegistry"]
+    TR["ToolRegistry (filters by SessionConfig.interactive per call)"]
   end
   subgraph B["Branch scope"]
     QB["QuestionsBranchPlugin (B:Questions)"]:::new
     TE["ToolExecutor"]
     TL["Timeline + Dispatcher"]
   end
-  RPC["Rpc"]
-  MC["methods registry (level session)"]:::contract
-  SC["SessionConfig.interactive"]:::contract
-  STS["SessionToolSource contract"]:::contract
-  SC --> QP
-  QP -- "provides" --> STS
-  STS --> TR
-  QP -- "contributes session.question.respond" --> MC
-  MC --> RPC
-  QP -- "service::<Questions>(branch)" --> QB
+  QP -- "registers ask_user (requires interactive)" --> PT
+  TR --> PT
+  QP -- "registers session.question.respond" --> MP
+  RPC --> MP
+  QP -. "per call: service::<Questions>(branch)" .-> QB
   TE -- "handler call + batch token" --> QB
   QB -- "append_registered / append" --> TL
   TL -- "question/answered (Dispatcher)" --> QB
@@ -34,14 +34,14 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-The tool presence is decided once per Session from `SessionConfig.interactive`; all waiting and ordering lives in the branch part. The method handler holds no state and reaches the branch only through `service::<Questions>(branch)`.
+ToolRegistry offers `ask_user` only when the calling Session's `SessionConfig.interactive` is true; all waiting and ordering lives in the branch part. The process part holds no state, depends on no Session or branch plugin and reaches the branch only per call through `service::<Questions>(branch)` of the calling Session.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:TreeCommands`, `SessionConfig.interactive` | `S:SessionToolSource#questions`: one set with `ask_user`, or none; method `session.question.respond` (`level: session`, [method contribution](../contracts/session-boundary.md)) |
+| `QuestionsPlugin` | Process | [tool source port](../contracts/process-tool-contribution.md), [method port](../contracts/session-boundary.md) | Tool set `questions` (`ask_user`, requirement `interactive`); method `session.question.respond` (`level: session`) |
 | `QuestionsBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher` | `B:Questions` (`ask`, `respond`) |
 
-Contracts depended on: the Session tool source contract of [tool contributions](../../architecture/rust-agent/tool-contributions.md); `TreeCommands::get(branch).service::<T>()` (as [Wait](../../architecture/rust-agent/plugins/Wait.md)); Permission risk category `session`; ToolExecutor's batch token and settlement; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md); `SessionConfig.interactive` (proposed Agents supplement, set by `session.create`); the [method contribution](../contracts/session-boundary.md) contract (`methods` point of the [extension registry](../contracts/extension-registry.md)); client-visible dynamic events (#2, A10).
+Contracts depended on: the tool source port and its per-call context (calling Session's `SessionConfig`, branch, batch token, branch service lookup, A1); `service::<T>()` on the calling branch (as [Wait](../../architecture/rust-agent/plugins/Wait.md)); Permission risk category `session`; ToolExecutor's batch token and settlement; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md); `SessionConfig.interactive` (proposed Agents supplement, set by `session.create`); the method port (Rpc passes the acquired Session to `level: session` handlers); client-visible dynamic events (#2, A10).
 
 Contracts defined here: the `ask_user` tool, the `question/*` data and consumption contracts, `B:Questions`, `session.question.respond` and its errors. The only write path of `question/answered` is `Questions::respond`. Questions names no other plugin's internal type.
 
@@ -80,7 +80,7 @@ All three events are branch Timeline facts written only by `B:Questions`; the pe
 
 Outcome rule, used by rebuild and by clients reading history: a question is **pending** while it has `asked` and neither `answered` nor `cancelled`; **answered** when an `answered` exists and no `cancelled`; otherwise **cancelled**. `cancelled` always wins because it is written exactly when an answer was not delivered to the handler.
 
-Rebuild on load folds only the branch's local events (a child branch never owns its parent's questions) and writes `question/cancelled` ("did not survive recovery") for every unresolved `asked`. Tool presence is fixed at Session creation from `SessionConfig`.
+Rebuild on load folds only the branch's local events (a child branch never owns its parent's questions) and writes `question/cancelled` ("did not survive recovery") for every unresolved `asked`. `interactive` is fixed at Session creation, so the per-call filter gives a stable tool list per Session.
 
 Why the events exist (overview §6): between handler start and `step/tool-result` a call has no fact, and results publish only after the whole batch, so "waiting" and "answered" are not derivable; the answer is user content that must be a fact to be ordered against `stop/interrupt` and to survive until the batch result. `turn_id`, `request_id` and `declined` extend the overview payload (A3, open question F1).
 
@@ -130,7 +130,7 @@ Ordering closes the attach race: anything dispatched before the listener is in h
 
 ### 3.3 Non-interactive Sessions
 
-`session.create {interactive: false}` (used by `exec`, AcpGateway, Scheduler, Workflow) fixes `SessionConfig.interactive = false`; `QuestionsPlugin` publishes no set and the model never sees `ask_user`. A model calling it by name gets `Unknown tool`.
+`session.create {interactive: false}` (used by `exec`, AcpGateway, Scheduler, Workflow) fixes `SessionConfig.interactive = false`; ToolRegistry filters `ask_user` out for that Session and the model never sees it. A model calling it by name gets `Unknown tool`.
 
 ## 4. Timing and conflicts
 
@@ -168,12 +168,13 @@ sequenceDiagram
   Note over G2: rebuilt = S, provide B:Questions
 ```
 
-Nothing is re-asked. Questions reloads only with `B:Timeline`/`B:Dispatcher` and is not on ToolExecutor's injection chain, so its reload ends only its own calls.
+Nothing is re-asked. The branch part reloads only with `B:Timeline`/`B:Dispatcher` and is not on ToolExecutor's injection chain, so its reload ends only its own calls. A `QuestionsPlugin` (process) unload removes its registrations: in-flight `ask_user` calls end "provider unavailable", the ask future is dropped and writes `question/cancelled {reason: "provider unavailable"}`, and turns continue; no consumer reloads.
 
 | Scenario | Outcome |
 | --- | --- |
 | Two clients answer | Second registration fails `AlreadyAnswered` |
 | Client unable to answer (ACP, `-p` attached to an interactive Session) | ACP Sessions are non-interactive, no tool; a `-p` CLI stops the turn with exit code 3 (A8) |
+| `QuestionsPlugin` unloaded while pending | Call ends "provider unavailable"; `C` written; turn continues |
 | Remote paired device answers | Allowed: Session method; paired devices may call all Session methods |
 | `input/withdrawn` while pending | No effect on the question |
 | Process restart mid-question | `C` on load; batch settled as not executed; turn Failed |
@@ -194,8 +195,8 @@ Never visible: `question/*` events, `structured_content`, the CLI rendering. Com
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `ask_user` | Tool, risk `session` | Ask 1–4 questions, wait for the answer |
-| `session.question.respond` | Session method (method contribution, `level: session`) | Answer or decline a pending call |
+| `ask_user` | Tool (tool source port), risk `session` | Ask 1–4 questions, wait for the answer |
+| `session.question.respond` | Session method (method port, `level: session`) | Answer or decline a pending call |
 | `B:Questions::ask` / `respond` | Branch service | Register and wait; boundary write of the answer |
 | `question/asked`, `question/answered`, `question/cancelled` | Events | Pending state and answer ordering |
 | CLI prompt contract | Client | Rendering, deferral, `Ctrl+C`, attach |
@@ -208,7 +209,7 @@ Never visible: `question/*` events, `structured_content`, the CLI rendering. Com
 
 ### A.1 Tool `ask_user`
 
-`ToolSource::Extension`, risk `session`. Declared only when `SessionConfig.interactive` is true.
+Registered into the tool source port, risk `session`, requirement `interactive`: ToolRegistry declares it only when the calling Session's `SessionConfig.interactive` is true.
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
@@ -267,9 +268,9 @@ pub enum QuestionRespondError { Unknown, AlreadyAnswered, Cancelled, Invalid(Str
 
 | Step | Mechanics |
 | --- | --- |
-| Tool resolution | Handler: `TreeCommands::get(ctx.branch_id)?.service::<Questions>()`; `AgentError::Reloading` maps to `HostError::Cancelled(CAPABILITY_RELOADING)` (as Wait) |
+| Tool resolution | Handler: the calling branch's `service::<Questions>()` from the per-call context; `AgentError::Reloading` maps to `HostError::Cancelled(CAPABILITY_RELOADING)` (as Wait) |
 | Ask | Token already cancelled: return Cancelled, write nothing. Else `append_registered(question/asked)`; on commit failure remove the entry and return Cancelled or an error |
-| Wait | `select! biased { response, cancel.cancelled() }`. On cancel: take the entry under the lock; if taken, write `question/cancelled {reason: "Tool execution cancelled"}` after releasing the lock; return Cancelled. Dropped sender: Cancelled with `CAPABILITY_RELOADING` |
+| Wait | `select! biased { response, cancel.cancelled() }`. On cancel: take the entry under the lock; if taken, write `question/cancelled {reason: "Tool execution cancelled"}` after releasing the lock; return Cancelled. Dropped sender: Cancelled with `CAPABILITY_RELOADING`. Ask future dropped (process part unloaded): the entry guard takes the entry and writes `question/cancelled {reason: "provider unavailable"}` |
 | Respond | Pre-check pending and validate against the entry's `asked` data; `append_registered(question/answered)`; await the dispatch result |
 | Consume | Take the entry; token cancelled: send `None`, reply `Cancelled`, write `question/cancelled`; else send the answer, reply `Ok`. Missing entry: `Unknown` |
 | Recheck | Only the batch token, which reflects interrupts ToolExecutor already consumed; no committed-but-unconsumed tail is read (time-bus §4) |
@@ -279,7 +280,7 @@ pub enum QuestionRespondError { Unknown, AlreadyAnswered, Cancelled, Invalid(Str
 
 ### A.5 Session method `session.question.respond`
 
-Contributed by `QuestionsPlugin` with `level: session` through the [method contribution](../contracts/session-boundary.md) contract. Rpc acquires the Session as for any Session method and routes to that Session's contribution; the handler resolves `B:Questions` of the named branch (`service::<Questions>(branch)`, as `approval.respond` does today).
+Registered by `QuestionsPlugin` with `level: session` into the [method port](../contracts/session-boundary.md). Rpc acquires the Session as for any Session method and passes it to the handler; the handler resolves `B:Questions` of the named branch per call (`service::<Questions>(branch)`, as `approval.respond` does today).
 
 `{sessionId, branchId?: "main", callId, answers: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`.
 
@@ -289,7 +290,8 @@ Contributed by `QuestionsPlugin` with `level: session` through the [method contr
 | `invalid_params` `Question already answered` | `AlreadyAnswered` |
 | `invalid_params` `Question was cancelled` | `Cancelled` |
 | `invalid_params` `<reason>` | `Invalid`: unknown question id, label not offered, several labels without `multiSelect`, `custom` without `allowCustom`, nothing selected and no `custom` while not `declined` |
-| `service_reloading` | `Closed` on a live branch, or the contribution inactive (registry rule) |
+| `service_reloading` | `Closed` on a live branch |
+| Method port outcome for an unregistered method | `QuestionsPlugin` not registered |
 | Session closed | `Closed` on a closed Session, mapped like `approval.respond` |
 
 Accepted commands belong to the Session and continue after disconnect.
@@ -340,8 +342,8 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 | Client unable to answer: `-p` CLI on an interactive Session | Q < I | CLI stops the turn; C via the interrupt | CLI; Questions |
 | No client attached ever | Q pending | Stays pending, no timeout (A7); user stops or answers later | User |
 | Paired remote device answers | Q < A | Accepted like any client | Questions |
-| Questions contribution inactive (Session part reloading) | — | `session.question.respond` → `service_reloading`; the question stays pending | Rpc registry |
-| Non-interactive Session | — | Tool absent; call by name → `Unknown tool` | ToolRegistry, ToolBinding |
+| `QuestionsPlugin` unloaded | Q pending | `ask_user` call ends "provider unavailable", `C` written, turn continues; `session.question.respond` gets the method port's unregistered outcome | Tool source port; method port; Questions |
+| Non-interactive Session | — | Tool filtered out per call; call by name → `Unknown tool` | ToolRegistry, ToolBinding |
 
 ## Appendix C. Errors and recovery
 
@@ -363,7 +365,7 @@ Flow tests through RPC, tool calls and events:
 3. Answer then stop: result has the answer. Stop then answer: `Cancelled`, `question/cancelled`, cancelled result. Both orders forced by committing `I` before `A` with a held Dispatcher.
 4. Two concurrent `respond`: exactly one accepted.
 5. Two `ask_user` plus a slow tool in one batch: answers held until the single `step/tool-result`.
-6. Branch close and Questions reload settle pending questions; restart writes "did not survive recovery" and the turn fails; no re-ask.
+6. Branch close, branch-part reload and process-part unload settle pending questions (the unload ends the call "provider unavailable" without failing the turn); restart writes "did not survive recovery" and the turn fails; no re-ask.
 7. Detach and re-attach: history shows the pending question; answering after re-attach works; answering from a paired remote device works.
 8. A withdrawn queued input while a question is pending does not affect it.
 9. CLI: rendering, deferral, `Ctrl+C`, EOF, `-p` exit code 3.
@@ -372,7 +374,7 @@ Flow tests through RPC, tool calls and events:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | The tool is a `SessionToolSource` whose presence Questions decides from `SessionConfig.interactive` | Overview §5.1; [session-access](../contracts/session-access.md) `config`; judgment | Agents puts `ask_user` in the tool list only for interactive Sessions |
+| A1 | `ask_user` registers into the tool source port with requirement `interactive`, and the port's per-call context gives the handler the calling branch's service lookup | [ADR 002](../../adr/002-dependency-direction.md) D2, D3; [session-access](../contracts/session-access.md) `config` | The handler resolves the branch through Session access per call |
 | A2 | `interactive` omitted on `session.create` means interactive | Judgment (existing clients) | Existing Sessions lose the tool |
 | A3 | Payload adds `turn_id`, `request_id`, `declined` | Judgment | Correlation through `step/tool-call`; decline modeled as an answer |
 | A4 | 1..=4 questions, 2..=6 options | Edge-case reference; judgment | Schema limits change |
