@@ -2,81 +2,240 @@
 
 Status: Draft. Overall design: [overview §5.5](../overview.md#55-web). Phase: P2. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
 
-Web is a process plugin that gives the model two tools, `web_search` and `web_fetch`, through the [process-level tool contribution](../contracts/process-tool-contribution.md) contract. Search goes to a configured search service; fetch downloads one public web page and returns bounded text. Web writes no Timeline events: every call and result is already a tool call fact.
+Web is a process plugin that gives the model `web_search` and `web_fetch` as a contributor to the process tool registry ([process-tool-contribution](../contracts/process-tool-contribution.md), pattern in [extension-registry](../contracts/extension-registry.md)). Search goes to a configured built-in adapter or to a search backend registered in Web's own `WebSearchBackends` registry; fetch downloads one public page and returns bounded text. Web writes no Timeline events: every call and result is already a tool call fact. Configuration changes are volatile updates and never reload Web; a Web unload only withdraws its tools.
 
-## 1. User flows
+## 1. Structure
 
-1. The user configures a search service and a credential reference through Settings. Web publishes a new tool set version that includes `web_search`; each Session's branches adopt it before their next request.
-2. The model calls `web_search`. Approval admits the call by the `network` risk category (ask under workspace-write, deny under read-only, allow under FullAccess). Web queries the service and returns a numbered result list as `ToolResult.content`.
-3. The model calls `web_fetch` with a URL. Web validates the URL and each resolved address, downloads at most the byte limit, converts the page to text, and returns a header plus a bounded slice of the body. If the body is longer, the model calls again with `start_char` to read the next slice.
-4. The user interrupts the turn while a fetch runs. The request is aborted, the handler returns a cancelled error result, and ToolExecutor settles the batch.
-5. The credential is removed from Settings. Web publishes a set without `web_search`; calls bound to the previous version that run after the removal return `search_unavailable`.
+```mermaid
+flowchart LR
+  subgraph PROC["Process (control node by default)"]
+    Web["Web: tool contributor"]:::new
+    WSB["WebSearchBackends registry (owned by Web)"]:::new
+    WebMount["Web tool mount"]:::new
+    BMount["Backend mount, one per configured backend"]:::new
+    Backend["Search backend from another plugin"]
+    PTR["Process tool registry"]:::contract
+    Settings["Settings: volatile configuration, credential-reference resolver"]:::contract
+  end
+  subgraph SESS["Session and branches"]
+    ToolRegistry["ToolRegistry"]
+    Exec["ToolBinding, ToolExecutor, Approval, Permission"]
+  end
+  WebMount -->|"register web set"| PTR
+  WebMount --> Web
+  Web --> WSB
+  BMount -->|"register"| WSB
+  BMount --> Backend
+  Web -->|"read web section, change notices, resolve secretRef"| Settings
+  ToolRegistry -->|"injects stable registry only"| PTR
+  ToolRegistry --> Exec
+  Exec -->|"handler call with SessionFacts ref and cancel token"| Web
+  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
+  classDef contract stroke-dasharray:4 3
+```
 
-## 2. Scope
+Sessions inject only the stable process tool registry, never Web; Web injects only its own registry, never a backend. A Web unload, a backend unload or a configuration edit therefore never reloads any Session plugin and never reloads Web.
 
-| Responsible | Not responsible |
-| --- | --- |
-| `web_search` and `web_fetch` definitions, parameters, results and limits | Admission decisions (Approval, Permission own the `network` category) |
-| Search adapters behind a Web-defined backend contract | Browser automation, JavaScript rendering, logged-in pages |
-| HTTP fetching, redirect and address policy, content conversion | Sending data to sites (only `GET`; no forms, cookies or auth headers) |
-| Reading its own configuration section and resolving credential references | Storage of secrets (host secret store) |
-| Per-process fetch cache for pagination | Any Session or branch state |
-
-## 3. Scope and dependencies
-
-Web is a single process part. It has no Session or branch part: everything it needs per call arrives through `ProcessToolSession` and `ToolExecutionContext`.
-
-**Contracts depended on**
-
-| Contract | Owner | Use | Status |
+| Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ProcessToolSource` / `ProcessToolProvider` / `ProcessToolHandler` | ToolRegistry ([contract](../contracts/process-tool-contribution.md)) | Offer the two tools; receive calls with a cancellation token | Proposed (P0) |
-| Typed plugin configuration read and change notification | Settings ([overview §7.2](../overview.md#72-app-server-process-plugins), #3) | Read the `web` section of the loader editable layer and observe changes without a plugin reload | Proposed |
-| Secret reference resolution | Host secret store | Resolve `secretRef` values at call time | Proposed generic form; the existing `ResolveProviderSecret` is keyed by Provider id (see §14) |
-| `ToolDefinition.risk = "network"` | Permission (`Risk::of` in [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)) | Admission | Existing |
-| Diagnostics channel | Trace | Request logs without content or secrets | Existing |
+| `Web` | Process (loader row; control node by default, A2) | Settings volatile configuration of the `web` section; Settings credential-reference resolver; `WebSearchBackends` (own); diagnostics channel | Keyed `ProcessToolSource` `web` |
+| Web tool mount | Process | Process tool registry, keyed `web` source | Registration of the `web` set (withdraw-only on unload) |
+| `WebSearchBackends` | Process, inside Web | — | Defines `WebSearchBackend`; name → backend with availability flag |
+| Backend mount (one per configured backend) | Process | `WebSearchBackends`, keyed backend service | Registration of one backend |
 
-**Contracts defined here** (owner: Web): the tool names, parameters and result formats in §6; the `WebSearchBackend` extension point; the `web` configuration section. Web does not depend on any specific search provider plugin. A search backend contributed by another plugin (for example one backed by an account Provider, which the feature list calls "account permissions") implements `WebSearchBackend` under a name; Web injects them as `When<ProcessContributions<WebSearchBackend>>` (A1). Without contributions, only Web's built-in HTTP adapters exist.
+**Contracts depended on:** process tool registry and `ProcessToolSource` ([process-tool-contribution](../contracts/process-tool-contribution.md)); the registry pattern ([extension-registry](../contracts/extension-registry.md)); Settings volatile configuration and the Settings credential-reference resolver ([overview §7.2](../overview.md#72-app-server-process-plugins)); `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
+**Contracts defined here:** the tool names, parameters and result formats; `WebSearchBackend` and the `WebSearchBackends` registry; the `web.*` configuration keys. Web knows no search provider's account semantics; a backend knows nothing about tools, Sessions or Web configuration (A1).
 
-| Part | Scope | Injects | Provides |
-| --- | --- | --- | --- |
-| `Web` | Process (control node by default) | Settings configuration read, secret resolution, `When<ProcessContributions<WebSearchBackend>>` | `ProcessToolSource` registered as `web` |
+**Node.** Network egress happens on the node running Web's row, independent of a Session's resource node, because network access is a process resource ([overview §3.1](../overview.md#31-multiple-nodes), A2). Web never uses `SessionResources`, FileStorage or HostPlatform.
 
-**Node.** Web performs network access from the node that runs its loader row. By default that is the control node, independent of a Session's resource node, because the network is not a Session-bound host resource in [overview §3.1](../overview.md#31-multiple-nodes) (A2). An operator may load Web as a `peer:<node>/web` row so egress leaves from another node; then every Session uses that node. Web never uses FileStorage or HostPlatform.
+## 2. Data and state
 
-## 4. Events
+```mermaid
+flowchart TB
+  subgraph CFG["Configuration (Settings, loader editable layer)"]
+    WebCfg["web.search.service, web.fetch.allow_private_hosts, web.proxy"]
+    Secret["secretRef (reference only)"]
+  end
+  subgraph MEM["Web memory (not persisted)"]
+    Snap["Configuration snapshot"]
+    Set["Tool set web, version = generation id + counter"]
+    Avail["Backend availability flags"]
+    Cache["Fetch cache, bounded (A9)"]
+    Inflight["In-flight calls: abort handle each"]
+  end
+  subgraph TL["Branch Timeline (written by others)"]
+    Cfgd["context/configured: adopted tools"]
+    Calls["step/tool-call ... step/tool-result, approval/*"]
+  end
+  WebCfg -->|"volatile change notice"| Snap
+  Snap --> Set
+  Avail --> Set
+  Set -->|"adopted by ToolBinding"| Cfgd
+  Inflight -->|"one ToolResult per call, written by ToolExecutor"| Calls
+```
 
-None. Each call is recorded by the existing `step/tool-call`, `step/tool-start`, `step/tool-completed` and `step/tool-result`; admission by `approval/*`. Search results and fetched text are in the tool result. Configuration changes are tool set versions recorded by the branch's `context/configured`. Nothing Web knows affects later behavior except through these facts.
+Web owns no Timeline state and no `StateCell`. Everything in memory is recomputed on `apply` from Settings and the registry, and the cache starts empty; nothing needs rebuilding from the Timeline.
 
-## 5. State
+## 3. Flows
 
-| State | Where | Rebuild |
+### 3.1 Configuration publishes or withdraws `web_search`
+
+```mermaid
+sequenceDiagram
+  participant U as User via Settings
+  participant S as Settings
+  participant W as Web
+  participant R as Process tool registry
+  participant TR as ToolRegistry per Session
+  participant B as ToolBinding per branch
+  participant TL as Timeline
+  U->>S: typed operation sets web.search.service
+  S-->>W: volatile change notice (no reload)
+  W->>W: rebuild set, new version, web_search present if usable
+  W-->>R: changed()
+  R-->>TR: refresh adapted sets
+  TR-->>B: changed
+  B->>TL: append_batch_registered context/configured before next request
+```
+
+`web_search` is present only while a service is configured and its adapter or backend is available (A3); removing the credential or the backend's availability flag going false publishes a set without it.
+
+### 3.2 A `web_fetch` call
+
+```mermaid
+sequenceDiagram
+  participant L as Loop
+  participant TL as Timeline
+  participant X as ToolExecutor
+  participant A as Approval and Permission
+  participant W as Web handler
+  participant N as Remote site
+  L->>TL: step/tool-call
+  TL-->>X: Dispatcher delivers, X registers batch task and returns
+  X->>TL: append step/tool-start
+  X->>A: admit risk network
+  A-->>X: allow (or ask, deny)
+  X->>W: execute(args, SessionFacts ref, cancel)
+  W->>W: validate URL, resolve host, check every address
+  W->>N: GET pinned to the validated address
+  N-->>W: body up to 5 MiB
+  W-->>X: ToolResult header plus text slice
+  X->>TL: step/tool-completed, then one step/tool-result for the batch
+```
+
+The handler runs on ToolExecutor's task, never on the Dispatcher, and decides only from its arguments and its own configuration snapshot at call start. Longer pages are read with further calls using `start_char`; a cross-host redirect is returned as a notice so the new host gets its own admission (A10).
+
+### 3.3 `web_search` through a contributed backend
+
+```mermaid
+sequenceDiagram
+  participant X as ToolExecutor
+  participant W as Web handler
+  participant C as Settings credential resolver
+  participant G as WebSearchBackends
+  participant K as Backend
+  X->>W: execute(query, filters, cancel)
+  alt built-in adapter
+    W->>C: resolve secretRef
+    C-->>W: secret (per call, never stored)
+    W->>W: query the service over HTTP
+  else configured backend name
+    W->>G: lookup(name)
+    G-->>W: backend or unavailable
+    W->>K: search(request, cancel)
+    K-->>W: hits
+  end
+  W-->>X: numbered result list, domain filters applied by Web
+```
+
+## 4. Timing and conflicts
+
+Web makes no Timeline decision; ordering is decided by ToolExecutor, Approval and the registries.
+
+```mermaid
+sequenceDiagram
+  participant TL as Timeline
+  participant X as ToolExecutor
+  participant W as Web
+  participant R as Process tool registry
+  Note over TL,W: Case 1, turn interrupt during a request
+  TL->>X: step/tool-start
+  X->>W: execute
+  TL-->>X: stop/interrupt (seq after tool-start)
+  X->>W: cancel token
+  W-->>X: error result cancelled (socket closed)
+  X->>TL: step/tool-result for the batch
+  Note over TL,R: Case 2, Web unloaded mid-call
+  W->>W: disposer aborts in-flight calls first
+  W-->>X: error result tool provider unavailable (not capability reloading)
+  W->>R: unregister web set
+  R-->>X: branches adopt a set without web tools at next opportunity
+  X->>TL: batch result, turn continues
+```
+
+Case 2 is the withdraw-only rule of [extension-registry](../contracts/extension-registry.md): the per-call outcome is never `capability reloading`, so Loop does not fail the turn and no other Session is affected.
+
+| Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Current configuration snapshot | Web memory, from Settings | Re-read on `apply` and on each Settings change notification |
-| Current tool set and version | Web memory | Recomputed from configuration; version = generation id + counter, never reused |
-| Fetch cache (A9) | Web memory, bounded | Not persisted; empty after reload or restart |
-| In-flight requests | Web memory, one abort handle per call | Not rebuilt; aborted on unload |
+| Configuration edit during a call | Call continues with the snapshot and credential resolved at its start; next call uses the new set version | Web |
+| Old-version `web_search` called after the service was removed | Error result `search_unavailable` | Web |
+| Backend mount unloaded mid-search | That call fails `search_unavailable`; Web publishes a set without `web_search`; Web is not reloaded | Web, `WebSearchBackends` |
+| Process restart mid-call | ToolExecutor settles the committed call as not surviving recovery; Web never repeats a request | ToolExecutor |
+| Compaction after a result | Fetched text survives only through the summary; the model can fetch again | ContextPreparation |
 
-Web owns no Timeline state and no `StateCell`.
+Full table in Appendix B.
 
-## 6. Interfaces
+## 5. Context mapping
 
-### 6.1 Tool set
+| The model sees | Form | Position |
+| --- | --- | --- |
+| `web_search`, `web_fetch` name, description, input schema | Tool declarations | Adopted `context/configured.tools`; replaced when a new set version is adopted |
+| Search results, fetched text, errors, redirect notices | `ToolResult.content` (text only) | Tool result position of the call's batch |
 
-One set, key `web`. `web_fetch` is always present while Web is loaded. `web_search` is present only when a search service is configured and its adapter or backend is available (A3). Both tools: `risk: "network"`, `requires: { interactive: false, roles: None }` (offered to every Session, including non-interactive ones).
+- Compaction: declarations are configuration and survive as the latest adopted set; results survive only through the summary.
+- Child branches inherit declarations and results in their ancestor prefix and adopt the current set version at their own next request.
+- Non-interactive Sessions see the same tools (`requires.interactive = false`).
+- Never visible: `structured_content`, the service or backend name, configuration, credential references, private-host exceptions, request logs and diagnostics.
+- Fetched page text is untrusted third-party content placed in a tool result without instruction framing (A14).
 
-### 6.2 `web_search`
+## 6. Interfaces (summary)
+
+| Interface | Kind | Purpose |
+| --- | --- | --- |
+| `web_search` | Tool, risk `network` | Query the configured service; numbered result list |
+| `web_fetch` | Tool, risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
+| `ProcessToolSource` key `web` | Contribution to the process tool registry | One set `web`; withdraw-only on unload |
+| `WebSearchBackend` / `WebSearchBackends` | Extension point and registry defined by Web | Search backends from other plugins (A1) |
+| `web.*` configuration | Settings, loader editable layer, volatile | Search service, private-host exceptions, proxy |
+
+No Session methods, no management methods, no CLI subcommand: configuration goes through Settings' typed operations and `/settings`. Details in Appendix A.
+
+## 7. Security
+
+- Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
+- SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address; cross-host redirects need a new call and a new admission (Appendix A.4, A10).
+- No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
+- Credentials: references resolved per call by the Settings resolver; never in definitions, results, `structured_content`, diagnostics or errors.
+- Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission, not by Web.
+- With `web.proxy`, the proxy resolves names itself; private-address protection then depends on the proxy (stated to the user).
+- Web runs in the App Server process (or its peer row), not under a Session's isolation configuration.
+
+## Appendix A. Interface details
+
+### A.1 Tool set
+
+One set, key `web`. `web_fetch` is present while Web is registered. `web_search` is present only when a service is configured and its adapter or backend is available (A3). Both tools: `risk: "network"`, `requires: { interactive: false, roles: None }`. Parameters are validated by the handler (the external boundary); a violation returns an error result without network access.
+
+### A.2 `web_search`
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
 | `query` | string | Required; 1 to 500 characters after trimming (A4) |
 | `max_results` | integer | Optional; 1 to 10; default 5 (A4) |
-| `allowed_domains` | string[] | Optional; at most 10 hostnames; results restricted to these hosts and their subdomains |
+| `allowed_domains` | string[] | Optional; at most 10 hostnames; results restricted to these hosts and subdomains |
 | `blocked_domains` | string[] | Optional; at most 10; mutually exclusive with `allowed_domains` |
 
-Domain filters are passed to the service when it supports them and applied by Web to the returned list in every case. Parameters are validated by the handler (the external boundary); a violation returns an error result without contacting the service.
-
-`ToolResult.content` (text):
+Domain filters are passed to the service when supported and applied by Web to the returned list in every case. `ToolResult.content`:
 
 ```
 Search results for "<query>" (<n> results)
@@ -88,17 +247,17 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-Titles and snippets are reduced to plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown to the model. `structured_content` carries `{ results: [{ title, url, snippet, published_at? }] }` for clients; it is not model text. Total time limit 20 seconds (A5).
+Titles and snippets are plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structured_content` carries `{ results: [{ title, url, snippet, published_at? }] }` for clients. Total time limit 20 s (A5).
 
-### 6.3 `web_fetch`
+### A.3 `web_fetch`
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
-| `url` | string | Required; absolute `http` or `https`; at most 2048 characters; no userinfo (`user:pass@`); fragment removed (A6) |
+| `url` | string | Required; absolute `http` or `https`; at most 2048 characters; no userinfo; fragment removed (A6) |
 | `start_char` | integer | Optional; default 0; offset into the converted text |
 | `max_chars` | integer | Optional; 1000 to 50000; default 20000 (A7) |
 
-`ToolResult.content` (text):
+`ToolResult.content`:
 
 ```
 URL: <final url>
@@ -111,174 +270,159 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-The bracketed lines appear only when they apply. `structured_content`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited }`.
-
-Fetch rules:
+Bracketed lines appear only when they apply. `structured_content`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited }`.
 
 | Item | Rule |
 | --- | --- |
-| Method and headers | `GET` only; fixed `User-Agent: dim-web/<version>`; `Accept` preferring HTML and text; no cookies, no stored credentials, no referrer (A8) |
-| Limits | Connect 10 s; whole call 30 s; at most 5 MiB of decoded body read, then the connection is closed and `download_limited` set (A5) |
-| Status | 2xx: converted; 3xx: redirect rules; 4xx/5xx: error result `http_status` with code and reason phrase, no body |
-| Redirects | Up to 5 hops. Every hop target is revalidated against the URL and address rules. A redirect to a different host (after lowercasing and removing a leading `www.`) is not followed: the result is a non-error notice `Redirected to <url>; call web_fetch with that URL to follow it.` so the new host is admitted as a separate call (A10) |
-| `text/html`, `application/xhtml+xml` | Charset from header, then `<meta>`, else UTF-8 with replacement. `script`, `style`, `noscript`, `template`, `svg`, `iframe`, navigation and form controls removed; main content preferred when detectable; converted to Markdown with absolute links; whitespace normalized |
-| `text/plain`, `text/markdown`, `text/csv`, `application/json`, `application/xml`, `text/xml`, `*+json`, `*+xml` | Decoded text returned as is (JSON pretty-printed if valid) |
-| Other types (images, PDF, archives, binaries) | Error result `unsupported_content_type` naming the type; nothing returned (A11) |
+| Method and headers | `GET` only; `User-Agent: dim-web/<version>`; `Accept` preferring HTML and text; no cookies, credentials or referrer (A8) |
+| Limits | Connect 10 s; whole call 30 s; at most 5 MiB decoded body, then the connection is closed and `download_limited` set (A5) |
+| Status | 2xx converted; 3xx redirect rules; 4xx/5xx error `http_status` with code and reason phrase, no body |
+| Redirects | Up to 5 hops, each revalidated. A redirect to a different host (lowercased, leading `www.` removed) is not followed: non-error notice `Redirected to <url>; call web_fetch with that URL to follow it.` (A10) |
+| `text/html`, `application/xhtml+xml` | Charset from header, then `<meta>`, else UTF-8 with replacement; `script`, `style`, `noscript`, `template`, `svg`, `iframe`, navigation and form controls removed; main content preferred; Markdown with absolute links; whitespace normalized |
+| `text/plain`, `text/markdown`, `text/csv`, `application/json`, `application/xml`, `text/xml`, `*+json`, `*+xml` | Decoded text as is (valid JSON pretty-printed) |
+| Other types | Error `unsupported_content_type` naming the type (A11) |
 | Empty conversion | Non-error result with header and `(no text content)` |
-| Slicing | Converted text is sliced by Unicode scalar values `[start_char, start_char + max_chars)`; `start_char >= total` returns an empty slice with the header |
+| Slicing | By Unicode scalar values `[start_char, start_char + max_chars)`; `start_char >= total` returns an empty slice with the header |
+| Cache | Converted text keyed by final URL, 15 minutes, at most 50 MiB, so pagination does not refetch (A9) |
 
-### 6.4 Address policy (SSRF)
+### A.4 Address policy
 
 | Rule | Content |
 | --- | --- |
-| Resolution | Web resolves the hostname itself, validates every resolved address, and connects only to a validated address (the connection is pinned to it), so DNS rebinding between check and connect is impossible |
-| Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918 private, link-local (`169.254.0.0/16`, `fe80::/10`, which includes cloud metadata endpoints), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of all of these, and hostnames `localhost` and `*.localhost` |
+| Resolution | Web resolves the hostname, validates every resolved address and connects only to a validated address (pinned), so DNS rebinding between check and connect is impossible |
+| Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
 | Literal IPs | Allowed only when public by the same rules |
 | Ports | Any port on a public address (A12) |
-| Exceptions | `web.fetch.allow_private_hosts`: exact hostnames or CIDRs the user permits; empty by default. Written only through Settings by the user, never by a tool |
-| Proxy | When `web.proxy` is configured, Web still validates the resolution it performs locally and sends the request through the proxy; the proxy's own resolution is outside Web's control (stated in §11) |
+| Exceptions | `web.fetch.allow_private_hosts`: exact hostnames or CIDRs; empty by default; written only by the user through Settings |
+| Proxy | With `web.proxy`, Web still validates its own resolution and sends through the proxy |
 
-### 6.5 `WebSearchBackend` (extension point defined by Web)
+### A.5 `WebSearchBackend` and `WebSearchBackends`
 
 ```rust
-/// Process service; key TypeKey::keyed_dynamic::<WebSearchBackend>(name). Defined by Web.
-pub trait WebSearch: Send + Sync + 'static {
+/// Keyed process service provided by a backend plugin; key TypeKey::keyed_dynamic::<dyn WebSearchBackend>(name).
+pub trait WebSearchBackend: Send + Sync + 'static {
     fn available(&self) -> watch::Receiver<bool>;
-    fn search(&self, request: SearchRequest, cancel: CancellationToken)
-        -> HostFuture<'_, Vec<SearchHit>>;
+    fn search(&self, request: SearchRequest, cancel: CancellationToken) -> HostFuture<'_, Vec<SearchHit>>;
 }
 pub struct SearchRequest { pub query: String, pub max_results: u8,
     pub allowed_domains: Vec<String>, pub blocked_domains: Vec<String> }
-pub struct SearchHit { pub title: String, pub url: String, pub snippet: String,
-    pub published_at: Option<String> }
+pub struct SearchHit { pub title: String, pub url: String, pub snippet: String, pub published_at: Option<String> }
+
+/// Process service provided by Web; stable for Web's lifetime.
+pub trait WebSearchBackends: Send + Sync + 'static {
+    fn register(&self, name: &str, backend: Arc<dyn WebSearchBackend>) -> Registration; // drop = unregister
+    fn lookup(&self, name: &str) -> Lookup; // Active(backend) | ConfiguredInactive | NotConfigured
+}
 ```
 
-A backend knows nothing about tools, Sessions or Web's configuration; Web knows nothing about the backend's account or provider.
+Registry rules follow [extension-registry](../contracts/extension-registry.md): one backend mount per configured backend injects `(WebSearchBackends, keyed backend)`, registers in `apply` and unregisters in its `ctx.effect` disposer after its in-flight searches return. The configured set comes from loader row declarations, so `lookup` distinguishes "not configured" from "configured but inactive". A backend reload reloads only its mount; for Web it is an availability change.
 
-### 6.6 Configuration (`web` section, loader editable layer)
+### A.6 Configuration (`web` section, loader editable layer, volatile)
 
 | Key | Type | Default |
 | --- | --- | --- |
-| `web.search.service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or `{ backend: "<contributed backend name>" }` or absent | absent (no `web_search`) |
+| `web.search.service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or `{ backend: "<backend name>" }` or absent | absent (no `web_search`) |
 | `web.fetch.allow_private_hosts` | string[] | `[]` |
 | `web.proxy` | string (URL) | absent |
 
-The set of built-in adapter ids is an implementation choice listed in the plugin's README (A13). Credentials appear only as `secretRef`. There are no Web management methods: the section is read and written through Settings' typed operations and the CLI's `/settings` aggregate entry.
+All keys are volatile: a change produces a notice to Web and a new tool set version, never a row reload. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
 
-No Session methods, no management methods, no CLI subcommand.
-
-## 7. Timeline and capability mechanics
+### A.7 Timeline and capability mechanics
 
 | Step | Path |
 | --- | --- |
-| Publish tools | Web's `apply` reads configuration, builds the set, registers its `changed()` sender and the Settings subscription with `ctx.effect`. ToolRegistry adapts and refreshes; branches adopt through ToolBinding into `context/configured` (`Timeline::append_batch_registered` by Prompt's configuration publisher). Web writes nothing |
-| Configuration change | Settings notification → Web rebuilds the set with a new version and signals `changed()`. Not a plugin reload |
-| Call | ToolExecutor consumes `step/tool-call` on the Dispatcher, registers the batch task and returns; per call appends `step/tool-start` (`Timeline::append`), Approval admits, the handler (Web) runs on the executor's task, `step/tool-completed`, then one `step/tool-result` for the batch |
-| Dispatcher | Web has no Dispatcher subscription; the handler never runs on the Dispatcher |
-| State and recheck | No `StateCell`. The handler decides only from its parameters and Web's own configuration snapshot at call start; it consumes no Timeline facts |
-| Terminal facts | Written by ToolExecutor (the initiator of the call). Web returns exactly one `ToolResult` per call |
-| Web reload | rutis reloads injecting ToolRegistries and downstream branches per the [reload protocol](../../architecture/rust-agent/single-tree.md); in-flight batches are settled as reload by ToolExecutor; Web's disposer aborts all requests first. The new generation publishes a set with a new version; branches re-adopt |
-| Process restart | Committed calls without results are settled by ToolExecutor as not surviving recovery; Web never repeats a request |
+| Register | The Web tool mount's `apply` registers the keyed `web` source with the process tool registry; Web's own `apply` reads configuration, builds the set and subscribes to Settings notices and backend availability with `ctx.effect` |
+| Adopt | ToolRegistry refreshes from the registry; ToolBinding adopts into `context/configured` through `Timeline::append_batch_registered` (Prompt's configuration publisher). Web writes nothing |
+| Call | ToolExecutor consumes `step/tool-call` on the Dispatcher, registers the batch task and returns; per call `step/tool-start` (`Timeline::append`), admission, handler on the executor's task, `step/tool-completed`, then one `step/tool-result` per batch |
+| Dispatcher | Web has no subscription |
+| State and recheck | No `StateCell`; no consumed facts; decisions use arguments and the snapshot at call start |
+| Terminal facts | Written by ToolExecutor (initiator); Web returns exactly one `ToolResult` per call |
+| Web unload or reload | The disposer aborts in-flight requests, returning "tool provider unavailable" per call, then unregisters; branches adopt without the `web` set; the new generation registers a set with a new version |
+| Process restart | Committed calls without results are settled by ToolExecutor's rebuild; Web never repeats a request |
 
-## 8. Timing and conflicts
+## Appendix B. Full conflict table
 
-Web makes no Timeline decision; all rows are decided by the owners named in the contract.
-
-| Scenario | Sequence order | Outcome | Owner of the decision |
+| Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Turn `stop/interrupt` before the batch is dispatched | interrupt < `step/tool-call` consumption | Not executed | ToolExecutor |
+| Turn `stop/interrupt` before dispatch | interrupt < `step/tool-call` consumption | Not executed | ToolExecutor |
 | Turn `stop/interrupt` during approval | `approval/request` < interrupt | `approval/cancelled`; no request sent | Approval |
-| Turn `stop/interrupt` during the request | `step/tool-start` < interrupt | Token cancelled; Web aborts the socket and returns error `cancelled`; a response already fully converted before the abort is returned as is | ToolExecutor, Web |
-| Branch-scoped interrupt or branch close | branch interrupt | Same as turn interrupt; Web keeps no work after returning | ToolExecutor |
+| Turn `stop/interrupt` during the request | `step/tool-start` < interrupt | Token cancelled; socket aborted; error `cancelled`; a response fully converted before the abort is returned as is | ToolExecutor, Web |
+| Branch-scoped interrupt or branch close | branch interrupt | As turn interrupt; Web keeps no work | ToolExecutor |
 | Batch with another long call | Web returned, other call running | Result held until the batch's `step/tool-result` | ToolExecutor |
-| Concurrent Steer/Queue/Append | Any | No effect on the running call; Steer is consumed after the batch result | Loop |
-| Compaction after the result | `step/tool-result` < compaction | Fetched text survives only through the summary; the model can fetch again | ContextPreparation |
-| Child branch cut | cut after `step/tool-result` | Child inherits the result; Web holds no per-branch state | — |
-| Credential removed while a call bound to the old version runs | set V2 published during call | Call continues with credentials resolved at its start | Web |
-| Old-version `web_search` called after removal | call > V2 publication, request bound to V1 | Error result `search_unavailable` | Web |
-| Web reload or process restart mid-call | no result yet | Settled by ToolExecutor; not repeated | ToolExecutor |
-| Session unload and restore | `branch/resume` | Tools re-adopted; cache unaffected | ToolRegistry, ToolBinding |
-| Resource node offline | — | No effect: Web does not use resource services. If Web itself runs as a peer row and that node is offline, Web is Pending and injecting ToolRegistries are Pending | rutis lifecycle |
-| Two branches fetch the same URL concurrently | — | Two independent requests; cache filled by whichever finishes first | Web |
+| Concurrent Steer/Queue/Append | any | No effect on the call; Steer consumed after the batch result | Loop |
+| `input/withdrawn` of a pending input | any | No effect; Web consumes no inputs | InputQueue |
+| Compaction after the result | `step/tool-result` < compaction | Text survives only via the summary | ContextPreparation |
+| Child branch cut | cut after `step/tool-result` | Child inherits the result; no per-branch state | — |
+| Configuration edit while a call runs | new version published during call | Call continues with values resolved at its start | Web |
+| Old-version `web_search` after removal | call > new version, bound to old | Error `search_unavailable` | Web |
+| Backend mount unloaded or Pending | flag false | That call `search_unavailable`; set without `web_search` published | Web |
+| Web unload or reload mid-call | no result yet | Error "tool provider unavailable" for that call; batch and turn continue; tools withdrawn until re-registered | Web, ToolExecutor, ToolRegistry |
+| Process restart mid-call | committed, no result | Settled as not surviving recovery; not repeated | ToolExecutor |
+| Session unload and restore | `branch/resume` | Re-adopt current version; cache unaffected | ToolRegistry, ToolBinding |
+| Session resource node offline | — | No effect; Web uses no resource services | — |
+| Web's own peer row node offline | Web mount Pending | Registry treats `web` as configured but inactive; branches adopt without it; no Session Pending | Process tool registry |
+| Duplicate or late handler call after cancellation | token already cancelled | Returns `cancelled` without network access | Web |
+| Two branches fetch the same URL | — | Independent requests; cache filled by the first to finish | Web |
 | Client detach | — | No effect | — |
 
-## 9. Context mapping
+## Appendix C. Errors and recovery
 
-| What the model sees | Form | Position |
-| --- | --- | --- |
-| `web_search`, `web_fetch` name, description, input schema | Tool declarations | Adopted `context/configured.tools`; replaced when a new set version is adopted |
-| Search results, fetched text, errors and redirect notices | `ToolResult.content` (text only) | Tool result position of the call's batch |
-
-Declarations are configuration and survive compaction as the latest adopted set; results survive only through the compaction summary. Child branches inherit declarations and results in their ancestor prefix. Non-interactive Sessions see the same tools. The model never sees `structured_content`, the search service or backend name, configuration, credential references, the private-host exceptions, request logs or diagnostics. Fetched page text is untrusted third-party content placed in a tool result; Web adds no instruction framing around it (A14).
-
-## 10. Errors and recovery
-
-Every error is an error `ToolResult` (`is_error: true`) whose content is `web_fetch failed: <code>: <message>` or `web_search failed: ...`. No error affects other calls or the Session.
+Every error is an error `ToolResult` (`is_error: true`) with content `web_fetch failed: <code>: <message>` or `web_search failed: ...`. No error affects other calls or the Session.
 
 | Code | Meaning |
 | --- | --- |
-| `invalid_input` | Parameter violates §6 |
-| `blocked_address` | URL host or any redirect hop resolves to a blocked address; the message names the rule, not the address list |
+| `invalid_input` | Parameter violates Appendix A |
+| `blocked_address` | Host or a redirect hop resolves to a blocked address; the message names the rule only |
 | `dns_failed`, `connect_failed`, `tls_failed` | Network errors |
 | `timeout` | Connect or whole-call limit reached |
 | `http_status` | Non-2xx final status |
-| `too_many_redirects` | More than 5 hops on the same host |
-| `unsupported_content_type` | Type not in §6.3 |
-| `search_unavailable` | No service configured, backend unavailable, or credential missing |
-| `search_failed` | Service returned an error or invalid data; the service's message is shortened and stripped of secrets |
+| `too_many_redirects` | More than 5 same-host hops |
+| `unsupported_content_type` | Type not in A.3 |
+| `search_unavailable` | No service configured, backend unavailable, or credential unresolvable |
+| `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `cancelled` | Token cancelled |
+| tool provider unavailable | Returned by the disposer on unload (contract outcome of [process-tool-contribution](../contracts/process-tool-contribution.md)) |
 
-Recovery: Web holds no durable work; reload and restart lose only the cache.
+Recovery: Web holds no durable work; unload and restart lose only the cache.
 
-## 11. Security
+## Appendix D. Acceptance
 
-- Admission: both tools declare `network`; every call passes Approval and Permission. FullAccess allows them; read-only denies; workspace-write asks.
-- SSRF: §6.4. Cross-host redirects require a new call and therefore a new admission (A10).
-- No ambient authority: no cookies, no stored site credentials, no client certificates; requests carry nothing from the Session except the URL the model wrote.
-- Credentials: resolved per call from `secretRef`; never in definitions, results, `structured_content`, diagnostics or errors.
-- Exfiltration: a model can encode data in a URL; this is the inherent risk of the `network` category and is controlled by admission, not by Web.
-- Prompt injection: fetched content is untrusted; it reaches the model only as a tool result.
-- Proxy: with `web.proxy`, the proxy resolves names itself; private-address protection then depends on the proxy (documented to the user).
-- Isolation: Web runs in the App Server process (or its peer row), not under a Session's isolation configuration.
+Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allow_private_hosts` entry, a fake backend plugin.
 
-## 12. Acceptance
-
-Flow tests through public interfaces (tool calls in a test Session, local test HTTP server reachable only through a test `allow_private_hosts` entry, a fake search backend):
-
-1. Without a search service, only `web_fetch` is declared; configuring one publishes `web_search` in a new version adopted before the next request; removing it withdraws it, and an old bound call returns `search_unavailable`.
-2. `web_search` result format, domain filters, zero results, service error.
-3. `web_fetch` of HTML returns the header and Markdown; `start_char` pagination reaches the end; `max_chars` bounds; download limit sets the notice.
+1. Without a service only `web_fetch` is declared; configuring one publishes `web_search` in a new version adopted before the next request, with no Web reload; removing it withdraws it and an old bound call returns `search_unavailable`.
+2. `web_search` format, domain filters, zero results, service error; same through a fake backend; unloading the backend mount withdraws `web_search` without reloading Web or any Session plugin.
+3. `web_fetch` HTML header and Markdown; `start_char` pagination to the end; `max_chars`; download limit notice.
 4. Plain text, JSON, unsupported type, 404, empty page.
-5. Same-host redirects followed up to 5; sixth fails; cross-host redirect returns the notice.
-6. Loopback, private, link-local, IPv4-mapped IPv6, `localhost`, and a hostname resolving to a private address are blocked without allowlist; DNS rebinding test resolves public then private and is not connected.
+5. Same-host redirects up to 5; sixth fails; cross-host redirect returns the notice.
+6. Loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname blocked; DNS rebinding test not connected.
 7. Permission: read-only denies, workspace-write asks, FullAccess allows.
-8. Conflict rows: interrupt before dispatch, during approval and during a slow response (socket closed, one result); reload and restart settlement without repeated requests.
-9. Non-interactive Session declares both tools.
-10. Diagnostics and results never contain the resolved credential.
+8. Interrupt before dispatch, during approval and during a slow response (socket closed, one result).
+9. Unloading Web during a slow fetch yields "tool provider unavailable" for that call; the turn continues; other Sessions are unaffected; restart settlement repeats no request.
+10. Non-interactive Session declares both tools.
+11. Diagnostics and results never contain the resolved credential.
 
-## 13. Assumptions
+## Appendix E. Assumptions
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Search backends from other plugins plug in through a Web-defined `WebSearchBackend` contract | Feature list ("configuration or account permissions"); overview §3 constraint 10 | Account-backed search must be a built-in adapter of Web |
-| A2 | Network access happens on the node running Web (control node by default), not on the Session's resource node | Overview §3.1 lists network services as process resources; judgment | Web would need a Session-bound network service on each resource node |
-| A3 | `web_search` is withdrawn from the set when no service is usable | Judgment | Tool always declared, failing at call time |
-| A4 | Query length 500, `max_results` 1 to 10 default 5 | Judgment | Limits change |
-| A5 | Timeouts 10 s connect, 30 s fetch, 20 s search; 5 MiB download limit | Edge-case reference; judgment | Limits change |
-| A6 | Only `http`/`https`, URL at most 2048 chars, no userinfo | Judgment | Wider input surface |
-| A7 | `max_chars` 1000 to 50000, default 20000, with `start_char` pagination | Judgment | Different bounding of tool results |
-| A8 | `GET` only, fixed user agent, no cookies or credentials | Judgment | Authenticated fetching would need a separate design |
-| A9 | In-memory cache of converted text for 15 minutes, at most 50 MiB, keyed by final URL, used so pagination does not refetch | Judgment | Each page slice refetches; results may differ between slices |
-| A10 | Cross-host redirects are reported, not followed | Edge-case reference; judgment | Redirects silently reach hosts never admitted |
-| A11 | PDFs and images are not converted in this version | Judgment | Add extraction or image content blocks |
-| A12 | Any port on public addresses is allowed | Judgment | Restrict to 80/443 |
-| A13 | The built-in search adapter list is an implementation choice | Overview §5.5 names no service | Overview or feature list fixes a service |
-| A14 | No wrapper or warning text is added around fetched content | Judgment | Model-visible framing to define |
+| A1 | Search backends from other plugins (for example account-backed ones) plug in through Web's `WebSearchBackends` registry | Feature list ("configuration or account permissions"); overview §3 constraint 10 | Account-backed search must be a built-in adapter |
+| A2 | Network access happens on the node running Web (control node by default) | Overview §3.1; judgment | A Session-bound network service on each resource node |
+| A3 | `web_search` is withdrawn when no service is usable | Judgment | Tool always declared, failing at call time |
+| A4 | Query length 500; `max_results` 1 to 10, default 5 | Judgment | Limits change |
+| A5 | 10 s connect, 30 s fetch, 20 s search; 5 MiB download | Edge-case reference; judgment | Limits change |
+| A6 | Only `http`/`https`, at most 2048 characters, no userinfo | Judgment | Wider input surface |
+| A7 | `max_chars` 1000 to 50000, default 20000, `start_char` pagination | Judgment | Different bounding of results |
+| A8 | `GET` only, fixed user agent, no cookies or credentials | Judgment | Authenticated fetching needs its own design |
+| A9 | Cache 15 minutes, at most 50 MiB, keyed by final URL | Judgment | Each slice refetches; slices may differ |
+| A10 | Cross-host redirects reported, not followed | Edge-case reference; judgment | Redirects reach hosts never admitted |
+| A11 | PDFs and images not converted | Judgment | Add extraction or image content blocks |
+| A12 | Any port on public addresses | Judgment | Restrict to 80/443 |
+| A13 | Built-in adapter list is an implementation choice | Overview §5.5 names no service | A service is fixed by the overview or feature list |
+| A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
 
-## 14. Open questions
+## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| Settings change without reload | #3 makes plugin configuration loader-row configuration; a row config change may reload Web, which by the [tool contribution contract](../contracts/process-tool-contribution.md) reloads every injecting ToolRegistry and fails running turns. Web needs a typed configuration read with change notification that is not a reload |
-| Generic secret resolution | The existing `ResolveProviderSecret` takes a Provider id; Web and Notifications need a host secret resolution not tied to Provider |
-| Cross-language migration | Overview §5.5 names Web as the first #4 migration target; since Web needs no capability port, the TS implementation uses only process services |
+| Cross-language migration | Overview §5.5 names Web as the first #4 migration target; the TypeScript implementation needs only process services (process tool registry, Settings volatile configuration, credential resolver) |
+| Overview wording | Overview §7.1 ToolRegistry row still says the contributor lifecycle "follows the dependency"; this design follows the withdraw-only registry of decisions B.3 |
