@@ -851,6 +851,141 @@ async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+#[derive(Clone)]
+struct ShutdownCleanup {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    fail: bool,
+}
+impl TypedPlugin for ShutdownCleanup {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "ShutdownCleanup"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        (): (),
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        let cleanup = self.clone();
+        Box::pin(async move {
+            Ok(rutis::Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    cleanup.entered.notify_one();
+                    cleanup.release.notified().await;
+                    if cleanup.fail {
+                        return Err(rutis::CordisError::PluginFailed(Box::new(
+                            std::io::Error::other("private cleanup detail"),
+                        )));
+                    }
+                    Ok(())
+                })
+            })))
+        })
+    }
+}
+impl Capability for ShutdownCleanup {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_shutdown_reports_completion_after_cleanup_and_preserves_failures() {
+    for (ws, fail, disconnect) in [
+        (false, false, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let home =
+            std::path::PathBuf::from("/tmp").join(format!("dim-shutdown-{}", uuid::Uuid::new_v4()));
+        let cleanup = ShutdownCleanup {
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            fail,
+        };
+        let owner = cleanup.clone();
+        let (server, _) = launch_with(
+            Arc::new(MockTools),
+            ServerConfig {
+                target_home: Some(home.clone()),
+                ..Default::default()
+            },
+            move |builder| {
+                builder.session_plugin(move |_| owner.clone());
+            },
+        )
+        .await;
+        let mut client = Client::new_version(&server, ws, 3).await;
+        assert_ok(&client.rpc("session.create", create(json!([]))).await);
+        let id = client.send("daemon.shutdown", json!({})).await;
+        tokio::time::timeout(Duration::from_secs(5), cleanup.entered.notified())
+            .await
+            .expect("cleanup entered");
+        if disconnect {
+            drop(client);
+            cleanup.release.notify_one();
+        } else {
+            let early = tokio::time::timeout(Duration::from_millis(30), client.response(id)).await;
+            cleanup.release.notify_one();
+            let premature = early.is_ok();
+            let result = match early {
+                Ok(result) => result,
+                Err(_) => client.response(id).await,
+            };
+            if fail {
+                assert_eq!(result["error"]["data"]["appError"], "shutdown_failed");
+                assert!(!result.to_string().contains("private cleanup detail"));
+            } else {
+                assert_ok(&result);
+                let db = dim_app_server::storage::SqliteStorage::open(home.join("dimcode.sqlite"))
+                    .expect("successful stop released SQLite before replying");
+                db.close().await.unwrap();
+            }
+            assert!(
+                !premature,
+                "shutdown acknowledged completion before its disposer settled"
+            );
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .expect("cleanup survives caller disconnect");
+        assert_eq!(result.is_err(), fail);
+        let _ = std::fs::remove_dir_all(home);
+    }
+}
+
+#[tokio::test]
+async fn forced_shutdown_settles_an_already_admitted_graceful_reply() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let path = server.unix_path.clone().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let Transport::Unix(stream) = &mut client.transport else {
+        unreachable!()
+    };
+    // Pipeline both requests in one frame batch on a single-thread runtime:
+    // both are admitted before either handler starts shutdown. The graceful
+    // writer may reach the coordinator before or after it observes force.
+    stream
+        .get_mut()
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"daemon.shutdown\",\"params\":{}}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"daemon.shutdown\",\"params\":{\"force\":true}}\n",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), server.join())
+            .await
+            .expect("force does not await business cleanup")
+            .unwrap(),
+        ShutdownReason::Forced
+    );
+    let response = tokio::time::timeout(Duration::from_secs(1), client.response(100))
+        .await
+        .expect("accepted graceful shutdown must receive a terminal reply");
+    assert_eq!(response["error"]["data"]["appError"], "shutdown_failed");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
 struct ConfirmTool {
     calls: Arc<AtomicUsize>,
     seen: Arc<Mutex<Vec<String>>>,
@@ -1783,7 +1918,7 @@ async fn unix_daemon_recovers_after_a_crash_without_stealing_endpoints() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn configured_binary_uses_native_aimux_over_unix_and_websocket() {
+async fn configured_binary_shares_public_execution_and_persists_settings() {
     use axum::{Json, Router, routing::post};
     use std::process::Stdio;
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1792,7 +1927,11 @@ async fn configured_binary_uses_native_aimux_over_unix_and_websocket() {
         let router = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             let seen = seen.clone();
             async move {
+                let list_team = body["model"] == "alternate" && body["messages"].as_array().unwrap().last().unwrap()["role"] != "tool";
                 seen.lock().await.push(body);
+                if list_team {
+                    return ([("content-type", "text/event-stream")], format!("data: {}\n\ndata: [DONE]\n\n", json!({"id":"remote","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"list-team","type":"function","function":{"name":"agent","arguments":"{\"action\":\"list\"}"}}]},"finish_reason":"tool_calls"}]})));
+                }
                 ([ ("content-type", "text/event-stream") ], format!("data: {}\n\ndata: [DONE]\n\n", json!({"id":"remote","choices":[{"index":0,"delta":{"content":"native server answer"},"finish_reason":"stop"}]})))
             }
         }));
@@ -1803,9 +1942,18 @@ async fn configured_binary_uses_native_aimux_over_unix_and_websocket() {
         let directory = std::path::PathBuf::from("/tmp").join(format!("dim-aimux-server-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("ipc/server.sock"); let configuration = directory.join("models.json");
-        std::fs::write(&configuration, json!({"defaultModel":{"providerId":"local","modelId":"native-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"native-model","config":{"maxTokens":4096}}]}]}).to_string()).unwrap();
+        let home = directory.join("state");
+        let work = directory.join("work");
+        std::fs::create_dir_all(&home).unwrap();
+        let skill = work.join(".agents/skills/review");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: review\ndescription: Review changes\n---\nInspect changes.\n").unwrap();
+        std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"disabled-fixture":{"command":"never-run-this-test-command","enabled":false}}}).to_string()).unwrap();
+        std::fs::write(&configuration, json!({"defaultModel":{"providerId":"local","modelId":"native-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"native-model","config":{"maxTokens":4096}},{"id":"alternate","config":{"maxTokens":1536}}]}]}).to_string()).unwrap();
+        for restart in [false, true] {
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
-            .args(["--model-config", configuration.to_str().unwrap(), "--unix", socket.to_str().unwrap(), "--ws", "127.0.0.1:0"])
+            .args(["--model-config", configuration.to_str().unwrap(), "--home", home.to_str().unwrap(), "--unix", socket.to_str().unwrap(), "--ws", "127.0.0.1:0"])
+            .env("HOME", &directory).current_dir(&work)
             .stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap()); let mut line = String::new();
         output.read_line(&mut line).await.unwrap();
@@ -1820,7 +1968,11 @@ async fn configured_binary_uses_native_aimux_over_unix_and_websocket() {
             } else { Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())) };
             let mut client = Client { transport, id: 0, notices: vec![], instance: Value::Null, features: Value::Null };
             assert_ok(&client.rpc("hello", json!({"protocolVersion":1,"clientKind":"other"})).await);
-            let created = client.rpc("session.create", create(json!([]))).await; assert_ok(&created);
+            if ws {
+                assert_eq!(client.rpc("session.create", create(json!([]))).await["error"]["data"]["appError"], "local_transport_required");
+                continue;
+            }
+            let created = client.rpc("session.create", json!({"cwd":work,"tools":[]})).await; assert_ok(&created);
             let sid = created["result"]["sessionId"].clone();
             assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
             assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"text":"hello native"})).await);
@@ -1834,14 +1986,81 @@ async fn configured_binary_uses_native_aimux_over_unix_and_websocket() {
             }
             assert!(events.iter().any(|event| event["data"]["delta"] == "native server answer"));
             assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
-            if ws {
-                assert_ok(&client.rpc("daemon.shutdown", json!({"force":false})).await);
-            }
         }
+        let mut client = Client { transport: Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())), id:0, notices:vec![], instance:Value::Null, features:Value::Null };
+        let hello = client.rpc("hello", json!({"protocolVersion":3,"clientKind":"other"})).await;
+        assert_ok(&hello);
+        let features = hello["result"]["features"].as_array().unwrap();
+        for method in dim_app_server::protocol::LOCAL_EXECUTION_METHODS.into_iter().chain(dim_app_server::protocol::MCP_METHODS) {
+            assert!(features.contains(&json!(method)), "{method}: {features:?}");
+        }
+        assert!(!features.contains(&json!("account.providers")));
+        assert_eq!(client.rpc("account.providers", json!({})).await["error"]["code"], -32601);
+        let catalog = client.rpc("skills.catalog", json!({"cwd":work})).await;
+        assert_ok(&catalog);
+        let review = catalog["result"]["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == "review").unwrap();
+        assert_eq!(review["enabled"], !restart);
+        assert_ok(&client.rpc("skills.set_enabled", json!({"cwd":work,"id":review["id"],"enabled":false})).await);
+        let catalog = client.rpc("mcp.catalog", json!({"cwd":work})).await;
+        assert_ok(&catalog);
+        assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
+        assert!(!catalog.to_string().contains("never-run-this-test-command"));
+        let expected = catalog["result"]["userRevision"].clone();
+        if restart {
+            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http","approval":"notRequired","approvalToken":null}]));
+            assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"managed-fixture","expectedVersion":expected})).await);
+            let empty = client.rpc("mcp.catalog", json!({})).await;
+            assert_ok(&empty);
+            assert_eq!(empty["result"]["servers"], json!([]));
+        } else {
+            let invalid = client.rpc("mcp.save", json!({"source":"user","id":"invalid","expectedVersion":expected,"configuration":{"type":"http","url":"","headers":{"X-Test":"private-fixture-value"}}})).await;
+            assert_eq!(invalid["error"]["data"]["appError"], "mcp_invalid_config");
+            assert!(!invalid.to_string().contains("private-fixture-value"));
+            assert_ok(&client.rpc("mcp.save", json!({"source":"user","id":"managed-fixture","expectedVersion":expected,"configuration":{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Test":"private-fixture-value"},"enabled":false}})).await);
+            let stale = client.rpc("mcp.remove", json!({"source":"user","id":"disabled-fixture","expectedVersion":expected})).await;
+            assert_eq!(stale["error"]["data"]["appError"], "mcp_settings_conflict");
+            let saved = client.rpc("mcp.catalog", json!({})).await;
+            assert_ok(&saved);
+            assert_eq!(saved["result"]["servers"].as_array().unwrap().len(), 2);
+            assert!(!saved.to_string().contains("private-fixture-value"));
+            assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"disabled-fixture","expectedVersion":saved["result"]["userRevision"]})).await);
+            // Once imported, neither malformed legacy MCP nor Skill bytes regain authority.
+            std::fs::write(home.join("mcp.json"), "not json").unwrap();
+            std::fs::write(home.join("skills.json"), "not json").unwrap();
+        }
+        let created = client.rpc("session.create", json!({"cwd":work})).await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].clone();
+        let branch = json!({"sessionId":sid,"branchId":"main"});
+        let permission = client.rpc("session.permission.get", branch.clone()).await;
+        assert_ok(&permission);
+        assert_ok(&client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":permission["result"]["version"],"policy":{"preset":"read-only","allowedTools":["agent"],"disallowedTools":[]}})).await);
+        assert_ok(&client.rpc("session.prompt.refresh", branch.clone()).await);
+        assert_ok(&client.rpc("session.skills", branch.clone()).await);
+        assert_ok(&client.rpc("session.mcp", json!({"sessionId":sid})).await);
+        let invalid = client.rpc("session.model.update", json!({"sessionId":sid,"branchId":"main","providerId":"local","modelId":"missing"})).await;
+        assert!(invalid.get("error").is_some());
+        assert_ok(&client.rpc("session.model.update", json!({"sessionId":sid,"branchId":"main","providerId":"local","modelId":"alternate"})).await);
+        assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"branchId":"main","text":"use public capabilities"})).await);
+        assert_ok(&client.rpc("session.idle", branch).await);
+        assert_ok(&client.rpc("daemon.shutdown", json!({"force":false})).await);
         assert!(child.wait().await.unwrap().success());
+        }
         let requests = requests.lock().await;
-        assert_eq!(requests.len(), 2);
-        assert!(requests.iter().all(|body| body["model"] == "native-model" && body.get("tools").is_none()));
+        assert_eq!(requests.len(), 6);
+        for pair in requests.as_chunks::<3>().0 {
+            assert_eq!(pair[0]["model"], "native-model");
+            assert!(pair[0].get("tools").is_none());
+            assert_eq!(pair[1]["model"], "alternate");
+            assert_eq!(pair[1]["max_tokens"], 1536);
+            let names: Vec<_> = pair[1]["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap()).collect();
+            for name in ["read", "write", "edit", "glob", "grep", "exec", "wait", "skill", "branch", "agent"] {
+                assert!(names.contains(&name), "{names:?}");
+            }
+            let tool = pair[2]["messages"].as_array().unwrap().iter().find(|message| message["role"] == "tool").unwrap();
+            assert!(tool["content"].as_str().unwrap().contains("participants"), "{tool}");
+            assert!(tool["content"].as_str().unwrap().contains("agents"), "{tool}");
+        }
         drop(requests);
         stop.cancel(); http.await.unwrap(); std::fs::remove_dir_all(directory).unwrap();
     }).await.unwrap();

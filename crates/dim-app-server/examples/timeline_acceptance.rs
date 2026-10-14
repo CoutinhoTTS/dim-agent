@@ -168,7 +168,6 @@ impl ContextModel for BoundedContext {
                 summary: "Prior turns completed.".into(),
                 diagnostics: Box::new(diagnostics),
                 context_baseline: vec![],
-                checkpoint: None,
             })
         })
     }
@@ -280,8 +279,8 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
     let stop_ms = stop.elapsed().as_secs_f64() * 1000.;
     let connection = Connection::open(directory.join("dimcode.sqlite"))?;
     let checkpoints: i64 = connection.query_row(
-        "SELECT count(*) FROM timeline_events WHERE checkpoint = 1",
-        [],
+        "SELECT count(*) FROM timeline_snapshots WHERE interpreter = ?1",
+        [HistoryRenderer::default().checkpoint_interpreter],
         |row| row.get(0),
     )?;
     {
@@ -583,12 +582,20 @@ impl TimelineStore for BarrierStore {
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.inner.trace(k, s)
     }
-    fn latest_checkpoint<'a>(
+    fn save_snapshot<'a>(
+        &'a self,
+        k: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.inner.save_snapshot(k, snapshot)
+    }
+    fn latest_snapshot<'a>(
         &'a self,
         k: &'a TimelineKey,
         s: u64,
-    ) -> BoxFuture<'a, Result<Option<ContextCompactionData>>> {
-        self.inner.latest_checkpoint(k, s)
+        interpreter: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        self.inner.latest_snapshot(k, s, interpreter)
     }
     fn append(&self, k: TimelineKey, e: Vec<StoredEvent>, publish: PublishCallback) -> Result<()> {
         let mode = self.mode.clone();

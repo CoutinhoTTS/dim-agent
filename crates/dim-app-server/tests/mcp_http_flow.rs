@@ -53,9 +53,12 @@ impl Capability for Capture {
 
 struct Fixture {
     root: Ctx,
+    publication: mcp_host::Host,
     mcp: Arc<McpService>,
     home: PathBuf,
 }
+#[path = "fixtures/mcp_host.rs"]
+mod mcp_host;
 impl Fixture {
     async fn new(url: &str, token: &str) -> Self {
         Self::configured(json!({"type":"http","url":url,"auth":{"type":"bearer","token":token}}))
@@ -82,6 +85,7 @@ impl Fixture {
         file.write_all(&serde_json::to_vec(&json!({"mcpServers":{"docs":configuration}})).unwrap())
             .unwrap();
         let root = Ctx::root().unwrap();
+        let (publication, _) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         let views = vec![
             root.plugin(capability_plugin(FileStoragePlugin::new(vec![
@@ -101,11 +105,13 @@ impl Fixture {
         .unwrap();
         Self {
             root,
+            publication,
             mcp: capture.get().unwrap().clone(),
             home,
         }
     }
     async fn close(&self) {
+        self.publication.close().await;
         self.root.shutdown().await.unwrap();
     }
 }
@@ -830,16 +836,14 @@ async fn stdio_sdk_discovery_call_cancel_and_process_cleanup() {
         let cancel = CancellationToken::new();
         let mut expected_cwd = fs::canonicalize(&fixture.home).unwrap();
         let project = if mode == "stubborn" {
-            expected_cwd = expected_cwd.join("later-project");
-            fs::create_dir(&expected_cwd).unwrap();
+            let workspace = expected_cwd.join("later-project");
+            expected_cwd = workspace.join("relative-cwd");
+            fs::create_dir_all(&expected_cwd).unwrap();
             let mut settings: Value =
                 serde_json::from_slice(&fs::read(fixture.home.join("mcp.json")).unwrap()).unwrap();
-            settings["mcpServers"]["docs"]
-                .as_object_mut()
-                .unwrap()
-                .remove("cwd");
+            settings["mcpServers"]["docs"]["cwd"] = json!("relative-cwd");
             fs::write(
-                expected_cwd.join(".mcp.json"),
+                workspace.join(".mcp.json"),
                 serde_json::to_vec(&settings).unwrap(),
             )
             .unwrap();
@@ -848,13 +852,40 @@ async fn stdio_sdk_discovery_call_cancel_and_process_cleanup() {
                     .root
                     .get::<SettingsService>()
                     .unwrap()
-                    .authorize_project(expected_cwd.clone(), &cancel)
+                    .authorize_project(workspace, &cancel)
                     .await
                     .unwrap(),
             )
         } else {
             None
         };
+        if let Some(project) = project {
+            assert!(
+                fixture
+                    .mcp
+                    .server(Some(project), "docs".into(), &cancel)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                !fixture.home.join("pid").exists(),
+                "unapproved project must not spawn"
+            );
+            let token = fixture
+                .mcp
+                .catalog(Some(project), &cancel)
+                .await
+                .unwrap()
+                .servers["docs"]
+                .approval_token
+                .clone()
+                .unwrap();
+            fixture
+                .mcp
+                .approve(project, "docs".into(), token, &cancel)
+                .await
+                .unwrap();
+        }
         let connection = fixture
             .mcp
             .server(project, "docs".into(), &cancel)
@@ -895,7 +926,17 @@ async fn stdio_sdk_discovery_call_cancel_and_process_cleanup() {
             })
         };
         wait_file(&fixture.home.join("pid.called")).await;
-        cancel.cancel();
+        if let Some(project) = project {
+            fixture
+                .mcp
+                .revoke(project, "docs".into(), &cancel)
+                .await
+                .unwrap();
+            assert_eq!(connection.state(), McpServerState::Closed);
+            assert_child_reaped(&fixture).await;
+        } else {
+            cancel.cancel();
+        }
         assert!(matches!(
             task.await.unwrap(),
             Err(McpServerError::Cancelled)

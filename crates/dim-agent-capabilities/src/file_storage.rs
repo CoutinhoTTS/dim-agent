@@ -407,6 +407,37 @@ impl FileLease {
         .await
     }
 
+    /// Creates a durable, exclusive sibling copy while retaining this lease.
+    /// An existing or partially written backup is never overwritten or removed.
+    pub async fn backup(
+        &mut self,
+        suffix: &str,
+        permissions: Option<Permissions>,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if suffix.is_empty()
+            || !suffix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(FileStorageError::InvalidPath("invalid backup suffix"));
+        }
+        let suffix = suffix.to_owned();
+        self.run(cancel, move |parent, name, owner, cancel| {
+            let bytes = read(&parent, &name, &owner, &cancel)?;
+            let mut backup = name.clone();
+            backup.push(format!(".{suffix}"));
+            let mut file =
+                native::create_temp(&parent, &backup, &parent, &name, permissions.as_ref())?;
+            // Once created, retain a failed backup for explicit operator recovery.
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            native::sync_replacement(&file, &parent, &parent)?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Permissions are supplied by the business owner; absent permissions preserve
     /// an existing file's mode/readonly attribute. New files use Unix umask or the
     /// Windows business parent DACL; existing Windows DACLs are preserved.

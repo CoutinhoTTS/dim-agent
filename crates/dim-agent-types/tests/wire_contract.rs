@@ -58,28 +58,14 @@ fn frozen_typescript_samples_roundtrip_without_losing_fields() {
             && value["name"] == "compaction"
             && value["data"]["status"] == "completed"
         {
-            let mut internal: AgentEvent = serde_json::from_value(value.clone()).unwrap();
-            let EventKind::ContextCompaction(data) = &mut internal.kind else {
-                unreachable!()
-            };
-            let ContextCompactionResult::Completed {
-                cursor, checkpoint, ..
-            } = &mut data.outcome
-            else {
-                unreachable!()
-            };
-            *checkpoint = Some(Box::new(ProjectionCheckpoint {
-                resume: TimelinePosition {
-                    branch_id: "main".into(),
-                    sequence: data.through,
-                },
-                state: ProjectionCheckpointState {
-                    compacted_through: cursor.clone(),
-                    ..ProjectionCheckpointState::default()
-                },
-            }));
+            let internal: AgentEvent = serde_json::from_value(value.clone()).unwrap();
             let encoded = serde_json::to_value(&internal).unwrap();
-            assert!(encoded["data"]["checkpoint"].is_object());
+            assert!(
+                !encoded["data"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("checkpoint")
+            );
             assert_eq!(
                 serde_json::from_value::<AgentEvent>(encoded).unwrap(),
                 internal

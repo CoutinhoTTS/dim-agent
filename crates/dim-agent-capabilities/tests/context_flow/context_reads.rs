@@ -7,9 +7,11 @@ type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
 struct CountContextReads {
     memory: MemoryTimelineStore,
     reads: AtomicUsize,
+    earliest_read: std::sync::atomic::AtomicU64,
     fail_at: AtomicUsize,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
+    fail_snapshot: bool,
     /// Pauses the first context read cut at a `step/model-start`: Loop's
     /// preparation read, whatever other reads run around it.
     pause_preparation: std::sync::atomic::AtomicBool,
@@ -190,6 +192,8 @@ impl TimelineStore for CountContextReads {
         key: &'a TimelineKey,
         range: RangeInclusive<u64>,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
+        self.earliest_read
+            .fetch_min(*range.start(), Ordering::SeqCst);
         self.memory.read(key, range)
     }
     fn read_segments<'a>(
@@ -197,6 +201,10 @@ impl TimelineStore for CountContextReads {
         session_id: &'a str,
         segments: Vec<(String, RangeInclusive<u64>)>,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
+        for (_, range) in &segments {
+            self.earliest_read
+                .fetch_min(*range.start(), Ordering::SeqCst);
+        }
         self.memory.read_segments(session_id, segments)
     }
     fn trace<'a>(
@@ -206,11 +214,24 @@ impl TimelineStore for CountContextReads {
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.memory.trace(key, sequence)
     }
-    fn latest_checkpoint<'a>(
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        if self.fail_snapshot {
+            return Box::pin(async {
+                Err(AgentError::Storage("injected snapshot save failure".into()))
+            });
+        }
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
         &'a self,
         key: &'a TimelineKey,
         through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<ContextCompactionData>>> {
+        interpreter: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         Box::pin(async move {
             let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail_at.load(Ordering::SeqCst) == read {
@@ -242,7 +263,7 @@ impl TimelineStore for CountContextReads {
                     "injected prompt adoption rejection".into(),
                 ));
             }
-            self.memory.latest_checkpoint(key, through).await
+            self.memory.latest_snapshot(key, through, interpreter).await
         })
     }
 }
@@ -576,14 +597,17 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
 
 #[tokio::test]
 async fn each_model_step_reads_context_twice_with_and_without_compaction_policy() {
-    for policy in [false, true] {
-        let store = Arc::new(CountContextReads::default());
+    for (policy, fail_snapshot) in [(false, false), (true, false), (true, true)] {
+        let store = Arc::new(CountContextReads {
+            fail_snapshot,
+            ..Default::default()
+        });
         let mut builder = if policy {
             builder_with_context(
                 Arc::new(EchoModel),
                 HistoryRenderer::default(),
                 Context {
-                    threshold: Some(300.),
+                    threshold: Some(900.),
                     ..Context::default()
                 },
             )
@@ -599,7 +623,7 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
             .create_session(SessionConfig::default())
             .await
             .unwrap();
-        for input in ["x".repeat(500), "next".into()] {
+        for input in ["x".repeat(1_500), "next".into()] {
             let before = store.reads.load(Ordering::SeqCst);
             session
                 .submit(input, InputMode::Queue, "main")
@@ -621,7 +645,79 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
             2
         );
         if policy {
-            assert!(history.iter().any(|event| matches!(&event.kind, EventKind::ContextCompaction(data) if matches!(&data.outcome, ContextCompactionResult::Completed { checkpoint: Some(_), .. }))));
+            let compaction = history
+                .iter()
+                .rev()
+                .find(|event| {
+                    matches!(&event.kind,
+                EventKind::ContextCompaction(data) if matches!(&data.outcome,
+                    ContextCompactionResult::Completed { .. }))
+                })
+                .unwrap();
+            let snapshot = store
+                .memory
+                .latest_snapshot(
+                    &TimelineKey {
+                        session_id: session.id().into(),
+                        branch_id: "main".into(),
+                    },
+                    history.last().unwrap().sequence,
+                    HistoryRenderer::default().checkpoint_interpreter,
+                )
+                .await
+                .unwrap();
+            if fail_snapshot {
+                assert!(snapshot.is_none());
+            } else {
+                let snapshot = snapshot.unwrap();
+                assert_eq!(snapshot.event_id, compaction.id);
+                let renderer = HistoryRenderer::default();
+                let checkpoint = (renderer.decode_checkpoint)(&snapshot).unwrap();
+                assert!(checkpoint.resume.sequence > 1);
+                let timeline = Timeline::restore(
+                    Ctx::root().unwrap(),
+                    TimelineKey {
+                        session_id: session.id().into(),
+                        branch_id: "main".into(),
+                    },
+                    vec![],
+                    store.clone(),
+                )
+                .await
+                .unwrap();
+                store.earliest_read.store(u64::MAX, Ordering::SeqCst);
+                let recovered = renderer
+                    .context(&timeline, timeline.sequence())
+                    .await
+                    .unwrap();
+                assert!(recovered.checkpoint.is_some());
+                assert_eq!(
+                    store.earliest_read.load(Ordering::SeqCst),
+                    checkpoint.resume.sequence
+                );
+                timeline.close().await.unwrap();
+            }
+            assert_eq!(
+                history
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::ContextCompaction(_)))
+                    .count(),
+                1
+            );
+            for request in history.iter().filter_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(&data.request),
+                _ => None,
+            }) {
+                assert_eq!(
+                    request.messages[0].as_ref(),
+                    &dim_agent_capabilities::history::summary_message("short")
+                );
+                assert!(
+                    !request
+                        .messages
+                        .contains(&Arc::new(Message::text(Role::User, "x".repeat(1_500))))
+                );
+            }
         }
         agent.close().await.unwrap();
     }

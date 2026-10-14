@@ -7,7 +7,7 @@ use dim_agent_runtime::{
     AgentError, BoxFuture, Capability, KeysOf, PublishCallback, Result, SessionConfig,
     StoredBranch, StoredEvent, TimelineInfo, TimelineKey, TimelineStore, TimelineTrace, scoped,
 };
-use dim_agent_types::{BranchCreateAt, ContextCompactionData, ContextCompactionResult, EventKind};
+use dim_agent_types::{BranchCreateAt, ContextCompactionResult, EventKind, RecoverySnapshot};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rutis::{CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,7 @@ impl SqliteTimelineStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
         for table in [
+            "timeline_snapshots",
             "timeline_events",
             "timeline_branches",
             "timeline_content",
@@ -611,10 +612,9 @@ fn write_batch(connection: &Connection, batch: &Pending) -> Result<()> {
                     started_at: record.event.create_at,
                     records: vec![wire],
                 };
-                insert_event(connection, &batch.key, sequence, kind, &row, false)?;
+                insert_event(connection, &batch.key, sequence, kind, &row)?;
             }
             _ => {
-                let checkpoint = matches!(&record.event.kind, EventKind::ContextCompaction(data) if data.is_checkpoint());
                 insert_event(
                     connection,
                     &batch.key,
@@ -623,7 +623,6 @@ fn write_batch(connection: &Connection, batch: &Pending) -> Result<()> {
                     &Row::Event {
                         record: Box::new(wire),
                     },
-                    checkpoint,
                 )?;
             }
         }
@@ -658,18 +657,16 @@ fn insert_event(
     sequence: u64,
     kind: &str,
     row: &Row,
-    checkpoint: bool,
 ) -> Result<()> {
     connection
         .execute(
-            "INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO timeline_events VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
             params![
                 key.session_id,
                 key.branch_id,
                 sql_sequence(sequence)?,
                 kind,
                 serde_json::to_string(row).map_err(error)?,
-                checkpoint,
                 match row {
                     Row::Event { record } => record.event["id"].as_str(),
                     Row::Output { .. } => None,
@@ -1015,18 +1012,46 @@ impl TimelineStore for SqliteTimelineStore {
                 .await
         })
     }
-    fn latest_checkpoint<'a>(
+    fn save_snapshot<'a>(
         &'a self,
         key: &'a TimelineKey,
-        through: u64,
-    ) -> BoxFuture<'a, Result<Option<ContextCompactionData>>> {
+        snapshot: RecoverySnapshot,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let key = key.clone();
             self.db.run(move |connection| {
-            let sequence: Option<u64> = connection.query_row("SELECT sequence FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND checkpoint = 1 AND sequence <= ?3 ORDER BY sequence DESC LIMIT 1", params![key.session_id, key.branch_id, sql_sequence(through)?], |row| read_sequence(row, 0)).optional().map_err(error)?;
-            let Some(sequence) = sequence else { return Ok(None) };
-            match read_events(connection, &key, sequence..=sequence, false)?.pop().map(|record| record.event.kind.clone()) { Some(EventKind::ContextCompaction(data)) => Ok(Some(data)), _ => Err(error("checkpoint index does not reference compaction")) }
-        }).await
+                let anchor = read_events(connection, &key, snapshot.sequence..=snapshot.sequence, false)?
+                    .pop().ok_or_else(|| error("snapshot anchor is missing"))?;
+                if anchor.event.id != snapshot.event_id
+                    || !matches!(&anchor.event.kind, EventKind::ContextCompaction(data)
+                        if matches!(data.outcome, ContextCompactionResult::Completed { .. }))
+                {
+                    return Err(error("snapshot anchor is not the identified completed compaction"));
+                }
+                connection.execute(
+                    "INSERT OR REPLACE INTO timeline_snapshots VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![key.session_id, key.branch_id, sql_sequence(snapshot.sequence)?, snapshot.interpreter, snapshot.event_id, snapshot.state],
+                ).map_err(error)?;
+                Ok(())
+            }).await
+        })
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
+        Box::pin(async move {
+            let key = key.clone();
+            let interpreter = interpreter.to_owned();
+            self.db.run(move |connection| {
+                connection.query_row(
+                    "SELECT s.sequence, s.event_id, s.interpreter, s.state FROM timeline_snapshots s JOIN timeline_events e ON e.session_id=s.session_id AND e.branch_id=s.branch_id AND e.sequence=s.sequence AND e.event_id=s.event_id WHERE s.session_id=?1 AND s.branch_id=?2 AND s.sequence<=?3 AND s.interpreter=?4 AND typeof(s.sequence)='integer' AND s.sequence>0 AND typeof(s.event_id)='text' AND typeof(s.state)='text' AND e.kind='context/compaction' AND json_valid(e.body) AND json_extract(e.body, '$.record.event.data.status')='completed' AND json_extract(e.body, '$.record.event.id')=s.event_id AND json_extract(e.body, '$.record.event.sequence')=s.sequence ORDER BY s.sequence DESC LIMIT 1",
+                    params![key.session_id, key.branch_id, sql_sequence(through)?, interpreter],
+                    |row| Ok(RecoverySnapshot { sequence: read_sequence(row, 0)?, event_id: row.get(1)?, interpreter: row.get(2)?, state: row.get(3)? }),
+                ).optional().map_err(error)
+            }).await
         })
     }
 }
@@ -1048,7 +1073,7 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
     let mut branches = BTreeMap::new();
     let mut event_ids = BTreeSet::new();
     let mut created = BTreeSet::new();
-    let mut checkpoints = vec![];
+    let mut completions = vec![];
     for (id, info, sequence) in directory {
         let info: TimelineInfo = serde_json::from_str(&info).map_err(error)?;
         if info.id != id {
@@ -1062,28 +1087,25 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
                 branch_id: id.clone(),
             };
             let page = db.run(move |connection| {
-                let mut query = connection.prepare("SELECT sequence, last_sequence, kind, body, checkpoint, event_id FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 ORDER BY sequence LIMIT 64").map_err(error)?;
+                let mut query = connection.prepare("SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 ORDER BY sequence LIMIT 64").map_err(error)?;
                 let rows = query.query_map(params![key.session_id, key.branch_id, sql_sequence(next)?], |row| Ok((
-                    read_sequence(row,0)?, read_sequence(row,1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,i64>(4)?, row.get::<_,Option<String>>(5)?
+                    read_sequence(row,0)?, read_sequence(row,1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<String>>(4)?
                 ))).map_err(error)?;
                 let mut cache = ContentCache::default();
                 rows.map(|row| {
-                    let (first,last,kind,body,checkpoint,event_id) = row.map_err(error)?;
+                    let (first,last,kind,body,event_id) = row.map_err(error)?;
                     let records = decode_row(connection, &key.session_id, &kind, &body, &mut cache)?;
                     let indexed = !matches!(kind.as_str(), "step/text" | "step/thinking");
                     if indexed && event_id.as_deref() != Some(records[0].event.id.as_str()) || !indexed && event_id.is_some() {
                         return Err(error("event identity index does not match row"));
                     }
-                    Ok((first,last,kind,checkpoint,records))
+                    Ok((first,last,kind,records))
                 }).collect::<Result<Vec<_>>>()
             }).await?;
             if page.is_empty() {
                 break;
             }
-            for (first, last, kind, checkpoint, records) in page {
-                if !(0..=1).contains(&checkpoint) {
-                    return Err(error("invalid compaction checkpoint flag"));
-                }
+            for (first, last, kind, records) in page {
                 if first != next || records.last().unwrap().event.sequence != last {
                     return Err(error("Timeline contains a sequence gap"));
                 }
@@ -1113,26 +1135,13 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
                     }) {
                         return Err(error("before trace does not match event"));
                     }
-                    let actual_checkpoint = matches!(&record.event.kind, EventKind::ContextCompaction(data) if data.is_checkpoint());
-                    if (checkpoint == 1) != actual_checkpoint {
-                        return Err(error("invalid compaction checkpoint index"));
-                    }
                     if let EventKind::BranchCreate(data) = &record.event.kind {
                         created.insert(data.branch.clone());
                     }
                     if let EventKind::ContextCompaction(data) = &record.event.kind
-                        && actual_checkpoint
-                        && let ContextCompactionResult::Completed {
-                            checkpoint: Some(checkpoint),
-                            ..
-                        } = &data.outcome
+                        && matches!(data.outcome, ContextCompactionResult::Completed { .. })
                     {
-                        checkpoints.push((
-                            id.clone(),
-                            record.event.sequence,
-                            data.through,
-                            checkpoint.resume.clone(),
-                        ));
+                        completions.push((id.clone(), record.event.sequence, data.through));
                     }
                     next += 1;
                 }
@@ -1211,9 +1220,9 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
                 .as_ref();
         }
     }
-    for (branch, at, through, resume) in checkpoints {
+    for (branch, at, through) in completions {
         if through >= at || through > branches[&branch].sequence {
-            return Err(error("checkpoint refers to a future preparation boundary"));
+            return Err(error("compaction refers to a future preparation boundary"));
         }
         let key = TimelineKey {
             session_id: session.into(),
@@ -1222,28 +1231,7 @@ async fn validate_session(db: &Arc<SqliteStorage>, session: &str) -> Result<Vec<
         if through > 0 {
             db.run(move |connection| read_events(connection, &key, through..=through, true))
                 .await
-                .map_err(|_| error("checkpoint preparation boundary is inside an atomic batch"))?;
-        }
-        let mut current = &branch;
-        let mut limit = through;
-        loop {
-            if current == &resume.branch_id {
-                if resume.sequence == 0
-                    || resume.sequence > limit
-                    || resume.sequence > branches[current].sequence
-                {
-                    return Err(error("invalid compaction checkpoint resume position"));
-                }
-                break;
-            }
-            let info = &branches[current].info;
-            let Some(parent) = &info.parent else {
-                return Err(error(
-                    "checkpoint resume branch is outside the ancestor chain",
-                ));
-            };
-            limit = info.branch_point.unwrap();
-            current = parent;
+                .map_err(|_| error("compaction preparation boundary is inside an atomic batch"))?;
         }
     }
     Ok(branches.into_values().collect())

@@ -81,7 +81,6 @@ impl ContextModel for Context {
                 summary: "short".into(),
                 diagnostics: Box::new(diagnostics),
                 context_baseline: Vec::new(),
-                checkpoint: None,
             })
         })
     }

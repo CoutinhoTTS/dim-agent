@@ -47,7 +47,8 @@ impl ConfigurationPublisher {
         inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot) -> Vec<InputBlock> + Send,
         register: impl FnOnce(&[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> + Send,
     ) -> dim_agent_runtime::Result<Option<u64>> {
-        let context = self.timeline.context(self.timeline.sequence()).await?;
+        let context =
+            crate::history::read_context(&self.timeline, self.timeline.sequence()).await?;
         let before = PromptSnapshot::from_context(&context);
         for change in &changes {
             let scope = match change {
@@ -428,8 +429,8 @@ impl ContextPreparation {
         *self.prepared.lock().unwrap() =
             Some((source.turn_id.clone(), source.through, request.clone()));
         let context = self
-            .timeline
-            .context(source.through)
+            .history
+            .context(&self.timeline, source.through)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
         crate::context_policy::check_cancel(&cancel)?;

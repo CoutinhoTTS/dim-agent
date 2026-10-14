@@ -141,6 +141,65 @@ async fn run(options: Options) -> Result<i32> {
             }
             Ok(0)
         }
+        Action::McpList => {
+            #[derive(serde::Deserialize)]
+            struct Catalog {
+                servers: Vec<Server>,
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Server {
+                id: String,
+                source: String,
+                enabled: bool,
+                transport: String,
+                approval: String,
+                approval_token: Option<String>,
+            }
+            let catalog: Catalog = client
+                .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
+                .await?;
+            for server in catalog.servers {
+                // Debug escaping preserves IDs on one line, including C1 and
+                // bidi controls that JSON permits as literal Unicode characters.
+                println!(
+                    "{:?}\t{}\t{}\t{}\t{}\t{}",
+                    server.id,
+                    display::safe(&server.source),
+                    display::safe(&server.transport),
+                    if server.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    display::safe(&server.approval),
+                    display::safe(server.approval_token.as_deref().unwrap_or("-"))
+                );
+            }
+            eprintln!(
+                "Columns: ID, source, transport, enablement, approval, fingerprint.\nBefore approving, inspect this workspace's .mcp.json and the code or endpoint it runs. Pass the fingerprint from this listing; approval may start discovery in active sessions."
+            );
+            Ok(0)
+        }
+        Action::McpApprove { id, token } => {
+            client
+                .rpc(
+                    "mcp.approve",
+                    serde_json::json!({"cwd":options.cwd,"id":id,"approvalToken":token}),
+                )
+                .await?;
+            println!("Project MCP configuration approved. Active sessions may now connect.");
+            Ok(0)
+        }
+        Action::McpRevoke(id) => {
+            client
+                .rpc("mcp.revoke", serde_json::json!({"cwd":options.cwd,"id":id}))
+                .await?;
+            println!(
+                "Project MCP approval revoked and connections closed. Earlier external effects are not undone."
+            );
+            Ok(0)
+        }
         Action::Chat => session::chat(&mut client, &options).await,
         Action::Help | Action::Version | Action::DaemonStop => unreachable!(),
     }

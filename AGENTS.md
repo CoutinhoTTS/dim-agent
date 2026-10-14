@@ -12,6 +12,7 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - Process serves delivery; keep effort proportional to the complexity and risk of the change. Handle ordinary changes directly and only delegate complex work that can progress independently. Tracking issues individually does not mean a separate agent, report or full verification run per issue.
 - Development and tests use an isolated `--home` (or `DIMCODE_HOME`); never touch the product home `~/.dimcode`.
 - This is a public repository. The private account plugin, its account realm and token flows, and any credentials stay out of it; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
+- Review correctness, security, compatibility and unnecessary abstraction before committing. Commit complete, reviewable units on their declared parent, with their documentation and observable-behavior tests. Never commit secrets or scratch experiments.
 
 ## Data and interface conventions
 
@@ -21,10 +22,12 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - Do not add read/parse/normalize wrappers for data of a known type; access fields and call interfaces directly. Such a function must correspond to a real external data boundary or business transformation.
 - Missing values and recovery behavior must have a clear business meaning; do not introduce them because of uncertainty about what upstream returns.
 - `ToolResult.content` is the only text the model can read. Handles, cursors and state the model needs later must be written into `content`; `structuredContent` is only for persistence, UI and internal logic.
+- Incompatible persistence changes require an explicit format decision; do not silently reuse a version for incompatible committed formats. Validate against disposable databases, never a user's existing store.
 
 ## Documentation
 
 - Cross-module flows live in higher-level documents; lower-level documents only describe their own inputs, outputs and error contracts.
+- Read the [foundation ADR](docs/adr/001-harness-foundation.md) for branch implementation status and proposals requiring maintainer alignment. Keep accepted decisions, implemented contracts and proposals distinct. A branch implementation does not supersede an issue's agreed design, and contributors must not be required to use APIs that do not exist yet.
 
 ## Testing
 
@@ -69,3 +72,7 @@ Event, state and ownership principles follow the [architecture document](docs/ar
 5. Crate dependency restrictions are enforced by `xtask check`; run `check` / `graph` as described [above](#architecture-graphs-and-boundary-checks) after adding or removing a Capability or changing assembly or crate dependencies.
 6. When requirements change, update or delete old assertions to match. Use `tests/integration` for everyday behavior verification. The event format fixtures in `crates/dim-agent-types/tests/fixtures/` are a frozen compatibility baseline; do not change them as a side effect of other work.
 7. Before writing code, read the relevant design section and neighboring implementation, and reuse existing mechanisms: `Dispatcher` subscriptions, `StateCell`, and host ports (`PrepareModelHost`, `ModelHost`, `ToolHost`, etc.; see `tests/extension-a` and `tests/extension-b` for examples).
+8. Settle a generation's accepted work and required terminal facts before removing its services. Detaching a client is not closing a Session. Runtime handles are not durable identities.
+9. Publish Timeline events only after their atomic batch commits. Compression facts are durable history; recovery snapshots are optional derived state and cannot replace required facts.
+10. Under the current public protocol, runtime context injection uses adopted inputs containing final content. Domain-specific history rendering must not introduce another context-input path. The dynamic-event projection proposal is subject to the maintainer alignment recorded in the foundation ADR.
+11. A trusted in-process plugin is not sandboxed by dependency declarations. Authorization and isolation require explicit host execution boundaries. Project MCP discovery and calls require host-local approval of the current scoped configuration, including through retained tool bindings; file-root authorization, tool permission presets and replay never confer that approval. See the foundation ADR's trust contract.

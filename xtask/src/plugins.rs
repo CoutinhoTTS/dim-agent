@@ -2,9 +2,9 @@
 //!
 //! `graph` assembles the local execution profile, records its live rutis
 //! diagnostics in `generated/local/services.json`, and rewrites the generated
-//! block of every plugin document from them. `check` reads the recorded
-//! diagnostics and fails when a block is stale or when the hand-written
-//! `## 依赖` table does not name exactly the plugin's injected services.
+//! block of every plugin document from them. `check` requires a document for
+//! every business plugin in that profile and checks its generated block and
+//! hand-written `## Dependencies` (or `## 依赖`) table against the diagnostics.
 use dim_agent_capabilities::{
     defaults,
     file_storage::FileStoragePlugin,
@@ -30,6 +30,18 @@ const BEGIN: &str = "<!-- generated:plugin ";
 const END: &str = "<!-- /generated -->";
 const TOOLS: [&str; 8] = [
     "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+];
+// Runtime assembly and the scripted model adapter are not business plugins.
+// Keep this exclusion list narrow: a newly assembled capability needs a page.
+const INFRASTRUCTURE: [&str; 8] = [
+    "rutis-loader",
+    "session",
+    "branch",
+    "SessionScope",
+    "BranchScope",
+    "SessionBroadcast",
+    "SessionBroadcastEnd",
+    "PrepareModelHost",
 ];
 
 fn docs_dir(root: &Path) -> PathBuf {
@@ -148,12 +160,22 @@ pub fn write(root: &Path, graphs: &BTreeMap<&'static str, Value>) -> Result<()> 
 pub fn check(root: &Path) -> Result<()> {
     let documents = documents(root)?;
     if documents.is_empty() {
-        return Ok(());
+        return Err(format!("{}: no plugin documents", docs_dir(root).display()).into());
     }
     let graphs: BTreeMap<String, Value> =
         serde_json::from_str(&std::fs::read_to_string(graph_file(root))?)?;
     let facts = Facts::new(&graphs);
     let mut errors = Vec::new();
+    let documented: BTreeSet<_> = documents.iter().map(|(_, name)| name.as_str()).collect();
+    for (_, plugin) in &facts.plugins {
+        let name = plugin["name"].as_str().ok_or("plugin graph has no name")?;
+        if !INFRASTRUCTURE.contains(&name) && !documented.contains(name) {
+            errors.push(format!(
+                "business plugin `{name}` has no document in {}",
+                docs_dir(root).display()
+            ));
+        }
+    }
     for (path, name) in &documents {
         let text = std::fs::read_to_string(path)?;
         let (_, block, _) = split_block(&text, name, path)?;
@@ -172,13 +194,13 @@ pub fn check(root: &Path) -> Result<()> {
         let explained = dependency_rows(&text);
         for missing in injected.difference(&explained) {
             errors.push(format!(
-                "{}: `## 依赖` does not explain injected `{missing}`",
+                "{}: dependency table does not explain injected `{missing}`",
                 path.display()
             ));
         }
         for extra in explained.difference(&injected) {
             errors.push(format!(
-                "{}: `## 依赖` explains `{extra}`, which the plugin does not inject",
+                "{}: dependency table explains `{extra}`, which the plugin does not inject",
                 path.display()
             ));
         }
@@ -194,9 +216,7 @@ pub fn check(root: &Path) -> Result<()> {
 /// `(path, plugin name)` of every document; the file stem is the plugin name.
 fn documents(root: &Path) -> Result<Vec<(PathBuf, String)>> {
     let dir = docs_dir(root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(Vec::new());
-    };
+    let entries = std::fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let mut documents = Vec::new();
     for entry in entries {
         let path = entry?.path();
@@ -224,13 +244,13 @@ fn split_block<'a>(text: &'a str, name: &str, path: &Path) -> Result<(&'a str, &
     Ok((&text[..start], &text[start..end], &text[end..]))
 }
 
-/// First-column codes of the table under `## 依赖`.
+/// First-column codes of the hand-written dependency table.
 fn dependency_rows(text: &str) -> BTreeSet<String> {
     let mut rows = BTreeSet::new();
     let mut inside = false;
     for line in text.lines() {
         if line.starts_with("## ") {
-            inside = line.trim() == "## 依赖";
+            inside = matches!(line.trim(), "## Dependencies" | "## 依赖");
             continue;
         }
         let Some(cell) = line
@@ -386,5 +406,79 @@ mod tests {
             dependency_rows(text),
             BTreeSet::from(["B:Permission".to_owned()])
         );
+    }
+
+    #[test]
+    fn documentation_check_requires_complete_profile_and_exact_dependencies() {
+        let root = std::env::temp_dir().join(format!(
+            "dim-plugin-doc-check-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let result = (|| -> Result<()> {
+            assert!(check(&root).is_err(), "missing directory must not pass");
+            std::fs::create_dir_all(docs_dir(&root))?;
+            let mut graphs = BTreeMap::from([(
+                "main",
+                serde_json::json!({
+                    "plugins": [
+                        {"id":1,"name":"branch","injects":[],"resolved":[]},
+                        {"id":2,"name":"Example","injects":[{"service":"crate::Timeline@main"}],"resolved":[]}
+                    ],
+                    "bindings":[]
+                }),
+            )]);
+            write(&root, &graphs)?;
+            assert!(check(&root).is_err(), "empty document set must not pass");
+            let path = docs_dir(&root).join("Example.md");
+            let page = format!(
+                "# Example\n\n## Dependencies\n\n| Service | Purpose |\n| --- | --- |\n| `B:Timeline` | Commit results |\n\n{BEGIN}Example -->\n{END}\n"
+            );
+            std::fs::write(&path, &page)?;
+            write(&root, &graphs)?;
+            check(&root)?;
+            let valid = std::fs::read_to_string(&path)?;
+            std::fs::write(
+                &path,
+                valid.replace("| `B:Timeline` | Commit results |", ""),
+            )?;
+            assert!(
+                check(&root).is_err(),
+                "a missing dependency explanation must fail"
+            );
+            std::fs::write(&path, &valid)?;
+            graphs.get_mut("main").unwrap()["plugins"]
+                .as_array_mut()
+                .unwrap()
+                .push(
+                    serde_json::json!({"id":3,"name":"NewCapability","injects":[],"resolved":[]}),
+                );
+            write(&root, &graphs)?;
+            assert!(
+                check(&root).is_err(),
+                "new business plugins require documentation"
+            );
+            graphs.get_mut("main").unwrap()["plugins"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+            write(&root, &graphs)?;
+            std::fs::write(
+                docs_dir(&root).join("Removed.md"),
+                page.replace("Example", "Removed"),
+            )?;
+            assert!(
+                check(&root).is_err(),
+                "removed plugins must not retain orphan documents"
+            );
+            std::fs::remove_file(docs_dir(&root).join("Removed.md"))?;
+            check(&root)
+        })();
+        std::fs::remove_dir_all(root).unwrap();
+        result.unwrap();
     }
 }

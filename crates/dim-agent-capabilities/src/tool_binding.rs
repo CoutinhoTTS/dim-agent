@@ -201,7 +201,7 @@ impl ToolBinding {
         timeline: &Timeline,
         cancel: &CancellationToken,
     ) -> dim_agent_runtime::Result<()> {
-        let prefix = timeline.context(timeline.sequence()).await?;
+        let prefix = crate::history::read_context(timeline, timeline.sequence()).await?;
         let Some(configuration) = context_configuration(&prefix) else {
             return Ok(());
         };

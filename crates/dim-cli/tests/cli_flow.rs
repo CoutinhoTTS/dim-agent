@@ -204,35 +204,62 @@ fn daemon_stop_without_an_endpoint_never_creates_state_or_spawns_a_server() {
 }
 
 #[test]
-fn daemon_stop_waits_for_graceful_closure_while_retaining_home_state() {
+fn daemon_stop_waits_for_completion_and_closure_without_touching_a_successor() {
     let home = Home::new();
     fs::write(home.0.join("account-marker"), "retained").unwrap();
     let socket = home.0.join("rust/daemon.sock");
     let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":"0".repeat(64)},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":"0".repeat(64)},"features":["session.create","session.history","daemon.shutdown.completed"]}));
         let shutdown = wire.read("daemon.shutdown");
         assert_eq!(shutdown["params"], json!({}));
+        thread::sleep(Duration::from_millis(100));
+        fs::remove_file(&socket).unwrap();
+        let _successor = UnixListener::bind(&socket).unwrap();
         wire.reply(&shutdown, json!({}));
         thread::sleep(Duration::from_millis(100));
         wire.0.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
-        thread::sleep(Duration::from_millis(100));
-        fs::remove_file(socket).unwrap();
     });
     let started = Instant::now();
     let output = home.command().args(["daemon", "stop"]).output().unwrap();
+    let elapsed = started.elapsed();
     daemon.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(started.elapsed() >= Duration::from_millis(200));
-    assert!(!home.0.join("rust/daemon.sock").exists());
+    assert!(elapsed >= Duration::from_millis(200));
+    assert!(home.0.join("rust/daemon.sock").exists());
     assert_eq!(
         fs::read_to_string(home.0.join("account-marker")).unwrap(),
         "retained"
     );
+}
+
+#[test]
+fn daemon_stop_never_treats_old_protocol_eof_or_cleanup_failure_as_completion() {
+    for case in ["old", "eof", "failed"] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            let hello = wire.read("hello");
+            let mut features = vec!["session.create", "session.history"];
+            if case != "old" { features.push("daemon.shutdown.completed"); }
+            wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features}));
+            if case == "old" {
+                let mut line = String::new();
+                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "must not stop an incompatible daemon");
+            } else {
+                let request = wire.read("daemon.shutdown");
+                if case == "failed" { wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"Daemon cleanup failed"}})); }
+            }
+        });
+        let output = home.command().args(["daemon", "stop"]).output().unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{case}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Daemon stopped."));
+        assert!(!output.stderr.is_empty());
+    }
 }
 
 #[test]
@@ -721,6 +748,78 @@ impl Drop for OwnedDaemon {
 
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn project_mcp_approval_commands_persist_and_reject_stale_configuration() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let config = home.0.join("model.json");
+    fs::write(
+        &config,
+        include_str!("../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let write_config = |argument: &str| {
+        fs::write(project.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":[argument],"env":{"SECRET":"must-not-print"}}}}).to_string()).unwrap();
+    };
+    write_config("original");
+    let run = |args: &[&str]| {
+        home.command()
+            .arg("--server")
+            .arg(&binary)
+            .arg("--model-config")
+            .arg(&config)
+            .arg("--cwd")
+            .arg(&project)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let list = || {
+        let output = run(&["mcp", "list"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert!(!output.contains("must-not-print"));
+        output
+    };
+    let original = list();
+    assert!(original.contains("\tproject\tstdio\tenabled\trequired\t"));
+    let token = original.trim_end().split('\t').next_back().unwrap();
+    assert_eq!(token.len(), 64);
+    assert!(run(&["mcp", "approve", "docs", token]).status.success());
+    assert!(list().contains("\tapproved\t"));
+    assert!(run(&["daemon", "stop"]).status.success());
+    assert!(list().contains("\tapproved\t"), "restart lost the grant");
+    write_config("changed");
+    assert!(list().contains("\trequired\t"));
+    let rejected = run(&["mcp", "approve", "docs", token]);
+    assert!(!rejected.status.success());
+    assert!(list().contains("\trequired\t"));
+    let current = list();
+    let token = current.trim_end().split('\t').next_back().unwrap();
+    assert!(run(&["mcp", "approve", "docs", token]).status.success());
+    assert!(run(&["mcp", "revoke", "docs"]).status.success());
+    assert!(list().contains("\trequired\t"));
+    let id = "untrusted\u{9b}2J\u{202e}\nname";
+    fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{(id):{"command":"missing-mcp-program"}}}).to_string(),
+    )
+    .unwrap();
+    let escaped = list();
+    assert!(!escaped.contains(['\u{9b}', '\u{202e}']));
+    assert_eq!(escaped.lines().count(), 1);
+    assert!(escaped.contains("untrusted\\u{9b}2J\\u{202e}\\nname"));
+    assert!(run(&["daemon", "stop"]).status.success());
+}
+
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
     let binary = std::env::var("DIM_TEST_APP_SERVER").expect("DIM_TEST_APP_SERVER");
     for mock in [true, false] {
@@ -848,16 +947,20 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             let mut bytes = vec![0; length];
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
-            let names: Vec<_> = request["tools"]
+            let mut names: Vec<_> = request["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(|tool| tool["function"]["name"].as_str().unwrap())
                 .collect();
-            assert_eq!(names.len(), 8);
-            assert!(names.contains(&"read"));
-            assert!(names.contains(&"exec"));
-            assert!(!names.contains(&"echo"));
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                [
+                    "agent", "branch", "edit", "exec", "glob", "grep", "read", "skill", "wait",
+                    "write"
+                ]
+            );
             let frame = |delta, finish| {
                 format!(
                     "data: {}\n\n",

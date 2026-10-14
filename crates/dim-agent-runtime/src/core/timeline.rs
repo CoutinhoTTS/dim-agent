@@ -4,8 +4,8 @@ use crate::{
     TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
-    AgentEvent, ContextCompactionData, ContextCompactionResult, EventDraft, EventKind,
-    TimelinePosition,
+    AgentEvent, ContextCompactionResult, EventDraft, EventKind, ProjectionCheckpoint,
+    RecoverySnapshot, TimelinePosition,
 };
 use rutis::{CordisError, Ctx, Disposer, Event, EventKey, InstanceId, SyncEvent, SyncNext};
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,7 @@ pub struct TimelineTrace {
 /// A checkpoint and the ordered events replayed after its saved projection state.
 #[derive(Debug, Clone)]
 pub struct ContextHistory {
-    pub checkpoint: Option<ContextCompactionData>,
+    pub checkpoint: Option<ProjectionCheckpoint>,
     pub ancestry: Vec<String>,
     pub events: Vec<Arc<AgentEvent>>,
     /// Source addresses corresponding one-to-one with `events`.
@@ -474,7 +474,18 @@ impl Timeline {
             .map(|r| r.event)
             .collect())
     }
+    /// Full fact replay; no interpreter or snapshot is required.
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
+        self.context_from(through, None).await
+    }
+    /// Select an interpreter-compatible cache before decoding or trimming facts.
+    /// Invalid caches are disposable; failures reading required facts are not.
+    pub async fn context_with_checkpoint(
+        &self,
+        through: u64,
+        interpreter: &str,
+        decode: fn(&RecoverySnapshot) -> Option<ProjectionCheckpoint>,
+    ) -> Result<ContextHistory> {
         let through = self.through(Some(through))?;
         let segments: Vec<_> = self
             .0
@@ -483,36 +494,80 @@ impl Timeline {
             .cloned()
             .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
             .collect();
-        let mut checkpoint = None;
-        for (branch, cut) in segments.iter().rev() {
+        for (index, (branch, cut)) in segments.iter().enumerate().rev() {
             if *cut == 0 {
                 continue;
-            }
-            if *branch == self.0.key.branch_id
-                && let Some(found) = self.hot_checkpoint(*cut)
-            {
-                checkpoint = Some(found);
-                break;
             }
             let key = TimelineKey {
                 session_id: self.0.key.session_id.clone(),
                 branch_id: branch.clone(),
             };
-            if let Some(found) = self.0.store.latest_checkpoint(&key, *cut).await? {
-                checkpoint = Some(found);
-                break;
+            let Some(snapshot) = self
+                .0
+                .store
+                .latest_snapshot(&key, *cut, interpreter)
+                .await?
+            else {
+                continue;
+            };
+            if snapshot.interpreter != interpreter
+                || snapshot.sequence == 0
+                || snapshot.sequence > *cut
+            {
+                continue;
             }
+            let Some(checkpoint) = decode(&snapshot) else {
+                continue;
+            };
+            let Some(resume_index) = segments[..=index]
+                .iter()
+                .position(|(id, _)| *id == checkpoint.resume.branch_id)
+            else {
+                continue;
+            };
+            if checkpoint.resume.sequence == 0
+                || checkpoint.resume.sequence > segments[resume_index].1
+            {
+                continue;
+            }
+            // The anchor is a fact, not copied cache metadata. Reading to the
+            // legal branch cut also supports an anchor inside an atomic batch.
+            let anchor = self
+                .records(branch, snapshot.sequence, *cut)
+                .await?
+                .into_iter()
+                .next();
+            let Some(anchor) = anchor else { continue };
+            let EventKind::ContextCompaction(data) = &anchor.event.kind else {
+                continue;
+            };
+            if anchor.event.id != snapshot.event_id
+                || data.through >= snapshot.sequence
+                || (resume_index == index && checkpoint.resume.sequence > data.through)
+                || !matches!(&data.outcome, ContextCompactionResult::Completed { cursor, .. }
+                    if *cursor == checkpoint.state.compacted_through)
+            {
+                continue;
+            }
+            return self.context_from(through, Some(checkpoint)).await;
         }
-        let resume = checkpoint.as_ref().and_then(|data| match &data.outcome {
-            ContextCompactionResult::Completed {
-                checkpoint: Some(checkpoint),
-                ..
-            } => Some(checkpoint.resume.clone()),
-            _ => None,
-        });
+        self.context(through).await
+    }
+    async fn context_from(
+        &self,
+        through: u64,
+        checkpoint: Option<ProjectionCheckpoint>,
+    ) -> Result<ContextHistory> {
+        let through = self.through(Some(through))?;
+        let segments = self
+            .0
+            .ancestors
+            .iter()
+            .cloned()
+            .chain(std::iter::once((self.0.key.branch_id.clone(), through)));
+        let resume = checkpoint.as_ref().map(|checkpoint| &checkpoint.resume);
         let mut active = resume.is_none();
         let ranges: Vec<_> = segments
-            .into_iter()
             .filter_map(|(branch, cut)| {
                 let start = match &resume {
                     Some(position) if !active && position.branch_id == branch => {
@@ -548,21 +603,24 @@ impl Timeline {
             positions,
         })
     }
-    /// The latest checkpoint at or before `through` still in the hot window,
-    /// which may not be in the store yet.
-    fn hot_checkpoint(&self, through: u64) -> Option<ContextCompactionData> {
-        let data = self.0.data.lock().unwrap();
-        data.hot
-            .iter()
-            .rev()
-            .find_map(|record| match &record.event.kind {
-                EventKind::ContextCompaction(data)
-                    if record.event.sequence <= through && data.is_checkpoint() =>
-                {
-                    Some(data.clone())
-                }
-                _ => None,
-            })
+    /// Waits for the anchor's durable publication, then writes only the cache.
+    /// The owner tracks this future along with its other preparation work.
+    pub async fn save_snapshot(&self, snapshot: RecoverySnapshot) -> Result<()> {
+        self.through(Some(snapshot.sequence))?;
+        let mut changed = self.watch();
+        loop {
+            if let Some(error) = self.failure() {
+                return Err(error);
+            }
+            if self.sequence() >= snapshot.sequence {
+                break;
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| AgentError::Closed(self.0.key.branch_id.clone()))?;
+        }
+        self.0.store.save_snapshot(&self.0.key, snapshot).await
     }
     pub async fn trace(&self, sequence: u64) -> Result<Option<TimelineTrace>> {
         self.through(Some(sequence))?;

@@ -440,7 +440,7 @@ impl AgentLoop {
                     source.request_id = request_id.clone();
                     return Ok(source);
                 }
-                let prefix = owner.timeline.context(through).await?;
+                let prefix = owner.history.context(&owner.timeline, through).await?;
                 let configuration = context_configuration(&prefix);
                 let prompt = PromptSnapshot::from_context(&prefix).revision;
                 let entries = (owner.history.render)(&prefix)

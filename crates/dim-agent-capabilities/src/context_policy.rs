@@ -1,5 +1,7 @@
 use crate::{
-    history::{HistoryEntry, HistoryRenderer, context_messages, summary_message},
+    history::{
+        HistoryEntry, HistoryRenderer, context_compaction, context_messages, summary_message,
+    },
     host::*,
 };
 use dim_agent_runtime::{ContextHistory, Timeline};
@@ -96,22 +98,19 @@ impl ContextPolicy {
                     CompactionInput {
                         history: history.clone(),
                         checkpoint: checkpoint.or_else(|| {
-                            context
-                                .checkpoint
-                                .as_ref()
-                                .and_then(|data| match &data.outcome {
-                                    ContextCompactionResult::Completed {
-                                        cursor,
-                                        summary,
-                                        context_baseline,
-                                        ..
-                                    } => Some(CompactionCheckpoint {
-                                        cursor: cursor.clone(),
-                                        summary: summary.clone(),
-                                        context_baseline: context_baseline.clone().into(),
-                                    }),
-                                    _ => None,
-                                })
+                            context_compaction(&context).and_then(|data| match &data.outcome {
+                                ContextCompactionResult::Completed {
+                                    cursor,
+                                    summary,
+                                    context_baseline,
+                                    ..
+                                } => Some(CompactionCheckpoint {
+                                    cursor: cursor.clone(),
+                                    summary: summary.clone(),
+                                    context_baseline: context_baseline.clone().into(),
+                                }),
+                                _ => None,
+                            })
                         }),
                         estimated_input_tokens: estimate.input,
                         baseline_source: estimate.source,
@@ -158,7 +157,6 @@ impl ContextPolicy {
                 summary,
                 context_baseline,
                 diagnostics,
-                checkpoint,
             } = &mut outcome
             {
                 match authoritative_baseline(&history, cursor).and_then(|baseline| {
@@ -167,10 +165,6 @@ impl ContextPolicy {
                 }) {
                     Ok(baseline) => {
                         *context_baseline = baseline.to_vec();
-                        *checkpoint = Some(Box::new(
-                            (self.history.checkpoint)(&context, cursor)
-                                .map_err(HostError::failed)?,
-                        ));
                     }
                     Err(error) => {
                         outcome = ContextCompactionResult::Failed {
@@ -204,6 +198,22 @@ impl ContextPolicy {
                     ..
                 } => {
                     prepared = compacted_request(cursor, summary, context_baseline.clone().into())?;
+                    // Build from the final middleware-adopted cursor, then save
+                    // independently of the immutable fact. Cache failures do
+                    // not discard a successful summary or repeat model work.
+                    if data.through == source.through {
+                        let saved = async {
+                            let snapshot = self.history.snapshot(&context, cursor, &event)?;
+                            self.timeline
+                                .save_snapshot(snapshot)
+                                .await
+                                .map_err(|error| error.to_string())
+                        }
+                        .await;
+                        if saved.is_err() {
+                            tracing::warn!("projection snapshot unavailable; using fact replay");
+                        }
+                    }
                 }
                 ContextCompactionResult::Failed { error, .. } if source.recovery.is_some() => {
                     return Err(HostError::failed(error.clone()));

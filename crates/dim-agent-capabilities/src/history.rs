@@ -1,6 +1,8 @@
 use crate::prompt_state::PromptSnapshot;
-use dim_agent_runtime::ContextHistory;
+use dim_agent_runtime::{ContextHistory, Timeline};
 use dim_agent_types::*;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 
 /// Adopt the stable guide together with the renderer's system configuration.
@@ -35,9 +37,56 @@ pub struct HistoryEntry {
 pub type RenderHistory = fn(&ContextHistory) -> Result<Vec<HistoryEntry>, String>;
 pub type BuildProjectionCheckpoint =
     fn(&ContextHistory, &str) -> Result<ProjectionCheckpoint, String>;
+pub type EncodeProjectionCheckpoint =
+    fn(&RecoverySnapshot, &ProjectionCheckpoint) -> Result<String, String>;
 pub struct HistoryRenderer {
     pub render: RenderHistory,
     pub checkpoint: BuildProjectionCheckpoint,
+    /// Identifies the saved projection semantics, independently of store format.
+    pub checkpoint_interpreter: &'static str,
+    /// Paired codec owned by the interpreter. The encoder receives snapshot
+    /// identity with empty state; custom formats must override both callbacks.
+    /// Builders are trusted to produce replay-equivalent state. Integrity checks
+    /// detect persisted corruption, not incorrect or malicious trusted producers.
+    pub encode_checkpoint: EncodeProjectionCheckpoint,
+    pub decode_checkpoint: fn(&RecoverySnapshot) -> Option<ProjectionCheckpoint>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CheckpointEnvelope {
+    payload: String,
+    sha256: String,
+}
+
+fn checkpoint_digest(snapshot: &RecoverySnapshot, payload: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"dim/recovery-snapshot/v1\0");
+    hash.update(snapshot.sequence.to_be_bytes());
+    for value in [&snapshot.event_id, &snapshot.interpreter, payload] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn encode_checkpoint(
+    snapshot: &RecoverySnapshot,
+    checkpoint: &ProjectionCheckpoint,
+) -> Result<String, String> {
+    let payload = serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
+    serde_json::to_string(&CheckpointEnvelope {
+        sha256: checkpoint_digest(snapshot, &payload),
+        payload,
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn decode_checkpoint(snapshot: &RecoverySnapshot) -> Option<ProjectionCheckpoint> {
+    let envelope: CheckpointEnvelope = serde_json::from_str(&snapshot.state).ok()?;
+    if envelope.sha256 != checkpoint_digest(snapshot, &envelope.payload) {
+        return None;
+    }
+    serde_json::from_str(&envelope.payload).ok()
 }
 
 impl Default for HistoryRenderer {
@@ -45,8 +94,57 @@ impl Default for HistoryRenderer {
         Self {
             render: project_context_history,
             checkpoint: projection_checkpoint,
+            checkpoint_interpreter: "dim/context-projection/v2",
+            encode_checkpoint,
+            decode_checkpoint,
         }
     }
+}
+
+impl HistoryRenderer {
+    /// Encode optional state only after the final compaction fact is adopted.
+    pub fn snapshot(
+        &self,
+        context: &ContextHistory,
+        cursor: &str,
+        anchor: &AgentEvent,
+    ) -> Result<RecoverySnapshot, String> {
+        let checkpoint = (self.checkpoint)(context, cursor)?;
+        let mut snapshot = RecoverySnapshot {
+            sequence: anchor.sequence,
+            event_id: anchor.id.clone(),
+            interpreter: self.checkpoint_interpreter.into(),
+            state: String::new(),
+        };
+        snapshot.state = (self.encode_checkpoint)(&snapshot, &checkpoint)?;
+        Ok(snapshot)
+    }
+
+    pub async fn context(
+        &self,
+        timeline: &Timeline,
+        through: u64,
+    ) -> dim_agent_runtime::Result<ContextHistory> {
+        let context = timeline
+            .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
+            .await?;
+        // Storage validates the anchor; only the interpreter can establish that
+        // the cached state can replay its suffix. An incomplete but decodable
+        // cache must not prevent recovery from intact facts. Do not catch errors
+        // reading those facts, or suppress a later full-replay failure.
+        if context.checkpoint.is_some() && (self.render)(&context).is_err() {
+            return timeline.context(through).await;
+        }
+        Ok(context)
+    }
+}
+
+/// Read the shared prompt/input/output projection using its supported cache.
+pub async fn read_context(
+    timeline: &Timeline,
+    through: u64,
+) -> dim_agent_runtime::Result<ContextHistory> {
+    HistoryRenderer::default().context(timeline, through).await
 }
 
 /// One message an input or the projection places, with the in-effect
@@ -344,11 +442,23 @@ fn initial_state(context: &ContextHistory) -> Option<&ProjectionCheckpointState>
     context
         .checkpoint
         .as_ref()
-        .and_then(|data| match &data.outcome {
-            ContextCompactionResult::Completed {
-                checkpoint: Some(checkpoint),
-                ..
-            } => Some(&checkpoint.state),
+        .map(|checkpoint| &checkpoint.state)
+}
+
+/// Compression is a durable fact, not a side effect of selecting a snapshot.
+/// The snapshot resumes before its anchoring fact; the suffix retains every
+/// subsequent compression, including completions without a saved snapshot.
+pub(crate) fn context_compaction(context: &ContextHistory) -> Option<&ContextCompactionData> {
+    context
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data)
+                if matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
+            {
+                Some(data)
+            }
             _ => None,
         })
 }
@@ -358,10 +468,13 @@ pub fn project_context_history(context: &ContextHistory) -> Result<Vec<HistoryEn
     if let Some(ContextCompactionData {
         outcome: ContextCompactionResult::Completed { cursor, .. },
         ..
-    }) = &context.checkpoint
-        && let Some(index) = history.iter().position(|entry| &entry.id == cursor)
+    }) = context_compaction(context)
     {
-        history.drain(..=index);
+        if let Some(index) = history.iter().position(|entry| &entry.id == cursor) {
+            history.drain(..=index);
+        } else if !initial_state(context).is_some_and(|state| state.compacted_through == *cursor) {
+            return Err("Compaction cursor is outside the fixed context history.".into());
+        }
     }
     Ok(history)
 }
@@ -376,7 +489,7 @@ pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> V
                 ..
             },
         ..
-    }) = &context.checkpoint
+    }) = context_compaction(context)
     {
         messages.push(summary_message(summary));
         messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));

@@ -961,6 +961,70 @@ async fn malformed_native_block_lifecycle_is_a_classified_failure() {
     root.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn chat_reasoning_can_reopen_a_completed_segment_identity() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    // Real Chat providers send empty content alongside nonempty reasoning.
+    // AiMux closes and reopens reasoning-0; each balanced lifetime is distinct.
+    let body = frame(
+        json!({"reasoning_content":"first", "content":""}),
+        Value::Null,
+    ) + &frame(
+        json!({"reasoning_content":" second", "content":""}),
+        Value::Null,
+    ) + &frame(json!({"content":"answer"}), json!("stop"))
+        + "data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(capability_plugin(AimuxPlugin)).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiCompatible,
+                base_url: server.uri(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut thoughts = vec![];
+    let mut text = String::new();
+    let mut stopped = false;
+    while let Some(chunk) = stream.next().await {
+        match chunk.unwrap() {
+            ModelChunk::ThinkingEnd { thinking } => thoughts.push(thinking),
+            ModelChunk::Text(delta) => text.push_str(&delta),
+            ModelChunk::MessageStop { .. } => stopped = true,
+            _ => {}
+        }
+    }
+    assert_eq!(thoughts, ["first", " second"]);
+    assert_eq!(text, "answer");
+    assert!(stopped);
+    root.shutdown().await.unwrap();
+}
+
 async fn invoke_failure(
     host: &ModelHost,
     protocol: ModelProtocol,

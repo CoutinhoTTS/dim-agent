@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     io,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     time::Duration,
 };
@@ -65,15 +65,14 @@ pub struct Client {
     next_id: u64,
     frame: Vec<u8>,
     pub notices: VecDeque<Message>,
-    #[cfg(unix)]
-    endpoint: (PathBuf, u64, u64),
+    shutdown_completion: bool,
     #[cfg(windows)]
     _bridge: tokio::process::Child,
 }
 impl Client {
     async fn open(endpoint: &Path, _binary: &Path) -> io::Result<Self> {
         #[cfg(unix)]
-        let (stream, endpoint) = {
+        let stream = {
             use std::os::unix::fs::FileTypeExt;
             use std::os::unix::fs::MetadataExt;
             let metadata = std::fs::symlink_metadata(endpoint)?;
@@ -93,10 +92,7 @@ impl Client {
                     "Daemon belongs to a different user",
                 ));
             }
-            (
-                stream,
-                (endpoint.to_owned(), metadata.dev(), metadata.ino()),
-            )
+            stream
         };
         #[cfg(windows)]
         let (read, write, bridge) = {
@@ -150,8 +146,7 @@ impl Client {
             next_id: 0,
             frame: Vec::new(),
             notices: VecDeque::new(),
-            #[cfg(unix)]
-            endpoint,
+            shutdown_completion: false,
             #[cfg(windows)]
             _bridge: bridge,
         })
@@ -267,6 +262,10 @@ impl Client {
         if profile.is_some_and(|profile| &hello.daemon_profile != profile) {
             return Err("Existing daemon uses a different model profile; use a separate --home for --model-config".into());
         }
+        self.shutdown_completion = hello
+            .features
+            .iter()
+            .any(|feature| feature == "daemon.shutdown.completed");
         Ok(())
     }
 }
@@ -282,6 +281,9 @@ pub async fn stop(options: &Options) -> Result<i32> {
         println!("Daemon is not running.");
         return Ok(0);
     };
+    if !client.shutdown_completion {
+        return Err("Daemon does not support verified shutdown completion; stop the older daemon with its matching CLI before restarting".into());
+    }
     tokio::time::timeout(Duration::from_secs(30), async {
         client.rpc("daemon.shutdown", json!({})).await?;
         loop {
@@ -292,17 +294,9 @@ pub async fn stop(options: &Options) -> Result<i32> {
             let size = buffer.len();
             client.read.consume(size);
         }
-        #[cfg(unix)]
-        loop {
-            use std::os::unix::fs::MetadataExt;
-            let (path, device, inode) = &client.endpoint;
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.dev() == *device && metadata.ino() == *inode => {}
-                Ok(_) => break,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-                Err(error) => return Err(error.into()),
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        #[cfg(windows)]
+        if !client._bridge.wait().await?.success() {
+            return Err("Daemon transport bridge did not close successfully".into());
         }
         Ok::<_, crate::Error>(())
     })
@@ -355,7 +349,7 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
             "{:x}",
             Sha256::digest(format!("dimcode:{}", native_home.display()))
         );
-        PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
+        std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
     let binary = match &options.server {
         Some(path) => path.clone(),

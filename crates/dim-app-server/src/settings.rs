@@ -1,10 +1,14 @@
-//! Product settings over L0 file leases. No MCP connections or Skill discovery.
+//! Source-targeted settings. No MCP connections or Skill discovery.
+mod mcp_approval;
+mod native;
+
+use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
 use dim_agent_capabilities::skill_settings::{
     SettingsVersion, SkillSettings as SkillSettingsPort, SkillSettingsError, SkillSettingsHost,
     SkillSettingsSnapshot,
 };
-use dim_agent_runtime::{Capability, KeysOf, StateCell, scoped};
+use dim_agent_runtime::{Capability, KeysOf, StateCell, When};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,6 +31,8 @@ pub enum SettingsError {
     Closed,
     #[error("settings operation cancelled")]
     Cancelled,
+    #[error("settings persistence failed; read the current revision before retrying")]
+    Persistence,
     #[error("settings worker failed: {0}")]
     Worker(#[from] tokio::task::JoinError),
 }
@@ -45,7 +51,7 @@ pub type Result<T> = std::result::Result<T, SettingsError>;
 
 /// Roots are authorized FileStorage indices supplied by the product host, not
 /// arbitrary paths received from RPC. Project files are always `.mcp.json`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SettingsSource {
     UserMcp,
     ProjectMcp(usize),
@@ -138,6 +144,7 @@ enum SettingsChange {
 
 pub struct SettingsService {
     files: Arc<FileStorage>,
+    database: Option<Arc<SqliteStorage>>,
     home_root: usize,
     projects: Arc<Mutex<BTreeMap<PathBuf, usize>>>,
     stopping: CancellationToken,
@@ -154,6 +161,9 @@ impl SettingsService {
         cwd: PathBuf,
         cancel: &CancellationToken,
     ) -> Result<usize> {
+        if cwd.to_str().is_none() {
+            return Err(SettingsError::Invalid("project cwd must be UTF-8"));
+        }
         let task = {
             let _guard = self.gate.lock().unwrap();
             self.check_open(cancel)?;
@@ -163,7 +173,9 @@ impl SettingsService {
                 let root = owner.files.register_root(cwd.clone(), &cancel).await?;
                 let _guard = owner.gate.lock().unwrap();
                 owner.check_open(&cancel)?;
-                owner.projects.lock().unwrap().insert(cwd, root);
+                if owner.projects.lock().unwrap().insert(cwd, root) != Some(root) {
+                    owner.changed.update(|version| *version += 1);
+                }
                 Ok(root)
             })
         };
@@ -174,13 +186,16 @@ impl SettingsService {
         self.projects.lock().unwrap().get(cwd).copied()
     }
 
-    pub(crate) fn project_path(&self, root: usize) -> Result<PathBuf> {
-        self.projects
-            .lock()
-            .unwrap()
-            .iter()
-            .find_map(|(path, index)| (*index == root).then(|| path.clone()))
-            .ok_or(SettingsError::Invalid("unauthorized project"))
+    pub(crate) fn mcp_sources(&self) -> Vec<(SettingsSource, Option<PathBuf>)> {
+        std::iter::once((SettingsSource::UserMcp, None))
+            .chain(
+                self.projects
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(path, index)| (SettingsSource::ProjectMcp(*index), Some(path.clone()))),
+            )
+            .collect()
     }
 
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -224,11 +239,16 @@ impl SettingsService {
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot> {
         self.check_open(cancel)?;
+        if self.database.is_some()
+            && matches!(source, SettingsSource::UserMcp | SettingsSource::Skills)
+        {
+            return self.native_read(source, cancel).await;
+        }
         decode(source, self.files.read(&self.path(source)?, cancel).await)
     }
 
-    /// CAS is checked against disk under the same lease as replacement, not an
-    /// in-memory counter. It detects edits made outside this service as well.
+    /// CAS is checked in the source's write transaction or file lease, not against
+    /// an in-memory counter. Workspace edits made outside this service are detected.
     pub async fn update(
         self: &Arc<Self>,
         source: SettingsSource,
@@ -277,6 +297,13 @@ impl SettingsService {
         change: SettingsChange,
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot> {
+        if self.database.is_some()
+            && matches!(source, SettingsSource::UserMcp | SettingsSource::Skills)
+        {
+            return self
+                .native_replace(source, expected_revision, change, cancel)
+                .await;
+        }
         let mut lease = loop {
             self.check_open(cancel)?;
             match self.files.lock(&path, cancel).await {
@@ -289,26 +316,12 @@ impl SettingsService {
                 Err(error) => return Err(error.into()),
             }
         };
-        let mut current = decode(source, lease.read(cancel).await)?;
+        let current = decode(source, lease.read(cancel).await)?;
         if current.revision != expected_revision {
             return Err(SettingsError::Conflict);
         }
-        let document = match change {
-            SettingsChange::Replace(document) => document,
-            SettingsChange::SkillEnabled { id, enabled } => {
-                let SettingsDocument::Skills(settings) = &mut current.document else {
-                    unreachable!("Skill updates use the Skills source")
-                };
-                if settings.disabled_skill_ids.contains(&id) != enabled {
-                    return Ok(current);
-                }
-                if enabled {
-                    settings.disabled_skill_ids.retain(|value| value != &id);
-                } else {
-                    settings.disabled_skill_ids.push(id);
-                }
-                current.document
-            }
+        let Some(document) = change.apply(&current.document) else {
+            return Ok(current);
         };
         let mut bytes = match &document {
             SettingsDocument::Mcp(value) => serde_json::to_vec_pretty(value),
@@ -332,6 +345,28 @@ impl SettingsService {
         self.changed.update(|version| *version += 1);
         drop(lease);
         Ok(SettingsSnapshot { revision, document })
+    }
+}
+
+impl SettingsChange {
+    fn apply(self, current: &SettingsDocument) -> Option<SettingsDocument> {
+        match self {
+            Self::Replace(document) => Some(document),
+            Self::SkillEnabled { id, enabled } => {
+                let SettingsDocument::Skills(mut settings) = current.clone() else {
+                    unreachable!("Skill updates use the Skills source")
+                };
+                if settings.disabled_skill_ids.contains(&id) != enabled {
+                    return None;
+                }
+                if enabled {
+                    settings.disabled_skill_ids.retain(|value| value != &id);
+                } else {
+                    settings.disabled_skill_ids.push(id);
+                }
+                Some(SettingsDocument::Skills(settings))
+            }
+        }
     }
 }
 
@@ -520,6 +555,7 @@ pub struct SettingsPlugin {
     home_root: usize,
     project_roots: Vec<usize>,
     projects: Arc<Mutex<BTreeMap<PathBuf, usize>>>,
+    native: bool,
 }
 impl SettingsPlugin {
     pub fn new(home_root: usize, project_roots: Vec<usize>) -> Self {
@@ -527,28 +563,44 @@ impl SettingsPlugin {
             home_root,
             project_roots,
             projects: Arc::new(Mutex::new(BTreeMap::new())),
+            native: false,
+        }
+    }
+
+    /// SQLite owns user documents after their first successful import. Workspace
+    /// files remain authoritative; legacy user files are retained but never dual-written.
+    pub fn native(home_root: usize, project_roots: Vec<usize>) -> Self {
+        Self {
+            native: true,
+            ..Self::new(home_root, project_roots)
         }
     }
 }
 impl TypedPlugin for SettingsPlugin {
-    type Deps = (Arc<FileStorage>,);
+    type Deps = (Arc<FileStorage>, When<Arc<SqliteStorage>>);
     fn name(&self) -> &str {
         "Settings"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (files,): Self::Deps,
+        (files, When(database)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             for root in &self.project_roots {
                 let path = files
                     .root_path(*root)
                     .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                if path.to_str().is_none() {
+                    return Err(CordisError::PluginFailed(Box::new(SettingsError::Invalid(
+                        "project cwd must be UTF-8",
+                    ))));
+                }
                 self.projects.lock().unwrap().insert(path, *root);
             }
             let service = Arc::new(SettingsService {
                 files,
+                database,
                 home_root: self.home_root,
                 projects: self.projects.clone(),
                 stopping: CancellationToken::new(),
@@ -581,6 +633,6 @@ impl TypedPlugin for SettingsPlugin {
 }
 impl Capability for SettingsPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
+        ((), self.native.then_some(()))
     }
 }

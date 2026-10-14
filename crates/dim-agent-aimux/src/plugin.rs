@@ -44,8 +44,8 @@ impl Capability for AimuxPlugin {
     fn keys(&self) -> KeysOf<Self> {}
 }
 
-/// The --model-config development profile owns its catalog and resolver.
-/// The product Provider plugin replaces this profile when it is implemented.
+/// The API-key profile supplies model selection and request-local connections;
+/// execution capabilities are independent of this provider choice.
 pub struct ConfiguredModelsPlugin(pub Arc<AimuxModels>);
 impl TypedPlugin for ConfiguredModelsPlugin {
     type Deps = ();
@@ -59,10 +59,12 @@ impl TypedPlugin for ConfiguredModelsPlugin {
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide_as(TypeKey::of::<AimuxModels>(), self.0.clone())?;
-            ctx.provide(ProviderConnectionResolver(Arc::new(ConfiguredConnection {
+            let resolver = Arc::new(ConfiguredConnection {
                 models: self.0.clone(),
                 generation: ctx.cancellation_token(),
-            })))?;
+            });
+            ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
+            ctx.provide(ModelSelectionHost(resolver))?;
             Ok(Effect::Done)
         })
     }
@@ -73,6 +75,35 @@ impl Capability for ConfiguredModelsPlugin {
 struct ConfiguredConnection {
     models: Arc<AimuxModels>,
     generation: CancellationToken,
+}
+impl ResolveModelSelection for ConfiguredConnection {
+    fn resolve(
+        &self,
+        explicit: Option<dim_agent_types::ModelId>,
+        _: Option<std::path::PathBuf>,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, dim_agent_types::ModelSelection> {
+        Box::pin(async move {
+            if self.generation.is_cancelled() {
+                return Err(HostError::classified(
+                    HostErrorKind::OwnerClosed,
+                    "Model catalog owner is closed",
+                ));
+            }
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled("Model selection cancelled".into()));
+            }
+            let id = explicit.unwrap_or_else(|| self.models.default_model().clone());
+            let model = self.models.get(&id.provider_id, &id.model_id)?;
+            Ok(dim_agent_types::ModelSelection {
+                provider_id: id.provider_id,
+                model_id: id.model_id,
+                capability_snapshot: None,
+                config: Some(model.defaults.clone()),
+                metadata: None,
+            })
+        })
+    }
 }
 impl ResolveModelConnection for ConfiguredConnection {
     fn resolve(

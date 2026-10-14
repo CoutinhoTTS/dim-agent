@@ -2,7 +2,7 @@ use crate::{
     AgentError, BoxFuture, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent,
     TimelineInfo, TimelineKey, TimelineStore, TimelineTrace,
 };
-use dim_agent_types::{BranchCreateAt, ContextCompactionData, EventKind};
+use dim_agent_types::{BranchCreateAt, ContextCompactionResult, EventKind, RecoverySnapshot};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Mutex};
 
 /// In-memory storage for standalone Agents, tests and development profiles.
@@ -15,6 +15,7 @@ struct MemorySession {
 struct MemoryBranch {
     info: TimelineInfo,
     events: Vec<StoredEvent>,
+    snapshots: BTreeMap<(String, u64), RecoverySnapshot>,
 }
 impl MemoryTimelineStore {
     pub(crate) fn remove_session(&self, id: &str) {
@@ -48,6 +49,7 @@ impl TimelineStore for MemoryTimelineStore {
                         create_anchor: None,
                     },
                     events: vec![],
+                    snapshots: BTreeMap::new(),
                 },
             );
             sessions.insert(session_id.into(), session);
@@ -133,6 +135,7 @@ impl TimelineStore for MemoryTimelineStore {
                             create_anchor: Some(record.event.sequence),
                         },
                         events: vec![],
+                        snapshots: BTreeMap::new(),
                     },
                 );
             }
@@ -205,11 +208,43 @@ impl TimelineStore for MemoryTimelineStore {
                 .and_then(|e| e.trace.clone()))
         })
     }
-    fn latest_checkpoint<'a>(
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        snapshot: RecoverySnapshot,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let mut sessions = self.0.lock().unwrap();
+            let branch = sessions
+                .get_mut(&key.session_id)
+                .and_then(|session| session.branches.get_mut(&key.branch_id))
+                .ok_or_else(|| AgentError::Storage("snapshot branch is missing".into()))?;
+            let valid = snapshot
+                .sequence
+                .checked_sub(1)
+                .and_then(|index| branch.events.get(index as usize))
+                .is_some_and(|record| {
+                    record.event.id == snapshot.event_id
+                        && matches!(&record.event.kind, EventKind::ContextCompaction(data)
+                        if matches!(data.outcome, ContextCompactionResult::Completed { .. }))
+                });
+            if !valid {
+                return Err(AgentError::InvalidInput(
+                    "snapshot anchor is not a completed compaction".into(),
+                ));
+            }
+            branch
+                .snapshots
+                .insert((snapshot.interpreter.clone(), snapshot.sequence), snapshot);
+            Ok(())
+        })
+    }
+    fn latest_snapshot<'a>(
         &'a self,
         key: &'a TimelineKey,
         through: u64,
-    ) -> BoxFuture<'a, Result<Option<ContextCompactionData>>> {
+        interpreter: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         Box::pin(async move {
             Ok(self
                 .0
@@ -218,17 +253,10 @@ impl TimelineStore for MemoryTimelineStore {
                 .get(&key.session_id)
                 .and_then(|s| s.branches.get(&key.branch_id))
                 .and_then(|b| {
-                    b.events.iter().rev().find_map(|record| {
-                        if record.event.sequence > through {
-                            return None;
-                        }
-                        match &record.event.kind {
-                            EventKind::ContextCompaction(data) if data.is_checkpoint() => {
-                                Some(data.clone())
-                            }
-                            _ => None,
-                        }
-                    })
+                    b.snapshots
+                        .range((interpreter.to_owned(), 0)..=(interpreter.to_owned(), through))
+                        .next_back()
+                        .map(|(_, snapshot)| snapshot.clone())
                 }))
         })
     }

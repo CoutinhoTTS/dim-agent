@@ -208,6 +208,7 @@ impl ModelDriver for Model {
 
 struct Env {
     root: Ctx,
+    publication: mcp_host::Host,
     home: PathBuf,
     agent: Agent,
     model: Arc<Model>,
@@ -217,6 +218,8 @@ struct Env {
     stop: CancellationToken,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
 }
+#[path = "fixtures/mcp_host.rs"]
+mod mcp_host;
 impl Env {
     async fn new() -> Self {
         let remote = Remote::new();
@@ -242,6 +245,7 @@ impl Env {
         )
         .unwrap();
         let root = Ctx::root().unwrap();
+        let (publication, _) = mcp_host::Host::start(&root).await;
         let views = vec![
             root.plugin(capability_plugin(
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
@@ -284,6 +288,7 @@ impl Env {
         let agent = builder.build_in(&root);
         Self {
             root,
+            publication,
             home,
             agent,
             model,
@@ -339,6 +344,7 @@ impl Env {
     }
     async fn close(self) {
         self.agent.close().await.unwrap();
+        self.publication.close().await;
         self.root.shutdown().await.unwrap();
         self.stop.cancel();
         self.server.await.unwrap().unwrap();
@@ -414,6 +420,127 @@ async fn results(session: &Session) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn project_discovery_does_not_connect_without_execution_approval() {
+    let env = Env::new().await;
+    env.update(
+        SettingsSource::ProjectMcp(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    let mut state = session.session_service::<McpSession>().unwrap().subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if state
+                .borrow_and_update()
+                .servers
+                .get("docs")
+                .is_some_and(|s| !matches!(s, McpSourceState::Connecting))
+            {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // This assertion also runs on the pre-fix source, where discovery connects
+    // before any model tool call and FullAccess offers no execution boundary.
+    let initializes = env.remote.initializes.load(Ordering::SeqCst);
+    env.close().await;
+    assert_eq!(
+        initializes, 0,
+        "unapproved project discovery made an external request"
+    );
+}
+
+#[tokio::test]
+async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_request() {
+    let env = Env::new().await;
+    let cancel = CancellationToken::new();
+    env.update(
+        SettingsSource::ProjectMcp(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    let token = env
+        .directory
+        .catalog(Some(1), &cancel)
+        .await
+        .unwrap()
+        .servers["docs"]
+        .approval_token
+        .clone()
+        .unwrap();
+    env.directory
+        .approve(1, "docs".into(), token, &cancel)
+        .await
+        .unwrap();
+    ready(&session).await;
+    env.turn(
+        &session,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(
+        results(&session)
+            .await
+            .last()
+            .unwrap()
+            .contains("project:8")
+    );
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
+
+    *env.model.actions.lock().unwrap() = VecDeque::from([
+        Action::Call {
+            pause: true,
+            name: None,
+        },
+        Action::Text,
+    ]);
+    session
+        .submit("pause".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), env.model.entered.notified())
+        .await
+        .unwrap();
+    env.directory
+        .revoke(1, "docs".into(), &cancel)
+        .await
+        .unwrap();
+    env.model.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), session.idle("main"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        env.remote.calls.lock().unwrap().len(),
+        1,
+        "retained tool binding bypassed revocation"
+    );
+    assert_eq!(env.remote.deletes.load(Ordering::SeqCst), 1);
+    assert!(results(&session).await.last().unwrap().contains("isError"));
+    let mut state = session.session_service::<McpSession>().unwrap().subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.borrow_and_update().servers.get("docs")
+            != Some(&McpSourceState::ApprovalRequired)
+        {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    env.close().await;
 }
 
 #[tokio::test]

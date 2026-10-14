@@ -274,8 +274,6 @@ pub enum ContextCompactionResult {
         diagnostics: Box<CompactionDiagnosticsRecord>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context_baseline: Vec<ContextBaselineEntry>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        checkpoint: Option<Box<ProjectionCheckpoint>>,
     },
     Skipped {
         reason: String,
@@ -300,21 +298,6 @@ pub struct ContextCompactionData {
     pub through: u64,
     #[serde(flatten)]
     pub outcome: ContextCompactionResult,
-}
-
-impl ContextCompactionData {
-    /// A completed compaction whose saved projection state matches its
-    /// cursor: context reads restart from it.
-    pub fn is_checkpoint(&self) -> bool {
-        matches!(
-            &self.outcome,
-            ContextCompactionResult::Completed {
-                cursor,
-                checkpoint: Some(checkpoint),
-                ..
-            } if *cursor == checkpoint.state.compacted_through
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -11,6 +11,7 @@ pub mod managed_provider;
 pub mod mcp;
 pub mod model_catalog;
 mod outbound;
+pub mod plugin_files;
 pub mod protocol;
 pub mod provider;
 pub mod settings;
@@ -72,6 +73,16 @@ impl Default for ServerConfig {
             write_timeout: Duration::from_secs(10),
             startup_timeout: Duration::from_secs(10),
         }
+    }
+}
+impl ServerConfig {
+    /// Public execution capabilities do not depend on an account provider.
+    pub(crate) fn local_execution(&self) -> bool {
+        self.session_execution && self.protected_profile()
+    }
+
+    pub(crate) fn protected_profile(&self) -> bool {
+        self.product_home.is_some() || self.model_catalog.is_some()
     }
 }
 #[derive(Debug, thiserror::Error)]
@@ -157,17 +168,9 @@ impl RunningServer {
             ))));
         }
         // Dependents were evicted during the unload; settle their queued reloads.
-        let views = self.processes.views();
-        for view in &views {
-            let _ = view.await;
-        }
-        wait_active(
-            &self.root,
-            &views,
-            self.config.startup_timeout,
-            &CancellationToken::new(),
-        )
-        .await?;
+        self.processes
+            .wait_active(&self.root, self.config.startup_timeout)
+            .await?;
         Ok(())
     }
     /// The default Agent of the current Agents generation.
@@ -208,9 +211,46 @@ impl Processes {
             .loader
             .entries()
             .into_iter()
-            .filter(|entry| entry.parent.is_none() && entry.instance.is_none())
+            .filter(|entry| {
+                entry.parent.is_none()
+                    && entry.instance.is_none()
+                    && entry.owner == rutis_loader::Owner::Layer(0)
+            })
             .filter_map(|entry| entry.view);
         std::iter::once(self.view.clone()).chain(rows).collect()
+    }
+
+    async fn wait_active(&self, root: &Ctx, timeout: Duration) -> dim_agent_runtime::Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // RuntimeRows refreshes offline JS declarations after Node starts.
+            // New injections replace the row's fiber; a saved view can become
+            // Disposed even though the current row is loading successfully.
+            let views = self.views();
+            let mut ready = true;
+            for view in &views {
+                let snapshot = view.watch().borrow().clone();
+                match snapshot.state {
+                    rutis::FiberState::Active => {}
+                    rutis::FiberState::Failed => {
+                        return Err(snapshot.error.map(AgentError::from).unwrap_or_else(|| {
+                            AgentError::Build(format!("{}: Failed", view.name()))
+                        }));
+                    }
+                    _ => ready = false,
+                }
+            }
+            if ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return wait_active(root, &views, Duration::ZERO, &CancellationToken::new()).await;
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
+            )
+            .await;
+        }
     }
 }
 
@@ -242,6 +282,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if config.managed_plugin.is_some() && config.product_home.is_none() {
         return Err(ServerError::Configuration(
             "managed plugins require a product home".into(),
+        ));
+    }
+    if config.model_catalog.is_some() && config.product_home.is_some() {
+        return Err(ServerError::Configuration(
+            "configured and product model providers are mutually exclusive".into(),
+        ));
+    }
+    if config.model_catalog.is_some()
+        && config.target_home.is_none()
+        && config.database_path.is_none()
+    {
+        return Err(ServerError::Configuration(
+            "configured execution requires --home or --database for persistent settings".into(),
         ));
     }
     if config.product_home.is_some() {
@@ -320,6 +373,32 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
+    let execution_root = if config.local_execution() {
+        let cwd = std::env::current_dir()?;
+        let home = config
+            .product_home
+            .clone()
+            .or_else(|| config.target_home.clone())
+            .or_else(|| {
+                cwd.join(config.database_path.as_ref()?)
+                    .parent()
+                    .map(PathBuf::from)
+            })
+            .ok_or_else(|| ServerError::Configuration("database must name a file".into()))?;
+        std::fs::create_dir_all(&home)?;
+        let home = std::fs::canonicalize(home)?;
+        Some(
+            match config.file_roots.iter().position(|root| root == &home) {
+                Some(index) => index,
+                None => {
+                    config.file_roots.push(home);
+                    config.file_roots.len() - 1
+                }
+            },
+        )
+    } else {
+        None
+    };
     let config = Arc::new(config);
     let root = Ctx::root_with_sink(
         tokio::runtime::Handle::current(),
@@ -338,6 +417,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut builtins = rutis_loader::Builtins::new();
     let mut service_catalog = rutis_loader::ServiceCatalog::new();
     service_catalog.register_shared("managedProvider");
+    service_catalog.register_shared("pluginFiles");
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
@@ -359,16 +439,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_aimux::ConfiguredModelsPlugin(models.clone())
         }));
-        rows.push(register_capability(&mut builtins, || {
-            ConfiguredSkillSettings
-        }));
-        rows.push(register_capability(&mut builtins, || {
-            dim_agent_capabilities::host_platform::HostPlatformPlugin::new(Default::default())
-        }));
-        rows.push(register_capability(
-            &mut builtins,
-            dim_agent_capabilities::skills::SkillsCatalogPlugin::new,
-        ));
     }
     if let Some(path) = &config.database_path {
         let path = path.clone();
@@ -380,12 +450,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }));
     }
     if let Some(home_root) = product_root {
-        let settings = settings::SettingsPlugin::new(home_root, vec![]);
-        rows.push(register_capability(&mut builtins, move || settings.clone()));
         rows.push(register_capability(&mut builtins, || {
             managed_provider::ManagedProvidersPlugin
         }));
         if let Some(plugin) = &config.managed_plugin {
+            rows.push(register_capability(&mut builtins, move || {
+                plugin_files::PluginFilesPlugin(home_root)
+            }));
             let plugin = plugin.clone();
             let manifest: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(plugin.plugin_dir.join("dim-plugin.json"))?)
@@ -393,7 +464,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                         ServerError::Configuration("invalid managed plugin manifest".into())
                     })?;
             if manifest["schemaVersion"] != 1
-                || manifest["hostApiVersion"] != 1
+                || manifest["hostApiVersion"] != 2
                 || manifest["rutisVersion"] != "0.10.0"
             {
                 return Err(ServerError::Configuration(
@@ -452,21 +523,29 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &mut builtins,
             provider::ProviderPlugin::default,
         ));
-        if config.session_execution {
-            mcp::install(&mut builder);
-            rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
-            rows.push(register_capability(&mut builtins, move || {
-                dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
-                    dim_agent_capabilities::host_platform::HostPlatformConfig {
-                        exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                    },
-                )
-            }));
-            rows.push(register_capability(
-                &mut builtins,
-                dim_agent_capabilities::skills::SkillsCatalogPlugin::new,
-            ));
-        }
+    }
+    if let Some(home_root) = execution_root.or(product_root) {
+        let settings = settings::SettingsPlugin::native(home_root, vec![]);
+        rows.push(register_capability(&mut builtins, move || settings.clone()));
+    }
+    let mut publication = None;
+    if let Some(home_root) = execution_root {
+        mcp::install(&mut builder);
+        let (publisher, row) = mcp::McpPublication::register(&mut builtins);
+        publication = Some(publisher);
+        rows.push(row);
+        rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
+        rows.push(register_capability(&mut builtins, move || {
+            dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
+                dim_agent_capabilities::host_platform::HostPlatformConfig {
+                    exec_shell_file: Some((home_root, "exec-shell.json".into())),
+                },
+            )
+        }));
+        rows.push(register_capability(
+            &mut builtins,
+            dim_agent_capabilities::skills::SkillsCatalogPlugin::new,
+        ));
     }
     agents::register(&mut builtins);
     rows.push(register_capability(&mut builtins, || {
@@ -543,6 +622,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         loader,
         view: loader_view,
     };
+    let assembly = rutis_loader::Layer::new(
+        "assembly",
+        vec![rutis_loader::Patch {
+            insert: Some(rows),
+            ..Default::default()
+        }],
+    );
     // One deadline covers the loader, the reconcile and the rows: reconcile
     // waits while a row is Loading, so a hung `apply` must not outlive it.
     let deadline = tokio::time::Instant::now() + config.startup_timeout;
@@ -555,11 +641,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &CancellationToken::new(),
         )
         .await?;
-        let rows = serde_json::from_value(serde_json::json!([{ "insert": rows }]))
-            .map_err(|error| AgentError::Build(error.to_string()))?;
-        let reconcile = processes
-            .loader
-            .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None);
+        let reconcile = processes.loader.reconcile(vec![assembly.clone()], None);
         let report = match tokio::time::timeout_at(deadline, reconcile).await {
             Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
             // The deadline has passed: this names the rows not yet Active.
@@ -583,13 +665,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             )));
         }
         // The report omits rows still Pending; the deadline names them.
-        wait_active(
-            &root,
-            &processes.views(),
-            remaining(),
-            &CancellationToken::new(),
-        )
-        .await
+        processes.wait_active(&root, remaining()).await
     }
     .await;
     if let Err(error) = started {
@@ -625,7 +701,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .get::<ListenAddresses>()
         .ok_or_else(|| ServerError::Configuration("listener addresses missing".into()))?;
     handle.open();
-    let task = tokio::spawn(coordinate(root.clone(), handle.clone()));
+    let publication = publication.map(|publisher| (publisher, processes.loader.clone(), assembly));
+    let task = tokio::spawn(coordinate(root.clone(), handle.clone(), publication));
     startup.armed = false;
     Ok(RunningServer {
         unix_path: addresses.unix_path.clone(),
@@ -637,29 +714,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle,
         task: Some(task),
     })
-}
-
-struct ConfiguredSkillSettings;
-impl rutis::TypedPlugin for ConfiguredSkillSettings {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "ConfiguredSkillSettings"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            ctx.provide(dim_agent_capabilities::skill_settings::SkillSettingsHost(
-                Arc::new(dim_agent_capabilities::skills::MemorySkillSettings::default()),
-            ))?;
-            Ok(rutis::Effect::Done)
-        })
-    }
-}
-impl dim_agent_runtime::Capability for ConfiguredSkillSettings {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {}
 }
 
 struct NodeRows(Arc<rutis_loader::RuntimeResolver>);
@@ -689,12 +743,39 @@ impl dim_agent_runtime::Capability for NodeRows {
 
 /// Graceful shutdown: stop admission, settle Agent work, drain commands and
 /// trace writers, close connections, then release the process tree.
-async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownReason> {
+async fn coordinate(
+    root: Ctx,
+    control: Arc<ServerControl>,
+    publication: Option<(
+        mcp::McpPublication,
+        rutis_loader::Loader,
+        rutis_loader::Layer,
+    )>,
+) -> Result<ShutdownReason> {
+    let publication = publication.map(|(publisher, loader, assembly)| {
+        tokio::spawn(publisher.run(root.clone(), loader, assembly, control.shutdown().clone()))
+    });
     control.shutdown().cancelled().await;
+    let hub = root.get::<ConnectionHub>();
+    // Taking RPC admission fences the shutdown-request tracker. Every accepted
+    // graceful request installs its reply ID, and every force acknowledgement
+    // settles, before we choose a mode or close the connection writers.
+    let rpc = hub.as_ref().and_then(|hub| hub.take_rpc());
+    if let Some(hub) = &hub {
+        hub.shutdown_requests.close();
+        hub.shutdown_requests.wait().await;
+    }
     if control.forced() {
+        if let Some(hub) = hub {
+            hub.close().await;
+        }
+        control.complete_shutdown(false).await;
         return Ok(ShutdownReason::Forced);
     }
     let mut errors = vec![];
+    if let Some(providers) = root.get::<managed_provider::ManagedProviders>() {
+        providers.quiesce().await;
+    }
     // One generation throughout: its archives finish after its Sessions close.
     let index = root.get::<AgentIndex>();
     if let Some(index) = &index {
@@ -702,8 +783,7 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
             errors.push(error);
         }
     }
-    let hub = root.get::<ConnectionHub>();
-    if let Some(rpc) = hub.as_ref().and_then(|hub| hub.take_rpc()) {
+    if let Some(rpc) = rpc {
         rpc.unloading.cancel();
         rpc.commands.close();
         rpc.commands.wait().await;
@@ -714,21 +794,32 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
     if let Some(hub) = hub {
         hub.close().await;
     }
+    if let Some(publication) = publication
+        && publication.await.is_err()
+    {
+        errors.push(AgentError::Build(
+            "MCP configuration publisher failed".into(),
+        ));
+    }
     if let Err(error) = root.shutdown().await {
         errors.push(error.into());
     }
     let cleanup = AgentError::aggregate(errors);
-    if let Some(fault) = control.take_fault() {
-        return Err(match cleanup {
+    let result = if let Some(fault) = control.take_fault() {
+        Err(match cleanup {
             Ok(()) => fault,
             Err(cleanup) => ServerError::Cleanup {
                 cause: Box::new(fault),
                 cleanup,
             },
-        });
-    }
-    cleanup?;
-    Ok(ShutdownReason::Graceful)
+        })
+    } else {
+        cleanup
+            .map(|()| ShutdownReason::Graceful)
+            .map_err(ServerError::from)
+    };
+    control.complete_shutdown(result.is_ok()).await;
+    result
 }
 
 struct NodeRuntime(Arc<rutis_bridge::runtime::LocalRuntime>);

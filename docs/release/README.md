@@ -4,6 +4,10 @@ Dim uses self-hosted runners for PR checks and the complete GitHub release workf
 
 The public source uses MIT. An account-enabled distribution can contain a separately supplied private runtime plugin; `NOTICE` excludes that artifact from the public source license. This project does not select or publish a license for that private plugin.
 
+## Upgrade compatibility
+
+Distributions using host API 2 require managed plugins that implement `quiesce`; API 1 packages are rejected. Before replacing an older CLI and daemon, stop that daemon with its matching CLI. The new `dimcode daemon stop` refuses daemons without `daemon.shutdown.completed` and leaves them running. Include both requirements in the release notes for this upgrade. Forced shutdown does not certify storage or plugin cleanup.
+
 ## Runner setup
 
 Workflows use GitHub's [default self-hosted OS and architecture labels](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow). Register runners with these labels and grant this repository access to their runner group:
@@ -59,7 +63,7 @@ These commands stage an API-key-only distribution. Account-enabled staging adds 
 
 In CI, configure the `release-build` Environment with `DIM_OAUTH_PACKAGE_URL` and `DIM_OAUTH_PACKAGE_SHA256`, plus optional secret `DIM_OAUTH_DOWNLOAD_TOKEN`, to include the same immutable plugin archive on all targets. If neither variable is set, CI builds API-key-only payloads. Partial or invalid configuration fails instead of silently omitting the plugin.
 
-An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `dist/index.js`. The manifest uses schema 1, host API 1 and rutis 0.10.0. The private SDK is bundled in `dist/index.js`; source maps, tests and account files are excluded.
+An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `dist/index.js`. The manifest uses schema 1, host API 2 and rutis 0.10.0. Host API 2 requires `quiesce` and supports native file transactions; API 1 archives are rejected. The private SDK is bundled in `dist/index.js`; source maps, tests and account files are excluded.
 
 Account-enabled native staging copies the pinned host Node and its license. Cross-target staging downloads the pinned official Node distribution for the **target** OS/CPU and verifies its archive against the official `SHASUMS256.txt`. Both install the locked rutis runtime with [npm target OS/CPU overrides](https://docs.npmjs.com/cli/v11/using-npm/config/#cpu) and install scripts disabled, then copy the verified plugin. Staging never bundles the host Node into a cross-target payload.
 

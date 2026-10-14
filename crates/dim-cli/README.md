@@ -45,6 +45,53 @@ The configuration references credentials by environment-variable name. The share
 
 `--cwd PATH` selects the workspace. `--provider ID --model ID` selects a different configured model for a new session. The server validates the selection.
 
+## Project MCP execution approval
+
+Project `.mcp.json` entries require explicit approval before discovery can launch a stdio
+process or connect to an HTTP/SSE server. This is separate from per-tool permission prompts.
+An unapproved project entry still shadows a same-name user entry. User-scoped MCP configuration
+remains trusted local configuration.
+
+Use the same `--home` and model profile as the daemon serving your workspace:
+
+```bash
+dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp list
+# Review .mcp.json and its referenced code or endpoint after obtaining this fingerprint.
+dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project \
+  mcp approve docs FINGERPRINT_FROM_LIST
+dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp revoke docs
+```
+
+`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement, approval
+state and fingerprint. It does not print commands, environment values, headers or credentials.
+For example (the actual fingerprint has 64 hexadecimal characters):
+
+```text
+"docs"  project  stdio  enabled  required  <fingerprint>
+                  |
+             review + approve
+                  v
+"docs"  project  stdio  enabled  approved  <same fingerprint>
+                  |
+                revoke
+                  v
+"docs"  project  stdio  enabled  required  <same fingerprint>
+```
+
+Pass the ID's actual value, not its displayed escape spelling. List **before** reviewing the file,
+then approve that fingerprint: if the effective configuration changed since listing, approval
+fails instead of trusting the new content. Do not automatically pipe a listing into approval.
+Approval is an explicit mutating command and works without a TTY; it can immediately start
+discovery in active sessions. It does not enable an explicitly disabled server.
+
+Grants are private to the selected host home, canonical workspace, server ID and configuration.
+They survive restart, but do not travel with a Session or project. Changed executable settings
+require a matching grant. Revocation cancels and joins this host's generation work and closes
+connections, including those retained by an in-flight model request. It does not undo previous
+remote effects. After an interrupted command, run `mcp list` before retrying. Configuration
+approval is not a sandbox and does not detect changed script/binary contents or inherited
+environment; see the [host trust contract](../dim-app-server/README.md#mcp-configuration-management).
+
 ## Scrollback and session recovery
 
 ```text
@@ -118,7 +165,7 @@ The repository root `./dev` prepares the local provider package, builds incremen
 dimcode --home /path/to/plugin-home daemon stop
 ```
 
-`daemon stop` authenticates an existing endpoint for the selected home without spawning a server or creating a missing home. It requests normal shutdown and waits up to 30 seconds for settlement and endpoint closure; a timeout reports failure without force-killing the process. Account and session files remain available for restart. This command accepts a daemon with a different model profile and does not read model/plugin files, so configuration edits cannot prevent an explicit stop. On Unix it also waits for the original socket to disappear; a replacement endpoint is left untouched.
+`daemon stop` authenticates an existing endpoint for the selected home without spawning a server or creating a missing home. It requires `daemon.shutdown.completed`, requests normal shutdown, and waits up to 30 seconds for a successful cleanup-completion response followed by connection closure. EOF alone, cleanup errors and timeout report failure without force-killing the process. An older daemon without the feature is left running; stop it using its matching CLI before upgrading. Account and session files remain available for restart. This command accepts a daemon with a different model profile and does not read model/plugin files, so configuration edits cannot prevent an explicit stop. It never removes or waits on a replacement endpoint; successful cleanup includes releasing the original daemon's storage and listener ownership.
 
 ## Home, transport and output
 
@@ -126,7 +173,7 @@ The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overri
 
 On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dim-app-server --connect-pipe` bridge, which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
-Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
+Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Explicit `mcp approve` is a separate management command. Configuration/transport failures do not silently select a mock model or old core.
 
 | Exit code | Meaning |
 | --- | --- |

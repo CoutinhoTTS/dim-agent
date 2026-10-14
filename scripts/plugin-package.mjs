@@ -33,12 +33,12 @@ export function extractPluginArchive(archive, expectedDigest, destination) {
   const metadata = JSON.parse(readFileSync(path.join(destination, 'package.json')));
   assert.equal(manifest.schemaVersion, 1, 'Unsupported plugin schema');
   assert.equal(manifest.id, 'dim-oauth', 'Unexpected plugin ID');
-  assert.equal(manifest.hostApiVersion, 1, 'Unsupported host API');
+  assert.equal(manifest.hostApiVersion, 2, 'Unsupported host API');
   assert.equal(manifest.rutisVersion, '0.10.0', 'Unsupported rutis version');
   assert.equal(manifest.entry, 'dist/index.js', 'Unexpected plugin entry');
   assert.equal(metadata.type, 'module', 'Plugin must be ESM');
   assert.equal(metadata.version, manifest.version, 'Plugin version mismatch');
   assert.deepEqual(Object.keys(manifest.files), ['dist/index.js'], 'Unexpected plugin file manifest');
   assert.equal(manifest.files['dist/index.js'], digest(readFileSync(path.join(destination, 'dist/index.js'))), 'Plugin entry digest mismatch');
-  return { version: manifest.version, sha256: expectedDigest, hostApiVersion: 1, rutisVersion: '0.10.0' };
+  return { version: manifest.version, sha256: expectedDigest, hostApiVersion: 2, rutisVersion: '0.10.0' };
 }

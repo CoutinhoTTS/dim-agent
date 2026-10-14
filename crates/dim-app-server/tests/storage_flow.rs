@@ -1,3 +1,4 @@
+use dim_agent_capabilities::history::{HistoryRenderer, read_context};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, SessionConfig, StoredEvent, Timeline, TimelineKey,
     TimelineStore, TimelineTrace, TraceStep, capability_plugin,
@@ -6,6 +7,18 @@ use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use std::{path::PathBuf, sync::Arc, time::Duration};
+
+const INTERPRETER: &str = "dim/context-projection/v2";
+fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
+    let mut snapshot = RecoverySnapshot {
+        sequence,
+        event_id: format!("event-{sequence}"),
+        interpreter: INTERPRETER.into(),
+        state: String::new(),
+    };
+    snapshot.state = (HistoryRenderer::default().encode_checkpoint)(&snapshot, checkpoint).unwrap();
+    snapshot
+}
 
 struct Database(PathBuf);
 impl Database {
@@ -71,7 +84,7 @@ async fn append(
 }
 
 #[tokio::test]
-async fn documented_native_records_restore_their_checkpoint_and_child_branch() {
+async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
     use dim_agent_capabilities::history::{
         project_context_history, project_history, projection_checkpoint,
     };
@@ -101,6 +114,7 @@ async fn documented_native_records_restore_their_checkpoint_and_child_branch() {
         .unwrap();
     for table in [
         "agent_store_format",
+        "settings_documents",
         "providers",
         "provider_selections",
         "provider_imports",
@@ -110,6 +124,7 @@ async fn documented_native_records_restore_their_checkpoint_and_child_branch() {
         "timeline_branches",
         "timeline_content",
         "timeline_events",
+        "timeline_snapshots",
     ] {
         for row in example[table].as_array().unwrap() {
             let row = row.as_object().unwrap();
@@ -147,20 +162,16 @@ async fn documented_native_records_restore_their_checkpoint_and_child_branch() {
     .unwrap();
     let generated = projection_checkpoint(&main.context(2).await.unwrap(), "e2").unwrap();
     let saved = store
-        .latest_checkpoint(&key("s1", "main"), 7)
+        .latest_snapshot(&key("s1", "main"), 7, "dim/context-projection/v1")
         .await
         .unwrap()
         .unwrap();
-    let ContextCompactionResult::Completed {
-        checkpoint: Some(saved),
-        ..
-    } = saved.outcome
-    else {
-        panic!("documented checkpoint is missing")
-    };
-    assert_eq!(*saved, generated);
+    let saved: ProjectionCheckpoint = serde_json::from_str(&saved.state).unwrap();
+    assert_eq!(saved, generated);
     let full = project_history(&main.history(Some(7)).await.unwrap()).unwrap();
-    let compacted = project_context_history(&main.context(7).await.unwrap()).unwrap();
+    let recovered = read_context(&main, 7).await.unwrap();
+    assert!(recovered.checkpoint.is_none());
+    let compacted = project_context_history(&recovered).unwrap();
     assert_eq!(
         full.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
         ["e2", "e7"]
@@ -175,7 +186,7 @@ async fn documented_native_records_restore_their_checkpoint_and_child_branch() {
     .await
     .unwrap();
     assert_eq!(
-        project_context_history(&child.context(2).await.unwrap()).unwrap(),
+        project_context_history(&read_context(&child, 2).await.unwrap()).unwrap(),
         compacted
     );
 
@@ -799,12 +810,15 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 10));
             INSERT INTO agent_store_format VALUES (10);"#,
         ),
-        // Unknown future formats must be preserved rather than opened or rewritten.
+        // v11's inline checkpoint schema must be preserved and rejected.
         (
             true,
             r#"DROP TABLE agent_store_format;
-            CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 12));
-            INSERT INTO agent_store_format VALUES (12);"#,
+            CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 11));
+            INSERT INTO agent_store_format VALUES (11);
+            DROP TABLE timeline_snapshots;
+            ALTER TABLE timeline_events ADD COLUMN checkpoint INTEGER NOT NULL DEFAULT 0;
+            CREATE INDEX timeline_events_checkpoints ON timeline_events(session_id,branch_id,checkpoint,sequence);"#,
         ),
         // v9 is an unpublished development format without import markers.
         (
@@ -1071,7 +1085,11 @@ async fn concurrent_and_cancelled_close_waits_for_the_same_durable_round() {
 }
 
 #[tokio::test]
-async fn recovery_validates_checkpoint_resume_and_keeps_the_original_event_wire() {
+async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart() {
+    use dim_agent_capabilities::history::{
+        context_messages, project_context_history, projection_checkpoint, summary_message,
+    };
+
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
@@ -1079,7 +1097,185 @@ async fn recovery_validates_checkpoint_resume_and_keeps_the_original_event_wire(
         .create_session("session", &SessionConfig::default())
         .await
         .unwrap();
-    append(&store, key("session", "main"), vec![text(1, "history")])
+    append(
+        &store,
+        key("session", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("question", None)),
+            ),
+            record(
+                2,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-1".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::ModelStart(ModelStartData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                }),
+            ),
+            text(4, "RETAINED ANSWER"),
+            record(
+                5,
+                EventKind::ModelOutputEnd(ModelOutputEndData {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    outcome: ModelOutputOutcome::Completed {
+                        finish_reason: FinishReason::EndTurn,
+                    },
+                }),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let timeline = Timeline::restore(
+        rutis::Ctx::root().unwrap(),
+        key("session", "main"),
+        vec![],
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-2").unwrap();
+    assert_eq!(checkpoint.resume.sequence, 5);
+    assert!(!checkpoint.state.output.is_empty());
+    let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../dim-agent-types/tests/fixtures/events.json"
+    ))
+    .unwrap();
+    let mut compaction = fixtures
+        .into_iter()
+        .filter(|event| {
+            event["type"] == "context"
+                && event["name"] == "compaction"
+                && event["data"]["status"] == "completed"
+        })
+        .find_map(
+            |event| match serde_json::from_value::<AgentEvent>(event).unwrap().kind {
+                EventKind::ContextCompaction(data) => Some(data),
+                _ => None,
+            },
+        )
+        .unwrap();
+    compaction.through = 5;
+    if let ContextCompactionResult::Completed {
+        cursor,
+        summary,
+        context_baseline,
+        ..
+    } = &mut compaction.outcome
+    {
+        *cursor = "event-2".into();
+        *summary = "summary".into();
+        context_baseline.clear();
+    }
+    timeline.close().await.unwrap();
+    append(
+        &store,
+        key("session", "main"),
+        vec![record(6, EventKind::ContextCompaction(compaction))],
+    )
+    .await
+    .unwrap();
+    let saved = snapshot(6, &checkpoint);
+    store
+        .save_snapshot(&key("session", "main"), saved.clone())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+
+    let connection = Connection::open(&database.0).unwrap();
+    let facts = || {
+        connection
+            .prepare("SELECT body FROM timeline_events ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let original = facts();
+    let mut damaged: serde_json::Value = serde_json::from_str(&saved.state).unwrap();
+    let mut payload: serde_json::Value =
+        serde_json::from_str(damaged["payload"].as_str().unwrap()).unwrap();
+    payload["state"]["output"] = serde_json::json!([]);
+    damaged["payload"] = payload.to_string().into();
+    for (state, intact) in [(saved.state, true), (damaged.to_string(), false)] {
+        connection
+            .execute("UPDATE timeline_snapshots SET state=?1", [state])
+            .unwrap();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        store.branches("session").await.unwrap();
+        let timeline = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            key("session", "main"),
+            vec![],
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let full = timeline.context(6).await.unwrap();
+        let recovered = read_context(&timeline, 6).await.unwrap();
+        let expected = vec![
+            summary_message("summary"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![MessagePart::Text {
+                    provider_metadata: None,
+                    text: "RETAINED ANSWER".into(),
+                    start_time: None,
+                    end_time: None,
+                }]),
+            },
+        ];
+        assert_eq!(
+            context_messages(&full, &project_context_history(&full).unwrap()),
+            expected
+        );
+        assert_eq!(
+            context_messages(&recovered, &project_context_history(&recovered).unwrap()),
+            expected
+        );
+        assert_eq!(recovered.checkpoint.is_some(), intact);
+        timeline.close().await.unwrap();
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+        assert_eq!(facts(), original);
+    }
+}
+
+#[tokio::test]
+async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut input_batch = vec![
+        record(
+            1,
+            EventKind::InputMessage(InputMessageData::text("history", Some(InputMode::Queue))),
+        ),
+        record(
+            2,
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: "event-1".into(),
+            }),
+        ),
+    ];
+    for event in &mut input_batch {
+        event.batch_end = 2;
+    }
+    append(&store, key("session", "main"), input_batch)
         .await
         .unwrap();
     let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
@@ -1099,33 +1295,72 @@ async fn recovery_validates_checkpoint_resume_and_keeps_the_original_event_wire(
             _ => None,
         })
         .unwrap();
-    compaction.through = 1;
+    compaction.through = 2;
     let ContextCompactionResult::Completed {
-        cursor, checkpoint, ..
+        cursor, summary, ..
     } = &mut compaction.outcome
     else {
         panic!()
     };
-    *checkpoint = Some(Box::new(ProjectionCheckpoint {
-        resume: TimelinePosition {
-            branch_id: "main".into(),
-            sequence: 1,
-        },
-        state: ProjectionCheckpointState {
-            compacted_through: cursor.clone(),
-            ..Default::default()
-        },
-    }));
-    let original = record(2, EventKind::ContextCompaction(compaction));
+    *cursor = "event-2".into();
+    *summary = "retained summary".into();
+    let original = record(3, EventKind::ContextCompaction(compaction));
     append(&store, key("session", "main"), vec![original.clone()])
         .await
         .unwrap();
     assert!(
         store
-            .latest_checkpoint(&key("session", "main"), 2)
+            .latest_snapshot(&key("session", "main"), 3, INTERPRETER)
             .await
             .unwrap()
-            .is_some()
+            .is_none()
+    );
+    for (sequence, event_id) in [(1, "event-1"), (3, "wrong"), (4, "event-4")] {
+        assert!(
+            store
+                .save_snapshot(
+                    &key("session", "main"),
+                    RecoverySnapshot {
+                        sequence,
+                        event_id: event_id.into(),
+                        interpreter: INTERPRETER.into(),
+                        state: "opaque".into(),
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
+    let opaque = RecoverySnapshot {
+        sequence: 3,
+        event_id: "event-3".into(),
+        interpreter: INTERPRETER.into(),
+        state: "not json".into(),
+    };
+    store
+        .save_snapshot(&key("session", "main"), opaque.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_snapshot(&key("session", "main"), 3, INTERPRETER)
+            .await
+            .unwrap(),
+        Some(opaque)
+    );
+    assert!(
+        store
+            .latest_snapshot(&key("session", "main"), 2, INTERPRETER)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .latest_snapshot(&key("session", "main"), 3, "other")
+            .await
+            .unwrap()
+            .is_none()
     );
     store.close().await.unwrap();
     db.close().await.unwrap();
@@ -1134,19 +1369,106 @@ async fn recovery_validates_checkpoint_resume_and_keeps_the_original_event_wire(
     let connection = Connection::open(&database.0).unwrap();
     let body: String = connection
         .query_row(
-            "SELECT body FROM timeline_events WHERE sequence = 2",
+            "SELECT body FROM timeline_events WHERE sequence = 3",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    for (branch, sequence) in [("unknown", 1), ("main", 0), ("main", 2)] {
+    let mut states = vec![
+        None,
+        Some(("unsupported/v99", "not json".to_owned())),
+        Some((INTERPRETER, "not json".to_owned())),
+    ];
+    // Sequence 2 is a legal resume address, but this state omits the pending
+    // input consumed there. Decoding and anchor checks alone cannot accept it.
+    for (branch, sequence) in [("unknown", 1), ("main", 0), ("main", 3), ("main", 2)] {
+        states.push(Some((
+            INTERPRETER,
+            snapshot(
+                3,
+                &ProjectionCheckpoint {
+                    resume: TimelinePosition {
+                        branch_id: branch.into(),
+                        sequence,
+                    },
+                    state: ProjectionCheckpointState {
+                        compacted_through: "event-2".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .state,
+        )));
+    }
+    for state in states {
+        connection
+            .execute("DELETE FROM timeline_snapshots", [])
+            .unwrap();
+        if let Some((interpreter, state)) = state {
+            connection
+                .execute(
+                    "INSERT INTO timeline_snapshots VALUES ('session','main',3,?1,'event-3',?2)",
+                    params![interpreter, state],
+                )
+                .unwrap();
+        }
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        store.branches("session").await.unwrap();
+        let timeline = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            key("session", "main"),
+            vec![],
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let full = timeline.context(3).await.unwrap();
+        assert!(full.checkpoint.is_none());
+        let accelerated = read_context(&timeline, 3).await.unwrap();
+        assert!(accelerated.checkpoint.is_none());
+        use dim_agent_capabilities::history::{
+            context_messages, project_context_history, summary_message,
+        };
+        assert_eq!(
+            context_messages(
+                &accelerated,
+                &project_context_history(&accelerated).unwrap()
+            ),
+            [summary_message("retained summary")]
+        );
+        assert_eq!(
+            project_context_history(&accelerated).unwrap(),
+            project_context_history(&full).unwrap()
+        );
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+        dim_agent_capabilities::defaults::install(&mut builder);
+        builder.timeline_store(store.clone());
+        let agent = builder.build();
+        agent.restore_session("session".into()).await.unwrap();
+        agent.close().await.unwrap();
+        timeline.close().await.unwrap();
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT body FROM timeline_events WHERE sequence=3",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            body
+        );
+    }
+    for through in [1, 3, 4] {
         let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
-        value["record"]["event"]["data"]["checkpoint"]["resume"] =
-            serde_json::json!({"branch_id": branch, "sequence": sequence});
+        value["record"]["event"]["data"]["through"] = through.into();
         let bad = serde_json::to_string(&value).unwrap();
         connection
             .execute(
-                "UPDATE timeline_events SET body = ?1 WHERE sequence = 2",
+                "UPDATE timeline_events SET body = ?1 WHERE sequence = 3",
                 [&bad],
             )
             .unwrap();
@@ -1163,7 +1485,7 @@ async fn recovery_validates_checkpoint_resume_and_keeps_the_original_event_wire(
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT body FROM timeline_events WHERE sequence = 2",
+                    "SELECT body FROM timeline_events WHERE sequence = 3",
                     [],
                     |row| row.get::<_, String>(0)
                 )
@@ -1173,43 +1495,74 @@ async fn recovery_validates_checkpoint_resume_and_keeps_the_original_event_wire(
     }
     connection
         .execute(
-            "UPDATE timeline_events SET body = ?1 WHERE sequence = 2",
+            "UPDATE timeline_events SET body = ?1 WHERE sequence = 3",
             [&body],
         )
-        .unwrap();
-    connection
-        .execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE timeline_events SET checkpoint = 2 WHERE sequence = 2")
-        .unwrap();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let store = SqliteTimelineStore::new(db.clone());
-    assert!(matches!(
-        store.branches("session").await,
-        Err(AgentError::Storage(_))
-    ));
-    store.close().await.unwrap();
-    db.close().await.unwrap();
-    drop(store);
-    drop(db);
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT checkpoint FROM timeline_events WHERE sequence = 2",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        2
-    );
-    connection
-        .execute_batch("UPDATE timeline_events SET checkpoint = 1 WHERE sequence = 2")
         .unwrap();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
     store.branches("session").await.unwrap();
     assert_eq!(
-        store.read(&key("session", "main"), 2..=2).await.unwrap()[0].event,
+        store.read(&key("session", "main"), 3..=3).await.unwrap()[0].event,
         original.event
     );
+    connection
+        .execute("DELETE FROM timeline_snapshots", [])
+        .unwrap();
+    // Inject malformed cache metadata through this disposable connection;
+    // ordinary writes retain their foreign-key enforcement.
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    for (branch, sequence, event_id) in [
+        ("main", 3, "wrong"),
+        ("main", 1, "event-1"),
+        ("orphan", 99, "missing"),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO timeline_snapshots VALUES ('session',?1,?2,?3,?4,'not json')",
+                params![branch, sequence, INTERPRETER, event_id],
+            )
+            .unwrap();
+    }
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    assert!(
+        store
+            .latest_snapshot(&key("session", "main"), 99, INTERPRETER)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .latest_snapshot(&key("session", "orphan"), 99, INTERPRETER)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store.branches("session").await.unwrap();
+    store.rollback_session("session").await.unwrap();
+    for table in [
+        "timeline_snapshots",
+        "timeline_events",
+        "timeline_branches",
+        "timeline_content",
+        "agent_sessions",
+    ] {
+        assert_eq!(
+            connection
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE session_id='session'"),
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
@@ -1289,13 +1642,16 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
                             .clone(),
                     )
                     .unwrap(),
-                    checkpoint: Some(Box::new(checkpoint)),
                 },
             }),
         )],
     )
     .await
     .unwrap();
+    store
+        .save_snapshot(&key("nested", "main"), snapshot(4, &checkpoint))
+        .await
+        .unwrap();
     for (sequence, branch, cut) in [(5, "early", 2), (6, "child", 4)] {
         append(
             &store,
@@ -1332,7 +1688,7 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     )
     .await
     .unwrap();
-    let early_context = early.context(0).await.unwrap();
+    let early_context = read_context(&early, 0).await.unwrap();
     assert!(early_context.checkpoint.is_none());
     assert_eq!(early_context.events.len(), 2);
     assert_eq!(
@@ -1386,7 +1742,7 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     )
     .await
     .unwrap();
-    let context = grandchild.context(0).await.unwrap();
+    let context = read_context(&grandchild, 0).await.unwrap();
     assert!(context.checkpoint.is_some());
     assert_eq!(
         context
@@ -1914,16 +2270,10 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         )
         .unwrap();
         compaction.through = 6;
-        let ContextCompactionResult::Completed {
-            cursor,
-            checkpoint: saved,
-            ..
-        } = &mut compaction.outcome
-        else {
+        let ContextCompactionResult::Completed { cursor, .. } = &mut compaction.outcome else {
             unreachable!()
         };
         *cursor = "event-2".into();
-        *saved = Some(Box::new(checkpoint));
         append(
             &store,
             key("native", "main"),
@@ -1931,6 +2281,10 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         )
         .await
         .unwrap();
+        store
+            .save_snapshot(&key("native", "main"), snapshot(7, &checkpoint))
+            .await
+            .unwrap();
         let assistant = Message {
             role: Role::Assistant,
             content: MessageContent::Parts(content.clone()),
@@ -1988,7 +2342,7 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             .await
             .unwrap();
             let history =
-                project_context_history(&timeline.context(through).await.unwrap()).unwrap();
+                project_context_history(&read_context(&timeline, through).await.unwrap()).unwrap();
             assert_eq!(
                 history
                     .iter()
@@ -2001,17 +2355,11 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             timeline.close().await.unwrap();
         }
         let saved = store
-            .latest_checkpoint(&key("native", "main"), 9)
+            .latest_snapshot(&key("native", "main"), 9, INTERPRETER)
             .await
             .unwrap()
             .unwrap();
-        let ContextCompactionResult::Completed {
-            checkpoint: Some(checkpoint),
-            ..
-        } = saved.outcome
-        else {
-            panic!("missing checkpoint")
-        };
+        let checkpoint = (HistoryRenderer::default().decode_checkpoint)(&saved).unwrap();
         assert_eq!(checkpoint.state.output, content);
         store.close().await.unwrap();
         db.close().await.unwrap();

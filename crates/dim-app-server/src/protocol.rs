@@ -171,7 +171,11 @@ pub enum Call {
     PromptRefresh(BranchRequest),
     McpCatalog(SelectionScope),
     McpSetEnabled(SetMcpEnabled),
+    McpSave(SaveMcp),
+    McpRemove(RemoveMcp),
     McpDisconnect(McpTarget),
+    McpApprove(ApproveMcp),
+    McpRevoke(RevokeMcp),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
 }
@@ -218,11 +222,31 @@ impl Call {
                 | Self::SkillsRefresh(_)
                 | Self::McpCatalog(_)
                 | Self::McpSetEnabled(_)
+                | Self::McpSave(_)
+                | Self::McpRemove(_)
                 | Self::McpDisconnect(_)
+                | Self::McpApprove(_)
+                | Self::McpRevoke(_)
         )
     }
 
-    pub(crate) fn is_product_session(&self) -> bool {
+    pub(crate) fn is_execution_management(&self) -> bool {
+        matches!(
+            self,
+            Self::SkillsCatalog(_)
+                | Self::SkillSetEnabled(_)
+                | Self::SkillsRefresh(_)
+                | Self::McpCatalog(_)
+                | Self::McpSetEnabled(_)
+                | Self::McpSave(_)
+                | Self::McpRemove(_)
+                | Self::McpDisconnect(_)
+                | Self::McpApprove(_)
+                | Self::McpRevoke(_)
+        )
+    }
+
+    pub(crate) fn is_execution_session(&self) -> bool {
         matches!(
             self,
             Self::PermissionGet(_)
@@ -249,10 +273,14 @@ pub const LOCAL_EXECUTION_METHODS: [&str; 9] = [
     "session.prompt.refresh",
 ];
 
-pub const MCP_METHODS: [&str; 5] = [
+pub const MCP_METHODS: [&str; 9] = [
     "mcp.catalog",
     "mcp.set_enabled",
+    "mcp.save",
+    "mcp.remove",
     "mcp.disconnect",
+    "mcp.approve",
+    "mcp.revoke",
     "session.mcp",
     "session.mcp.refresh",
 ];
@@ -405,6 +433,20 @@ pub enum McpScope {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApproveMcp {
+    pub cwd: String,
+    pub id: String,
+    pub approval_token: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevokeMcp {
+    pub cwd: String,
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpTarget {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub cwd: Option<String>,
@@ -421,19 +463,48 @@ pub struct SetMcpEnabled {
     pub expected_version: String,
     pub enabled: bool,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    pub expected_version: String,
+    pub configuration: crate::settings::McpServerSettings,
+}
+impl std::fmt::Debug for SaveMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveMcp").finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    pub expected_version: String,
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCatalogResult {
     pub user_revision: String,
     pub project_revision: Option<String>,
+    pub user_application: crate::mcp::McpApplication,
+    pub project_application: Option<crate::mcp::McpApplication>,
     pub servers: Vec<McpCatalogEntry>,
 }
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpCatalogEntry {
     pub id: String,
     pub source: McpScope,
     pub enabled: bool,
     pub transport: &'static str,
+    pub approval: crate::mcp::McpApproval,
+    pub approval_token: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -913,7 +984,11 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
             "mcp.catalog" => Call::McpCatalog(params(raw_params)?),
             "mcp.set_enabled" => Call::McpSetEnabled(params(raw_params)?),
+            "mcp.save" => Call::McpSave(params(raw_params)?),
+            "mcp.remove" => Call::McpRemove(params(raw_params)?),
             "mcp.disconnect" => Call::McpDisconnect(params(raw_params)?),
+            "mcp.approve" => Call::McpApprove(params(raw_params)?),
+            "mcp.revoke" => Call::McpRevoke(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
             _ => return Err(RpcError::app(-32601, "unknown_method", "Unknown method")),

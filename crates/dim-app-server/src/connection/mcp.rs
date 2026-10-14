@@ -16,6 +16,7 @@ pub(super) fn error(error: McpError) -> RpcError {
         | McpError::InvalidSource
         | McpError::InvalidId => "mcp_invalid_config",
         McpError::UnknownServer => "mcp_unknown_server",
+        McpError::ApprovalRequired => "mcp_approval_required",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
             return RpcError::reloading();
         }
@@ -63,13 +64,14 @@ pub(super) async fn management(rpc: &RpcService, call: Call) -> Result<Reply, Rp
     let cancel = &rpc.unloading;
     match call {
         Call::McpCatalog(p) => {
-            let catalog = directory
-                .catalog(project(rpc, p.cwd).await?, cancel)
-                .await
-                .map_err(error)?;
+            let project = project(rpc, p.cwd).await?;
+            let catalog = directory.catalog(project, cancel).await.map_err(error)?;
             Ok(Reply::McpCatalog(McpCatalogResult {
                 user_revision: catalog.user_revision,
                 project_revision: catalog.project_revision,
+                user_application: directory.application(SettingsSource::UserMcp),
+                project_application: project
+                    .map(|root| directory.application(SettingsSource::ProjectMcp(root))),
                 servers: catalog
                     .servers
                     .into_iter()
@@ -81,6 +83,8 @@ pub(super) async fn management(rpc: &RpcService, call: Call) -> Result<Reply, Rp
                             SettingsSource::Skills => unreachable!("MCP directory excludes Skills"),
                         },
                         enabled: entry.enabled(),
+                        approval: entry.approval,
+                        approval_token: entry.approval_token,
                         transport: match entry.configuration {
                             McpServerSettings::Stdio { .. } => "stdio",
                             McpServerSettings::Remote {
@@ -95,6 +99,44 @@ pub(super) async fn management(rpc: &RpcService, call: Call) -> Result<Reply, Rp
                     })
                     .collect(),
             }))
+        }
+        Call::McpApprove(p) => {
+            let project = project(rpc, Some(p.cwd)).await?.expect("required cwd");
+            directory
+                .approve(project, p.id, p.approval_token, cancel)
+                .await
+                .map_err(error)?;
+            Ok(Reply::empty())
+        }
+        Call::McpRevoke(p) => {
+            let project = project(rpc, Some(p.cwd)).await?.expect("required cwd");
+            directory
+                .revoke(project, p.id, cancel)
+                .await
+                .map_err(error)?;
+            Ok(Reply::empty())
+        }
+        Call::McpSave(p) => {
+            let source = source(p.source, project(rpc, p.cwd).await?)?;
+            directory
+                .update(
+                    source,
+                    p.expected_version,
+                    p.id,
+                    McpChange::Put(p.configuration),
+                    cancel,
+                )
+                .await
+                .map_err(error)?;
+            Ok(Reply::empty())
+        }
+        Call::McpRemove(p) => {
+            let source = source(p.source, project(rpc, p.cwd).await?)?;
+            directory
+                .update(source, p.expected_version, p.id, McpChange::Remove, cancel)
+                .await
+                .map_err(error)?;
+            Ok(Reply::empty())
         }
         Call::McpSetEnabled(p) => {
             let source = source(p.source, project(rpc, p.cwd).await?)?;
@@ -135,6 +177,7 @@ fn project_state(id: &str, state: McpSessionState, tools: ToolSourcesState) -> M
                 let status = tools.0.get(&format!("mcp:{id}"));
                 let (state, version, message) = match state {
                     McpSourceState::Disabled => ("disabled", None, None),
+                    McpSourceState::ApprovalRequired => ("approval_required", None, None),
                     McpSourceState::Connecting => ("connecting", None, None),
                     McpSourceState::Ready { version } => ("ready", Some(version), None),
                     McpSourceState::Failed { message } => ("failed", None, Some(message)),
