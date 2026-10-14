@@ -1,15 +1,53 @@
 //! Skills management wire boundary; discovery and enablement belong to SkillsCatalog.
 use crate::{
-    methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
-    protocol::{
-        RpcError, SelectionScope, SetSkillEnabled, SkillEntry, SkillIssue, SkillsCatalogResult,
-        SkillsRefreshResult, SkillsVersion, canonical_cwd,
-    },
+    methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
+    protocol::{RpcError, canonical_cwd, optional_non_null},
 };
 use dim_agent_capabilities::skills::{RefreshTarget, SkillStatus, SkillsCatalog, SkillsError};
 use dim_agent_runtime::{Capability, KeysOf, scoped};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetSkillEnabled {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub enabled: bool,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub file_path: String,
+    pub allowed_tools: Vec<String>,
+    pub enabled: bool,
+    pub shadowed_by: Option<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct SkillIssue {
+    pub path: String,
+    pub message: String,
+}
+#[derive(Debug, Serialize)]
+pub struct SkillsCatalogResult {
+    pub version: u64,
+    pub entries: Vec<SkillEntry>,
+    pub issues: Vec<SkillIssue>,
+}
+#[derive(Debug, Serialize)]
+pub struct SkillsRefreshResult {
+    pub version: u64,
+    pub issues: Vec<SkillIssue>,
+}
+#[derive(Debug, Serialize)]
+pub struct SkillsVersion {
+    pub version: u64,
+}
 
 fn error(error: SkillsError) -> RpcError {
     let kind = match &error {

@@ -1,12 +1,22 @@
 //! Codex OAuth account wire boundary.
 use super::OpenAICodexOAuthService;
 use crate::{
-    managed_provider::management::{attempt_id, managed_attempt, managed_oauth_error as error},
+    managed_provider::management::{
+        BrowserLogin, LoginAttempt, attempt_id, managed_attempt, managed_oauth_error as error,
+    },
     methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
-    protocol::*,
+    protocol::{Empty, RpcError},
 };
 use rutis::{CordisError, Ctx};
+use serde::Deserialize;
 use std::sync::Arc;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserLoginComplete {
+    pub attempt_id: String,
+    pub callback_url: String,
+}
 
 pub(super) fn provide(ctx: &Ctx, oauth: Arc<OpenAICodexOAuthService>) -> Result<(), CordisError> {
     ManagementMethods::provide(

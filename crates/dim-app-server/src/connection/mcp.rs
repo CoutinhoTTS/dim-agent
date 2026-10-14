@@ -1,44 +1,13 @@
 //! Local product wire projections over native MCP owners.
 use super::*;
+pub(super) use crate::mcp::management::error;
 use crate::{
     agents::AgentHost,
-    mcp::{McpError, McpSession, McpSessionState, McpSourceState},
-    settings::SettingsError,
+    mcp::{McpSession, McpSessionState, McpSourceState},
 };
 use dim_agent_capabilities::tool_registry::{ToolSourcesState, ToolSourcesView};
 use rutis::{EventKey, FiberState, FiberStatusChanged, Listener};
 use tokio::sync::watch;
-
-pub(super) fn error(error: McpError) -> RpcError {
-    let kind = match &error {
-        McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
-        McpError::Settings(SettingsError::AppliedUnsaved) => "mcp_settings_unsaved",
-        McpError::Settings(SettingsError::Invalid(_))
-        | McpError::InvalidSource
-        | McpError::InvalidId => "mcp_invalid_config",
-        McpError::UnknownServer => "mcp_unknown_server",
-        McpError::ApprovalRequired => "mcp_approval_required",
-        McpError::Closed | McpError::Settings(SettingsError::Closed) => {
-            return RpcError::reloading();
-        }
-        McpError::Cancelled | McpError::Settings(SettingsError::Cancelled) => {
-            "operation_interrupted"
-        }
-        McpError::Settings(_) => "mcp_settings_read",
-        _ => "mcp_unavailable",
-    };
-    // Transport errors already carry fixed diagnostics, without configuration secrets.
-    RpcError::app(
-        -32000,
-        kind,
-        match error {
-            McpError::Worker(_) | McpError::Settings(SettingsError::Worker(_)) => {
-                "MCP worker failed".into()
-            }
-            other => other.to_string(),
-        },
-    )
-}
 
 fn project_state(id: &str, state: McpSessionState, tools: ToolSourcesState) -> McpStateResult {
     McpStateResult {

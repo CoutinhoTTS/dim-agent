@@ -2,10 +2,96 @@
 use super::{AccountSnapshot, ManagedProviders};
 use crate::{
     methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
-    protocol::*,
+    protocol::{Empty, RpcError, optional_non_null},
+    provider::management::ProviderTarget,
 };
 use rutis::{CordisError, Ctx};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LoginBegin {
+    pub provider_id: String,
+    pub directory: String,
+    #[serde(
+        default,
+        deserialize_with = "optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub email: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserLoginBegin {
+    pub provider_id: String,
+    pub directory: String,
+    #[serde(
+        default,
+        deserialize_with = "optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub email: Option<String>,
+    pub redirect_uri: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedBrowserLoginComplete {
+    pub provider_id: String,
+    pub attempt_id: String,
+    pub callback_url: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedLoginAttempt {
+    pub provider_id: String,
+    pub attempt_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LoginAttempt {
+    pub attempt_id: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserLogin {
+    pub attempt_id: String,
+    pub authorization_url: String,
+    pub expires_at: u64,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceLogin {
+    pub attempt_id: String,
+    pub verification_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
+    pub user_code: String,
+    pub expires_at: u64,
+}
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum ManagedLoginState {
+    Pending,
+    Completed,
+    Failed { error: String },
+    Cancelled,
+    Expired,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum LoginState {
+    Pending,
+    Completed {
+        account: crate::managed_provider::AccountSnapshot,
+    },
+    Failed {
+        error: String,
+    },
+    Cancelled,
+    Expired,
+}
 
 pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), CordisError> {
     ManagementMethods::provide(

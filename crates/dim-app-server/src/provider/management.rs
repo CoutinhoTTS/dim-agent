@@ -1,11 +1,77 @@
 //! Provider configuration wire boundary; accepted operations drain on unload.
 use super::ProviderService;
 use crate::{
-    methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
-    protocol::*,
+    methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
+    protocol::{Empty, RpcError, canonical_cwd, optional_non_null},
 };
 use rutis::{CordisError, Ctx};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportLegacyProviders {
+    pub source_path: std::path::PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveProvider {
+    pub provider: crate::provider::ProviderInput,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_version: Option<u32>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteProvider {
+    pub provider_id: String,
+    pub expected_version: u32,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetEnabledModels {
+    pub provider_id: String,
+    pub expected_version: u32,
+    pub model_ids: Vec<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderTarget {
+    pub provider_id: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditModel {
+    pub provider_id: String,
+    pub expected_version: u32,
+    pub model_id: String,
+    pub edit: crate::model_catalog::ModelEdit,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResetModel {
+    pub provider_id: String,
+    pub expected_version: u32,
+    pub model_id: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectModel {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub provider_id: String,
+    pub model_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_version: Option<u32>,
+}
+#[derive(Debug, Serialize)]
+pub struct CatalogResult {
+    pub catalog: Option<crate::provider::ProviderCatalog>,
+}
+#[derive(Debug, Serialize)]
+pub struct SelectionResult {
+    pub selection: Option<crate::provider::ProviderSelection>,
+}
 
 pub(super) fn provide(ctx: &Ctx, provider: Arc<ProviderService>) -> Result<(), CordisError> {
     ManagementMethods::provide(

@@ -9533,9 +9533,13 @@
       "from": "dim_app_server::codex_oauth::management",
       "to": "dim_app_server::managed_provider::management",
       "references": [
+        "path BrowserLogin",
+        "path LoginAttempt",
         "path attempt_id",
         "path error",
         "path managed_attempt",
+        "use crate::managed_provider::management::BrowserLogin",
+        "use crate::managed_provider::management::LoginAttempt",
         "use crate::managed_provider::management::attempt_id",
         "use crate::managed_provider::management::managed_attempt",
         "use crate::managed_provider::management::managed_oauth_error"
@@ -9561,11 +9565,10 @@
       "from": "dim_app_server::codex_oauth::management",
       "to": "dim_app_server::protocol",
       "references": [
-        "path BrowserLogin",
-        "path BrowserLoginComplete",
         "path Empty",
-        "path LoginAttempt",
-        "path RpcError::invalid"
+        "path RpcError::invalid",
+        "use crate::protocol::Empty",
+        "use crate::protocol::RpcError"
       ]
     },
     {
@@ -9991,7 +9994,6 @@
       "to": "dim_app_server::connection::mcp",
       "references": [
         "mod mcp",
-        "path mcp::error",
         "path mcp::session_state"
       ]
     },
@@ -10018,6 +10020,13 @@
       "references": [
         "path ServerControl",
         "use crate::control::ServerControl"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_app_server::mcp::management",
+      "references": [
+        "path mcp::error"
       ]
     },
     {
@@ -10181,18 +10190,9 @@
     },
     {
       "from": "dim_app_server::connection::mcp",
-      "to": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::management",
       "references": [
-        "path McpError",
-        "path McpError::ApprovalRequired",
-        "path McpError::Cancelled",
-        "path McpError::Closed",
-        "path McpError::InvalidId",
-        "path McpError::InvalidSource",
-        "path McpError::Settings",
-        "path McpError::UnknownServer",
-        "path McpError::Worker",
-        "use crate::mcp::McpError"
+        "use crate::mcp::management::error"
       ]
     },
     {
@@ -10219,22 +10219,7 @@
         "path McpServerStatus",
         "path McpStateResult",
         "path Notification::McpState",
-        "path RpcError",
-        "path RpcError::app",
-        "path RpcError::reloading"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection::mcp",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsError::AppliedUnsaved",
-        "path SettingsError::Cancelled",
-        "path SettingsError::Closed",
-        "path SettingsError::Conflict",
-        "path SettingsError::Invalid",
-        "path SettingsError::Worker",
-        "use crate::settings::SettingsError"
+        "path RpcError"
       ]
     },
     {
@@ -10531,9 +10516,13 @@
       "from": "dim_app_server::grok_oauth::management",
       "to": "dim_app_server::managed_provider::management",
       "references": [
+        "path DeviceLogin",
+        "path LoginAttempt",
         "path attempt_id",
         "path error",
         "path managed_attempt",
+        "use crate::managed_provider::management::DeviceLogin",
+        "use crate::managed_provider::management::LoginAttempt",
         "use crate::managed_provider::management::attempt_id",
         "use crate::managed_provider::management::managed_attempt",
         "use crate::managed_provider::management::managed_oauth_error"
@@ -10559,9 +10548,8 @@
       "from": "dim_app_server::grok_oauth::management",
       "to": "dim_app_server::protocol",
       "references": [
-        "path DeviceLogin",
         "path Empty",
-        "path LoginAttempt"
+        "use crate::protocol::Empty"
       ]
     },
     {
@@ -10628,6 +10616,7 @@
       "references": [
         "path AccountSnapshot",
         "path ManagedProviders",
+        "path crate::managed_provider::AccountSnapshot",
         "path super::ManagedProviderError",
         "use super::AccountSnapshot",
         "use super::ManagedProviders"
@@ -10653,26 +10642,21 @@
       "from": "dim_app_server::managed_provider::management",
       "to": "dim_app_server::protocol",
       "references": [
-        "path BrowserLogin",
-        "path BrowserLoginBegin",
-        "path DeviceLogin",
         "path Empty",
-        "path LoginAttempt",
-        "path LoginBegin",
-        "path LoginState",
-        "path LoginState::Failed",
-        "path ManagedBrowserLoginComplete",
-        "path ManagedLoginAttempt",
-        "path ManagedLoginState",
-        "path ManagedLoginState::Cancelled",
-        "path ManagedLoginState::Completed",
-        "path ManagedLoginState::Expired",
-        "path ManagedLoginState::Failed",
-        "path ManagedLoginState::Pending",
-        "path ProviderTarget",
         "path RpcError",
         "path RpcError::app",
-        "path RpcError::invalid"
+        "path RpcError::invalid",
+        "use crate::protocol::Empty",
+        "use crate::protocol::RpcError",
+        "use crate::protocol::optional_non_null"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider::management",
+      "to": "dim_app_server::provider::management",
+      "references": [
+        "path ProviderTarget",
+        "use crate::provider::management::ProviderTarget"
       ]
     },
     {
@@ -10789,9 +10773,17 @@
         "path McpError::UnknownServer",
         "path McpError::Worker",
         "path McpService",
+        "path crate::mcp::McpApproval",
         "use super::McpChange",
         "use super::McpError",
         "use super::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::publication",
+      "references": [
+        "path crate::mcp::McpApplication"
       ]
     },
     {
@@ -10801,11 +10793,13 @@
         "path Interruption::Report",
         "path ManagementMethods::provide",
         "path MethodDecl::management",
+        "path SelectionScope",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
         "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
+        "use crate::methods::SelectionScope",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -10814,35 +10808,14 @@
       "from": "dim_app_server::mcp::management",
       "to": "dim_app_server::protocol",
       "references": [
-        "path ApproveMcp",
-        "path McpCatalogEntry",
-        "path McpCatalogResult",
-        "path McpScope",
-        "path McpScope::Project",
-        "path McpScope::User",
-        "path McpTarget",
-        "path RemoveMcp",
-        "path RevokeMcp",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
         "path RpcError::reloading",
-        "path SaveMcp",
-        "path SelectionScope",
-        "path SetMcpEnabled",
         "path canonical_cwd",
-        "use crate::protocol::ApproveMcp",
-        "use crate::protocol::McpCatalogEntry",
-        "use crate::protocol::McpCatalogResult",
-        "use crate::protocol::McpScope",
-        "use crate::protocol::McpTarget",
-        "use crate::protocol::RemoveMcp",
-        "use crate::protocol::RevokeMcp",
         "use crate::protocol::RpcError",
-        "use crate::protocol::SaveMcp",
-        "use crate::protocol::SelectionScope",
-        "use crate::protocol::SetMcpEnabled",
-        "use crate::protocol::canonical_cwd"
+        "use crate::protocol::canonical_cwd",
+        "use crate::protocol::optional_non_null"
       ]
     },
     {
@@ -10864,6 +10837,7 @@
         "path SettingsSource::ProjectMcp",
         "path SettingsSource::Skills",
         "path SettingsSource::UserMcp",
+        "path crate::settings::McpServerSettings",
         "use crate::settings::McpServerSettings",
         "use crate::settings::RemoteTransport",
         "use crate::settings::SettingsError",
@@ -11485,43 +11459,6 @@
     },
     {
       "from": "dim_app_server::protocol",
-      "to": "dim_app_server::managed_provider",
-      "references": [
-        "path crate::managed_provider::AccountSnapshot"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
-      "to": "dim_app_server::mcp",
-      "references": [
-        "path crate::mcp::McpApproval"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
-      "to": "dim_app_server::mcp::publication",
-      "references": [
-        "path crate::mcp::McpApplication"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
-      "to": "dim_app_server::model_catalog",
-      "references": [
-        "path crate::model_catalog::ModelEdit"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
-      "to": "dim_app_server::provider",
-      "references": [
-        "path crate::provider::ProviderCatalog",
-        "path crate::provider::ProviderInput",
-        "path crate::provider::ProviderSelection"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
       "to": "dim_app_server::provider::preferences",
       "references": [
         "path crate::provider::ModelPreferences"
@@ -11531,7 +11468,6 @@
       "from": "dim_app_server::protocol",
       "to": "dim_app_server::settings",
       "references": [
-        "path crate::settings::McpServerSettings",
         "path crate::settings::SettingsDocument",
         "path crate::settings::SettingsSource"
       ]
@@ -11921,35 +11857,37 @@
         "path Interruption::Drain",
         "path ManagementMethods::provide",
         "path MethodDecl::management",
+        "path SelectionScope",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
         "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
+        "use crate::methods::SelectionScope",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
     },
     {
       "from": "dim_app_server::provider::management",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path crate::model_catalog::ModelEdit"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
       "to": "dim_app_server::protocol",
       "references": [
-        "path CatalogResult",
-        "path DeleteProvider",
-        "path EditModel",
         "path Empty",
-        "path ImportLegacyProviders",
-        "path ProviderTarget",
-        "path ResetModel",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
-        "path SaveProvider",
-        "path SelectModel",
-        "path SelectionResult",
-        "path SelectionScope",
-        "path SetEnabledModels",
-        "path canonical_cwd"
+        "path canonical_cwd",
+        "use crate::protocol::Empty",
+        "use crate::protocol::RpcError",
+        "use crate::protocol::canonical_cwd",
+        "use crate::protocol::optional_non_null"
       ]
     },
     {
@@ -11957,6 +11895,9 @@
       "to": "dim_app_server::provider",
       "references": [
         "path ProviderService",
+        "path crate::provider::ProviderCatalog",
+        "path crate::provider::ProviderInput",
+        "path crate::provider::ProviderSelection",
         "use super::ProviderService"
       ]
     },
@@ -12277,11 +12218,13 @@
         "path Interruption::Report",
         "path ManagementMethods::provide",
         "path MethodDecl::management",
+        "path SelectionScope",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
         "use crate::methods::ManagementMethods",
         "use crate::methods::MethodDecl",
+        "use crate::methods::SelectionScope",
         "use crate::methods::params",
         "use crate::methods::reply"
       ]
@@ -12294,23 +12237,10 @@
         "path RpcError::app",
         "path RpcError::invalid",
         "path RpcError::reloading",
-        "path SelectionScope",
-        "path SetSkillEnabled",
-        "path SkillEntry",
-        "path SkillIssue",
-        "path SkillsCatalogResult",
-        "path SkillsRefreshResult",
-        "path SkillsVersion",
         "path canonical_cwd",
         "use crate::protocol::RpcError",
-        "use crate::protocol::SelectionScope",
-        "use crate::protocol::SetSkillEnabled",
-        "use crate::protocol::SkillEntry",
-        "use crate::protocol::SkillIssue",
-        "use crate::protocol::SkillsCatalogResult",
-        "use crate::protocol::SkillsRefreshResult",
-        "use crate::protocol::SkillsVersion",
-        "use crate::protocol::canonical_cwd"
+        "use crate::protocol::canonical_cwd",
+        "use crate::protocol::optional_non_null"
       ]
     },
     {

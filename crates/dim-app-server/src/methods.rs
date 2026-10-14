@@ -3,10 +3,17 @@
 use crate::protocol::RpcError;
 use dim_agent_runtime::Contributions;
 use rutis::{BoxFuture, CordisError, Ctx, TypeKey};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectionScope {
+    #[serde(default, deserialize_with = "crate::protocol::optional_non_null")]
+    pub cwd: Option<String>,
+}
 
 pub(crate) fn params<T: DeserializeOwned>(value: Value) -> Result<T, RpcError> {
     serde_json::from_value(value).map_err(|_| RpcError::invalid("Invalid request parameters"))

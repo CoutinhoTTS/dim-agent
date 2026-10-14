@@ -1,20 +1,101 @@
 //! MCP management wire boundary over the MCP and Settings owners.
 use super::{McpChange, McpError, McpService};
 use crate::{
-    methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
-    protocol::{
-        ApproveMcp, McpCatalogEntry, McpCatalogResult, McpScope, McpTarget, RemoveMcp, RevokeMcp,
-        RpcError, SaveMcp, SelectionScope, SetMcpEnabled, canonical_cwd,
-    },
+    methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
+    protocol::{RpcError, canonical_cwd, optional_non_null},
     settings::{
         McpServerSettings, RemoteTransport, SettingsError, SettingsService, SettingsSource,
     },
 };
 use rutis::{CordisError, Ctx};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-fn error(error: McpError) -> RpcError {
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpScope {
+    User,
+    Project,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApproveMcp {
+    pub cwd: String,
+    pub id: String,
+    pub approval_token: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevokeMcp {
+    pub cwd: String,
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpTarget {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetMcpEnabled {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    pub expected_version: String,
+    pub enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    pub expected_version: String,
+    pub configuration: crate::settings::McpServerSettings,
+}
+impl std::fmt::Debug for SaveMcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveMcp").finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveMcp {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    pub expected_version: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCatalogResult {
+    pub user_revision: String,
+    pub project_revision: Option<String>,
+    pub user_application: crate::mcp::McpApplication,
+    pub project_application: Option<crate::mcp::McpApplication>,
+    pub servers: Vec<McpCatalogEntry>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCatalogEntry {
+    pub id: String,
+    pub source: McpScope,
+    pub enabled: bool,
+    pub transport: &'static str,
+    pub approval: crate::mcp::McpApproval,
+    pub approval_token: Option<String>,
+}
+
+pub(crate) fn error(error: McpError) -> RpcError {
     let kind = match &error {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
         McpError::Settings(SettingsError::AppliedUnsaved) => "mcp_settings_unsaved",

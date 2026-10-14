@@ -27,7 +27,9 @@ adapter rows. Settings provides `configuration.*` when it has the native
 UserConfiguration source. App Server's SkillsCatalog mounts the reusable catalog
 and publishes both catalog and management interfaces in one plugin, with the
 catalog's original `Deps` and effects; the capabilities crate does not depend on
-App Server's wire protocol. Public request and response DTOs remain in `protocol`.
+App Server's wire protocol. Management request and response DTOs belong to their
+business owners; `protocol` retains the envelope and built-in Session contracts.
+MCP management and built-in Session methods share the MCP owner's error mapping.
 
 `Contributions<T>` collects named services at the process scope (`None`) or a
 Session/branch instance (`Some(instance)`). A listed but missing provider gates
