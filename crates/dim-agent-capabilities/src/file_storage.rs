@@ -755,6 +755,23 @@ mod native {
     pub fn temporary_directory(parent: &File) -> io::Result<File> {
         Ok(directories(parent)?.1)
     }
+    fn lock_key(parent: &File, name: &OsStr) -> io::Result<File> {
+        // Concurrent nonexclusive creation can fail with ENOENT on macOS even
+        // when the winner created the key. Create once, then open that inode.
+        let file = match open(
+            parent,
+            name,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                open(parent, name, libc::O_RDWR, 0)?
+            }
+            Err(error) => return Err(error),
+        };
+        regular(file)
+    }
     pub fn lock(parent: &File, name: &OsStr, storage: &Arc<FileStorage>) -> Result<PhysicalLock> {
         // Reserve the fixed temp directory before opening any business lock key,
         // so filesystem-equivalent spellings cannot create a competing inode.
@@ -769,26 +786,16 @@ mod native {
         }
         // Raw names on the same volume share its case/Unicode equivalence. Hashes
         // or string folding cannot reproduce the filesystem's name identity.
-        let alias_lock = regular(open(&directory, name, libc::O_RDWR | libc::O_CREAT, 0o600)?)?;
+        let alias_lock = lock_key(&directory, name)?;
         alias_lock.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => FileStorageError::Locked,
             TryLockError::Error(error) => FileStorageError::Io(error),
         })?;
-        let marker_key = regular(open(
-            &directory,
-            OsStr::new("auth.json.lock"),
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?)?;
+        let marker_key = lock_key(&directory, OsStr::new("auth.json.lock"))?;
         if same_inode(&alias_lock.metadata()?, &marker_key.metadata()?) {
             return Err(FileStorageError::InvalidPath("reserved storage lock"));
         }
-        let auth_key = regular(open(
-            &directory,
-            OsStr::new("auth.json"),
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?)?;
+        let auth_key = lock_key(&directory, OsStr::new("auth.json"))?;
         if same_inode(&alias_lock.metadata()?, &auth_key.metadata()?) {
             return account_lock(parent, alias_lock, storage);
         }
