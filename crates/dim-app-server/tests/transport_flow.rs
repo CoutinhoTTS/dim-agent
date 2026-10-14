@@ -61,6 +61,9 @@ mod product_protocol;
 #[path = "transport_flow/summaries.rs"]
 mod summaries;
 
+#[path = "transport_flow/management.rs"]
+mod management;
+
 enum Transport {
     Unix(BufReader<UnixStream>),
     Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
@@ -1991,11 +1994,25 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         let hello = client.rpc("hello", json!({"protocolVersion":3,"clientKind":"other"})).await;
         assert_ok(&hello);
         let features = hello["result"]["features"].as_array().unwrap();
-        for method in dim_app_server::protocol::LOCAL_EXECUTION_METHODS.into_iter().chain(dim_app_server::protocol::MCP_METHODS) {
+        for method in dim_app_server::protocol::LOCAL_EXECUTION_METHODS.into_iter().chain([
+            "skills.catalog", "skills.set_enabled", "skills.refresh",
+            "mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove",
+            "mcp.disconnect", "mcp.approve", "mcp.revoke",
+        ]) {
             assert!(features.contains(&json!(method)), "{method}: {features:?}");
         }
         assert!(!features.contains(&json!("account.providers")));
         assert_eq!(client.rpc("account.providers", json!({})).await["error"]["code"], -32601);
+        // Contributed methods validate params at the owner, not at decoding.
+        for method in [
+            "skills.catalog", "skills.set_enabled", "skills.refresh",
+            "mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove",
+            "mcp.disconnect", "mcp.approve", "mcp.revoke",
+        ] {
+            let invalid = client.rpc(method, json!({"unexpected":true})).await;
+            assert_eq!(invalid["error"]["code"], -32602, "{method}: {invalid}");
+            assert_eq!(invalid["error"]["data"]["appError"], "invalid_params", "{method}: {invalid}");
+        }
         let catalog = client.rpc("skills.catalog", json!({"cwd":work})).await;
         assert_ok(&catalog);
         let review = catalog["result"]["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == "review").unwrap();
@@ -2090,3 +2107,111 @@ async fn model_configuration_errors_exit_before_listening() {
 
 #[path = "transport_flow/managed_provider.rs"]
 mod managed_provider;
+
+#[test]
+fn contributed_management_methods_decode_with_unvalidated_raw_params() {
+    use dim_app_server::protocol::{Call, decode};
+    let methods = [
+        "account.providers",
+        "account.status",
+        "account.recover",
+        "account.login.begin",
+        "account.login.browser.begin",
+        "account.login.browser.complete",
+        "account.login.status",
+        "account.login.cancel",
+        "account.logout",
+        "account.codex.status",
+        "account.codex.recover",
+        "account.codex.login.browser.begin",
+        "account.codex.login.browser.complete",
+        "account.codex.login.status",
+        "account.codex.login.cancel",
+        "account.codex.logout",
+        "account.grok.status",
+        "account.grok.recover",
+        "account.grok.login.begin",
+        "account.grok.login.status",
+        "account.grok.login.cancel",
+        "account.grok.logout",
+        "provider.catalog",
+        "provider.refresh",
+        "provider.models.set_enabled",
+        "provider.models.edit",
+        "provider.models.reset",
+        "provider.selection",
+        "provider.select",
+        "provider.list",
+        "provider.save",
+        "provider.delete",
+        "provider.import_legacy",
+        "mcp.catalog",
+        "mcp.set_enabled",
+        "mcp.save",
+        "mcp.remove",
+        "mcp.disconnect",
+        "mcp.approve",
+        "mcp.revoke",
+        "skills.catalog",
+        "skills.set_enabled",
+        "skills.refresh",
+    ];
+    assert_eq!(methods.len(), 43);
+    for method in methods {
+        for params in [json!({"unexpected":true}), json!([1]), Value::Null] {
+            let request = decode(
+                &serde_json::to_vec(&json!({
+                    "jsonrpc":"2.0", "id":1, "method":method, "params":params,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            match request.call {
+                Call::Management {
+                    method: routed,
+                    params: raw,
+                } => {
+                    assert_eq!(routed, method);
+                    assert_eq!(raw, params);
+                }
+                other => panic!("{method} decoded as {other:?}"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    for version in [1, 2, 3] {
+        let mut client = Client::new_version(&server, false, version).await;
+        for method in [
+            "account.providers",
+            "provider.save",
+            "mcp.save",
+            "skills.set_enabled",
+        ] {
+            let result = client.rpc(method, json!({"unexpected":true})).await;
+            assert_eq!(
+                result["error"]["code"], -32601,
+                "v{version} {method}: {result}"
+            );
+            assert_eq!(result["error"]["data"]["appError"], "unknown_method");
+        }
+        let created = client.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        assert_ok(
+            &client
+                .rpc(
+                    "session.close",
+                    json!({"sessionId":created["result"]["sessionId"]}),
+                )
+                .await,
+        );
+    }
+    let mut remote = Client::new_version(&server, true, 3).await;
+    let result = remote.rpc("mcp.save", json!({"unexpected":true})).await;
+    assert_eq!(result["error"]["data"]["appError"], "unknown_method");
+    server.shutdown();
+    server.join().await.unwrap();
+}

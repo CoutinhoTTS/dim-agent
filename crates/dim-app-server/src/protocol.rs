@@ -7,6 +7,23 @@ use std::sync::Arc;
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub(crate) async fn canonical_cwd(cwd: &str) -> Result<std::path::PathBuf, RpcError> {
+    if !std::path::Path::new(cwd).is_absolute() {
+        return Err(RpcError::invalid("cwd must be an absolute directory"));
+    }
+    let path = tokio::fs::canonicalize(cwd)
+        .await
+        .map_err(|_| RpcError::invalid("cwd is not accessible"))?;
+    if !tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| RpcError::invalid("cwd is not accessible"))?
+        .is_dir()
+    {
+        return Err(RpcError::invalid("cwd must be a directory"));
+    }
+    Ok(path)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
@@ -109,6 +126,7 @@ pub struct Request {
 #[derive(Debug)]
 pub enum Call {
     Hello(Hello),
+    Management { method: String, params: Value },
     Ping,
     Shutdown(Shutdown),
     Create(Create),
@@ -127,137 +145,17 @@ pub enum Call {
     AgentCreate(AgentCreate),
     AgentList,
     AgentClose(AgentClose),
-    AccountProviders,
-    AccountStatus(ProviderTarget),
-    AccountRecover(ProviderTarget),
-    LoginBegin(LoginBegin),
-    BrowserLoginBegin(BrowserLoginBegin),
-    BrowserLoginComplete(ManagedBrowserLoginComplete),
-    LoginStatus(ManagedLoginAttempt),
-    LoginCancel(ManagedLoginAttempt),
-    Logout(ProviderTarget),
-    CodexAccountStatus,
-    CodexAccountRecover,
-    CodexBrowserLoginBegin,
-    CodexBrowserLoginComplete(BrowserLoginComplete),
-    CodexLoginStatus(LoginAttempt),
-    CodexLoginCancel(LoginAttempt),
-    CodexLogout,
-    GrokAccountStatus,
-    GrokAccountRecover,
-    GrokLoginBegin,
-    GrokLoginStatus(LoginAttempt),
-    GrokLoginCancel(LoginAttempt),
-    GrokLogout,
-    ProviderCatalog(ProviderTarget),
-    ProviderRefresh(ProviderTarget),
-    ProviderModelsSetEnabled(SetEnabledModels),
-    ProviderModelEdit(EditModel),
-    ProviderModelReset(ResetModel),
-    ProviderSelection(SelectionScope),
-    ProviderSelect(SelectModel),
-    ProviderList,
-    ProviderSave(SaveProvider),
-    ProviderDelete(DeleteProvider),
-    ProviderImportLegacy(ImportLegacyProviders),
     PermissionGet(BranchRequest),
     PermissionUpdate(UpdatePermission),
     ExecStop(StopExec),
-    SkillsCatalog(SelectionScope),
-    SkillSetEnabled(SetSkillEnabled),
-    SkillsRefresh(SelectionScope),
     SessionSkills(BranchRequest),
     ModelUpdate(UpdateModel),
     PromptRefresh(BranchRequest),
-    McpCatalog(SelectionScope),
-    McpSetEnabled(SetMcpEnabled),
-    McpSave(SaveMcp),
-    McpRemove(RemoveMcp),
-    McpDisconnect(McpTarget),
-    McpApprove(ApproveMcp),
-    McpRevoke(RevokeMcp),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
-    ConfigurationCatalog,
-    ConfigurationGet(ConfigurationTarget),
-    ConfigurationUpdate(ConfigurationUpdate),
-    ConfigurationFlush,
 }
 
 impl Call {
-    pub(crate) fn is_management(&self) -> bool {
-        matches!(
-            self,
-            Self::AccountProviders
-                | Self::AccountStatus(_)
-                | Self::AccountRecover(_)
-                | Self::LoginBegin(_)
-                | Self::BrowserLoginBegin(_)
-                | Self::BrowserLoginComplete(_)
-                | Self::LoginStatus(_)
-                | Self::LoginCancel(_)
-                | Self::Logout(_)
-                | Self::CodexAccountStatus
-                | Self::CodexAccountRecover
-                | Self::CodexBrowserLoginBegin
-                | Self::CodexBrowserLoginComplete(_)
-                | Self::CodexLoginStatus(_)
-                | Self::CodexLoginCancel(_)
-                | Self::CodexLogout
-                | Self::GrokAccountStatus
-                | Self::GrokAccountRecover
-                | Self::GrokLoginBegin
-                | Self::GrokLoginStatus(_)
-                | Self::GrokLoginCancel(_)
-                | Self::GrokLogout
-                | Self::ProviderCatalog(_)
-                | Self::ProviderRefresh(_)
-                | Self::ProviderModelsSetEnabled(_)
-                | Self::ProviderModelEdit(_)
-                | Self::ProviderModelReset(_)
-                | Self::ProviderSelection(_)
-                | Self::ProviderSelect(_)
-                | Self::ProviderList
-                | Self::ProviderSave(_)
-                | Self::ProviderDelete(_)
-                | Self::ProviderImportLegacy(_)
-                | Self::SkillsCatalog(_)
-                | Self::SkillSetEnabled(_)
-                | Self::SkillsRefresh(_)
-                | Self::McpCatalog(_)
-                | Self::McpSetEnabled(_)
-                | Self::McpSave(_)
-                | Self::McpRemove(_)
-                | Self::McpDisconnect(_)
-                | Self::McpApprove(_)
-                | Self::McpRevoke(_)
-                | Self::ConfigurationCatalog
-                | Self::ConfigurationGet(_)
-                | Self::ConfigurationUpdate(_)
-                | Self::ConfigurationFlush
-        )
-    }
-
-    pub(crate) fn is_execution_management(&self) -> bool {
-        matches!(
-            self,
-            Self::SkillsCatalog(_)
-                | Self::SkillSetEnabled(_)
-                | Self::SkillsRefresh(_)
-                | Self::McpCatalog(_)
-                | Self::McpSetEnabled(_)
-                | Self::McpSave(_)
-                | Self::McpRemove(_)
-                | Self::McpDisconnect(_)
-                | Self::McpApprove(_)
-                | Self::McpRevoke(_)
-                | Self::ConfigurationCatalog
-                | Self::ConfigurationGet(_)
-                | Self::ConfigurationUpdate(_)
-                | Self::ConfigurationFlush
-        )
-    }
-
     pub(crate) fn is_execution_session(&self) -> bool {
         matches!(
             self,
@@ -273,36 +171,15 @@ impl Call {
     }
 }
 
-pub const LOCAL_EXECUTION_METHODS: [&str; 9] = [
+pub const LOCAL_EXECUTION_METHODS: [&str; 8] = [
     "session.permission.get",
     "session.permission.update",
     "session.exec.stop",
-    "skills.catalog",
-    "skills.set_enabled",
-    "skills.refresh",
     "session.skills",
     "session.model.update",
     "session.prompt.refresh",
-];
-
-pub const MCP_METHODS: [&str; 9] = [
-    "mcp.catalog",
-    "mcp.set_enabled",
-    "mcp.save",
-    "mcp.remove",
-    "mcp.disconnect",
-    "mcp.approve",
-    "mcp.revoke",
     "session.mcp",
     "session.mcp.refresh",
-];
-
-pub const CONFIGURATION_METHODS: [&str; 5] = [
-    "configuration.catalog",
-    "configuration.get",
-    "configuration.update",
-    "configuration.flush",
-    "configuration.changed",
 ];
 
 /// This boundary cannot name infrastructure, project grants or arbitrary plugins.
@@ -352,42 +229,6 @@ pub struct ConfigurationMutation {
     pub current: crate::user_configuration::UserConfigurationInfo,
     pub persistence: crate::user_configuration::UserPersistenceStatus,
 }
-
-pub const MANAGEMENT_METHODS: [&str; 33] = [
-    "account.providers",
-    "account.status",
-    "account.recover",
-    "account.login.begin",
-    "account.login.browser.begin",
-    "account.login.browser.complete",
-    "account.login.status",
-    "account.login.cancel",
-    "account.logout",
-    "account.codex.status",
-    "account.codex.recover",
-    "account.codex.login.browser.begin",
-    "account.codex.login.browser.complete",
-    "account.codex.login.status",
-    "account.codex.login.cancel",
-    "account.codex.logout",
-    "account.grok.status",
-    "account.grok.recover",
-    "account.grok.login.begin",
-    "account.grok.login.status",
-    "account.grok.login.cancel",
-    "account.grok.logout",
-    "provider.catalog",
-    "provider.refresh",
-    "provider.models.set_enabled",
-    "provider.models.edit",
-    "provider.models.reset",
-    "provider.selection",
-    "provider.select",
-    "provider.list",
-    "provider.save",
-    "provider.delete",
-    "provider.import_legacy",
-];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -907,7 +748,37 @@ pub struct BranchCreate {
     pub prompt: String,
 }
 
-/// This is the external boundary; validated requests never carry untyped params.
+/// Methods still decoded by the built-in protocol cannot be shadowed by
+/// runtime contributions. Session-looking names not listed here remain valid
+/// management names (for example `session.shell`).
+pub(crate) fn is_builtin_method(method: &str) -> bool {
+    LOCAL_EXECUTION_METHODS.contains(&method)
+        || matches!(
+            method,
+            "hello"
+                | "daemon.ping"
+                | "daemon.shutdown"
+                | "session.create"
+                | "session.list"
+                | "session.summaries"
+                | "session.attach"
+                | "session.detach"
+                | "session.submit"
+                | "session.input_lookup"
+                | "session.history"
+                | "session.stop"
+                | "session.idle"
+                | "session.close"
+                | "approval.respond"
+                | "session.branch_create"
+                | "agent.create"
+                | "agent.list"
+                | "agent.close"
+        )
+}
+
+/// Validates the envelope and built-in calls. Runtime contributions retain raw
+/// params until the owning adapter validates its concrete request type.
 pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|_| (None, RpcError::wire(-32700, "Invalid JSON")))?;
@@ -976,100 +847,18 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
                 Call::AgentList
             }
             "agent.close" => Call::AgentClose(params(raw_params)?),
-            "account.providers" => {
-                let _: Empty = params(raw_params)?;
-                Call::AccountProviders
-            }
-            "account.status" => Call::AccountStatus(params(raw_params)?),
-            "account.recover" => Call::AccountRecover(params(raw_params)?),
-            "account.login.begin" => Call::LoginBegin(params(raw_params)?),
-            "account.login.browser.begin" => Call::BrowserLoginBegin(params(raw_params)?),
-            "account.login.browser.complete" => Call::BrowserLoginComplete(params(raw_params)?),
-            "account.login.status" => Call::LoginStatus(params(raw_params)?),
-            "account.login.cancel" => Call::LoginCancel(params(raw_params)?),
-            "account.logout" => Call::Logout(params(raw_params)?),
-            "account.codex.status" => {
-                let _: Empty = params(raw_params)?;
-                Call::CodexAccountStatus
-            }
-            "account.codex.recover" => {
-                let _: Empty = params(raw_params)?;
-                Call::CodexAccountRecover
-            }
-            "account.codex.login.browser.begin" => {
-                let _: Empty = params(raw_params)?;
-                Call::CodexBrowserLoginBegin
-            }
-            "account.codex.login.browser.complete" => {
-                Call::CodexBrowserLoginComplete(params(raw_params)?)
-            }
-            "account.codex.login.status" => Call::CodexLoginStatus(params(raw_params)?),
-            "account.codex.login.cancel" => Call::CodexLoginCancel(params(raw_params)?),
-            "account.codex.logout" => {
-                let _: Empty = params(raw_params)?;
-                Call::CodexLogout
-            }
-            "account.grok.status" => {
-                let _: Empty = params(raw_params)?;
-                Call::GrokAccountStatus
-            }
-            "account.grok.recover" => {
-                let _: Empty = params(raw_params)?;
-                Call::GrokAccountRecover
-            }
-            "account.grok.login.begin" => {
-                let _: Empty = params(raw_params)?;
-                Call::GrokLoginBegin
-            }
-            "account.grok.login.status" => Call::GrokLoginStatus(params(raw_params)?),
-            "account.grok.login.cancel" => Call::GrokLoginCancel(params(raw_params)?),
-            "account.grok.logout" => {
-                let _: Empty = params(raw_params)?;
-                Call::GrokLogout
-            }
-            "provider.catalog" => Call::ProviderCatalog(params(raw_params)?),
-            "provider.refresh" => Call::ProviderRefresh(params(raw_params)?),
-            "provider.models.set_enabled" => Call::ProviderModelsSetEnabled(params(raw_params)?),
-            "provider.models.edit" => Call::ProviderModelEdit(params(raw_params)?),
-            "provider.models.reset" => Call::ProviderModelReset(params(raw_params)?),
-            "provider.selection" => Call::ProviderSelection(params(raw_params)?),
-            "provider.select" => Call::ProviderSelect(params(raw_params)?),
-            "provider.list" => {
-                let _: Empty = params(raw_params)?;
-                Call::ProviderList
-            }
-            "provider.save" => Call::ProviderSave(params(raw_params)?),
-            "provider.delete" => Call::ProviderDelete(params(raw_params)?),
-            "provider.import_legacy" => Call::ProviderImportLegacy(params(raw_params)?),
             "session.permission.get" => Call::PermissionGet(params(raw_params)?),
             "session.permission.update" => Call::PermissionUpdate(params(raw_params)?),
             "session.exec.stop" => Call::ExecStop(params(raw_params)?),
-            "skills.catalog" => Call::SkillsCatalog(params(raw_params)?),
-            "skills.set_enabled" => Call::SkillSetEnabled(params(raw_params)?),
-            "skills.refresh" => Call::SkillsRefresh(params(raw_params)?),
             "session.skills" => Call::SessionSkills(params(raw_params)?),
             "session.model.update" => Call::ModelUpdate(params(raw_params)?),
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
-            "mcp.catalog" => Call::McpCatalog(params(raw_params)?),
-            "mcp.set_enabled" => Call::McpSetEnabled(params(raw_params)?),
-            "mcp.save" => Call::McpSave(params(raw_params)?),
-            "mcp.remove" => Call::McpRemove(params(raw_params)?),
-            "mcp.disconnect" => Call::McpDisconnect(params(raw_params)?),
-            "mcp.approve" => Call::McpApprove(params(raw_params)?),
-            "mcp.revoke" => Call::McpRevoke(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
-            "configuration.catalog" => {
-                let _: Empty = params(raw_params)?;
-                Call::ConfigurationCatalog
-            }
-            "configuration.get" => Call::ConfigurationGet(params(raw_params)?),
-            "configuration.update" => Call::ConfigurationUpdate(params(raw_params)?),
-            "configuration.flush" => {
-                let _: Empty = params(raw_params)?;
-                Call::ConfigurationFlush
-            }
-            _ => return Err(RpcError::app(-32601, "unknown_method", "Unknown method")),
+            _ => Call::Management {
+                method,
+                params: raw_params,
+            },
         })
     })();
     result
@@ -1091,7 +880,7 @@ pub struct HelloResult {
     pub protocol_version: u32,
     pub daemon_profile: DaemonProfile,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub features: Option<Vec<&'static str>>,
+    pub features: Option<Vec<String>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
@@ -1169,6 +958,7 @@ pub enum InputLookupResult {
 #[serde(untagged)]
 pub enum Reply {
     Hello(HelloResult),
+    Management(Value),
     Ping(PingResult),
     Create(CreateResult),
     List(Vec<SessionInfo>),
@@ -1180,34 +970,12 @@ pub enum Reply {
     Barrier(crate::tree_protocol::BarrierResult),
     AgentCreated(AgentCreated),
     Agents(Vec<AgentInfo>),
-    AccountProviders(Vec<crate::managed_provider::ProviderDescriptor>),
-    Account(crate::managed_provider::AccountSnapshot),
-    DeviceLogin(DeviceLogin),
-    BrowserLogin(BrowserLogin),
-    LoginState(LoginState),
-    ManagedAuthStatus(crate::codex_oauth::AuthStatus),
-    ManagedLoginState(ManagedLoginState),
-    Catalog(CatalogResult),
-    ProviderCatalog(crate::provider::ProviderCatalog),
-    Selection(SelectionResult),
-    ProviderSelection(crate::provider::ProviderSelection),
-    ProviderList(crate::provider::ProviderList),
-    ProviderSummary(crate::provider::ProviderSummary),
-    ProviderImport(crate::provider::ImportResult),
     Permission(PermissionResult),
     ExecEnded(dim_agent_types::ExecEndedData),
-    SkillsCatalog(SkillsCatalogResult),
-    SkillsRefresh(SkillsRefreshResult),
-    SkillsVersion(SkillsVersion),
     SessionSkills(SessionSkillsResult),
     ModelUpdate(ModelUpdateResult),
     Configuration(ConfigurationResult),
-    McpCatalog(McpCatalogResult),
     McpState(McpStateResult),
-    ConfigurationCatalog(ConfigurationCatalog),
-    ConfigurationInfo(crate::user_configuration::UserConfigurationInfo),
-    ConfigurationMutation(ConfigurationMutation),
-    ConfigurationPersistence(crate::user_configuration::UserPersistenceStatus),
     Empty(Empty),
 }
 impl Reply {
@@ -1288,6 +1056,11 @@ pub enum Notification {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum Outbound {
+    ManagementNotice {
+        jsonrpc: &'static str,
+        method: String,
+        params: Value,
+    },
     Success {
         jsonrpc: &'static str,
         id: RequestId,

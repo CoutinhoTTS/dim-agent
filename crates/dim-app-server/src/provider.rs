@@ -2,6 +2,7 @@
 //! managed credentials; this plugin owns provider configuration and SQLite records.
 mod drivers;
 mod legacy;
+pub(crate) mod management;
 mod new_api;
 mod preferences;
 mod remote;

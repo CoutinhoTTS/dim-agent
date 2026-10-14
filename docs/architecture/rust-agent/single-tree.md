@@ -6,7 +6,9 @@ optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses the root editable layer; MCP connections and Skill content instances belong
 to Sessions. Project MCP execution requires host-local approval. See
 [ADR 002](../../adr/002-loader-plugin-management.md) for implemented configuration
-scope and the outstanding generic management/Management entrypoint work.
+scope. The stable Methods port and [Management](../../design/plugins/management.md)
+view route account, provider, MCP, Skills and configuration management methods
+to owner adapters. Execution-side dependency inversion remains outstanding.
 Product assembly preflight and typed capability event declarations remain
 incomplete; proposals are recorded in [ADR 001](../../adr/001-harness-foundation.md).
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
@@ -129,8 +131,12 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `AgentScope`（`agent` 实例中的行） | 一个 `Agent`（Session 建在同一 Agent 实例里）与承载监听的子插件 `Sessions`；`AgentHost`（agent、agentId、default、trace 归档）；apply 登记进目录 | 经 `AgentDirectory` 登记 | `AgentDirectory`、`Loader`；`TimelineStore` 由已配置的 AgentBuilder 传入 |
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |
-| `ConnectionPlugin` | 连接索引、连接/请求/字节许可、连接读写任务 | `ConnectionHub` | `ServerControl` |
-| `RpcPlugin` | 已受理命令的任务集合 | `apply` 向 `ConnectionHub` 注册 `RpcService`，effect 注销后排空命令 | `AgentIndex`、`ConnectionHub`、`ServerControl`；产品 profile 另加实际开放的管理服务 |
+| `ConnectionPlugin` | Connection index, admission limits, transport tasks and local management notification delivery | `ConnectionHub` | `ServerControl`, `Methods` |
+| `RpcPlugin` | Accepted command tasks | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`; product profile also uses Provider for model selection |
+| `MethodsPlugin` | RPC-side contribution catalog | Stable process port; atomic admission/removal and per-registration accepted-task drainage | None |
+| `ManagementPlugin` | Management-level view and discovery method | `Management` | `Methods` |
+| Management adapters | Owner-specific wire validation and business calls | Register with effect-owned unregister/drain | `Methods` and each owner's business services |
+| `ConfigurationManagement` | Configuration wire adapter and coalesced invalidations | Publishes through a generic generation-fenced notification port | `Methods`, `SettingsService`, `UserConfiguration` |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
 `AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算，最后排空 trace 归档。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算并排空归档，再关闭 Agent 实例；effect 幂等重复这两步。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
@@ -246,7 +252,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ## RPC 接线
 
-- **协议处理**：解码、hello 与版本协商、v1/v2 错误映射与事件过滤按 App Server 协议合同执行；handler 只调用 `RpcService` 持有的类型化服务。
+- **Protocol handling**: envelope decoding, hello/version negotiation, v1/v2 error mapping and event filtering follow the App Server contract. Built-in calls use RpcService; contributed management calls enter the Methods port, whose owners validate concrete DTOs. The local v3 entry serves management; WebSocket does not. Hello precedes management notifications in the ordered outbound queue.
 - **`session.create`**：App Server 解析工作目录、显式或默认模型与准入（产品 profile 经 `ProviderService`），再由 `Agent` 创建 Session。
 - **无 Session 的管理请求**：使用进程 `ProviderService` 与账号服务（Codex/Grok OAuth、`ManagedProviders`），不创建隐藏 Session。
 - **WS**：账号与 provider 管理只经本地传输（Unix socket / Windows named pipe）开放，WS 不开放账号与配置方法。

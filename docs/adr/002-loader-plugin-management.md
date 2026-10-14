@@ -122,7 +122,8 @@ of plugin intent. Read projections contain fixed row IDs and opaque revisions,
 never document bodies. An update reports whether its save completed separately
 from the current, independently sampled intent and persistence status.
 `configuration.changed` coalesces framework LoaderChanged events and save-result
-invalidations. Rpc owns and drains the notification task. Listeners neither
+invalidations. The configuration adapter owns and drains the notification task.
+Connection supplies generic generation-fenced delivery. Listeners neither
 mutate the loader nor feed loader events back into business configuration watches.
 
 This is not the complete generic management surface in issue #3. Arbitrary row
@@ -142,13 +143,18 @@ ADR 002 records this branch's approved direction, not acceptance of changes to
 another contributor's PR. Production compression, the marketplace and dynamic
 events are not introduced by this implementation.
 
-PR #13's revised management design introduces a process-level `Management`
-plugin: owners contribute named methods, and entrypoint mounting/link exports
-control access. This branch does not implement that aggregate or claim to finish
-the corresponding Rpc migration. Its configuration methods use the existing
-protected-local Rpc boundary as a compatibility adapter; configuration ownership
-remains in Settings/UserConfiguration. Integrating Management must move this
-adapter along with existing MCP, Skill, provider and account management methods,
-preserving their wire contracts and accepted-work draining. It must not add a
-second configuration authority or infer execution permission from installation.
-Session-owned MCP instances are independent of that entrypoint migration.
+PR #15's revised dependency direction replaces the proposed extension registry
+with consumer-owned stable ports. The RPC-side Methods port, Management view,
+local v3 dispatch and all existing account/provider/MCP/Skills/configuration
+management adapters are implemented; see [Management](../design/plugins/management.md).
+Each adapter owns its declarations, validation and accepted tasks. Hello and
+management discovery use those registrations, not a second feature table.
+Configuration authority remains in Settings/UserConfiguration. Non-serving
+entries return `unknown_method` for contributed methods.
+
+Execution dependency inversion remains separate: Rpc still reaches Provider for
+model preferences, Agents depends on Settings/model selection, and Session MCP
+contributions feed ToolRegistry. The method migration alone does not isolate
+those business-owner reloads. Link export, RemoteGateway, contributed Session
+calls and CallChannel remain outside this delivered subset. Session-owned MCP
+instances and host-local execution approval are unchanged.

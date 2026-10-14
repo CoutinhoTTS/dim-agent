@@ -1119,6 +1119,17 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::codex_oauth::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::codex_oauth",
+      "file": "crates/dim-app-server/src/codex_oauth/management.rs",
+      "unexpandedMacros": [
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::collaboration",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1145,24 +1156,13 @@
       ]
     },
     {
-      "id": "dim_app_server::connection::configuration",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::connection",
-      "file": "crates/dim-app-server/src/connection/configuration.rs",
-      "unexpandedMacros": [
-        "tokio::select",
-        "unreachable"
-      ]
-    },
-    {
       "id": "dim_app_server::connection::mcp",
       "crate": "dim_app_server",
       "parent": "dim_app_server::connection",
       "file": "crates/dim-app-server/src/connection/mcp.rs",
       "unexpandedMacros": [
         "format",
-        "tokio::select",
-        "unreachable"
+        "tokio::select"
       ]
     },
     {
@@ -1204,6 +1204,17 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::grok_oauth::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::grok_oauth",
+      "file": "crates/dim-app-server/src/grok_oauth/management.rs",
+      "unexpandedMacros": [
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::managed_oauth",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1226,6 +1237,26 @@
       ]
     },
     {
+      "id": "dim_app_server::managed_provider::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::managed_provider",
+      "file": "crates/dim-app-server/src/managed_provider/management.rs",
+      "unexpandedMacros": [
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/management.rs",
+      "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::mcp",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1235,6 +1266,17 @@
         "tokio::pin",
         "tokio::select",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/management.rs",
+      "unexpandedMacros": [
+        "serde_json::json",
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -1303,6 +1345,17 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "tokio::pin",
+        "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::methods",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/methods.rs",
+      "unexpandedMacros": [
+        "serde_json::json",
         "tokio::pin",
         "tokio::select"
       ]
@@ -1390,6 +1443,17 @@
       ]
     },
     {
+      "id": "dim_app_server::provider::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/management.rs",
+      "unexpandedMacros": [
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::new_api",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -1449,6 +1513,16 @@
         "format",
         "matches",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::skills_management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/skills_management.rs",
+      "unexpandedMacros": [
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -1535,6 +1609,19 @@
         "matches",
         "params",
         "serde_json::json",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::user_configuration::management",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::user_configuration",
+      "file": "crates/dim-app-server/src/user_configuration/management.rs",
+      "unexpandedMacros": [
+        "matches",
+        "serde_json::json",
+        "tokio::select",
+        "unreachable",
         "vec"
       ]
     },
@@ -8780,6 +8867,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::codex_oauth::management",
+      "references": [
+        "path codex_oauth::management::CodexAccountManagement"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::collaboration",
       "references": [
         "mod collaboration",
@@ -8823,6 +8917,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::grok_oauth::management",
+      "references": [
+        "path grok_oauth::management::GrokAccountManagement"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::managed_oauth",
       "references": [
         "mod managed_oauth"
@@ -8841,10 +8942,32 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::managed_provider::management",
+      "references": [
+        "path managed_provider::management::AccountManagement"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::management",
+      "references": [
+        "mod management",
+        "path management::ManagementPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::mcp",
       "references": [
         "mod mcp",
         "path mcp::McpPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::mcp::management",
+      "references": [
+        "path mcp::management::McpManagement"
       ]
     },
     {
@@ -8859,6 +8982,14 @@
       "to": "dim_app_server::mcp::session",
       "references": [
         "path mcp::install"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::methods",
+      "references": [
+        "mod methods",
+        "path methods::MethodsPlugin"
       ]
     },
     {
@@ -8903,12 +9034,27 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::provider::management",
+      "references": [
+        "path provider::management::ProviderManagement"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::settings",
       "references": [
         "mod settings",
         "path settings",
         "path settings::SettingsPlugin::native",
         "path settings::SettingsPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::skills_management",
+      "references": [
+        "mod skills_management",
+        "path skills_management::SkillsManagement"
       ]
     },
     {
@@ -8966,6 +9112,13 @@
         "path user_configuration::UserConfigurationPlugin",
         "path user_configuration::UserPersist::default",
         "path user_configuration::register_documents"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::user_configuration::management",
+      "references": [
+        "path user_configuration::management::ConfigurationManagement"
       ]
     },
     {
@@ -9395,6 +9548,13 @@
     },
     {
       "from": "dim_app_server::codex_oauth",
+      "to": "dim_app_server::codex_oauth::management",
+      "references": [
+        "mod management"
+      ]
+    },
+    {
+      "from": "dim_app_server::codex_oauth",
       "to": "dim_app_server::managed_oauth",
       "references": [
         "path AttemptStatus",
@@ -9413,6 +9573,65 @@
         "use managed_oauth::Config",
         "use managed_oauth::CredentialLease",
         "use managed_oauth::OAuthError"
+      ]
+    },
+    {
+      "from": "dim_app_server::codex_oauth::management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::codex_oauth::management",
+      "to": "dim_app_server::codex_oauth",
+      "references": [
+        "path OpenAICodexOAuthService",
+        "use super::OpenAICodexOAuthService"
+      ]
+    },
+    {
+      "from": "dim_app_server::codex_oauth::management",
+      "to": "dim_app_server::managed_provider::management",
+      "references": [
+        "path attempt_id",
+        "path error",
+        "path managed_attempt",
+        "use crate::managed_provider::management::attempt_id",
+        "use crate::managed_provider::management::managed_attempt",
+        "use crate::managed_provider::management::managed_oauth_error"
+      ]
+    },
+    {
+      "from": "dim_app_server::codex_oauth::management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Interruption::Drain",
+        "path MethodDecl::management",
+        "path Methods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Methods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::codex_oauth::management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path BrowserLogin",
+        "path BrowserLoginComplete",
+        "path Empty",
+        "path LoginAttempt",
+        "path RpcError::invalid"
       ]
     },
     {
@@ -9697,9 +9916,6 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_capabilities::skills",
       "references": [
-        "path RefreshTarget",
-        "path SkillStatus::Active",
-        "path SkillStatus::Shadowed",
         "path SkillsError",
         "path SkillsError::Closed",
         "path SkillsError::RootUnreadable",
@@ -9708,18 +9924,7 @@
         "path SkillsError::SettingsSync",
         "path SkillsError::SettingsWrite",
         "path SkillsError::UnknownSkill",
-        "path dim_agent_capabilities::skills::SkillIssue",
-        "use dim_agent_capabilities::skills::RefreshTarget",
-        "use dim_agent_capabilities::skills::SkillStatus",
         "use dim_agent_capabilities::skills::SkillsError"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
-      "to": "dim_agent_capabilities::skills::catalog",
-      "references": [
-        "path SkillsCatalog",
-        "use dim_agent_capabilities::skills::SkillsCatalog"
       ]
     },
     {
@@ -9840,13 +10045,6 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_app_server::codex_oauth",
-      "references": [
-        "path crate::codex_oauth::OpenAICodexOAuthService"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
       "to": "dim_app_server::collaboration",
       "references": [
         "path crate::collaboration::Collaboration"
@@ -9854,22 +10052,10 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_app_server::connection::configuration",
-      "references": [
-        "mod configuration",
-        "path configuration",
-        "path configuration::management",
-        "path configuration::subscribe"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
       "to": "dim_app_server::connection::mcp",
       "references": [
         "mod mcp",
-        "path mcp",
         "path mcp::error",
-        "path mcp::management",
         "path mcp::session_state"
       ]
     },
@@ -9900,39 +10086,19 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_app_server::grok_oauth",
-      "references": [
-        "path crate::grok_oauth::GrokOAuthService"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
-      "to": "dim_app_server::managed_oauth",
-      "references": [
-        "path crate::managed_oauth::AttemptStatus",
-        "path crate::managed_oauth::OAuthError"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
-      "to": "dim_app_server::managed_provider",
-      "references": [
-        "path crate::managed_provider::ManagedProviderError",
-        "path crate::managed_provider::ManagedProviders"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
-      "to": "dim_app_server::mcp",
-      "references": [
-        "path crate::mcp::McpService"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
       "to": "dim_app_server::mcp::session",
       "references": [
         "path crate::mcp::McpSession"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path MethodLevel::Management",
+        "path Methods",
+        "use crate::methods::MethodLevel",
+        "use crate::methods::Methods"
       ]
     },
     {
@@ -9951,118 +10117,57 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path AgentCreated",
-        "path BrowserLogin",
         "path Call",
-        "path Call::AccountProviders",
-        "path Call::AccountRecover",
-        "path Call::AccountStatus",
         "path Call::AgentClose",
         "path Call::AgentCreate",
         "path Call::AgentList",
         "path Call::ApprovalRespond",
         "path Call::Attach",
         "path Call::BranchCreate",
-        "path Call::BrowserLoginBegin",
-        "path Call::BrowserLoginComplete",
         "path Call::Close",
-        "path Call::CodexAccountRecover",
-        "path Call::CodexAccountStatus",
-        "path Call::CodexBrowserLoginBegin",
-        "path Call::CodexBrowserLoginComplete",
-        "path Call::CodexLoginCancel",
-        "path Call::CodexLoginStatus",
-        "path Call::CodexLogout",
         "path Call::Create",
         "path Call::Detach",
         "path Call::ExecStop",
-        "path Call::GrokAccountRecover",
-        "path Call::GrokAccountStatus",
-        "path Call::GrokLoginBegin",
-        "path Call::GrokLoginCancel",
-        "path Call::GrokLoginStatus",
-        "path Call::GrokLogout",
         "path Call::Hello",
         "path Call::History",
         "path Call::Idle",
         "path Call::InputLookup",
         "path Call::List",
-        "path Call::LoginBegin",
-        "path Call::LoginCancel",
-        "path Call::LoginStatus",
-        "path Call::Logout",
+        "path Call::Management",
         "path Call::McpRefresh",
         "path Call::ModelUpdate",
         "path Call::PermissionGet",
         "path Call::PermissionUpdate",
         "path Call::Ping",
         "path Call::PromptRefresh",
-        "path Call::ProviderCatalog",
-        "path Call::ProviderDelete",
-        "path Call::ProviderImportLegacy",
-        "path Call::ProviderList",
-        "path Call::ProviderModelEdit",
-        "path Call::ProviderModelReset",
-        "path Call::ProviderModelsSetEnabled",
-        "path Call::ProviderRefresh",
-        "path Call::ProviderSave",
-        "path Call::ProviderSelect",
-        "path Call::ProviderSelection",
         "path Call::SessionMcp",
         "path Call::SessionSkills",
         "path Call::Shutdown",
-        "path Call::SkillSetEnabled",
-        "path Call::SkillsCatalog",
-        "path Call::SkillsRefresh",
         "path Call::Stop",
         "path Call::Submit",
         "path Call::Summaries",
-        "path CatalogResult",
         "path ConfigurationResult",
         "path Create",
         "path CreateResult",
-        "path DeviceLogin",
-        "path LoginAttempt",
-        "path LoginState",
-        "path LoginState::Failed",
-        "path ManagedLoginState::Cancelled",
-        "path ManagedLoginState::Completed",
-        "path ManagedLoginState::Expired",
-        "path ManagedLoginState::Failed",
-        "path ManagedLoginState::Pending",
         "path ModelUpdateResult",
+        "path Outbound::ManagementNotice",
         "path Outbound::result",
         "path PermissionResult",
         "path PingResult",
         "path Reply",
-        "path Reply::Account",
-        "path Reply::AccountProviders",
         "path Reply::AgentCreated",
         "path Reply::Agents",
         "path Reply::Barrier",
-        "path Reply::BrowserLogin",
-        "path Reply::Catalog",
         "path Reply::Configuration",
         "path Reply::Create",
-        "path Reply::DeviceLogin",
         "path Reply::ExecEnded",
         "path Reply::List",
-        "path Reply::LoginState",
-        "path Reply::ManagedAuthStatus",
-        "path Reply::ManagedLoginState",
+        "path Reply::Management",
         "path Reply::McpState",
         "path Reply::ModelUpdate",
         "path Reply::Permission",
         "path Reply::Ping",
-        "path Reply::ProviderCatalog",
-        "path Reply::ProviderImport",
-        "path Reply::ProviderList",
-        "path Reply::ProviderSelection",
-        "path Reply::ProviderSummary",
-        "path Reply::Selection",
         "path Reply::SessionSkills",
-        "path Reply::SkillsCatalog",
-        "path Reply::SkillsRefresh",
-        "path Reply::SkillsVersion",
         "path Reply::Summaries",
         "path Reply::empty",
         "path Request",
@@ -10076,15 +10181,10 @@
         "path RpcError::reloading",
         "path RpcError::wire",
         "path SERVER_VERSION",
-        "path SelectionResult",
         "path SessionInfo",
         "path SessionSkillsResult",
         "path SessionSummary",
-        "path SkillEntry",
-        "path SkillIssue",
-        "path SkillsCatalogResult",
-        "path SkillsRefreshResult",
-        "path SkillsVersion"
+        "path canonical_cwd"
       ]
     },
     {
@@ -10103,71 +10203,9 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
       "to": "dim_app_server::tree_protocol",
       "references": [
         "path crate::tree_protocol::BarrierResult"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
-      "to": "dim_app_server::user_configuration",
-      "references": [
-        "path crate::user_configuration::UserConfiguration"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection::configuration",
-      "to": "dim_app_server::connection",
-      "references": [
-        "path ConnectionHub",
-        "path RpcService",
-        "use super::ConnectionHub",
-        "use super::RpcService"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection::configuration",
-      "to": "dim_app_server::protocol",
-      "references": [
-        "path Call",
-        "path Call::ConfigurationCatalog",
-        "path Call::ConfigurationFlush",
-        "path Call::ConfigurationGet",
-        "path Call::ConfigurationUpdate",
-        "path ConfigurationCatalog",
-        "path ConfigurationMutation",
-        "path Empty",
-        "path Notification::ConfigurationChanged",
-        "path Outbound::notice",
-        "path Reply",
-        "path Reply::ConfigurationCatalog",
-        "path Reply::ConfigurationInfo",
-        "path Reply::ConfigurationMutation",
-        "path Reply::ConfigurationPersistence",
-        "path RpcError",
-        "path RpcError::app",
-        "path RpcError::invalid",
-        "path RpcError::reloading"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection::configuration",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsError",
-        "path SettingsError::AppliedUnsaved",
-        "path SettingsError::Cancelled",
-        "path SettingsError::Closed",
-        "path SettingsError::Conflict",
-        "path SettingsError::Invalid",
-        "use crate::settings::SettingsError"
       ]
     },
     {
@@ -10199,18 +10237,13 @@
       "from": "dim_app_server::connection::mcp",
       "to": "dim_app_server::connection",
       "references": [
-        "path Connection",
-        "path RpcService",
-        "path canonical_cwd"
+        "path Connection"
       ]
     },
     {
       "from": "dim_app_server::connection::mcp",
       "to": "dim_app_server::mcp",
       "references": [
-        "path McpChange::Put",
-        "path McpChange::Remove",
-        "path McpChange::SetEnabled",
         "path McpError",
         "path McpError::ApprovalRequired",
         "path McpError::Cancelled",
@@ -10220,7 +10253,6 @@
         "path McpError::Settings",
         "path McpError::UnknownServer",
         "path McpError::Worker",
-        "use crate::mcp::McpChange",
         "use crate::mcp::McpError"
       ]
     },
@@ -10244,29 +10276,12 @@
       "from": "dim_app_server::connection::mcp",
       "to": "dim_app_server::protocol",
       "references": [
-        "path Call",
-        "path Call::McpApprove",
-        "path Call::McpCatalog",
-        "path Call::McpDisconnect",
-        "path Call::McpRemove",
-        "path Call::McpRevoke",
-        "path Call::McpSave",
-        "path Call::McpSetEnabled",
-        "path McpCatalogEntry",
-        "path McpCatalogResult",
         "path McpRejection",
-        "path McpScope",
-        "path McpScope::Project",
-        "path McpScope::User",
         "path McpServerStatus",
         "path McpStateResult",
         "path Notification::McpState",
-        "path Reply",
-        "path Reply::McpCatalog",
-        "path Reply::empty",
         "path RpcError",
         "path RpcError::app",
-        "path RpcError::invalid",
         "path RpcError::reloading"
       ]
     },
@@ -10274,24 +10289,13 @@
       "from": "dim_app_server::connection::mcp",
       "to": "dim_app_server::settings",
       "references": [
-        "path McpServerSettings::Remote",
-        "path McpServerSettings::Stdio",
-        "path RemoteTransport::Http",
-        "path RemoteTransport::Sse",
         "path SettingsError::AppliedUnsaved",
         "path SettingsError::Cancelled",
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
-        "path SettingsSource",
-        "path SettingsSource::ProjectMcp",
-        "path SettingsSource::Skills",
-        "path SettingsSource::UserMcp",
-        "use crate::settings::McpServerSettings",
-        "use crate::settings::RemoteTransport",
-        "use crate::settings::SettingsError",
-        "use crate::settings::SettingsSource"
+        "use crate::settings::SettingsError"
       ]
     },
     {
@@ -10548,6 +10552,13 @@
     },
     {
       "from": "dim_app_server::grok_oauth",
+      "to": "dim_app_server::grok_oauth::management",
+      "references": [
+        "mod management"
+      ]
+    },
+    {
+      "from": "dim_app_server::grok_oauth",
       "to": "dim_app_server::managed_oauth",
       "references": [
         "path AttemptStatus",
@@ -10566,6 +10577,63 @@
         "use managed_oauth::CredentialLease",
         "use managed_oauth::DeviceBegin",
         "use managed_oauth::OAuthError"
+      ]
+    },
+    {
+      "from": "dim_app_server::grok_oauth::management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::grok_oauth::management",
+      "to": "dim_app_server::grok_oauth",
+      "references": [
+        "path GrokOAuthService",
+        "use super::GrokOAuthService"
+      ]
+    },
+    {
+      "from": "dim_app_server::grok_oauth::management",
+      "to": "dim_app_server::managed_provider::management",
+      "references": [
+        "path attempt_id",
+        "path error",
+        "path managed_attempt",
+        "use crate::managed_provider::management::attempt_id",
+        "use crate::managed_provider::management::managed_attempt",
+        "use crate::managed_provider::management::managed_oauth_error"
+      ]
+    },
+    {
+      "from": "dim_app_server::grok_oauth::management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Interruption::Drain",
+        "path MethodDecl::management",
+        "path Methods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Methods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::grok_oauth::management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path DeviceLogin",
+        "path Empty",
+        "path LoginAttempt"
       ]
     },
     {
@@ -10602,12 +10670,124 @@
     },
     {
       "from": "dim_app_server::managed_provider",
+      "to": "dim_app_server::managed_provider::management",
+      "references": [
+        "mod management"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEntry"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider::management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider::management",
+      "to": "dim_app_server::managed_oauth",
+      "references": [
+        "path crate::managed_oauth::AttemptStatus",
+        "path crate::managed_oauth::OAuthError"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider::management",
+      "to": "dim_app_server::managed_provider",
+      "references": [
+        "path AccountSnapshot",
+        "path ManagedProviders",
+        "path super::ManagedProviderError",
+        "use super::AccountSnapshot",
+        "use super::ManagedProviders"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider::management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Interruption::Drain",
+        "path MethodDecl::management",
+        "path Methods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Methods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider::management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path BrowserLogin",
+        "path BrowserLoginBegin",
+        "path DeviceLogin",
+        "path Empty",
+        "path LoginAttempt",
+        "path LoginBegin",
+        "path LoginState",
+        "path LoginState::Failed",
+        "path ManagedBrowserLoginComplete",
+        "path ManagedLoginAttempt",
+        "path ManagedLoginState",
+        "path ManagedLoginState::Cancelled",
+        "path ManagedLoginState::Completed",
+        "path ManagedLoginState::Expired",
+        "path ManagedLoginState::Failed",
+        "path ManagedLoginState::Pending",
+        "path ProviderTarget",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid"
+      ]
+    },
+    {
+      "from": "dim_app_server::management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf"
+      ]
+    },
+    {
+      "from": "dim_app_server::management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path MethodLevel::Management",
+        "path Methods",
+        "path params",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::MethodLevel",
+        "use crate::methods::Methods",
+        "use crate::methods::params"
+      ]
+    },
+    {
+      "from": "dim_app_server::management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
       ]
     },
     {
@@ -10632,6 +10812,13 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::management",
+      "references": [
+        "mod management"
       ]
     },
     {
@@ -10694,6 +10881,117 @@
         "path SettingsSource::UserMcp",
         "use crate::settings::McpServerSettings",
         "use crate::settings::SettingsDocument",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsService",
+        "use crate::settings::SettingsSource"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp",
+      "references": [
+        "path McpChange::Put",
+        "path McpChange::Remove",
+        "path McpChange::SetEnabled",
+        "path McpError",
+        "path McpError::ApprovalRequired",
+        "path McpError::Cancelled",
+        "path McpError::Closed",
+        "path McpError::InvalidId",
+        "path McpError::InvalidSource",
+        "path McpError::Settings",
+        "path McpError::UnknownServer",
+        "path McpError::Worker",
+        "path McpService",
+        "use super::McpChange",
+        "use super::McpError",
+        "use super::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Interruption::Report",
+        "path MethodDecl::management",
+        "path Methods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Methods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path ApproveMcp",
+        "path McpCatalogEntry",
+        "path McpCatalogResult",
+        "path McpScope",
+        "path McpScope::Project",
+        "path McpScope::User",
+        "path McpTarget",
+        "path RemoveMcp",
+        "path RevokeMcp",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path SaveMcp",
+        "path SelectionScope",
+        "path SetMcpEnabled",
+        "path canonical_cwd",
+        "use crate::protocol::ApproveMcp",
+        "use crate::protocol::McpCatalogEntry",
+        "use crate::protocol::McpCatalogResult",
+        "use crate::protocol::McpScope",
+        "use crate::protocol::McpTarget",
+        "use crate::protocol::RemoveMcp",
+        "use crate::protocol::RevokeMcp",
+        "use crate::protocol::RpcError",
+        "use crate::protocol::SaveMcp",
+        "use crate::protocol::SelectionScope",
+        "use crate::protocol::SetMcpEnabled",
+        "use crate::protocol::canonical_cwd"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path McpServerSettings::Remote",
+        "path McpServerSettings::Stdio",
+        "path RemoteTransport::Http",
+        "path RemoteTransport::Sse",
+        "path SettingsError::AppliedUnsaved",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsError::Worker",
+        "path SettingsService",
+        "path SettingsSource",
+        "path SettingsSource::ProjectMcp",
+        "path SettingsSource::Skills",
+        "path SettingsSource::UserMcp",
+        "use crate::settings::McpServerSettings",
+        "use crate::settings::RemoteTransport",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService",
         "use crate::settings::SettingsSource"
@@ -11113,6 +11411,31 @@
       ]
     },
     {
+      "from": "dim_app_server::methods",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::methods",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path RpcError::wire",
+        "path crate::protocol::is_builtin_method",
+        "use crate::protocol::RpcError"
+      ]
+    },
+    {
       "from": "dim_app_server::model_catalog",
       "to": "dim_agent_types",
       "references": [
@@ -11253,17 +11576,9 @@
     },
     {
       "from": "dim_app_server::protocol",
-      "to": "dim_app_server::managed_oauth",
-      "references": [
-        "path crate::codex_oauth::AuthStatus"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
       "to": "dim_app_server::managed_provider",
       "references": [
-        "path crate::managed_provider::AccountSnapshot",
-        "path crate::managed_provider::ProviderDescriptor"
+        "path crate::managed_provider::AccountSnapshot"
       ]
     },
     {
@@ -11293,16 +11608,7 @@
       "references": [
         "path crate::provider::ProviderCatalog",
         "path crate::provider::ProviderInput",
-        "path crate::provider::ProviderList",
-        "path crate::provider::ProviderSelection",
-        "path crate::provider::ProviderSummary"
-      ]
-    },
-    {
-      "from": "dim_app_server::protocol",
-      "to": "dim_app_server::provider::legacy",
-      "references": [
-        "path crate::provider::ImportResult"
+        "path crate::provider::ProviderSelection"
       ]
     },
     {
@@ -11525,6 +11831,13 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::management",
+      "references": [
+        "mod management"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::new_api",
       "references": [
         "mod new_api"
@@ -11674,6 +11987,79 @@
         "path ProviderSecret::Token",
         "path StaticCredential::Inline",
         "path StaticCredential::Reference"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::HostError",
+        "path dim_agent_capabilities::host::HostError::Cancelled"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Interruption::Drain",
+        "path MethodDecl::management",
+        "path Methods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Methods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path CatalogResult",
+        "path DeleteProvider",
+        "path EditModel",
+        "path Empty",
+        "path ImportLegacyProviders",
+        "path ProviderTarget",
+        "path ResetModel",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path SaveProvider",
+        "path SelectModel",
+        "path SelectionResult",
+        "path SelectionScope",
+        "path SetEnabledModels",
+        "path canonical_cwd"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path ProviderService",
+        "use super::ProviderService"
       ]
     },
     {
@@ -11934,6 +12320,90 @@
         "path SettingsService",
         "path SettingsSource",
         "path SettingsSource::ProjectMcp"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_agent_capabilities::skills",
+      "references": [
+        "path RefreshTarget",
+        "path SkillStatus::Active",
+        "path SkillStatus::Shadowed",
+        "path SkillsError",
+        "path SkillsError::Closed",
+        "path SkillsError::RootUnreadable",
+        "path SkillsError::SettingsConflict",
+        "path SkillsError::SettingsRead",
+        "path SkillsError::SettingsSync",
+        "path SkillsError::SettingsWrite",
+        "path SkillsError::UnknownSkill",
+        "path dim_agent_capabilities::skills::SkillIssue",
+        "use dim_agent_capabilities::skills::RefreshTarget",
+        "use dim_agent_capabilities::skills::SkillStatus",
+        "use dim_agent_capabilities::skills::SkillsError"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_agent_capabilities::skills::catalog",
+      "references": [
+        "path SkillsCatalog",
+        "use dim_agent_capabilities::skills::SkillsCatalog"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Interruption::Report",
+        "path MethodDecl::management",
+        "path Methods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Methods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path SelectionScope",
+        "path SetSkillEnabled",
+        "path SkillEntry",
+        "path SkillIssue",
+        "path SkillsCatalogResult",
+        "path SkillsRefreshResult",
+        "path SkillsVersion",
+        "path canonical_cwd",
+        "use crate::protocol::RpcError",
+        "use crate::protocol::SelectionScope",
+        "use crate::protocol::SetSkillEnabled",
+        "use crate::protocol::SkillEntry",
+        "use crate::protocol::SkillIssue",
+        "use crate::protocol::SkillsCatalogResult",
+        "use crate::protocol::SkillsRefreshResult",
+        "use crate::protocol::SkillsVersion",
+        "use crate::protocol::canonical_cwd"
       ]
     },
     {
@@ -12302,6 +12772,13 @@
     },
     {
       "from": "dim_app_server::transport",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::MethodLevel::Management"
+      ]
+    },
+    {
+      "from": "dim_app_server::transport",
       "to": "dim_app_server::outbound",
       "references": [
         "path MAX_FRAME_BYTES",
@@ -12312,12 +12789,9 @@
       "from": "dim_app_server::transport",
       "to": "dim_app_server::protocol",
       "references": [
-        "path CONFIGURATION_METHODS",
         "path Call::Hello",
         "path HelloResult",
         "path LOCAL_EXECUTION_METHODS",
-        "path MANAGEMENT_METHODS",
-        "path MCP_METHODS",
         "path Outbound::Error",
         "path Outbound::result",
         "path PROTOCOL_VERSION",
@@ -12474,6 +12948,79 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::user_configuration",
+      "to": "dim_app_server::user_configuration::management",
+      "references": [
+        "mod management"
+      ]
+    },
+    {
+      "from": "dim_app_server::user_configuration::management",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::user_configuration::management",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path Interruption::Drain",
+        "path MethodDecl::management",
+        "path Methods",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Methods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::user_configuration::management",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path ConfigurationCatalog",
+        "path ConfigurationMutation",
+        "path ConfigurationTarget",
+        "path ConfigurationUpdate",
+        "path Empty",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path RpcError::reloading"
+      ]
+    },
+    {
+      "from": "dim_app_server::user_configuration::management",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsError",
+        "path SettingsError::AppliedUnsaved",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsService",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::user_configuration::management",
+      "to": "dim_app_server::user_configuration",
+      "references": [
+        "path UserConfiguration",
+        "use crate::user_configuration::UserConfiguration"
       ]
     },
     {
@@ -12888,108 +13435,92 @@
       "path": "OwnedHandle::from_raw_handle"
     },
     {
-      "module": "dim_app_server::connection",
-      "path": "AttemptStatus::Cancelled"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "AttemptStatus::Completed"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "AttemptStatus::Expired"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "AttemptStatus::Failed"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "AttemptStatus::Pending"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::AccountChanged"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::AttemptClosed"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::AttemptNotFound"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::Closed"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::Config"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::InvalidCallback"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::InvalidStore"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::Missing"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::RecoveryRequired"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::Rejected"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::Storage"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::TooManyAttempts"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::Transient"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::UnsupportedSchema"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "OAuthError::Worker"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "Source::InvalidManifest"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "Source::RootUnreadable"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "Source::ScanLimitReached"
-    },
-    {
-      "module": "dim_app_server::connection",
-      "path": "Source::Unreadable"
-    },
-    {
       "module": "dim_app_server::managed_oauth",
       "path": "ToString::to_string"
     },
     {
       "module": "dim_app_server::managed_oauth",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "AttemptStatus::Cancelled"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "AttemptStatus::Completed"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "AttemptStatus::Expired"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "AttemptStatus::Failed"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "AttemptStatus::Pending"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::AccountChanged"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::AttemptClosed"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::AttemptNotFound"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::Closed"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::Config"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::InvalidCallback"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::InvalidStore"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::Missing"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::RecoveryRequired"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::Rejected"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::Storage"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::TooManyAttempts"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::Transient"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::UnsupportedSchema"
+    },
+    {
+      "module": "dim_app_server::managed_provider::management",
+      "path": "OAuthError::Worker"
     },
     {
       "module": "dim_app_server::mcp::server",
@@ -13022,6 +13553,22 @@
     {
       "module": "dim_app_server::provider::preferences",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::skills_management",
+      "path": "Source::InvalidManifest"
+    },
+    {
+      "module": "dim_app_server::skills_management",
+      "path": "Source::RootUnreadable"
+    },
+    {
+      "module": "dim_app_server::skills_management",
+      "path": "Source::ScanLimitReached"
+    },
+    {
+      "module": "dim_app_server::skills_management",
+      "path": "Source::Unreadable"
     },
     {
       "module": "dim_app_server::transport",

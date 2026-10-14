@@ -704,13 +704,17 @@ async fn run_connection(
                                             "session.model.progress",
                                         ]);
                                     }
-                                    if local && hub.config().product_home.is_some() {
-                                        features.extend(MANAGEMENT_METHODS);
-                                    }
                                     if local && hub.config().local_execution() {
                                         features.extend(LOCAL_EXECUTION_METHODS);
-                                        features.extend(MCP_METHODS);
-                                        features.extend(CONFIGURATION_METHODS);
+                                    }
+                                    let mut features: Vec<String> =
+                                        features.into_iter().map(str::to_owned).collect();
+                                    if local {
+                                        features.extend(
+                                            hub.methods
+                                                .methods(crate::methods::MethodLevel::Management),
+                                        );
+                                        features.extend(hub.methods.notification_names());
                                     }
                                     features
                                 }),

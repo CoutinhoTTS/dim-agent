@@ -2,17 +2,17 @@ use crate::{
     ServerConfig,
     agents::AgentIndex,
     control::ServerControl,
+    methods::{MethodLevel, Methods},
     outbound::{Frame, Sender},
     protocol::*,
 };
 use dim_agent_capabilities::{
     permission::{Permission, PermissionState, PermissionUpdateError},
-    skills::{RefreshTarget, SkillStatus, SkillsBranch, SkillsCatalog, SkillsError},
+    skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
 };
 use dim_agent_runtime::{AgentError, Capability, KeysOf, Session, When, scoped};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
-mod configuration;
 mod mcp;
 mod subscription;
 mod tree;
@@ -121,6 +121,35 @@ impl Connection {
             }
             let guard = self.admit(&request)?;
             let this = self.clone();
+            if let Call::Management { method, params } = &request.call {
+                if self.protocol_version() < 3 || !self.local {
+                    return Err(RpcError::app(
+                        -32601,
+                        "unknown_method",
+                        "Management method is unavailable",
+                    ));
+                }
+                let accepted = self.hub.methods.dispatch(
+                    method.clone(),
+                    params.clone(),
+                    MethodLevel::Management,
+                    self.closed.clone(),
+                    rpc.unloading.clone(),
+                )?;
+                rpc.commands.spawn(async move {
+                    let _guard = guard;
+                    let result = accepted
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(RpcError::wire(-32603, "Management operation failed"))
+                        })
+                        .map(Reply::Management);
+                    let _ = this
+                        .sender
+                        .send(Outbound::result(request.id, result), false);
+                });
+                return Ok(());
+            }
             let rpc = rpc.clone();
             // Shutdown must join its control requests without waiting for
             // business commands that a forced exit deliberately abandons.
@@ -189,12 +218,8 @@ impl Connection {
                 "Execution and management require a protected local connection",
             ));
         }
-        if call.is_management() || call.is_execution_session() {
-            let available = if call.is_execution_management() || call.is_execution_session() {
-                rpc.config.local_execution()
-            } else {
-                rpc.config.product_home.is_some()
-            };
+        if call.is_execution_session() {
+            let available = rpc.config.local_execution();
             if self.protocol_version() < 3 || !available {
                 return Err(RpcError::app(
                     -32601,
@@ -211,7 +236,6 @@ impl Connection {
             }
         }
         if !rpc.config.session_execution
-            && !call.is_management()
             && !matches!(
                 call,
                 Call::Hello(_)
@@ -240,19 +264,7 @@ impl Connection {
                 "Method requires protocol v3",
             ));
         }
-        if matches!(
-            call,
-            Call::McpCatalog(_)
-                | Call::McpSetEnabled(_)
-                | Call::McpSave(_)
-                | Call::McpRemove(_)
-                | Call::McpDisconnect(_)
-                | Call::McpApprove(_)
-                | Call::McpRevoke(_)
-                | Call::SessionMcp(_)
-                | Call::McpRefresh(_)
-        ) && rpc.mcp.is_none()
-        {
+        if matches!(call, Call::SessionMcp(_) | Call::McpRefresh(_)) && rpc.mcp.is_none() {
             return Err(RpcError::app(
                 -32601,
                 "unknown_method",
@@ -394,28 +406,6 @@ impl Connection {
     ) -> Option<Result<Reply, RpcError>> {
         if let Err(error) = self.validate_call(rpc, &call) {
             return Some(Err(error));
-        }
-        if call.is_management() {
-            if matches!(
-                call,
-                Call::SkillsCatalog(_)
-                    | Call::SkillSetEnabled(_)
-                    | Call::SkillsRefresh(_)
-                    | Call::McpCatalog(_)
-                    | Call::McpSetEnabled(_)
-                    | Call::McpSave(_)
-                    | Call::McpRemove(_)
-                    | Call::McpDisconnect(_)
-                    | Call::McpApprove(_)
-                    | Call::McpRevoke(_)
-            ) {
-                return Some(tokio::select! {
-                    biased;
-                    _ = rpc.unloading.cancelled() => Err(RpcError::app(-32000, "operation_interrupted", "Service reloaded; the operation may already have committed. Read the current state before retrying")),
-                    result = self.management(rpc, call) => result,
-                });
-            }
-            return Some(self.management(rpc, call).await);
         }
         let session_id = match &call {
             Call::Submit(p) => Some(&p.session_id),
@@ -997,469 +987,6 @@ impl Connection {
             trace_path,
         }))
     }
-
-    async fn management(&self, rpc: &RpcService, call: Call) -> Result<Reply, RpcError> {
-        if matches!(
-            call,
-            Call::ConfigurationCatalog
-                | Call::ConfigurationGet(_)
-                | Call::ConfigurationUpdate(_)
-                | Call::ConfigurationFlush
-        ) {
-            return configuration::management(rpc, call).await;
-        }
-        if matches!(
-            call,
-            Call::McpCatalog(_)
-                | Call::McpSetEnabled(_)
-                | Call::McpSave(_)
-                | Call::McpRemove(_)
-                | Call::McpDisconnect(_)
-                | Call::McpApprove(_)
-                | Call::McpRevoke(_)
-        ) {
-            return mcp::management(rpc, call).await;
-        }
-        if matches!(
-            call,
-            Call::SkillsCatalog(_) | Call::SkillSetEnabled(_) | Call::SkillsRefresh(_)
-        ) {
-            return self.skills_management(rpc, call).await;
-        }
-        let oauth = rpc
-            .oauth
-            .as_ref()
-            .expect("product services are declared dependencies");
-        let provider = rpc
-            .provider
-            .as_ref()
-            .expect("product services are declared dependencies");
-        let cancel = &rpc.unloading;
-        Ok(match call {
-            Call::AccountProviders => {
-                Reply::AccountProviders(oauth.providers(cancel).await.map_err(oauth_error)?)
-            }
-            Call::AccountStatus(params) => Reply::Account(
-                oauth
-                    .status(&params.provider_id, cancel)
-                    .await
-                    .map_err(oauth_error)?,
-            ),
-            Call::AccountRecover(params) => Reply::Account(
-                oauth
-                    .call(
-                        "recover",
-                        serde_json::to_value(params).expect("typed DTO"),
-                        cancel,
-                    )
-                    .await
-                    .map_err(oauth_error)?,
-            ),
-            Call::LoginBegin(params) => Reply::DeviceLogin(
-                oauth
-                    .call(
-                        "beginDevice",
-                        serde_json::to_value(params).expect("typed DTO"),
-                        cancel,
-                    )
-                    .await
-                    .map_err(oauth_error)?,
-            ),
-            Call::BrowserLoginBegin(params) => Reply::BrowserLogin(
-                oauth
-                    .call(
-                        "beginBrowser",
-                        serde_json::to_value(params).expect("typed DTO"),
-                        cancel,
-                    )
-                    .await
-                    .map_err(oauth_error)?,
-            ),
-            Call::BrowserLoginComplete(params) => Reply::Account(
-                oauth
-                    .call(
-                        "completeBrowser",
-                        serde_json::to_value(params).expect("typed DTO"),
-                        cancel,
-                    )
-                    .await
-                    .map_err(oauth_error)?,
-            ),
-            Call::LoginStatus(params) => {
-                let status: LoginState = oauth
-                    .call(
-                        "attemptStatus",
-                        serde_json::to_value(params).expect("typed DTO"),
-                        cancel,
-                    )
-                    .await
-                    .map_err(oauth_error)?;
-                Reply::LoginState(match status {
-                    LoginState::Failed { .. } => LoginState::Failed {
-                        error: "Login failed".into(),
-                    },
-                    status => status,
-                })
-            }
-            Call::LoginCancel(params) => {
-                let _: serde_json::Value = oauth
-                    .call(
-                        "cancelAttempt",
-                        serde_json::to_value(params).expect("typed DTO"),
-                        cancel,
-                    )
-                    .await
-                    .map_err(oauth_error)?;
-                Reply::empty()
-            }
-            Call::Logout(params) => Reply::Account(
-                oauth
-                    .call(
-                        "logout",
-                        serde_json::to_value(params).expect("typed DTO"),
-                        cancel,
-                    )
-                    .await
-                    .map_err(oauth_error)?,
-            ),
-            Call::CodexAccountStatus => Reply::ManagedAuthStatus(
-                rpc.codex
-                    .as_ref()
-                    .expect("declared dependency")
-                    .status(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?,
-            ),
-            Call::CodexAccountRecover => {
-                rpc.codex
-                    .as_ref()
-                    .expect("declared dependency")
-                    .recover(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::empty()
-            }
-            Call::CodexBrowserLoginBegin => {
-                let login = rpc
-                    .codex
-                    .as_ref()
-                    .expect("declared dependency")
-                    .begin_browser(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::BrowserLogin(BrowserLogin {
-                    attempt_id: login.attempt_id.to_string(),
-                    authorization_url: login.authorization_url.into(),
-                    expires_at: login.expires_at,
-                })
-            }
-            Call::CodexBrowserLoginComplete(params) => {
-                let id = uuid::Uuid::parse_str(&params.attempt_id)
-                    .map_err(|_| RpcError::invalid("attemptId must be a UUID"))?;
-                let callback = url::Url::parse(&params.callback_url)
-                    .map_err(|_| RpcError::invalid("callbackUrl must be a callback URL"))?;
-                rpc.codex
-                    .as_ref()
-                    .expect("declared dependency")
-                    .complete_browser(id, callback, cancel)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::empty()
-            }
-            Call::CodexLoginStatus(params) => managed_attempt(
-                rpc.codex
-                    .as_ref()
-                    .expect("declared dependency")
-                    .attempt_status(attempt_id(&params)?)
-                    .await
-                    .map_err(managed_oauth_error)?,
-            ),
-            Call::CodexLoginCancel(params) => {
-                rpc.codex
-                    .as_ref()
-                    .expect("declared dependency")
-                    .cancel_attempt(attempt_id(&params)?)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::empty()
-            }
-            Call::CodexLogout => {
-                rpc.codex
-                    .as_ref()
-                    .expect("declared dependency")
-                    .logout(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::empty()
-            }
-            Call::GrokAccountStatus => Reply::ManagedAuthStatus(
-                rpc.grok
-                    .as_ref()
-                    .expect("declared dependency")
-                    .status(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?,
-            ),
-            Call::GrokAccountRecover => {
-                rpc.grok
-                    .as_ref()
-                    .expect("declared dependency")
-                    .recover(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::empty()
-            }
-            Call::GrokLoginBegin => {
-                let login = rpc
-                    .grok
-                    .as_ref()
-                    .expect("declared dependency")
-                    .begin_device(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::DeviceLogin(DeviceLogin {
-                    attempt_id: login.attempt_id.to_string(),
-                    verification_uri: login.verification_uri.into(),
-                    verification_uri_complete: login.verification_uri_complete.map(Into::into),
-                    user_code: login.user_code,
-                    expires_at: login.expires_at,
-                })
-            }
-            Call::GrokLoginStatus(params) => managed_attempt(
-                rpc.grok
-                    .as_ref()
-                    .expect("declared dependency")
-                    .attempt_status(attempt_id(&params)?)
-                    .await
-                    .map_err(managed_oauth_error)?,
-            ),
-            Call::GrokLoginCancel(params) => {
-                rpc.grok
-                    .as_ref()
-                    .expect("declared dependency")
-                    .cancel_attempt(attempt_id(&params)?)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::empty()
-            }
-            Call::GrokLogout => {
-                rpc.grok
-                    .as_ref()
-                    .expect("declared dependency")
-                    .logout(cancel)
-                    .await
-                    .map_err(managed_oauth_error)?;
-                Reply::empty()
-            }
-            Call::ProviderCatalog(params) => Reply::Catalog(CatalogResult {
-                catalog: provider
-                    .catalog_for(params.provider_id, cancel)
-                    .await
-                    .map_err(provider_error)?,
-            }),
-            Call::ProviderRefresh(params) => Reply::ProviderCatalog(
-                provider
-                    .refresh_for(params.provider_id, cancel)
-                    .await
-                    .map_err(provider_error)?,
-            ),
-            Call::ProviderModelsSetEnabled(params) => Reply::ProviderCatalog(
-                provider
-                    .set_enabled_models(
-                        params.provider_id,
-                        params.expected_version,
-                        params.model_ids,
-                        cancel,
-                    )
-                    .await
-                    .map_err(provider_error)?,
-            ),
-            Call::ProviderModelEdit(params) => Reply::ProviderCatalog(
-                provider
-                    .update_model_config(
-                        params.provider_id,
-                        params.expected_version,
-                        params.model_id,
-                        Some(params.edit),
-                        cancel,
-                    )
-                    .await
-                    .map_err(provider_error)?,
-            ),
-            Call::ProviderModelReset(params) => Reply::ProviderCatalog(
-                provider
-                    .update_model_config(
-                        params.provider_id,
-                        params.expected_version,
-                        params.model_id,
-                        None,
-                        cancel,
-                    )
-                    .await
-                    .map_err(provider_error)?,
-            ),
-            Call::ProviderSelection(params) => {
-                let cwd = match params.cwd {
-                    Some(cwd) => Some(canonical_cwd(&cwd).await?),
-                    None => None,
-                };
-                Reply::Selection(SelectionResult {
-                    selection: provider
-                        .selection(cwd.as_deref(), cancel)
-                        .await
-                        .map_err(provider_error)?,
-                })
-            }
-            Call::ProviderSelect(params) => {
-                if params.model_id.trim().is_empty() {
-                    return Err(RpcError::invalid("modelId must not be empty"));
-                }
-                let cwd = match params.cwd {
-                    Some(cwd) => Some(canonical_cwd(&cwd).await?),
-                    None => None,
-                };
-                Reply::ProviderSelection(
-                    provider
-                        .select(
-                            cwd.as_deref(),
-                            dim_agent_types::ModelId {
-                                provider_id: params.provider_id,
-                                model_id: params.model_id,
-                            },
-                            params.expected_version,
-                            cancel,
-                        )
-                        .await
-                        .map_err(provider_error)?,
-                )
-            }
-            Call::ProviderList => {
-                Reply::ProviderList(provider.list(cancel).await.map_err(provider_error)?)
-            }
-            Call::ProviderSave(params) => Reply::ProviderSummary(
-                provider
-                    .save_static(params.provider, params.expected_version, cancel)
-                    .await
-                    .map_err(provider_error)?,
-            ),
-            Call::ProviderImportLegacy(params) => Reply::ProviderImport(
-                provider
-                    .import_legacy(params.source_path, cancel)
-                    .await
-                    .map_err(provider_error)?,
-            ),
-            Call::ProviderDelete(params) => {
-                provider
-                    .delete_static(params.provider_id, params.expected_version, cancel)
-                    .await
-                    .map_err(provider_error)?;
-                Reply::empty()
-            }
-            _ => unreachable!("only provider management calls reach this boundary"),
-        })
-    }
-
-    async fn skills_management(&self, rpc: &RpcService, call: Call) -> Result<Reply, RpcError> {
-        Ok(match call {
-            Call::SkillsCatalog(params) => {
-                let catalog = rpc.skills.as_ref().ok_or_else(|| {
-                    RpcError::app(
-                        -32000,
-                        "product_integration_pending",
-                        "Skills integration is unavailable",
-                    )
-                })?;
-                let cwd = match params.cwd {
-                    Some(cwd) => Some(canonical_cwd(&cwd).await?),
-                    None => None,
-                };
-                let view = catalog.query(cwd.as_deref()).await.map_err(skills_error)?;
-                Reply::SkillsCatalog(SkillsCatalogResult {
-                    version: view.version,
-                    entries: view
-                        .entries
-                        .into_iter()
-                        .map(|entry| SkillEntry {
-                            id: entry.definition.id.clone(),
-                            name: entry.definition.name.clone(),
-                            description: entry.definition.description.clone(),
-                            file_path: entry.definition.file_path.to_string_lossy().into_owned(),
-                            allowed_tools: entry.definition.allowed_tools.clone(),
-                            enabled: entry.enabled,
-                            shadowed_by: match entry.status {
-                                SkillStatus::Active => None,
-                                SkillStatus::Shadowed { by } => Some(by),
-                            },
-                        })
-                        .collect(),
-                    issues: view.issues.into_iter().map(skill_issue).collect(),
-                })
-            }
-            Call::SkillSetEnabled(params) => {
-                if params.id.trim().is_empty() {
-                    return Err(RpcError::invalid("id must not be empty"));
-                }
-                let catalog = rpc.skills.as_ref().ok_or_else(|| {
-                    RpcError::app(
-                        -32000,
-                        "product_integration_pending",
-                        "Skills integration is unavailable",
-                    )
-                })?;
-                let cwd = match params.cwd {
-                    Some(cwd) => Some(canonical_cwd(&cwd).await?),
-                    None => None,
-                };
-                let (_, version) = catalog
-                    .set_enabled(&params.id, params.enabled, cwd.as_deref())
-                    .await
-                    .map_err(skills_error)?;
-                Reply::SkillsVersion(SkillsVersion { version })
-            }
-            Call::SkillsRefresh(params) => {
-                let catalog = rpc.skills.as_ref().ok_or_else(|| {
-                    RpcError::app(
-                        -32000,
-                        "product_integration_pending",
-                        "Skills integration is unavailable",
-                    )
-                })?;
-                let project = match params.cwd {
-                    Some(cwd) => Some(canonical_cwd(&cwd).await?),
-                    None => None,
-                };
-                let (version, issues) = catalog
-                    .refresh(RefreshTarget {
-                        user: true,
-                        project,
-                    })
-                    .await
-                    .map_err(skills_error)?;
-                Reply::SkillsRefresh(SkillsRefreshResult {
-                    version,
-                    issues: issues.into_iter().map(skill_issue).collect(),
-                })
-            }
-            _ => unreachable!("only management calls reach this boundary"),
-        })
-    }
-}
-
-async fn canonical_cwd(cwd: &str) -> Result<std::path::PathBuf, RpcError> {
-    if !Path::new(cwd).is_absolute() {
-        return Err(RpcError::invalid("cwd must be an absolute directory"));
-    }
-    let path = tokio::fs::canonicalize(cwd)
-        .await
-        .map_err(|_| RpcError::invalid("cwd is not accessible"))?;
-    if !tokio::fs::metadata(&path)
-        .await
-        .map_err(|_| RpcError::invalid("cwd is not accessible"))?
-        .is_dir()
-    {
-        return Err(RpcError::invalid("cwd must be a directory"));
-    }
-    Ok(path)
 }
 
 fn configuration_outcome(
@@ -1488,67 +1015,6 @@ fn skills_error(error: SkillsError) -> RpcError {
     RpcError::app(-32000, app, error.to_string())
 }
 
-fn skill_issue(issue: dim_agent_capabilities::skills::SkillIssue) -> SkillIssue {
-    use dim_agent_capabilities::skills::SkillIssue as Source;
-    match issue {
-        Source::InvalidManifest { path, reason } | Source::Unreadable { path, reason } => {
-            SkillIssue {
-                path: path.to_string_lossy().into_owned(),
-                message: reason,
-            }
-        }
-        Source::RootUnreadable { root, reason } => SkillIssue {
-            path: root.to_string_lossy().into_owned(),
-            message: reason,
-        },
-        Source::ScanLimitReached { root } => SkillIssue {
-            path: root.to_string_lossy().into_owned(),
-            message: "Skill scan limit reached".into(),
-        },
-    }
-}
-
-fn oauth_error(error: crate::managed_provider::ManagedProviderError) -> RpcError {
-    RpcError::app(-32000, error.code, error.message)
-}
-fn attempt_id(params: &LoginAttempt) -> Result<uuid::Uuid, RpcError> {
-    uuid::Uuid::parse_str(&params.attempt_id)
-        .map_err(|_| RpcError::invalid("attemptId must be a UUID"))
-}
-fn managed_attempt(status: crate::managed_oauth::AttemptStatus) -> Reply {
-    use crate::managed_oauth::AttemptStatus;
-    Reply::ManagedLoginState(match status {
-        AttemptStatus::Pending => ManagedLoginState::Pending,
-        AttemptStatus::Completed => ManagedLoginState::Completed,
-        AttemptStatus::Failed(_) => ManagedLoginState::Failed {
-            error: "oauth_failed".into(),
-        },
-        AttemptStatus::Cancelled => ManagedLoginState::Cancelled,
-        AttemptStatus::Expired => ManagedLoginState::Expired,
-    })
-}
-fn managed_oauth_error(error: crate::managed_oauth::OAuthError) -> RpcError {
-    use crate::managed_oauth::OAuthError;
-    let kind = match error {
-        OAuthError::AccountChanged => "account_changed",
-        OAuthError::AttemptNotFound => "login_attempt_unknown",
-        OAuthError::AttemptClosed => "login_attempt_closed",
-        OAuthError::Missing | OAuthError::Rejected => "account_required",
-        OAuthError::InvalidStore(_) => "account_invalid_store",
-        OAuthError::UnsupportedSchema => "account_unsupported_schema",
-        OAuthError::RecoveryRequired => "account_recovery_required",
-        OAuthError::InvalidCallback(_) | OAuthError::Config(_) => "account_invalid_input",
-        OAuthError::TooManyAttempts => "login_attempt_limit",
-        OAuthError::Transient(_) => "account_unavailable",
-        OAuthError::Closed => "service_reloading",
-        _ => "account_failed",
-    };
-    let message = match error {
-        OAuthError::Storage(_) | OAuthError::Worker(_) => "OAuth account operation failed".into(),
-        error => error.to_string(),
-    };
-    RpcError::app(-32000, kind, message)
-}
 fn provider_error(error: dim_agent_capabilities::host::HostError) -> RpcError {
     let kind = match &error {
         dim_agent_capabilities::host::HostError::Cancelled(_) => "provider_cancelled",
@@ -1560,6 +1026,7 @@ fn provider_error(error: dim_agent_capabilities::host::HostError) -> RpcError {
 /// Connection index, admission permits and connection tasks of the process.
 pub(crate) struct ConnectionHub {
     config: Arc<ServerConfig>,
+    pub methods: Arc<Methods>,
     pub control: Arc<ServerControl>,
     connections: Mutex<HashMap<String, Weak<Connection>>>,
     pub tasks: TaskTracker,
@@ -1568,7 +1035,7 @@ pub(crate) struct ConnectionHub {
     rpc: RwLock<Option<Arc<RpcService>>>,
 }
 impl ConnectionHub {
-    fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>) -> Self {
+    fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>, methods: Arc<Methods>) -> Self {
         Self {
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
@@ -1577,6 +1044,7 @@ impl ConnectionHub {
             rpc: RwLock::new(None),
             control,
             config,
+            methods,
         }
     }
     pub fn config(&self) -> &ServerConfig {
@@ -1644,17 +1112,17 @@ impl ConnectionPlugin {
     }
 }
 impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Arc<ServerControl>,);
+    type Deps = (Arc<ServerControl>, Arc<Methods>);
     fn name(&self) -> &str {
         "Connection"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (control,): Self::Deps,
+        (control, methods): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control));
+            let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, methods));
             let owner = hub.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
@@ -1664,6 +1132,48 @@ impl TypedPlugin for ConnectionPlugin {
                     })
                 }))
             })?;
+            let mut notices = hub.methods.subscribe();
+            let delivery = hub.clone();
+            hub.tasks.spawn(async move {
+                loop {
+                    let notice = tokio::select! {
+                        biased;
+                        _ = delivery.closing.cancelled() => break,
+                        notice = notices.recv() => match notice {
+                            Ok(notice) => notice,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(_) => break,
+                        },
+                    };
+                    let _ = delivery.with_rpc(|rpc| {
+                        delivery.methods.with_current(&notice, || {
+                            for connection in delivery
+                                .connections
+                                .lock()
+                                .expect("connection index")
+                                .values()
+                                .filter_map(Weak::upgrade)
+                            {
+                                if connection.local
+                                    && connection.version.get() == Some(&3)
+                                    && connection.instance.get().map(String::as_str)
+                                        == Some(rpc.index.server_instance_id())
+                                    && !connection.closed.is_cancelled()
+                                {
+                                    let _ = connection.sender.send(
+                                        Outbound::ManagementNotice {
+                                            jsonrpc: "2.0",
+                                            method: notice.method.clone(),
+                                            params: notice.params.clone(),
+                                        },
+                                        false,
+                                    );
+                                }
+                            }
+                        });
+                    });
+                }
+            });
             ctx.provide_as(TypeKey::of::<ConnectionHub>(), hub)?;
             Ok(Effect::Done)
         })
@@ -1680,14 +1190,10 @@ pub(crate) struct RpcService {
     pub index: Arc<AgentIndex>,
     pub control: Arc<ServerControl>,
     pub config: Arc<ServerConfig>,
-    pub oauth: Option<Arc<crate::managed_provider::ManagedProviders>>,
-    pub codex: Option<Arc<crate::codex_oauth::OpenAICodexOAuthService>>,
-    pub grok: Option<Arc<crate::grok_oauth::GrokOAuthService>>,
     pub provider: Option<Arc<crate::provider::ProviderService>>,
-    pub skills: Option<Arc<SkillsCatalog>>,
-    pub mcp: Option<Arc<crate::mcp::McpService>>,
-    pub settings: Option<Arc<crate::settings::SettingsService>>,
-    pub configuration: Option<Arc<crate::user_configuration::UserConfiguration>>,
+    /// Session MCP follow/refresh availability, not a host management service.
+    /// The actual owners are acquired from the Session and followed across reload.
+    pub mcp: Option<()>,
     pub commands: TaskTracker,
     /// Cancelled when this generation unloads: commands waiting on client
     /// input end so that draining cannot wait for requests it rejects.
@@ -1729,20 +1235,6 @@ impl RpcPlugin {
         Self { config }
     }
 }
-/// Account and provider management of the product profile.
-type ProductServices = (
-    Arc<crate::managed_provider::ManagedProviders>,
-    Arc<crate::codex_oauth::OpenAICodexOAuthService>,
-    Arc<crate::grok_oauth::GrokOAuthService>,
-    Arc<crate::provider::ProviderService>,
-);
-/// Public capabilities shared by every local execution profile.
-type ExecutionServices = (
-    Arc<SkillsCatalog>,
-    Arc<crate::mcp::McpService>,
-    Arc<crate::settings::SettingsService>,
-    Arc<crate::user_configuration::UserConfiguration>,
-);
 impl TypedPlugin for RpcPlugin {
     type Deps = (
         Arc<AgentIndex>,
@@ -1750,8 +1242,8 @@ impl TypedPlugin for RpcPlugin {
         rutis::Gate<crate::collaboration::Collaboration>,
         Arc<ConnectionHub>,
         Arc<ServerControl>,
-        When<ProductServices>,
-        When<ExecutionServices>,
+        // Session create/model.update resolve product models through Provider.
+        When<Arc<crate::provider::ProviderService>>,
     );
     fn name(&self) -> &str {
         "Rpc"
@@ -1759,33 +1251,15 @@ impl TypedPlugin for RpcPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, _, hub, control, When(product), When(execution)): Self::Deps,
+        (index, _, hub, control, When(provider)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let (oauth, codex, grok, provider) = match product {
-                Some((oauth, codex, grok, provider)) => {
-                    (Some(oauth), Some(codex), Some(grok), Some(provider))
-                }
-                None => (None, None, None, None),
-            };
-            let (skills, mcp, settings, configuration) = match execution {
-                Some((skills, mcp, settings, configuration)) => {
-                    (Some(skills), Some(mcp), Some(settings), Some(configuration))
-                }
-                None => (None, None, None, None),
-            };
             let service = Arc::new(RpcService {
                 index,
                 control,
                 config: self.config.clone(),
-                oauth,
-                codex,
-                grok,
                 provider,
-                skills,
-                mcp,
-                settings,
-                configuration,
+                mcp: self.config.local_execution().then_some(()),
                 commands: TaskTracker::new(),
                 unloading: CancellationToken::new(),
             });
@@ -1810,7 +1284,6 @@ impl TypedPlugin for RpcPlugin {
                     })
                 }))
             })?;
-            configuration::subscribe(ctx, &handler, &registered)?;
             // Registered only after its cleanup is owned by this generation.
             handler.register(registered);
             Ok(Effect::Done)
@@ -1820,13 +1293,6 @@ impl TypedPlugin for RpcPlugin {
 impl Capability for RpcPlugin {
     fn keys(&self) -> KeysOf<Self> {
         let product = self.config.product_home.is_some();
-        (
-            (),
-            (),
-            (),
-            (),
-            product.then_some(((), (), (), ())),
-            self.config.local_execution().then_some(((), (), (), ())),
-        )
+        ((), (), (), (), product.then_some(()))
     }
 }

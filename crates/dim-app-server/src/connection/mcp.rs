@@ -2,8 +2,8 @@
 use super::*;
 use crate::{
     agents::AgentHost,
-    mcp::{McpChange, McpError, McpSession, McpSessionState, McpSourceState},
-    settings::{McpServerSettings, RemoteTransport, SettingsError, SettingsSource},
+    mcp::{McpError, McpSession, McpSessionState, McpSourceState},
+    settings::SettingsError,
 };
 use dim_agent_capabilities::tool_registry::{ToolSourcesState, ToolSourcesView};
 use rutis::{EventKey, FiberState, FiberStatusChanged, Listener};
@@ -38,134 +38,6 @@ pub(super) fn error(error: McpError) -> RpcError {
             other => other.to_string(),
         },
     )
-}
-
-async fn project(rpc: &RpcService, cwd: Option<String>) -> Result<Option<usize>, RpcError> {
-    let Some(cwd) = cwd else { return Ok(None) };
-    let cwd = canonical_cwd(&cwd).await?;
-    rpc.settings
-        .as_ref()
-        .expect("declared MCP settings dependency")
-        .authorize_project(cwd, &rpc.unloading)
-        .await
-        .map(Some)
-        .map_err(|e| error(e.into()))
-}
-fn source(scope: McpScope, project: Option<usize>) -> Result<SettingsSource, RpcError> {
-    match scope {
-        McpScope::User => Ok(SettingsSource::UserMcp),
-        McpScope::Project => project
-            .map(SettingsSource::ProjectMcp)
-            .ok_or_else(|| RpcError::invalid("Project MCP operations require cwd")),
-    }
-}
-
-pub(super) async fn management(rpc: &RpcService, call: Call) -> Result<Reply, RpcError> {
-    let directory = rpc.mcp.as_ref().expect("declared MCP directory dependency");
-    let cancel = &rpc.unloading;
-    match call {
-        Call::McpCatalog(p) => {
-            let project = project(rpc, p.cwd).await?;
-            let catalog = directory.catalog(project, cancel).await.map_err(error)?;
-            Ok(Reply::McpCatalog(McpCatalogResult {
-                user_revision: catalog.user_revision,
-                project_revision: catalog.project_revision,
-                user_application: directory.application(SettingsSource::UserMcp),
-                project_application: project
-                    .map(|root| directory.application(SettingsSource::ProjectMcp(root))),
-                servers: catalog
-                    .servers
-                    .into_iter()
-                    .map(|(id, entry)| McpCatalogEntry {
-                        id,
-                        source: match entry.source {
-                            SettingsSource::UserMcp => McpScope::User,
-                            SettingsSource::ProjectMcp(_) => McpScope::Project,
-                            SettingsSource::Skills => unreachable!("MCP directory excludes Skills"),
-                        },
-                        enabled: entry.enabled(),
-                        approval: entry.approval,
-                        approval_token: entry.approval_token,
-                        transport: match entry.configuration {
-                            McpServerSettings::Stdio { .. } => "stdio",
-                            McpServerSettings::Remote {
-                                kind: RemoteTransport::Http,
-                                ..
-                            } => "http",
-                            McpServerSettings::Remote {
-                                kind: RemoteTransport::Sse,
-                                ..
-                            } => "sse",
-                        },
-                    })
-                    .collect(),
-            }))
-        }
-        Call::McpApprove(p) => {
-            let project = project(rpc, Some(p.cwd)).await?.expect("required cwd");
-            directory
-                .approve(project, p.id, p.approval_token, cancel)
-                .await
-                .map_err(error)?;
-            Ok(Reply::empty())
-        }
-        Call::McpRevoke(p) => {
-            let project = project(rpc, Some(p.cwd)).await?.expect("required cwd");
-            directory
-                .revoke(project, p.id, cancel)
-                .await
-                .map_err(error)?;
-            Ok(Reply::empty())
-        }
-        Call::McpSave(p) => {
-            let source = source(p.source, project(rpc, p.cwd).await?)?;
-            directory
-                .update(
-                    source,
-                    p.expected_version,
-                    p.id,
-                    McpChange::Put(p.configuration),
-                    cancel,
-                )
-                .await
-                .map_err(error)?;
-            Ok(Reply::empty())
-        }
-        Call::McpRemove(p) => {
-            let source = source(p.source, project(rpc, p.cwd).await?)?;
-            directory
-                .update(source, p.expected_version, p.id, McpChange::Remove, cancel)
-                .await
-                .map_err(error)?;
-            Ok(Reply::empty())
-        }
-        Call::McpSetEnabled(p) => {
-            let source = source(p.source, project(rpc, p.cwd).await?)?;
-            directory
-                .update(
-                    source,
-                    p.expected_version,
-                    p.id,
-                    McpChange::SetEnabled(p.enabled),
-                    cancel,
-                )
-                .await
-                .map_err(error)?;
-            Ok(Reply::empty())
-        }
-        Call::McpDisconnect(p) => {
-            if p.id.trim().is_empty() {
-                return Err(RpcError::invalid("id must not be empty"));
-            }
-            let source = source(p.source, project(rpc, p.cwd).await?)?;
-            directory
-                .disconnect(source, p.id, cancel)
-                .await
-                .map_err(error)?;
-            Ok(Reply::empty())
-        }
-        _ => unreachable!("only MCP management reaches this boundary"),
-    }
 }
 
 fn project_state(id: &str, state: McpSessionState, tools: ToolSourcesState) -> McpStateResult {

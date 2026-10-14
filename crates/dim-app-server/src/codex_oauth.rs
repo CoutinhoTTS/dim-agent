@@ -1,3 +1,4 @@
+pub(crate) mod management;
 use crate::managed_oauth::{self, Service};
 use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::{Capability, KeysOf, scoped};

@@ -1,5 +1,6 @@
 //! Private user documents referenced by the root loader's editable layer.
 //! The late-bound port contains wiring and immutable desired values, not resources.
+pub mod management;
 use crate::{settings::*, storage::SqliteStorage};
 use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::{Capability, KeysOf, StateCell};

@@ -1,0 +1,113 @@
+//! Grok OAuth account wire boundary.
+use super::GrokOAuthService;
+use crate::{
+    managed_provider::management::{attempt_id, managed_attempt, managed_oauth_error as error},
+    methods::{Interruption, MethodDecl, Methods, params, reply},
+    protocol::*,
+};
+use dim_agent_runtime::{Capability, KeysOf, scoped};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use std::sync::Arc;
+
+pub struct GrokAccountManagement;
+impl TypedPlugin for GrokAccountManagement {
+    type Deps = (Arc<Methods>, Arc<GrokOAuthService>);
+    fn name(&self) -> &str {
+        "GrokAccountManagement"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (management, oauth): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let registration = management
+                .register(
+                    "account.grok",
+                    [
+                        "account.grok.status",
+                        "account.grok.recover",
+                        "account.grok.login.begin",
+                        "account.grok.login.status",
+                        "account.grok.login.cancel",
+                        "account.grok.logout",
+                    ]
+                    .into_iter()
+                    .map(|name| {
+                        MethodDecl::management(
+                            name,
+                            !matches!(name, "account.grok.status" | "account.grok.login.status"),
+                            Interruption::Drain,
+                        )
+                    })
+                    .collect(),
+                    vec![],
+                    Arc::new(move |method, value, stopping| {
+                        let oauth = oauth.clone();
+                        Box::pin(async move {
+                            let cancel = &stopping;
+                            match method.as_str() {
+                                "account.grok.status" => {
+                                    let _: Empty = params(value)?;
+                                    reply(oauth.status(cancel).await.map_err(error)?)
+                                }
+                                "account.grok.recover" => {
+                                    let _: Empty = params(value)?;
+                                    oauth.recover(cancel).await.map_err(error)?;
+                                    reply(Empty {})
+                                }
+                                "account.grok.login.begin" => {
+                                    let _: Empty = params(value)?;
+                                    let login = oauth.begin_device(cancel).await.map_err(error)?;
+                                    reply(DeviceLogin {
+                                        attempt_id: login.attempt_id.to_string(),
+                                        verification_uri: login.verification_uri.into(),
+                                        verification_uri_complete: login
+                                            .verification_uri_complete
+                                            .map(Into::into),
+                                        user_code: login.user_code,
+                                        expires_at: login.expires_at,
+                                    })
+                                }
+                                "account.grok.login.status" => {
+                                    let p: LoginAttempt = params(value)?;
+                                    reply(managed_attempt(
+                                        oauth
+                                            .attempt_status(attempt_id(&p)?)
+                                            .await
+                                            .map_err(error)?,
+                                    ))
+                                }
+                                "account.grok.login.cancel" => {
+                                    let p: LoginAttempt = params(value)?;
+                                    oauth.cancel_attempt(attempt_id(&p)?).await.map_err(error)?;
+                                    reply(Empty {})
+                                }
+                                "account.grok.logout" => {
+                                    let _: Empty = params(value)?;
+                                    oauth.logout(cancel).await.map_err(error)?;
+                                    reply(Empty {})
+                                }
+                                _ => unreachable!("registered Grok account method"),
+                            }
+                        })
+                    }),
+                )
+                .map_err(|error| CordisError::PluginFailed(error.message.into()))?;
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        registration.unregister_and_drain().await;
+                        Ok(())
+                    })
+                }))
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for GrokAccountManagement {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&())
+    }
+}
