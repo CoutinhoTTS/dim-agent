@@ -748,6 +748,78 @@ impl Drop for OwnedDaemon {
 
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
+fn project_mcp_approval_commands_persist_and_reject_stale_configuration() {
+    let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let config = home.0.join("model.json");
+    fs::write(
+        &config,
+        include_str!("../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let project = home.0.join("work");
+    fs::create_dir(&project).unwrap();
+    let write_config = |argument: &str| {
+        fs::write(project.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":[argument],"env":{"SECRET":"must-not-print"}}}}).to_string()).unwrap();
+    };
+    write_config("original");
+    let run = |args: &[&str]| {
+        home.command()
+            .arg("--server")
+            .arg(&binary)
+            .arg("--model-config")
+            .arg(&config)
+            .arg("--cwd")
+            .arg(&project)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let list = || {
+        let output = run(&["mcp", "list"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert!(!output.contains("must-not-print"));
+        output
+    };
+    let original = list();
+    assert!(original.contains("\tproject\tstdio\tenabled\trequired\t"));
+    let token = original.trim_end().split('\t').next_back().unwrap();
+    assert_eq!(token.len(), 64);
+    assert!(run(&["mcp", "approve", "docs", token]).status.success());
+    assert!(list().contains("\tapproved\t"));
+    assert!(run(&["daemon", "stop"]).status.success());
+    assert!(list().contains("\tapproved\t"), "restart lost the grant");
+    write_config("changed");
+    assert!(list().contains("\trequired\t"));
+    let rejected = run(&["mcp", "approve", "docs", token]);
+    assert!(!rejected.status.success());
+    assert!(list().contains("\trequired\t"));
+    let current = list();
+    let token = current.trim_end().split('\t').next_back().unwrap();
+    assert!(run(&["mcp", "approve", "docs", token]).status.success());
+    assert!(run(&["mcp", "revoke", "docs"]).status.success());
+    assert!(list().contains("\trequired\t"));
+    let id = "untrusted\u{9b}2J\u{202e}\nname";
+    fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{(id):{"command":"missing-mcp-program"}}}).to_string(),
+    )
+    .unwrap();
+    let escaped = list();
+    assert!(!escaped.contains(['\u{9b}', '\u{202e}']));
+    assert_eq!(escaped.lines().count(), 1);
+    assert!(escaped.contains("untrusted\\u{9b}2J\\u{202e}\\nname"));
+    assert!(run(&["daemon", "stop"]).status.success());
+}
+
+#[test]
+#[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
     let binary = std::env::var("DIM_TEST_APP_SERVER").expect("DIM_TEST_APP_SERVER");
     for mock in [true, false] {
