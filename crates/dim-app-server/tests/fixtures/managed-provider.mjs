@@ -28,10 +28,10 @@ export default definePlugin({
       async providers() { return { ok: true, value: [{ providerId: 'managed-fixture', displayName: 'Managed fixture', loginMethods: ['browser'] }] } },
       async status({ providerId }) {
         if (providerId === 'fail') return { ok: false, error: { code: 'invalid_store', message: 'private-error-secret' } }
+        if (providerId === 'crash-runtime') process.exit(77)
         if (providerId === 'terminate-runtime') return files.withLock('fixture-state', async file => {
           const saved = await file.replace('before-crash')
           if (!saved.ok) throw Error('fixture storage failed')
-          setTimeout(() => process.exit(77), 20)
           return new Promise(() => {})
         })
         return { ok: true, value: account }

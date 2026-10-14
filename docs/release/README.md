@@ -4,6 +4,10 @@ All GitHub workflow templates are stored as `.yml.disabled`. They are not regist
 
 The public source uses MIT. An account-enabled distribution can contain a separately supplied private runtime plugin; `NOTICE` excludes that artifact from the public source license. This project does not select or publish a license for that private plugin.
 
+## Upgrade compatibility
+
+Distributions using host API 2 require managed plugins that implement `quiesce`; API 1 packages are rejected. Before replacing an older CLI and daemon, stop that daemon with its matching CLI. The new `dimcode daemon stop` refuses daemons without `daemon.shutdown.completed` and leaves them running. Include both requirements in the release notes for this upgrade. Forced shutdown does not certify storage or plugin cleanup.
+
 ## Local packaging
 
 One product version is shared by `Cargo.toml`, `npm/package.json`, its exact optional dependencies, native version output and the release tag. Keep them synchronized before building. Current `0.1.0` is a development baseline, not a claim that a new npm version is available for publication; check existing `dimcode` versions before selecting a release.

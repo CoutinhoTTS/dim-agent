@@ -35,7 +35,7 @@ impl ServerControl {
             .expect("shutdown replies")
             .push(reply);
     }
-    /// Called only after graph cleanup has joined all connection handoffs.
+    /// Called after all connection handoffs; success also requires graph cleanup.
     pub(crate) async fn complete_shutdown(&self, success: bool) {
         let replies = std::mem::take(&mut *self.shutdown_replies.lock().expect("shutdown replies"));
         futures_util::future::join_all(replies.into_iter().map(|reply| reply(success))).await;

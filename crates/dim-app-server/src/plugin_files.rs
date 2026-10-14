@@ -16,6 +16,7 @@ fn failure(error: FileStorageError) -> Value {
     let code = match error {
         FileStorageError::Closed | FileStorageError::Cancelled => "closed",
         FileStorageError::InvalidPath(_) => "invalid_path",
+        FileStorageError::Worker(_) => "internal",
         FileStorageError::Io(ref error) if error.kind() == io::ErrorKind::AlreadyExists => "exists",
         FileStorageError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData => {
             "invalid_data"
@@ -178,7 +179,8 @@ impl Scope {
         });
         Ok(Value::future(async move {
             let _cancel_waiter = cancel_waiter;
-            task.await.map_err(|_| invalid())?
+            task.await
+                .unwrap_or_else(|error| Ok(failure(FileStorageError::Worker(error))))
         }))
     }
 }
@@ -242,9 +244,11 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                                 Err(error) => failure(error),
                             })
                         });
-                        Ok(Value::future(
-                            async move { task.await.map_err(|_| invalid())? },
-                        ))
+                        Ok(Value::future(async move {
+                            task.await.unwrap_or_else(|error| {
+                                Ok(failure(FileStorageError::Worker(error)))
+                            })
+                        }))
                     }),
                 )
             })
