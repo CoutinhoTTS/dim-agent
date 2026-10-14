@@ -2,9 +2,15 @@
 
 设计时的判断规则；机制与分工见[架构](../README.md)。事件与状态机的原则（只认序号、事件契约与消费规则、状态可恢复、写入前复核、副作用不重放）以[时间总线总纲](time-bus.md)为准，本文不重复。
 
-## 1. Capability 有界
+## 1. 插件与 Capability 有界
 
-新功能做成一个 Capability。Capability 实现 rutis `TypedPlugin` 与 runtime `Capability`：`Deps` 声明全部依赖，含只用于装载顺序的依赖，`apply` 从 `Deps` 取得依赖；`apply` 注册服务与订阅，把句柄交给业务状态和回调；取得的资源立即用 `ctx.effect` 登记释放；`apply` 完成即服务与订阅可用，输入消费和后台业务在此之后启动。Capability 经 Session 级或 Timeline 级工厂注册，工厂只捕获配置和实例标识；作用域服务以该作用域的实例键（`SessionScope`/`BranchScope`）提供，依赖方以 `InSession`/`InBranch` 声明注入。Capability 之间的协调通过提交事件、订阅事件或 `Deps` 声明的服务完成。
+新功能是一个插件，按状态归谁拆成若干部分（[ADR 002](../../adr/002-plugin-scope.md)）：
+
+- **Capability 只指 Session 级与分支级的部分**：经 Session 或分支工厂注册到 Agent 实例，生命周期随 Session 或分支。
+- **进程级的部分是进程插件，不叫 Capability**：作为 loader 行装载，不进入 Agent 实例。
+- **App Server 只负责装配和对外入口**（Rpc、Transport、Agents 等），不放新功能的业务代码。新插件放在各自的 crate，或作为其他语言的插件包，由 App Server 按配置装载。
+
+Capability 实现 rutis `TypedPlugin` 与 runtime `Capability`：`Deps` 声明全部依赖，含只用于装载顺序的依赖，`apply` 从 `Deps` 取得依赖；`apply` 注册服务与订阅，把句柄交给业务状态和回调；取得的资源立即用 `ctx.effect` 登记释放；`apply` 完成即服务与订阅可用，输入消费和后台业务在此之后启动。Capability 经 Session 级或 Timeline 级工厂注册，工厂只捕获配置和实例标识；作用域服务以该作用域的实例键（`SessionScope`/`BranchScope`）提供，依赖方以 `InSession`/`InBranch` 声明注入。Capability 之间的协调通过提交事件、订阅事件或 `Deps` 声明的服务完成。
 
 所有可装配的运行能力和跨插件服务均由 Plugin 提供，包括文件访问、数据库和代码执行。普通模块只作为所属 Plugin 内部的函数、类型与算法实现，不能藏有绕过依赖声明的全局服务、资源或订阅。资源归属是单父树，服务依赖是允许多个上游的无环图；根、校验、失效重载以及唯一事件总线的目标约束见[单树装配](single-tree.md#产品装配约束目标)。
 
