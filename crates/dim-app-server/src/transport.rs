@@ -668,8 +668,7 @@ async fn run_connection(
                             .instance
                             .set(instance.clone())
                             .expect("first handshake");
-                        let mut methods =
-                            rpc.methods.methods(crate::methods::MethodLevel::Management);
+                        let mut methods = rpc.methods.methods();
                         methods.extend(rpc.methods.notification_names());
                         (instance, methods)
                     });

@@ -124,7 +124,6 @@ async fn contributor_reload_drains_writes_and_interrupts_waits_before_replacemen
             .dispatch(
                 "fixture.write".into(),
                 json!({}),
-                MethodLevel::Management,
                 disconnected.clone(),
                 stop.clone(),
                 &commands,
@@ -136,7 +135,6 @@ async fn contributor_reload_drains_writes_and_interrupts_waits_before_replacemen
             .dispatch(
                 "fixture.wait".into(),
                 json!({}),
-                MethodLevel::Management,
                 CancellationToken::new(),
                 stop,
                 &commands,
@@ -175,7 +173,6 @@ async fn contributor_reload_drains_writes_and_interrupts_waits_before_replacemen
                 .dispatch(
                     "fixture.read".into(),
                     json!({}),
-                    MethodLevel::Management,
                     CancellationToken::new(),
                     stop,
                     &commands,

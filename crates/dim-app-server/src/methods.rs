@@ -30,13 +30,6 @@ pub type Handler = Arc<
         + Sync,
 >;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MethodLevel {
-    Session,
-    Management,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interruption {
     Report,
@@ -46,7 +39,6 @@ pub enum Interruption {
 #[derive(Clone, Debug, Serialize)]
 pub struct MethodDecl {
     pub name: String,
-    pub level: MethodLevel,
     pub mutating: bool,
     #[serde(skip)]
     pub interruption: Interruption,
@@ -55,7 +47,6 @@ impl MethodDecl {
     pub fn management(name: &str, mutating: bool, interruption: Interruption) -> Self {
         Self {
             name: name.into(),
-            level: MethodLevel::Management,
             mutating,
             interruption,
         }
@@ -119,7 +110,6 @@ impl ManagementMethods {
             || declarations.iter().any(|decl| {
                 !valid_name(&decl.name)
                     || !within(&decl.name, namespace)
-                    || decl.level != MethodLevel::Management
                     || crate::protocol::is_builtin_method(&decl.name)
                     || !unique.insert(&decl.name)
             })
@@ -185,12 +175,11 @@ impl MethodTable {
         Ok(Self { owners: table })
     }
 
-    pub fn methods(&self, level: MethodLevel) -> Vec<String> {
+    pub fn methods(&self) -> Vec<String> {
         let mut names: Vec<_> = self
             .owners
             .values()
             .flat_map(|owner| &owner.declarations)
-            .filter(|decl| decl.level == level)
             .map(|decl| decl.name.clone())
             .collect();
         names.sort();
@@ -220,7 +209,6 @@ impl MethodTable {
         &self,
         method: String,
         params: Value,
-        level: MethodLevel,
         caller_gone: CancellationToken,
         entry_stopping: CancellationToken,
         commands: &TaskTracker,
@@ -234,7 +222,7 @@ impl MethodTable {
         let interruption = owner
             .declarations
             .iter()
-            .find(|decl| decl.name == method && decl.level == level)
+            .find(|decl| decl.name == method)
             .ok_or_else(|| RpcError::app(-32601, "unknown_method", "Unknown method"))?
             .interruption;
         let owner = owner.clone();

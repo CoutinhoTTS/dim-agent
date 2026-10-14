@@ -2,7 +2,7 @@ use crate::{
     ServerConfig,
     agents::AgentIndex,
     control::ServerControl,
-    methods::{ManagementMethods, MethodLevel, MethodTable},
+    methods::{ManagementMethods, MethodTable},
     outbound::{Frame, Sender},
     protocol::*,
 };
@@ -132,7 +132,6 @@ impl Connection {
                 let accepted = rpc.methods.dispatch(
                     method.clone(),
                     params.clone(),
-                    MethodLevel::Management,
                     self.closed.clone(),
                     rpc.unloading.clone(),
                     &rpc.commands,

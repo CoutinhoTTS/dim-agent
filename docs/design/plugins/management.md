@@ -1,9 +1,11 @@
 # Management methods
 
-Status: process-owner contributions implemented. This page describes the shipped
+Status: process-owner contributions implemented. This page describes the implemented
 subset of [PR #15](https://github.com/arcships/dim/pull/15)'s revised plugin-scope
-ADR and method contract (latest inspected branch `8605acb`, including D4/D5). Management is a method level, not a
-plugin. The earlier stable-port and Management-plugin proposals are withdrawn.
+ADR and method contract (latest inspected branch `34af2f1`, including D4/D5).
+Management methods belong to process owners, not a Management plugin. There is
+no per-method level; entry admission determines whether this table is served.
+The earlier stable-port and Management-plugin proposals are withdrawn.
 
 The subsequent [language-neutral contract revision](https://github.com/arcships/dim/commit/165174a94b16af0f0fb89b67d43b3b104a5deb00)
 adds ADR D5. This implementation provides the Rust-only subset, not the named
@@ -45,6 +47,8 @@ remain independent from the parent `account` namespace.
 
 Local v3 dispatches management contributions; v1/v2 and WebSocket do not.
 Unknown names and methods on non-serving entries return `unknown_method`.
+The proposed `ConnectionEntry {name, deviceId}` and paired-device routing remain
+RemoteGateway work; its connections must never be served management methods.
 `hello.features` snapshots the collected methods and declared notifications
 from the same Rpc load as the protocol instance. The withdrawn
 `management.methods` endpoint is not provided. Existing Session and daemon

@@ -10009,11 +10009,9 @@
       "to": "dim_app_server::methods",
       "references": [
         "path ManagementMethods",
-        "path MethodLevel::Management",
         "path MethodTable",
         "path MethodTable::new",
         "use crate::methods::ManagementMethods",
-        "use crate::methods::MethodLevel",
         "use crate::methods::MethodTable"
       ]
     },
@@ -11329,7 +11327,6 @@
         "path Handler",
         "path ManagementMethods",
         "path ManagementMethods::provide",
-        "path MethodLevel::Management",
         "path MethodTable",
         "path MethodTable::new"
       ]
@@ -12647,13 +12644,6 @@
       "references": [
         "path ServerControl",
         "use crate::control::ServerControl"
-      ]
-    },
-    {
-      "from": "dim_app_server::transport",
-      "to": "dim_app_server::methods",
-      "references": [
-        "path crate::methods::MethodLevel::Management"
       ]
     },
     {

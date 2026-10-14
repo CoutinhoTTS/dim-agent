@@ -1,7 +1,7 @@
 # 003: Session-owned MCP and business configuration
 
 Status: implementation direction approved by the repository owner for this branch,
-corrected to the authoritative D4 in PR #15 (`origin/pr-15-design`, `8605acb`).
+corrected to the authoritative D4 in PR #15 (`origin/pr-15-design`, `34af2f1`).
 PR #15 owns ADR 002, Plugin scope assignment and configuration placement; this
 branch record is numbered 003 to avoid that collision. This record supersedes
 ADR 001's process-shared MCP ownership, not issue #3's structural editable layer.
@@ -31,11 +31,12 @@ not certify discovery, model adoption or cleanup.
 
 ## D4: configuration authority
 
-Structural configuration (plugin enablement, package/runtime paths, node binding
-and listener addresses) belongs to loader rows and may reload a row. General
+Structural configuration (plugin enablement, package/runtime paths and node
+binding) belongs to loader rows and may reload a row. General
 editable structural configuration remains issue #3 work. Business configuration,
-including MCP server and Skill documents, belongs to the owner's business source.
-Data updates publish notifications without reloading the owner or Rpc.
+including MCP server and Skill documents and future Gateway listener settings,
+belongs to the owner's business source. Typed owner writes publish notifications
+without reloading the owner or Rpc. Process configuration is not a Timeline fact.
 
 SettingsService provides generic `BusinessDocument` read/update operations with
 per-source CAS. A business owner supplies its namespace, source filenames,
