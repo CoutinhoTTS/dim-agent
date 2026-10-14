@@ -387,7 +387,7 @@ Through management methods, `session.create`/`session.submit`, tools and events:
 | A20 | Observation Hooks run serially per branch | Judgment | Injected order may differ |
 | A21 | Submit Hooks run per `session.submit` call, retries included | Judgment | Rpc dedupes first |
 | A23 | Plugin Hooks run only from packages installed on the Session's resource node | Judgment; overview §3.1 | Cross-node content transfer |
-| A24 | Session creation does not wait for Session-start Hooks; their context may follow the first user input | Simplification (observe the broadcast `Created` notice) | A blocking creation hook is needed |
+| A24 | Session creation does not wait for Session-start Hooks; their context may follow the first user input | Maintainer decision: simplification (observe the broadcast `Created` notice) | A blocking creation hook is needed |
 
 Decided items formerly listed as assumptions: project path `.dimcode/hooks.json` (E11), `pre_tool_use` default deny and Approval fail-closed rule (E9), Session start only for `created_by = Client`, observed from the broadcast `Created` notice, fail open (E10), host-local approval service (R11).
 
