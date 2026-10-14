@@ -12,7 +12,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 |
 | [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |
-| [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:current` blocks, continuation | P2 |
+| [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:objective` and `goal:status` blocks, continuation | P2 |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2 |
 | [Hooks](Hooks.md) | — | rules, Session-start hooks | before callbacks, post-tool and turn-end hooks | P2 |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | P2 |

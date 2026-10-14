@@ -68,7 +68,7 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 | Plugin | Process | Session | Branch | Reason |
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` tool; `session.question.*` methods; not installed in non-interactive Sessions | Pending questions, `question/*` facts, following Approval | A question belongs to a branch's turn |
-| Goal | — | `goal_update` tool and `session.goal.*` methods, which only write one `input/message` with a `goal:current` keyed block | Goal state folded in sequence order from consumed `goal:current` blocks; continuation decided by Goal when it consumes `turn/end`, `stop/interrupt` or `input/deleted` through the Dispatcher, after the whole batch | A goal belongs to a branch, and continuation follows its events in order |
+| Goal | — | `goal_update` tool and `session.goal.*` methods, which only write one `input/message` with `goal:objective` and/or `goal:status` keyed blocks | Goal state folded in sequence order from consumed goal change blocks; continuation decided by Goal when it consumes `turn/end`, `stop/interrupt` or `input/deleted` through the Dispatcher, after the whole batch | A goal belongs to a branch, and continuation follows its events in order |
 | Hooks | — | Rules from business sources; Session-start Hooks | Before callbacks on `input/message` (`user_prompt_submit`) and `step/tool-call` (`pre_tool_use`); post-tool and turn-end Hooks from the Dispatcher | Rules apply to a Session; execution happens in a branch |
 | ShellInput | — | `shell.*` Session methods; runs in the Session's workspace and writes its input | — | Commands belong to the Session |
 | Attachments | — | `attachment.put`; Session files through SessionStore | — | Attachments are Session data |
@@ -162,7 +162,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 | ShellInput | Session | `!command` / `!!command` as `shell.run/stop/list` Session methods | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Session | `attachment.put` for large text; Session files | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Session | Title from the first adopted user input; `session.rename` | P1 | TypeScript first | [SessionTitle](plugins/SessionTitle.md) |
-| Goal | Session + branch | Goal state folded from `goal:current` input blocks; continuation; `goal_update`; `session.goal.*` | P2 | TypeScript first | [Goal](plugins/Goal.md) |
+| Goal | Session + branch | Goal state folded from `goal:objective` and `goal:status` input blocks; continuation; `goal_update`; `session.goal.*` | P2 | TypeScript first | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`, `web_fetch` | P2 | TypeScript first | [Web](plugins/Web.md) |
 | Hooks | Session + branch | Command Hooks: Session start, prompt-submit and pre-tool before callbacks, post-tool, turn end | P2 | Rust | [Hooks](plugins/Hooks.md) |
 | Scheduler | Process + Session | Scheduled jobs; `schedule` tool; run-outcome notice | P2 | TypeScript first | [Scheduler](plugins/Scheduler.md) |
@@ -219,13 +219,13 @@ sequenceDiagram
   participant IQ as InputQueue
   TL-->>D: turn/end at seq N
   D->>G: turn/end, in order
-  G->>G: read the whole batch, fold consumed goal:current blocks
+  G->>G: read the whole batch, fold consumed goal:objective and goal:status blocks
   G->>G: goal active? no stop/interrupt after it? limit not reached?
   G->>IQ: Queue input with dim-goal marker (owned work)
   IQ->>TL: input/message, then turn/start
 ```
 
-Every goal change (set, edit, pause, resume, clear, and the model's completed or blocked report through `goal_update`) is one `input/message` with a `goal:current` keyed block. The tool and the `session.goal.*` methods only write that event; they never read Goal's state or decide. Goal's state is the fold of the consumed blocks in sequence order with fixed rules: a later block overrides an earlier one, a repeated terminal status has no effect, and pause, resume or edit without a goal has no effect. Goal decides continuation itself when it consumes `turn/end`, `stop/interrupt` or `input/deleted` through the Dispatcher, after reading the whole atomic batch and from consumed state only; it registers the write as owned work, returns, and rechecks consumed state before writing. Deleted inputs never change the state. A `stop/interrupt` pauses the goal. If the interrupt lands after the continuation input, at most one extra turn runs, and the model sees the paused block.
+Every goal change (set, edit, pause, resume, clear, and the model's completed or blocked report through `goal_update`) is one `input/message` whose raw blocks carry the key `goal:objective` (set, edit), `goal:status` (set, pause, resume, completed, blocked, automatic pause) or retire both (clear); continuations carry no key and are only counted. Compaction replays the latest block of each key, so the model keeps the current objective and status. The tool and the `session.goal.*` methods only write that event; they never read Goal's state or decide. Goal's state is the fold of the consumed blocks in sequence order with fixed rules: a later block overrides an earlier one, a repeated terminal status has no effect, and pause, resume or edit without a goal has no effect. Goal decides continuation itself when it consumes `turn/end`, `stop/interrupt` or `input/deleted` through the Dispatcher, after reading the whole atomic batch and from consumed state only; it registers the write as owned work, returns, and rechecks consumed state before writing. Deleted inputs never change the state. A `stop/interrupt` pauses the goal. If the interrupt lands after the continuation input, at most one extra turn runs, and the model sees the paused block.
 
 ### 5.3 Observer through the Session broadcast (SessionTitle)
 

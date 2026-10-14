@@ -12,7 +12,7 @@
 | [ShellInput](ShellInput.md) | — | `shell.*` 方法、命令执行 | — | P1 |
 | [Attachments](Attachments.md) | — | `attachment.put`、Session 文件 | — | P1 |
 | [SessionTitle](SessionTitle.md) | — | 观察首条用户输入的采纳、`session.rename` | — | P1 |
-| [Goal](Goal.md) | — | `goal_update` 工具、`session.goal.*` | 由 `goal:current` 块折叠出的目标状态、续跑 | P2 |
+| [Goal](Goal.md) | — | `goal_update` 工具、`session.goal.*` | 由 `goal:objective` 与 `goal:status` 块折叠出的目标状态、续跑 | P2 |
 | [Web](Web.md) | — | `web_search`、`web_fetch` 工具 | — | P2 |
 | [Hooks](Hooks.md) | — | 规则、Session 开始 Hook | before 回调、工具调用后与 turn 结束 Hook | P2 |
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | P2 |

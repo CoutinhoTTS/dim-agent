@@ -68,7 +68,7 @@ flowchart TB
 | 插件 | 进程 | Session | 分支 | 理由 |
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` 工具；`session.question.*` 方法；非交互 Session 中不安装 | 待答问题、`question/*` 事实，沿用 Approval 的做法 | 问题属于某个分支的 turn |
-| Goal | — | `goal_update` 工具与 `session.goal.*` 方法，只写一条带 `goal:current` 块的 `input/message` | 目标状态由已消费的 `goal:current` 块按序号折叠得出；Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时，读完整个批次后自己决定续跑 | 目标属于某个分支，续跑按序跟随其事件 |
+| Goal | — | `goal_update` 工具与 `session.goal.*` 方法，只写一条带 `goal:objective` 和/或 `goal:status` 块的 `input/message` | 目标状态由已消费的目标变更块按序号折叠得出；Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时，读完整个批次后自己决定续跑 | 目标属于某个分支，续跑按序跟随其事件 |
 | Hooks | — | 来自业务来源的规则；Session 启动 Hook | `input/message`（`user_prompt_submit`）与 `step/tool-call`（`pre_tool_use`）上的 before 回调；来自 Dispatcher 的工具后与 turn 结束 Hook | 规则作用于 Session；执行发生在分支 |
 | ShellInput | — | `shell.*` Session 方法；在 Session 的工作区中运行并写入其输入 | — | 命令属于 Session |
 | Attachments | — | `attachment.put`；通过 SessionStore 管理 Session 文件 | — | 附件是 Session 数据 |
@@ -162,7 +162,7 @@ flowchart LR
 | ShellInput | Session | `!command` / `!!command`，作为 Session 方法 `shell.run/stop/list` | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Session | 大段文本的 `attachment.put`；Session 文件 | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Session | 由首条被采纳的用户输入生成标题；`session.rename` | P1 | TypeScript 优先 | [SessionTitle](plugins/SessionTitle.md) |
-| Goal | Session + 分支 | 目标状态由 `goal:current` 输入块折叠得出；续跑；`goal_update`；`session.goal.*` | P2 | TypeScript 优先 | [Goal](plugins/Goal.md) |
+| Goal | Session + 分支 | 目标状态由 `goal:objective` 与 `goal:status` 输入块折叠得出；续跑；`goal_update`；`session.goal.*` | P2 | TypeScript 优先 | [Goal](plugins/Goal.md) |
 | Web | Session | `web_search`、`web_fetch` | P2 | TypeScript 优先 | [Web](plugins/Web.md) |
 | Hooks | Session + 分支 | 命令 Hook：Session 启动、提示词提交与工具前 before 回调、工具后、turn 结束 | P2 | Rust | [Hooks](plugins/Hooks.md) |
 | Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果通知 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
@@ -219,13 +219,13 @@ sequenceDiagram
   participant IQ as InputQueue
   TL-->>D: seq N 处的 turn/end
   D->>G: turn/end，按序
-  G->>G: 读完整个批次，折叠已消费的 goal:current 块
+  G->>G: 读完整个批次，折叠已消费的 goal:objective 与 goal:status 块
   G->>G: 目标有效？其后无 stop/interrupt？未达上限？
   G->>IQ: 带 dim-goal 标记的 Queue 输入（自持任务）
   IQ->>TL: input/message，然后 turn/start
 ```
 
-每次目标变更（设置、编辑、暂停、恢复、清除，以及模型通过 `goal_update` 报告完成或受阻）都是一条带 `goal:current` 块的 `input/message`。工具和 `session.goal.*` 方法只写这条事件，不读 Goal 的状态，也不做决定。Goal 的状态是已消费的块按序号折叠的结果，规则固定：后来的块覆盖先前的块；重复的终态没有效果；没有目标时暂停、恢复或编辑没有效果。Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定是否续跑：先读完整个原子批次，只用已消费的状态；把写入登记为自持任务后返回，写入前再用已消费的状态复核。被删除的输入不改变状态。`stop/interrupt` 会暂停目标。如果中断落在续跑输入之后，最多多跑一个 turn，模型会看到已暂停的块。
+每次目标变更（设置、编辑、暂停、恢复、清除，以及模型通过 `goal_update` 报告完成或受阻）都是一条 `input/message`，其 raw 块带 key `goal:objective`（设置、编辑）、`goal:status`（设置、暂停、恢复、完成、受阻、自动暂停），或退役两者（清除）；续跑不带 key，只被计数。压缩重放每个 key 最新的块，因此模型保有当前目标与状态。工具和 `session.goal.*` 方法只写这条事件，不读 Goal 的状态，也不做决定。Goal 的状态是已消费的块按序号折叠的结果，规则固定：后来的块覆盖先前的块；重复的终态没有效果；没有目标时暂停、恢复或编辑没有效果。Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定是否续跑：先读完整个原子批次，只用已消费的状态；把写入登记为自持任务后返回，写入前再用已消费的状态复核。被删除的输入不改变状态。`stop/interrupt` 会暂停目标。如果中断落在续跑输入之后，最多多跑一个 turn，模型会看到已暂停的块。
 
 ### 5.3 通过 Session 广播的观察者（SessionTitle）
 

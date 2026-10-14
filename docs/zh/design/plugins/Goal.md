@@ -4,7 +4,7 @@
 
 需求（[功能列表](../../../feature-list.md)，BranchScope Agent 行为）：`/goal` 设置、编辑、暂停、恢复和清除目标（"切换 Goal 模式"）；Goal 续跑朝明确的目标继续工作，并记录完成或受阻。
 
-Goal 在分支上保持一个常驻目标，并自动续跑该分支，直到模型报告目标已完成或受阻、用户暂停、清除或中断，或达到续跑上限。Goal 是分支上的事件驱动状态机。**每次变更都是分支上的一条 `input/message`**，其第一个 raw 块带 key `goal:current`：用户的 `set`、`edit`、`pause`、`resume`、`clear`，以及模型经 `goal_update` 工具报告的 `completed` 或 `blocked`。工具和方法只写这条事件；它们不读 Goal 的状态，也不判断变更是否允许。**Goal 的状态是 Goal 已消费事件的折叠结果**，按序号顺序，用固定规则计算（[§2](#2-数据与状态)）。**分支部分**拥有这个折叠结果；它的 Dispatcher 处理器消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时，读完整个批次后只依据已消费的状态自己决定是否续跑；决定需要写入（续跑或自动暂停）时，处理器把写入登记为自己拥有的工作，然后返回。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `goal_update`）提供 `goal_update` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.goal`）提供 `session.goal.*` 方法（[session-boundary](../contracts/session-boundary.md)）；每次调用解析调用方分支或指定分支，经分支的公开输入入口 `Branch::input` 写入，只有 `session.goal.get` 向分支部分查询折叠结果。Goal 不写自己类型的事件，也没有单独的"Goal 模式"：目标的存在与状态可通过 `session.goal.get` 和目标块看到，覆盖了功能列表中"切换 Goal 模式"的说法。本文的每个契约都是语言中立的（服务名、作用域、key、带数据形状的方法），因此 TypeScript 实现无需手写 Rust 绑定即可满足；Rust 形式见[附录 G](#附录-g-rust-绑定)。Goal 还使用运行时的类型化服务（`S:TreeCommands`、`B:Timeline`、`B:Dispatcher`）；把它们按名称暴露给非 Rust 的 Capability 部分是 [#4](https://github.com/arcships/dim/issues/4) 的工作（需求见 [session access](../contracts/session-access.md) §9），在此之前 Goal 先用 Rust 实现。
+Goal 在分支上保持一个常驻目标，并自动续跑该分支，直到模型报告目标已完成或受阻、用户暂停、清除或中断，或达到续跑上限。Goal 是分支上的事件驱动状态机。**每次变更都是分支上的一条 `input/message`**，其 raw 块带两个 key 之一：`goal:objective` 承载目标文本，由 `set` 和 `edit` 写入；`goal:status` 承载状态，由用户的 `set`、`pause`、`resume`，模型经 `goal_update` 工具报告的 `completed` 或 `blocked`，以及 Goal 自己的自动暂停写入；`clear` 退役两个 key。续跑不带 key，也不是变更。工具和方法只写这条事件；它们不读 Goal 的状态，也不判断变更是否允许。**Goal 的状态是 Goal 已消费事件的折叠结果**，按序号顺序，用固定规则计算（[§2](#2-数据与状态)）。**分支部分**拥有这个折叠结果；它的 Dispatcher 处理器消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时，读完整个批次后只依据已消费的状态自己决定是否续跑；决定需要写入（续跑或自动暂停）时，处理器把写入登记为自己拥有的工作，然后返回。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `goal_update`）提供 `goal_update` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.goal`）提供 `session.goal.*` 方法（[session-boundary](../contracts/session-boundary.md)）；每次调用解析调用方分支或指定分支，经分支的公开输入入口 `Branch::input` 写入，只有 `session.goal.get` 向分支部分查询折叠结果。Goal 不写自己类型的事件，也没有单独的"Goal 模式"：目标的存在与状态可通过 `session.goal.get` 和目标块看到，覆盖了功能列表中"切换 Goal 模式"的说法。本文的每个契约都是语言中立的（服务名、作用域、key、带数据形状的方法），因此 TypeScript 实现无需手写 Rust 绑定即可满足；Rust 形式见[附录 G](#附录-g-rust-绑定)。Goal 还使用运行时的类型化服务（`S:TreeCommands`、`B:Timeline`、`B:Dispatcher`）；把它们按名称暴露给非 Rust 的 Capability 部分是 [#4](https://github.com/arcships/dim/issues/4) 的工作（需求见 [session access](../contracts/session-access.md) §9），在此之前 Goal 先用 Rust 实现。
 
 ## 1. 结构
 
@@ -27,7 +27,7 @@ flowchart LR
   TR -- "按名称收集 toolContribution" --> GS
   Rpc -- "解析 Session，调用 sessionMethods session.goal" --> GS
   GS -- "每次调用：调用方分支或指定分支" --> TC
-  TC -- "Branch::input：变更输入（goal:current）" --> TL
+  TC -- "Branch::input：变更输入（goal:objective、goal:status）" --> TL
   TC -- "只有 get" --> GB
   TL -- "按顺序 input/*、turn/*、stop/interrupt" --> GB
   GB -- "自有写入任务：续跑或自动暂停" --> TL
@@ -50,8 +50,8 @@ flowchart LR
 ```mermaid
 flowchart TB
   subgraph TLB["分支 Timeline（祖先前缀 + 本地）"]
-    GBK["变更 input/message，第一个 raw 块的 key 为 goal:current"]
-    CI["Goal 自己的 input/message：续跑或自动暂停"]
+    GBK["变更 input/message，raw 块的 key 为 goal:objective 或 goal:status"]
+    CI["Goal 自己的 input/message：续跑（无 key）或自动暂停（goal:status）"]
     OI["操作者 input/message（用户内容，无来源标记）"]
     IC["input/consumed、input/deleted"]
     TE["turn/start、turn/end、stop/interrupt"]
@@ -71,16 +71,16 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 至今已消费事件�
 
 变更在其 `input/message` 的序号处生效。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠结果去掉它重新计算，因为被删除的输入从不生效（[session access](../contracts/session-access.md)）。固定折叠规则按序号顺序应用；后来的变更覆盖先前的：
 
-| 变更（标记中的 `op`） | 写入方 | 对折叠结果的影响 |
-| --- | --- | --- |
-| `set {objective}` | `session.goal.set` | 新目标：`objective`，`owner` 为写入所在分支，`status = active`；计数重新开始 |
-| `edit {objective}` | `session.goal.edit` | 有存活目标：替换 `objective`，状态不变。没有目标：无效果 |
-| `pause`（原因 `user`） | `session.goal.pause` | `active` → `paused (user)`。其他情况无效果 |
-| `resume` | `session.goal.resume` | `paused` 或 `blocked` → `active`；计数重新开始。`active`：不变（这条 Queue 输入仍驱动一轮）。没有目标或 `completed`：无效果 |
-| `clear`（退役 key） | `session.goal.clear` | 没有目标 |
-| `completed` / `blocked {summary}` | 分支 `X` 上的 `goal_update` | `active` 且 `owner = X` → `completed` / `blocked`，带 `summary`。其他情况无效果；重复的终态无效果 |
-| `pause`（原因 `interrupted`、`limit`、`turn_failed`） | Goal 自己 | `active` → `paused (reason)`。其他情况无效果 |
-| 续跑 | Goal 自己 | 计数加 1；不做其他改变 |
+| 变更（标记中的 `op`） | 写入方 | Key | 对折叠结果的影响 |
+| --- | --- | --- | --- |
+| `set {objective}` | `session.goal.set` | `goal:objective`、`goal:status`（active） | 新目标：`objective`，`owner` 为写入所在分支，`status = active`；计数重新开始 |
+| `edit {objective}` | `session.goal.edit` | `goal:objective` | 有存活目标：替换 `objective`，状态不变。没有目标：无效果 |
+| `pause`（原因 `user`） | `session.goal.pause` | `goal:status` | `active` → `paused (user)`。其他情况无效果 |
+| `resume` | `session.goal.resume` | `goal:status` | `paused` 或 `blocked` → `active`；计数重新开始。`active`：不变（这条 Queue 输入仍驱动一轮）。没有目标或 `completed`：无效果 |
+| `clear` | `session.goal.clear` | 两者都退役 | 没有目标 |
+| `completed` / `blocked {summary}` | 分支 `X` 上的 `goal_update` | `goal:status` | `active` 且 `owner = X` → `completed` / `blocked`，带 `summary`。其他情况无效果；重复的终态无效果 |
+| `pause`（原因 `interrupted`、`limit`、`turn_failed`） | Goal 自己 | `goal:status` | `active` → `paused (reason)`。其他情况无效果 |
+| 续跑（不是变更） | Goal 自己 | 无 | 只计数：计数加 1 |
 
 基于已消费事件的推导值：
 
@@ -90,7 +90,7 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 至今已消费事件�
 | `A` | 最近一次使目标变为 `active` 的变更（`set` 或生效的 `resume`）的序号 |
 | `interrupted` | `B` 本地事件中序号大于 `A` 的 `stop/interrupt {scope: turn}` |
 | `last_operator` | 最新的操作者输入：带 `user` 内容且未被来源标记的 `input/message`（A5） |
-| `count` | 序号大于 `max(A, last_operator)` 的 Goal 续跑 |
+| `count` | 序号大于 `max(A, last_operator)` 的 Goal 续跑输入（标记 `kind="continuation"`，无 key） |
 | `decided` | 对每个 `turn/end` 序号 `N`，是否存在标有 `after="N"` 的 Goal 写入（续跑或自动暂停） |
 | `pending_driving` | 有效模式为 Queue 或 Steer、且既无 `input/consumed` 也无 `input/deleted` 的本地 `input/message`（session access §2 待处理规则）。Goal 不解读 InputQueue 的指令 `input/withdraw`；只有 InputQueue 的结果 `input/deleted` 才移除输入 |
 | `turn_open` | 最新 `turn/end` 之后存在 `turn/start` |
@@ -199,13 +199,13 @@ sequenceDiagram
 
 | 模型看到的内容 | 形式 | 位置 |
 | --- | --- | --- |
-| 每次变更 | 一条没有 `user` 内容的 `input/message`，其唯一 raw 块为 `<dim-goal kind="goal" op=... branch=...>`，key 为 `goal:current`（清除时退役该 key） | 在其 `input/consumed` 位置；Queue 块开启它所驱动的轮次，Append 块加入下一个请求 |
-| 续跑 | `input/message`，Queue，`<dim-goal kind="continuation" count=k limit=L after=N branch=...>`，key 为 `goal:current`；重述目标 | 它所驱动轮次的开头 |
+| 每次变更 | 一条没有 `user` 内容的 `input/message`，其第一个 raw 块为 `<dim-goal kind="goal" op=... branch=...>`；`edit` 给它 key `goal:objective`，状态变更给它 key `goal:status`，`set` 再加一个 key 为 `goal:status` 的块，`clear` 用两个块退役两个 key（A.5） | 在其 `input/consumed` 位置；Queue 块开启它所驱动的轮次，Append 块加入下一个请求 |
+| 续跑 | `input/message`，Queue，`<dim-goal kind="continuation" count=k limit=L after=N branch=...>`，无 key；不重述目标 | 它所驱动轮次的开头 |
 | `goal_update` | 已采用的 `context/configured` 中的固定工具声明；结果在 `ToolResult.content` 中 | 其批次的工具结果位置 |
 
 | 方面 | 规则 |
 | --- | --- |
-| 压缩 | 基线原样重放最新的存活 `goal:current` 块；已退役的 key 不重放；更早的块只通过摘要保留。Goal 自己的块（续跑、自动暂停）重述目标，因此只要最后写入的是 Goal，重放的块就写有目标 |
+| 压缩 | 基线原样重放每个 key 最新的存活块，因此模型看到当前目标（`goal:objective`）和当前状态（`goal:status`）；已退役的 key 不重放；续跑和更早的块只通过摘要保留 |
 | 子分支 | 继承切点之前已消费的块；块中写明所属分支，并告诉委派工作不要调用 `goal_update`（A3） |
 | 非交互 Session | 映射相同；续跑在没有用户在场时驱动轮次 |
 | 始终不可见 | `submissionId`、模式、操作者输入计数、折叠结果、诊断、其他插件的事件 |
@@ -237,7 +237,7 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 | §4.1 改别的模块拥有的状态时写指令事件 | 每次变更都是 Goal 自己消费的输入；Goal 从不删除或应用输入，它依据 InputQueue 的 `input/deleted`，不读 `input/withdraw`。 |
 | §4.2 交接后不能撤回 | Goal 从不撤回自己的续跑；中断后才被应用的续跑多跑一轮，之后的暂停块结束目标。 |
 | §4.3 只用 before 回调在写入前干预 | 不适用：Goal 不注册 before 回调，其工具和方法也不加入口检查（它们只写不判断）。 |
-| §4.4 核心机制不带业务含义 | Goal 不要求 Timeline、Dispatcher、InputQueue 或 Loop 改动；其标记是普通的带 key raw 块。 |
+| §4.4 核心机制不带业务含义 | Goal 不要求 Timeline、Dispatcher、InputQueue 或 Loop 改动；其标记是两个普通 key 下的普通 raw 块。 |
 | §4.5 决定前读完整个批次 | 折叠结果随每条事件推进；对 `turn/end`、`stop/interrupt` 与 `input/deleted` 的决定在读完整个批次后只依据已消费状态做出，写入前的复核也只用已消费状态。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 目标块与续跑只在被采用后进入模型；被删除的输入从不进入，并从折叠中移除。 |
 | §4.7 插件之间只通过公开事件和服务交互 | Goal 只读公开的 `input/*`、`turn/*` 与 `stop/interrupt` 契约，并经 `Branch::input` 写入。 |
@@ -317,18 +317,18 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 
 ### A.5 模型可见文本
 
-每次写入都是一条没有 `user` 内容的 `input/message`，其唯一 raw 块为标记 `<dim-goal kind="..." ...>`、换行、转义后的正文、换行、`</dim-goal>`（A2）。所有块都使用 key `goal:current`。
+每次写入都是一条没有 `user` 内容的 `input/message`。其第一个 raw 块为标记 `<dim-goal kind="..." ...>`、换行、转义后的正文、换行、`</dim-goal>`（A2）；`set` 和 `clear` 再加一个同样形式的块。一条 `InputWrite` 可携带任意多个 `RawBlock`，每个块有自己的 key（[session access A.1](../contracts/session-access.md#a1-sessions-服务)），因此每次变更仍是一条输入。无 key 的续跑不是变更。
 
-| 写入 | Key 用法 | 模式 | 文本 |
+| 写入 | 块（key 用法） | 模式 | 文本 |
 | --- | --- | --- | --- |
-| `set` | live | Queue | `<dim-goal kind="goal" op="set" branch="B">` / `Objective:` / `<objective>` / 空行 / `This is the user's standing goal for branch B. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why. If you are working on a delegated sub-task started from branch B, treat this goal as background and do not call goal_update.` / `</dim-goal>` |
-| `edit` | live | Append | `op="edit"`；`Objective:` / `<objective>` / 空行 / `The user changed the objective of the goal for branch B. Its status is unchanged.` |
-| `pause`（用户） | live | Append | `op="pause" reason="user"`；`The user paused the goal for branch B. Do not continue working toward it on your own; respond only to the user's latest input.` |
-| `resume` | live | Queue | `op="resume"`；`The user resumed the goal for branch B. Keep working toward it across turns; when it is completed or blocked, call goal_update.` |
-| `completed` / `blocked` | live | Append | `op="completed"` 或 `op="blocked"`；`Result:` 或 `Blocker:` / `<summary>` / 空行 / `goal_update reported the goal as completed.` 或 `... as blocked.` + ` Do not continue working toward it.` |
-| `clear` | retire | Append | `op="clear"`；`The previous goal was cleared by the user. Disregard it.` |
-| 暂停（Goal） | live | Append | `op="pause" reason="interrupted\|limit\|turn_failed" after="N"`；`Objective:` / `<objective>` / 空行 / `The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
-| 续跑 | live | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Objective:` / `<objective>` / 空行 / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are working on a delegated sub-task started from branch B, do not call goal_update.` |
+| `set` | 1：`goal:objective` live；2：`goal:status` live | Queue | 1：`<dim-goal kind="goal" op="set" branch="B">` / `Objective:` / `<objective>` / 空行 / `This is the user's standing goal for branch B. If you are working on a delegated sub-task started from branch B, treat this goal as background and do not call goal_update.` / `</dim-goal>`；2：`<dim-goal kind="status" status="active" branch="B">` / `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` / `</dim-goal>` |
+| `edit` | `goal:objective` live | Append | `op="edit"`；`Objective:` / `<objective>` / 空行 / `The user changed the objective of the goal for branch B. Its status is unchanged.` |
+| `pause`（用户） | `goal:status` live | Append | `op="pause" reason="user"`；`The user paused the goal for branch B. Do not continue working toward it on your own; respond only to the user's latest input.` |
+| `resume` | `goal:status` live | Queue | `op="resume"`；`The user resumed the goal for branch B. Keep working toward it across turns; when it is completed or blocked, call goal_update.` |
+| `completed` / `blocked` | `goal:status` live | Append | `op="completed"` 或 `op="blocked"`；`Result:` 或 `Blocker:` / `<summary>` / 空行 / `goal_update reported the goal as completed.` 或 `... as blocked.` + ` Do not continue working toward it.` |
+| `clear` | 1：`goal:objective` retire；2：`goal:status` retire | Append | 1：`op="clear"`；`The previous goal was cleared by the user. Disregard it.`；2：`<dim-goal kind="status" status="cleared" branch="B">` / `The goal for branch B has no status.` / `</dim-goal>` |
+| 暂停（Goal） | `goal:status` live | Append | `op="pause" reason="interrupted\|limit\|turn_failed" after="N"`；`The goal is paused (<reason phrase>). Do not continue working toward it on your own; respond only to the user's latest input.` |
+| 续跑 | 无 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" branch="B">` / `Continue working toward the active goal for branch B. If it is completed or blocked, call goal_update. If you are working on a delegated sub-task started from branch B, do not call goal_update.` |
 
 原因短语：`interrupted` "the user interrupted the turn"，`limit` "the automatic continuation limit was reached"，`turn_failed` "the last turn failed"。工具声明描述："Report that the current goal is completed or blocked."
 
@@ -374,10 +374,10 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 | `goal_update` 与 `edit`/`clear`/`pause` | 序号顺序 | 折叠按序号应用；后来的变更覆盖先前的 | Goal |
 | 没有目标时的 `pause`、`resume` 或 `edit` | — | 写入；折叠结果不变；模型看到该块（`resume` 仍驱动一轮） | Goal |
 | 目标写入与其消费之间压缩 | 写入 < 压缩 < 已消费 | 块在摘要之后的消费位置送达；之后的基线重放它 | 历史投影 |
-| 多个目标块之后压缩 | — | 只重放最新的 `goal:current` 块；折叠读取事件 | 历史投影；Goal |
+| 多个目标块之后压缩 | — | 只重放最新的 `goal:objective` 块和最新的 `goal:status` 块；续跑不重放；折叠读取事件 | 历史投影；Goal |
 | 子分支在目标写入与其消费之间切出 | 写入 < 切点 < 已消费 | 子分支不采纳它；`owner ≠ child`：不续跑 | InputQueue（子分支）；Goal |
 | 子分支在消费之后切出 | 已消费 < 切点 | 子分支把父目标视为背景；在那里的 `goal_update` 会写入，但无效果（A3） | Goal |
-| 在子分支上设置目标 | — | 子分支 Timeline 上的独立 key | Goal |
+| 在子分支上设置目标 | — | 子分支 Timeline 上的独立 key 组 | Goal |
 | Session 分叉 | 事实被复制 | 分叉的 `main` 拥有复制来的目标（A11） | Goal |
 | 未决策的 `turn/end` 之后分支部分重载或重启 | — | 加载时执行一次决策；`decided`、C4、C5 去重 | Goal |
 | 写入任务在途时分支部分卸载 | — | 任务结束；若尚未追加，新一代在加载时重新决策 | Goal |
@@ -411,18 +411,18 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 3. 中断各行：`turn/end` 之前、在 `turn/end` 与续跑之间提交（最多多一轮）、开始之后、应用之后；`goal_update` 写入之前与之后。
 4. 待处理的 Queue/Steer 输入抑制续跑；Append 不抑制；已删除的输入不抑制；在其抑制的 `turn/end` 之后被删除的输入会重新触发该决策；被撤回的 `pause` 从折叠中移除。
 5. 未决策的 `turn/end` 之后分支部分重载和重启：恰好一次决策；写入任务在途时重载，恰好一次写入。
-6. `completed` 之后压缩：基线包含 `completed`，而非 `active`；续跑之后压缩会重放目标文本。
+6. `completed` 之后压缩：基线包含 `completed`，而非 `active`。压缩之后，基线包含最新的 `goal:objective` 块和最新的 `goal:status` 块；续跑不重放。
 7. 子分支：继承块，不续跑，在那里的 `goal_update` 会写入但无效果；在子分支上设置的目标是独立的。
 8. 已卸载的 Session：`session.goal.pause` 恢复它并写入。未启用 Goal：`unknown_method`。修改 `goal.maxContinuations` 在下一次决策时生效，无需重载 Goal。
 9. 一个批次中的两个 `goal_update` 调用都返回确认，折叠结果显示第一个状态；没有目标时 `pause`、`edit`、`resume` 写入块且折叠结果不变；工具和方法从不读折叠结果（在分支部分重载期间写入来验证）。
-10. `edit`、`clear`（退役的 key 不重放）、目标文本或 summary 中伪造的 `</dim-goal>` 被转义；`session.goal.get` 反映每种状态，`through` 会达到每次写入的 `sequence`。
+10. `edit`（只改变 `goal:objective`）、`clear`（两个退役的 key 都不重放）、目标文本或 summary 中伪造的 `</dim-goal>` 被转义；`session.goal.get` 反映每种状态，`through` 会达到每次写入的 `sequence`。
 
 ## 附录 E. 假设
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
 | A1 | `set`、`resume` 和续跑使用 Queue；`edit`、`pause`、`clear`、`goal_update` 和 Goal 的暂停使用 Append | 判断（总体设计只为续跑固定了 Queue）；方法无法知道状态，所以 `edit` 从不开启一轮 | 设置不会在空闲分支上开始工作，或暂停会开启一轮 |
-| A2 | 附录 A.5 中的确切块格式与文本 | 判断 | 文本与解析一起改变 |
+| A2 | 附录 A.5 中的确切块格式与文本；目标与状态是分开的 key（`goal:objective`、`goal:status`），`set` 和 `clear` 在一条输入中写两者，续跑不带 key | 判断；[session access A.1](../contracts/session-access.md#a1-sessions-服务) 允许一条输入携带多个带 key 的 raw 块 | 文本与解析一起改变；若只有一个 key，压缩只重放最新的变更，状态变更后会丢失目标 |
 | A3 | 目标属于其 `set` 块中写明的分支；其他分支从不续跑它，其 `goal_update` 无效果 | 由子分支继承得出的判断 | 子分支会续跑或完成父分支的目标 |
 | A4 | `goal.maxContinuations` 默认 20，范围 1..=1000 | 判断 | 不同的默认值 |
 | A5 | 计数只在 `set`、生效的 `resume` 和操作者输入时重新开始：带 `user` 内容且第一个 raw 块不是来源标记 | 判断 | 其他插件的自动输入会重置上限 |
@@ -431,7 +431,7 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 | A8 | `session.goal.get` 是替代"Goal 模式"的状态查询 | 决定 E18；决定 §3（无 Goal 模式） | CLI 通过解析 Goal 的块推导状态 |
 | A9 | `goal_update` 风险为 `session`，提供给所有角色 | 判断 | 工具对某些角色隐藏，或在其他类别下准入 |
 | A10 | 目标文本 ≤ 4000 个字符，summary ≤ 2000 | 判断 | 其他限制 |
-| A11 | 分叉 Session 的 `main` 继续复制来的目标 | 判断 | 分叉需要退役复制来的 key |
+| A11 | 分叉 Session 的 `main` 继续复制来的目标 | 判断 | 分叉需要退役复制来的 key 组 |
 | A12 | `resume` 总是驱动一轮（使 active 的空闲目标重新开始工作）；重复的 `set` 和 `resume` 不去重 | 判断；方法看不到 `turn_open` 或待处理输入 | 重新开始的目标需要再次 `set`，或重复 resume 需要读取状态 |
 | A13 | `branchId` 默认为 `main`；任何分支都可以持有目标 | 判断 | Goal 限于 `main` |
 | A14 | 变更在其 `input/message` 序号处生效，被 InputQueue 删除时从折叠中移除 | 判断：轮次中写入的暂停必须在 Append 被应用之前就阻止该轮的续跑 | 变更改为在 `input/applied` 处生效，轮次中写入的暂停将无法阻止该轮的续跑 |
@@ -452,6 +452,7 @@ Goal 优先使用 TypeScript；Rust 实现（或在 #4 之前先用 Rust 起步�
 | `toolContribution` key `goal_update` | `S:ToolContribution`，由 ToolRegistry 作为 `Contributions<ToolContribution>` 的条目 `goal_update` 收集；取消请求 = 批次 `CancellationToken`；`cancelled` = `HostError::Cancelled` |
 | `sessionMethods` key `session.goal` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，key `SessionScope::named_key::<SessionMethodContribution>("session.goal")`；`describe` = `methods()`，`call` = `call(MethodCall, CallChannel, CancellationToken)` |
 | `goal` | `B:Goal`，key `BranchScope::key::<Goal>()`，`get` 返回折叠结果 |
+| Key | `const OBJECTIVE_KEY: &str = "objective"` 与 `const STATUS_KEY: &str = "status"`，以 `KeyUse::Live(name)` / `KeyUse::Retire(name)` 写入，存为 `goal:objective` / `goal:status`；续跑不带 `KeyUse` |
 | 卸载清理函数 | `ctx.effect` |
 | 写入任务 | Dispatcher 处理器在分支部分的 `ctx` 上登记的任务，以做出决定的序号为键；随卸载结束 |
 | 写入 | 经 `S:TreeCommands` 调用 `Branch::input`，来自 Session 部分的调用和写入任务 |
