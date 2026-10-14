@@ -1208,7 +1208,9 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
         Some(("unsupported/v99", "not json".to_owned())),
         Some((INTERPRETER, "not json".to_owned())),
     ];
-    for (branch, sequence) in [("unknown", 1), ("main", 0), ("main", 3)] {
+    // Sequence 2 is a legal resume address, but this state omits the pending
+    // input consumed there. Decoding and anchor checks alone cannot accept it.
+    for (branch, sequence) in [("unknown", 1), ("main", 0), ("main", 3), ("main", 2)] {
         states.push(Some((
             INTERPRETER,
             serde_json::to_string(&ProjectionCheckpoint {

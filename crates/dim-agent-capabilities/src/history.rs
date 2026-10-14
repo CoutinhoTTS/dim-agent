@@ -60,9 +60,17 @@ impl HistoryRenderer {
         timeline: &Timeline,
         through: u64,
     ) -> dim_agent_runtime::Result<ContextHistory> {
-        timeline
+        let context = timeline
             .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
-            .await
+            .await?;
+        // Storage validates the anchor; only the interpreter can establish that
+        // the cached state can replay its suffix. An incomplete but decodable
+        // cache must not prevent recovery from intact facts. Do not catch errors
+        // reading those facts, or suppress a later full-replay failure.
+        if context.checkpoint.is_some() && (self.render)(&context).is_err() {
+            return timeline.context(through).await;
+        }
+        Ok(context)
     }
 }
 
