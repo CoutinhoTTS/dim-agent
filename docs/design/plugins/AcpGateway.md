@@ -1,6 +1,6 @@
 # AcpGateway
 
-Status: Draft. Overall design: [overview §5.15](../overview.md#515-acpgateway). Phase: P3. Language: TypeScript first as a standalone program, then merged into the Rust CLI ([overview §11.3](../overview.md#113-assignment)).
+Status: Draft. Overall design: [overview §B.15](../overview.md#b15-acpgateway). Phase: P3. Language: TypeScript first as a standalone program, then merged into the Rust CLI ([overview §F.3](../overview.md#f3-assignment)).
 
 `dimcode acp` serves the Agent Client Protocol (ACP) over standard input and output so that editors can drive dim. It is a protocol adapter in the CLI process: it connects to the daemon over local RPC exactly like the CLI, maps each ACP session to a non-interactive dim Session, each ACP prompt to a `session.submit`, Session events to ACP `session/update` notifications, and dim approval requests to ACP permission requests. It opens no execution path in the daemon, writes nothing except through existing or registered Session methods, and declares no event.
 
@@ -17,10 +17,10 @@ flowchart LR
   end
   subgraph daemon["Daemon (App Server)"]
     Rpc["Rpc: local RPC protocol v3"]:::contract
-    Agents["Agents: session.create with interactive"]
+    Agents["Agents: session.create with interactive and client label"]
     IQ["InputQueue: session.input.withdraw"]
     Appr["Approval: approval.respond"]
-    Att["Attachments: attachment.put"]
+    Att["Attachments: attachment.put (level session)"]
   end
   Editor <-->|"ACP JSON-RPC over stdio"| GW
   GW --- Schema
@@ -35,7 +35,7 @@ The gateway depends on public RPC only; no daemon plugin knows it exists, and re
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `dimcode acp` | CLI process (not a daemon plugin) | Local RPC protocol v3 ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)): `hello`, `session.create` (with `interactive`, Agents/Rpc supplement), `session.attach`/`detach`, `session.submit`, `session.input_lookup`, `session.history`, `session.stop`, `session.permission.update`, `approval.respond`; `session.input.withdraw` (InputQueue, decisions R7); `attachment.put` ([Attachments](Attachments.md)); notifications `session.event`, `session.state`, `session.model.progress`, `approval.request`, `approval.cancelled`, `session.closed`; CLI daemon discovery | ACP agent on stdio; the ACP↔dim mapping of this document |
+| `dimcode acp` | CLI process (not a daemon plugin) | Local RPC protocol v3 ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)): `hello`, `session.create` (with `interactive` and `client`, Agents supplement), `session.attach`/`detach`, `session.submit`, `session.input_lookup`, `session.history`, `session.stop`, `session.permission.update`, `approval.respond`; `session.input.withdraw` (InputQueue, decisions R7); `attachment.put` ([Attachments](Attachments.md)); notifications `session.event`, `session.state`, `session.model.progress`, `approval.request`, `approval.cancelled`, `session.closed`; CLI daemon discovery | ACP agent on stdio; the ACP↔dim mapping of this document |
 
 ## 2. Data and state
 
@@ -67,11 +67,11 @@ sequenceDiagram
   participant R as Rpc
   participant TL as Session Timeline (main)
   E->>G: session/new {cwd, mcpServers}
-  G->>R: session.create {cwd, agentId?, interactive: false}, then session.attach
+  G->>R: session.create {cwd, agentId?, interactive: false, client: acp}, then session.attach
   G-->>E: sessionId, modes (mcpServers ignored)
   E->>G: session/prompt {prompt}
   G->>R: session.submit {branchId main, submissionId, user, mode queue}
-  R->>TL: filters, then relay through Session input boundary, Timeline append input/message
+  R->>TL: submission admission, then relay through Session input boundary, Timeline append input/message
   R-->>G: committed event: input_event_id
   TL-->>G: input/applied, turn/start, input/consumed {input_event_id}
   TL-->>G: progress, step/text, step/tool-use-*, step/tool-result
@@ -152,7 +152,7 @@ All other rows: [Appendix B](#appendix-b-full-conflict-table).
 | Source | Model sees | Placement |
 | --- | --- | --- |
 | ACP prompt `text` | `Text` user content | One user message at the Queue input's consumed position |
-| ACP `image` | `Image` (base64) after Attachments validation | Same message |
+| ACP `image` | `Image` (base64) after `session.submit` model-capability validation | Same message |
 | Embedded text `resource` ≤ 32 KiB | `Text` `"<uri>\n<text>"` (A6) | Same message |
 | Larger `resource` | `attachment.put`, then a text reference to the returned path (A6) | Same message |
 | `resource_link` | `Text` line `"@<uri>"` (A6) | Same message |
@@ -183,9 +183,9 @@ The gateway has the authority of a local CLI client: the local socket's ownershi
 
 | ACP | dim | Notes |
 | --- | --- | --- |
-| `initialize` | `hello {protocolVersion: 3, clientKind: acp}` once per process (A14) | Reply: `agentCapabilities { loadSession: true, promptCapabilities { image: true, audio: false, embeddedContext: true } }`, `authMethods: []` (A2) |
+| `initialize` | `hello {protocolVersion: 3}` once per process | Reply: `agentCapabilities { loadSession: true, promptCapabilities { image: true, audio: false, embeddedContext: true } }`, `authMethods: []` (A2) |
 | `authenticate` | — | Not offered; the local transport authenticates |
-| `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?, interactive: false}`, then `session.attach` | `sessionId` = dim session id; `modes` = permission presets, current = the Session's (A3); `mcpServers` ignored (E13) |
+| `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?, interactive: false, client: "acp"}` (A14), then `session.attach` | `sessionId` = dim session id; `modes` = permission presets, current = the Session's (A3); `mcpServers` ignored (E13) |
 | `session/load {sessionId, cwd, mcpServers}` | `session.attach`, then `session.history` of `main` from 0 | Replay before the response; `cwd` mismatch → `invalid_params`; an already-open session returns the same mapping; the Session keeps its own `interactive` fact |
 | `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | Response when the consuming turn ends; a second prompt while one is in flight → `prompt_in_progress` (A4) |
 | `session/cancel {sessionId}` | `session.input.withdraw {sessionId, branchId: "main", inputId: input_event_id}` if unconsumed, else (or if refused) `session.stop {sessionId, branchId: "main"}` | Prompt responds `cancelled` |
@@ -215,7 +215,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` → Rpc submission filters (registry, fail closed: a configured-but-inactive filter returns `service_reloading`, nothing written) → `SessionLease::relay` → Session input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
+| Prompt write | `session.submit` → submission admission ([session-boundary](../contracts/session-boundary.md), fail closed: an inactive configured checker returns `service_reloading`, nothing written) → `SessionLease::relay` → Session input boundary `validate` → `Timeline::append` of `input/message`; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` → InputQueue validates (own branch, not adopted) and writes `input/withdrawn` |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |
@@ -249,7 +249,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | Branch interrupt or Session close | `session.closed` | In-flight prompt `cancelled`; later `session_not_found` | Gateway |
 | Session idle-unload while attached | — | Attachment keeps it loaded | AgentIndex |
 | Resource node offline | capabilities Pending | Prompt waits; `turn/end` decides | rutis lifecycle |
-| Submission filter inactive | — | `service_reloading`, nothing written; retried after `input_lookup` | Rpc |
+| Submission admission checker inactive | — | `service_reloading`, nothing written; retried after `input_lookup` | Rpc |
 | Daemon reload mid-submit | — | `input_lookup` decides resubmission | Gateway |
 | Daemon restart mid-turn | turn settled `Failed` | `turn_failed` after catch-up | Loop |
 | Duplicate `session/prompt` | — | `prompt_in_progress` | Gateway |
@@ -262,7 +262,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | --- | --- |
 | `session_not_found` | Unknown or closed session id |
 | `prompt_in_progress` | Second concurrent prompt on one ACP session |
-| `unsupported_content` | Audio or binary resources; image rejected by Attachments (`attachment_*` passed through) |
+| `unsupported_content` | Audio or binary resources; image rejected by `session.submit` validation (code passed through) |
 | `turn_failed` | The consuming turn ended `Failed` and no cancel was requested |
 | `daemon_unavailable` | Connection lost and not re-established within 30 s (A12) |
 | `invalid_params` | ACP parameter validation, `cwd` mismatch on load |
@@ -285,11 +285,11 @@ Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus th
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | `dimcode acp` connects to or starts the daemon like other CLI commands | Overview §5.15; start behavior is judgment | Requires a running daemon |
+| A1 | `dimcode acp` connects to or starts the daemon like other CLI commands | Overview §B.15; start behavior is judgment | Requires a running daemon |
 | A2 | No ACP authentication methods | Judgment (local transport) | Add an auth method |
 | A3 | ACP modes map to dim permission presets | Feature list (policy levels); judgment | No modes |
 | A4 | One in-flight prompt per ACP session | Judgment | Queue prompts |
-| A5 | Client `fs`/`terminal` capabilities unused | Overview §3.1 | Editor-buffer reads via the client |
+| A5 | Client `fs`/`terminal` capabilities unused | Overview §6.3 | Editor-buffer reads via the client |
 | A6 | Resource conversions and 32 KiB threshold | Judgment | Other renderings |
 | A7 | Message updates only from `main`; approvals from all branches | Judgment (ACP has no branches) | Branch-aware updates |
 | A8 | Mirror other clients' user content; not raw-block inputs | Judgment | Show runtime inputs |
@@ -298,12 +298,12 @@ Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus th
 | A11 | An input adopted before the stop stays pending and runs later | Interrupt contract | Requires withdrawal of adopted inputs |
 | A12 | Reconnect window 30 s | Judgment | Other bound |
 | A13 | Questions in loaded interactive Sessions are shown as waiting, not answered over ACP | Decisions E13; ACP has no question request | Map to an ACP elicitation if one is standardized |
-| A14 | `hello.clientKind` gains `acp`, recorded as the Session's `created_by` (SessionFacts) on creation | Judgment; `ClientKind` today is `cli`, `web`, `other` | Use `other`; ACP Sessions not distinguishable |
-| A15 | "ACP Session display" (feature list, `/settings`) is a CLI display preference owned by the CLI: whether Sessions whose `created_by` is `acp` appear in CLI Session lists, default shown; nothing in this adapter | Feature list names only the setting | Defined elsewhere; adapter unchanged |
+| A14 | `session.create` gains an optional client label; ACP passes `acp`, recorded in `SessionConfig.created_by` as `Client` with that label (Agents supplement) | Judgment; `hello.clientKind` not needed | ACP Sessions not distinguishable |
+| A15 | "ACP Session display" (feature list, `/settings`) is a CLI display preference owned by the CLI: whether Sessions whose `created_by` carries the client label `acp` appear in CLI Session lists, default shown; nothing in this adapter | Feature list names only the setting | Defined elsewhere; adapter unchanged |
 
 ## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| `created_by` source | Whether Rpc derives `created_by` from `hello.clientKind` (A14) or `session.create` carries it; owned by the Agents/Rpc supplement |
+| Client label | `SessionOrigin::Client` must carry the optional label of A14; owned by the Agents supplement |
 | "ACP Session display" | Confirm A15 with the CLI settings design |

@@ -1,6 +1,6 @@
 # Workflow
 
-Status: Draft. Overall design: [overview §5.9](../overview.md#59-workflow). Phase: P2. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
+Status: Draft. Overall design: [overview §B.9](../overview.md#b9-workflow). Phase: P2. Language: TypeScript first ([overview §F.3](../overview.md#f3-assignment)).
 
 Workflow is a process plugin that owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own Session, either a new non-interactive Session launched through Agents or a Collaboration member of the starting Session created with Collaboration's `establish`. The model starts, queries and stops runs with the process-level `workflow` tool; operators use `workflow.*` management methods. When a run ends, its result is reported once to the starting branch as Steer input through [session-access](../contracts/session-access.md). Workflow writes no Timeline event.
 
@@ -15,7 +15,7 @@ flowchart LR
     Mgmt["workflow.* methods"]
   end
   ToolReg["Process tool registry (ToolRegistry)"]
-  MgmtReg["ManagementContribution (Management)"]
+  MgmtReg["Method contribution, level management (session-boundary)"]
   Launch["Agents launch (non-interactive, policy cap)"]
   Estab["Collaboration establish"]
   Access["SessionAccess facade"]
@@ -44,9 +44,9 @@ Runs belong to the process, not to the starting branch, so there is no Session o
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `WorkflowPlugin` | Process (control node) | `SessionAccess` (facts, acquire, input, `withdraw`, idle, stop, lookup, pages), Agents launch, `When<Collaboration establish>`, Provider purpose selection, App Server process storage, Settings sources and host-local approval service, `When<PluginContents>` (type key `workflows`) | Mount instances: process tool set `workflow` ([process-tool-contribution](../contracts/process-tool-contribution.md)), management contribution `workflow` ([Management](Management.md)) |
+| `WorkflowPlugin` | Process (control node) | `SessionAccess` (`config`, acquire, input, `withdraw`, idle, stop, lookup, pages), Agents launch, `When<Collaboration establish>`, Provider purpose selection, App Server process storage, Settings sources and host-local approval service, `When<PluginContents>` (type key `workflows`) | Mount instances: process tool set `workflow` ([process-tool-contribution](../contracts/process-tool-contribution.md)), methods `workflow.*` at level `management` ([session-boundary](../contracts/session-boundary.md)) |
 
-**Contracts depended on**: [extension-registry](../contracts/extension-registry.md) (mount pattern), process-tool-contribution, [session-access](../contracts/session-access.md), Agents launch (overview §7.2; shape in [Scheduler A.5](Scheduler.md#a5-agents-launch-depended-on)), Collaboration `establish(leader, agent)` (Collaboration supplement), Provider purpose policy (overview §7.2), App Server process storage (R8), Settings sources and host-local approval service (R11), [Management](Management.md), `PluginContents` (optional). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
+**Contracts depended on**: [extension-registry](../contracts/extension-registry.md) (mount pattern), process-tool-contribution, [session-access](../contracts/session-access.md), Agents launch (overview §C.2; shape in [Scheduler A.5](Scheduler.md#a5-agents-launch-depended-on)), Collaboration `establish(leader, agent)` (Collaboration supplement), Provider purpose policy (overview §C.2), [session-boundary](../contracts/session-boundary.md) (method contribution), App Server process storage (R8), Settings sources and host-local approval service (R11), `PluginContents` (optional). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
 
 ## 2. Data and state
 
@@ -205,14 +205,14 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `workflow` (`list`, `start`, `status`, `stop`) | Process tool, risk category of Collaboration's `agent` tool, interactive Sessions | Model runs workflows |
-| `workflow.list/save/start/status/stop/approve/revoke` | Management methods | Operators manage definitions and runs |
+| `workflow.list/save/start/status/stop/approve/revoke` | Methods, level `management` | Operators manage definitions and runs |
 | `/workflow`, `/workflow:save` | CLI | Call the management methods |
 | Agents `launch`, Collaboration `establish` | Depended on | Create stage Sessions |
 | `dim.workflow/v1` | Defined here | Definition format (Appendix A) |
 
 ## 7. Security
 
-Project and plugin definitions are executable content: `start` and every stage launch require a grant in the Settings host-local approval service, record `{owner: workflow, node, workspace, source, id: name, fingerprint}`, fingerprint = SHA-256 over the canonical definition document (R11). Grants come only from `workflow.approve` on a Management-mounted entry; the tool, Timeline facts, replay and fork never grant. User definitions need no approval. Stage policy follows 3.3 and a definition can only narrow it. Approvals raised inside a member stage are forwarded to the leader by Collaboration (E6), not by Workflow. Stage Sessions use only their resource node's Session-bound services. Params and results become Timeline content of stage and report Sessions; definitions must not carry credentials.
+Project and plugin definitions are executable content: `start` and every stage launch require a grant in the Settings host-local approval service, record `{owner: workflow, node, workspace, source, id: name, fingerprint}`, fingerprint = SHA-256 over the canonical definition document (R11). Grants come only from `workflow.approve` on an entry that mounts the `management` level; the tool, Timeline facts, replay and fork never grant. User definitions need no approval. Stage policy follows 3.3 and a definition can only narrow it. Approvals raised inside a member stage are forwarded to the leader by Collaboration (E6), not by Workflow. Stage Sessions reach host resources only through node services resolved per call by their `resource_node` (`node-services`, [extension-registry](../contracts/extension-registry.md)). Params and results become Timeline content of stage and report Sessions; definitions must not carry credentials.
 
 ## Appendix A. Interface details
 
@@ -261,9 +261,9 @@ Process tool set `workflow`, `requires: { interactive: true, roles: None }` (A8)
 | `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
 | `stop` | `run_id` | Final state after propagation |
 
-`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the caller's `SessionFacts` and tool execution context, and `policy_cap` from the starter (Agents launch contract). Errors: `definition_not_found`, `invalid_definition`, `invalid_parameters`, `approval_required`, `run_not_found`, `limit_exceeded` (A11).
+`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the caller's `SessionConfig` subset in the tool call context, and `policy_cap` from the starter (Agents launch contract). Errors: `definition_not_found`, `invalid_definition`, `invalid_parameters`, `approval_required`, `run_not_found`, `limit_exceeded` (A11).
 
-### A.3 Management methods
+### A.3 Methods (level `management`)
 
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
@@ -293,7 +293,7 @@ Stage { id, step, runner, state: waiting | launching | running | completed | fai
 
 | Contract | Owner | Use |
 | --- | --- | --- |
-| `launch(LaunchConfig) -> SessionLease` with `interactive: false`, `policy`, `created_by: workflow` | Agents supplement | Launched stages; Workflow writes the first input itself |
+| `launch(...) -> SessionLease` with `SessionConfig` values `interactive: false`, `resource_node`, `created_by: Launch { source: "workflow" }` (`SessionOrigin`), and `policy` | Agents supplement | Launched stages; Workflow writes the first input itself |
 | `establish(leader_session_id, agent_id) -> MemberRef` | Collaboration supplement | Member stages; Collaboration keeps Team rules (single leader, `Busy`), applies the leader's cwd and policy, and forwards member approvals to the leader |
 | `SessionAccess::withdraw(branch, input_id)` | session-access (InputQueue contract) | Withdraw own unconsumed stage inputs on stop |
 
@@ -382,15 +382,15 @@ Through the tool, management methods and session-access reads:
 | --- | --- | --- | --- |
 | A1 | Definitions read per call, not cached | Judgment (file authority) | Cache with change detection |
 | A2 | YAML with `schema: dim.workflow/v1` | Judgment | Other syntax |
-| A3 | User directory `<dim home>/workflows/` | Judgment; overview §5.9 user source | Path decided by Settings |
+| A3 | User directory `<dim home>/workflows/` | Judgment; overview §B.9 user source | Path decided by Settings |
 | A4 | Stages or parallel groups (≤ 32 steps, ≤ 8 per group); fail-fast | Feature list ("stages"); limits judgment | Per-stage failure policies |
-| A5 | Model precedence: stage > profile > purpose `workflow.stage` | Overview §5.9; precedence judgment | Other precedence |
+| A5 | Model precedence: stage > profile > purpose `workflow.stage` | Overview §B.9; precedence judgment | Other precedence |
 | A6 | Rendered prompt ≤ 32 KiB; stored result ≤ 64 KiB | Judgment | Other bounds |
 | A7 | Plain substitution templates | Judgment | Expressions need a sandbox |
-| A8 | Tool only for interactive Sessions | Overview §5.1; prevents nesting | Depth limit needed |
+| A8 | Tool only for interactive Sessions | Overview §6.2 (interactive Sessions); prevents nesting | Depth limit needed |
 | A9 | Log ≤ 500 entries; last 100 runs kept | Judgment | Other retention |
 | A11 | 4 running runs, 4 concurrent stages per run | Judgment | Other limits |
-| A12 | Approval rechecked before each stage launch | Overview §9; MCP precedent | Check only at start |
+| A12 | Approval rechecked before each stage launch | Overview §6; MCP precedent | Check only at start |
 | A13 | Unload waits up to 10 s for stage stops | Judgment | Other bound |
 | A15 | `start` does not deduplicate | Judgment | Idempotency keys |
 | A16 | Report preview ≤ 4 KiB | Judgment; `dim-agent-report` precedent | Other bound |
@@ -401,6 +401,6 @@ Decided: tool risk and stage policy cap (E2), `.dimcode/` (E11), report once aft
 
 | Question | Description |
 | --- | --- |
-| Overview method list | Overview §5.9 lists `workflow.list/save/start/status/stop`; this design adds `workflow.approve/revoke` (D11) |
-| Launch contract | Agents supplement must define `launch` with `policy` and the starter-policy resolution; overview §7.2 still says Agents submits the first input (D17) |
-| Collaboration `establish` | Must be registered in overview §7.2 Collaboration row |
+| Overview method list | Overview §B.9 lists `workflow.list/save/start/status/stop`; this design adds `workflow.approve/revoke` (D11) |
+| Launch contract | Agents supplement must define `launch` with `policy` and the starter-policy resolution; overview §C.2 still says Agents submits the first input (D17) |
+| Collaboration `establish` | Must be registered in overview §C.2 Collaboration row |

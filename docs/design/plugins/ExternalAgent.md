@@ -1,6 +1,6 @@
 # ExternalAgent
 
-Status: Draft. Overall design: [overview §5.10](../overview.md#510-externalagent). Phase: P3. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
+Status: Draft. Overall design: [overview §B.10](../overview.md#b10-externalagent). Phase: P3. Language: TypeScript first ([overview §F.3](../overview.md#f3-assignment)).
 
 ExternalAgent makes locally installed coding agents (Claude Code, Codex, Cursor, OpenCode, ZCode and similar) usable as a kind of model connection. A Session whose model is an external agent runs through Loop and ModelProvider as usual: ExternalAgent is the ModelHost provider for the connection kind `external-agent`, turns each dim model request into one external turn and turns the external stream back into model output chunks. External agents use their own tools; their permission requests become ordinary dim approvals in the Session that runs the call. ExternalAgent writes no Timeline event of its own.
 
@@ -14,7 +14,7 @@ flowchart LR
     EA["ExternalAgent"]:::new
     NodeReg["Point external-agent-nodes (per-node mounts)"]:::new
     KindReg["ModelHost registry, point model-kinds"]:::contract
-    MgmtReg["Management contribution registry"]:::contract
+    MgmtReg["Method contribution, point methods"]:::contract
     Store["App Server process storage"]:::contract
     Access["SessionAccess (read)"]:::contract
     Settings["Settings (configuration, credential resolver)"]
@@ -44,14 +44,14 @@ flowchart LR
   Bridge --> HP
 ```
 
-ExternalAgent never sits in a Session's or branch's dependency chain: it registers into consumer-owned registries ([extension-registry](../contracts/extension-registry.md): ModelHost point `model-kinds`, Management), and owns its own point `external-agent-nodes` built on the same `ExtensionRegistry` with one mount per bridge row, so its reload never reloads ModelProvider, and one offline node only fails the calls targeting that node. Approval is reached only through the port ModelProvider passes with the call.
+ExternalAgent never sits in a Session's or branch's dependency chain: it registers into consumer-owned registries ([extension-registry](../contracts/extension-registry.md): ModelHost point `model-kinds`, the `methods` point of [session-boundary](../contracts/session-boundary.md)), and owns its own point `external-agent-nodes` built on the same `ExtensionRegistry` with one mount per bridge row, so its reload never reloads ModelProvider, and one offline node only fails the calls targeting that node. Approval is reached only through the port ModelProvider passes with the call.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ExternalAgent` | Process, control node | ModelHost provider-kind registry; Management registry; `SessionAccess` (read); App Server process storage; Settings typed configuration and credential-reference resolver; Provider typed connection-entry operations; Agents profile registration; its own `ExternalAgentNode` registry | Provider for kind `external-agent`; management contribution `external_agents` |
-| `ExternalAgentBridge` | Process, one row per node: local row, `peer:<node>/ExternalAgentBridge` elsewhere ([overview §3.1](../overview.md#31-multiple-nodes)) | That node's `HostPlatform` | `ExternalAgentNode`, mounted into ExternalAgent's per-node registry, exported over the link |
+| `ExternalAgent` | Process, control node | ModelHost provider-kind registry; `methods` point; `SessionAccess` (read); App Server process storage; Settings typed configuration and credential-reference resolver; Provider typed connection-entry operations; Agents profile registration; its own `ExternalAgentNode` registry | Provider for kind `external-agent`; methods `external_agents.*` at level `management` |
+| `ExternalAgentBridge` | Process, one row per node: local row, `peer:<node>/ExternalAgentBridge` elsewhere ([overview §6.3](../overview.md#63-multiple-nodes)) | That node's `HostPlatform` | `ExternalAgentNode`, mounted into ExternalAgent's per-node registry, exported over the link |
 
-**Contracts depended on**: ModelHost provider-kind registry and the ModelProvider supplement `ModelCallScope` (call identity, `SessionFacts` reference, call-bound approval port: §A.2); the existing `ModelDriver`/`ModelStream`/`ModelChunk`/`HostError`/`ModelFailureFacts` contract ([host.rs](../../../crates/dim-agent-capabilities/src/host.rs)) and ModelProvider's failure policy ([recovery.rs](../../../crates/dim-agent-capabilities/src/model_provider/recovery.rs)); Approval's existing `admit` ([Approval](../../architecture/rust-agent/plugins/Approval.md)); the Collaboration supplement "member approval forwarded to the leader" (decisions E6); [session-access](../contracts/session-access.md); [extension-registry](../contracts/extension-registry.md); App Server process storage; Settings; [Management](Management.md). **Contracts defined here**: the connection kind `external-agent` and its target `{node, agent}`; `ExternalAgentNode`; the conversation record; the approval call shape `external_agent.<kind>`; configuration keys `external_agents.*`; methods `external_agents.*`; the ACP schema and conformance suite shared with [AcpGateway](AcpGateway.md) (client side). ModelHost, Provider, Agents, Approval and Collaboration never name this plugin.
+**Contracts depended on**: ModelHost provider-kind registry and `ModelCallScope` (§A.2); two supplements: **ModelProvider** passes a call-bound approval port in `ModelCallScope`, and **Approval** accepts a `Host`-source admission while a model step is open, reusing `approval/request`, `approval/respond` and `approval/cancelled` (no new event); the existing `ModelDriver`/`ModelStream`/`ModelChunk`/`HostError`/`ModelFailureFacts` contract ([host.rs](../../../crates/dim-agent-capabilities/src/host.rs)) and ModelProvider's failure policy ([recovery.rs](../../../crates/dim-agent-capabilities/src/model_provider/recovery.rs)); Approval's `admit` ([Approval](../../architecture/rust-agent/plugins/Approval.md)); the Collaboration supplement "member approval forwarded to the leader" (decisions E6); [session-access](../contracts/session-access.md); [extension-registry](../contracts/extension-registry.md); [session-boundary](../contracts/session-boundary.md); App Server process storage; Settings. **Contracts defined here**: the connection kind `external-agent` and its target `{node, agent}`; `ExternalAgentNode`; the conversation record; the approval call shape `external_agent.<kind>`; configuration keys `external_agents.*`; methods `external_agents.*`; the ACP schema and conformance suite shared with [AcpGateway](AcpGateway.md) (client side). ModelHost, Provider, Agents, Approval and Collaboration never name this plugin.
 
 ## 2. Data and state
 
@@ -133,24 +133,17 @@ sequenceDiagram
   participant EA as ExternalAgent
   participant AP as Approval (calling branch)
   participant TL as Branch Timeline
-  participant CO as Collaboration supplement
   participant U as Leader model or user
   BR->>EA: PermissionAsked(ask_id, title, kind, options)
-  EA-->>BR: (chunk) Thinking line permission asked
-  EA->>AP: admit(Host operation_id, external_agent.kind, risk, ask token)
-  AP->>AP: Permission.decide: Allow or Deny returns at once
-  AP->>TL: approval/request (append_registered, waiter registered in lock)
-  TL-->>CO: member Session? forward to leader
-  CO->>U: leader decides via agent tool, else user via approval.request
-  U->>AP: approval.respond (owner writes approval/respond)
-  TL->>AP: approval/respond (Dispatcher, by sequence)
-  AP->>AP: recheck current policy
-  AP-->>EA: Ok or denied or cancelled
-  EA->>BR: answer selected allow_once or reject_once, or cancelled
-  EA-->>BR: (chunk) Thinking line permission allowed or denied
+  EA->>AP: CallApproval admit (port from ModelCallScope), after a thinking line
+  AP->>TL: Ask only: approval/request (append_registered), step still open
+  U->>AP: approval.respond (leader via Collaboration E6, else user)
+  TL->>AP: approval/respond (Dispatcher, by sequence), recheck policy
+  AP-->>EA: Ok, denied or cancelled
+  EA->>BR: allow_once, reject_once or cancelled
 ```
 
-The permission request is an ordinary call admission in the Session running the external call (for a delegated member, the member Session): Permission's preset decides first, and only `Ask` writes `approval/request`. Forwarding to a leader is Collaboration's rule (E6); ExternalAgent only sees the outcome of `admit`. A thinking line is emitted before asking, so the call already has visible output while it waits (§4).
+The permission request is an ordinary call admission in the Session running the external call (for a delegated member, the member Session), through the two supplements of §1: Permission's preset decides first, and only `Ask` writes `approval/request`. Forwarding to a leader is Collaboration's rule (E6); ExternalAgent only sees the outcome. A thinking line is emitted before asking, so the call already has visible output while it waits (§4).
 
 Mapping: ACP `toolCall.kind` → call name `external_agent.<kind>` and risk: `read`, `search` → `read_filesystem`; `edit`, `delete`, `move` → `write_filesystem`; `execute` → `execute_process`; `fetch` → `network`; others → unclassified (A7). `admit` `Ok` selects an `allow_once` option; denial selects `reject_once`; when the needed once-option is absent, or the ask was cancelled, the bridge answers outcome `cancelled`. `*_always` is never selected. Non-interactive CLI adapters have no request channel: their launch arguments put the agent in its own non-auto-approving mode, so a request it cannot ask is refused by the agent (A16).
 
@@ -213,7 +206,7 @@ Keyed blocks are delivered once at consumption; "in effect" and retirement have 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `external_agents.list` / `set_enabled` / `configure` | Management methods | Per-node detection, enablement, configuration ([A.1](#a1-management-methods)) |
+| `external_agents.list` / `set_enabled` / `configure` | Methods, level `management` | Per-node detection, enablement, configuration ([A.1](#a1-methods-level-management)) |
 | Kind `external-agent`, target `{node, agent}` | ModelHost registry contribution | Model calls for external profiles ([A.2](#a2-provider-registration-and-call-scope)) |
 | `ExternalAgentNode` | Per-node process service | `detect`, `turn` with answerable permission asks ([A.3](#a3-bridge-service-and-adapters)) |
 | Approval call `external_agent.<kind>` | Approval admission (Host source) | External permission requests |
@@ -221,11 +214,11 @@ Keyed blocks are delivered once at consumption; "in effect" and retirement have 
 
 ## 7. Security
 
-External agents run with their own accounts and tools; dim admits their actions only where they ask, through the calling Session's policy and Approval, and cannot stop actions the agent takes without asking: the node's HostPlatform isolation is the enforcement boundary, and replay or fork never widens it. `*_always` is never selected. Credentials are environment values resolved from references by Settings' resolver at launch and never written to records, Timeline, diagnostics or replies. Enabling an agent is host configuration through Management only; the model cannot enable agents. Executables are resolved on the node, never from project files.
+External agents run with their own accounts and tools; dim admits their actions only where they ask, through the calling Session's policy and Approval, and cannot stop actions the agent takes without asking: the node's HostPlatform isolation is the enforcement boundary, and replay or fork never widens it. `*_always` is never selected. Credentials are environment values resolved from references by Settings' resolver at launch and never written to records, Timeline, diagnostics or replies. Enabling an agent is host configuration through `management`-level methods only; the model cannot enable agents. Executables are resolved on the node, never from project files.
 
 ## Appendix A. Interface details
 
-### A.1 Management methods
+### A.1 Methods (level `management`)
 
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
@@ -238,20 +231,20 @@ Detection runs at load and on `refresh` (A1); detected agents stay disabled unti
 ### A.2 Provider registration and call scope
 
 ```rust
-// Registry owned by ModelHost (overview §7.2 Aimux supplement, extension-registry.md);
+// Registry owned by ModelHost (overview §C.2 Aimux supplement, extension-registry.md);
 // one mount instance registers kind "external-agent" in apply, unregisters in its ctx.effect.
 fn invoke(&self, request: Arc<ModelRequest>, target: ConnectionTarget, scope: ModelCallScope,
           cancel: CancellationToken) -> HostFuture<'_, ModelStream>;
-// ModelCallScope (ModelProvider supplement): session_id, branch_id, turn_id, request_id,
-// call_sequence, SessionFacts (cwd, resource_node, interactive, collaboration_role, ...),
-// plus the call-bound approval port used here:
+// ModelCallScope (ModelProvider supplement): call identity (session_id, branch_id, turn_id,
+// request_id, call_sequence), the SessionConfig subset {cwd, resource_node, interactive,
+// collaboration_role}, and the call-bound approval port:
 trait CallApproval {   // bound by ModelProvider to its branch's Approval
     async fn admit(&self, operation_id: String, call: ApprovalCallData, risk: Option<String>,
                    cancel: CancellationToken) -> Result<(), HostError>;
 }
 ```
 
-The port forwards to the existing `Approval::admit(AdmitCall { source: BranchSource::Host { operation_id }, call }, risk, cancel)`; `operation_id = "external-agent:<request_id>:<ask_n>"`. While the kind is inactive, ModelHost fails requests of the kind before acceptance (transient); other kinds are unaffected.
+The port forwards to the existing `Approval::admit(AdmitCall { source: BranchSource::Host { operation_id }, call }, risk, cancel)`; `operation_id = "external-agent:<request_id>:<ask_n>"`. Approval supplement: such an admission is accepted while `step/model-start` is open; its facts are the ordinary approval facts, with no model-visible effect. While the kind is inactive, ModelHost fails requests of the kind before acceptance (transient); other kinds are unaffected.
 
 ### A.3 Bridge service and adapters
 
@@ -299,7 +292,7 @@ Retry safety: failures before `Accepted` that may be retried (spawn failure, con
 
 ### A.5 Shared ACP schema
 
-Pinned protocol version, generated types per language, transcript-based conformance suite shared with AcpGateway; fixtures cover initialize, new/load, prompt with text and image, streamed updates, cancel during a prompt, a permission request answered allow, reject and cancelled, a permission request during cancel, and process exit mid-prompt. No runtime code is shared ([overview §5.15](../overview.md#515-acpgateway)).
+Pinned protocol version, generated types per language, transcript-based conformance suite shared with AcpGateway; fixtures cover initialize, new/load, prompt with text and image, streamed updates, cancel during a prompt, a permission request answered allow, reject and cancelled, a permission request during cancel, and process exit mid-prompt. No runtime code is shared ([overview §B.15](../overview.md#b15-acpgateway)).
 
 ### A.6 Mechanics per step
 
@@ -396,16 +389,16 @@ Flow tests through public interfaces with a scripted ACP agent and a scripted CL
 | A3 | Detected agents are disabled until enabled | Judgment (they spend the user's accounts) | Default on |
 | A4 | Cancel grace 10 s | Judgment | Other bound |
 | A5 | One ACP process per conversation, closed after 10 min idle | Judgment | Shared process |
-| A6 | Adapter definitions are data inside the plugin | Overview §11.3 | Per-agent plugins |
+| A6 | Adapter definitions are data inside the plugin | Overview §F.3 | Per-agent plugins |
 | A7 | ACP tool kind → call name `external_agent.<kind>` and risk category mapping | Decisions E6 (ordinary approval); mapping is judgment | Single unclassified category (always asks under WorkspaceWrite) |
 | A8 | An empty delta fails the call | Judgment | Send a continuation prompt |
 | A9 | External tool activity rendered as thinking lines | Judgment | Text, or diagnostics only |
 | A10 | Usage only when the adapter reports it | Judgment | — |
 | A11 | `max_turn_requests` and `refusal` fail the request | Judgment | Map to `EndTurn` |
 | A12 | Records kept 30 days after last use | Judgment | Other retention or deletion on Session close |
-| A13 | An external agent serves only Sessions whose resource node is its node | Overview §3.1; judgment | Cross-node working directories |
-| A14 | Transcript format; thinking omitted | Overview §5.10 lists the content; format is judgment | Another rendering |
-| A15 | Uncertain or failed continuation re-initializes from history | Overview §13 (still open) | Explicit failure |
+| A13 | An external agent serves only Sessions whose resource node is its node | Overview §6.3; judgment | Cross-node working directories |
+| A14 | Transcript format; thinking omitted | Overview §B.10 lists the content; format is judgment | Another rendering |
+| A15 | Uncertain or failed continuation re-initializes from history | Overview §9 (still open) | Explicit failure |
 | A16 | CLI adapters launch in the agent's own non-auto-approving mode; they cannot ask dim | Judgment (no request channel) | Per-CLI permission bridges |
 | A17 | No timeout on an external permission approval | Approval has none; Questions precedent (E24) | Timeout answering reject |
 | A18 | Approval call input `{agent, title, kind, raw_input}` with `raw_input` bounded to 4 KiB | Judgment | Other shape |
@@ -414,7 +407,6 @@ Flow tests through public interfaces with a scripted ACP agent and a scripted CL
 
 | Question | Description |
 | --- | --- |
-| Call-bound approval port | `ModelCallScope` must carry an approval port bound to the branch's Approval; this requires ModelProvider to inject `B:Approval` (an Approval reload then reloads ModelProvider, rare). To be registered with the ModelProvider supplement in overview §7.1 |
-| Approval during a model step | `approval/request` with a `Host` source is written while `step/model-start` is open; clients and history projection must tolerate it (no model-visible effect expected) |
-| External conversation continuation | Overview §13; this design re-initializes (A15) |
+| Supplement cost | The approval port makes ModelProvider inject `B:Approval`, so an Approval reload reloads ModelProvider (rare) |
+| External conversation continuation | Overview §9; this design re-initializes (A15) |
 | ACP `session/load` | Whether a `ready` record after a process restart should continue via `session/load` rather than initialize |

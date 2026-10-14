@@ -1,6 +1,6 @@
 # Web
 
-Status: Draft. Overall design: [overview §5.5](../overview.md#55-web). Phase: P2. Language: TypeScript first ([overview §11.3](../overview.md#113-assignment)).
+Status: Draft. Overall design: [overview §B.5](../overview.md#b5-web). Phase: P2. Language: TypeScript first ([overview §F.3](../overview.md#f3-assignment)).
 
 Web is a process plugin that gives the model `web_search` and `web_fetch` as a contributor to the process tool registry ([process-tool-contribution](../contracts/process-tool-contribution.md), pattern in [extension-registry](../contracts/extension-registry.md)). Search goes to a configured built-in adapter or to a search backend registered in Web's own `WebSearchBackends` registry; fetch downloads one public page and returns bounded text. Web writes no Timeline events: every call and result is already a tool call fact. Configuration changes are volatile updates and never reload Web; a Web unload only withdraws its tools.
 
@@ -29,7 +29,7 @@ flowchart LR
   Web -->|"read web section, change notices, resolve secretRef"| Settings
   ToolRegistry -->|"injects stable registry only"| PTR
   ToolRegistry --> Exec
-  Exec -->|"handler call with SessionFacts ref and cancel token"| Web
+  Exec -->|"handler call with SessionConfig subset and cancel token"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
@@ -43,10 +43,10 @@ Sessions inject only the stable process tool registry, never Web; Web injects on
 | `WebSearchBackends` | Process, inside Web | — | Defines `WebSearchBackend`; name → backend with availability flag |
 | Backend mount (one per configured backend) | Process | `WebSearchBackends`, keyed backend service | Registration of one backend |
 
-**Contracts depended on:** process tool registry and `ProcessToolSource` ([process-tool-contribution](../contracts/process-tool-contribution.md)); the registry pattern ([extension-registry](../contracts/extension-registry.md)); Settings volatile configuration and the Settings credential-reference resolver ([overview §7.2](../overview.md#72-app-server-process-plugins)); `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
+**Contracts depended on:** process tool registry and `ProcessToolSource` ([process-tool-contribution](../contracts/process-tool-contribution.md)); the registry pattern ([extension-registry](../contracts/extension-registry.md)); Settings volatile configuration and the Settings credential-reference resolver ([overview §C.2](../overview.md#c2-app-server-process-plugins)); `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)).
 **Contracts defined here:** the tool names, parameters and result formats; `WebSearchBackend` and the `WebSearchBackends` registry; the `web.*` configuration keys. Web knows no search provider's account semantics; a backend knows nothing about tools, Sessions or Web configuration (A1).
 
-**Node.** Network egress happens on the node running Web's row, independent of a Session's resource node, because network access is a process resource ([overview §3.1](../overview.md#31-multiple-nodes), A2). Web never uses `SessionResources`, FileStorage or HostPlatform.
+**Node.** Network egress happens on the node running Web's row, independent of a Session's resource node, because network access is a process resource ([overview §6.3](../overview.md#63-multiple-nodes), A2). Web never resolves node services (`node-services`), FileStorage or HostPlatform.
 
 ## 2. Data and state
 
@@ -115,7 +115,7 @@ sequenceDiagram
   X->>TL: append step/tool-start
   X->>A: admit risk network
   A-->>X: allow (or ask, deny)
-  X->>W: execute(args, SessionFacts ref, cancel)
+  X->>W: execute(args, SessionConfig subset, cancel)
   W->>W: validate URL, resolve host, check every address
   W->>N: GET pinned to the validated address
   N-->>W: body up to 5 MiB
@@ -359,7 +359,7 @@ All keys are volatile: a change produces a notice to Web and a new tool set vers
 | Web unload or reload mid-call | no result yet | Error "tool provider unavailable" for that call; batch and turn continue; tools withdrawn until re-registered | Web, ToolExecutor, ToolRegistry |
 | Process restart mid-call | committed, no result | Settled as not surviving recovery; not repeated | ToolExecutor |
 | Session unload and restore | `branch/resume` | Re-adopt current version; cache unaffected | ToolRegistry, ToolBinding |
-| Session resource node offline | — | No effect; Web uses no resource services | — |
+| Session resource node offline | — | No effect; Web resolves no node services | — |
 | Web's own peer row node offline | Web mount Pending | Registry treats `web` as configured but inactive; branches adopt without it; no Session Pending | Process tool registry |
 | Duplicate or late handler call after cancellation | token already cancelled | Returns `cancelled` without network access | Web |
 | Two branches fetch the same URL | — | Independent requests; cache filled by the first to finish | Web |
@@ -405,8 +405,8 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Search backends from other plugins (for example account-backed ones) plug in through Web's `WebSearchBackends` registry | Feature list ("configuration or account permissions"); overview §3 constraint 10 | Account-backed search must be a built-in adapter |
-| A2 | Network access happens on the node running Web (control node by default) | Overview §3.1; judgment | A Session-bound network service on each resource node |
+| A1 | Search backends from other plugins (for example account-backed ones) plug in through Web's `WebSearchBackends` registry | Feature list ("configuration or account permissions"); overview §6.2 constraint 13 | Account-backed search must be a built-in adapter |
+| A2 | Network access happens on the node running Web (control node by default) | Overview §6.3; judgment | A Session-bound network service on each resource node |
 | A3 | `web_search` is withdrawn when no service is usable | Judgment | Tool always declared, failing at call time |
 | A4 | Query length 500; `max_results` 1 to 10, default 5 | Judgment | Limits change |
 | A5 | 10 s connect, 30 s fetch, 20 s search; 5 MiB download | Edge-case reference; judgment | Limits change |
@@ -417,12 +417,12 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | A10 | Cross-host redirects reported, not followed | Edge-case reference; judgment | Redirects reach hosts never admitted |
 | A11 | PDFs and images not converted | Judgment | Add extraction or image content blocks |
 | A12 | Any port on public addresses | Judgment | Restrict to 80/443 |
-| A13 | Built-in adapter list is an implementation choice | Overview §5.5 names no service | A service is fixed by the overview or feature list |
+| A13 | Built-in adapter list is an implementation choice | Overview §B.5 names no service | A service is fixed by the overview or feature list |
 | A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
 
 ## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
-| Cross-language migration | Overview §5.5 names Web as the first #4 migration target; the TypeScript implementation needs only process services (process tool registry, Settings volatile configuration, credential resolver) |
-| Overview wording | Overview §7.1 ToolRegistry row still says the contributor lifecycle "follows the dependency"; this design follows the withdraw-only registry of decisions B.3 |
+| Cross-language migration | Overview §B.5 names Web as the first #4 migration target; the TypeScript implementation needs only process services (process tool registry, Settings volatile configuration, credential resolver) |
+| Overview wording | Overview §C.1 ToolRegistry row still says the contributor lifecycle "follows the dependency"; this design follows the withdraw-only registry of decisions B.3 |
