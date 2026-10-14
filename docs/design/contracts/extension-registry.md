@@ -4,7 +4,7 @@ Status: Draft. Overall design: [overview §3 extension registries](../overview.m
 
 Every process-level extension point used by a Session, branch or Rpc consumer follows one pattern: a stable registry owned by the consumer contract, filled by one mount instance per configured contributor, with the configured set discovered from loader row declarations. A contributor's reload, failure or removal therefore never reloads the consumer; it only makes that contributor's contribution unavailable, with an outcome the consumer contract defines per call. This document defines the pattern once; each consumer contract states only its point-specific rules (the table in §4).
 
-The pattern implements the rule that dynamic sources are obtained through a declared management service that owns legitimacy and generation ([single-tree](../../architecture/rust-agent/single-tree.md), product assembly constraints), reuses the per-contributor mounts of [Management](../plugins/Management.md#1-structure), and keeps the implemented dynamic tool source contract ([tool contributions §7](../../architecture/rust-agent/tool-contributions.md)) unchanged for Sessions.
+The pattern implements the rule that dynamic sources are obtained through a declared management service that owns legitimacy and generation ([single-tree](../../architecture/rust-agent/single-tree.md), product assembly constraints), generalizes the per-contributor mounts of the management plane ([Management](../plugins/Management.md#1-structure)), and keeps the implemented dynamic tool source contract ([tool contributions §7](../../architecture/rust-agent/tool-contributions.md)) unchanged for Sessions.
 
 ## 1. Structure
 
@@ -39,13 +39,13 @@ The consumer's `Deps` contain only the registry, which depends on no contributor
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| Consumer contract (ToolRegistry, Approval, Rpc, Agents, SessionStore, Management, ModelHost, Web, Modality, SessionResources) | — | — | The point `P`: contribution type, key, validation, stance and per-call outcome (§4) |
+| Consumer contract (ToolRegistry, Approval, Rpc as entry layer, ModelHost, Web, Modality, node lookup) | — | — | The point `P`: contribution type, key, validation, stance and per-call outcome (§4) |
 | Registry plugin of `P` | Process | `Arc<Loader>` | `ExtensionRegistry<P>` (stable); mount group `<point>-mount` |
 | Mount instance (instanced group `<point>-mount`, one per configured name) | Process | `Arc<ExtensionRegistry<P>>`, the keyed contribution of its name | Registration of that contribution |
 | Contributor | Process (or a peer row) | its own dependencies | Keyed service `TypeKey::keyed_dynamic::<P::Service>(name)` |
 | Consumer | Session, branch or process | `Arc<ExtensionRegistry<P>>` (or a point-specific facade over it) | Its own services, unchanged |
 
-Contracts defined here: `ExtensionPoint`, `Stance`, `ExtensionRegistry<P>`, `RegistrySnapshot<P>`, `Configured`, `Active<P>`, `Lookup<P>`, `CallGuard`, `Unavailable`, `RegistryError`, the mount and discovery rules, the volatile-configuration rule and the facade rule. Contracts depended on: rutis-loader 0.10 `Loader::entries`, `Loader::resolve`, `Resolved::declares` (`Declared { requires, provides }`), `Loader::create_instance`/`remove_instance`, `LoaderChanged`, and `volatile_key`/`VolatileUpdate`; rutis `ctx.effect` disposers. Management's method registry ([Management](../plugins/Management.md#a1-contribution-contract)) follows the same rules, including discovery and the ready latch.
+Contracts defined here: `ExtensionPoint`, `Stance`, `NodeServices` (point `node-services`), `ExtensionRegistry<P>`, `RegistrySnapshot<P>`, `Configured`, `Active<P>`, `Lookup<P>`, `CallGuard`, `Unavailable`, `RegistryError`, the mount and discovery rules, the volatile-configuration rule and the facade rule. Contracts depended on: rutis-loader 0.10 `Loader::entries`, `Loader::resolve`, `Resolved::declares` (`Declared { requires, provides }`), `Loader::create_instance`/`remove_instance`, `LoaderChanged`, and `volatile_key`/`VolatileUpdate`; rutis `ctx.effect` disposers. The merged [method contribution](session-boundary.md#a1-method-contribution) registry follows the same rules, including discovery and the ready latch.
 
 ## 2. Data and state
 
@@ -179,15 +179,13 @@ A fail-closed consumer never treats a configured contributor it cannot reach as 
 
 | Extension point (owner contract) | Contributor inactive | Its in-flight work | Stance |
 | --- | --- | --- | --- |
-| Process tools ([ToolRegistry](process-tool-contribution.md)) | Its sets are revoked; branches adopt without them at the next opportunity; retained pins return the existing explicit stop error | That call gets the error result "tool provider `<name>` unavailable"; the batch and the turn continue | Withdraw-only |
-| Admission checks (Approval) | Any configured-but-inactive checker (or an `undetermined` row): Approval denies every call that reaches the check stage with a retryable reason | Cancelled check returns deny | Fail closed; the rule lives in Approval's contract |
-| Submission filters ([Rpc, session-boundary](session-boundary.md#a1-submission-filters-rpc)) | Configured-but-inactive filter (or an `undetermined` row): `session.submit` returns `service_reloading`; nothing is written | Cancelled filter: submission rejected, nothing written | Fail closed |
-| Session-created observers ([Agents, session-boundary](session-boundary.md#a3-session-created-observers-agents)) | Creation proceeds; diagnostic | Cancelled observer: nothing written | Fail open |
-| Session methods ([Rpc, session-boundary](session-boundary.md#a2-session-methods-rpc)) and management methods ([Management](../plugins/Management.md)) | That namespace returns `service_reloading`; other namespaces unaffected | Per method declaration (`Report` or `Drain`) | Per namespace |
-| Session closure participants ([SessionStore, session-boundary](session-boundary.md#a4-session-closure-participants-sessionstore)) | Fork and delete return `service_reloading` before any change | Idempotent participant steps; the operation is retried | Fail closed |
-| Model provider kinds (ModelHost) | Requests of that kind fail before acceptance (transient); other kinds unaffected | The provider cancels its streams; ModelProvider settles that call | Per kind |
-| Web search backends; Modality adapters and executors | Availability flag false (Web publishes a set without `web_search`; Modality reports the adapter or runtime unavailable) | That call or task fails or is `interrupted` | Per name |
-| Node services ([SessionResources](session-access.md#a4-sessionresources)) | `node_unavailable` for calls on that node only | Per owner of the call | Per node |
+| `process-tools` ([ToolRegistry](process-tool-contribution.md)) | Its sets are revoked; branches adopt without them at the next opportunity; retained pins return the existing explicit stop error | That call gets the error result "tool provider `<name>` unavailable"; the batch and the turn continue | Withdraw-only |
+| `admission-checks` (Approval) | Any configured-but-inactive checker (or an `undetermined` row): Approval denies every call that reaches the check stage with a retryable reason | Cancelled check returns deny | Fail closed; the rule lives in Approval's contract |
+| `submission-admission` ([Rpc, session-boundary](session-boundary.md#a3-submission-admission)) | Configured-but-inactive checker (or an `undetermined` row): `session.submit` returns `service_reloading`; nothing is written | Cancelled check: submission rejected, nothing written | Fail closed |
+| `methods` ([entry layer, session-boundary](session-boundary.md#a1-method-contribution)), levels `session` and `management` | That contributor's namespaces return `service_reloading`; other namespaces unaffected | Per method declaration (`Report` or `Drain`) | Per namespace |
+| `model-kinds` (ModelHost) | Requests of that kind fail before acceptance (transient); other kinds unaffected | The provider cancels its streams; ModelProvider settles that call | Per kind |
+| `web-search-backends` (Web); `modality-adapters` (Modality) | Availability flag false (Web publishes a set without `web_search`; Modality reports the adapter or runtime unavailable) | That call or task fails or is `interrupted` | Per name |
+| `node-services` (multi-node lookup, [overview §6.3](../overview.md#63-multiple-nodes)), keyed by node id | `node_unavailable` for calls on that node only | Guard cancelled; that call fails with `node_unavailable` | Per node |
 
 ## 5. Rules every point follows
 
@@ -197,8 +195,8 @@ A fail-closed consumer never treats a configured contributor it cannot reach as 
 | Injection | Session, branch and Rpc consumers inject only the registry (or a facade over it). `When<ProcessContributions<T>>` and every `Deps` injection of a contributor into a Session, branch or Rpc plugin are replaced by this pattern |
 | No reload reason | A contributor's unload never uses the `capability reloading` reason for a consumer's work; each call gets the point's per-call "provider unavailable" outcome |
 | Volatile configuration | Contributors to a Session-visible registry declare user-editable configuration as `x-volatile` fields and apply `VolatileUpdate` (listened on `volatile_key(ctx)`) in place, as new set versions or availability flags, never as a reload. A non-volatile change restarts only that contributor's row and therefore only its mount |
-| Per-call node services | Services on a resource node are resolved per call ([SessionResources](session-access.md#a4-sessionresources)); a node is a mount of the node-services point; an offline node yields `node_unavailable` for calls on that node only, never Pending for a consumer |
-| Facades | [SessionAccess](session-access.md) and [SessionEvents](session-broadcast-subscription.md) resolve the current AgentIndex per call through a stable slot that AgentsPlugin fills; during an Agents reload their calls return `Reloading` instead of reloading their consumers |
+| Per-call node services | Every node, including the local host, is a mount of the `node-services` point keyed by node id (the local mount injects the process `FileStorage` and `HostPlatform`, a peer mount what the peer row imports). Callers take the node id from `SessionConfig.resource_node` (`None` = local) and resolve `NodeServices` per call with `lookup(node_id)` and `admit()`; inactive or absent yields `node_unavailable` for calls on that node only, never Pending for a consumer. This is a multi-node concern, not a Session concept |
+| Facades | [SessionAccess](session-access.md) and the [Session broadcast subscription](session-broadcast-subscription.md) are facades provided by Agents over existing interfaces, not extension points; their behavior during an Agents reload (`Reloading`) is Agents' responsibility |
 | Re-entry | A new contributor generation registers with new set versions or a new generation number; consumers never reuse an old generation's handles except through the existing retained-pin rule |
 
 ## 6. Interfaces (summary)
@@ -213,7 +211,7 @@ A fail-closed consumer never treats a configured contributor it cannot reach as 
 
 ## 7. Security
 
-The registry is a lifecycle mechanism, not a trust boundary: contributors are trusted in-process code or rows the user enabled. Fail-closed points use the configured set from discovery so that an unavailable security contributor (an admission checker, a submission filter) cannot be skipped by making it fail. Registration validates names and namespaces so that a contributor cannot take over another contributor's names.
+The registry is a lifecycle mechanism, not a trust boundary: contributors are trusted in-process code or rows the user enabled. Fail-closed points use the configured set from discovery so that an unavailable security contributor (a tool admission checker, a submission admission checker) cannot be skipped by making it fail. Registration validates names and namespaces so that a contributor cannot take over another contributor's names.
 
 ## Appendix A. Interface details
 
@@ -264,6 +262,14 @@ impl<P: ExtensionPoint> Active<P> {
 }
 pub struct CallGuard { pub cancel: CancellationToken }  // drop = settled
 pub struct Unavailable { pub name: String }
+/// Point `node-services`; owned by the multi-node lookup. Key
+/// TypeKey::keyed_dynamic::<NodeServices>(node_id), "local" for the control node.
+pub struct NodeServices {
+    pub file_storage: Arc<FileStorage>,
+    pub host_platform: Arc<HostPlatform>,
+    pub isolation: Arc<dyn Fn() -> IsolationConfig + Send + Sync>, // host-local, read per call
+}
+pub type NodeServicesRegistry = ExtensionRegistry<NodeServicesPoint>;
 pub enum RegistryError {
     Invalid { name: String, reason: String },        // contribution rejected as a whole
     Collision { name: String, owner: String },
@@ -273,7 +279,7 @@ pub enum RegistryError {
 
 | Item | Rule |
 | --- | --- |
-| Point names | `[a-z][a-z0-9-]*`, owned by the consumer contract: `process-tools`, `admission-checks`, `submission-filters`, `session-created`, `session-methods`, `session-closure`, `model-kinds`, `web-search-backends`, `modality-adapters`, `node-services` (A2) |
+| Point names | `[a-z][a-z0-9-]*`, owned by the consumer contract: `process-tools`, `admission-checks`, `submission-admission`, `methods`, `model-kinds`, `web-search-backends`, `modality-adapters`, `node-services`, plus plugin-owned points such as `external-agent-nodes` (A2) |
 | Contributor names | Chosen by the contributor; validated by `P::admit`; stable across releases |
 | Snapshot consistency | One snapshot is internally consistent; consumers decide one call from one snapshot |
 | Revision | Increases on every change of `configured`, `undetermined` or `active` |
@@ -307,7 +313,7 @@ pub enum RegistryError {
 
 1. A contributor reload during a tool call yields one error result for that call; the turn continues; no ToolRegistry, ToolBinding, Loop or ToolExecutor reload occurs.
 2. A configured checker whose dependency is missing makes Approval deny with a retryable reason; disabling its row restores normal admission.
-3. A configured submission filter that is inactive makes `session.submit` return `service_reloading` and writes nothing.
+3. A configured submission admission checker that is inactive makes `session.submit` return `service_reloading` and writes nothing.
 4. A volatile configuration change publishes a new set version without any unload.
 5. One offline resource node yields `node_unavailable` for calls on that node; Sessions on other nodes are unaffected.
 6. Mount instances match the configured set after enable, disable and module rename of rows.
@@ -317,7 +323,7 @@ pub enum RegistryError {
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A1 | An enabled row whose declarations are unknown counts as possibly providing any name: fail-closed points refuse while it is undetermined, other points ignore it | Judgment; rutis-loader reports unknown declarations as `Err(why)` | Fail-closed points would admit while a security contributor's row cannot be described |
-| A2 | One shared generic registry implementation serves all points, Management included | Judgment | Each owner implements the same rules separately |
+| A2 | One shared generic registry implementation serves all points, method contribution included | Judgment | Each owner implements the same rules separately |
 
 ## Appendix F. Open questions
 

@@ -2,64 +2,50 @@
 
 Status: Draft. Overall design: [overview §4 plugin catalog](../overview.md#4-plugin-catalog), [§6.1 methods B and E](../overview.md#61-integration-methods), [Appendix C Agents](../overview.md#appendix-c-supplements-and-changes-to-existing-plugins), [§8 phases](../overview.md#8-phases). Phase: P0. Language: Rust.
 
-The public interface through which process plugins read a Session's fixed published Timeline prefix, write and withdraw their own input, learn the Session's creation facts, and reach the Session's resource-node services. It narrows existing public APIs (`Session::input/history/local_page/sequence/idle/stop`, `AgentIndex::acquire`, `session.input_lookup` semantics) into process services with source attribution. All of them are facades that resolve the current AgentIndex per call, so an Agents reload returns `Reloading` to callers instead of reloading them. This document also defines [`SessionFacts`](#a3-sessionfacts) and [`SessionResources`](#a4-sessionresources) (Agents supplements) and the process side of the [withdrawal contract](#a5-withdrawal).
+SessionAccess is not a new abstraction and not a new plugin: it is the existing public Session interface (`Session::input/history/local_page/sequence/idle/stop`, `AgentIndex::acquire`, `session.input_lookup` semantics) made reachable from process plugins, as Collaboration already uses it, with source attribution added. The existing Agents plugin provides it as a facade; keeping it stable across an Agents reload (calls in the window return `Reloading`) is Agents' responsibility. This document also defines `SessionAccess::config`, which returns the existing `SessionConfig` with three proposed fields ([A.3](#a3-sessionconfig-fields)), and the process side of the [withdrawal contract](#a4-withdrawal).
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
   subgraph PROC["Process (App Server)"]
-    SAP["SessionAccess plugin"]:::new
-    Slot["AgentIndexSlot"]:::contract
-    SA["SessionAccess"]:::contract
-    SRes["SessionResources"]:::contract
-    NReg["Node-services registry"]:::contract
-    Agents["AgentsPlugin (AgentIndex)"]
+    Agents["Agents (AgentIndex)"]
+    SA["SessionAccess facade"]:::contract
     Rpc["Rpc"]
     Callers["Process callers: Goal, Hooks, Scheduler, ..."]
   end
   subgraph SESS["Session / branch"]
-    SF["S:SessionFacts"]:::contract
+    SC["SessionConfig"]
     IQ["InputQueue, Loop, WaitBranch"]
     TL["Branch Timeline"]
   end
-  SAP --> Slot
-  SAP --> SA
-  SAP --> SRes
-  Agents -->|"register generation in apply"| Slot
-  SA -->|"per call: current AgentIndex"| Slot
-  SRes -->|"per call"| Slot
-  SRes -->|"per call: node mount"| NReg
+  Agents -->|"provides"| SA
   Callers --> SA
-  Callers --> SRes
   Rpc -->|"relay, session.input.withdraw"| SA
+  SA -->|"config()"| SC
   SA -->|"input/message"| TL
   SA -->|"withdraw own input"| IQ
-  Agents -->|"provides at Session build"| SF
   TL --> IQ
-  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
 ```
 
-The SessionAccess plugin has no dependency; AgentsPlugin injects the slot and registers each generation's AgentIndex, following the [extension-registry](extension-registry.md) pattern with one occupant. Callers inject only `SessionAccess` and `SessionResources`, so they survive Agents reloads and never wait on a resource node in `Deps`.
+Callers inject only `SessionAccess`. Resource-node services are not reached through it: callers read `resource_node` from `SessionConfig` and resolve the node per call through the [`node-services`](extension-registry.md#5-rules-every-point-follows) point.
 
 | Part | Scope | Depends on | Provides | Status |
 | --- | --- | --- | --- | --- |
-| SessionAccess plugin | Process | — | `AgentIndexSlot`, `SessionAccess`, `SessionResources` | Proposed |
-| `AgentsPlugin` | Process | existing; added `Arc<AgentIndexSlot>` | `AgentIndex` (existing), registered in the slot; `S:SessionFacts` for each Session; `SessionLoaded` on the slot's key | Supplement |
-| Node-services registry and mounts | Process | `Arc<Loader>`; per node the local or imported `FileStorage`, `HostPlatform`, isolation source | `ExtensionRegistry<NodeServices>` | Proposed (multiple-node supplement, overview Appendix C) |
+| Agents | Process | existing | `AgentIndex` (existing); `SessionAccess` facade; proposed `SessionConfig` fields | Supplement |
 | Runtime `Session` / `Branch` facades | Session / branch | — | `input`, `history`, `local_page`, `sequence`, `publication`, `idle`, `stop`, `branches` | Existing ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) |
 | InputQueue | Branch | existing | consumes `input/message`; owns withdrawal (`input/withdrawn`) | Change (overview Appendix C) |
-| Callers | Process | `Arc<SessionAccess>`, `Arc<SessionResources>` | — | Per plugin |
+| Callers | Process | `Arc<SessionAccess>` | — | Per plugin |
 
-Contracts defined here (owner: Agents): `SessionAccess`, `SourceAccess`, `SessionLease`, `SourceInput`, `RelayInput`, `RelayBlock`, `Marker`, `SourceBlock`, `KeyUse`, `Lookup`, `Withdrawal`, `AccessError`, `AgentIndexSlot`, `SessionFacts`, `SessionOrigin`, `SessionResources`, `SessionResourceBinding`, `ResourceError`, the `interactive` parameter of `session.create`, and the source marker and key namespace conventions. Contracts depended on: runtime `Session`/`Branch` facades, `AgentIndex` loading, the `input/message` data and consumption contract, InputQueue's `input/withdrawn` data contract and withdrawal service, [extension registry](extension-registry.md). Callers depend on this contract only; it carries no caller-specific rule.
+Contracts defined here (owner: Agents): `SessionAccess`, `SourceAccess`, `SessionLease`, `SourceInput`, `RelayInput`, `RelayBlock`, `Marker`, `SourceBlock`, `KeyUse`, `Lookup`, `Withdrawal`, `AccessError`, the proposed `SessionConfig` fields `interactive`, `resource_node`, `created_by: SessionOrigin`, the `interactive` and `client` parameters of `session.create`, and the source marker and key namespace conventions. Contracts depended on: runtime `Session`/`Branch` facades, `AgentIndex` loading, `SessionConfig` ([config.rs](../../../crates/dim-agent-runtime/src/config.rs)), the `input/message` data and consumption contract, InputQueue's `input/withdrawn` data contract and withdrawal service. Callers depend on this contract only; it carries no caller-specific rule.
 
 ## 2. Data and state
 
 ```mermaid
 flowchart TB
-  subgraph STORE["SessionStore record (creation configuration)"]
-    Facts["SessionFacts: session, agent, cwd, resource node, interactive, role, origin"]
+  subgraph STORE["SessionStore record"]
+    Conf["SessionConfig: cwd, role, plus interactive, resource_node, created_by"]
   end
   subgraph TLB["Branch Timeline"]
     IM["input/message: marker block, raw blocks, user content, mode, submission_id"]
@@ -69,23 +55,20 @@ flowchart TB
   end
   subgraph MEM["Process memory"]
     Lease["Leases pinning loaded Sessions"]
-    SlotS["AgentIndexSlot: current generation or empty"]
   end
-  Facts -->|"S:SessionFacts, facts(), Loaded notice"| Readers["ToolRegistry, Approval, Rpc filters, callers"]
+  Conf -->|"S:SessionConfig, config(), Created and Loaded notices"| Readers["ToolRegistry, Approval, Rpc, callers"]
   IM --> IA
   IM --> IC
   IM --> IW
-  classDef contract stroke-dasharray:4 3
 ```
 
-`SessionFacts` are fixed at creation and stored with the Session; nothing here changes them. An input is pending while it has neither an `input/consumed` nor an `input/withdrawn` referencing its event id; every caller derivation of "pending input" uses exactly this rule.
+The proposed `SessionConfig` fields are fixed at creation and stored with the Session; nothing here changes them. An input is pending while it has neither an `input/consumed` nor an `input/withdrawn` referencing its event id; every caller derivation of "pending input" uses exactly this rule.
 
 | State | Owner | Rebuild |
 | --- | --- | --- |
-| `SessionFacts` | Agents, persisted in the Session record | Read from the record on restore |
+| `SessionConfig` | Agents, persisted in the Session record | Read from the record on restore |
 | Input queue, applied, consumed and withdrawn inputs | InputQueue, Loop (`StateCell<InputSnapshot>`, `LoopSnapshot`) | From the branch's local history on reload (existing) |
 | Leases | SessionAccess (wraps `SessionUse`) | Runtime only; ended on caller unload |
-| Slot occupant | AgentsPlugin generation | Re-registered in Agents `apply` |
 | Keyed block effect, model context | History projection ([history.rs](../../../crates/dim-agent-capabilities/src/history.rs)) | From the fixed prefix and compaction facts |
 | Caller progress (pending `submission_id`, runs) | Caller, process storage | Caller's document |
 
@@ -95,15 +78,15 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-  participant SE as SessionEvents
+  participant SE as Session broadcast subscription
   participant C as Caller (source goal)
   participant SA as SessionAccess
-  participant AI as AgentIndex (via slot)
+  participant AI as AgentIndex
   participant TL as Branch Timeline
   participant IQ as InputQueue, Loop
   SE-->>C: Event turn/end, sequence s
   C->>SA: source(goal).get or acquire(session)
-  SA->>AI: resolve current generation
+  SA->>AI: acquire or get
   SA-->>C: SessionLease
   C->>SA: prefix(main, at_least s)
   SA-->>C: events through published head
@@ -122,20 +105,20 @@ The caller holds no lock: facts committed after its read precede its write in se
 sequenceDiagram
   participant CL as Client
   participant Rpc as Rpc session.submit
-  participant F as Submission filters (normalize, policy)
+  participant H as Submission admission checkers
   participant SA as SessionAccess
   participant TL as Branch Timeline
   CL->>Rpc: user content
-  Rpc->>F: filter chain, see session-boundary
-  F-->>Rpc: draft with added blocks
-  Rpc->>Rpc: attribute each added block to its filter name
+  Rpc->>H: check, see session-boundary
+  H-->>Rpc: added blocks
+  Rpc->>Rpc: attribute each added block to its checker name
   Rpc->>SA: relay(branch, RelayInput with RelayBlock source per block)
   SA->>SA: render each block as dim-source element, key in source namespace
   SA->>TL: input/message, user remains author
   SA-->>Rpc: committed event
 ```
 
-The filter never names its own source: Rpc sets `RelayBlock.source` from the filter's registered name ([session-boundary](session-boundary.md#a1-submission-filters-rpc)), so blocks are attributed without a forgeable marker and the user content stays unmarked.
+The checker never names its own source: Rpc sets `RelayBlock.source` from the checker's registered name ([session-boundary](session-boundary.md#a3-submission-admission)), so blocks are attributed without a forgeable marker and the user content stays unmarked.
 
 ### 3.3 Withdrawal
 
@@ -161,29 +144,6 @@ sequenceDiagram
 
 The decision between withdrawal and consumption is made under the branch commit lock by InputQueue, so exactly one of `input/withdrawn` and `input/consumed` exists for an input. Clients use the Session method `session.input.withdraw`; process callers may withdraw only inputs that carry their own source marker.
 
-### 3.4 Resource-node services per call
-
-```mermaid
-sequenceDiagram
-  participant C as Caller (tool, filter, management method)
-  participant SR as SessionResources
-  participant AI as AgentIndex (via slot)
-  participant NR as Node-services registry
-  participant FS as FileStorage on node n
-  C->>SR: resolve(session_id)
-  SR->>AI: facts(session_id)
-  SR->>NR: lookup(facts.resource_node or local)
-  alt node active
-    NR-->>SR: node services, CallGuard
-    SR-->>C: SessionResourceBinding
-    C->>FS: operation
-  else node offline
-    SR-->>C: NodeUnavailable(n)
-  end
-```
-
-Resolution happens per call and no caller holds node services in `Deps`; one offline node fails only calls on that node.
-
 ## 4. Timing and conflicts
 
 ### 4.1 Agents reload during a call
@@ -191,25 +151,19 @@ Resolution happens per call and no caller holds node services in `Deps`; one off
 ```mermaid
 sequenceDiagram
   participant C as Caller
-  participant SA as SessionAccess
-  participant Slot as AgentIndexSlot
-  participant A1 as Agents generation 1
-  participant A2 as Agents generation 2
+  participant SA as SessionAccess (Agents facade)
+  participant A as Agents
   C->>SA: input(...)
-  SA->>Slot: current
-  Slot-->>SA: generation 1
-  Note over A1: Agents reload starts, slot emptied in disposer
+  Note over A: Agents reload starts
   SA-->>C: Reloading (if not committed) or committed event
   C->>SA: lookup(submission_id)
-  SA->>Slot: current
-  Slot-->>SA: empty
-  SA-->>C: Reloading
-  A2->>Slot: register
+  SA-->>C: Reloading while the window lasts
+  Note over A: new generation active
   C->>SA: lookup(submission_id)
   SA-->>C: Accepted or Unknown
 ```
 
-Callers are not reloaded; they retry after `Reloading` and look up their `submission_id` before re-writing. Sessions, Agents and leases survive an Agents reload (existing rule: only directory logic is replaced).
+Callers retry after `Reloading` and look up their `submission_id` before re-writing. Sessions and leases survive an Agents reload (existing rule: only directory logic is replaced); how the facade spans the window is Agents' responsibility.
 
 ### 4.2 Withdrawal between write and consumption
 
@@ -236,7 +190,7 @@ Full table: Appendix B.
 | --- | --- | --- |
 | Marker block | One user-role message with the verbatim element text | First, at the input's consumed position (`input/consumed`) |
 | Other raw blocks | One user-role message each, verbatim, in order | After the marker |
-| Relay blocks | One user-role message each, rendered as `<dim-<source> kind="...">` elements of the filter's source | Before the user content of the same input |
+| Relay blocks | One user-role message each, rendered as `<dim-<source> kind="...">` elements of the checker's source | Before the user content of the same input |
 | User content (text, images) | One user message; a single text block renders as text, otherwise parts with image blocks | After all blocks of the same input |
 | Keyed block (`Live`) | As a raw block; additionally in effect: latest block per key | Consumed position |
 | Retire block (`Retire`) | Delivered once; the key is no longer in effect | Consumed position |
@@ -244,28 +198,27 @@ Full table: Appendix B.
 
 Consumption position by mode: Queue is consumed when Loop starts the turn it drives; Steer at the next boundary of the running turn (after the current batch's `step/tool-result`, or replacing a request that has no output) and starts a turn when idle; Append with the next model request of a turn and never starts one. Inputs applied before an interrupt and not consumed are consumed by the next turn.
 
-Compaction: consumed inputs survive only through the summary, except keyed blocks, whose latest block per live key is replayed verbatim from the compaction baseline; retired keys are not replayed. Child branches see the ancestor prefix up to their cut, including the keys in effect at the cut, never inputs consumed after it, and never adopt pending inputs of the parent. Non-interactive Sessions use the same mapping; their Queue inputs drive turns with no user present. The model never sees `submission_id`, mode, `SessionFacts`, resource bindings, leases or events of other plugins; reads, `facts` and `resolve` have no model-visible effect.
+Compaction: consumed inputs survive only through the summary, except keyed blocks, whose latest block per live key is replayed verbatim from the compaction baseline; retired keys are not replayed. Child branches see the ancestor prefix up to their cut, including the keys in effect at the cut, never inputs consumed after it, and never adopt pending inputs of the parent. Non-interactive Sessions use the same mapping; their Queue inputs drive turns with no user present. The model never sees `submission_id`, mode, `SessionConfig` fields, leases or events of other plugins; reads and `config` have no model-visible effect.
 
 ## 6. Interfaces (summary)
 
 | Interface | Purpose |
 | --- | --- |
 | `SessionAccess::source(name) -> SourceAccess` | Binds source attribution for one caller |
-| `SessionAccess::facts(session_id)` | Creation facts of a loaded or stored Session |
+| `SessionAccess::config(session_id) -> SessionConfig` | Configuration of a loaded or stored Session |
 | `SourceAccess::get / acquire / stored_page / loaded` | Leases and reads without capability state |
 | `SessionLease::prefix / local_page / head / published / idle / stop` | Reads and turn-scope control |
 | `SessionLease::input` | Source-marked input |
 | `SessionLease::relay` | Operator content with per-block source attribution (Rpc) |
 | `SessionLease::withdraw` (`SessionAccess::withdraw`) | Withdraw a pending input of the caller's own source |
 | `SessionLease::lookup` | Find an input by `submission_id` |
-| `SessionResources::resolve` | Per-call resource-node binding |
-| `S:SessionFacts` | Session service for Session and branch capabilities |
-| `session.create { interactive }` | Non-interactive creation over RPC |
+| `S:SessionConfig` (existing) | Session service for Session and branch capabilities |
+| `session.create { interactive, client }` | Non-interactive creation and client origin over RPC |
 | `session.input.withdraw` | Client withdrawal Session method (InputQueue) |
 
 ## 7. Security
 
-Only in-process trusted plugins obtain `SessionAccess` and `SessionResources`; they are not RPC methods and not exported over rutis links by this contract. Markers, keys and relay attribution are source-scoped so users and other sources cannot impersonate a source; process callers withdraw only their own inputs. Writing input confers no authority: tools started by the resulting turn are admitted by Approval and Permission under the Session's policy. `SessionResourceBinding` carries the node's host-local isolation configuration; callers apply it and never relax it, and it never enters the Timeline. Inputs are Timeline facts replayed into model context: callers must not put credentials or host security settings into them.
+Only in-process trusted plugins obtain `SessionAccess`; they are not RPC methods and not exported over rutis links by this contract. Markers, keys and relay attribution are source-scoped so users and other sources cannot impersonate a source; process callers withdraw only their own inputs. Writing input confers no authority: tools started by the resulting turn are admitted by Approval and Permission under the Session's policy. Inputs are Timeline facts replayed into model context: callers must not put credentials or host security settings into them.
 
 ## Appendix A. Interface details
 
@@ -275,7 +228,7 @@ Only in-process trusted plugins obtain `SessionAccess` and `SessionResources`; t
 /// Process service; key TypeKey::of::<SessionAccess>(). In-process only, never exported as RPC.
 impl SessionAccess {
     pub fn source(&self, name: &'static str) -> SourceAccess;            // binds attribution (A1)
-    pub async fn facts(&self, session_id: &str) -> Result<SessionFacts, AccessError>; // loaded or stored
+    pub async fn config(&self, session_id: &str) -> Result<Arc<SessionConfig>, AccessError>; // loaded or stored
 }
 impl SourceAccess {
     pub fn loaded(&self) -> Result<Vec<SessionRef>, AccessError>;        // AgentIndex::hosts + Agent::sessions
@@ -285,7 +238,7 @@ impl SourceAccess {
         through: Option<u64>) -> Result<Page, AccessError>;               // no load
 }
 impl SessionLease {                                                        // pins one loaded incarnation
-    pub fn facts(&self) -> &SessionFacts;
+    pub fn config(&self) -> &Arc<SessionConfig>;
     pub fn branches(&self) -> Vec<TimelineInfo>;
     pub fn head(&self, branch: &str) -> Result<u64, AccessError>;        // published head
     pub async fn prefix(&self, branch: &str, at_least: u64) -> Result<Prefix, AccessError>;
@@ -312,17 +265,7 @@ pub enum Lookup { Accepted(Arc<AgentEvent>), Unknown }                  // Ambig
 pub enum Withdrawal { Withdrawn { sequence: u64 }, NotPending }
 ```
 
-**Facade.** Every call resolves the AgentIndex currently registered in `AgentIndexSlot`; an empty slot returns `Reloading`. A `SessionLease` holds the Session's `SessionUse`, which belongs to the Session, not to the Agents generation, so a lease stays valid across an Agents reload; only calls that need AgentIndex itself (`acquire`, `get`, `loaded`, `stored_page`, `facts` of an unloaded Session) return `Reloading` during the window.
-
-```rust
-/// Process service of the SessionAccess plugin; single-occupant registry.
-impl AgentIndexSlot {
-    pub fn register(&self, ctx: &Ctx, index: Arc<AgentIndex>);  // AgentsPlugin apply; removal via ctx.effect
-    pub fn current(&self) -> Option<Arc<AgentIndex>>;
-    pub fn changed(&self) -> tokio::sync::watch::Receiver<u64>;
-    pub fn loaded_key(&self) -> EventKey<SessionLoaded>;      // stable across Agents generations
-}
-```
+**Facade.** Agents provides `SessionAccess`. A `SessionLease` holds the Session's `SessionUse`, which belongs to the Session, not to the Agents generation, so a lease stays valid across an Agents reload; only calls that need AgentIndex itself (`acquire`, `get`, `loaded`, `stored_page`, `config` of an unloaded Session) return `Reloading` during the window.
 
 ### A.2 Prefix, marking, keys, relay, submission identity
 
@@ -332,67 +275,40 @@ impl AgentIndexSlot {
 
 **Keys.** `KeyUse` names are placed in the source namespace: the raw block key is `<source>:<name>` (A4). Prompt's `rule:` and `state:` prefixes can never be produced. A key is per branch Timeline.
 
-**Relay.** `relay` writes operator content on the user's behalf at the submission boundary. The user content carries no marker (the user remains its author, A5). Each `RelayBlock` is rendered as `context_block::element("dim-<source>", [("kind", kind)], text)` with its key in `<source>:`; `source` is set by Rpc from the registered name of the filter that added the block, never by the filter. `relay` requires `user` and is used only by Rpc.
+**Relay.** `relay` writes operator content on the user's behalf at the submission boundary. The user content carries no marker (the user remains its author, A5). Each `RelayBlock` is rendered as `context_block::element("dim-<source>", [("kind", kind)], text)` with its key in `<source>:`; `source` is set by Rpc from the registered name of the admission checker that added the block, never by the checker. `relay` requires `user` and is used only by Rpc.
 
 **Submission identity.** `submission_id` is generated by the caller per logical submission, `<source>:<uuid>` (A6). Writes do not deduplicate. A caller that may retry after an uncertain outcome calls `lookup` first: `Accepted` returns the committed input, `Unknown` permits a retry, `Ambiguous` is an error. Same scan as `session.input_lookup` ([connection/tree.rs](../../../crates/dim-app-server/src/connection/tree.rs)).
 
 **Never possible:** writing any event other than `input/message`, InputQueue's `input/withdrawn` through `withdraw`, and `stop`'s `stop/interrupt`; branch-scoped interrupts; editing or deleting history; reading capability state; supplying `submission_id`s, keys or markers of another source; withdrawing another source's or the user's input (enforced for well-behaved trusted code, not a sandbox).
 
-### A.3 SessionFacts
+### A.3 SessionConfig fields
+
+Agents supplement: the existing `SessionConfig` gains three fields, fixed at creation and persisted with the Session record.
 
 ```rust
-/// Owned by Agents; fixed at creation; persisted with the Session record.
-pub struct SessionFacts {
-    pub session_id: String,
-    pub agent_id: String,
-    pub cwd: String,
-    pub resource_node: Option<String>,        // None = the local host (control node)
-    pub interactive: bool,                    // false: exec, ACP, automation
-    pub collaboration_role: CollaborationRole,
+pub struct SessionConfig {
+    // existing: permission_policy, cwd, model, system_prompt, tools, collaboration_role
+    pub interactive: bool,               // false: exec, ACP, automation; stored Sessions without it: true
+    pub resource_node: Option<NodeId>,   // None = the local host (control node)
     pub created_by: SessionOrigin,
 }
 pub enum SessionOrigin {
-    Client,                                   // session.create over Rpc
+    Client { client: Option<String> },      // session.create over Rpc; label from `client`, e.g. "acp"
     Collaboration { leader_session: String }, // member created by Collaboration (including establish)
-    Launch { source: String },                // Agents launch by a process source, e.g. "scheduler"
-    Fork { source_session: String },          // created from another Session's cut
+    Launch { source: String },              // Agents launch by a process source, e.g. "scheduler"
+    Fork { source_session: String },        // created from another Session's cut
 }
 ```
 
 | Exposure | Consumers |
 | --- | --- |
-| `S:SessionFacts` (Session service provided by Agents when the Session is built) | ToolRegistry (process tool filtering), Approval (admission check requests), other Session/branch capabilities |
-| `SessionAccess::facts(session_id)`, `SessionLease::facts()` | Process callers, Rpc (submission filter context, Session methods) |
-| `SessionNotice::Loaded { facts, .. }` | Broadcast subscribers ([session broadcast](session-broadcast-subscription.md)) |
-| `ModelCallScope` (ModelProvider supplement) | ModelHost providers, by reference |
+| `S:SessionConfig` (existing Session service) | ToolRegistry (process tool filtering and handler context), Approval (admission check requests), other Session/branch capabilities |
+| `SessionAccess::config(session_id)`, `SessionLease::config()` | Process callers, Rpc (submission admission request, Session-level methods) |
+| `Created` and `Loaded` notices (subset `interactive`, `collaboration_role`, `created_by`, `resource_node`) | Broadcast subscribers ([session broadcast](session-broadcast-subscription.md)) |
 
-`SessionFacts` replaces `ProcessToolSession`, the Session fields of `AdmissionRequest`, `SubmissionContext` and `ModelCallScope`, `LaunchConfig`'s Session values, and `SessionResourceBinding`'s duplicates. Agents supplement: `SessionConfig` gains `interactive` (stored Sessions without it are interactive) and `resource_node`; the Session record stores `created_by`. `session.create` gains `interactive?: bool` (default `true`); `exec`, AcpGateway and automation (`launch`) create non-interactive Sessions. A fork copies `cwd`, `resource_node`, `interactive` and `collaboration_role` from the source and sets `created_by: Fork`.
+`session.create` gains `interactive?: bool` (default `true`) and `client?: string` (recorded in `SessionOrigin::Client`, so AcpGateway marks its Sessions without a separate `hello` field); `exec`, AcpGateway and automation (`launch`) create non-interactive Sessions. A fork copies `cwd`, `resource_node`, `interactive` and `collaboration_role` from the source and sets `created_by: Fork`. Only creation-time fields are read from `SessionConfig`; the current permission preset and model are Timeline facts.
 
-### A.4 SessionResources
-
-```rust
-/// Process service (Agents supplement); key TypeKey::of::<SessionResources>().
-impl SessionResources {
-    /// Resolved per call; never cache a binding across calls.
-    pub async fn resolve(&self, session_id: &str) -> Result<SessionResourceBinding, ResourceError>;
-}
-pub struct SessionResourceBinding {
-    pub facts: SessionFacts,
-    pub file_storage: Arc<FileStorage>,      // Session-bound, on facts.resource_node
-    pub host_platform: Arc<HostPlatform>,    // on facts.resource_node
-    pub isolation: IsolationConfig,          // host-local isolation of that node (Settings), read per call
-    guard: CallGuard,                        // node mount admission; dropped with the binding
-}
-pub enum ResourceError {
-    UnknownSession,
-    NodeUnavailable { node: String },        // wire: appError "node_unavailable"
-    Reloading,                               // Agents window
-}
-```
-
-Each node, including the local host, is a mount of the `node-services` point of the [extension registry](extension-registry.md): the local mount injects the process `FileStorage` and `HostPlatform`; a peer mount injects the services the peer row imports. `resolve` reads `SessionFacts`, looks up the node and admits a call guard; if the node's mount unloads during an operation, the guard's cancel token fires and the operation fails with `NodeUnavailable` for that call only. Process tools, submission filters, Session methods and management methods reach the resource node only this way ([process tool contribution](process-tool-contribution.md#a3-per-call-context)).
-
-### A.5 Withdrawal
+### A.4 Withdrawal
 
 | Item | Content |
 | --- | --- |
@@ -403,7 +319,7 @@ Each node, including the local host, is a mount of the `node-services` point of 
 | Withdraw and re-submit as Steer | One InputQueue atomic batch (`append_batch_registered`): `input/withdrawn` and the new `input/message` with mode Steer |
 | Pending rule | An input is pending iff no `input/consumed` and no `input/withdrawn` references its event id; Goal, Notifications, AcpGateway, Scheduler and every caller use this rule |
 
-### A.6 Errors
+### A.5 Errors
 
 | Error | From | Meaning |
 | --- | --- | --- |
@@ -411,23 +327,23 @@ Each node, including the local host, is a mount of the `node-services` point of 
 | `SessionUnavailable(reason)` | `AgentError::Storage` from `acquire` | Stored but no available owner, or unreadable |
 | `BranchMissing` | `AgentError::UnknownBranch` | Branch never published or already closed |
 | `NotLoaded` | `get` | Use `acquire` or `stored_page` |
-| `Reloading` | Empty `AgentIndexSlot`, `AgentError::Reloading` | Retry; after a write, `lookup` first |
+| `Reloading` | Agents reload window, `AgentError::Reloading` | Retry; after a write, `lookup` first |
 | `Rejected(reason)` | `InputMessageData::validate`, marker, key, source or own-source rules, `FutureSequence` | Nothing written |
 | `PublicationUnknown` | Committed, publication failed | Outcome uncertain; `lookup` after recovery |
 | `Failed(AgentError)` | Fault, storage failure | Session fault |
 
-### A.7 Timeline and capability mechanics
+### A.6 Timeline and capability mechanics
 
 | Step | Path |
 | --- | --- |
 | Write | `SessionLease::input`/`relay` build `InputMessageData`, call `Session::input(data, branch)` → `Branch::input` → `TimelineContext::input`: fault check, close check, `validate()`, then `Timeline::append` (no registration callback; `before` hooks may transform the draft). `published` waits on `Branch::publication().watch()` |
-| Withdraw | InputQueue `append_registered` with the pending recheck (A.5) |
+| Withdraw | InputQueue `append_registered` with the pending recheck (A.4) |
 | Consumption | InputQueue's Dispatcher subscription on `input/message` appends `input/applied { mode }`; Loop consumes at a turn or request boundary and appends `input/consumed`, skipping withdrawn inputs; WaitBranch records Steer arrivals; SessionBroadcast emits every event. Handlers register work and return |
 | State | InputQueue `StateCell<InputSnapshot>` and Loop `LoopSnapshot`, rebuilt from `local(..=S)` on reload |
 | Read | `Session::history` / `local_page`, bounded by the published head; no state read |
 | Recheck | The caller decides on the prefix it read; later facts are ordered before its write and resolved by the input owners |
 | Terminal facts | An input has no terminal fact; its consumption is Loop's, its withdrawal InputQueue's. A caller's own work records its outcome in the caller's process storage |
-| Agents reload | Slot emptied in the old generation's disposer, refilled by the new one; calls in the window return `Reloading`; callers and leases are not reloaded; a committed input stays |
+| Agents reload | Calls in the window return `Reloading` (Agents' facade); callers and leases are not reloaded; a committed input stays |
 | InputQueue or Loop reload | The committed input is picked up by the new generation from the Timeline |
 | Restart | Leases vanish; committed inputs are restored with the Session and adopted if neither consumed nor withdrawn; callers look up pending `submission_id`s before retrying |
 
@@ -459,12 +375,11 @@ Each node, including the local host, is a mount of the `node-services` point of 
 | Session unload between read and write | lease held | Lease pins the instance; unload refused while in use | AgentIndex |
 | Session not loaded | — | `acquire` restores before writing | AgentIndex |
 | Resource node offline, input write | — | Input committed; turns start when capabilities leave Pending | rutis lifecycle |
-| Resource node offline, `resolve` | — | `NodeUnavailable` for that call only | SessionResources |
 | Client detach | — | No effect | — |
 
 ## Appendix C. Errors and recovery
 
-Errors are listed in A.6. Cancelling a caller's future after `Session::input` returned does not withdraw the input; only `withdraw` does. `idle` and `stop` follow the runtime facade: they wait for Loop and return dispatched sequences; a closed branch returns `BranchMissing`. Restoring a Session through `acquire` runs project authorization as AgentIndex does today and can fail with `Failed`.
+Errors are listed in A.5. Cancelling a caller's future after `Session::input` returned does not withdraw the input; only `withdraw` does. `idle` and `stop` follow the runtime facade: they wait for Loop and return dispatched sequences; a closed branch returns `BranchMissing`. Restoring a Session through `acquire` runs project authorization as AgentIndex does today and can fail with `Failed`.
 
 ## Appendix D. Acceptance
 
@@ -475,12 +390,11 @@ Flow tests through public interfaces (App Server test suite):
 3. Interrupt rows: input before an interrupt stays pending and is consumed by the next turn; input after it starts a turn.
 4. Keyed block survives compaction as its latest block; a retired key does not; a child branch inherits and retires a key independently.
 5. Marker, key and own-source validation: reserved names, foreign namespaces and foreign withdrawals are `Rejected`; RPC cannot submit blocks.
-6. Relay blocks render with the filter's source; user content stays unmarked.
+6. Relay blocks render with the admission checker's source; user content stays unmarked.
 7. Withdrawal before consumption leaves the input unconsumed; withdrawal racing consumption yields exactly one of the two facts.
-8. `acquire` restores an unloaded Session; `stored_page` and `facts` read without loading.
+8. `acquire` restores an unloaded Session; `stored_page` and `config` read without loading.
 9. An Agents reload returns `Reloading` to a caller without reloading it; `lookup` then finds the committed input.
-10. `resolve` on a Session whose node is offline returns `NodeUnavailable`; a Session on the local host is unaffected.
-11. `session.create {interactive: false}` produces `SessionFacts.interactive = false` visible through `facts`, `S:SessionFacts` and the `Loaded` notice.
+10. `session.create {interactive: false, client: "acp"}` produces `interactive = false` and `created_by = Client { client: Some("acp") }`, visible through `config`, `S:SessionConfig` and the `Created` notice.
 
 ## Appendix E. Assumptions
 
@@ -490,7 +404,7 @@ Flow tests through public interfaces (App Server test suite):
 | A2 | Every source input starts with one marker block `<dim-<source> kind="...">` | Overview B.2, B.8, §7; format is judgment | Each plugin defines its own recognition |
 | A3 | A source name is the producing plugin's own stable name | Judgment | Renaming breaks recognition of historical inputs |
 | A4 | Keys are `<source>:<name>`; Prompt's `rule:`/`state:` are reserved | Judgment; existing Prompt key format | Collisions between sources become possible |
-| A5 | Submission-boundary user content is relayed as the user's without a marker; added blocks carry the filter's source | Overview §6.1 method E, B.4, B.7; decision record C13 | Such inputs gain a marker and render as runtime content |
+| A5 | Submission-boundary user content is relayed as the user's without a marker; added blocks carry the admission checker's source | Overview §6.1 method E, B.4, B.7; decision record C13 | Such inputs gain a marker and render as runtime content |
 | A6 | `submission_id` format `<source>:<uuid>`; writes never deduplicate | Existing `session.input_lookup`; format is judgment | Write-time deduplication would need registration in the commit lock |
 | A7 | Process plugins may call `stop` (turn scope) and `idle` on a Session | Collaboration precedent; overview B.9 | Callers that stop Sessions they started need another stop path |
 | A8 | Stored Sessions without `interactive` are interactive; `session.create` defaults to interactive | Judgment | Clients must always send the field |
