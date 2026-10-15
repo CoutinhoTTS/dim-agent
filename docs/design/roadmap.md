@@ -122,7 +122,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | --- | --- | --- | --- |
 | 1（现在） | A2 契约定稿、A3 Goal（已决定）、~~A4 权限类别~~（已完成） | S6 FileStorage、R1 Failed 错误码 | C3 工具接入、C4 spike、S7 argv 辅助、S10 pluginFiles |
 | 2 | S8a Settings 源（等 A2）、S4 AuxiliaryModel、C7 固定前缀读 | C1 sessionMethods（等 A2）、C2 interactive、S5a Session 文件 | C4 TS 桥接（等 C3）、F5 隔离 spike |
-| 3 | S1 InputQueue 撤回（等 C1）、S8b Settings 服务（等 C4）、S11 图片占位、F2 权限命令规则 | C6 广播通知、P1 ShellInput（等 C1、S7）、S5b 标题、S3 活动句柄（确认） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
+| 3 | S1 InputQueue 撤回（等 C1）、S8b Settings 服务（等 C4）、S11 图片占位、F2 权限命令规则 | C6 广播通知、P1 ShellInput（等 C1、S7）、S5b 标题、~~S3 活动句柄~~（不需要） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
 | 4 | F1 压缩宿主（等 S4）、P5 Goal（等 C5、S1、S8b） | S2 sessions（等 C2、S1）、P2 Attachments（等 S5a、S11）、S5c 删除和 fork、F4 MCP OAuth | P3 Web（等 C4、S8b）、P4 SessionTitle（等 C6、S4、S5b、S8b） |
 | 5 | — | — | P6 Scheduler、P7 Workflow（等 S2） |
 
