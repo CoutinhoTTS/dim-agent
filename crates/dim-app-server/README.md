@@ -83,7 +83,8 @@ decision (ADR 003 D4). FullAccess, file-root authorization and Session restorati
 An old `mcp-approvals.json` is ignored, not migrated or removed.
 
 Successful configuration mutations return `{}` after persistence, not after connection/tool
-adoption. The catalog also returns `userApplication` and optional `projectApplication`, each with
+adoption; disabling or removing an entry also waits until its running generations have closed in
+every Session. The catalog also returns `userApplication` and optional `projectApplication`, each with
 `appliedRevision`, `error` and `cleanupError`. Application describes source eligibility
 and instance creation failures; it does not confirm a network connection or tool adoption.
 An application error leaves persisted intent intact. Cleanup errors remain visible for that
@@ -106,9 +107,13 @@ Catalog reads and connection operations also request refresh of external workspa
 there is no background filesystem watcher. A catalog reply is not a refresh-completion barrier.
 Already bound tools retain their connection generation while a replacement takes over, so a
 request in flight finishes on the configuration it started with. After the last old binding is
-released, the coordinator closes that instance through the loader's fiber. Disabling or removing
-an entry in a readable source closes its generations in every Session, including bound ones; an
-unreadable source closes nothing. A generation that no lease uses closes even while current, such
+released, the coordinator closes that instance through the loader's fiber. Disabling an entry
+closes its generations in every Session, including bound ones, even while its source is
+unreadable: the coordinator applies the user's current choice, or an unreadable record, to the
+entries it last read. Removing an entry does so once its source is read; an unreadable source
+closes nothing else. `session.mcp` reports a withdrawn entry as `disabled`, not `failed`. Sessions
+re-read their selection when the coordinator's applied state changes, so an external edit that a
+catalog read or connection operation picks up reaches every Session. A generation that no lease uses closes even while current, such
 as a user server that a project entry now shadows. Session closure drains all its instances, including those
 retained by old bindings, without affecting another Session using the same server configuration.
 Explicit disconnect drains all generations of the selected source/server, without changing its

@@ -13,7 +13,10 @@ use serde::Serialize;
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -90,7 +93,7 @@ impl Capability for ConnectionPlugin {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpApplication {
     pub applied_revision: Option<String>,
@@ -109,6 +112,8 @@ enum Command {
         id: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Replies after a refresh, so a write's withdrawals are settled.
+    Settle { reply: oneshot::Sender<Result<()>> },
 }
 pub struct Publication {
     commands: mpsc::Sender<Command>,
@@ -121,6 +126,18 @@ impl Publication {
     }
     pub(super) fn refresh(&self) {
         self.released.send_replace(());
+    }
+    /// Changes when a source's applied state changes, including entries that
+    /// the publisher observed in external edits; Sessions re-read then.
+    pub(super) fn applied(&self) -> watch::Receiver<BTreeMap<SettingsScope, McpApplication>> {
+        self.applications.subscribe()
+    }
+    /// Waits until the worker has refreshed after this call, so generations
+    /// the latest write withdrew are retired in every Session.
+    pub(super) async fn settle(&self, cancel: &CancellationToken) -> Result<()> {
+        let (reply, received) = oneshot::channel();
+        self.request(Command::Settle { reply }, received, cancel)
+            .await
     }
     async fn request<T>(
         &self,
@@ -248,6 +265,9 @@ impl Worker {
                     let result = projection.disconnect(source, id).await;
                     let _ = reply.send(result);
                 }
+                Some(Command::Settle { reply }) => {
+                    let _ = reply.send(Ok(()));
+                }
                 None => {}
             }
         }
@@ -344,6 +364,9 @@ struct Generation {
     instance: rutis_loader::Instance,
     service: Arc<McpServer>,
     lease: Weak<McpConnection>,
+    /// Set before a withdrawal retires it, so its holders report the entry
+    /// as disabled rather than as a failed connection.
+    withdrawn: Arc<AtomicBool>,
 }
 struct Projection {
     port: Arc<Publication>,
@@ -354,10 +377,16 @@ struct Projection {
     application_failed: BTreeMap<(String, SettingsScope, String), (String, CancellationToken)>,
 }
 impl Projection {
-    /// The entry no longer exists enabled in its readable source.
+    /// The entry no longer exists enabled. A known entry that is disabled is
+    /// withdrawn even while its source is unreadable: the user's decision does
+    /// not depend on the project file. A missing entry is withdrawn only when
+    /// its source was read.
     fn withdrawn(&self, generation: &Generation) -> bool {
         self.sources.get(&generation.source).is_some_and(|source| {
-            source.error.is_none() && !source.current.get(&generation.id).is_some_and(enabled)
+            match source.current.get(&generation.id) {
+                Some(config) => !enabled(config),
+                None => source.error.is_none(),
+            }
         })
     }
     async fn refresh(&mut self, settings: &SettingsService, cancel: &CancellationToken) {
@@ -390,6 +419,21 @@ impl Projection {
                         degraded: None,
                     });
                     intent.error = Some("MCP source could not be read");
+                    // Keep the configurations last read, but apply the user's
+                    // current enablement to them: an explicit disable, or an
+                    // unreadable record, withdraws project entries anyway.
+                    if matches!(source, SettingsScope::Project(_)) {
+                        let workspace = config::workspace(settings, source).ok();
+                        for (id, config) in &mut intent.current {
+                            let (McpServerSettings::Stdio { enabled, .. }
+                            | McpServerSettings::Remote { enabled, .. }) = config;
+                            *enabled = Some(
+                                workspace
+                                    .as_deref()
+                                    .is_some_and(|workspace| enablement.contains(workspace, id)),
+                            );
+                        }
+                    }
                     continue;
                 }
             };
@@ -423,15 +467,19 @@ impl Projection {
             );
         }
         // Bindings keep a superseded generation while its entry stays enabled,
-        // so a replacement never breaks a request in flight. Disabling or
-        // removing the entry from a readable source retires it in every
-        // Session, even with bindings; an unused generation closes even while
-        // current. An unreadable source retires nothing.
+        // so a replacement never breaks a request in flight. Disabling the
+        // entry retires it in every Session, even with bindings and while its
+        // source is unreadable; removing it does so once the source is read.
+        // An unused generation closes even while current.
         let retired: Vec<_> = self
             .generations
             .iter()
             .filter(|(_, g)| {
-                g.owner.closed.is_cancelled() || g.lease.strong_count() == 0 || self.withdrawn(g)
+                let withdrawn = self.withdrawn(g);
+                if withdrawn {
+                    g.withdrawn.store(true, Ordering::SeqCst);
+                }
+                g.owner.closed.is_cancelled() || g.lease.strong_count() == 0 || withdrawn
             })
             .map(|(reference, _)| reference.clone())
             .collect();
@@ -447,40 +495,40 @@ impl Projection {
         self.publish();
     }
     fn publish(&self) {
-        self.port.applications.set(
-            self.sources
-                .iter()
-                .map(|(source, intent)| {
-                    let inactive = intent.current.values().any(|configuration| {
-                        enabled(configuration)
-                            && McpServerPlugin::new(
-                                configuration.clone(),
-                                TypeKey::of::<McpServer>(),
-                            )
+        let applications: BTreeMap<_, _> = self
+            .sources
+            .iter()
+            .map(|(source, intent)| {
+                let inactive = intent.current.values().any(|configuration| {
+                    enabled(configuration)
+                        && McpServerPlugin::new(configuration.clone(), TypeKey::of::<McpServer>())
                             .is_err()
-                    }) || self.application_failed.keys().any(
-                        |(_, failed_source, id)| {
-                            failed_source == source && intent.current.get(id).is_some_and(enabled)
-                        },
-                    );
-                    let error = intent
-                        .error
-                        .or(intent.degraded)
-                        .or(inactive.then_some("MCP configuration is not active"));
-                    (
-                        *source,
-                        McpApplication {
-                            applied_revision: error.is_none().then(|| intent.revision.clone()),
-                            error,
-                            cleanup_error: self
-                                .cleanup_failed
-                                .contains(source)
-                                .then_some("MCP generation cleanup failed"),
-                        },
-                    )
-                })
-                .collect(),
-        );
+                }) || self.application_failed.keys().any(
+                    |(_, failed_source, id)| {
+                        failed_source == source && intent.current.get(id).is_some_and(enabled)
+                    },
+                );
+                let error = intent
+                    .error
+                    .or(intent.degraded)
+                    .or(inactive.then_some("MCP configuration is not active"));
+                (
+                    *source,
+                    McpApplication {
+                        applied_revision: error.is_none().then(|| intent.revision.clone()),
+                        error,
+                        cleanup_error: self
+                            .cleanup_failed
+                            .contains(source)
+                            .then_some("MCP generation cleanup failed"),
+                    },
+                )
+            })
+            .collect();
+        // Notify only on change: Sessions re-read their selection then.
+        if self.port.applications.get() != applications {
+            self.port.applications.set(applications);
+        }
     }
     async fn retire(&mut self, references: Vec<String>) -> bool {
         let mut failed = false;
@@ -613,6 +661,7 @@ impl Projection {
             instance,
             service: service.unwrap(),
             lease: Weak::new(),
+            withdrawn: Default::default(),
         };
         let lease = connection(&self.port, &generation);
         generation.lease = Arc::downgrade(&lease);
@@ -651,6 +700,7 @@ fn connection(port: &Publication, generation: &Generation) -> Arc<McpConnection>
     Arc::new(McpConnection {
         service: generation.service.clone(),
         released: port.released.clone(),
+        withdrawn: generation.withdrawn.clone(),
     })
 }
 

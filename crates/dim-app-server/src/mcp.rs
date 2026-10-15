@@ -15,7 +15,10 @@ use server::{McpServer, McpServerError};
 use std::{
     collections::BTreeMap,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -78,10 +81,16 @@ pub enum McpChange {
 pub struct McpConnection {
     service: Arc<McpServer>,
     released: tokio::sync::watch::Sender<()>,
+    withdrawn: Arc<AtomicBool>,
 }
 impl McpConnection {
     pub fn state(&self) -> server::McpServerState {
         self.service.state()
+    }
+    /// The generation was retired because its entry was disabled or removed,
+    /// not because the connection failed.
+    pub fn withdrawn(&self) -> bool {
+        self.withdrawn.load(Ordering::SeqCst)
     }
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<server::McpServerState> {
         self.service.subscribe()
@@ -216,7 +225,9 @@ impl McpService {
     /// project files. Enabling checks `expected` against the project source and
     /// that the entry exists there. Disabling or removing first withdraws the
     /// record without depending on the project file, so an entry the user
-    /// turned off stays off even if the file is unreadable or the entry returns.
+    /// turned off stays off even if the file is unreadable. Disabling or
+    /// removing returns once the publisher has retired the entry's generations
+    /// in every Session.
     pub async fn update(
         &self,
         source: SettingsScope,
@@ -228,55 +239,23 @@ impl McpService {
         if id.trim().is_empty() {
             return Err(McpError::InvalidId);
         }
-        self.run(cancel, move |settings, cancel| async move {
-            let project = matches!(source, SettingsScope::Project(_));
-            if project && matches!(change, McpChange::SetEnabled(false) | McpChange::Remove) {
-                set_project_enabled(&settings, source, &id, false, &cancel).await?;
-                if matches!(change, McpChange::SetEnabled(false)) {
-                    return Ok(settings
-                        .read::<McpSettings>(source, &cancel)
-                        .await
-                        .map_or(expected, |snapshot| snapshot.revision));
-                }
-            }
-            let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
-            if snapshot.revision != expected {
-                return Err(SettingsError::Conflict.into());
-            }
-            let mut document = snapshot.document;
-            if project && matches!(change, McpChange::SetEnabled(true)) {
-                if !document.mcp_servers.contains_key(&id) {
-                    return Err(McpError::UnknownServer);
-                }
-                set_project_enabled(&settings, source, &id, true, &cancel).await?;
-                return Ok(snapshot.revision);
-            }
-            match change {
-                McpChange::Put(configuration) => {
-                    document.mcp_servers.insert(id, configuration);
-                }
-                McpChange::Remove => {
-                    document
-                        .mcp_servers
-                        .remove(&id)
-                        .ok_or(McpError::UnknownServer)?;
-                }
-                McpChange::SetEnabled(value) => {
-                    let configuration = document
-                        .mcp_servers
-                        .get_mut(&id)
-                        .ok_or(McpError::UnknownServer)?;
-                    let (McpServerSettings::Stdio { enabled, .. }
-                    | McpServerSettings::Remote { enabled, .. }) = configuration;
-                    *enabled = Some(value);
-                }
-            }
-            Ok(settings
-                .update(source, &expected, document, &cancel)
-                .await?
-                .revision)
-        })
-        .await
+        let withdraws = matches!(change, McpChange::SetEnabled(false) | McpChange::Remove);
+        let publication = self.publication.clone();
+        let revision = self
+            .run(cancel, move |settings, cancel| async move {
+                write(&settings, source, expected, id, change, &cancel).await
+            })
+            .await?;
+        if withdraws {
+            // The write is committed. A closed publisher has retired every
+            // generation, and an interrupted caller reads the outcome.
+            let _ = self
+                .run(cancel, move |_, cancel| async move {
+                    publication.settle(&cancel).await
+                })
+                .await;
+        }
+        Ok(revision)
     }
 
     // Admission and draining belong to this Plugin. Settings still owns the
@@ -312,6 +291,63 @@ impl McpService {
         };
         task.await?
     }
+}
+
+/// Writes one change to its source and returns the source's revision.
+async fn write(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    expected: String,
+    id: String,
+    change: McpChange,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let project = matches!(source, SettingsScope::Project(_));
+    if project && matches!(change, McpChange::SetEnabled(false) | McpChange::Remove) {
+        set_project_enabled(settings, source, &id, false, cancel).await?;
+        if matches!(change, McpChange::SetEnabled(false)) {
+            return Ok(settings
+                .read::<McpSettings>(source, cancel)
+                .await
+                .map_or(expected, |snapshot| snapshot.revision));
+        }
+    }
+    let snapshot = settings.read::<McpSettings>(source, cancel).await?;
+    if snapshot.revision != expected {
+        return Err(SettingsError::Conflict.into());
+    }
+    let mut document = snapshot.document;
+    if project && matches!(change, McpChange::SetEnabled(true)) {
+        if !document.mcp_servers.contains_key(&id) {
+            return Err(McpError::UnknownServer);
+        }
+        set_project_enabled(settings, source, &id, true, cancel).await?;
+        return Ok(snapshot.revision);
+    }
+    match change {
+        McpChange::Put(configuration) => {
+            document.mcp_servers.insert(id, configuration);
+        }
+        McpChange::Remove => {
+            document
+                .mcp_servers
+                .remove(&id)
+                .ok_or(McpError::UnknownServer)?;
+        }
+        McpChange::SetEnabled(value) => {
+            let configuration = document
+                .mcp_servers
+                .get_mut(&id)
+                .ok_or(McpError::UnknownServer)?;
+            let (McpServerSettings::Stdio { enabled, .. }
+            | McpServerSettings::Remote { enabled, .. }) = configuration;
+            *enabled = Some(value);
+        }
+    }
+    Ok(settings
+        .update(source, &expected, document, cancel)
+        .await?
+        .revision)
 }
 
 /// Records the user's enablement of one project entry. Toggles of different

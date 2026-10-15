@@ -80,8 +80,10 @@ Disabling, or removing the entry through `mcp.remove`, withdraws the record firs
 and does not depend on the project file, so an entry that disappears and returns,
 for example through a checkout, starts disabled again. An unreadable record
 disables every project entry and is reported in the project application; user
-entries stay available. A record outlives a deleted workspace; a different
-project later cloned at the same path with the same id is treated as enabled.
+entries stay available. A disable returns once the entry's running generations
+have closed in every Session, including while the project file is unreadable. A
+record outlives a deleted workspace; a different project later cloned at the
+same path with the same id is treated as enabled.
 `mcp-approvals.json` is no longer read, migrated or removed. The record is
 configuration, not replayable authority: file-root access, tool permission
 presets and Session replay enable nothing. This is an additive source in the v13

@@ -558,21 +558,19 @@ async fn enabled_project_entry_serves_tools_and_disabling_stops_it_in_every_sess
     tokio::time::timeout(Duration::from_secs(5), env.model.entered.notified())
         .await
         .unwrap();
-    // Disabling stops the server in both Sessions at once, including the
-    // connection that the paused request has already bound.
+    // Disabling stops the server in both Sessions before it returns,
+    // including the connection that the paused request has already bound.
     env.update(
         SettingsScope::Project(1),
         "docs",
         McpChange::SetEnabled(false),
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while env.remote.deletes.load(Ordering::SeqCst) < 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("disabling closes every Session's generation");
+    assert_eq!(
+        env.remote.deletes.load(Ordering::SeqCst),
+        2,
+        "disabling returned before every Session's generation closed"
+    );
     state(&other, McpSourceState::Disabled).await;
     adopted(&other, None).await;
     env.model.release.notify_one();
@@ -929,6 +927,75 @@ async fn unreadable_catalog_preserves_adopted_tools_until_a_valid_update() {
     adopted(&session, None).await;
     assert!(view.state().catalog_error.is_none());
     assert!(view.state().servers.is_empty());
+    env.close().await;
+}
+
+#[tokio::test]
+async fn disabling_an_entry_whose_project_file_is_unreadable_withdraws_it() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let record = env.home.join("mcp-projects.json");
+    let granted = std::fs::read(&record).unwrap();
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    let view = session.session_service::<McpSession>().unwrap();
+    ready(&session).await;
+
+    let file = env.home.join("project/.mcp.json");
+    let written = std::fs::read(&file).unwrap();
+    std::fs::write(&file, "{ invalid json").unwrap();
+    let mut changes = view.subscribe();
+    view.refresh().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while changes.borrow_and_update().catalog_error.is_none() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    ready(&session).await;
+    // The user's choice does not depend on the file: the running server
+    // stops before the call returns, and the Session reports it disabled.
+    env.directory
+        .update(
+            SettingsScope::Project(1),
+            "unreadable".into(),
+            "docs".into(),
+            McpChange::SetEnabled(false),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        env.remote.deletes.load(Ordering::SeqCst),
+        1,
+        "a disabled server kept running while its project file was unreadable"
+    );
+    state(&session, McpSourceState::Disabled).await;
+    adopted(&session, None).await;
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ invalid json");
+
+    // Another process enables it again; once the file is readable, the Session
+    // follows the publisher without its own refresh and connects again.
+    std::fs::write(&record, granted).unwrap();
+    std::fs::write(&file, written).unwrap();
+    env.directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    ready(&session).await;
+    assert!(view.state().catalog_error.is_none());
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
     env.close().await;
 }
 

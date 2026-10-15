@@ -10875,6 +10875,7 @@
         "path McpSettings",
         "path config",
         "path config::effective",
+        "path config::workspace",
         "use super::config",
         "use super::config::McpProjectEnablement",
         "use super::config::McpServerSettings",
@@ -11231,6 +11232,7 @@
       "from": "dim_app_server::mcp::session",
       "to": "dim_app_server::mcp::publication",
       "references": [
+        "path super::McpApplication",
         "path super::McpOwner",
         "path super::McpOwner::in_session",
         "path super::publication::ConnectionConfig",
@@ -11247,6 +11249,13 @@
         "path super::server::McpServerError::Closed",
         "use super::server::McpServerState",
         "use super::server::McpTool"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::session",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path crate::settings::SettingsScope"
       ]
     },
     {

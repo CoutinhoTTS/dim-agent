@@ -509,6 +509,9 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     remote.repeating.store(false, Ordering::SeqCst);
     replacement.tools(&cancel).await.unwrap();
     let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    // Disabling returns once the server has stopped, even for a connection a
+    // request still holds, so the remote's DELETE is released beforehand.
+    remote.release_delete.notify_one();
     fixture
         .mcp
         .update(
@@ -520,19 +523,11 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
         )
         .await
         .unwrap();
-    remote.release_delete.notify_one();
+    assert_eq!(replacement.state(), McpServerState::Closed);
     assert!(matches!(
         fixture.mcp.server(None, "docs".into(), &cancel).await,
         Err(McpError::Disabled)
     ));
-    // Disabling stops the server, even for a connection a request still holds.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while replacement.state() != McpServerState::Closed {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
     assert!(matches!(
         replacement.tools(&cancel).await,
         Err(McpServerError::Closed)

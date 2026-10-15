@@ -162,6 +162,7 @@ impl TypedPlugin for McpSessionPlugin {
             let project = directory.settings.project_root(Path::new(&config.cwd));
             // Subscribe before any file reads, including the first discovery.
             let settings = directory.settings.subscribe();
+            let applied = directory.publication.applied();
             let stopped = ctx.cancellation_token();
             let owner = Arc::new(McpSession {
                 connections: super::McpOwner::in_session(ctx.clone(), loader, self.scope),
@@ -209,7 +210,12 @@ impl TypedPlugin for McpSessionPlugin {
                     _ = owner.stopped.cancelled() => return,
                     published = session.activated() => if !published { return },
                 }
-                reconcile(directory, owner, project, settings, refresh, workers).await
+                let changes = Changes {
+                    settings,
+                    applied,
+                    refresh,
+                };
+                reconcile(directory, owner, project, changes, workers).await
             });
             Ok(Effect::Done)
         })
@@ -221,12 +227,19 @@ impl Capability for McpSessionPlugin {
     }
 }
 
+/// What makes a Session re-read its selection: a settings write, a change
+/// the publisher applied (including external file edits), or a refresh.
+struct Changes {
+    settings: watch::Receiver<u64>,
+    applied: watch::Receiver<BTreeMap<crate::settings::SettingsScope, super::McpApplication>>,
+    refresh: watch::Receiver<()>,
+}
+
 async fn reconcile(
     directory: Arc<McpService>,
     owner: Arc<McpSession>,
     project: Option<usize>,
-    mut settings: watch::Receiver<u64>,
-    mut refresh: watch::Receiver<()>,
+    mut changes: Changes,
     tasks: TaskTracker,
 ) {
     let mut active: BTreeMap<String, (McpServerEntry, CancellationToken)> = BTreeMap::new();
@@ -240,7 +253,10 @@ async fn reconcile(
                 owner.state.update(|state| state.catalog_error = None);
                 let entries = catalog.servers;
                 active.retain(|id, (entry, cancel)| {
+                    // A cancelled discovery ended with its entry withdrawn;
+                    // this read selects the entry again.
                     let keep = !force
+                        && !cancel.is_cancelled()
                         && entries.get(id).is_some_and(|next| {
                             next.source == entry.source && next.configuration == entry.configuration
                         });
@@ -287,8 +303,9 @@ async fn reconcile(
         force = tokio::select! {
             biased;
             _ = owner.stopped.cancelled() => break,
-            result = refresh.changed() => { if result.is_err() { break; } true },
-            result = settings.changed() => { if result.is_err() { break; } false },
+            result = changes.refresh.changed() => { if result.is_err() { break; } true },
+            result = changes.settings.changed() => { if result.is_err() { break; } false },
+            result = changes.applied.changed() => { if result.is_err() { break; } false },
         };
     }
     for (_, (_, cancel)) in active {
@@ -303,8 +320,10 @@ async fn discover(
     id: String,
     cancel: CancellationToken,
 ) {
+    let mut lease = None;
     let result = async {
         let connection = directory.server(owner.connections.clone(), project, id.clone(), &cancel).await?;
+        lease = Some(connection.clone());
         let mut changed = connection.tool_changes();
         let mut state = connection.subscribe();
         let mut previous: Option<Vec<McpTool>> = None;
@@ -335,15 +354,25 @@ async fn discover(
             }
         }
     }.await;
-    if let Err(error) = result {
-        owner.publish(
+    // A generation retired because its entry was disabled or removed, even
+    // while the source is unreadable, reports the entry as disabled. The
+    // discovery then marks itself ended, so the next read selects the entry
+    // again, for example once it is re-enabled.
+    let withdrawn = lease.take().is_some_and(|lease| lease.withdrawn());
+    match result {
+        Ok(()) => {}
+        Err(error) if withdrawn || matches!(error, McpError::Disabled) => {
+            owner.publish(&id, None, McpSourceState::Disabled, &cancel);
+            cancel.cancel();
+        }
+        Err(error) => owner.publish(
             &id,
             None,
             McpSourceState::Failed {
                 message: error.to_string(),
             },
             &cancel,
-        );
+        ),
     }
 }
 

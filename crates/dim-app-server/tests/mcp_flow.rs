@@ -414,20 +414,15 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
         let cancel = cancel.clone();
         async move { set_project(&mcp, 0, enabled, &cancel).await }
     };
-    // Disabling stops the running server in every Session, even while bound.
+    // Disabling stops the running server in every Session before it returns,
+    // even while bound.
     let connection = mcp.server(Some(0), "shared".into(), &cancel).await.unwrap();
     set(false).await.unwrap();
+    assert_eq!(connection.state(), McpServerState::Closed);
     assert!(matches!(
         mcp.server(Some(0), "shared".into(), &cancel).await,
         Err(McpError::Disabled)
     ));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while connection.state() != McpServerState::Closed {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the disabled server closes");
     assert_eq!(
         fs::read_to_string(restarted.home.join("mcp-projects.json")).unwrap(),
         "{\n  \"enabled\": {}\n}\n"
@@ -463,10 +458,24 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
     .unwrap();
     assert!(!mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
 
-    // Disabling never depends on the project file being readable.
+    // Disabling never depends on the project file being readable: a retained
+    // connection closes while the publisher still cannot read the file.
     set(true).await.unwrap();
+    let retained = mcp.server(Some(0), "shared".into(), &cancel).await.unwrap();
     let written = fs::read(&project_file).unwrap();
-    fs::write(&project_file, b"{broken").unwrap();
+    let broken = || async {
+        fs::write(&project_file, b"{broken").unwrap();
+        assert!(mcp.catalog(Some(0), &cancel).await.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while mcp.application(SettingsScope::Project(0)).error.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the publisher reads the broken file");
+    };
+    broken().await;
+    assert_eq!(retained.state(), McpServerState::Disconnected);
     mcp.update(
         SettingsScope::Project(0),
         "stale".into(),
@@ -476,9 +485,30 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
     )
     .await
     .unwrap();
+    assert_eq!(retained.state(), McpServerState::Closed);
+    assert_eq!(fs::read(&project_file).unwrap(), b"{broken");
     fs::write(&project_file, &written).unwrap();
     assert!(!mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
-    drop(connection);
+
+    // With both the file and the record unreadable, it is withdrawn too.
+    set(true).await.unwrap();
+    let retained = mcp.server(Some(0), "shared".into(), &cancel).await.unwrap();
+    broken().await;
+    let record = restarted.home.join("mcp-projects.json");
+    let kept = fs::read(&record).unwrap();
+    fs::write(&record, b"{invalid").unwrap();
+    assert!(mcp.catalog(Some(0), &cancel).await.is_err());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while retained.state() != McpServerState::Closed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an unreadable record withdraws an unreadable file's entries");
+    fs::write(&record, kept).unwrap();
+    fs::write(&project_file, &written).unwrap();
+    assert!(mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
+    drop((connection, retained));
     restarted.close().await;
 }
 
