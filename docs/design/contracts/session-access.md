@@ -90,7 +90,7 @@ sequenceDiagram
   C->>C: record outcome in process storage
 ```
 
-The caller holds no lock. Facts committed after its read are ordered before its write and are resolved by the input owners. A caller that may retry after an uncertain outcome calls `lookup` with its `submissionId` first. A write that matches an asynchronous Timeline before callback on its branch commits after the callback, so the reply may wait for it; a callback may append `input/withdraw` for that input in the same batch (A.4); InputQueue then writes `input/deleted` for it, and the caller reads the input as deleted.
+The caller holds no lock. Facts committed after its read are ordered before its write and are resolved by the input owners. A caller that may retry after an uncertain outcome calls `lookup` with its `submissionId` first.
 
 ### 3.2 Withdrawal
 
@@ -113,7 +113,7 @@ sequenceDiagram
   end
 ```
 
-`input/withdraw { input_id, reason? }` is a command event, and `input/deleted { input_id }` is InputQueue's result fact. Legitimate producers write the command: clients through `session.input.withdraw`, which InputQueue provides through `sessionMethods` ([session-boundary](session-boundary.md#a1-method-contributions)), process callers through `sessions.withdraw`, and a Timeline before callback (for example Hooks) in the same atomic batch as the input. InputQueue consumes commands in sequence order and decides from its own decision state only ([time bus §4](../../architecture/rust-agent/time-bus.md#4-写入前的复核归各状态机)): the command takes effect only if InputQueue still holds that `input/message` unapplied. Once InputQueue has written `input/applied` for an input, the input belongs to Loop and cannot be withdrawn; Loop needs no change. InputQueue decides adoption for inputs only after the whole atomic batch containing them has been dispatched, so a withdraw in the input's own batch always takes effect. For one input, at most one of `input/applied` and `input/deleted` exists.
+`input/withdraw { input_id, reason? }` is a command event, and `input/deleted { input_id }` is InputQueue's result fact. Legitimate producers write the command: clients through `session.input.withdraw`, which InputQueue provides through `sessionMethods` ([session-boundary](session-boundary.md#a1-method-contributions)), and process callers through `sessions.withdraw`. InputQueue consumes commands in sequence order and decides from its own decision state only ([time bus §4](../../architecture/rust-agent/time-bus.md#4-写入前的复核归各状态机)): the command takes effect only if InputQueue still holds that `input/message` unapplied. Once InputQueue has written `input/applied` for an input, the input belongs to Loop and cannot be withdrawn; Loop needs no change. For one input, at most one of `input/applied` and `input/deleted` exists.
 
 ## 4. Timing and conflicts
 
@@ -123,7 +123,6 @@ sequenceDiagram
 | Input after `stop/interrupt` | interrupt < input | Queue/Steer start a turn, Append waits | InputQueue, Loop |
 | Withdraw while the input is held | input < `input/withdraw`, no `input/applied` | `input/deleted`; never applied or consumed; not pending | InputQueue |
 | Withdraw after the input is applied | `input/applied` < `input/withdraw` | No effect, nothing written; reply `notHeld`; the input is consumed normally | InputQueue |
-| Input and withdraw in one batch (before callback) | input, `input/withdraw` same batch | `input/deleted`; never applied; the write's reply still carries `{inputId, sequence}` | Callback owner, InputQueue |
 | Agents reload during a `sessions` call | — | Caller reloads with Agents (D3); committed inputs stay; caller calls `lookup` before rewriting | rutis lifecycle, caller |
 | Session's resource node offline | — | Input committed; tool calls on that node fail `node_unavailable`; nothing goes Pending | rutis link (#5) |
 | Launch with a policy wider than the starter's | — | Capped to the starter's current policy | Agents |
@@ -168,9 +167,9 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | --- | --- |
 | §4 rule 1 (command events) | Withdrawal is the command `input/withdraw`; only InputQueue writes the result `input/deleted`, and a withdraw with no effect writes nothing and replies `notHeld`. |
 | §4 rule 2 (handover) | `input/applied` hands an input from InputQueue to Loop; after it the input cannot be withdrawn, only interrupted with `stop/interrupt`. |
-| §4 rule 3 (before callbacks only) | Entries check only param shape, authorization and the caller's own source; a before callback acts on an input by editing the draft or by appending only the command `input/withdraw` to its batch. |
+| §4 rule 3 (before callbacks only) | Entries check only param shape, authorization and the caller's own source; no before callback is used. |
 | §4 rule 4 (no business meaning in core) | `reason`, markers, keys and `submissionId` are generic data; InputQueue and Agents never interpret a source. |
-| §4 rule 5 (whole batch) | InputQueue decides adoption only after an input's whole batch is dispatched, so a same-batch withdraw always wins. |
+| §4 rule 5 (batch) | InputQueue handles `input/message` and `input/withdraw` in sequence order; "withdraw and re-submit as Steer" writes the withdraw first in one batch. |
 | §4 rule 6 (model context) | A deleted input never enters context; consumed inputs are placed at their consumed position (§5). |
 | §4 rule 7 (public events and services) | Process callers reach Sessions only through `sessions`, and withdraw only through InputQueue's public withdrawal service. |
 | §4 rule 8 (requirements) | #4, fixed-prefix read, caller source from plugin identity and optional-part assembly are raised in §9. |
@@ -224,7 +223,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | Effect on sequence, batch, interrupt, reload | Decided at Session load, and a Session reload decides again; enabling a plugin applies to Sessions loaded afterwards. |
 | Owner and issue | Runtime (Agent assembly); issue to be opened. |
 
-Asynchronous before callbacks, used by §3.1, are raised in [Hooks §9](../plugins/Hooks.md#9-requirements-raised-to-mechanism-owners); #5, used by the offline rows, in [ExternalAgent §9](../plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The optional `reason` on `input/withdraw` and the `LaunchRequest.agent` default are changes of InputQueue and Agents, listed in [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins).
+#5, used by the offline rows, in [ExternalAgent §9](../plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The optional `reason` on `input/withdraw` and the `LaunchRequest.agent` default are changes of InputQueue and Agents, listed in [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins).
 
 ## Appendix A. Interface details
 
@@ -310,15 +309,14 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 
 | Item | Content |
 | --- | --- |
-| Command | `input/withdraw { input_id, reason? }`, a branch command event. `reason` is generic optional text with no business meaning, which clients show for the deleted input; events written without it are unchanged. Producers: the withdrawal service (clients, process callers) and Timeline before callbacks in the input's own batch. It is never a fact about the input by itself |
+| Command | `input/withdraw { input_id, reason? }`, a branch command event. `reason` is generic optional text with no business meaning, which clients show for the deleted input; events written without it are unchanged. Producers: the withdrawal service (clients, process callers). It is never a fact about the input by itself |
 | Result fact | `input/deleted { input_id }`, written only by InputQueue, only when it consumes an `input/withdraw` while it holds that input unapplied |
-| Held | InputQueue holds an input from its `input/message` until it writes `input/applied` or `input/deleted` for it. Adoption of an input is decided only after the whole atomic batch containing it has been dispatched |
+| Held | InputQueue holds an input from its `input/message` until it writes `input/applied` or `input/deleted` for it. |
 | No effect | Unknown id, input already applied, or already deleted: InputQueue writes nothing and no failure event exists; the caller's reply is `notHeld` |
 | Client path | `session.input.withdraw {sessionId, branchId, inputId, reason?}`, provided by InputQueue through `sessionMethods` (namespace `session.input`; proposed Session-scoped InputQueue part that calls the branch's withdrawal service), so Rpc names no owning service → `{status: "deleted", sequence}` or `{status: "notHeld"}` |
 | Process and branch-part path | `sessions.withdraw` for process callers, InputQueue's branch withdrawal service for branch parts: only inputs whose marker is the caller's source; otherwise `foreign_source`, nothing written |
 | Write path | The service appends `input/withdraw`, then replies with InputQueue's decision for that command. InputQueue's recheck uses only its own decision state (held set), never a lock on another owner's facts |
 | Withdraw and re-submit as Steer | One atomic batch: `input/withdraw` for the old input plus the new Steer `input/message`. The withdraw takes effect only if the old input is still held; the new input is written either way |
-| Withdrawal in the input's own batch | A Timeline before callback on `input/message` may append `input/withdraw` (with its `reason`) for that input to its batch; InputQueue then always writes `input/deleted` and never applies it. Which inputs and why is the callback owner's rule (for example [Hooks](../plugins/Hooks.md) `user_prompt_submit`) |
 | After apply | An applied input cannot be withdrawn; Loop consumes it as usual and needs no change |
 
 ### A.5 Fixed-prefix read
@@ -348,8 +346,6 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | Input consumed by the interrupted turn | consumed < interrupt | Cancelled with that turn; stays in history | Loop |
 | Branch close | close < write | `SessionClosed`/`BranchMissing` | Runtime facade |
 | Concurrent writers | Timeline order | Applied by mode in sequence order | InputQueue |
-| Input pending on a before callback while another write arrives on the branch | this < other | The other write queues behind it; order is kept | Timeline |
-| Input and `input/withdraw` in one batch by a before callback | same batch | `input/deleted`; never applied; reply carries `inputId` | Callback owner, InputQueue |
 | Tool batch not settled | input < `step/tool-result` | Steer and Append after the batch; Queue after `turn/end` | Loop |
 | `input/withdraw` while held | input < withdraw, no `input/applied` | `input/deleted`; never applied or consumed | InputQueue |
 | `input/withdraw` after apply | `input/applied` < withdraw | No effect; `notHeld`; consumed normally | InputQueue, Loop |
@@ -372,7 +368,7 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 2. `session.create {interactive: false, client: "acp"}` produces the fields visible in the Session's `SessionConfig`, and no `ask_user`.
 3. Queue, Steer and Append written during a tool batch are consumed in the documented order, with the marker before the user content.
 4. A keyed block survives compaction, a retired key does not, and a child branch inherits keys independently.
-5. `input/withdraw` while InputQueue holds the input yields `input/deleted` and the input is never applied; after `input/applied` it writes nothing and replies `notHeld`; for one input at most one of `input/applied` and `input/deleted` exists. A same-batch withdraw from a before callback always deletes. A deleted input's raw and keyed blocks never reach the model. A foreign withdrawal fails `foreign_source`.
+5. `input/withdraw` while InputQueue holds the input yields `input/deleted` and the input is never applied; after `input/applied` it writes nothing and replies `notHeld`; for one input at most one of `input/applied` and `input/deleted` exists. A deleted input's raw and keyed blocks never reach the model. A foreign withdrawal fails `foreign_source`.
 6. `history` with `atLeast` after a dispatched `turn/end` returns `through` ≥ that sequence.
 
 ## Appendix D. Assumptions

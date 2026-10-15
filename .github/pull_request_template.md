@@ -11,7 +11,7 @@ Answer each item; write "n/a" with a reason where it does not apply. Rules: [des
 - [ ] Handover: every handover point is an explicit event; nothing is revoked after handover.
 - [ ] Before-write intervention uses Timeline `before` callbacks only, which never block the write; they edit the draft (asking the event owner for a generic field when needed) and append only commands to owners or their own events. Entries validate only shape and authorization; feature checks belong to the feature owner.
 - [ ] Core mechanisms and consumers gain no plugin-specific handling.
-- [ ] Batch: decisions consider the whole atomic batch.
+- [ ] Batch: facts that take effect together are written in one batch, with the deciding event last.
 - [ ] Context: only handed-over, consumed facts reach the model context.
 - [ ] No reading another plugin's internal state or deciding for it.
 - [ ] Business configuration stays out of loader rows; contracts are language-neutral.

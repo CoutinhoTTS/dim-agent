@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`，读完其整个批次之后），它仅凭该输入的文本，经 Provider `AuxiliaryModel` 在用途 key `session-title` 下生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（通用通知记录是对运行时的需求，见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel` 在用途 key `session-title` 下生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（通用通知记录是对运行时的需求，见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 1. 结构
 
@@ -75,7 +75,7 @@ sequenceDiagram
   participant Aux as AuxiliaryModel
   TL-->>SB: input/applied 位于 N，分支 main
   SB-->>ST: Event
-  Note over ST: 读完 N 所在的整个批次后：交互式 leader，已启用，无在途生成
+  Note over ST: 交互式 leader，已启用，无在途生成
   ST->>Meta: metadata：无标题，revision r
   ST->>TL: prefix(main, 批次末尾)：第一条被采用的操作者输入的文本
   ST->>Aux: complete(session-title, text)
@@ -165,7 +165,7 @@ revision 检查就是复检：手动标题总是胜出。
 | 原则 §4 第 2 条（交接） | SessionTitle 只在输入交接（`input/applied`）之后读取它，从不处理输入本身。 |
 | 原则 §4 第 3 条（只用 before 回调） | 不在写入前干预；重命名规则由 SessionTitle 自己的方法检查，不在入口检查。 |
 | 原则 §4 第 4 条（核心不带业务含义） | §9 提出的 Session 广播通知是通用记录，任何拥有 Session 进程级状态的所有者都可使用。 |
-| 原则 §4 第 5 条（读完整个批次） | 触发只在 `input/applied` 所在的整个批次分派完之后才处理它。 |
+| 原则 §4 第 5 条（批次） | 触发在消费 `input/applied` 时按序处理它。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | SessionTitle 不向模型上下文添加内容；辅助请求只含被采用的输入文本。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、SessionStore `setTitle`、`AuxiliaryModel` 和 Settings，均为公开接口。 |
 | 原则 §4 第 8 条（向机制所有者提需求） | 对运行时的需求（通用广播通知记录）写在 §9；#4 写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。对其他插件的需求（SessionStore 标题元数据和发出通知、Rpc 转发通知）列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
@@ -222,7 +222,7 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- |
 | 监听 | 应用时：为 `main` 上的 `input/applied` 事件注册 Session 广播监听器，卸载时移除 |
 | 资格 | `SessionConfig.interactive && collaborationRole = leader` |
-| 触发 | 收到位于 `N` 的 `input/applied`，并在 `N` 所在的整个批次分派完之后：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
+| 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `metadata(session)`：已有任何标题则跳过；记下 revision `r` |
 | 读取 | `main` 至该批次末尾的固定前缀；第一条有 `input/applied` 的操作者输入（`user` 内容，无来源标记；A10）及其文本。没有这样的输入或无文本：不生成标题（A8） |
 | 生成 | `complete({purpose: "session-title", inherit: 前缀中最新 context/configured 的模型, request})`，30 s 预算（A4）。规范化：取第一行，去除引号与末尾标点，折叠空白，在 `maxLength` 处截断 |
