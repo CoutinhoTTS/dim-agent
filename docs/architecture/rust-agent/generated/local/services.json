@@ -2576,6 +2576,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_runtime::config::SessionLifecycle@session",
+        "provider": 10,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
         "provider": 10,
         "generation": 1,

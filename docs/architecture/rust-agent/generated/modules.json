@@ -815,7 +815,6 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/config.rs",
       "unexpandedMacros": [
-        "matches",
         "vec"
       ]
     },
@@ -7463,6 +7462,9 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
+        "path SessionPhase::Active",
+        "path SessionPhase::Closed",
+        "path SessionPhase::Closing",
         "path config"
       ]
     },
@@ -7599,6 +7601,9 @@
         "path BranchPhase::Closing",
         "path SessionConfig",
         "path SessionIdentity",
+        "path SessionLifecycle",
+        "path SessionLifecycle::new",
+        "path SessionPhase::Closed",
         "path TimelineIdentity",
         "path config"
       ]
@@ -8127,6 +8132,7 @@
         "path BranchLifecycle",
         "path SessionConfig",
         "path SessionIdentity",
+        "path SessionLifecycle",
         "path TimelineIdentity"
       ]
     },
@@ -13080,6 +13086,10 @@
     {
       "module": "dim_agent_runtime::capability",
       "path": "D::scoped"
+    },
+    {
+      "module": "dim_agent_runtime::config",
+      "path": "P::default"
     },
     {
       "module": "dim_agent_types",

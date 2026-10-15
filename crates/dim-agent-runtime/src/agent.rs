@@ -234,7 +234,7 @@ impl Agent {
                 match &result {
                     Ok(session) => {
                         entries.insert(id.clone(), Entry::Ready(session.clone()));
-                        session.activate_supervisor();
+                        session.activate();
                     }
                     Err(_) => {
                         entries.remove(&id);
@@ -358,7 +358,10 @@ impl Session {
             supervisor: Mutex::new(None),
         }))
     }
-    fn activate_supervisor(&self) {
+    /// Publication: starts fault supervision and lets Session capabilities
+    /// begin the background work they deferred during assembly.
+    fn activate(&self) {
+        self.0.owner.lifecycle.advance(SessionPhase::Active);
         let weak = Arc::downgrade(&self.0);
         let mut faults = self.0.owner.faults.watch();
         let stop = self.0.owner.closing.clone();
@@ -629,6 +632,7 @@ impl Session {
     }
     fn finish(&self, unloading: bool) -> BoxFuture<'static, Result<()>> {
         self.0.owner.closing.cancel();
+        self.0.owner.lifecycle.advance(SessionPhase::Closing);
         let this = self.clone();
         self.0.close.start(&self.0.handle, async move {
             let diagnostics = &this.0.owner.diagnostics;
@@ -668,6 +672,7 @@ impl Session {
             if let Err(e) = shutdown_scope(&this.0.view, &children).await {
                 errors.push(e);
             }
+            this.0.owner.lifecycle.advance(SessionPhase::Closed);
             let supervisor = this.0.supervisor.lock().unwrap().take();
             if let Some(task) = supervisor
                 && let Err(e) = task.await

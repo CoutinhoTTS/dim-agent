@@ -123,6 +123,7 @@ impl SessionService for SessionConfig {}
 impl PublicService for SessionConfig {}
 impl SessionService for AgentConfig {}
 impl SessionService for SessionIdentity {}
+impl SessionService for SessionLifecycle {}
 impl SessionService for FaultReporter {}
 impl SessionService for Diagnostics {}
 impl SessionService for TimelineFactory {}

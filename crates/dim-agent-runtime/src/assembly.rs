@@ -677,6 +677,7 @@ pub(crate) struct SessionAssembly {
     pub unloading: CancellationToken,
     pub faults: FaultReporter,
     pub closing: CancellationToken,
+    pub lifecycle: SessionLifecycle,
     pub diagnostics: Diagnostics,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
 }
@@ -723,6 +724,10 @@ impl TypedPlugin for SessionScopePlugin {
                     restored: owner.restored,
                     unloading: owner.unloading.clone(),
                 }),
+            )?;
+            ctx.provide_as(
+                scope.key::<SessionLifecycle>(),
+                Arc::new(owner.lifecycle.clone()),
             )?;
             ctx.provide_as(
                 scope.key::<TimelineFactory>(),
@@ -1269,6 +1274,7 @@ pub(crate) async fn build_session(
         faults: FaultReporter::default(),
         unloading: CancellationToken::new(),
         closing,
+        lifecycle: SessionLifecycle::new(),
         diagnostics,
         loaded: Mutex::new(None),
     });
@@ -1350,6 +1356,8 @@ pub(crate) async fn build_session(
     match result {
         Ok((view, tree)) => Ok(BuiltSession { owner, view, tree }),
         Err(error) => {
+            // Never published: deferred background work ends without starting.
+            owner.lifecycle.advance(SessionPhase::Closed);
             let rollback = match started {
                 Ok(created) => Some(created),
                 Err((_, created)) => created,

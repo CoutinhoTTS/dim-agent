@@ -75,7 +75,7 @@ pub struct SessionIdentity {
 }
 
 /// Phase of one branch's lifecycle.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BranchPhase {
     /// Its capabilities are loading; it may still fail and never start.
     #[default]
@@ -86,50 +86,103 @@ pub enum BranchPhase {
     Closed,
 }
 
-/// Lifecycle of one branch: provided by its scope, advanced only by the
-/// branch's [`crate::TimelineContext`]. Capabilities that spawn background
-/// work in `apply` wait for [`Self::activated`] before doing it.
+/// Phase of one Session's lifecycle, ordered like [`BranchPhase`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SessionPhase {
+    /// Its capabilities are loading; it may still fail and never be published.
+    #[default]
+    Loading,
+    /// Built and published by its Agent: background work may begin.
+    Active,
+    Closing,
+    Closed,
+}
+
+/// Monotonic phase behind both lifecycles: Loading < Active < Closing <
+/// Closed, and a later phase is never replaced by an earlier one.
 #[derive(Clone)]
-pub struct BranchLifecycle(std::sync::Arc<tokio::sync::watch::Sender<BranchPhase>>);
-impl BranchLifecycle {
-    pub(crate) fn new() -> Self {
+struct Phases<P>(std::sync::Arc<tokio::sync::watch::Sender<P>>);
+impl<P: Copy + Ord + Default + Send + Sync + 'static> Phases<P> {
+    fn new() -> Self {
         Self(std::sync::Arc::new(
-            tokio::sync::watch::channel(BranchPhase::Loading).0,
+            tokio::sync::watch::channel(P::default()).0,
         ))
     }
-    pub fn phase(&self) -> BranchPhase {
+    fn get(&self) -> P {
         *self.0.borrow()
     }
-    pub fn watch(&self) -> tokio::sync::watch::Receiver<BranchPhase> {
+    fn watch(&self) -> tokio::sync::watch::Receiver<P> {
         self.0.subscribe()
     }
-    /// Waits until the branch leaves `Loading`: true when it became Active,
-    /// false when it closes without ever starting.
-    pub async fn activated(&self) -> bool {
+    async fn reach(&self, done: impl FnMut(&P) -> bool) -> Option<P> {
         let mut phase = self.0.subscribe();
-        let reached = phase
-            .wait_for(|phase| *phase != BranchPhase::Loading)
-            .await
-            .map(|phase| *phase);
-        matches!(reached, Ok(BranchPhase::Active))
+        phase.wait_for(done).await.map(|phase| *phase).ok()
     }
-    /// Waits until the branch starts closing; background work ends then,
-    /// without waiting for its capability to unload.
-    pub async fn closing(&self) {
-        let mut phase = self.0.subscribe();
-        let _ = phase
-            .wait_for(|phase| matches!(phase, BranchPhase::Closing | BranchPhase::Closed))
-            .await;
-    }
-    /// Advances only: a later phase is never replaced by an earlier one.
-    pub(crate) fn advance(&self, next: BranchPhase) {
+    fn advance(&self, next: P) {
         self.0.send_if_modified(|phase| {
-            let rank = |phase: BranchPhase| phase as u8;
-            let changed = rank(next) > rank(*phase);
+            let changed = next > *phase;
             if changed {
                 *phase = next;
             }
             changed
         });
+    }
+}
+
+/// Lifecycle of one branch: provided by its scope, advanced only by the
+/// branch's [`crate::TimelineContext`]. Capabilities that spawn background
+/// work in `apply` wait for [`Self::activated`] before doing it.
+#[derive(Clone)]
+pub struct BranchLifecycle(Phases<BranchPhase>);
+impl BranchLifecycle {
+    pub(crate) fn new() -> Self {
+        Self(Phases::new())
+    }
+    pub fn phase(&self) -> BranchPhase {
+        self.0.get()
+    }
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<BranchPhase> {
+        self.0.watch()
+    }
+    /// Waits until the branch leaves `Loading`: true when it became Active,
+    /// false when it closes without ever starting.
+    pub async fn activated(&self) -> bool {
+        self.0.reach(|phase| *phase != BranchPhase::Loading).await == Some(BranchPhase::Active)
+    }
+    /// Waits until the branch starts closing; background work ends then,
+    /// without waiting for its capability to unload.
+    pub async fn closing(&self) {
+        self.0.reach(|phase| *phase >= BranchPhase::Closing).await;
+    }
+    pub(crate) fn advance(&self, next: BranchPhase) {
+        self.0.advance(next);
+    }
+}
+
+/// Lifecycle of one Session: provided by its scope and advanced by its Agent.
+/// Session capabilities that spawn background work in `apply`, such as
+/// creating Session-owned instances or contacting external services, wait for
+/// [`Self::activated`]. A Session whose assembly fails never activates, and
+/// readiness of its assembly never depends on that work.
+#[derive(Clone)]
+pub struct SessionLifecycle(Phases<SessionPhase>);
+impl SessionLifecycle {
+    pub(crate) fn new() -> Self {
+        Self(Phases::new())
+    }
+    pub fn phase(&self) -> SessionPhase {
+        self.0.get()
+    }
+    /// Waits until the Session leaves `Loading`: true when it was published,
+    /// false when its assembly ended without publication.
+    pub async fn activated(&self) -> bool {
+        self.0.reach(|phase| *phase != SessionPhase::Loading).await == Some(SessionPhase::Active)
+    }
+    /// Waits until the Session starts closing.
+    pub async fn closing(&self) {
+        self.0.reach(|phase| *phase >= SessionPhase::Closing).await;
+    }
+    pub(crate) fn advance(&self, next: SessionPhase) {
+        self.0.advance(next);
     }
 }
