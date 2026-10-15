@@ -2,6 +2,8 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
+> **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
+
 Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (proposed ModelProvider supplement, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`) ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file owned by SessionStore on the Session's resource node and returns its path; the user's text references the path and the model reads the file with `read` when needed. Fork sharing and deletion of those files are SessionStore behavior. No events.
 
 ## 1. Structure
@@ -139,7 +141,7 @@ The CLI decodes images only to check headers and limits; ModelProvider decodes t
 | Principles §4 rule 2 (handover) | Attachments never touches inputs; images enter only inside `input/message` and are handed to Loop by `input/applied` as usual. |
 | Principles §4 rule 3 (before callbacks only) | No check at the RPC or Session entry: Rpc checks only parameter shape, image checks live in the CLI and in ModelProvider's request building (principles §4 rule 3). |
 | Principles §4 rule 4 (no business meaning in core) | No core change; ModelProvider's image handling applies to every image block regardless of writer. |
-| Principles §4 rule 5 (read the whole batch) | Not applicable: Attachments decides on no event. |
+| Principles §4 rule 5 (batch) | Not applicable: Attachments decides on no event. |
 | Principles §4 rule 6 (context from handed-over events) | Images reach the model only from consumed inputs; deleted inputs never enter context. |
 | Principles §4 rule 7 (public events and services only) | Attachments uses only `sessionMethods` and SessionStore's public Session-file operation. |
 | Principles §4 rule 8 (requirements to mechanism owners) | The only runtime or rutis requirement, #5, is stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The ModelProvider supplement is a requirement to another plugin and is listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), with the reasons in A.1. |
