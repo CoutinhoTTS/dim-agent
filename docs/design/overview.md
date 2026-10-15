@@ -403,7 +403,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 
 | Question | Status |
 | --- | --- |
-| How events enter context | Decided: only adopted input and tool results (ADR 001). #2 was revised on 2026-10-15 and no longer has projection rules |
+| How events enter context | Decided: only adopted input and tool results (ADR 001). #2 was revised on 2026-10-15 to match |
 | MCP stdio isolation | Open: whether MCP stdio processes are isolated by default |
 | Remote access trade-offs | Open: authentication, disconnection and TLS deployment, related to [#5](https://github.com/arcships/dim/issues/5) ([RemoteGateway](plugins/RemoteGateway.md)) |
 | TypeScript Session parts | Open: SessionTitle, Goal, Web, Notifications and the Session parts of Scheduler and Workflow provide neutral contracts by name; those that also use the runtime's typed services (Timeline, Dispatcher, InputQueue) need #4 to expose them by name, otherwise they start in Rust |
