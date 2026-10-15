@@ -126,7 +126,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `attachment.put` | `sessionMethods`（Session，key `attachment`） | 把文本附件存为 Session 文件，返回其路径 |
 | CLI 图片检查 | 客户端契约（A.1、A.3） | 提交前嗅探格式、执行限制 |
-| 构建请求时的图片处理 | ModelProvider 补充（拟议，A.1） | 按请求所用模型发送图片块，或换成文本占位 |
+| 构建请求时的图片处理 | ModelProvider 补充（已实现，S11，A.1） | 按请求所用模型发送图片块，或换成文本占位 |
 | `attachment_*` 错误 | `attachment.put` 上的 `appError` | 拒绝原因 |
 
 ## 7. 安全
@@ -175,14 +175,16 @@ CLI 在提交前检查：
 
 限制（A2）：每次提交最多 20 张图片，每张解码后 5 MiB，每边 8000 px；违反即拒绝，从不缩放。块保持其顺序。
 
-ModelProvider 补充（拟议，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)），在构建模型请求时作用于每个图片块：
+ModelProvider 补充（已在 S11 实现，`model_provider/images.rs`；[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)），在构建模型请求时作用于每个图片块：
 
 | 图片块 | 请求内容 |
 | --- | --- |
 | 请求所用模型接受图片输入，且适配器接受该块的格式和大小 | 原样发送 |
 | 模型不接受图片输入（Provider 目录） | 文本 `[Image omitted: the current model does not accept images.]` |
 | 能力未知 | 原样发送；由提供方决定（A4） |
-| URL 来源、无法解码的数据，或适配器不接受的格式或大小 | 文本 `[Image omitted: the image cannot be sent to this model.]`（A10） |
+| URL 来源、缺失或无法解码的 base64 数据，或 PNG、JPEG、WebP、GIF 以外的格式 | 文本 `[Image omitted: the image cannot be sent to this model.]`（A10） |
+
+这里不检查大小：没有适配器公布按模型的图片大小上限，所以超大的图片照常发送，由提供方决定，与能力未知时相同（A4）。CLI 的限制（A2）在提交前仍然适用。
 
 历史从不改变；每个请求按自己的模型重新决定。
 
