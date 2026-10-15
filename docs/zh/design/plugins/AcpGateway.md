@@ -2,6 +2,8 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（CLI 进程）。阶段：P3。语言：先以 TypeScript 独立程序实现，再并入 Rust CLI（[overview 附录 C](../overview.md)）。
 
+> **before 回调相关路径已撤回。** 本文描述的 before 回调行为（推迟 `input/message` 的提交、给它加块、在它自己的批次中撤回它）随 Hooks 一并撤回（[#21](https://github.com/arcships/dim/issues/21)）；before 回调只同步变换草稿。这些段落在 P3 设计复核时删除。
+
 `dimcode acp` 通过标准输入输出提供 Agent Client Protocol（ACP），使编辑器能够驱动 dim。它是 CLI 进程中的协议适配器：与 CLI 完全一样通过本地 RPC 连接守护进程，把每个 ACP session 映射为一个非交互 dim Session，把每个 ACP prompt 映射为一次 `session.submit`，把 Session 事件映射为 ACP `session/update` 通知，把 dim 审批请求映射为 ACP 权限请求。它不在守护进程中开辟任何执行路径，除通过 Rpc 内置的 Session 方法和 `sessionMethods` 服务（由 Rpc 经 Session 分派）外不写入任何内容，也不声明任何事件。运行前被移除的 prompt，其结果由 InputQueue 的结果事件 `input/deleted` 决定：生效的 `input/withdraw` 在该输入自己的批次中时（由 before 回调写入，例如 Hooks `user_prompt_submit` 规则，[Hooks](Hooks.md)），结果为 ACP 停止原因 `refusal`，并把该 `input/withdraw` 的可选 `reason` 作为文本显示；其他情况（网关自己取消，或其他客户端撤回）结果为 `cancelled`。它仅有的契约是 RPC 线协议和 ACP schema，两者都是语言中立的数据，因此没有 Rust 绑定附录（[ADR 002 D5](../../adr/002-plugin-scope.md)）。
 
 ## 1. 结构

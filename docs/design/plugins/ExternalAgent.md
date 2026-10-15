@@ -1,6 +1,8 @@
 # ExternalAgent
 
-Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process). Phase: P3. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Needs redesign. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process). Phase: P3. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+
+> **Needs redesign.** The approval part of this document is withdrawn and must not be implemented ([#28](https://github.com/arcships/dim/issues/28)): no `approval_ask` / `approval_ask_withdrawn` items in the model stream, no ModelProvider dependency on Approval, no `answerApproval` on `modelKind`, no synthetic thinking line, no Approval supplement. Direction for the redesign: an external agent's permission request is written as an `input/message` to the branch where the main model runs, and ExternalAgent offers a tool with which the main model decides; that tool call goes through dim's Approval and Permission like any other. Also for the redesign ([#37](https://github.com/arcships/dim/issues/37)): bridges become loader rows (`peer:<node>/...` on remote nodes) reconciled from the business configuration, instead of processes ExternalAgent starts and stops itself; the document describes one way ExternalAgent attaches to ModelHost.
 
 ExternalAgent makes locally installed coding agents (Claude Code, Codex, Cursor, OpenCode, ZCode and similar) usable as a kind of model connection. A Session whose model is an external agent runs through Loop and ModelProvider as usual: ExternalAgent provides the `modelKind` service for kind `external-agent`, which Aimux's ModelHost routes to (an Aimux supplement), turns each dim model request into one external turn and turns the external stream back into model output chunks. External agents use their own tools; their permission requests come back in the stream as approval asks, which ModelProvider admits as ordinary dim approvals in the Session that runs the call. ExternalAgent writes no Timeline event of its own. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding).
 
@@ -241,6 +243,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 ## 9. Requirements raised to mechanism owners
 
 ### 9.1 Imported services stay registered while a link is down (#5)
+
+Withdrawn: rutis is an external dependency, so no requirement is raised to it. Behaviour while a node is offline follows rutis' existing node behaviour.
 
 | Item | Content |
 | --- | --- |

@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`, read after its whole batch), it generates a title from that input's text alone through the Provider `AuxiliaryModel` under the purpose key `session-title`. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the generic notice record is a runtime requirement in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
+SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel` under the purpose key `session-title`. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the generic notice record is a runtime requirement in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 1. Structure
 
@@ -75,9 +75,9 @@ sequenceDiagram
   participant Aux as AuxiliaryModel
   TL-->>SB: input/applied at N, branch main
   SB-->>ST: Event
-  Note over ST: after the whole batch of N: interactive leader, enabled, none in flight
+  Note over ST: interactive leader, enabled, none in flight
   ST->>Meta: metadata: no title, revision r
-  ST->>TL: prefix(main, end of the batch): first adopted operator input text
+  ST->>TL: prefix(main, published through N): first adopted operator input text
   ST->>Aux: complete(session-title, text)
   Aux-->>ST: title text
   ST->>Meta: setTitle(expected r, auto)
@@ -165,7 +165,7 @@ The first input's text is sent to the model chosen for `session-title`; with the
 | Principles §4 rule 2 (handover) | SessionTitle reads an input only after its handover (`input/applied`) and never acts on the input itself. |
 | Principles §4 rule 3 (before callbacks only) | No intervention before a write; rename rules are checked by SessionTitle's own method, not at an entry. |
 | Principles §4 rule 4 (no business meaning in core) | The Session broadcast notice requested in §9 is a generic record for any owner of process-level Session state. |
-| Principles §4 rule 5 (read the whole batch) | The trigger acts on `input/applied` only after the whole batch containing it is dispatched. |
+| Principles §4 rule 5 (batch) | The trigger acts on `input/applied` when it is consumed, in sequence order. |
 | Principles §4 rule 6 (context from handed-over events) | SessionTitle adds nothing to model context; the auxiliary request contains only adopted input text. |
 | Principles §4 rule 7 (public events and services only) | It uses the Session broadcast, fixed-prefix read, SessionStore `setTitle`, `AuxiliaryModel` and Settings, all public. |
 | Principles §4 rule 8 (requirements to mechanism owners) | The runtime requirement (generic broadcast notice record) is stated in §9; #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). Requirements to other plugins (SessionStore title metadata and notice emission, Rpc forwarding of notices) are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
@@ -222,9 +222,9 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | --- | --- |
 | Listen | On apply: Session broadcast listener for `input/applied` events on `main`, removed on unload |
 | Eligibility | `SessionConfig.interactive && collaborationRole = leader` |
-| Trigger | On `input/applied` at `N`, after the whole batch containing `N` is dispatched: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
+| Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `metadata(session)`: skip if any title exists; keep revision `r` |
-| Read | Fixed prefix of `main` through the end of that batch; the first operator input (user content, no source marker; A10) that has an `input/applied`, and its text. No such input or no text: no title (A8) |
+| Read | Fixed prefix of `main` published through `N` (session-access A.5, `atLeast = N`); the first operator input (`user` content; A10) that has an `input/applied`, and its text. No such input or no text: no title (A8) |
 | Generate | `complete({purpose: "session-title", inherit: model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
 | Write | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
@@ -236,7 +236,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | --- | --- | --- | --- |
 | First input's turn interrupted or failed | input < `stop/interrupt` | Generation proceeds | SessionTitle |
 | Inputs without `user` content (Goal blocks, source markers) | — | Never trigger, never used | SessionTitle |
-| First input withdrawn in its own batch (Hook deny) or later (`session.input.withdraw`) | input < withdraw < `input/deleted` | Never applied: no generation, text never sent; the first applied operator input triggers | SessionTitle |
+| First input withdrawn (`session.input.withdraw`) before it is applied | input < withdraw < `input/deleted` | Never applied: no generation, text never sent; the first applied operator input triggers | SessionTitle |
 | First user input carries only images | — | No automatic title (A8) | SessionTitle |
 | Rename before the check | rename < check | Title present: skip | SessionTitle |
 | Rename during generation | check (r) < rename (r+1) < write | `conflict`: automatic title discarded | SessionStore revision |
@@ -277,7 +277,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title.
 8. Reload during generation writes nothing; the next input generates. Three failures stop attempts.
 9. Invalid rename inputs return `invalid_params`.
-10. A first input denied by a Hook (withdrawn in its own batch) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
+10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
 
 ## Appendix E. Assumptions
 
@@ -292,7 +292,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | A7 | Session fork does not copy the title | Judgment | Fork shows the source title |
 | A8 | A first user input without text produces no automatic title | Decision: title from first user input | Later inputs or a placeholder |
 | A9 | Generation waits for adoption (`input/applied`); a deleted input never titles the Session | Maintainer decision | Deleted text could reach the auxiliary model |
-| A10 | "User input" means operator input: `user` content without a source marker | Judgment | Source-written inputs could title a Session |
+| A10 | "User input" means operator input: in an interactive leader Session it is the input with `user` content, since Collaboration, Goal and ShellInput write raw blocks only (Scheduler and Workflow inputs carry `user` content but run in non-interactive Sessions, which SessionTitle does not title) | Judgment | Source-written inputs could title a Session |
 | A11 | SessionStore announces title changes with a Session broadcast notice; a client that is not subscribed sees the change at its next `session.list` | Principles §4 rule 9 | Clients poll `session.list` |
 
 ## Appendix F. Open questions

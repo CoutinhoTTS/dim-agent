@@ -9,9 +9,10 @@ Answer each item; write "n/a" with a reason where it does not apply. Rules: [des
 - [ ] Scope: each new part is placed by the owner of its state and lifecycle (process / Session / branch); no wiring module.
 - [ ] Commands and results: changes to another module's state are command events; the owner writes the result; a command with no effect writes no event and the caller's reply says so.
 - [ ] Handover: every handover point is an explicit event; nothing is revoked after handover.
-- [ ] Before-write intervention uses Timeline `before` callbacks only, which never block the write; they edit the draft (asking the event owner for a generic field when needed) and append only commands to owners or their own events. Entries validate only shape and authorization; feature checks belong to the feature owner.
+- [ ] Timeline `before` callbacks only transform the draft synchronously: they never block the write or wait for external work (ask the event owner for a generic field when the draft cannot express it). Entries validate only shape and authorization; feature checks belong to the feature owner.
+- [ ] Infrastructure (Timeline, Dispatcher, event envelope, assembly and lifecycle, Session and branch facades) is unchanged, or the change comes from and closes within the infrastructure itself.
 - [ ] Core mechanisms and consumers gain no plugin-specific handling.
-- [ ] Batch: decisions consider the whole atomic batch.
+- [ ] Batch: facts that take effect together are written in one batch, with the deciding event last.
 - [ ] Context: only handed-over, consumed facts reach the model context.
 - [ ] No reading another plugin's internal state or deciding for it.
 - [ ] Business configuration stays out of loader rows; contracts are language-neutral.

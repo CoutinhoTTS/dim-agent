@@ -5,9 +5,11 @@ Session-owned instanced groups. Business documents retain source-local authority
 [ADR 002](002-plugin-scope.md) D4 reserves loader configuration for structural settings.
 
 Decision status: Recovery design adopted for this branch. ADR 004 records the approved
-configuration scope and its remaining integration work for issue #3. Dynamic-event
-registration, its model-context boundary and dependency-loss refinements remain Proposed
-for issues #2 and #6. This ADR does not supersede those issues' decisions.
+configuration scope and its remaining integration work for issue #3. For dynamic events, the
+model-context boundary, the type-key-only write check, history of unloaded declarations and
+terminal writes during drain are decided (issue #2, revised 2026-10-15). The rest of dynamic-event
+registration and the dependency-loss refinements remain Proposed for issues #2 and #6. This ADR
+does not supersede those issues' decisions.
 
 Implementation status: The recovery, configuration and common-assembly batch is implemented;
 the broader foundation remains incomplete. The delivery table records implementation scope,
@@ -28,7 +30,18 @@ SQLite, Node, a TUI or a private account plugin.
 
 ## Decisions
 
-### Events and ownership (Proposed; issue #2)
+### Events and ownership (issue #2)
+
+Status: the model-context boundary, the write check and lifetimes 2 and 3 below are Decided (2026-10-15, issue #2
+revised to match). The rest of this section remains Proposed.
+
+Model-context boundary: events never enter model context directly. The model sees only adopted
+inputs and tool results; a capability that needs content in context writes an adopted input with
+the final content or returns it in a tool result.
+
+Write check: Timeline checks only the envelope and rejects a write whose type key is not currently
+registered. The payload is the declaring module's data contract, guaranteed by its producer;
+Timeline does not validate it.
 
 Runtime mechanism facts, public capability protocol events and domain events share one
 registration and persistence mechanism. A Rust core-event enum is a convenience view, not
@@ -37,13 +50,13 @@ their own events. Changes to shared protocol semantics require a decision record
 
 Distinguish three lifetimes:
 
-1. A module declares a stable identity, event keys and payload schemas. Do not persist
+1. A module declares a stable identity and event keys. Do not persist
    loader-generated names or process-local instance IDs as declaration identities.
-2. An instance adopts declarations within a scope and generation. Stop new work before
+2. (Decided) An instance adopts declarations within a scope and generation. Stop new work before
    draining accepted work; retain the ability to write required terminal facts until drain
    completes. Reject stale-generation operations afterward.
-3. History retains immutable declaration content and references. Reading or importing a
-   declaration never installs code, grants permissions or resumes external work.
+3. (Decided) History keeps events whose declaration is gone, unchanged. Reading or importing
+   history never installs code, grants permissions or resumes external work.
 
 Use stable type keys and reject conflicting declarations. Namespaces express ownership conventions,
 not authentication or a central approval process. The declaration owner defines the data contract;
@@ -51,12 +64,13 @@ legitimate producers use the appropriate public ports and work ownership, rather
 to the type's declaring instance. Bind active registration and its cleanup to rutis, not a second
 plugin lifecycle manager. Revoke registration after the generation's required terminal writes drain.
 
-Validate the final payload at the write boundary. Persist a declaration and its first use
-atomically. Hashes identify content, not schema or semantic compatibility. Preserve unknown
+The producer guarantees the payload; Timeline checks only that the type key is registered.
+Persist a declaration and its first use atomically. Hashes identify content, not semantic
+compatibility. Preserve unknown
 historical events without executing them. Declaration size and reference resolution are bounded;
 declarations contain no resolved credentials. All stores and portable exports preserve the
-reference closure, including branch history and trace records. Archived schemas provide contract
-provenance, not executable business interpretation. Unknown payloads remain readable as data.
+reference closure, including branch history and trace records. Unknown payloads remain readable
+as data.
 
 Preserve the existing v1-v3 protocol contracts. A new dynamic protocol should preserve unknown
 event types without requiring a server-side adapter for every extension. Visibility, authorization
@@ -264,7 +278,7 @@ never overwrite a user's existing store to make a test pass.
 
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
-| #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
+| #2 | Events enter model context only through adopted inputs and tool results; Timeline checks only that a written type key is registered, not the payload; history keeps events of unloaded plugins; an unloading plugin keeps its declarations until accepted work drains, so it can write required terminal facts (revised 2026-10-15); registration follows the plugin lifecycle | Decided: these four. The rest of the Events section remains Proposed; resolve it before implementing the dynamic public event format |
 | #3 | Structural plugin configuration uses the persisted editable layer and loader operations; ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and the user's local MCP enablement record remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
@@ -285,7 +299,7 @@ behavior with maintainer approval of the proposed issue changes.
 Continuing to add domain variants to the closed enum would defer extension ownership and force
 another migration for every feature. A universal executable projection language would create a
 second context-adoption mechanism and make history depend on plugin interpreters. This proposal
-rejects both; agreement on issue #2 is still required.
+rejects both; issue #2 adopts the same model-context boundary (revised 2026-10-15).
 
 Stable public contracts require cross-crate work and explicit storage compatibility. Snapshots add
 storage maintenance but remain disposable; immutable facts and reference closure remain authoritative.
