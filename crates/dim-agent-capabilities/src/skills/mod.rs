@@ -2,6 +2,7 @@
 //! per-Session view, its list as a prompt source and the `skill` tool, and
 //! the per-branch adoption of list changes (`SkillsBranch`).
 mod catalog;
+mod content;
 mod discovery;
 mod session;
 
@@ -19,6 +20,12 @@ use std::{
 /// plugin registered by the composition root.
 pub fn install(builder: &mut AgentBuilder) {
     builder
+        .session_extension::<content::ContentConfig, _>(
+            content::GROUP,
+            "SkillContent",
+            content::ContentPlugin::new,
+        )
+        .session_plugin(content::ContributionsPlugin::new)
         .session_plugin(SkillsPlugin::new)
         .session_tool("skill")
         .session_prompt_source(session::INSTRUCTIONS_SOURCE)
@@ -121,19 +128,10 @@ pub struct SkillSummary {
 const METADATA_BUDGET_CHARS: usize = 4000;
 
 impl SkillView {
-    pub(crate) fn from_catalog(view: &CatalogView) -> Self {
-        let mut skills = BTreeMap::new();
-        let mut disabled = BTreeSet::new();
-        for entry in &view.entries {
-            if entry.status != SkillStatus::Active {
-                continue;
-            }
-            if entry.enabled {
-                skills.insert(entry.definition.name.clone(), entry.definition.clone());
-            } else {
-                disabled.insert(entry.definition.name.clone());
-            }
-        }
+    pub(crate) fn from_contributions(
+        skills: BTreeMap<String, Arc<SkillDefinition>>,
+        disabled: BTreeSet<String>,
+    ) -> Self {
         let list = (!skills.is_empty()).then(|| render_skill_metadata(&skills));
         let identity = serde_json::json!({
             "skills": skills.values().map(|skill| serde_json::json!([

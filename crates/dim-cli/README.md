@@ -45,52 +45,39 @@ The configuration references credentials by environment-variable name. The share
 
 `--cwd PATH` selects the workspace. `--provider ID --model ID` selects a different configured model for a new session. The server validates the selection.
 
-## Project MCP execution approval
+## MCP servers
 
-Project `.mcp.json` entries require explicit approval before discovery can launch a stdio
-process or connect to an HTTP/SSE server. This is separate from per-tool permission prompts.
-An unapproved project entry still shadows a same-name user entry. User-scoped MCP configuration
-remains trusted local configuration.
-
-Use the same `--home` and model profile as the daemon serving your workspace:
+`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport and enablement.
+It does not print commands, environment values, headers or credentials. `mcp enable ID` and
+`mcp disable ID` change the entry that `mcp list` shows for the workspace.
 
 ```bash
 dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp list
-# Review .mcp.json and its referenced code or endpoint after obtaining this fingerprint.
-dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project \
-  mcp approve docs FINGERPRINT_FROM_LIST
-dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp revoke docs
+# Review the entry in .mcp.json and the code or endpoint it runs, then:
+dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp enable docs
 ```
-
-`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement, approval
-state and fingerprint. It does not print commands, environment values, headers or credentials.
-For example (the actual fingerprint has 64 hexadecimal characters):
 
 ```text
-"docs"  project  stdio  enabled  required  <fingerprint>
+"docs"  project  stdio  disabled
                   |
-             review + approve
+             mcp enable docs
                   v
-"docs"  project  stdio  enabled  approved  <same fingerprint>
-                  |
-                revoke
-                  v
-"docs"  project  stdio  enabled  required  <same fingerprint>
+"docs"  project  stdio  enabled
 ```
 
-Pass the ID's actual value, not its displayed escape spelling. List **before** reviewing the file,
-then approve that fingerprint: if the effective configuration changed since listing, approval
-fails instead of trusting the new content. Do not automatically pipe a listing into approval.
-Approval is an explicit mutating command and works without a TTY; it can immediately start
-discovery in active sessions. It does not enable an explicitly disabled server.
-
-Grants are private to the selected host home, canonical workspace, server ID and configuration.
-They survive restart, but do not travel with a Session or project. Changed executable settings
-require a matching grant. Revocation cancels and joins this host's generation work and closes
-connections, including those retained by an in-flight model request. It does not undo previous
-remote effects. After an interrupted command, run `mcp list` before retrying. Configuration
-approval is not a sandbox and does not detect changed script/binary contents or inherited
-environment; see the [host trust contract](../dim-app-server/README.md#mcp-configuration-management).
+A configured MCP server runs when it is enabled; there is no separate approval
+([ADR 003](../../docs/adr/003-approval-scope.md)). Entries from a project's `.mcp.json` start
+disabled, and the project file cannot enable them. `mcp enable` records the choice for this home,
+workspace and ID only; it never edits `.mcp.json`, and it survives daemon restarts. An enabled
+project entry runs later edits to its command without asking again and can start discovery in
+active sessions. Disabling stops it in every session before the command returns, including a
+request that is using it, and works even when `.mcp.json` cannot be read or no longer lists the
+entry. Editing the entry out of `.mcp.json` does not withdraw the choice: if the same ID returns, it
+is enabled again, so run `mcp disable ID` to withdraw it. `mcp list` prints configuration errors on
+stderr. A project entry still shadows a same-name user entry. Pass the ID's actual
+value, not its displayed escape spelling, and use the same `--home` and model profile as the daemon
+serving your workspace. See the
+[MCP configuration contract](../dim-app-server/README.md#mcp-configuration-management).
 
 ## Scrollback and session recovery
 
@@ -173,7 +160,7 @@ The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overri
 
 On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dim-app-server --connect-pipe` bridge, which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
-Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Explicit `mcp approve` is a separate management command. Configuration/transport failures do not silently select a mock model or old core.
+Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
 
 | Exit code | Meaning |
 | --- | --- |

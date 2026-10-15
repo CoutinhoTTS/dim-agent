@@ -217,9 +217,8 @@ pub struct AgentIndex {
     pub(crate) session_restored: EventKey<SessionRestored>,
     builder: AgentBuilder,
     session_defaults: SessionConfig,
-    // Gated product dependency: a soft optional read can miss Provider during
-    // startup. Member creation uses the same host as product selection.
-    pub(crate) model_selection: Option<Arc<ModelSelectionHost>>,
+    /// Protected profiles resolve Session models through a `ModelSelectionHost`.
+    selects_models: bool,
     /// Tools the process assembly provides: host tools and contributions.
     tools: BTreeSet<String>,
     /// Loading context of `AgentsPlugin`.
@@ -234,6 +233,19 @@ pub struct AgentIndex {
     stopping: CancellationToken,
 }
 impl AgentIndex {
+    /// Whether this profile resolves Session models through a host.
+    pub(crate) fn selects_models(&self) -> bool {
+        self.selects_models
+    }
+    /// The model selection host, read per call rather than depended on: in
+    /// the product profile Provider supplies it, and an inactive or reloading
+    /// management owner must not keep Agents, and so Rpc, from loading
+    /// (methods contract §3.2). `None` while its provider is not active.
+    pub(crate) fn model_selection(&self) -> Option<Arc<ModelSelectionHost>> {
+        self.selects_models
+            .then(|| self.ctx.get()?.get::<ModelSelectionHost>())
+            .flatten()
+    }
     const SUMMARY_SCAN_LIMIT: usize = 256;
     const SUMMARY_PREVIEW_CHARS: usize = 120;
     /// Process Session defaults that Agent profiles apply on top of.
@@ -1005,7 +1017,6 @@ impl TypedPlugin for AgentsPlugin {
     type Deps = (
         When<(Arc<SessionStore>, Arc<SqliteStorage>)>,
         When<Arc<SettingsService>>,
-        When<Arc<ModelSelectionHost>>,
         Arc<Loader>,
         Arc<AgentDirectory>,
     );
@@ -1015,7 +1026,7 @@ impl TypedPlugin for AgentsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (When(stored), When(settings), When(model_selection), loader, directory): Self::Deps,
+        (When(stored), When(settings), loader, directory): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let mut builder = self.builder.clone();
@@ -1052,7 +1063,7 @@ impl TypedPlugin for AgentsPlugin {
                 records,
                 session_store,
                 settings,
-                model_selection,
+                selects_models: self.config.protected_profile(),
                 stopping: CancellationToken::new(),
             };
             let index = Arc::new(index);
@@ -1078,7 +1089,6 @@ impl Capability for AgentsPlugin {
         (
             self.config.database_path.is_some().then_some(((), ())),
             self.config.local_execution().then_some(()),
-            self.config.protected_profile().then_some(()),
             (),
             (),
         )

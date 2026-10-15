@@ -748,7 +748,7 @@ impl Drop for OwnedDaemon {
 
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
-fn project_mcp_approval_commands_persist_and_reject_stale_configuration() {
+fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
     let home = Home::new();
     let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
@@ -760,10 +760,8 @@ fn project_mcp_approval_commands_persist_and_reject_stale_configuration() {
     .unwrap();
     let project = home.0.join("work");
     fs::create_dir(&project).unwrap();
-    let write_config = |argument: &str| {
-        fs::write(project.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":[argument],"env":{"SECRET":"must-not-print"}}}}).to_string()).unwrap();
-    };
-    write_config("original");
+    // The project file asks to be enabled; only the user can enable it.
+    fs::write(project.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":["original"],"env":{"SECRET":"must-not-print"},"enabled":true}}}).to_string()).unwrap();
     let run = |args: &[&str]| {
         home.command()
             .arg("--server")
@@ -787,24 +785,92 @@ fn project_mcp_approval_commands_persist_and_reject_stale_configuration() {
         assert!(!output.contains("must-not-print"));
         output
     };
-    let original = list();
-    assert!(original.contains("\tproject\tstdio\tenabled\trequired\t"));
-    let token = original.trim_end().split('\t').next_back().unwrap();
-    assert_eq!(token.len(), 64);
-    assert!(run(&["mcp", "approve", "docs", token]).status.success());
-    assert!(list().contains("\tapproved\t"));
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    let written = fs::read(project.join(".mcp.json")).unwrap();
+    let enabled = run(&["mcp", "enable", "docs"]);
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(enabled.stdout).unwrap(),
+        "Enabled \"docs\" (project).\n"
+    );
+    assert!(String::from_utf8_lossy(&enabled.stderr).contains(".mcp.json"));
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tenabled\n");
+    // The choice belongs to this user and home, not the shared project file.
+    assert_eq!(fs::read(project.join(".mcp.json")).unwrap(), written);
     assert!(run(&["daemon", "stop"]).status.success());
-    assert!(list().contains("\tapproved\t"), "restart lost the grant");
-    write_config("changed");
-    assert!(list().contains("\trequired\t"));
-    let rejected = run(&["mcp", "approve", "docs", token]);
-    assert!(!rejected.status.success());
-    assert!(list().contains("\trequired\t"));
-    let current = list();
-    let token = current.trim_end().split('\t').next_back().unwrap();
-    assert!(run(&["mcp", "approve", "docs", token]).status.success());
-    assert!(run(&["mcp", "revoke", "docs"]).status.success());
-    assert!(list().contains("\trequired\t"));
+    assert_eq!(
+        list(),
+        "\"docs\"\tproject\tstdio\tenabled\n",
+        "restart lost the choice"
+    );
+    assert!(run(&["mcp", "disable", "docs"]).status.success());
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    // An entry that leaves the file can still be disabled, and comes back off.
+    assert!(run(&["mcp", "enable", "docs"]).status.success());
+    fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    let unlisted = run(&["mcp", "disable", "docs"]);
+    assert!(unlisted.status.success());
+    assert!(String::from_utf8_lossy(&unlisted.stderr).contains("\"docs\" is not in mcp list"));
+    fs::write(project.join(".mcp.json"), &written).unwrap();
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    // Disabling does not need a readable .mcp.json.
+    assert!(run(&["mcp", "enable", "docs"]).status.success());
+    fs::write(project.join(".mcp.json"), "{broken").unwrap();
+    assert!(!run(&["mcp", "list"]).status.success());
+    let unreadable = run(&["mcp", "disable", "docs"]);
+    assert!(
+        unreadable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unreadable.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(unreadable.stdout).unwrap(),
+        "Disabled \"docs\" (project).\n"
+    );
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("could not be read"));
+    fs::write(project.join(".mcp.json"), &written).unwrap();
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    // A configuration the daemon cannot apply is reported on stderr.
+    fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"remote":{"type":"http","url":"not a url"}}}).to_string(),
+    )
+    .unwrap();
+    assert!(run(&["mcp", "enable", "remote"]).status.success());
+    let reported = (0..50).any(|_| {
+        let output = run(&["mcp", "list"]);
+        let reported = String::from_utf8_lossy(&output.stderr)
+            .contains("project MCP configuration: MCP configuration is not active");
+        if !reported {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        reported
+    });
+    assert!(
+        reported,
+        "mcp list did not report the inactive configuration"
+    );
+    assert!(run(&["mcp", "disable", "remote"]).status.success());
+    fs::write(project.join(".mcp.json"), &written).unwrap();
+    let missing = run(&["mcp", "enable", "absent"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("No MCP server \"absent\""));
+    for removed in [
+        &["mcp", "approve", "docs", "token"][..],
+        &["mcp", "revoke", "docs"],
+    ] {
+        let output = run(removed);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("mcp enable ID"));
+    }
     let id = "untrusted\u{9b}2J\u{202e}\nname";
     fs::write(
         project.join(".mcp.json"),
