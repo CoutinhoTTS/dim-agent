@@ -32,7 +32,7 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-RemoteGateway 只认证升级请求，并在连接上记录设备；此后的每次调用都是由其所有者提供的普通 Session 方法。它自己的 `remote.*` 方法是一个 `managementMethods` 进程服务（key `remote`），由 Rpc 按名称收集进其方法表；与每个管理方法一样，可从本地入口访问，从不能从已配对设备访问。Rpc 依赖该服务，因此 RemoteGateway 重载会重载 Rpc；重载是少见的结构性事件，该代价被接受（[ADR 002 D3](../../adr/002-plugin-scope.md)）。
+RemoteGateway 只认证升级请求，并在连接上记录设备；此后的每次调用都是由其所有者提供的普通 Session 方法。它自己的 `remote.*` 方法是一个 `managementMethods` 进程服务（key `remote`），由 Rpc 按名称查找；与每个管理方法一样，可从本地入口访问，从不能从已配对设备访问。Rpc 按调用查找该服务，不依赖它，因此 RemoteGateway 重载不会重载 Rpc（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
@@ -205,7 +205,7 @@ sequenceDiagram
 | §1 Capability 与 App Server 边界 | RemoteGateway 是位于自己 crate 的进程插件，不是 Capability；Transport、Connection 与 Rpc 只做通用的入口变更。 |
 | ADR 002 D1 作用域跟随状态所有者 | 设备与监听器按宿主存在，因此 RemoteGateway 是进程作用域。 |
 | ADR 002 D2 不设接线模块 | Rpc 按名字收集 `managementMethods`；没有接线模块。 |
-| ADR 002 D3 依赖跟随作用域 | RemoteGateway 单向依赖 Transport 的 `entryHost`；它自己的重载会重载 Rpc，这是可接受的少见结构性事件。 |
+| ADR 002 D3 依赖跟随作用域 | RemoteGateway 单向依赖 Transport 的 `entryHost`；Rpc 不依赖 RemoteGateway，它的重载不会重载 Rpc。 |
 | ADR 002 D4 结构性配置与业务配置分离 | 只有 `enabled` 是结构性的，且只由 PluginManager 写入；`bind`、`tls`、`plaintext` 是来源 `remote` 中的业务配置，变更时重新绑定监听器而不重载。 |
 | ADR 002 D5 合同语言中立 | `entryHost`、HTTP 接口与各方法以中立形式给出；附录 G 只是绑定。 |
 
@@ -295,7 +295,7 @@ RemoteGateway 没有启动或停止方法，也从不写自己的 `enabled` 字�
 | 写入 | RemoteGateway 不写入。远程调用与本地调用一样经 Rpc 到达所有者：`session.submit` → Session 输入边界（`Timeline::append`），`approval.respond` → 分支 Approval（`approval/respond`），`session.stop` → `stop/interrupt`，`session.permission.update` → Permission（`permission/changed`），`session.input.withdraw` → InputQueue 的 `sessionMethods`（撤回指令 `input/withdraw`；若 InputQueue 仍持有该输入，则写入 `input/deleted`） |
 | Dispatcher | 不订阅；设备通过其每连接的 Session 附着接收事件 |
 | 并发附着方 | 无独占所有者（A13）；全部以每分支顺序收到相同事件 |
-| 重载 | 关闭入口：监听器与远程连接关闭（脱离）；记录保留；邀约丢失；Rpc 因收集 `managementMethods` 而随之重载（ADR 002 D3，已接受）；在途调用遵循 Rpc 的重载规则。Transport 重载会重载 RemoteGateway（它依赖 `entryHost`）；运行时设置变更从不重载它 |
+| 重载 | 关闭入口：监听器与远程连接关闭（脱离）；记录保留；邀约丢失；RemoteGateway 重新激活前 `remote.*` 返回 `unknown_method`，Rpc 不重载；在途的 `remote.*` 调用按其 `interruption` 处理。Transport 重载会重载 RemoteGateway（它依赖 `entryHost`）；运行时设置变更从不重载它 |
 | 进程重启 | 若 `enabled` 则重新打开入口；设备重连并重新附着；已提交的输入与待处理审批在附着时重放 |
 
 ## 附录 B. 完整冲突表

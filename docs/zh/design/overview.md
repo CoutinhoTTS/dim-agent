@@ -98,7 +98,7 @@ flowchart TB
 | 把内容放入模型上下文 | 分支输入（raw 块、带 key 的块）或工具结果（[Session 访问](contracts/session-access.md#a2-来源输入约定)） | Goal, Hooks, ShellInput, Scheduler, Workflow |
 | 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调（[single-tree](../../architecture/rust-agent/single-tree.md)），借助运行时补充异步执行（[附录 B.1](#b1-session-与分支-capability)）；回调变换草稿，或向同一批次追加事件，追加的只能是发给事件所有者的指令或自身声明的事件；回调从不使写入失败或阻止写入 | Hooks `user_prompt_submit`、`pre_tool_use` |
 | 关于某个 Session 的客户端方法 | `sessionMethods`，由 Rpc 经该 Session 分发（[A.1](contracts/session-boundary.md#a1-方法贡献)） | Questions, Goal, SessionTitle, Attachments, ShellInput, Hooks, Notifications, InputQueue（`session.input.withdraw`） |
-| 宿主管理方法 | 进程插件的 `managementMethods`，由 Rpc 收集到其方法表中 | 现有管理方法, Settings（业务配置）, Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
+| 宿主管理方法 | 进程插件的 `managementMethods`，由 Rpc 按调用查找 | 现有管理方法, Settings（业务配置）, Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | 访问其他 Session | Agents 的 `sessions` 服务（`launch`、`input`、`history`、`idle` 等），与 Collaboration 的做法相同（[Session 访问](contracts/session-access.md#a1-sessions-服务)） | Scheduler, Workflow |
 | 响应另一个进程插件的结果 | 事件通知，而非依赖 | Scheduler 运行结果 |
 
@@ -123,7 +123,7 @@ flowchart LR
     IQ["InputQueue"]
     BP["分支部分"]:::new
   end
-  Rpc -->|"收集 managementMethods"| MM
+  Rpc -.->|"按调用查找"| MM
   Rpc -->|"sessionMethods"| SP
   TR -->|"收集 toolContribution"| SP
   SP -->|"监听"| BC
@@ -134,7 +134,7 @@ flowchart LR
   SP -->|"分支服务"| BP
 ```
 
-箭头是依赖边，指向相同或外层作用域（D3）。收集方依赖其贡献（ToolRegistry 依赖工具，Rpc 依赖方法所有者），因此贡献方重载会使其收集方重载。重载只跟随罕见的结构性操作（安装、升级、启用、禁用、崩溃）。其传播（包括使在途 turn 失败）是被接受并记录的代价，不增加任何阻止手段。业务配置变更永不重载（D4）。
+箭头是依赖边，指向相同或外层作用域（D3）。收集方依赖其贡献（ToolRegistry 依赖工具），因此贡献方重载会使其收集方重载。Rpc 不依赖管理方法所有者：虚线箭头是按调用查找，未激活或正在重载的所有者只影响自己的命名空间（[方法 §3.2](contracts/session-boundary.md#32-管理方法)）。重载只跟随罕见的结构性操作（安装、升级、启用、禁用、崩溃）。其传播（包括使在途 turn 失败）是被接受并记录的代价，不增加任何阻止手段。业务配置变更永不重载（D4）。
 
 ### 3.1 合同形式
 
@@ -502,7 +502,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 
 | 插件 | 类型 | 内容 | 理由 |
 | --- | --- | --- | --- |
-| Rpc | 变更 | 方法表：内建方法，然后是收集到的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive, client}`。把 Session 广播通知记录原样转发给已订阅的客户端（SessionTitle）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权、自有来源检查）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
+| Rpc | 变更 | 方法表：内建方法，然后是按调用查找、不依赖其所有者的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive, client}`。把 Session 广播通知记录原样转发给已订阅的客户端（SessionTitle）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权、自有来源检查）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}`；Connection 把每个声明为客户端可见（#2）的事件作为 `session.event` 转发，不了解其含义 | RemoteGateway；Questions |
 | Agents | 补充 | `sessions` 服务；`SessionConfig` 字段；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建；Session 部分持有的活动句柄，持有期间 Agents 不因空闲卸载该 Session（提议）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)） | Scheduler、Workflow、fork、ExternalAgent；ShellInput |
 | Collaboration | 变更 | 按用途 `collaboration.member` 选择成员模型；成员审批转发给 leader | ExternalAgent |

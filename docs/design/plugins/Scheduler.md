@@ -408,7 +408,7 @@ One binding of the neutral contracts above, for a Rust implementation; a TypeScr
 | Neutral | Rust |
 | --- | --- |
 | `toolContribution` key `schedule` | Session-scoped `ToolContribution` registered in `SchedulerSession`'s `provides`; `declaration()` / `execute(ToolCall, cancel)` |
-| `managementMethods` key `schedule` | Entry of `Contributions<ManagementMethods>` collected by Rpc |
+| `managementMethods` key `schedule` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
 | `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` lease, then `Session::input`, `local_page`, `idle`, `stop`, `service::<InputQueue>(branch).withdraw` |
 | `scheduled_run_outcomes` | `pub fn scheduled_run_outcomes() -> EventKey<RunOutcome>` in Scheduler's public types crate; `emit(host_ctx, &key, Arc::new(outcome))`, listeners `on(host_ctx, &key, listener)` |

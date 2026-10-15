@@ -408,7 +408,7 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | 中立 | Rust |
 | --- | --- |
 | `toolContribution` key `schedule` | 在 `SchedulerSession` 的 `provides` 中注册的 Session 级 `ToolContribution`；`declaration()` / `execute(ToolCall, cancel)` |
-| `managementMethods` key `schedule` | 由 Rpc 收集的 `Contributions<ManagementMethods>` 条目 |
+| `managementMethods` key `schedule` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
 | `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` 租约，然后 `Session::input`、`local_page`、`idle`、`stop`、`service::<InputQueue>(branch).withdraw` |
 | `scheduled_run_outcomes` | Scheduler 公共类型 crate 中的 `pub fn scheduled_run_outcomes() -> EventKey<RunOutcome>`；`emit(host_ctx, &key, Arc::new(outcome))`，监听方 `on(host_ctx, &key, listener)` |
