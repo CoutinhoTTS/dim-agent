@@ -204,6 +204,16 @@ fn unknown() -> RpcError {
     RpcError::app(-32601, "unknown_method", "Unknown method")
 }
 
+/// Unlike `service_reloading`, a retry fails the same way until the owner is
+/// fixed or restarted.
+fn unavailable() -> RpcError {
+    RpcError::app(
+        -32000,
+        "service_unavailable",
+        "Service is unavailable until it is fixed or restarted",
+    )
+}
+
 /// The management namespaces assembly configures, each with the loader row
 /// of the owner that provides it. Rpc reaches a namespace's provider by key on
 /// each call and reads that row's status only when none is active, to tell a
@@ -249,33 +259,35 @@ impl Owners {
         let provider = match provider(ctx, namespace) {
             Some(provider) => provider,
             // No active provider: the owner row's state answers (methods
-            // contract §3.2). A disabled or absent row has no enabled provider.
+            // contract §3.2). Each known state is named, and a new
+            // `FiberState` does not compile until it is placed.
             None => match self.loader.get(row).map(|entry| entry.status) {
-                None | Some(EntryStatus::Disabled) => return Err(unknown()),
-                // Unlike `service_reloading`, a retry fails the same way until
-                // the owner is fixed or restarted.
-                Some(
-                    EntryStatus::Unresolved(_)
-                    | EntryStatus::Running(Snapshot {
-                        state: FiberState::Failed,
-                        ..
-                    }),
-                ) => {
-                    return Err(RpcError::app(
-                        -32000,
-                        "service_unavailable",
-                        "Service is unavailable until it is fixed or restarted",
-                    ));
-                }
-                // Active between the lookup and the status read.
-                Some(EntryStatus::Running(Snapshot {
-                    state: FiberState::Active,
-                    ..
-                })) => provider(ctx, namespace).ok_or_else(unknown)?,
-                // Pending, between generations while it reloads, or not
-                // started yet: running, or about to, but not failed.
-                Some(_) => return Err(RpcError::reloading()),
-            },
+                // No enabled provider.
+                None | Some(EntryStatus::Disabled) => Err(unknown()),
+                // Not started yet, or between generations while the loader
+                // replaces its fiber. An owner that disposed itself also ends
+                // here: the process loader cannot disable its row (#124).
+                Some(EntryStatus::Inactive) => Err(RpcError::reloading()),
+                Some(EntryStatus::Running(Snapshot { state, .. })) => match state {
+                    // Waiting for its dependencies, applying, or unloading
+                    // between generations. A failed dependency keeps it
+                    // Pending until the dependency is fixed (#124).
+                    FiberState::Pending | FiberState::Loading | FiberState::Unloading => {
+                        Err(RpcError::reloading())
+                    }
+                    // Active between the lookup and the status read.
+                    FiberState::Active => provider(ctx, namespace).ok_or_else(unknown),
+                    // Its apply failed, or it was removed and cannot restart.
+                    FiberState::Failed | FiberState::Disposed => Err(unavailable()),
+                },
+                // The row cannot run as configured; or a copy inside an
+                // instance disposed itself and waits for an explicit restart
+                // (`get` reads the row itself, so it never reports this).
+                Some(EntryStatus::Unresolved(_) | EntryStatus::Stopped) => Err(unavailable()),
+                // `EntryStatus` is non-exhaustive. A state added later stops
+                // the client instead of letting it retry without end.
+                Some(_) => Err(unavailable()),
+            }?,
         };
         provider.accept(method, params, entry_stopping)
     }
