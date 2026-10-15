@@ -6,7 +6,10 @@ use super::{
     server::{McpServer, McpServerError, McpServerPlugin, McpServerState},
 };
 use crate::settings::{SettingsScope, SettingsService};
-use dim_agent_runtime::{Capability, KeysOf, SessionLoader, StateCell, register_capability};
+use dim_agent_runtime::{
+    Capability, KeysOf, SessionLifecycle, SessionLoader, SessionPhase, StateCell,
+    register_capability,
+};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use rutis_loader::{Builtins, InstanceResult, Loader};
 use serde::Serialize;
@@ -32,6 +35,7 @@ pub struct McpOwner {
     loader: Arc<SessionLoader>,
     scope: rutis::InstanceId,
     closed: CancellationToken,
+    session: Option<SessionLifecycle>,
 }
 impl McpOwner {
     pub fn new(ctx: Ctx, loader: Loader) -> Self {
@@ -41,12 +45,14 @@ impl McpOwner {
             scope: ctx.instance(),
             ctx,
             loader: Arc::new(SessionLoader::new(loader)),
+            session: None,
         }
     }
     pub(super) fn in_session(
         ctx: Ctx,
         loader: Arc<SessionLoader>,
         scope: dim_agent_runtime::SessionScope,
+        session: SessionLifecycle,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -54,7 +60,17 @@ impl McpOwner {
             scope: scope.instance,
             ctx,
             loader,
+            session: Some(session),
         }
+    }
+    /// A closing Session keeps its generations until it unloads, but no
+    /// new instance is created in it.
+    fn admits(&self) -> bool {
+        !self.closed.is_cancelled()
+            && self
+                .session
+                .as_ref()
+                .is_none_or(|session| session.phase() < SessionPhase::Closing)
     }
 }
 
@@ -551,7 +567,7 @@ impl Projection {
         id: String,
         cancel: &CancellationToken,
     ) -> Result<Arc<McpConnection>> {
-        if owner.closed.is_cancelled() {
+        if !owner.admits() {
             return Err(McpError::Closed);
         }
         let mut selected = None;
@@ -626,7 +642,7 @@ impl Projection {
             }
         };
         let service = owner.ctx.get_as::<McpServer>(key);
-        if owner.closed.is_cancelled()
+        if !owner.admits()
             || cancel.is_cancelled()
             || service.is_none()
             || instance
@@ -637,14 +653,14 @@ impl Projection {
             if instance.view.shutdown().await.is_err() || instance.view.state().error.is_some() {
                 self.cleanup_failed.insert(source);
             }
-            if !owner.closed.is_cancelled() && !cancel.is_cancelled() {
+            if owner.admits() && !cancel.is_cancelled() {
                 self.application_failed.insert(
                     (owner.id.clone(), source, id.clone()),
                     (self.sources[&source].revision.clone(), owner.closed.clone()),
                 );
             }
             self.publish();
-            return Err(if owner.closed.is_cancelled() {
+            return Err(if !owner.admits() {
                 McpError::Closed
             } else {
                 McpError::Unavailable

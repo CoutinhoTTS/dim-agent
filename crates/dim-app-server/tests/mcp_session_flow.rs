@@ -125,8 +125,13 @@ async fn events(State(remote): State<Arc<Remote>>) -> impl IntoResponse {
 }
 
 enum Action {
-    Call { pause: bool, name: Option<String> },
+    Call {
+        pause: bool,
+        name: Option<String>,
+    },
     Text,
+    /// Ignores cancellation until released, so a Session close waits for it.
+    Hold,
 }
 #[derive(Default)]
 struct Model {
@@ -192,6 +197,14 @@ impl ModelDriver for Model {
                     vec![ModelChunk::Text("done".into()), ModelChunk::TextEnd],
                     ModelStopReason::EndTurn,
                 ),
+                Action::Hold => {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    (
+                        vec![ModelChunk::Text("done".into()), ModelChunk::TextEnd],
+                        ModelStopReason::EndTurn,
+                    )
+                }
             };
             let mut stream = vec![Ok(ModelChunk::MessageStart {
                 message_id: "message".into(),
@@ -996,6 +1009,48 @@ async fn disabling_an_entry_whose_project_file_is_unreadable_withdraws_it() {
     ready(&session).await;
     assert!(view.state().catalog_error.is_none());
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_closing_session_starts_no_connection() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    state(&session, McpSourceState::Disabled).await;
+    // A held turn keeps the close waiting for its branch, with every Session
+    // capability still loaded.
+    *env.model.actions.lock().unwrap() = VecDeque::from([Action::Hold]);
+    session
+        .submit("hold".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), env.model.entered.notified())
+        .await
+        .unwrap();
+    let closing = session.close();
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        0,
+        "a closing Session connected an MCP server"
+    );
+    env.model.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), closing)
+        .await
+        .unwrap()
+        .unwrap();
     env.close().await;
 }
 

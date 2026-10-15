@@ -10831,6 +10831,16 @@
     },
     {
       "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionLifecycle",
+        "path SessionPhase::Closing",
+        "use dim_agent_runtime::SessionLifecycle",
+        "use dim_agent_runtime::SessionPhase"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
       "to": "dim_agent_runtime::scope",
       "references": [
         "path SessionLoader",

@@ -165,7 +165,12 @@ impl TypedPlugin for McpSessionPlugin {
             let applied = directory.publication.applied();
             let stopped = ctx.cancellation_token();
             let owner = Arc::new(McpSession {
-                connections: super::McpOwner::in_session(ctx.clone(), loader, self.scope),
+                connections: super::McpOwner::in_session(
+                    ctx.clone(),
+                    loader,
+                    self.scope,
+                    (*session).clone(),
+                ),
                 sets: Mutex::default(),
                 state: StateCell::new(McpSessionState::default()),
                 changed: watch::Sender::new(()),
@@ -203,7 +208,8 @@ impl TypedPlugin for McpSessionPlugin {
             )?;
             // No network await in apply, and all owned resources have a disposer.
             // Discovery creates Session-owned instances and may start servers,
-            // so it waits for publication; an unpublished Session never starts it.
+            // so it waits for publication; an unpublished Session never starts it,
+            // and it ends when the Session starts closing.
             let workers = tasks.clone();
             tasks.spawn(async move {
                 tokio::select! {
@@ -215,7 +221,7 @@ impl TypedPlugin for McpSessionPlugin {
                     applied,
                     refresh,
                 };
-                reconcile(directory, owner, project, changes, workers).await
+                reconcile(directory, owner, project, &session, changes, workers).await
             });
             Ok(Effect::Done)
         })
@@ -239,16 +245,24 @@ async fn reconcile(
     directory: Arc<McpService>,
     owner: Arc<McpSession>,
     project: Option<usize>,
+    session: &SessionLifecycle,
     mut changes: Changes,
     tasks: TaskTracker,
 ) {
     let mut active: BTreeMap<String, (McpServerEntry, CancellationToken)> = BTreeMap::new();
     let mut force = false;
+    let closing = session.closing();
+    tokio::pin!(closing);
     loop {
         if owner.stopped.is_cancelled() {
             break;
         }
-        match directory.catalog(project, &owner.stopped).await {
+        let catalog = tokio::select! {
+            biased;
+            _ = &mut closing => break,
+            catalog = directory.catalog(project, &owner.stopped) => catalog,
+        };
+        match catalog {
             Ok(catalog) => {
                 owner.state.update(|state| state.catalog_error = None);
                 let entries = catalog.servers;
@@ -302,6 +316,7 @@ async fn reconcile(
         }
         force = tokio::select! {
             biased;
+            _ = &mut closing => break,
             _ = owner.stopped.cancelled() => break,
             result = changes.refresh.changed() => { if result.is_err() { break; } true },
             result = changes.settings.changed() => { if result.is_err() { break; } false },
