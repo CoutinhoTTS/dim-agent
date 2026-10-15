@@ -389,12 +389,12 @@ impl FileStorage {
 
     /// Removes the entry at `path` and, for a directory, everything beneath
     /// it, including this module's resources there. Files are removed under
-    /// the lock leases use, so a lease held on or beneath the entry stops
-    /// removal with `Locked`; a link is removed itself. An absent entry counts
-    /// as removed, so retrying is safe. Removal is not atomic: an error or
-    /// cancellation can leave part of a tree removed. The directory's owner
-    /// orders removal after its writers; entries or leases created beneath it
-    /// meanwhile make removal fail.
+    /// the lock leases use, so removing a leased file, or a directory with a
+    /// lease held beneath it, fails with `Locked`; a link is removed itself.
+    /// An absent entry counts as removed, so retrying is safe. Removal is not
+    /// atomic: an error or cancellation can leave part of a tree removed. The
+    /// directory's owner orders removal after its writers; entries or leases
+    /// created beneath it meanwhile make removal fail.
     pub async fn remove(
         self: &Arc<Self>,
         path: &FilePath,
@@ -648,8 +648,8 @@ fn remove_entry(
 
 /// Removes this module's resources from a directory whose business entries
 /// are gone. Every lock key is locked before any is unlinked and stays locked
-/// until the caller has removed the directory, so no lease can hold a key
-/// that was unlinked while its file could still exist.
+/// until the caller's removal of the directory returns, so removal never
+/// unlinks a key another holder has locked.
 fn remove_resources(directory: &File) -> Result<Vec<HeldKey>> {
     let mut keys = Vec::new();
     let mut contents = Vec::new();
