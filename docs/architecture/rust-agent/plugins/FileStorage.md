@@ -124,13 +124,13 @@ than list entries whose aliases of reserved names could not be recognized.
 `file_storage_flow` (path, lock, permission and platform checks),
 `directory_listing_and_removal_stay_inside_the_authorized_root` (Session-file
 layout, reserved resources and aliases, leases held during partial removal,
-links, cancellation, leftovers with reserved names) and
-`removal_scales_with_directory_size` (a directory that
-used 300 names and a 1,000-level tree, removed under a 64-descriptor limit on a
-256 KiB worker stack, where recursion overflowed at a few hundred levels). The unit test
-`lock_keys_stay_exclusive_across_concurrent_directory_removal` in the owner
-module drives the lock, removal and temporary-file interleavings that the public
-API cannot produce reliably.
+links, cancellation, leftovers with reserved names, a marker whose release
+failed) and `removal_scales_with_directory_size` (a directory that used 300
+names and a 1,000-level tree, removed under a 64-descriptor limit on a 256 KiB
+worker stack, where recursion overflowed at a few hundred levels). The unit
+test `lock_keys_stay_exclusive_across_concurrent_directory_removal` in the
+owner module drives the lock, removal and temporary-file interleavings that the
+public API cannot produce reliably.
 
 <!-- generated:plugin FileStorage — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
