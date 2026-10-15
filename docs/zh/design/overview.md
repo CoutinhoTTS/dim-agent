@@ -465,7 +465,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 扩展 | `/skills`、`/reload-skills`、Skill 来源 | 现有：SkillsCatalog、Skills；由 PluginManager 安装 |
 | 扩展 | `plan` Skill | 不计划 |
 | 扩展 | `AGENTS.md` | 现有：PromptSources |
-| 扩展 | `/mcp`、MCP 连接 | 现有：Mcp、Settings；扩展：HTTP/SSE OAuth |
+| 扩展 | `/mcp`、MCP 连接 | 现有：Mcp、Settings；扩展：HTTP/SSE OAuth（[MCP OAuth](appserver/mcp-oauth.md)） |
 | 扩展 | `/workflow`、`/workflow:save` | 新增：Workflow |
 | 扩展 | `/external-agents` | 新增：ExternalAgent，经 Collaboration 委派 |
 | 扩展 | 并行子 Agent | 现有：Collaboration；扩展：Provider 模型选择 |
@@ -521,7 +521,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、ExternalAgent、Modality、RemoteGateway、PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 已删除，服务启用即运行，项目条目默认关闭、只能由用户本机配置启用（§6.4 批准范围） | Rpc 迁移 |
 | ManagedProviders | 补充 | 套餐用量查询 | `/usage` |
-| Mcp | 补充 | HTTP/SSE OAuth；通过自己的类型化操作从 PluginManager 接收插件包中的 MCP 配置（#36） | MCP；PluginManager |
+| Mcp | 补充 | HTTP/SSE OAuth（[MCP OAuth](appserver/mcp-oauth.md)）；通过自己的类型化操作从 PluginManager 接收插件包中的 MCP 配置（#36） | MCP；PluginManager |
 | SkillsCatalog | 补充 | 通过自己的类型化操作从 PluginManager 接收插件包中的 Skill 根目录（#36） | PluginManager |
 | Trace | 补充 | 模型请求快照导出 | 快照导出 |
 
