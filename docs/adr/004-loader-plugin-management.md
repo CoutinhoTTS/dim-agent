@@ -62,7 +62,9 @@ ordinary edits preserve its import provenance. Project `.mcp.json` retains file
 authority and content CAS; standalone Settings may use the file backend.
 
 Successful writes acknowledge persistence and only then notify consumers. Failed
-persistence does not publish unsaved runtime intent. Interrupted replies require
+persistence does not publish unsaved runtime intent. A file replacement that is
+in place but could not be synced is not unsaved: consumers are notified and the
+write reports that its durability is uncertain. Interrupted replies require
 rereading before retry. There is no UserConfiguration service, editable-user
 document row, configuration RPC namespace, queued flush, v14 envelope, migration
 API or two-stage bootstrap. Full process assembly is reconciled once. Unsupported

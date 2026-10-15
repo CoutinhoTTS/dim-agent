@@ -261,7 +261,8 @@
       "file": "crates/dim-agent-capabilities/src/file_storage.rs",
       "unexpandedMacros": [
         "cfg",
-        "format"
+        "format",
+        "matches"
       ]
     },
     {
@@ -12074,6 +12075,7 @@
         "path FileStorageError::Closed",
         "path FileStorageError::Io",
         "path FileStorageError::Locked",
+        "path FileStorageError::Unsynced",
         "path dim_agent_capabilities::file_storage::FileLease",
         "use dim_agent_capabilities::file_storage::FilePath",
         "use dim_agent_capabilities::file_storage::FileStorage",

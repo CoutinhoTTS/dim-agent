@@ -238,7 +238,16 @@ impl SettingsService {
                     .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
                 bytes.push(b'\n');
                 let revision = revision(Some(&bytes));
-                lease.replace(bytes, private_permissions(), &cancel).await?;
+                match lease.replace(bytes, private_permissions(), &cancel).await {
+                    Ok(()) => {}
+                    // The new content is what readers now see: consumers follow
+                    // it, and the caller learns it may not survive a crash.
+                    Err(FileStorageError::Unsynced(error)) => {
+                        owner.publish::<D>(scope, &revision);
+                        return Err(FileStorageError::Unsynced(error).into());
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 owner.publish::<D>(scope, &revision);
                 Ok(SettingsSnapshot { revision, document })
             })

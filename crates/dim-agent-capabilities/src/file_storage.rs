@@ -55,6 +55,10 @@ pub enum FileStorageError {
     },
     #[error("file lock cleanup: {0:?}")]
     Release(Vec<io::Error>),
+    /// The replacement is in place and visible, but syncing it failed, so it
+    /// may not survive a crash. It is not an unchanged file.
+    #[error("file replaced, but its durability could not be confirmed: {0}")]
+    Unsynced(#[source] io::Error),
 }
 
 /// A relative path bound to one authorized root and one service generation.
@@ -474,12 +478,14 @@ impl FileLease {
                 // may abandon rename or its durability result.
                 owner.check(&cancel)?;
                 native::replace(&temp, &temporary_directory, &temporary, &parent, &name)?;
-                native::sync_replacement(&temp, &temporary_directory, &parent)?;
-                Ok(())
+                native::sync_replacement(&temp, &temporary_directory, &parent)
+                    .map_err(FileStorageError::Unsynced)
             })();
             // On success rename consumed the temporary name. On failure before
             // rename it is still ours; after rename it no longer exists.
-            if result.is_err()
+            if result
+                .as_ref()
+                .is_err_and(|error| !matches!(error, FileStorageError::Unsynced(_)))
                 && let Err(cleanup) = native::remove(&temporary_directory, &temporary)
                 && cleanup.kind() != io::ErrorKind::NotFound
             {
