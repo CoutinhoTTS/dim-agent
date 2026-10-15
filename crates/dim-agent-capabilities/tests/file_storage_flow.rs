@@ -323,6 +323,50 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
         Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
 
+    // Leftovers with reserved names go with their directory: a stray
+    // resource-prefixed file and directory, and an account marker that is a
+    // directory or a link, even beside `auth.json`.
+    let leftovers = root_path.join("leftovers");
+    fs::create_dir_all(leftovers.join(".dim-file-storage-old/nested")).unwrap();
+    fs::write(leftovers.join(".dim-file-storage-old/nested/file"), b"old").unwrap();
+    fs::write(leftovers.join(".dim-file-storage-stray"), b"old").unwrap();
+    fs::create_dir_all(leftovers.join("marker-directory/auth.json.lock/nested")).unwrap();
+    fs::write(leftovers.join("marker-directory/auth.json"), b"{}").unwrap();
+    fs::create_dir(leftovers.join("marker-link")).unwrap();
+    symlink(&outside, leftovers.join("marker-link/auth.json.lock")).unwrap();
+    fs::write(leftovers.join("marker-link/auth.json"), b"{}").unwrap();
+    assert_eq!(
+        storage.list(&path("leftovers"), &cancel).await.unwrap(),
+        [
+            entry("marker-directory", EntryKind::Directory),
+            entry("marker-link", EntryKind::Directory)
+        ]
+    );
+    storage.remove(&path("leftovers"), &cancel).await.unwrap();
+    assert!(fs::symlink_metadata(&leftovers).is_err());
+    assert_eq!(fs::read(outside.join("secret")).unwrap(), b"outside");
+
+    // A marker this process failed to release is reclaimed at once, while a
+    // marker naming this process otherwise counts as live.
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } != 0 {
+        let (failing_root, _, failing) = mount(root_path.clone()).await;
+        fs::create_dir(root_path.join("abandoned")).unwrap();
+        let abandoned = failing.path(0, "abandoned").unwrap();
+        let account = failing
+            .lock(&failing.path(0, "abandoned/auth.json").unwrap(), &cancel)
+            .await
+            .unwrap();
+        let marker = root_path.join("abandoned/auth.json.lock");
+        fs::set_permissions(&marker, Permissions::from_mode(0o000)).unwrap();
+        drop(account);
+        fs::set_permissions(&marker, Permissions::from_mode(0o600)).unwrap();
+        assert!(marker.exists());
+        failing.remove(&abandoned, &cancel).await.unwrap();
+        assert!(fs::symlink_metadata(root_path.join("abandoned")).is_err());
+        failing_root.shutdown().await.unwrap();
+    }
+
     // Links are listed and removed themselves, never followed.
     fs::create_dir_all(root_path.join("sessions/s2")).unwrap();
     symlink(&outside, root_path.join("sessions/s2/linked-directory")).unwrap();

@@ -51,6 +51,14 @@ A replacement writes its temporary file in
 that key's holder writes or removes it. A leftover from an interrupted
 replacement is discarded by the next replacement of that name.
 
+`auth.json` also takes the TypeScript-compatible `auth.json.lock` marker, which
+is reclaimed only while holding the `auth.json` key. A marker is stale once it
+is older than 30 seconds and names a process that is no longer running; a
+marker naming this process counts as live. The exception is a marker this
+process failed to release: it keeps the owner record, whose nonce only that
+marker carries, and reclaims the marker at once, so removal and locking need
+not wait for the process to exit.
+
 ## Listing and removal
 
 `list` returns the entries of a directory below an authorized root, sorted by
@@ -67,10 +75,15 @@ mount of the same filesystem is not detected). An explicit stack replaces
 recursion, so depth costs no thread stack. On Unix, removal holds one directory
 descriptor at a time: it returns to each parent through `..` and fails if that
 is no longer the directory it descended from, or starts again from the target if
-a concurrent removal deleted it. Windows holds a handle per level,
-since it cannot reopen a parent from a handle without a path. Each directory's
-FileStorage resources go last and hold one key at a time, however many names
-the directory has used:
+a concurrent removal deleted it. Windows holds a handle per level, since it
+cannot reopen a parent from a handle without a path.
+
+In each directory, leftovers go first: entries the listing hides by name, other
+than the lock directory and a regular account marker. Examples are a resource
+from an earlier version, or a marker that is a directory or a link. They follow
+the same rules as business entries, and going first means a stray marker cannot
+block locking `auth.json` beside it. The directory's FileStorage resources go
+last and hold one key at a time, however many names the directory has used:
 
 ```text
 remove(d), once d's other entries are gone:
@@ -102,7 +115,8 @@ marker cannot be listed or removed.
 `file_storage_flow` (path, lock, permission and platform checks),
 `directory_listing_and_removal_stay_inside_the_authorized_root` (Session-file
 layout, reserved resources and aliases, leases held during partial removal,
-links, cancellation) and `removal_scales_with_directory_size` (a directory that
+links, cancellation, leftovers with reserved names) and
+`removal_scales_with_directory_size` (a directory that
 used 300 names and a 1,000-level tree, removed under a 64-descriptor limit on a
 256 KiB worker stack, where recursion overflowed at a few hundred levels). The unit test
 `lock_keys_stay_exclusive_across_concurrent_directory_removal` in the owner

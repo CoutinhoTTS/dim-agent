@@ -384,23 +384,20 @@ pub(super) fn entry_kind(parent: &File, name: &OsStr) -> io::Result<Option<Entry
     }
 }
 /// Identities of the reserved directory and account marker in `directory`.
-pub(super) fn reserved(directory: &File) -> io::Result<Vec<Identity>> {
-    let mut identities = Vec::new();
-    for name in [LOCK_DIRECTORY, "auth.json.lock"] {
-        match create(
-            Some(directory),
-            OsStr::new(name),
-            FILE_READ_ATTRIBUTES,
-            FILE_OPEN,
-            0,
-            null_mut(),
-        ) {
-            Ok(entry) => identities.push(identity(&entry)?.FileId.Identifier),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(identities)
+pub(super) fn reserved(directory: &File) -> io::Result<[Option<Identity>; 2]> {
+    let entry = |name: &str| match create(
+        Some(directory),
+        OsStr::new(name),
+        FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        0,
+        null_mut(),
+    ) {
+        Ok(entry) => Ok(Some(identity(&entry)?.FileId.Identifier)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    Ok([entry(LOCK_DIRECTORY)?, entry("auth.json.lock")?])
 }
 pub(super) fn entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, Identity)>> {
     // Records are 8-byte aligned within the buffer.

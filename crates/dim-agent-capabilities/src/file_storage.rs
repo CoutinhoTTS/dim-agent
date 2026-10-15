@@ -689,12 +689,40 @@ fn create_temporary(
 /// Entries a business owner may address: this module's resources are
 /// omitted by name and by the identity the filesystem gives them.
 fn business_entries(directory: &File) -> Result<Vec<DirectoryEntry>> {
+    let entries = remaining_entries(directory)?;
     let reserved = native::reserved(directory)?;
-    Ok(remaining_entries(directory)?
+    Ok(entries
         .into_iter()
-        .filter(|(entry, identity)| !reserved_name(&entry.name) && !reserved.contains(identity))
+        .filter(|(entry, identity)| {
+            !reserved_name(&entry.name) && !reserved.iter().flatten().any(|id| id == identity)
+        })
         .map(|(entry, _)| entry)
         .collect())
+}
+
+/// Entries removal empties from `directory` before its FileStorage
+/// resources: all but the lock directory and a regular account marker, which
+/// have their own protocols and are recognized by name or, for aliases, by
+/// identity. Leftovers with reserved names go first; a stray marker that is a
+/// directory or link would otherwise block locking `auth.json` beside it.
+fn removal_entries(directory: &File) -> Result<Vec<DirectoryEntry>> {
+    let entries = remaining_entries(directory)?;
+    let [locks, marker] = native::reserved(directory)?;
+    let resources = [
+        (LOCK_DIRECTORY, locks, EntryKind::Directory),
+        ("auth.json.lock", marker, EntryKind::File),
+    ];
+    let mut entries: Vec<_> = entries
+        .into_iter()
+        .filter(|(entry, identity)| {
+            !resources.iter().any(|(name, resource, kind)| {
+                entry.kind == *kind && (entry.name == *name || resource.as_ref() == Some(identity))
+            })
+        })
+        .map(|(entry, _)| entry)
+        .collect();
+    entries.sort_by_key(|entry| !reserved_name(&entry.name));
+    Ok(entries)
 }
 
 /// Removes a non-directory entry below `parent`: a file under the lock leases
@@ -739,7 +767,7 @@ fn remove_tree(
         };
         let mut levels = vec![Level {
             name: name.clone(),
-            entries: business_entries(&directory)?.into_iter(),
+            entries: removal_entries(&directory)?.into_iter(),
         }];
         let mut ancestors = native::Ancestors::default();
         while let Some(level) = levels.last_mut() {
@@ -769,7 +797,7 @@ fn remove_tree(
             }
             match native::subdirectory(&directory, &entry.name) {
                 Ok(child) => {
-                    let entries = business_entries(&child)?.into_iter();
+                    let entries = removal_entries(&child)?.into_iter();
                     ancestors.push(std::mem::replace(&mut directory, child))?;
                     levels.push(Level {
                         name: entry.name,
@@ -942,9 +970,13 @@ impl Drop for PhysicalLock {
     fn drop(&mut self) {
         if let Some(parent) = &self.account_parent
             && let Err(error) = release_account(parent, &self.file, self.owner.as_deref())
-            && let Some(storage) = self.storage.upgrade()
         {
-            storage.state.lock().unwrap().cleanup_errors.push(error);
+            if let Some(owner) = self.owner.take() {
+                ABANDONED_MARKERS.lock().unwrap().push(owner);
+            }
+            if let Some(storage) = self.storage.upgrade() {
+                storage.state.lock().unwrap().cleanup_errors.push(error);
+            }
         }
         // Windows may defer an implicit unlock after CloseHandle. Settle the
         // real byte-range lock before a new generation is admitted.
@@ -1023,6 +1055,14 @@ fn account_lock(
     Err(FileStorageError::Locked)
 }
 
+/// Owner records of account markers this process failed to release. Each
+/// carries a fresh nonce, so only that leftover marker matches one.
+static ABANDONED_MARKERS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// Removes a stale account marker; false while it may be live. A marker this
+/// process failed to release is stale at once. Any other marker is stale once
+/// older than 30 seconds and naming a process that is no longer running.
+/// Called holding the `auth.json` key.
 fn reclaim_account(parent: &File) -> io::Result<bool> {
     let name = OsString::from("auth.json.lock");
     let mut file = match native::read_account_file(parent, &name) {
@@ -1031,12 +1071,6 @@ fn reclaim_account(parent: &File) -> io::Result<bool> {
         Err(error) => return Err(error),
     };
     let observed = file.metadata()?;
-    let age = SystemTime::now()
-        .duration_since(observed.modified()?)
-        .unwrap_or_default();
-    if age <= Duration::from_secs(30) {
-        return Ok(false);
-    }
     let mut owner = Vec::new();
     (&mut file).take(256).read_to_end(&mut owner)?;
     let pid = owner
@@ -1048,9 +1082,17 @@ fn reclaim_account(parent: &File) -> io::Result<bool> {
         .filter(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|pid| pid.parse::<u32>().ok())
         .filter(|pid| *pid > 0);
-    if let Some(pid) = pid {
-        let alive = native::process_alive(pid)?;
-        if alive {
+    let abandoned = ABANDONED_MARKERS.lock().unwrap().contains(&owner);
+    if !abandoned {
+        let age = SystemTime::now()
+            .duration_since(observed.modified()?)
+            .unwrap_or_default();
+        if age <= Duration::from_secs(30) {
+            return Ok(false);
+        }
+        if let Some(pid) = pid
+            && native::process_alive(pid)?
+        {
             return Ok(false);
         }
     }
@@ -1069,11 +1111,18 @@ fn reclaim_account(parent: &File) -> io::Result<bool> {
     if current_owner != owner {
         return Ok(false);
     }
-    match native::remove_account(parent, &name, &current) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-        Err(error) => Err(error),
+    if let Err(error) = native::remove_account(parent, &name, &current)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error);
     }
+    if abandoned {
+        ABANDONED_MARKERS
+            .lock()
+            .unwrap()
+            .retain(|record| *record != owner);
+    }
+    Ok(true)
 }
 
 fn release_account(parent: &File, owned: &File, owner: Option<&[u8]>) -> io::Result<()> {
@@ -1355,14 +1404,10 @@ mod native {
         Ok(stat(parent, name)?.as_ref().map(kind))
     }
     /// Identities of the reserved directory and account marker in `directory`.
-    pub fn reserved(directory: &File) -> io::Result<Vec<Identity>> {
-        let mut identities = Vec::new();
-        for name in [LOCK_DIRECTORY, "auth.json.lock"] {
-            if let Some(stat) = stat(directory, OsStr::new(name))? {
-                identities.push(identity(&stat));
-            }
-        }
-        Ok(identities)
+    pub fn reserved(directory: &File) -> io::Result<[Option<Identity>; 2]> {
+        let entry =
+            |name| Ok::<_, io::Error>(stat(directory, OsStr::new(name))?.as_ref().map(identity));
+        Ok([entry(LOCK_DIRECTORY)?, entry("auth.json.lock")?])
     }
     pub fn entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, Identity)>> {
         let mut entries = Vec::new();
@@ -1810,7 +1855,7 @@ mod unsupported {
     pub fn entry_kind(_: &File, _: &OsStr) -> io::Result<Option<EntryKind>> {
         Err(unsupported())
     }
-    pub fn reserved(_: &File) -> io::Result<Vec<Identity>> {
+    pub fn reserved(_: &File) -> io::Result<[Option<Identity>; 2]> {
         Err(unsupported())
     }
     pub fn entries(_: &File) -> io::Result<Vec<(DirectoryEntry, Identity)>> {
