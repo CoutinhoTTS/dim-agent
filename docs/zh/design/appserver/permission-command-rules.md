@@ -27,8 +27,8 @@ rutis、Settings 和装配。
 
 ### 1.1 不做什么
 
-- 不做项目作用域规则、按工作区的规则、模式或正则、shell 解析器、`ask` 决定。每一项都列为
-  [待定问题](#10-待定问题)，不属于 F2。
+- 不做项目作用域规则、按工作区的规则、模式或正则、shell 解析器、`ask` 决定。每一项都已暂缓
+  （[§10](#10-决定)）。
 - 不为其他工具设规则。Session 策略里的 `allowedTools`/`disallowedTools` 已覆盖整个工具。
 - 不改执行 Shell 设置。功能清单把"执行 Shell"与命令规则写在一起，但它是 HostPlatform 的业务配置
   （ADR 002"现有插件"）。
@@ -215,7 +215,7 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
 
 允许回复后的复核本来就有；加上规则后，它也能看到提问期间新写入的 deny 规则。
 
-### 5.4 "总是允许"
+### 5.4 "总是允许"（客户端流程，在 F6 实现）
 
 ```
  客户端                         PermissionRules             Approval
@@ -251,7 +251,7 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
 
 - 规则只管 agent 的工具调用（ADR 003 D1）。用户命令（`!command`、ShellInput）和按配置运行的命令
   （MCP stdio、Hooks、工作流）不受影响。
-- 只有用户作用域，因此项目文件无法给自己授予 allow 规则。项目作用域是待定问题（§10）。
+- 只有用户作用域，因此项目文件无法给自己授予 allow 规则。项目作用域已暂缓（§10）。
 - 规则是宿主安全设置：从不进入 Timeline，重放或 fork 从不恢复或放宽，配对设备不能写入（管理方法
   只在本地提供）。
 - allow 规则不能超出预设；deny 规则在所有预设下生效；读取失败即拒绝。
@@ -266,7 +266,7 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
 | ToolExecutor、WorkspaceTools、ShellTools | 不变；`exec` 与 `execute` 已声明 `execute_process` 并接收 `command` |
 | Settings | 不变；新增一个来源 `permission`（用户文件、原生行）。它的 `settings.changed` 与任何来源一样照常发出；F2 不监听 |
 | Timeline、Dispatcher、rutis、装配 | 不变 |
-| CLI `/approvals` | 基于这些方法的客户端工作：列出、添加、删除规则，并在审批提示中为简单的 `exec`/`execute` 命令提供"总是"选项。在此之前现有提示（`Allow once? [y/N]`）不变 |
+| CLI `/approvals`（F6） | 不属于 F2。F6 承接的需求：`/approvals` 面板经 `permission.rules`/`permission.set_rules` 列出、添加、删除规则，并在审批提示中为简单的 `exec`/`execute` 命令提供"总是"选项（§5.4）。F6 之前现有提示（`Allow once? [y/N]`）不变 |
 | HostPlatform | 执行 Shell 仍是它自己的业务配置；不属于 F2 |
 | RemoteGateway | 配对设备可以回答审批，但不能读写规则 |
 | Collaboration、Scheduler、Workflow | 规则是宿主级的，在每个 Session 中生效；由于 allow 只回答 `Ask`，上限为 read-only 的自动化 Session 不会被放宽 |
@@ -300,21 +300,20 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
 
 向机制所有者提出的需求：无。
 
-## 10. 待定问题
+## 10. 决定
 
-1. **项目规则。** 项目文件（例如 `.dimcode/permission.json`）是否可以提供规则？安全的最小做法是只允许
-   deny 规则，项目的 allow 规则默认禁用，直到用户本地配置启用（ADR 003 D3）。F2 的完成标准不需要。
-2. **按工作区的用户规则。** 用户规则是否带可选的工作区路径，使"总是允许"只在该项目生效？目前每条
-   规则都是宿主级的。
-3. **模式与 shell 解析。** 按词的 `exact`/`prefix` 是否够用，还是需要通配？是否用真正的 shell 解析器
-   替代分隔字符检查（能命中更多 allow，但代码更多，且因 shell 而异）？
-4. **`ask` 规则。** 是否需要即使在 full-access 下也强制提问的规则？
-5. **S8b 之后的管理方法。** 有了 `settings.read`/`settings.update` 之后，`permission.rules`/
-   `permission.set_rules` 保留，还是 CLI 改用通用方法？
-6. **绑定形式。** 本方案按配置在 Session 级绑定端口（私有根的测试 Agent 不变）。另一种做法是
-   Permission 直接注入进程服务：省掉 Session 部分，但每个带 Permission 的装配，包括用
-   `AgentBuilder::build()` 构建的测试，都必须运行在提供该服务的宿主根下。
-7. **F2 是否包含 CLI。** F2 是否包括 CLI `/approvals` 面板和"总是"选项，还是只做服务端，CLI 放在 F6？
+维护者已决定：
+
+1. **项目规则：** 暂缓，现在不需要。只有用户作用域规则，没有项目文件。
+2. **按工作区的用户规则：** 暂缓，现在不需要。
+3. **通配或 shell 解析器：** 暂缓，现在不需要。保持按词的 `exact`/`prefix` 加分隔字符检查（§5.1）。
+4. **`ask` 规则：** 暂缓，现在不需要。
+5. **专用方法与 S8b 的 `settings.read`/`settings.update`：** 在设计 S8b 时决定；F2 保留
+   `permission.rules`/`permission.set_rules`。
+6. **绑定：** 按配置在 Session 级绑定端口 `InSession<CommandRulesHost>`（§4.2），不依赖进程服务；
+   现有测试不变。
+7. **范围：** F2 只做服务端：规则来源、Permission 检查、管理方法和流程测试。CLI `/approvals` 面板和
+   "总是"选项属于 F6（CLI），作为它承接的需求（§5.4、§8）。
 
 ## 11. 验收（流程测试）
 

@@ -31,7 +31,7 @@ Timeline, Dispatcher, rutis, Settings or assembly.
 ### 1.1 What this does not do
 
 - No project-scope rules, no per-workspace rules, no patterns or regular expressions, no shell
-  parser, no `ask` decision. Each is an [open question](#10-open-questions), not part of F2.
+  parser, no `ask` decision. Each is deferred ([§10](#10-decisions)).
 - No rules for other tools. `allowedTools`/`disallowedTools` in the Session policy already cover
   whole tools.
 - No change to the execution shell setting. The feature list puts "execution Shell" next to
@@ -231,7 +231,7 @@ read-only stays read-only. A read failure fails closed because a deny rule may e
 The recheck after an allow response already exists; with rules it also picks up a deny rule
 written while the question was open.
 
-### 5.4 "Always allow"
+### 5.4 "Always allow" (client flow, implemented in F6)
 
 ```
  Client                         PermissionRules             Approval
@@ -269,8 +269,8 @@ denials do today, for example
 
 - Rules govern only agent tool calls (ADR 003 D1). User commands (`!command`, ShellInput) and
   commands run by configuration (MCP stdio, Hooks, workflows) are not affected.
-- Only the user scope exists, so no project file can grant itself an allow rule. Project scope is an
-  open question (§10).
+- Only the user scope exists, so no project file can grant itself an allow rule. Project scope is
+  deferred (§10).
 - Rules are host security settings: never in the Timeline, never restored or widened by replay or
   fork, and not writable from a paired device (management methods are local only).
 - Allow rules cannot exceed the preset; deny rules apply under every preset; read failures deny.
@@ -286,7 +286,7 @@ denials do today, for example
 | ToolExecutor, WorkspaceTools, ShellTools | Unchanged; `exec` and `execute` already declare `execute_process` and take `command` |
 | Settings | Unchanged; one new source `permission` (user file, native row). Its `settings.changed` event is emitted as for any source; F2 does not listen |
 | Timeline, Dispatcher, rutis, assembly | Unchanged |
-| CLI `/approvals` | Client work on these methods: list, add, remove rules, and an "always" choice on the approval prompt for simple `exec`/`execute` commands. The current prompt (`Allow once? [y/N]`) is unchanged until then |
+| CLI `/approvals` (F6) | Not part of F2. Requirement F6 consumes: a `/approvals` panel that lists, adds and removes rules through `permission.rules`/`permission.set_rules`, and an "always" choice on the approval prompt for simple `exec`/`execute` commands (§5.4). The current prompt (`Allow once? [y/N]`) is unchanged until F6 |
 | HostPlatform | The execution shell stays its own business configuration; not F2 |
 | RemoteGateway | Paired devices answer approvals but cannot read or write rules |
 | Collaboration, Scheduler, Workflow | Rules are host-wide and apply in every Session; since allow only answers `Ask`, an automation Session capped at read-only is not widened |
@@ -320,24 +320,22 @@ Each is needed for a rule to be stored, written by a client, and read by Permiss
 
 Requirements raised to mechanism owners: none.
 
-## 10. Open questions
+## 10. Decisions
 
-1. **Project rules.** Should a project file (for example `.dimcode/permission.json`) contribute
-   rules? A safe minimum would be deny rules only, with project allow rules disabled until the
-   user's local configuration enables them (ADR 003 D3). Not needed for the F2 done criterion.
-2. **Per-workspace user rules.** Should a user rule carry an optional workspace path so "always
-   allow" applies only in that project? Today every rule is host-wide.
-3. **Patterns and shell parsing.** Are word-wise `exact`/`prefix` enough, or are globs wanted? Should
-   a real shell parser replace the separator check (more allow matches, more code, per-shell)?
-4. **`ask` rules.** Should a rule force a question even under full-access?
-5. **Management methods after S8b.** When `settings.read`/`settings.update` exist, do
-   `permission.rules`/`permission.set_rules` stay, or does the CLI move to the generic methods?
-6. **Binding shape.** The proposal binds the port per profile at Session scope (no change to the
-   private-root test agents). The alternative is a process service that Permission injects
-   directly; it removes the Session part but requires every assembly with Permission, including
-   tests built with `AgentBuilder::build()`, to run under a host root that provides it.
-7. **CLI in F2.** Does F2 include the CLI `/approvals` panel and the "always" option, or only the
-   server side, with the CLI in F6?
+Decided by the maintainer:
+
+1. **Project rules:** deferred, not needed now. User-scope rules only; no project file.
+2. **Per-workspace user rules:** deferred, not needed now.
+3. **Wildcards or a shell parser:** deferred, not needed now. Word-wise `exact`/`prefix` plus the
+   separator check (§5.1).
+4. **`ask` rules:** deferred, not needed now.
+5. **Dedicated methods vs S8b `settings.read`/`settings.update`:** decided when S8b is designed;
+   F2 keeps `permission.rules`/`permission.set_rules`.
+6. **Binding:** the Session port `InSession<CommandRulesHost>` per profile (§4.2), not a process
+   service dependency; existing tests are unchanged.
+7. **Scope:** F2 is server side only: rules source, Permission check, management methods and flow
+   tests. The CLI `/approvals` panel and the "always" option belong to F6 (CLI) as a requirement it
+   consumes (§5.4, §8).
 
 ## 11. Acceptance (flow tests)
 
