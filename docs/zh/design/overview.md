@@ -361,7 +361,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | 上下文 | 模型上下文只经由工具结果和输入；常驻规则经由提示词来源或带 key 的 raw 块 |
 | 配置 | 每项一个来源、一条写入路径。结构性条目（例如 `enabled`）位于 loader 行，只由 PluginManager 的结构性操作（安装、启用、禁用、更新）在 loader 可编辑层（#3）上修改；插件不写自己的结构性字段。每个插件的业务条目，包括用户编写的配置（例如 Scheduler 任务、保存的 Workflow 定义），通过 Settings 类型化操作写入该插件的 Settings 业务来源，按插件自己声明的 schema。运行记录位于 `pluginFiles`（扩展后）；项目目录中的工作流文件仍是项目文件（一种配置来源）。RemoteGateway 监听设置、Modality 的 OCR 组件路径和 ExternalAgent 桥接都是业务配置。凭据是引用，由 Settings 凭据解析器解析 |
 | 批准范围 | Approval 与 Permission 只管 agent 决策引起的动作（模型的工具调用）。按用户或项目配置运行、而不是由 agent 决定的命令（连接时启动的 MCP stdio 服务、Hook 命令、工作流文件、插件）不属于 agent 体系，由该配置自己负责：启用即运行，不需要批准。功能开关（启用、禁用）是普通配置，与批准无关；来自项目来源的条目默认关闭，只能由用户本机配置启用。没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；现有的 `mcp.approve`/`mcp.revoke` 在后续代码变更中删除（[附录 B.2](#b2-app-server-进程插件)） |
-| 安全设置 | 宿主安全设置从不进入 Timeline，回放和 fork 从不恢复或放宽它们。权限预设是 Timeline 事实（`permission/changed`），由子分支继承，fork 时重置为默认值 |
+| 安全设置 | 宿主安全设置从不进入 Timeline，回放和 fork 从不恢复或放宽它们。权限预设是 Timeline 事实（`permission/changed`），由子分支继承，fork 时随事实一起复制 |
 | 持久化 | 进程存储使用 `pluginFiles`（扩展后）：每插件根目录、UTF-8 与二进制原子替换、锁、格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）。Session 文件位于 SessionStore 之下 |
 | 协议 | Rpc 内建方法优先于贡献的方法 |
 | 国际化 | 用户可见文本属于 CLI；模型可见文本属于提示词来源 |
@@ -414,7 +414,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | FullAccess 与新类别 | 已决定：自动允许（约束 7） |
 | 外部 Agent 权限 | 已决定：普通 dim 审批，Collaboration 成员的审批转发给 leader（§5.6，[ExternalAgent](plugins/ExternalAgent.md)） |
 | 外部会话延续 | 提议：从分支历史重新初始化（[ExternalAgent](plugins/ExternalAgent.md)） |
-| fork 时的权限预设 | 已决定：fork 时重置（§6.4） |
+| fork 时的权限预设 | 已决定：不特殊处理；预设随事实一起复制，应用层如需不同的预设，在 fork 后自行设置（#26） |
 | 重载传播 | 已决定：罕见结构性操作的可接受代价（[ADR 002](../adr/002-plugin-scope.md) D3） |
 | **已撤回（Hooks 待设计，#21）。** 异步 before 与同步写入方 | 已决定：写入方的追加在被接受时返回，提交结果经 Dispatcher 报告，因此 Loop 等写入方不会阻塞。属于异步 before 需求（[附录 F](#附录-f-向机制所有者提出的需求)） |
 | 由 Collaboration 成员运行 Workflow 阶段 | 未来功能：跨阶段复用成员的上下文。目前每个阶段都在启动的 Session 中运行（[Workflow](plugins/Workflow.md)） |
@@ -510,7 +510,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
 | Agents | 补充 | `sessions` 服务；`SessionConfig` 字段；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建；Session 部分持有的活动句柄，持有期间 Agents 不因空闲卸载该 Session（提议）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)） | Scheduler、Workflow、fork、ExternalAgent；ShellInput |
 | Collaboration | 变更 | 按用途 `collaboration.member` 选择成员模型；成员审批转发给 leader | ExternalAgent |
-| SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）；删除与清理；fork（复制切点之前的事实，重置权限预设）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除 | SessionTitle、Attachments、fork |
+| SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）；删除与清理；fork（复制切点之前的事实）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除 | SessionTitle、Attachments、fork |
 | Settings | 补充 | 带变更通知的业务来源（D4），每个插件一个，按各插件声明的 schema 提供类型化写操作；凭据引用解析器 | 每个有业务配置的插件，包括用户编写的 Scheduler 任务（来源 `schedule`）和 Workflow 定义（来源 `workflow`） |
 | Provider | 补充 | 按用途的策略，单一写入路径；`AuxiliaryModel` 服务（`complete`，用途为消费方拥有的 key）；按 Modality 类别的非对话连接；外部 Agent 连接类型；连接条目经 Provider 的类型化公共写操作写入 | SessionTitle、压缩、Collaboration、Modality、ExternalAgent |
 | Aimux / ModelHost | 补充 | 来自其他插件的 provider kind；某 kind 没有 provider 时，其请求在受理前失败 | ExternalAgent |
