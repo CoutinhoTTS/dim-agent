@@ -34,6 +34,13 @@ enter a later request prefix. Already bound requests retain their handlers.
 Registry refresh is neither a durable configuration save nor permission
 authorization; a new tool is not model-visible until adoption.
 
+The pre-input attachment requirement in
+[Session boundary A.5](../../../design/contracts/session-boundary.md#a5-tool-contribution)
+is not implemented: Session input admission does not wait for attachment and
+branch adoption. This is a C3 delivery blocker. Existing `BranchOpening` finishes
+before Session publication, so waiting there for publication-dependent work would
+create an initialization cycle.
+
 ## Tests
 
 [flows.rs](../../../../crates/dim-agent-capabilities/tests/flows.rs):

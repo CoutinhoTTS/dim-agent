@@ -2,6 +2,8 @@
 
 状态：Implemented；`branch`、`agent` 以贡献提供；没有通用的 `task` 工具，脱离工作的查询、等待与停止由所属能力各自的工具提供。基线为[单树装配](single-tree.md)与[能力重载协议](single-tree.md#能力重载协议)。
 
+C3 验收缺口：[Session boundary A.5](../../design/contracts/session-boundary.md#a5-tool-contribution) 要求工具接入在 Session 接受输入之前完成。当前发布后任务与 ToolBinding 后台采用没有提供该就绪保证，C3 尚不能交付。现有 `BranchOpening` 在 Session 发布前结束，不能等待依赖发布的接入任务；未增加 core 就绪机制，也未改变该合同。
+
 ## 1. 范围
 
 Session 能力向本 Session 的 `ToolRegistry` 贡献模型可调用的工具。宿主工具仍经 `ToolHost` 提供，不在本文范围。
