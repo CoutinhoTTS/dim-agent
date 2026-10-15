@@ -23,7 +23,8 @@ use windows_sys::{
     },
     Win32::{
         Foundation::{
-            ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, LocalFree,
+            ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_LEVEL,
+            ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, LocalFree,
             RtlNtStatusToDosError, UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
@@ -35,7 +36,8 @@ use windows_sys::{
         },
         Storage::FileSystem::*,
         System::{
-            IO::IO_STATUS_BLOCK,
+            IO::{DeviceIoControl, IO_STATUS_BLOCK},
+            SystemServices::IO_REPARSE_TAG_MOUNT_POINT,
             Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, WaitForSingleObject},
         },
     },
@@ -403,22 +405,37 @@ pub(super) fn entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, Ident
     // Records are 8-byte aligned within the buffer.
     let mut buffer = vec![0u64; 8 * 1024];
     let mut entries = Vec::new();
+    // The first query restarts the scan, so every listing of a handle is
+    // complete; later queries continue it.
+    let mut class = FileIdExtdDirectoryRestartInfo;
     loop {
         if unsafe {
             GetFileInformationByHandleEx(
                 directory.as_raw_handle(),
-                FileIdExtdDirectoryInfo,
+                class,
                 buffer.as_mut_ptr().cast(),
                 (buffer.len() * size_of::<u64>()) as u32,
             )
         } == 0
         {
             let error = io::Error::last_os_error();
-            return match error.raw_os_error() {
-                Some(code) if code as u32 == ERROR_NO_MORE_FILES => Ok(entries),
+            return match error.raw_os_error().map(|code| code as u32) {
+                Some(ERROR_NO_MORE_FILES) => Ok(entries),
+                // FAT, exFAT and some network file systems report no file IDs
+                // during enumeration, which hiding resource aliases needs.
+                Some(
+                    ERROR_INVALID_PARAMETER
+                    | ERROR_INVALID_LEVEL
+                    | ERROR_NOT_SUPPORTED
+                    | ERROR_INVALID_FUNCTION,
+                ) if class == FileIdExtdDirectoryRestartInfo => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "directory listing needs file IDs, as on NTFS or ReFS",
+                )),
                 _ => Err(error),
             };
         }
+        class = FileIdExtdDirectoryInfo;
         let base = buffer.as_ptr().cast::<u8>();
         let mut offset = 0;
         loop {
@@ -804,7 +821,9 @@ fn cleanup_created(file: &File, error: io::Error) -> io::Error {
 pub(super) fn remove_account(_: &File, _: &OsString, file: &File) -> io::Result<()> {
     delete(file)
 }
-/// Removes a non-directory entry; a reparse point is removed, never followed.
+/// Removes a non-directory entry. A reparse point is removed itself, never
+/// followed, except that a volume mounted there is refused, as Unix refuses
+/// to remove a directory on another filesystem.
 pub(super) fn remove(parent: &File, name: &OsStr) -> io::Result<()> {
     let entry = create(
         Some(parent),
@@ -814,13 +833,72 @@ pub(super) fn remove(parent: &File, name: &OsStr) -> io::Result<()> {
         0,
         null_mut(),
     )?;
-    if kind(entry.metadata()?.file_attributes()) == EntryKind::Directory {
+    let attributes = entry.metadata()?.file_attributes();
+    if kind(attributes) == EntryKind::Directory {
         return Err(io::Error::new(
             io::ErrorKind::IsADirectory,
             "expected a non-directory entry",
         ));
     }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && volume_mount_point(&entry)? {
+        return Err(io::Error::new(
+            io::ErrorKind::CrossesDevices,
+            "volume mounted here",
+        ));
+    }
     delete(&entry)
+}
+/// Whether a reparse point mounts a volume: a mount point whose target is a
+/// volume GUID path, not a directory as a junction's is. Reads the reparse
+/// data without following it.
+fn volume_mount_point(entry: &File) -> io::Result<bool> {
+    // Defined in Win32_System_Ioctl, which this crate does not enable.
+    const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00a8;
+    let mut buffer = vec![0u32; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize / size_of::<u32>()];
+    let mut returned = 0;
+    if unsafe {
+        DeviceIoControl(
+            entry.as_raw_handle(),
+            FSCTL_GET_REPARSE_POINT,
+            null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * size_of::<u32>()) as u32,
+            &mut returned,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let data =
+        unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned as usize) };
+    // REPARSE_DATA_BUFFER: tag, data length and reserved, then for a mount
+    // point the substitute name's byte offset and length into the path
+    // buffer that starts at byte 16.
+    let field = |offset: usize| {
+        data.get(offset..offset + 2)
+            .map(|bytes| usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))
+    };
+    let tag = data
+        .get(..4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
+    let (Some(IO_REPARSE_TAG_MOUNT_POINT), Some(offset), Some(length)) = (tag, field(8), field(10))
+    else {
+        return Ok(false);
+    };
+    let Some(target) = data.get(16 + offset..16 + offset + length) else {
+        return Ok(false);
+    };
+    let target: Vec<u16> = target
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|unit| u16::from_le_bytes(*unit))
+        .collect();
+    Ok(String::from_utf16_lossy(&target)
+        .to_ascii_lowercase()
+        .starts_with(r"\??\volume{"))
 }
 pub(super) fn remove_directory(parent: &File, name: &OsStr) -> io::Result<()> {
     delete(&open(

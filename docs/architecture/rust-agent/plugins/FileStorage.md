@@ -108,6 +108,15 @@ commits: if removal deleted the empty temporary directory first, the
 replacement creates it again. Roots, the reserved directory and the account
 marker cannot be listed or removed.
 
+On Windows, every reparse point is listed as `Other` and never entered. Removal
+deletes a junction or symbolic link itself, but refuses a volume mount point
+(a mount-point reparse point whose target is a `\??\Volume{…}` path) with
+`CrossesDevices`, as Unix refuses a directory on another filesystem; Unix lists
+such a directory as `Directory`. Listing and removal need a volume that reports
+file IDs during enumeration, such as NTFS or ReFS. Elsewhere, such as on FAT,
+exFAT or some network shares, they fail with an `Unsupported` I/O error rather
+than list entries whose aliases of reserved names could not be recognized.
+
 ## Tests
 
 [file_storage_flow.rs](../../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs):
