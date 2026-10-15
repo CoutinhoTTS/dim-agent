@@ -23,9 +23,9 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 | PR | 状态 | 内容 | 对计划的影响 |
 | --- | --- | --- | --- |
-| [#14](https://github.com/arcships/dim/pull/14) | Draft | Session 持有 MCP；`ManagementMethods` 由业务 owner 提供；`SessionLifecycle` | C1 的前置 |
-| [#16](https://github.com/arcships/dim/pull/16) | Open | 移除 `mcp.approve`/`mcp.revoke`（ADR 003） | 还缺 ADR 003 D3：项目源条目默认禁用 |
-| [#17](https://github.com/arcships/dim/pull/17) | Open | 实验性 Pursuit 设计 | 决策 D3 |
+| [#14](https://github.com/arcships/dim/pull/14) | 已合入 | Session 持有 MCP；`ManagementMethods` 由业务 owner 提供；`SessionLifecycle`；移除 `mcp.approve`/`mcp.revoke`，项目源条目默认禁用（ADR 003 D3、ADR 004） | C1、S8、F4 的前置已满足 |
+| [#16](https://github.com/arcships/dim/pull/16) | 已关闭 | 移除 `mcp.approve`/`mcp.revoke` | 已由 #14 完成 |
+| [#17](https://github.com/arcships/dim/pull/17) | 已合入 | 实验性 Pursuit 设计 | 决策 D3 |
 | [#20](https://github.com/arcships/dim/pull/20) | 已合入 | `managementMethods` 按调用查找，不依赖其所有者 | 已反映在总体设计 B.2 |
 
 ## 2. 排期原则
@@ -44,7 +44,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 ### 3.1 立即做（文档与对齐）
 
-1. 合入 #14，再合入 #16 并补 ADR 003 D3。两个 PR 都改 MCP，先合改动大的 #14。
+1. ~~合入 #14、#16 并补 ADR 003 D3~~：已由 #14 完成（#16 关闭）。
 2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8 Settings 业务源（§5.2）。核心部件（Session 装配、ToolRegistry）不硬依赖任何可选插件，可选插件没起来时只有它自己的功能不可用（#34），在契约里一并写明。
 3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
 4. 决定 Goal 还是 Pursuit（D3）。
@@ -103,16 +103,45 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 
 | 负责线 | 依次合入 | 说明 |
 | --- | --- | --- |
-| Rpc（`connection.rs`、`protocol.rs`） | #14 → C1 → C2 → C6 → S5b/S5c 的 Session 方法 | 冲突最多的地方 |
-| 装配（`assembly.rs`、App Server `lib.rs`） | C3 → C4 → C5；每个新插件的登记在这之后追加 | 新插件登记只加几行，按合入顺序 rebase |
-| `agents.rs` | S3（若需要）→ S2 | |
-| 存储（`storage/timeline.rs`） | S5a → S5b → S5c →（#32） | 存储格式的改动依次做，每次单独做格式决定 |
+| Rpc（`connection.rs`、`protocol.rs`），yyhhyyyyyy | C1 → C2 → C6 → S5b/S5c 的 Session 方法 | 冲突最多的地方 |
+| 装配（`assembly.rs`、App Server `lib.rs`），zerob13 | C3 → C4 → C5；每个新插件的登记在这之后追加 | 新插件登记只加几行，按合入顺序 rebase |
+| `agents.rs`，yyhhyyyyyy | S3（若需要）→ S2 | |
+| 存储（`storage/timeline.rs`），yyhhyyyyyy | S5a → S5b → S5c →（#32） | 存储格式的改动依次做，每次单独做格式决定 |
 | 事件类型（`events.rs` 与冻结样本） | S1 | 单独做格式决定 |
 | 插件自己的 crate 或包 | 无冲突 | |
 
 契约层面的冲突比文件冲突更要紧：C1、C2、S8 一旦改动，所有使用者都要跟着改，所以放在 §3.1 先定稿。
 
-### 3.5 并发规则
+### 3.5 按人按批次
+
+每条串行负责线只由一个人负责，避免同一批文件在人之间来回交接。"批"只表示先后：前置一到就进下一批，不等整批结束。
+
+| 批次 | eric8810（核心机制与契约） | yyhhyyyyyy（Rpc、Agents、存储、MCP） | zerob13（装配、TS 桥接、TS 插件、CLI、平台） |
+| --- | --- | --- | --- |
+| 1（现在） | A2 契约定稿、A3 Goal/Pursuit、A4 权限类别 | S6 FileStorage | C3 工具接入、C4 spike、S7 argv 辅助、S10 pluginFiles |
+| 2 | S8 Settings 源（等 A2）、S4 AuxiliaryModel、C7 固定前缀读 | C1 sessionMethods（等 A2）、C2 interactive、S5a Session 文件 | C4 TS 桥接（等 C3）、F5 隔离 spike |
+| 3 | S1 InputQueue 撤回（等 C1）、S11 图片占位、F2 权限命令规则 | C6 广播通知、P1 ShellInput（等 C1、S7）、S5b 标题、S3 活动句柄（确认） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
+| 4 | F1 压缩宿主（等 S4）、P5 Goal/Pursuit（等 C5、S1、S8） | S2 sessions（等 C2、S1）、P2 Attachments（等 S5a、S11）、S5c 删除和 fork、F4 MCP OAuth | P3 Web（等 C4、S8）、P4 SessionTitle（等 C6、S4、S5b） |
+| 5 | — | — | P6 Scheduler、P7 Workflow（等 S2） |
+
+跨人的交接（都不在同一批文件上）：
+
+| 交付 | 交付方 | 等它的 |
+| --- | --- | --- |
+| A2 契约定稿 | eric8810 | C1、C2（yyhhyyyyyy） |
+| C1 sessionMethods | yyhhyyyyyy | S1（eric8810） |
+| S1 撤回 | eric8810 | S2（yyhhyyyyyy） |
+| S4 AuxiliaryModel | eric8810 | P4（zerob13） |
+| S8 Settings 源 | eric8810 | P3、P4、P6、P7（zerob13） |
+| C6 广播通知、S5b 标题 | yyhhyyyyyy | P4（zerob13） |
+| S11 图片占位 | eric8810 | P2（yyhhyyyyyy） |
+| S7 argv 辅助 | zerob13 | P1（yyhhyyyyyy） |
+| S2 sessions | yyhhyyyyyy | P6、P7（zerob13） |
+| C4、C5 TS 桥接 | zerob13 | P5（eric8810） |
+
+yyhhyyyyyy 在第 2、4 批较满；卡住时 F4 MCP OAuth 可以后推，它不挡任何人。
+
+### 3.6 并发规则
 
 - `docs/architecture/rust-agent/generated/` 下的生成文件不手工解冲突：rebase 后重跑 `xtask graph`。
 - 不给还没落地的接口打桩，等接口合入再开工。
