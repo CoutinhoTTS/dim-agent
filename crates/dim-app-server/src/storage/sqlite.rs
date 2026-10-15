@@ -94,7 +94,16 @@ pub struct SqliteStorage {
 struct Admission {
     closed: bool,
     running: usize,
-    lease: Option<File>,
+    lease: Option<DatabaseLease>,
+}
+// Closing a descriptor alone may leave a flock held by a concurrently spawned
+// child until exec. Release ownership explicitly, including failed opens and
+// shutdown. The connection must always be dropped before this lease.
+struct DatabaseLease(File);
+impl Drop for DatabaseLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 struct Operation(Arc<SqliteStorage>);
 impl Drop for Operation {
@@ -137,6 +146,7 @@ impl SqliteStorage {
             )),
             std::fs::TryLockError::Error(error) => storage(error),
         })?;
+        let admission = DatabaseLease(admission);
         let mut connection = Connection::open(&path).map_err(storage)?;
         connection
             .busy_timeout(Duration::from_secs(5))
@@ -250,19 +260,20 @@ impl SqliteStorage {
             }
             tokio::task::spawn_blocking(move || {
                 let mut guard = db.connection.lock().unwrap();
-                let Some(connection) = guard.take() else {
-                    return Ok(());
-                };
-                match connection.close() {
-                    Ok(()) => {
-                        drop(db.admission.lock().unwrap().lease.take());
-                        Ok(())
-                    }
-                    Err((connection, failure)) => {
-                        *guard = Some(connection);
-                        Err(storage(failure))
-                    }
+                if let Some(connection) = guard.take()
+                    && let Err((connection, failure)) = connection.close()
+                {
+                    *guard = Some(connection);
+                    return Err(storage(failure));
                 }
+                // Retain the lease on unlock failure so another close can retry,
+                // even when the SQLite connection has already closed.
+                let mut admission = db.admission.lock().unwrap();
+                if let Some(lease) = &admission.lease {
+                    lease.0.unlock().map_err(storage)?;
+                }
+                admission.lease.take();
+                Ok(())
             })
             .await
             .map_err(storage)?

@@ -8,7 +8,7 @@
 use dim_agent_capabilities::{
     defaults,
     file_storage::FileStoragePlugin,
-    host_platform::{HostPlatformConfig, HostPlatformPlugin},
+    host_platform::{HostPlatform, HostPlatformConfig, HostPlatformPlugin, ShellStatus},
     model_provider::ModelProviderPlugin,
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
@@ -16,7 +16,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
-use rutis::TypeKey;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,7 +33,7 @@ const TOOLS: [&str; 8] = [
 ];
 // Runtime assembly and the scripted model adapter are not business plugins.
 // Keep this exclusion list narrow: a newly assembled capability needs a page.
-const INFRASTRUCTURE: [&str; 8] = [
+const INFRASTRUCTURE: [&str; 9] = [
     "rutis-loader",
     "session",
     "branch",
@@ -42,7 +42,42 @@ const INFRASTRUCTURE: [&str; 8] = [
     "SessionBroadcast",
     "SessionBroadcastEnd",
     "PrepareModelHost",
+    "SessionExtension",
 ];
+
+/// Graph-only host facts. Keep real local-execution dependencies but never scan
+/// the developer's home or make the graph depend on their installed skills.
+struct GraphPlatform(PathBuf);
+impl TypedPlugin for GraphPlatform {
+    type Deps = <HostPlatformPlugin as TypedPlugin>::Deps;
+    fn name(&self) -> &str {
+        "HostPlatform"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        _: Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let mut platform = HostPlatform::current(ShellStatus::Unavailable {
+                code: "GRAPH_ONLY",
+                reason: "Graph generation does not execute commands".into(),
+            })
+            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+            platform.home = self.0.clone();
+            ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for GraphPlatform {
+    fn keys(&self) -> KeysOf<Self> {
+        HostPlatformPlugin::new(HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+        })
+        .keys()
+    }
+}
 
 fn docs_dir(root: &Path) -> PathBuf {
     root.join("docs/architecture/rust-agent/plugins")
@@ -58,18 +93,19 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     let (storage, work) = (dir.join("storage"), dir.join("work"));
     std::fs::create_dir_all(&storage)?;
     std::fs::create_dir_all(&work)?;
+    let skill = storage.join(".agents/skills/graph");
+    std::fs::create_dir_all(&skill)?;
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: graph\ndescription: Architecture fixture\n---\nGraph fixture instructions.\n",
+    )?;
     let process = rutis::Ctx::root()?;
     // FileStorage refuses symlinked components such as macOS `/var`.
     (&process.plugin(capability_plugin(FileStoragePlugin::new(vec![
         storage.canonicalize()?,
     ]))))
         .await?;
-    (&process.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
-            exec_shell_file: Some((0, "exec-shell.json".into())),
-        },
-    ))))
-        .await?;
+    (&process.plugin(capability_plugin(GraphPlatform(storage.canonicalize()?)))).await?;
     process.provide_as(
         TypeKey::of::<SkillSettingsHost>(),
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),

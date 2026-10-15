@@ -93,8 +93,14 @@ impl SessionService for ToolContribution {}
 
 ### 7.1 职责
 
+MCP connections belong to the Session loader subtree, not to the process or
+workspace. Session closure drains its instances even while stale tool bindings
+remain. Replacements retain old connections for existing bindings; disabling or
+removing an entry closes its instances across Sessions, even with bindings.
+New bindings automatically adopt the replacement through the existing flow below.
+
 - **收集来源**：宿主工具（`S:ToolHost`）、固定贡献（`S:ToolContribution[name]`，如 `skill`、`branch`、`wait`）、动态来源（`S:SessionToolSource[name]`；当前只有 App Server 的 McpSession：登记名 `mcp`，键 `mcp:<serverId>`，版本随连接代次与工具列表变化且不复用，工具名带 server 前缀避免跨来源重名，连接失败时撤销该键）。`SessionConfig.tools` 只列固定工具；动态来源的可见性由来源方自己的配置决定。
-- **MCP 执行准入**：项目 `.mcp.json` 中的服务器须经宿主本地批准当前作用域配置才可执行（AGENTS 规则 11、[ADR 001](../../adr/001-harness-foundation.md) 信任合同）。未批准、已禁用或删除的服务器不发现、不连接，McpSession 不提供其集合（状态 `ApprovalRequired` / `Disabled`）；配置或批准变化时立即撤销旧集合（仅刷新时保留旧集合至替换就绪）。已绑定请求所持的旧版本 handler 不代替批准：每次 `tools`/`call` 前经 McpPublication 重新检查当前来源与批准，撤销后经保留快照的调用返回需批准错误。文件根授权、工具权限预设与 Session 回放都不授予该批准。
+- **MCP 启用**：已配置的服务器启用即运行，没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；项目 `.mcp.json` 的条目默认禁用，只由用户的本地记录启用。已禁用或删除的服务器不发现、不连接，McpSession 不提供其集合（状态 `Disabled`）；配置或启用变化时立即撤销旧集合（仅刷新时保留旧集合至替换就绪）。配置替换时，已绑定请求所持的旧版本 handler 保留其代次直到释放；停用、删除或显式断开会在所有 Session 中关闭它，包括已绑定的请求；停用在来源文件不可读时也生效，被撤回的条目报告为 `Disabled` 而非连接失败。协调者的应用状态变化时各 McpSession 重读选择，外部编辑经目录读取或连接操作被发现后到达每个 Session；Session 开始关闭后不再发现或创建连接。文件根授权、工具权限预设与 Session 回放都不启用条目。
 - **维护变化**：动态来源按整组校验、原子替换；分支采用新的工具集合，作为 `context/configured` 的工具部分写入 Timeline（工具声明属于模型上下文）。
 - **请求一致**：在 Loop 构造请求时固定本请求的声明与实现（同一版本），供 ToolExecutor 按名取实现；本请求结算后释放。Loop 在 `turn/end` 统一 `retain_only(None)`，不在每种结束路径各自释放。
 
@@ -251,7 +257,7 @@ Loop 释放:
 | Prompt 重载 | ToolBinding 及下游重载，快照随旧 ToolBinding 释放 |
 | Loop 单独重载 | ToolBinding 与快照保留；新 Loop 重建后 `retain_only` |
 | ToolBinding 重载后预算恢复 | `transfer` 因无快照失败，turn Failed |
-| 进程恢复 | 旧句柄不恢复；动态来源生成新版本，各分支 ToolBinding 在 `apply` 及 `branch/resume` 分发时重新采用。来源尚未就绪（MCP 仍在连接，或项目服务器尚未批准）时采用不含其工具，就绪后按正常替换再采用；回放历史不恢复 MCP 批准 |
+| 进程恢复 | 旧句柄不恢复；动态来源生成新版本，各分支 ToolBinding 在 `apply` 及 `branch/resume` 分发时重新采用。来源尚未就绪（MCP 仍在连接，或项目条目尚未由用户启用）时采用不含其工具，就绪后按正常替换再采用；回放历史不启用任何 MCP 条目 |
 
 `bind` 时不做“同名改绑当前 handler”：前缀版本不可取得即明确失败，版本变化一律留下采用事实。
 

@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview](../overview.md) (Web). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-Web is a Session plugin that gives the model `web_search` and `web_fetch` as two Session-scoped `toolContribution` services keyed by tool name ([tool contributions](../../architecture/rust-agent/tool-contributions.md); ToolRegistry accepts named tool services as a supplement, [ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)). Search goes to a configured built-in search adapter; fetch downloads one public page and returns bounded text. Web holds no state shared across Sessions, writes no Timeline event (every call and result is already a tool call fact) and reads its `web.*` business configuration from a Settings business source at use time, so editing it never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
+Web is a Session plugin that gives the model `web_search` and `web_fetch` as two Session-scoped `toolContribution` services keyed by tool name ([tool contributions](../../architecture/rust-agent/tool-contributions.md); ToolRegistry accepts named tool services as a supplement, [ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)). Search goes to a configured built-in search adapter; fetch downloads one public page and returns bounded text. Web holds no state shared across Sessions, writes no Timeline event (every call and result is already a tool call fact) and reads its business configuration from its Settings source `web` at use time, so editing it never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
 ## 1. Structure
 
@@ -18,8 +18,8 @@ flowchart LR
   subgraph BR["Branch"]
     Exec["ToolBinding, ToolExecutor, Approval, Permission"]
   end
-  Web -->|"read web section at use, resolve secretRef"| Settings
-  ToolRegistry -->|"collects toolContribution by name"| Web
+  Web -->|"read source web at use, resolve secretRef"| Settings
+  ToolRegistry -.->|"attaches toolContribution at Session publication"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall), cancel request"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
@@ -27,11 +27,11 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Web` | Session (installed only when enabled) | Settings business source (section `web`) and credential-reference resolver; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
+| `Web` | Session (installed only when enabled) | Settings source `web` and credential-reference resolver; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
 
-**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web.*` business configuration. The diagnostics channel is an existing typed service; the Settings business source and credential-reference resolver are Settings supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
+**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web` business document. The diagnostics channel is an existing typed service. Settings sources exist today only through the Rust `BusinessDocument` binding; the language-neutral `settings` service and the credential-reference resolver are Settings supplements that are not implemented yet (S8b, [overview §6.4](../overview.md#64-conventions) and [Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
 
-**Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web and, through the collected `toolContribution` services, ToolRegistry and its dependents; in-flight calls are settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
+**Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry attaches Web's tools when the Session is published and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
 
 **Node.** Requests leave from the App Server process that hosts the Session, not from the Session's resource node (A2).
 
@@ -39,8 +39,8 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  subgraph CFG["Business configuration (Settings source, section web)"]
-    WebCfg["web.search.service, web.fetch.allow_private_hosts, web.proxy"]
+  subgraph CFG["Business configuration (Settings source web)"]
+    WebCfg["search_service, allow_private_hosts, proxy"]
     Secret["secretRef (reference only)"]
   end
   subgraph MEM["Web memory per Session (not persisted)"]
@@ -76,7 +76,7 @@ sequenceDiagram
   A-->>X: allow (or ask, deny)
   X->>W: execute(ToolCall)
   W->>W: validate URL, resolve host, check every address
-  W->>N: GET pinned to the validated IP (direct, or CONNECT IP:port through web.proxy)
+  W->>N: GET pinned to the validated IP (direct, or CONNECT IP:port through proxy)
   N-->>W: body up to 5 MiB
   W-->>X: ToolResult header plus text slice
   X->>TL: step/tool-completed, then one step/tool-result for the batch
@@ -93,7 +93,7 @@ sequenceDiagram
   participant S as Settings
   participant Q as Search service
   X->>W: execute(ToolCall: query, filters)
-  W->>S: read web.search.service
+  W->>S: read search_service
   alt no usable service
     W-->>X: error search_unavailable
   else configured adapter
@@ -126,7 +126,7 @@ sequenceDiagram
 | --- | --- | --- |
 | Configuration edit during a call | Call continues with values read at its start; next call uses the new values | Web |
 | Service removed between calls | Next `web_search` returns `search_unavailable` | Web |
-| Web or Settings reload mid-call | ToolRegistry and dependents reload; the call is settled as reloaded (D3) | ToolExecutor |
+| Web or Settings reload mid-call | The call is settled as reloaded; ToolRegistry and Loop keep running and Web's tools are absent until the Session's next reload (D3, C3) | ToolExecutor |
 | Process restart mid-call | ToolExecutor settles the committed call as not surviving recovery; Web never repeats a request | ToolExecutor |
 | Compaction after a result | Fetched text survives only through the summary | ContextPreparation |
 
@@ -141,7 +141,7 @@ Full table in Appendix B.
 
 - Compaction: declarations survive as configuration; results only through the summary.
 - Child branches inherit results in their ancestor prefix.
-- Non-interactive Sessions see the same tools (`requires.interactive = false`).
+- Non-interactive Sessions see the same tools and can use them; the tool set stays the same across Sessions (#30).
 - Never visible: `structuredContent`, the service name, configuration, credential references, private-host exceptions, diagnostics.
 - Fetched page text is untrusted third-party content placed in a tool result without instruction framing (A14).
 
@@ -151,18 +151,18 @@ Full table in Appendix B.
 | --- | --- | --- |
 | `web_search` | `toolContribution` (Session, key `web_search`), risk `network` | Query the configured service; numbered result list |
 | `web_fetch` | `toolContribution` (Session, key `web_fetch`), risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
-| `web.*` configuration | Business configuration in a Settings source, read at use | Search service, private-host exceptions, proxy |
+| `web` source | Business configuration in Web's Settings source, read at use | Search service, private-host exceptions, proxy |
 
-No Session methods, no `managementMethods` and no CLI subcommand: configuration goes through Settings' typed operations and `/settings`. Details in Appendix A.
+No Session methods, no `managementMethods` and no CLI subcommand: configuration goes through Settings' client methods `settings.read`/`settings.update` (S8b, not implemented) and `/settings`. Details in Appendix A.
 
 ## 7. Security
 
 - Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
-- SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address, with or without `web.proxy`; cross-host redirects need a new call and a new admission (A.4, A10).
+- SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address, with or without `proxy`; cross-host redirects need a new call and a new admission (A.4, A10).
 - No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
 - Credentials: references resolved per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
-- With `web.proxy`, Web asks the proxy for an HTTP `CONNECT` to the validated IP and port, never to the hostname, so the proxy does not resolve the target name; TLS SNI and the `Host` header carry the original hostname. Pinning and private-address protection are the same as for a direct connection (A.4).
+- With `proxy`, Web asks the proxy for an HTTP `CONNECT` to the validated IP and port, never to the hostname, so the proxy does not resolve the target name; TLS SNI and the `Host` header carry the original hostname. Pinning and private-address protection are the same as for a direct connection (A.4).
 
 ## 8. Rule check
 
@@ -172,7 +172,7 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 | Principles §4 rule 2 (handover) | Not applicable: Web takes over no object; it only runs calls ToolExecutor hands it. |
 | Principles §4 rule 3 (before callbacks only) | No intervention before a write; argument checks are inside the tool handler. |
 | Principles §4 rule 4 (no business meaning in core) | No core change; the tools use the generic `toolContribution` contract. |
-| Principles §4 rule 5 (read the whole batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
+| Principles §4 rule 5 (batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
 | Principles §4 rule 6 (context from handed-over events) | Results reach the model only as `step/tool-result` facts written by ToolExecutor. |
 | Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution`, the Settings business source and the credential resolver. |
 | Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement of its own; the Settings supplements it uses are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins); #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
@@ -181,7 +181,7 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 | ADR 002 D1 (scope follows state) | Session scope: Web holds no state shared across Sessions. |
 | ADR 002 D2 (no wiring modules) | No wiring module; search adapters are built in (A1). |
 | ADR 002 D3 (dependencies follow scope) | Its only dependency, Settings, is in the enclosing scope; a Settings reload reloads Web, which is accepted. |
-| ADR 002 D4 (structural vs business configuration) | Enabling is structural; `web.*` is business configuration in Web's own Settings source, read at each call. |
+| ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `web` document is business configuration in Web's own Settings source, read at each call. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
@@ -264,22 +264,22 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 
 | Rule | Content |
 | --- | --- |
-| Resolution | Web resolves the hostname, validates every resolved address and connects only to a validated address (pinned), directly or through `web.proxy`, so DNS rebinding between check and connect is impossible |
+| Resolution | Web resolves the hostname, validates every resolved address and connects only to a validated address (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
 | Blocked by default | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these; hostnames `localhost` and `*.localhost` |
 | Literal IPs | Allowed only when public by the same rules |
 | Ports | Any port on a public address (A12) |
-| Exceptions | `web.fetch.allow_private_hosts`: exact hostnames or CIDRs; empty by default; written only by the user through Settings |
-| Proxy | With `web.proxy`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`; TLS SNI and the `Host` header use the original hostname; the proxy never receives the hostname as the connect target. A proxy that refuses the `CONNECT` fails the call with `connect_failed` (A15) |
+| Exceptions | `allow_private_hosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
+| Proxy | With `proxy`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`; TLS SNI and the `Host` header use the original hostname; the proxy never receives the hostname as the connect target. A proxy that refuses the `CONNECT` fails the call with `connect_failed` (A15) |
 
-### A.5 Business configuration (`web` section, Settings source)
+### A.5 Business configuration (Settings source `web`)
 
-| Key | Type | Default |
+| Field | Type | Default |
 | --- | --- | --- |
-| `web.search.service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or absent | absent (`web_search` returns `search_unavailable`) |
-| `web.fetch.allow_private_hosts` | string[] | `[]` |
-| `web.proxy` | string (URL) | absent |
+| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or absent | absent (`web_search` returns `search_unavailable`) |
+| `allow_private_hosts` | string[] | `[]` |
+| `proxy` | string (URL) | absent |
 
-Read at each call; written only through Settings typed operations into Web's business source, whose schema Web declares; a change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`.
+Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`, an opaque non-empty reference resolved per call through the credential resolver.
 
 ### A.6 Timeline and capability mechanics
 
@@ -344,7 +344,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 3. `web_fetch` HTML header and Markdown; `start_char` pagination to the end; `max_chars`; download limit notice.
 4. Plain text, JSON, unsupported type, 404, empty page.
 5. Same-host redirects up to 5; sixth fails; cross-host redirect returns the notice.
-6. Loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname blocked; DNS rebinding test not connected, both directly and with `web.proxy` (the test proxy receives only `CONNECT <validated IP>:<port>`, with SNI and `Host` set to the hostname).
+6. Loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname blocked; DNS rebinding test not connected, both directly and with `proxy` (the test proxy receives only `CONNECT <validated IP>:<port>`, with SNI and `Host` set to the hostname).
 7. Permission: read-only denies, workspace-write asks, FullAccess allows.
 8. Interrupt before dispatch, during approval and during a slow response (socket closed, one result).
 9. Restart settlement repeats no request.
@@ -375,7 +375,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | Question | Description |
 | --- | --- |
-| Settings by name | The TypeScript implementation needs the Settings business source, credential-reference resolver and diagnostics channel exposed by name ([#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)); `toolContribution` itself is neutral |
+| Settings by name | The TypeScript implementation needs the Settings source, credential-reference resolver and diagnostics channel exposed by name (the Settings parts are S8b; [#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)); `toolContribution` itself is neutral |
 
 ## Appendix G. Rust binding
 

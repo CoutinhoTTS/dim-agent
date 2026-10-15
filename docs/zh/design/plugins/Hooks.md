@@ -1,6 +1,8 @@
 # Hooks
 
-状态：草案。总体设计：[overview](../overview.md)（Hooks）。阶段：P2（用户与项目来源）；插件来源在 #3 之后。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session + 分支）。
+状态：待设计。总体设计：[overview](../overview.md)（Hooks）。阶段：P2（用户与项目来源）；插件来源在 #3 之后。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session + 分支）。
+
+> **待设计。** 本文不具权威性，不得按现文实现。Hooks 是兼容第三方插件机制（Claude、Codex、pi 等）所需的横向机制，单独设计，不复用现有基础设施：本文要求的异步 Timeline before 回调已撤回（[#21](https://github.com/arcships/dim/issues/21)），`skip` 字段及其对其他插件提出的改动一并撤回。
 
 Hooks 在 Session 工作的固定节点运行用户配置的命令。其 Session 部件持有规则（从业务来源与项目文件读取），并运行 Session 启动 Hook。其分支部件注册两个异步 Timeline before 回调（即 [overview 附录 B.1](../overview.md) 中的运行时补充）：在 `input/message` 上用于 `user_prompt_submit`，在 `step/tool-call` 上用于 `pre_tool_use`；它还从分支 Dispatcher 运行工具后、turn 结束与通知 Hook。回调从不让它持有的写入失败，也不阻止它。回调先改草稿（`step/tool-call` 上按调用的通用 `skip` 字段，或加入操作者输入的 context 块），在同一批次只追加给所有者的指令（带通用可选字段 `reason` 的 `input/withdraw {input_id, reason?}`）。这两个字段是对其他插件契约的改动，列在 [overview 附录 B.1](../overview.md)（Loop/ToolExecutor 与 InputQueue 两行），设计见 [A.7](#a7-对其他插件的改动)；异步 before 回调是对运行时的需求，见 [§9](#9-向机制所有者提出的需求)。Hooks 不声明任何事件，也从不写别的模块的结果事件，例如 `step/tool-result` 或 `input/deleted`。Approval 不变；ToolExecutor 与 InputQueue 只增加通用的 `skip` 处理和 `reason` 字段，它们不带 Hooks 含义；Loop 对调用与结果的配对不变，它与所有写入方一样经 Dispatcher 得知被持有写入的提交（R1）。命令经 Session 的 `HostPlatform`（其资源节点）运行；输出只以三种形式进入上下文：来源为 `hooks` 的分支输入、加入操作者输入的块，或 ToolExecutor 为被跳过调用写入的错误结果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
@@ -9,7 +11,7 @@ Hooks 在 Session 工作的固定节点运行用户配置的命令。其 Session
 ```mermaid
 flowchart LR
   subgraph PROC["进程"]
-    Settings["Hooks 业务来源（Settings）"]
+    Settings["Settings 来源 hooks"]
   end
   subgraph SESS["Session"]
     HS["HooksSession：目录、运行器、Session 启动"]:::new
@@ -37,7 +39,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `HooksSession` | Session（仅启用时安装） | Settings 业务来源（`hooks` 文档）；Session 的 `HostPlatform` 与 `FileStorage`；`SessionConfig` | `sessionMethods` key `hooks`，含 `hooks.catalog`；`main` 的 Session 启动 Hook 结果；供 `HooksBranch` 使用的内部目录与命令运行器（不是契约） |
+| `HooksSession` | Session（仅启用时安装） | Settings 来源 `hooks`；Session 的 `HostPlatform` 与 `FileStorage`（读取 `.dimcode/hooks.json`）；`SessionConfig` | `sessionMethods` key `hooks`，含 `hooks.catalog`；`main` 的 Session 启动 Hook 结果；供 `HooksBranch` 使用的内部目录与命令运行器（不是契约） |
 | `HooksBranch` | 分支 | `HooksSession` 的运行器；分支 Timeline（before 回调）、`Branch::input`、Dispatcher 与 ToolBinding | `input/message` 与 `step/tool-call` 上的 before 回调，在部件加载时注册、卸载时移除 |
 
 没有任何部件收集 Hooks：回调是分支 Timeline 上的注册，随 `HooksBranch` 的生命周期存在，因此没有消费方依赖 Hooks 或指名它。
@@ -215,7 +217,7 @@ sequenceDiagram
 | `step/tool-call` 上的 before 回调 | 由 `HooksBranch` 在分支 Timeline 上注册 | 运行 `pre_tool_use` Hook；给被拒绝的调用标记 `skip` |
 | `input/message` 上的 before 回调 | 由 `HooksBranch` 在分支 Timeline 上注册 | 运行 `user_prompt_submit` Hook；添加 context 块，或追加 `input/withdraw {input_id, reason?}` |
 | `hooks.catalog {sessionId}` | `sessionMethods` key `hooks` | Session 的有效 Hook 及其启用状态 |
-| `hooks` 文档 | Settings 业务来源 | 用户 Hook、`disable_all`、启用覆盖（项目 Hook 按工作区和 Hook ID 记录） |
+| `hooks` 文档 | Settings 来源 `hooks` | 用户 Hook、`disable_all`、启用覆盖（项目 Hook 按工作区和 Hook ID 记录） |
 | 配置格式、命令协议 | 本文定义 | 附录 A |
 
 ## 7. 安全
@@ -264,7 +266,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 
 ### A.1 配置格式
 
-每个来源一个 JSON 文档，用户配置（Settings 中的 `hooks` 文档）与项目文件 `.dimcode/hooks.json` 形状相同：
+每个来源一个 JSON 文档，用户配置（Settings 来源 `hooks` 中的文档）与项目文件 `.dimcode/hooks.json` 形状相同。项目文件不是 Settings 来源：Hooks 在项目文件权威下自己经 FileStorage 读取。
 
 ```json
 {
@@ -337,7 +339,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 | --- | --- |
 | `{sessionId}` | 按来源列出的 Hook：`id`、`source`、`event`、匹配器、`command`、`enabled`、`invalid?`；全局 `disabled` |
 
-启用、禁用与 `disable_all` 是对 `hooks` 文档的类型化 Settings 操作，只由用户执行（A9）；没有批准。
+启用、禁用与 `disable_all` 是 `hooks` 文档中仅限用户的字段：用户经客户端方法 `settings.update` 写入（S8b，尚未实现），Hooks 没有写配置的工具（A9）；没有批准。
 
 ### A.6 机制
 
