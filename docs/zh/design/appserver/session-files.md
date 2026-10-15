@@ -1,0 +1,428 @@
+# SessionStore Session 文件
+
+状态：草稿（待评审）。路线图工作项 S5a（[#59](https://github.com/arcships/dim/issues/59)），在 S6（[#51](https://github.com/arcships/dim/issues/51)）之后。
+总体设计：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 FileStorage 行。作用域：
+[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，位于现有的 SessionStore 插件内。
+使用方：[Attachments](../plugins/Attachments.md)（P2），以及 Session 的分叉与删除（S5c）。
+
+## 1. 概要
+
+SessionStore 为 Session 保存不可变文件。调用方为某个 Session 交给它一个文件名和字节；SessionStore 在该 Session 的资源节点上只写一次、以只读方式保存，并返回一个模型可以 `read` 的绝对路径。文件存续期间路径不变，因为 Session 历史会引用它，而历史从不改变。
+
+- **位置。** 文件位于原生数据库 `<db>`（默认 `dimcode.sqlite`）旁边的 `<db>.session-files/<fileId>/<name>`。这个目录属于该数据库，不属于任何单个 Session。
+- **所有权。** 所有权是控制节点原生存储中的一组行。分叉只增加行，不复制字节；删除 Session 就删除它的行。
+- **移除。** 后台清扫移除最后一个所有者行已消失的文件，以及目录中没有任何行记录的东西。
+- **FileStorage。** S5a 只新增一个操作 `create_directory`。共享不需要建链接的操作。
+- **格式。** 原生存储升级到 15 版，新增两张表；v13 存储在启动时原地升级。
+- **接口。** Attachments 通过进程服务 `sessionFiles` 使用它。
+
+不新增 Timeline 事件，不新增插件，不改运行时、rutis 或 Session 门面。
+
+## 2. 结构
+
+```
+ 进程作用域（控制节点）
+ +--------------------------------------------------------------------------+
+ |  SessionStore（现有插件）                                                |
+ |    sessionFiles.put ---------------------------+                         |
+ |    S5c 的分叉与删除步骤（Rust，内部）          |                         |
+ |    清扫（后台）                                |                         |
+ |         |                                      |                         |
+ |         | 行                                   | 每次调用按 Session 的   |
+ |         v                                      | 资源节点查找（#38）     |
+ |  SqliteStorage: session_files,                 |                         |
+ |                 session_file_owners            |                         |
+ +------------------------------------------------|-------------------------+
+                                                  v
+ 资源节点（P1/P2 即控制节点）               FileStorage: create_directory,
+                                            replace, list, remove
+ Session 作用域
+   Attachments（Deps: SessionIdentity, sessionFiles）-- put(自身 sessionId, name, text)
+```
+
+SessionStore 仍只依赖 SqliteStorage，不依赖 FileStorage：它在每次调用时读取 Session 资源节点上的 FileStorage。这是总体设计 [§6.3](../overview.md#63-多节点) 对节点服务的要求，做法与 Rpc 读取管理方法提供方相同（[methods.rs](../../../../crates/dim-app-server/src/methods.rs) 的 `ctx.get_as`）。因此 FileStorage 重载不会让 SessionStore 以及其上的 Agents 和 Session 重载。Attachments 依赖核心部件 SessionStore；SessionStore 不指名任何使用方。
+
+## 3. 布局与所有权
+
+### 3.1 磁盘布局
+
+```
+<数据库目录>/                       FileStorage 根（产品配置：~/.dimcode/rust）
+  dimcode.sqlite                    原生存储，含 session_files 与 session_file_owners
+  dimcode.sqlite.session-files/     该数据库的 SessionStore 目录，0700
+    .dim-file-storage-locks/        FileStorage 自己的资源，列目录时隐藏
+    3f2a…-uuid/                     一个 Session 文件；fileId 为随机 UUID v4，0700
+      .dim-file-storage-locks/
+      paste.txt                     内容，只写一次，只读（0400）
+    9c41…-uuid/
+      notes.md
+```
+
+- 目录位于拥有它的那个数据库旁边，并以数据库文件命名，就像 SQLite 的 `-wal` 和 FileStorage 的 `.lock` 伴随文件一样。因此每个数据库都有自己的目录，即使两个数据库位于同一目录（两个 `--database` 文件）。复制数据库文件不会复制它的 Session 文件。
+- 控制节点上，数据库目录是 `--home` 目录，或 `--database` 所在的目录。产品配置中它是 `~/.dimcode/rust`，而不是 `native_home` 指向的产品 home `~/.dimcode`（[lib.rs](../../../../crates/dim-app-server/src/lib.rs)）。数据库目录还不是 FileStorage 根时，由 `serve` 注册（使用 `--home` 时已经是），并把索引交给 `SessionStorePlugin`。只要 SessionStore 已加载就提供 `sessionFiles`；没有原生存储的宿主没有 SessionStore，也就没有 Session 文件。
+- 返回的路径是 `root_path(root)/<db>.session-files/<fileId>/<name>`。根都是规范化的绝对路径，所以 `read` 解析到同一个文件。
+- 在 P3 的资源节点上，目录以同样的名字位于该节点 FileStorage 注册的 home 根下。按节点查找属于 P3（#38）。一个资源节点只服务一个控制节点，因为总体设计 §6.3 不设计跨控制节点的使用。S5a 只实现控制节点，因为 P3 之前没有 `SessionConfig.resourceNode`；但每个文件都记下节点，P3 不需要再改格式。
+
+Attachments 原先假设的布局，即每个 Session 根目录下的 `attachments/<attachmentId>/<name>`，改为 `<db>.session-files/<fileId>/<name>`，`attachmentId = fileId`。
+
+目录不按 Session 划分。历史引用路径，所以只要还有 Session 拥有文件，路径就必须有效。源 Session 删除后，分叉出的 Session 仍保留源的路径。按 Session 划分的目录因此会比它的 Session 活得更久，"这个目录是不是垃圾"仍要看行。目录与 Session 无关时，行是唯一的依据。
+
+### 3.2 所有权状态
+
+一个文件是一行 `session_files` 加上它的目录；它的所有者是它的 `session_file_owners` 行。
+
+```
+                txn 1                        txn 2（提交）
+   （无行）---------> pending -----------------------------> owned（>= 1 个所有者）
+                      writer = G                                |   ^
+                        |                                       |   | 分叉：复制源的
+                        | 放弃：失败、取消、                    |   | 所有者行
+                        | Session 已不存在（writer := NULL）    |   |
+                        v                                       v   |
+     pending，writer   unowned <---- 最后一个所有者行被删除（删除）
+     属于已死的   ---->  |
+     代次                | 清扫：FileStorage.remove(<db>.session-files/<fileId>) 成功
+     （清扫认领）        v
+                      （删除行）
+```
+
+- **pending：** `writer` 保存正在写入该文件的 SessionStore 实例的代次 ID G。它没有所有者，所以不会被分叉共享，也没有 Session 能看到它的路径。
+- **owned：** `writer` 为 NULL，且至少有一个所有者行。
+- **unowned：** `writer` 为 NULL，且没有所有者行。这是终态：所有者只由创建该文件的写入添加，或从另一个 Session 的所有者行复制而来，所以无主文件不会再有所有者。
+
+G 是每次 SessionStore `apply` 生成的随机 UUID。卸载一个代次时，会取消它已接纳的写入，并等待每个写入提交或放弃。因此，writer 不是当前代次的 pending 行，所属的写入已不可能完成。设计并不只依赖这次等待：清扫先认领这样的行，只在 `writer` 仍是那个旧值时把它清空；txn 2 也只在自己的行仍为 G 时提交。所以旧代次的写入永远无法提交一个正被清扫移除的文件。
+
+## 4. 分叉时共享
+
+**决定：原生存储中的引用行。** 分叉在提交时拥有源当时拥有的全部文件。S5c 的分叉事务复制所有者行：
+
+```sql
+INSERT INTO session_file_owners (session_id, file_id)
+SELECT :fork, file_id FROM session_file_owners WHERE session_id = :source
+```
+
+不复制字节，也不碰任何文件，所以资源节点离线时分叉照样成功。分叉共享源拥有的所有文件，而不只是继承前缀引用到的那些：要区分它们，就得在历史文本里扫描路径；而分叉从不引用的共享文件，代价只是分叉删除前占用的磁盘空间。pending 文件从不被共享：它的路径还没有返回，继承的历史不可能引用它。
+
+这个机制借鉴自 containerd 的内容存储：引用记在元数据库里，租约保护进行中的写入不被回收，垃圾回收移除没有引用的内容。这里所有者行就是引用，`writer` 就是租约，清扫就是回收器。
+
+否决的方案：
+
+| 方案 | 原因 |
+| --- | --- |
+| 硬链接，每个所有者一个（`sessions/<id>/attachments/...`） | 历史只引用一个路径，所以行不通：源删除后，分叉继承的路径就不存在了，不管还剩哪些链接。链接还不能跨卷，在 FAT、exFAT 和部分网络文件系统上不可用；它又是第二套引用计数，崩溃后可能与行不一致。为此还要给 FileStorage 加建链接的操作，却得不到任何好处 |
+| 内容寻址存储（`sha256/<hash>`）加所有者行 | Attachments 已决定不去重（A7），每次写入返回一个 id。相同的粘贴会共享一个路径和一个 id，文件名也会从路径中消失；与清扫相同内容的写入竞争还需要额外协调。所有者行反正都要 |
+| 所有权放在资源节点上（文件旁的标记文件或 JSON 索引） | 分叉和删除需要节点在线，也无法与它们所属的 Session 行原子提交。两边之间崩溃会泄漏文件，或丢失仍在使用的分叉的文件 |
+| 所有权放在单独的 SQLite 文件里 | 能保持 v13，但失去与分叉和删除的原子性：WAL 模式下，跨附加数据库的事务不是整体原子的 |
+| `agent_sessions.config` 里的 JSON 字段 | `SessionConfig` 在创建时固定，归 Agents 所有（[session-access A.3](../contracts/session-access.md#a3-sessionconfig-字段)） |
+
+## 5. 流程
+
+下文的 `<sf>` 指 Session 文件目录 `<db>.session-files`。
+
+### 5.1 写入
+
+```
+ 调用方        SessionStore                  原生存储              FileStorage（Session 的节点）
+   | put(S, name, content)                        |                          |
+   |----------->| 检查 name、大小                 |                          |
+   |            | 读取 S 的资源节点 ------------->| 无 S：not_found          |
+   |            | 查找该节点的 FileStorage ------------------------------------> 缺失：node_unavailable
+   |            | txn 1：S 存在？插入行           |                          |
+   |            |   (file_id, node, writer = G) ->|                          |
+   |            | create_directory(<sf>) ------------------------------------->| 同步父目录
+   |            | create_directory(<sf>/<id>) -------------------------------->| 同步父目录
+   |            | replace(<sf>/<id>/<name>, content, 只读) ------------------->| 同步文件与父目录
+   |            | 已取消？-> 放弃                 |                          |
+   |            | txn 2：S 存在且行仍为 G？       |                          |
+   |            |   插入所有者 (S, id)；          |                          |
+   |            |   writer = NULL --------------->|                          |
+   |<-----------| {fileId, path, bytes}           |                          |
+```
+
+文件及其目录项同步完成、txn 2 提交（`synchronous=FULL`）之后才回复。Windows 没有目录同步；与 `replace` 一样，那里的持久性依靠文件同步和 NTFS 元数据日志。
+
+**放弃。** txn 1 之后发生失败、取消（紧挨 txn 2 之前检查），或 txn 2 发现 Session 已不存在、自己的行已不再以 G 处于 pending 时，SessionStore 执行 `UPDATE session_files SET writer = NULL WHERE file_id = ? AND writer = G`。文件变为无主，并安排一次清扫。如果这条更新也失败，该行以 G 保持 pending，由下一个代次清扫。
+
+### 5.2 分叉（S5c）
+
+```
+ S5c fork(S -> F)             原生存储（一个事务）
+   |-- 复制切点之前的事实，创建 F（S5c）---->|
+   |-- 把 S 的所有者行复制给 F（§4）------->|
+   |-- 提交 -------------------------------| F 拥有同样的文件；不碰任何文件
+```
+
+如果源已先被删除，S5c 的分叉事务找不到源，分叉失败。所有者行只在 S5c 自己的事务内复制，从不作为单独的调用，所以分叉不会缺少它的文件。
+
+### 5.3 删除（S5c）
+
+```
+ S5c delete(S)       Agents          原生存储（一个事务）                   清扫
+   | 关闭 S -------->| 部件卸载；Attachments 不再调用
+   | 删除 S 的所有者行，再删除 S 的 Session 行 --->| 提交
+   | 安排清扫 ------------------------------------------------------------>|
+                                                     移除失去所有者的文件
+```
+
+所有者行要在 `agent_sessions` 之前删除，因为 `session_file_owners` 引用它。Session 创建回滚（`rollback_creation`）也同样删除所有者行。分叉的创建被回滚时，它的文件仍以源为所有者；除非源在此期间已被删除，那时文件变为无主并被清扫。提交后，最后一个所有者是 S 的文件变为无主，由清扫移除。节点离线时删除照样提交，文件以无主行的形式等待，直到清扫到达该节点。
+
+### 5.4 清扫
+
+```
+ sweep(N)：
+   1 认领：对节点 N 上 writer IS NOT NULL 且 writer != G 的每一行：
+             txn：SET writer = NULL WHERE file_id = ? AND writer = <该旧值>   （变为无主）
+   2 移除：对节点 N 上 writer IS NULL 且无所有者的每一行：
+             FileStorage(N).remove(<sf>/<file_id>)          不存在即视为已删除
+               成功              -> txn：若该行仍无主，删除它
+               Locked、I/O 错误  -> 保留该行，记录诊断；下次清扫重试
+               节点不可用        -> 停止；下次清扫重试
+   3 列目录：FileStorage(N).list(<sf>)，再读取这些名字对应的行
+             没有行的每个条目 -> FileStorage(N).remove(<sf>/<name>)
+```
+
+| 触发 | 原因 |
+| --- | --- |
+| 一次写入放弃了文件 | 它的目录可能已存在 |
+| 一次提交删除了所有者行（S5c 删除、创建回滚） | 文件可能失去了最后一个所有者 |
+| 每个 SessionStore 代次在某节点上的第一次写入 | 崩溃或重载的代次留下的 pending 行、删除失败留下的无主行，以及因断电而重新出现的已删目录 |
+| S5c 清理 | 主动回收 |
+
+第 3 步是安全的：目录只属于一个数据库（§3.1），而写入先提交行、再创建目录。列目录返回的每个目录，到读取行的时候要么已经有行（pending 或已拥有的文件，清扫会跳过），要么从来没有行。之所以需要它，是因为 FileStorage 的删除不做同步（[S6](https://github.com/arcships/dim/pull/87)）：断电后，已删除的目录可能重新出现，而以 `synchronous=FULL` 提交的行删除不会回来。SessionStore 以外创建的条目也同样移除：这个目录归 SessionStore 所有。
+
+每个节点同时至多运行一次清扫；清扫期间的触发会再安排一轮。清扫是 SessionStore 自己的后台工作，卸载时取消并排空；FileStorage 的删除可以重试，所以这是安全的。
+
+## 6. 删除、崩溃恢复与串行化
+
+**与 Session 关闭和租约的顺序。** S5c 先关闭 Session，再提交删除事务，然后 SessionStore 清扫。FileStorage 租约不会比一次写入活得更久：`replace` 只在写入期间持有租约。清扫从不移除当前代次的 pending 文件。因此删除不会因为写入而遇到 `Locked` 或 `DirectoryNotEmpty`；如果因为 SessionStore 以外的原因遇到，该行保留，下次清扫重试。
+
+**写入与删除、分叉的串行化。** 三者都在同一个原生存储连接的写事务上做决定：txn 2 检查 Session 是否仍存在；S5c 的删除同时删除所有者行和 Session 行；分叉在创建它的事务里复制所有者行。SQLite 给这些事务排序，所以不需要内存锁：
+
+| 竞争 | 先提交 | 结果 |
+| --- | --- | --- |
+| 写入与其 Session 的删除 | 删除 | txn 2 找不到 Session：`not_found`；文件被放弃并清扫 |
+| 写入与其 Session 的删除 | 写入 | 删除释放该文件；除非有分叉拥有它，否则被清扫 |
+| 写入与其 Session 的分叉 | 写入 | 分叉共享该文件 |
+| 写入与其 Session 的分叉 | 分叉 | 只有源拥有它；分叉之后才返回的路径不可能出现在分叉的历史里 |
+| 分叉与源的删除 | 分叉 | 分叉保留文件 |
+| 分叉与源的删除 | 删除 | 分叉失败：没有源 |
+
+**崩溃恢复。**
+
+| 崩溃位置 | 留下的状态 | 恢复 |
+| --- | --- | --- |
+| txn 1 之后、写入之前或写入期间 | 已死代次的 pending 行；可能有目录和一个 FileStorage 临时文件 | 清扫认领该行，再移除目录（连同 FileStorage 的资源）和该行 |
+| 写入之后、txn 2 之前 | 同上 | 同上；调用方没有拿到路径 |
+| txn 2 之后、回复之前 | 已拥有的文件；客户端没有收到回复 | 文件留在 Session 中（不去重，Attachments A7） |
+| 删除提交之后、清扫之前或清扫期间 | 无主行；不完整的目录 | 下次清扫；删除可以安全重试 |
+| 清扫中，目录已删、行未删 | 无主行，没有目录 | 下次清扫：不存在即视为已删除 |
+| 清扫删除目录并删除行之后断电 | 目录可能重新出现且没有行 | 下一次清扫的第 3 步 |
+
+## 7. FileStorage 新增操作
+
+**只新增 `create_directory`。** 共享靠行（§4），FileStorage 不需要建链接或引用计数的操作。删除、列目录和持久写入已经有了：S6 的 `remove` 和 `list`，以及带权限参数的 `replace`。S6 评审已同意在 S5a 中加入 `create_directory`。
+
+`create_directory(path, cancel) -> ()`：让授权根目录下的 `path` 成为一个已存在的业务目录。
+
+| 规则 | 内容 |
+| --- | --- |
+| 父目录 | 除最后一个之外的每个组成部分都按 `open_directory` 的方式打开：不跟随链接到达的已有目录，且不是保留目录。父目录缺失时以 `Io` `NotFound` 失败；不递归创建，调用方按层依次创建 |
+| 保留名 | `path` 已经按名字拒绝保留前缀 `.dim-file-storage-` 和 `auth.json.lock`（`InvalidPath`） |
+| 别名 | 在创建任何东西之前，按 `lock` 的方式检查别名。先确保父目录中的保留目录存在，这样文件系统视为等同的任何拼写都已存在。然后在该保留目录中打开最后一个组成部分和 `auth.json.lock` 的锁键；二者是同一个文件时，名字就是账户标记的别名，调用以 `InvalidPath` 失败 |
+| 创建 | 最后一个组成部分不存在时，相对已持有的父目录句柄创建：Unix 用 `mkdirat`，模式 `0700`；Windows 用 `NtCreateFile` 加 `FILE_CREATE` 和 `FILE_DIRECTORY_FILE`，继承父目录的 DACL |
+| 已存在 | 已存在的目录按 `open_directory` 的方式打开，所以保留目录的别名以 `InvalidPath` 失败。已存在的业务目录视为创建成功，正如 S6 的 `remove` 把不存在的条目视为已删除。其他已存在的条目（文件、链接、重解析点、特殊文件）以 `Io` 失败且不被改动；从不跟随链接 |
+| 持久性 | 无论是新建还是已存在，返回前都同步父目录，所以 `Unsynced` 之后的重试能确认持久性。同步失败时返回 `Unsynced`（目录存在且可见，持久性未确认）；它的消息从"file replaced"推广到也涵盖目录。Windows 没有目录同步，与 `replace` 相同 |
+| 根目录 | 不能指名根目录本身：`path` 要求相对名称 |
+| 取消 | 一直检查到创建为止，创建就是提交边界；创建之后报告同步结果 |
+| 错误 | `InvalidPath`、`Io`（父目录 `NotFound`、已存在的非目录条目、其他 I/O）、`Unsynced`、`Closed`、`Cancelled`、`Worker` |
+
+别名检查打开的锁键留在保留目录中，与文件名的锁键一样；`remove` 会随目录一起删除它们。该操作位于 FileStorage 自己的模块内，与 `list`、`remove` 并列，使用相同的代次准入。实现时由 FileStorage 的插件页记录。
+
+## 8. 存储格式
+
+**决定：15 版，新增两张表，从恰好的 v13 原地升级。** 记录在 [native-storage-format.md](../../../design/appserver/native-storage-format.md#s5a-v15-格式决定)。
+
+```sql
+CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 15))
+CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)
+CREATE TABLE session_file_owners (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id),
+  file_id TEXT NOT NULL REFERENCES session_files(file_id), PRIMARY KEY (session_id, file_id))
+CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)
+```
+
+| 列 | 含义 |
+| --- | --- |
+| `session_files.file_id` | 小写带连字符的 UUID v4；既是目录名，也是调用方拿到的 `fileId` |
+| `session_files.node` | 写入时 Session 的 `resourceNode`；NULL 表示控制节点，与 `resourceNode` 缺省的含义相同。所有者删除后它仍在，清扫据此知道去哪里移除 |
+| `session_files.writer` | pending 时为代次 ID G；提交或放弃后为 NULL |
+| `session_file_owners` | 每个拥有它的 Session 一行。主键服务按 Session 的分叉与删除；索引服务"已无所有者"的检查 |
+
+行里不记文件名、大小和时间戳：没有决定要用到它们，磁盘上的文件本身也有这些信息。
+
+**为什么不能留在 v13。** 启动要求精确的 SQL 结构（[sqlite.rs](../../../../crates/dim-app-server/src/storage/sqlite.rs)），v13 守护进程会拒绝多出表的库。格式文档只在旧读取器能解释新数据、旧写入器不会丢掉新数据、且不变量成立时保持版本；打不开库的旧守护进程不满足第一条。C2 和 S8a 留在 v13，是因为它们只在现有表内增加 JSON 字段和行。S5a 需要与 Session 行原子提交的关系（§4），没有哪张现有表拥有它们。
+
+**为什么是 15 而不是 14。** 分支专用的 v14（`user_configuration`）曾在 e41ceaf 提交，后在 fb3748e 移除。带 14 标记的开发库可能存在，格式文档写明它们永远不会被当作 v13 解释。把 14 给另一种结构，就是给不兼容的已提交格式复用版本号，AGENTS.md 禁止这样做。
+
+**升级路径。** 升级在现有的启动准入事务中进行（`IMMEDIATE`，写入型 PRAGMA 之前）：
+
+| 找到的库 | 处理 |
+| --- | --- |
+| 空库 | 以标记 15 建立 v15 结构 |
+| 结构恰为 v13、标记为 13 | 在同一事务内：以 `CHECK (version = 15)` 删除并重建 `agent_store_format`，写入 15，建两张表和索引。只替换标记行，不读取、不改写任何业务行；失败则回滚，v13 库保持原样 |
+| 结构恰为 v15、标记为 15 | 打开 |
+| 其他（更旧的格式、分支专用 v14、未知结构） | 照旧拒绝并保留 |
+
+升级是单向的。v13 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库，降级需要能读 v15 的守护进程。这是可以接受的：改动是增量的，而另一种做法，即拒绝所有 v13 库，会丢失用户的 Session。之后的格式各自追加从前一版本出发的一步。测试用 v13 结构的冻结副本构建一次性 v13 库，从不打开用户的库（AGENTS.md）。
+
+## 9. 接口
+
+### 9.1 语言中立形式（ADR 002 D5）
+
+`sessionFiles`，进程作用域，无实例键，由 SessionStore 提供。
+
+| 方法 | 方式 | 请求 | 回复 |
+| --- | --- | --- | --- |
+| `put` | async | `{sessionId: string, name: string, content: string}`，`content` 是字节的 base64 | `{fileId: string, path: string, bytes: u64}` |
+
+- `path` 是 Session 资源节点上的绝对路径，与 `read` 为该 Session 解析的结果一致；`bytes` 是保存的长度。
+- 取消是协议动作：调用方放弃调用，或发送桥接协议的取消请求。取消在 txn 2 之前有效；之后文件已提交，回复有效。
+- 错误是数据 `{code, message}`（§10）。
+- SessionStore 不提供修改、重命名或移除单个文件的操作。共享和释放只发生在 S5c 的分叉和删除事务内，它们是 SessionStore 自己的 Rust 步骤，不是服务方法。
+
+### 9.2 Attachments 如何使用
+
+Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中声明 `S:SessionIdentity` 和进程服务 `sessionFiles`：这是对外层作用域核心部件的依赖（D3）。SessionStore 重载会让 Attachments 重载，它的规则检查已接受这一点。处理 `attachment.put` 时，它调用 `put(sessionId = 自身 Session, name, content = 文本的 UTF-8 字节)`，回复 `{attachmentId: fileId, path, bytes}` 以及它自己统计的 `lines`。Attachments 不引用 SessionStore 的任何类型；Rust 绑定见附录 A。
+
+| `sessionFiles` 错误 | `attachment.put` 结果 |
+| --- | --- |
+| `not_found` | `session_closed` |
+| `invalid` | `attachment_invalid` |
+| `too_large` | `attachment_too_large`（Attachments 的 10 MiB 限制低于 SessionStore 的，因此不会发生） |
+| `node_unavailable` | `node_unavailable` |
+| `cancelled` | `operation_interrupted`，即该调用的 `report` 中断 |
+| `storage` | Attachments 目前没有对应的码；已提给 Attachments 的设计细化（§15） |
+
+## 10. 错误、限制与不可变性
+
+| 码 | 何时 | 留下什么 |
+| --- | --- | --- |
+| `not_found` | 没有该 id 的 Session 记录，或它在 txn 2 之前被删除。与 SessionStore 元数据服务的码相同（[SessionTitle](../plugins/SessionTitle.md)） | 不拥有任何文件；放弃的目录会被清扫 |
+| `invalid` | `name` 违反下面的规则 | 无 |
+| `too_large` | 内容超过 16 MiB | 无 |
+| `node_unavailable` | Session 资源节点上的 FileStorage 不可达；在控制节点上即 FileStorage 正在重载或已关闭。可重试 | 不拥有任何文件；放弃的目录会被清扫 |
+| `cancelled` | 在 txn 2 之前被取消，包括 SessionStore 卸载 | 不拥有任何文件；会被清扫 |
+| `storage` | SQLite 或 FileStorage 失败，包括 `Unsynced`（持久性未确认） | 不拥有任何文件；会被清扫 |
+
+限制及其归属：
+
+| 限制 | 归属 | 原因 |
+| --- | --- | --- |
+| 单个文件至多 16 MiB | SessionStore | 一次写入是一条消息，`replace` 把内容放在内存里；这个上限约束单次调用的内存 |
+| `name`：`[A-Za-z0-9._-]{1,64}`，不以点开头，不论大小写都不是 `auth.json` 或 `auth.json.lock`，并且节点的 FileStorage 接受它作为一个路径组成部分（Windows 设备名） | SessionStore | 文件名会成为 SessionStore 目录下的路径组成部分。`auth.json` 会让 `replace` 改走 FileStorage 的账户标记协议 |
+| 内容规则（非空文本、10 MiB、默认 `paste.txt`） | 各使用方（Attachments A.2） | 功能的业务规则 |
+| 不设每个 Session 的数量或总量配额 | 无 | 磁盘占用随 Session 删除和清理（S5c）结束；配额需要一个业务所有者，目前没有 |
+
+**不可变性。** 在文件存续期间，路径始终指向同样的字节；文件只在清扫移除无主文件时结束。文件只写一次，并且只读：Unix 模式 `0400`，Windows 只读属性，通过 `replace` 的权限参数设置。因此 WorkspaceTools 的 `write` 和 `edit` 会以 `permission_denied` 失败：它们的提交步骤在替换前先以写方式打开目标，Windows 上还会检查只读属性。这是一道防护，不是隔离：以 root 运行的守护进程在 Unix 上不受模式限制，shell 命令仍可以修改文件，FileStorage 也只是可信的宿主存储边界，不隔离同一用户的进程。移动数据库目录会破坏历史中的绝对路径，就像移动工作区会破坏指向其中的路径一样。
+
+## 11. 安全
+
+- 文件只写在 `<db>.session-files/<fileId>/` 下，从不写到调用方选择的位置；`name` 是经过校验的单个组成部分。Unix 上目录为 `0700`、文件为 `0400`；Windows 继承父目录的 DACL。
+- 路径不授予任何权限。`read` 本来就在 Session 的权限策略下读取绝对路径，这些行也不授予任何东西。
+- 目录只属于一个数据库，所以一个存储的清扫不会移除另一个存储的文件，即使两个数据库位于同一目录。
+- 内容是用户数据，不出现在任何诊断、行或事件中；诊断只带文件 id、节点和错误。
+
+## 12. 时序与冲突
+
+| 场景 | 结果 | 由谁决定 |
+| --- | --- | --- |
+| 写入、分叉与删除的竞争 | 见 §6 的表 | 原生存储的写入顺序 |
+| 对已关闭但未删除的 Session 写入 | 保存成功：记录还在。Attachments 本身随 Session 一起卸载 | — |
+| 同一 Session 的两次写入 | 两个独立的文件 | — |
+| 写入时节点离线 | `node_unavailable`；什么都不保存；不重载任何东西 | SessionStore |
+| 分叉时节点离线 | 不受影响：不碰任何文件 | 原生存储 |
+| 删除时节点离线 | 删除提交；无主行等待清扫 | 清扫 |
+| 写入期间 FileStorage 重载 | `node_unavailable` 或 `storage`；放弃并清扫 | SessionStore |
+| 写入期间 SessionStore 重载 | 在 txn 2 之前取消（放弃），或已提交；Attachments 随之重载 | SessionStore 卸载 |
+| 进程重启 | 遗留物在第一次写入时或下一次删除之后被清扫 | 清扫 |
+| SessionStore 以外的东西写入 Session 文件目录 | 顶层条目由清扫的第 3 步移除；某个文件目录内的条目在该文件无主时随目录移除。遇到 `Locked` 则留给下次清扫 | FileStorage、清扫 |
+| 最后一个所有者删除后 `read` | 文件不存在；没有存活的 Session 引用该路径 | — |
+
+## 13. 对其他文档的修改
+
+| 文档 | 本 PR 中的修改 |
+| --- | --- |
+| [Attachments](../plugins/Attachments.md) | 布局改为 `<db>.session-files/<fileId>/<name>`，`attachmentId = fileId`；A1 细化为不属于任何单个 Session 的目录；分叉与删除顺序的行指向本文；离线相关的行不再依赖已撤回的 #5，因为 SessionStore 每次调用时查找 FileStorage（#38）。`attachment.put` 的客户端契约不变 |
+| [总体设计 B.2](../overview.md#b2-app-server-进程插件) | FileStorage 行增加目录创建 |
+| [原生存储格式](../../../design/appserver/native-storage-format.md) | 计划中的 v15 决定 |
+
+S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.delete`，并通过 RPC 覆盖它们。S5a 实现这些步骤，并在 SessionStore 的 Rust API 上测试。
+
+## 14. 规则检查
+
+| 规则 | 回答 |
+| --- | --- |
+| 原则 §4 第 1 条（改别人的状态用指令） | Session 文件是 SessionStore 没有 Timeline 的进程级状态。调用方只能通过它的类型化 `put` 修改；分叉和删除是 SessionStore 自己的步骤。SessionStore 不修改其他模块的状态；它使用 FileStorage 的公开操作。 |
+| 原则 §4 第 2 条（交接） | 不适用：没有交接。路径只会出现在客户端写入的用户输入中，由此进入分支。 |
+| 原则 §4 第 3 条（before 回调） | 不使用 before 回调。文件名和大小检查是所有者在自己服务上的功能检查，不是入口检查；Rpc 不变。 |
+| 原则 §4 第 4 条（核心不带业务含义） | Timeline、Dispatcher、before 和批次都不动。 |
+| 原则 §4 第 5 条（批次） | 不适用：没有事件。 |
+| 原则 §4 第 6 条（上下文来自交接后的事件） | 模型只在已采用的用户输入里看到路径，只在 `read` 结果里看到文件内容。 |
+| 原则 §4 第 7 条（只用公开的事件和服务） | Attachments 使用 `sessionFiles`；SessionStore 使用 FileStorage 的公开操作，不读任何插件的内部状态。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 不改 Timeline、Dispatcher、事件格式、rutis、装配或 Session 门面，也不向 rutis 提需求。格式变化属于 SessionStore 自己的存储，记录为格式决定。`create_directory` 是 FileStorage 在自己模块内的补充，已在 S6 评审中同意。 |
+| 原则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 没有 Timeline 事件。所有权是 SessionStore 行中的进程级状态。 |
+| 原则 §1（Capability 与 App Server 边界） | Session 文件是 SessionStore 的数据（总体设计 B.2）；不新增插件。粘贴功能留在 Attachments 自己的 crate 中。 |
+| ADR 002 D1（作用域跟随状态） | 进程作用域：文件比写入它的 Session 活得更久，并在 Session 之间共享。 |
+| ADR 002 D2（不设接线模块） | `sessionFiles` 是 SessionStore 自己的服务；没有适配器或注册表。 |
+| ADR 002 D3（依赖跟随作用域） | Attachments（可选，Session）依赖 SessionStore（核心，进程）；SessionStore 不依赖任何可选插件，并按资源节点逐次查找 FileStorage，所以 FileStorage 重载不会引起任何重载。 |
+| ADR 002 D4（结构性配置与业务配置） | 没有配置：位置和限制都是固定的。 |
+| ADR 002 D5（语言中立合同） | §9.1 是合同；附录 A 是一种绑定。 |
+
+## 15. 向机制所有者提出的需求
+
+不向运行时或 rutis 提需求。对其他所有者的补充和需求：
+
+| 对象 | 需求 | 状态 |
+| --- | --- | --- |
+| FileStorage | `create_directory`（§7） | 在 S5a 的实现中加入，已在 S6 评审中同意 |
+| App Server 装配（lib.rs 中的 `serve`） | 数据库目录还不是 FileStorage 根时注册它，并把索引交给 `SessionStorePlugin`（§3.1） | S5a 实现中的几行改动，像其他登记一样在装配线的工作之后追加 |
+| Attachments（P2 设计细化） | 把 `sessionFiles` 的 `storage` 映射为 `attachment.put` 的某个码。Attachments 目前没有；SessionTitle 把 SessionStore 的 `storage` 映射为 `storage_failed` | 随 Attachments 细化处理 |
+| S5c | 在删除事务内、关闭 Session 之后、删除 `agent_sessions` 之前删除所有者行；在分叉事务内复制所有者行；删除后安排清扫 | S5c 的合同（§5.2、§5.3） |
+
+## 16. 验收（流程测试）
+
+1. `put` 返回绝对路径 `<数据库目录>/<db>.session-files/<fileId>/<name>`；读回的字节与内容相同，文件只读，Unix 上其目录为 `0700`。
+2. 第二个 Session 通过分叉步骤共享文件。释放源后文件仍在（同一文件身份，不复制字节）；释放第二个 Session 后，清扫将其移除。
+3. 对未知或已删除的 Session 写入：`not_found`；没有所有者行；若已创建目录，则被清扫。
+4. 另一个代次的 pending 行及其目录，在新代次第一次写入时被清扫，没有行的目录也一样。同一目录下第二个数据库的 Session 文件目录保持不动。
+5. FileStorage 未激活：`node_unavailable`；什么都不写；SessionStore 和 Attachments 保持加载。
+6. 在 txn 2 之前取消：不拥有任何文件；目录被清扫。文件名无效（包括 `AUTH.JSON`）或内容超过 16 MiB：`invalid` 或 `too_large`；什么都不写。
+7. 空库建为 v15。一次性 v13 库原地升级为精确的 v15 结构，所有业务行不变，再次打开时为 v15。分支专用 v14 和未知结构被拒绝并保留。
+8. FileStorage 流程：`create_directory` 以 `0700` 创建并同步父目录；已存在的目录成功；父目录缺失以 `NotFound` 失败。保留名、保留目录的大小写别名，以及（在大小写不敏感的文件系统上）`auth.json.lock` 的大小写别名，都以 `InvalidPath` 失败且不创建任何东西。已存在的文件或链接被拒绝且不改动。创建前取消则什么都不创建。
+
+验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及先 `cargo run --locked -p xtask -- graph` 再 `check`，因为 SessionStore 提供了新服务。
+
+## 附录 A. Rust 绑定
+
+放在 `dim-agent-capabilities::host`，与其他宿主端口并列，这样 Attachments 不依赖任何 App Server 类型：
+
+```rust
+pub struct StoredSessionFile { pub file_id: String, pub path: PathBuf, pub bytes: u64 }
+pub enum SessionFileErrorCode { NotFound, Invalid, TooLarge, NodeUnavailable, Cancelled, Storage }
+pub struct SessionFileError { pub code: SessionFileErrorCode, pub message: String }
+pub trait PutSessionFile: Send + Sync + 'static {
+    fn put(&self, session_id: String, name: String, content: Vec<u8>, cancel: CancellationToken)
+        -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+}
+pub struct SessionFilesHost(pub Arc<dyn PutSessionFile>);
+```
+
+`SessionStorePlugin` 接收数据库目录的根索引，提供 `SessionFilesHost`，并在每次调用时用 `ctx.get_as` 读取 `FileStorage`。分叉、释放和清扫步骤是 SessionStore 基于原生存储连接的方法，供 S5c 使用。
+
+FileStorage：
+
+```rust
+impl FileStorage {
+    pub async fn create_directory(self: &Arc<Self>, path: &FilePath, cancel: &CancellationToken)
+        -> Result<()>;
+}
+```
