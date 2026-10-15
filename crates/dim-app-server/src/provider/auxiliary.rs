@@ -1,7 +1,7 @@
 //! One model call outside any Session for a consumer that cannot hold
 //! credentials. The caller owns the choice of model; no event is written.
 use super::{ModelPreferences, ProductResolver, ProviderService};
-use dim_agent_capabilities::host::*;
+use dim_agent_capabilities::{host::*, model_provider::invoke_with_recovery};
 use dim_agent_types::{ModelId, ModelRequest, SystemPrompt};
 use futures_util::StreamExt;
 use std::{future::Future, pin::Pin, sync::Arc, time::Instant};
@@ -134,51 +134,22 @@ async fn run(
     model_request.capability_snapshot = selection.capability_snapshot;
     model_request.config = Some(config);
     let model_request = Arc::new(model_request);
-    let ResolvedModelConnection {
-        mut connection,
-        mut recovery,
-        ..
-    } = ResolveModelConnection::resolve(
+    let resolved = ResolveModelConnection::resolve(
         &ProductResolver(owner.clone()),
         model_request.clone(),
         cancel.clone(),
     )
     .await?;
-    // One credential recovery, as for Session requests; transient retry is the caller's.
-    let mut phase = CredentialRecoveryPhase::Initial;
-    loop {
-        let result = match host
-            .0
-            .invoke(model_request.clone(), connection.clone(), cancel.clone())
-            .await
-        {
-            Ok(stream) => collect(stream).await,
-            Err(error) => Err(error),
-        };
-        let Err(error) = &result else {
-            return Ok(result?);
-        };
-        let rejection = recovery
-            .as_ref()
-            .map_or(CredentialRejection::Unrelated, |recovery| {
-                recovery.rejection(error, phase)
-            });
-        match (rejection, recovery.as_ref()) {
-            (CredentialRejection::Terminal, Some(owner)) => {
-                owner.finish_rejected(cancel.clone()).await?;
-                return Ok(result?);
-            }
-            (CredentialRejection::Recoverable, Some(owner))
-                if phase == CredentialRecoveryPhase::Initial =>
-            {
-                let recovered = owner.recover(cancel.clone()).await?;
-                connection = recovered.connection;
-                recovery = Some(recovered.recovery);
-                phase = CredentialRecoveryPhase::Recovered;
-            }
-            _ => return Ok(result?),
-        }
-    }
+    // The same failure policy as Session requests, settlement included.
+    Ok(invoke_with_recovery(
+        &host,
+        &model_request,
+        resolved,
+        &cancel,
+        &mut (),
+        |stream, _, _, _| Box::pin(collect(stream)),
+    )
+    .await?)
 }
 
 async fn collect(mut stream: ModelStream) -> Result<AuxiliaryReply, HostError> {
@@ -191,10 +162,17 @@ async fn collect(mut stream: ModelStream) -> Result<AuxiliaryReply, HostError> {
             _ => {}
         }
     }
+    let stop_reason =
+        stop_reason.ok_or_else(|| HostError::failed("Model stream ended without a stop"))?;
+    // No tools are offered, so a tool stop is a provider defect.
+    if stop_reason == ModelStopReason::ToolUse {
+        return Err(HostError::failed(
+            "Model stopped for a tool it was not offered",
+        ));
+    }
     Ok(AuxiliaryReply {
         text,
-        stop_reason: stop_reason
-            .ok_or_else(|| HostError::failed("Model stream ended without a stop"))?,
+        stop_reason,
         usage,
     })
 }

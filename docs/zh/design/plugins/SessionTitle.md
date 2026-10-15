@@ -34,7 +34,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | 其所在 Session 的 Session 广播、TimelineTree（`main` 的固定前缀）、`SessionConfig`；进程服务 SessionStore 标题元数据、Provider `AuxiliaryModel`、Settings 来源 `session-title` | `sessionMethods` key `session.rename`（在其 `provides` 中声明）；Settings 来源 `session-title`，字段 `enabled`、`maxLength`、`model` |
+| `SessionTitle` | Session | 其所在 Session 的 Session 广播、TimelineTree（`main` 的固定前缀）、`SessionConfig`；进程服务 SessionStore 标题元数据、Provider `AuxiliaryModel`（硬依赖：没有 Provider 时 SessionTitle 报告为失败并指出缺少的服务）、Settings 来源 `session-title` | `sessionMethods` key `session.rename`（在其 `provides` 中声明）；Settings 来源 `session-title`，字段 `enabled`、`maxLength`、`model` |
 
 每个依赖都位于 Session 作用域或外层进程作用域。多数是既有的类型化服务；SessionStore 标题元数据和标题通知是拟议的补充；Settings 来源已为 Rust 所有者提供，具名的 `settings` 服务尚未实现（S8b）（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)；形状见 A.2）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。SessionStore、Provider 或 Settings 重载会重载 SessionTitle，从而取消在途的生成；这是可接受的（[ADR 002 D3](../../adr/002-plugin-scope.md)）。业务配置变更从不触发重载（[D4](../../adr/002-plugin-scope.md)）。
 
@@ -154,7 +154,7 @@ revision 检查就是复检：手动标题总是胜出。
 
 ## 7. 安全
 
-第一条输入的文本会发送给 `session-title` 来源中设置的模型；未设置时即该 Session 的模型。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
+第一条输入的文本会发送给 `session-title` 来源中设置的模型；未设置时即该 Session 的模型。Session 的模型是 `external-agent:*` 条目时不自动生成标题，所以起标题的请求不会发给外部 Agent 桥接。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
 
 ## 8. 规则检查
 
@@ -209,7 +209,7 @@ revision 检查就是复检：手动标题总是胜出。
 | SessionStore 元数据（补充） | `metadata` | 异步 | `{sessionId}` | `{revision, title?: {text, source: "auto" \| "manual"}}`；错误 `not_found`、`storage` |
 | SessionStore 元数据（补充） | `setTitle` | 异步 | `{sessionId, expectedRevision, title: {text, source} \| null}` | 新的 `revision`；错误 `conflict`、`not_found`、`storage`。提交后 SessionStore 发出标题通知 |
 | SessionStore（补充） | 标题通知 | Session 广播通知（通用记录，§9） | — | 在该 Session 的广播频道上发出 `{source: "SessionStore", kind: "title", data: {sessionId, title, titleSource, revision}}`；没有序号，不重放 |
-| Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [用户文本], maxOutputTokens}}`（[设计](../appserver/auxiliary-model.md)） | `{text, stopReason, usage}`；错误作为数据。由取消请求或丢弃调用取消 |
+| Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: 文本}], maxOutputTokens}}`（[设计](../appserver/auxiliary-model.md)） | `{text, stopReason, usage}`；错误作为数据。由取消请求或丢弃调用取消 |
 
 ### A.3 配置
 
