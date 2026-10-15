@@ -15,6 +15,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use dim_agent_capabilities::methods::RpcError;
 use dim_agent_runtime::{Capability, KeysOf, When};
 use futures_util::{
     SinkExt, StreamExt,
@@ -709,6 +710,7 @@ async fn run_connection(
                                             "session.input_lookup",
                                             "session.create",
                                             "session.model.progress",
+                                            "session.methods",
                                         ]);
                                     }
                                     if local && hub.config().local_execution() {

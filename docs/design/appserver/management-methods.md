@@ -61,6 +61,11 @@ Entry admission precedes routing for built-in and contributed methods alike:
 a protected profile answers every call except `hello` and `daemon.ping` from a
 non-local transport with `local_transport_required`, as before contributions
 ([methods contract A.3](../contracts/session-boundary.md#a3-entries-and-export)). Local v3 then dispatches management contributions; v1/v2 do not.
+A name inside a Session namespace recorded with `AgentBuilder::session_methods`
+is a Session method instead, dispatched through the Session its `sessionId`
+names ([methods contract A.1](../contracts/session-boundary.md#a1-method-contributions));
+Rpc fails to load when a recorded Session namespace overlaps a configured
+management namespace, so no name has both owners.
 A namespace with no enabled provider (no configured namespace owns the name, or
 its owner row is disabled), or a name its provider does not declare, returns
 `unknown_method`. A namespace whose owner row is not running and has not failed
@@ -74,7 +79,8 @@ lowercase segments, at most 128 bytes) is unknown without any lookup, so a
 caller's name bounds the lookups made under the handler lock. Error codes at the
 edges are unchanged: a call before `hello` is `-32600` and one after shutdown has
 begun is `-32603`; an unknown method is `-32601` whatever its params, and only
-the owner of a declared method rejects its params (`-32602`).
+the owner of a declared method rejects its params (`-32602`), except that Rpc
+reads the `sessionId` of a Session method.
 The proposed `ConnectionEntry {name, deviceId}` and paired-device routing remain
 RemoteGateway work; its connections must never be served management methods.
 `hello.features` lists the methods of the providers active at that `hello`.
@@ -151,18 +157,28 @@ user-local business document; see ADR 004.
 
 ## Notifications
 
-Management methods have no notification channel. Connection-bound notifications
-belong to the contract's `callChannel.notify` ([A.2](../contracts/session-boundary.md#a2-call-channel)),
-which is not implemented. Settings source watches invalidate business consumers
+A method that declares `progress` sends progress on its call through the
+handler's `Progress`; Rpc delivers it as `management.progress {id, method, data}`
+to the calling connection only, before the reply, and drops it after a
+disconnect ([A.2](../contracts/session-boundary.md#a2-call-channel)). Progress
+is best effort: a connection queues at most 256 progress frames and 4 MiB of
+them, beside the 1024 frames and 32 MiB of replies and notifications; it
+drops a notice that does not fit, so one over 4 MiB never arrives, and stays
+open. Management
+and Session methods share this path; no management method declares `progress`
+today. Connection-bound notifications belong to the contract's
+`callChannel.notify`, which is not implemented. Settings source watches invalidate business consumers
 after successful persistence; they are not loader events or management
 notifications. Persistence does not certify runtime adoption or generation
 settlement.
 
 ## Limits and verification
 
-RemoteGateway, rutis-link export, contributed Session methods, per-call progress,
-connection-bound CallChannel and shutdown reply handoff are not implemented in
-this subset. There is no new settings authority, loader or authorization system.
+RemoteGateway, rutis-link export, connection-bound CallChannel notifications and
+shutdown reply handoff are not implemented in this subset. Contributed Session
+methods (`SessionMethods`) share its declarations, handler, errors and call
+admission, which live in dim-agent-capabilities `methods`
+([methods contract Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)). There is no new settings authority, loader or authorization system.
 
 Completing D5 requires binding the named `managementMethods[namespace]` service
 and its serializable `describe`/`call` contract to provider declarations and
@@ -188,3 +204,8 @@ generations, the calling load's unload, Pending owners answering
 `service_unavailable` while other namespaces and the `hello` listing stay intact,
 disabled and unconfigured owners answering `unknown_method`, reserved roots, and
 nested ownership with an enabled or a disabled child.
+Session method flows (`transport_flow/session_methods.rs`) contribute a
+namespace from a test plugin and cover dispatch through the Session, the
+routing errors, a provider reload, Session close and restore, `session.methods`,
+per-call progress, and progress dropped for a caller that does not read while
+its reply still arrives.
