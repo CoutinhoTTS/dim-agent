@@ -382,7 +382,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | --- | --- | --- |
 | `goal/*` | 带 key 的 raw 块，包括终态块 | 目标状态是输入 |
 | `shell/*` | `!command` 结果写为 Append 输入 | 不是分支在途工作 |
-| `hook/*` | 工具拒绝表现为 `step/tool-call` 草稿中该调用上的 `skip: {reason}`（由 ToolExecutor 写错误结果），提示词拒绝表现为 `input/withdraw {input_id, reason}`（随后为 `input/deleted`），以及注入的输入、诊断；Hooks 不声明事件（[Hooks](plugins/Hooks.md)） | 不是核心事件 |
+| **已撤回（Hooks 待设计，#21）。** `hook/*` | 工具拒绝表现为 `step/tool-call` 草稿中该调用上的 `skip: {reason}`（由 ToolExecutor 写错误结果），提示词拒绝表现为 `input/withdraw {input_id, reason}`（随后为 `input/deleted`），以及注入的输入、诊断；Hooks 不声明事件（[Hooks](plugins/Hooks.md)） | 不是核心事件 |
 | `external_agent/*` | Collaboration 事实、成员事件、审批事实 | 外部 Agent 是模型连接 |
 | `session/titled` | SessionStore 进程级状态，经其类型化操作写入，并发出 Session 广播通知 | 不影响分支行为 |
 | `workflow/*`、定时运行结果 | 工具结果、报告输入、`pluginFiles` 存储、事件通知 | 进程级结果 |
