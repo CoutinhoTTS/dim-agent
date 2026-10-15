@@ -21,7 +21,9 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
-  daemon stop                      Gracefully stop an existing daemon\n\n\
+  daemon stop                      Gracefully stop an existing daemon\n\
+  web [--port N] [--no-open]       Open the Web workspace in the browser\n\
+  web --close                      Close the Web workspace entry\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
@@ -77,6 +79,12 @@ pub enum Action {
         enabled: bool,
     },
     DaemonStop,
+    /// `web`: open (or with `close`, close) the daemon's local web entry.
+    Web {
+        port: Option<u16>,
+        open_browser: bool,
+        close: bool,
+    },
     /// `--fullscreen default` / `--scrollback default`: save the terminal
     /// UI mode used when neither flag is given.
     DefaultTerminalMode {
@@ -269,6 +277,33 @@ impl Options {
                         },
                         _ => return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into()),
                     };
+                }
+                "web" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Web {
+                        port: None,
+                        open_browser: true,
+                        close: false,
+                    };
+                }
+                "--port" if matches!(options.action, Action::Web { .. }) => {
+                    let value = value(&mut args)?;
+                    if let Action::Web { port, .. } = &mut options.action {
+                        *port = Some(
+                            value
+                                .parse()
+                                .map_err(|_| format!("Invalid port: {value}"))?,
+                        );
+                    }
+                }
+                "--no-open" if matches!(options.action, Action::Web { .. }) => {
+                    if let Action::Web { open_browser, .. } = &mut options.action {
+                        *open_browser = false;
+                    }
+                }
+                "--close" if matches!(options.action, Action::Web { .. }) => {
+                    if let Action::Web { close, .. } = &mut options.action {
+                        *close = true;
+                    }
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {
                     if value(&mut args)? != "stop" {

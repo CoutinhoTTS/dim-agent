@@ -32,12 +32,24 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const MAX_REQUESTS: usize = 64;
 const CONTROL_RESERVE: usize = 8;
 
+/// The entry a connection was accepted on; it decides which methods Rpc serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Entry {
+    /// Owner-only Unix socket or named pipe.
+    Local,
+    /// The unauthenticated `/ws` of `--ws`.
+    Bare,
+    /// The authenticated local web entry: Session methods and web-readable
+    /// management reads only.
+    Web,
+}
+
 pub(crate) struct Connection {
     pub id: String,
     pub version: OnceLock<u32>,
     /// The protocol instance this connection completed hello with.
     pub instance: OnceLock<String>,
-    pub local: bool,
+    pub entry: Entry,
     hub: Arc<ConnectionHub>,
     pub closed: CancellationToken,
     pub sender: Sender,
@@ -63,7 +75,7 @@ impl Drop for Inflight {
 impl Connection {
     pub fn new(
         hub: Arc<ConnectionHub>,
-        local: bool,
+        entry: Entry,
     ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
         let closed = hub.closing.child_token();
         let (sender, receiver) = Sender::new(closed.clone());
@@ -71,7 +83,7 @@ impl Connection {
             id: uuid::Uuid::new_v4().to_string(),
             version: OnceLock::new(),
             instance: OnceLock::new(),
-            local,
+            entry,
             closed,
             sender,
             shutdown_reply: Mutex::new(None),
@@ -153,7 +165,7 @@ impl Connection {
                     });
                     return Ok(());
                 }
-                if self.protocol_version() < 3 || !self.local {
+                if self.protocol_version() < 3 || self.entry == Entry::Bare {
                     return Err(RpcError::app(
                         -32601,
                         "unknown_method",
@@ -262,19 +274,44 @@ impl Connection {
     }
     /// The connection's entry decides what it may call before any method is
     /// routed, for built-in and contributed methods alike: protected profiles
-    /// serve only `hello` and `daemon.ping` to non-local transports.
+    /// serve only `hello` and `daemon.ping` to the bare WebSocket, and the web
+    /// entry serves Session methods plus the web-readable management reads.
     fn admit_entry(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
-        if rpc.config.protected_profile()
-            && !self.local
-            && !matches!(call, Call::Hello(_) | Call::Ping)
-        {
-            return Err(RpcError::app(
-                -32000,
-                "local_transport_required",
-                "Execution and management require a protected local connection",
-            ));
+        match self.entry {
+            Entry::Local => Ok(()),
+            Entry::Web => {
+                let allowed = match call {
+                    Call::Shutdown(_) => false,
+                    // Session methods contributed by plugins, and the
+                    // management reads the web entry is served.
+                    Call::Contributed { method, .. } => {
+                        rpc.sessions.owner(method).is_some()
+                            || WEB_READABLE_METHODS.contains(&method.as_str())
+                    }
+                    call => !call.is_web_entry(),
+                };
+                if allowed {
+                    Ok(())
+                } else {
+                    Err(RpcError::app(
+                        -32601,
+                        "unknown_method",
+                        "Method is unavailable on the web entry",
+                    ))
+                }
+            }
+            Entry::Bare
+                if rpc.config.protected_profile()
+                    && !matches!(call, Call::Hello(_) | Call::Ping) =>
+            {
+                Err(RpcError::app(
+                    -32000,
+                    "local_transport_required",
+                    "Execution and management require a protected local connection",
+                ))
+            }
+            Entry::Bare => Ok(()),
         }
-        Ok(())
     }
     fn admit(self: &Arc<Self>, request: &Request) -> Result<Inflight, RpcError> {
         let mut ids = self.ids.lock().expect("request identities");
@@ -315,6 +352,23 @@ impl Connection {
         *self.version.get().expect("handshake precedes requests")
     }
     fn validate_call(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
+        if call.is_web_entry() {
+            if self.protocol_version() < 3 {
+                return Err(RpcError::app(
+                    -32601,
+                    "unknown_method",
+                    "Method requires protocol v3",
+                ));
+            }
+            if self.entry != Entry::Local {
+                return Err(RpcError::app(
+                    -32000,
+                    "local_transport_required",
+                    "The web entry is managed from a protected local connection",
+                ));
+            }
+            return Ok(());
+        }
         if call.is_execution_session() {
             let available = rpc.config.local_execution();
             if self.protocol_version() < 3 || !available {
@@ -324,7 +378,7 @@ impl Connection {
                     "Management method is unavailable",
                 ));
             }
-            if !self.local {
+            if self.entry == Entry::Bare {
                 return Err(RpcError::app(
                     -32000,
                     "local_transport_required",
@@ -535,6 +589,9 @@ impl Connection {
     ) -> Option<Result<Reply, RpcError>> {
         if let Err(error) = self.validate_call(rpc, &call) {
             return Some(Err(error));
+        }
+        if call.is_web_entry() {
+            return Some(self.web(call).await);
         }
         let session_id = match &call {
             Call::Submit(p) => Some(&p.session_id),
@@ -1177,6 +1234,19 @@ impl Connection {
             trace_path,
         }))
     }
+
+    async fn web(&self, call: Call) -> Result<Reply, RpcError> {
+        let web = &self.hub.web;
+        Ok(match call {
+            Call::WebOpen(params) => Reply::WebOpened(web.open(&self.hub, params.port).await?),
+            Call::WebStatus => Reply::WebStatus(web.status(&self.hub).await),
+            Call::WebClose => {
+                web.close(&self.hub).await;
+                Reply::empty()
+            }
+            _ => unreachable!("validated web entry method"),
+        })
+    }
 }
 
 pub(crate) fn configuration_outcome(
@@ -1231,10 +1301,12 @@ pub(crate) struct ConnectionHub {
     pub shutdown_requests: TaskTracker,
     closing: CancellationToken,
     rpc: RwLock<Option<Arc<RpcService>>>,
+    pub web: crate::web_entry::WebEntry,
 }
 impl ConnectionHub {
     fn new(config: Arc<ServerConfig>, control: Arc<ServerControl>) -> Self {
         Self {
+            web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
             connections: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
@@ -1278,6 +1350,28 @@ impl ConnectionHub {
     /// Removes the handler; the caller drains its commands.
     pub fn take_rpc(&self) -> Option<Arc<RpcService>> {
         self.rpc.write().expect("inbound handler").take()
+    }
+    fn entry_connections(&self, entry: Entry) -> Vec<Arc<Connection>> {
+        self.connections
+            .lock()
+            .expect("connection index")
+            .values()
+            .filter_map(Weak::upgrade)
+            .filter(|connection| connection.entry == entry)
+            .collect()
+    }
+    pub fn entry_count(&self, entry: Entry) -> usize {
+        self.entry_connections(entry).len()
+    }
+    /// Asks every connection accepted on `entry` to close.
+    pub fn close_entry(&self, entry: Entry) {
+        for connection in self.entry_connections(entry) {
+            connection.closed.cancel();
+        }
+    }
+    /// A token cancelled when the hub closes; listeners it owns stop with it.
+    pub fn closing(&self) -> CancellationToken {
+        self.closing.clone()
     }
     fn count(&self) -> usize {
         self.connections.lock().expect("connection index").len()

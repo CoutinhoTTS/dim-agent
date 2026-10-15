@@ -101,8 +101,8 @@ mod notices;
 #[path = "transport_flow/fork.rs"]
 mod fork;
 
-#[path = "transport_flow/titles.rs"]
-mod titles;
+#[path = "transport_flow/web_entry.rs"]
+mod web_entry;
 
 #[path = "transport_flow/session_title.rs"]
 mod session_title;
