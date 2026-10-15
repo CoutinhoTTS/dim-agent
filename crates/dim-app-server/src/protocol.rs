@@ -695,8 +695,6 @@ pub struct ClosedNotice {
 #[derive(Debug, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Notification {
-    #[serde(rename = "configuration.changed")]
-    ConfigurationChanged(Empty),
     #[serde(rename = "session.mcp.state")]
     McpState(McpStateResult),
     #[serde(rename = "session.event")]
