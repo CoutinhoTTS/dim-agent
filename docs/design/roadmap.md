@@ -48,7 +48,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8 Settings 业务源（§5.2）。核心部件（Session 装配、ToolRegistry）不硬依赖任何可选插件，可选插件没起来时只有它自己的功能不可用（#34），在契约里一并写明。
 3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
 4. 决定 Goal 还是 Pursuit（D3）。
-5. 确认两项可能不需要的工作：Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
+5. 确认两项可能不需要的工作：Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 
 不排期，等设计完成：Questions（需要重新设计）、Hooks（待设计，作为第三方插件兼容机制单独设计）、ExternalAgent（需要重新设计）、#2 动态事件（没有使用者）。
@@ -70,7 +70,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | C5 | #4 分支级：TypeScript 部件按名使用 `Dispatcher`、`Branch::input`、`TreeCommands` | M | 装配 | C4 | Goal |
 | S1 | InputQueue 撤回：`input/withdraw`、`input/deleted`、`session.input.withdraw`（新事件需做格式决定） | M | 事件类型 | C1 | `Ctrl+S`/`/queue`、Goal、S2 |
 | S2 | Agents `sessions` 服务：`launch`、`input`、`idle`、`withdraw` | L | `agents.rs` | C2、S1 | Scheduler、Workflow |
-| S3 | Session 活动句柄（先确认是否需要） | S | `agents.rs` | — | ShellInput |
+| S3 | ~~Session 活动句柄~~：不需要，App Server 不自动卸载空闲 Session（#57） | S | `agents.rs` | — | — |
 | S4 | Provider 用途策略与 `AuxiliaryModel` | M | Provider | — | SessionTitle、生产压缩宿主 |
 | S5a | SessionStore：Session 文件 | M | 存储 | S6 | Attachments |
 | S5b | SessionStore：标题元数据与 `setTitle` | S | 存储 | C6 | SessionTitle |
@@ -87,7 +87,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 | 顺序 | 插件 | 语言 | 依赖 |
 | --- | --- | --- | --- |
-| 1 | ShellInput | Rust | C1、S7（S3 视确认结果） |
+| 1 | ShellInput | Rust | C1、S7 |
 | 2 | Attachments | Rust | C1、S5a、S6、S11 |
 | 3 | Web | TypeScript | C3、C4、S8 |
 | 4 | SessionTitle | TypeScript | C1、C2、C4、C6、C7、S4、S5b、S8 |
@@ -105,7 +105,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | --- | --- | --- |
 | Rpc（`connection.rs`、`protocol.rs`），yyhhyyyyyy | C1 → C2 → C6 → S5b/S5c 的 Session 方法 | 冲突最多的地方 |
 | 装配（`assembly.rs`、App Server `lib.rs`），zerob13 | C3 → C4 → C5；每个新插件的登记在这之后追加 | 新插件登记只加几行，按合入顺序 rebase |
-| `agents.rs`，yyhhyyyyyy | S3（若需要）→ S2 | |
+| `agents.rs`，yyhhyyyyyy | S2 | |
 | 存储（`storage/timeline.rs`），yyhhyyyyyy | S5a → S5b → S5c →（#32） | 存储格式的改动依次做，每次单独做格式决定 |
 | 事件类型（`events.rs` 与冻结样本） | S1 | 单独做格式决定 |
 | 插件自己的 crate 或包 | 无冲突 | |
@@ -161,7 +161,6 @@ flowchart LR
 
   C1 --> SH["ShellInput"]
   S7["S7 argv"] --> SH
-  S3["S3 活动句柄?"] -.-> SH
   C1 --> AT["Attachments"]
   S5a --> AT
   S11["S11 图片占位"] --> AT
