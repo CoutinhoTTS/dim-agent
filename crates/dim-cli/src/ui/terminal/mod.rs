@@ -26,6 +26,11 @@ use std::time::{Duration, Instant};
 
 pub use input::{InputEvent, KeyCode, KeyEvent, Modifiers, MouseEvent, MouseKind};
 pub use keyboard::KeyboardProtocol;
+
+/// Columns and rows of the terminal on stdout, when it is one.
+pub fn window_size() -> Option<(u16, u16)> {
+    sys::window_size()
+}
 use modes::Mode;
 
 /// Running inside tmux, which needs passthrough for some sequences.

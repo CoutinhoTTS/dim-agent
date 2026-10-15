@@ -43,9 +43,9 @@ fn main() {
                     .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
             };
             let host = session_host::SessionHost::start(options.clone());
-            let session_id = match ui::tui::run(Box::new(host), env) {
+            let handoff = match ui::tui::run(Box::new(host), env) {
                 ui::tui::Leave::Exit(code) => return Ok(code),
-                ui::tui::Leave::Web { session_id } => session_id,
+                ui::tui::Leave::Web(handoff) => handoff,
             };
             // `/web` hands the session over: the interface has closed and the
             // browser opens on it, as `dimcode web` would.
@@ -54,7 +54,7 @@ fn main() {
                 .build()?;
             return runtime.block_on(async {
                 let mut client = client::connect(&options).await?;
-                open_web(&mut client, None, true, session_id.as_deref()).await
+                open_web(&mut client, None, true, Some(&handoff)).await
             });
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -328,13 +328,13 @@ async fn run(options: Options) -> Result<i32> {
     }
 }
 
-/// Opens the daemon's web entry, at `session_id`'s chat when given, and
-/// says where it is.
+/// Opens the daemon's web entry, at the handed-over session's chat for
+/// `/web`, and shows where it is.
 async fn open_web(
     client: &mut client::Client,
     port: Option<u16>,
     open_browser: bool,
-    session_id: Option<&str>,
+    handoff: Option<&ui::tui::WebHandoff>,
 ) -> Result<i32> {
     #[derive(serde::Deserialize)]
     struct Opened {
@@ -346,21 +346,21 @@ async fn open_web(
         None => serde_json::json!({}),
     };
     let opened: Opened = client.typed("web.open", params).await?;
+    let session_id = handoff.and_then(|handoff| handoff.session_id.as_deref());
     let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
     let path = session_id.map_or(String::new(), |id| format!("chat/{id}"));
-    let url = format!("http://{}/{path}#{fragment}", opened.address);
-    println!("Web workspace  http://{}/{path}", opened.address);
-    if open_browser && browser::open(&url) {
-        println!("Opened in your browser.");
-    } else {
-        // The fragment carries the sign-in token; show it only to this user.
-        println!("Open this link to sign in: {url}");
-    }
-    println!(
-        "The workspace stays available until the daemon stops or you run `dimcode web --close`."
+    let url = format!("http://{}/{path}", opened.address);
+    let sign_in = format!("{url}#{fragment}");
+    // The sign-in link carries the token; it is shown only to this user
+    // when no browser took it.
+    let opened_browser = open_browser && browser::open(&sign_in);
+    ui::tui::print_web_panel(
+        &ui::tui::WebOpened {
+            url: &url,
+            sign_in: (!opened_browser).then_some(sign_in.as_str()),
+            session_id,
+        },
+        handoff,
     );
-    if let Some(id) = session_id {
-        println!("To continue in the terminal: dimcode --resume {id}");
-    }
     Ok(0)
 }

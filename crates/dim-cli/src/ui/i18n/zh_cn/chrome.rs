@@ -68,6 +68,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Workspace" => "工作区",
         "Git branch" => "Git 分支",
         "Bye!" => "再见！",
+        "DIM Web is ready" => "DIM Web 已就绪",
+        "Opened in your browser" => "已在浏览器中打开",
+        "Open the sign-in link below" => "在浏览器中打开下面的登录链接",
+        "Web" => "Web",
+        "Sign-in link:" => "登录链接：",
+        "Resume" => "回到终端",
+        "Close" => "关闭",
+        "The workspace stays open until the daemon stops." => {
+            "守护进程停止前，Web 工作区会一直可用。"
+        }
         "To resume this session:" => "恢复此会话：",
 
         // composer/commands.rs: categories

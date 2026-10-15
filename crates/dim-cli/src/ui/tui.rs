@@ -103,26 +103,67 @@ pub fn is_interactive() -> bool {
 pub enum Leave {
     Exit(i32),
     /// `/web`: the interface closed so the browser carries on with the
-    /// session (`None` before the first one exists). Detaching leaves any
-    /// running turn going in the App Server.
-    Web {
-        session_id: Option<String>,
-    },
+    /// session. Detaching leaves any running turn going in the App Server.
+    Web(WebHandoff),
+}
+
+/// What the interface hands to the browser: the session (`None` before the
+/// first one exists) and the palette and width the Web panel is drawn with.
+pub struct WebHandoff {
+    pub session_id: Option<String>,
+    palette: Palette,
+    cols: usize,
 }
 
 pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
     let mut web = None;
     let code = run_terminal(host, surroundings, &mut web);
     match web {
-        Some(session_id) => Leave::Web { session_id },
+        Some(handoff) => Leave::Web(handoff),
         None => Leave::Exit(code),
+    }
+}
+
+/// Where the Web workspace is, as `/web` and `dimcode web` report it.
+pub struct WebOpened<'a> {
+    /// The workspace URL without its sign-in token.
+    pub url: &'a str,
+    /// The sign-in URL, shown when no browser was opened with it.
+    pub sign_in: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+}
+
+/// Prints `opened` in the welcome panel's box: with the `/web` interface's
+/// palette, the detected one for `dimcode web`, or as plain lines when
+/// stdout is not a terminal.
+pub fn print_web_panel(opened: &WebOpened, handoff: Option<&WebHandoff>) {
+    use std::io::IsTerminal;
+    let (palette, cols) = match handoff {
+        Some(handoff) => (handoff.palette.clone(), handoff.cols),
+        None if std::io::stdout().is_terminal() => (
+            Theme::detect(&detect::env_from_process(), true, None).palette,
+            crate::ui::terminal::window_size().map_or(80, |(cols, _)| usize::from(cols)),
+        ),
+        None => {
+            println!("Web workspace  {}", opened.url);
+            match opened.sign_in {
+                Some(url) => println!("Open this link to sign in: {url}"),
+                None => println!("Opened in your browser."),
+            }
+            return;
+        }
+    };
+    print!("{}", web_panel(cols, &palette, opened));
+    // Unwrapped below the box, so the terminal keeps it one clickable link.
+    if let Some(url) = opened.sign_in {
+        println!("\n {}\n {url}\n", t("Sign-in link:"));
     }
 }
 
 fn run_terminal(
     host: Box<dyn SessionPort>,
     surroundings: Env,
-    web: &mut Option<Option<String>>,
+    web: &mut Option<WebHandoff>,
 ) -> i32 {
     let mut terminal = match Terminal::enter() {
         Ok(terminal) => terminal,
@@ -404,7 +445,7 @@ fn run_terminal(
                         match app.handle(InputEvent::Key(key)) {
                             Outcome::Exit(code) => break code,
                             Outcome::Web => {
-                                *web = Some(app.web_session());
+                                *web = Some(app.web_handoff(terminal.size().0));
                                 break 0;
                             }
                             _ => {}
@@ -480,7 +521,7 @@ fn run_terminal(
                 }
                 Outcome::Exit(code) => break code,
                 Outcome::Web => {
-                    *web = Some(app.web_session());
+                    *web = Some(app.web_handoff(terminal.size().0));
                     break 0;
                 }
             },
@@ -767,9 +808,13 @@ impl App {
     }
 
     /// True once the session has a message (what "needs a session" means).
-    /// The session `/web` opens in the browser, once one exists.
-    fn web_session(&self) -> Option<String> {
-        (!self.session_id.is_empty()).then(|| self.session_id.clone())
+    /// What `/web` hands to the browser.
+    fn web_handoff(&self, cols: u16) -> WebHandoff {
+        WebHandoff {
+            session_id: (!self.session_id.is_empty()).then(|| self.session_id.clone()),
+            palette: self.palette.clone(),
+            cols: usize::from(cols),
+        }
     }
 
     fn session_active(&self) -> bool {
@@ -2888,26 +2933,11 @@ fn banner(cols: usize, p: &Palette, branch: &str) -> String {
         t("Type / for commands · Ctrl+P for the palette").to_owned(),
     ];
     let header = startup_header(&greeting, body_width);
-    let inline = body_width >= 32;
-    let label_width = if inline {
-        (10 + 2).clamp(8, body_width.saturating_sub(12).max(8))
-    } else {
-        body_width
-    };
-    let value_width = body_width.saturating_sub(label_width).max(1);
     let mut info = vec![String::new()];
-    for (label, value) in [(t("Workspace"), &cwd), (t("Git branch"), &branch)] {
-        if !inline {
-            info.push(label.to_owned());
-            info.extend(wrap(value, body_width));
-            continue;
-        }
-        for (index, part) in wrap(value, value_width).into_iter().enumerate() {
-            let lead = if index == 0 { label } else { "" };
-            let pad = " ".repeat(label_width.saturating_sub(width_of(lead)));
-            info.push(format!("{lead}{pad}{part}"));
-        }
-    }
+    info.extend(labeled_rows(
+        &[(t("Workspace"), &cwd), (t("Git branch"), &branch)],
+        body_width,
+    ));
     let rows: Vec<String> = header.iter().chain(info.iter()).cloned().collect();
     let header_rows = header.len();
     let mut text = boxed(
@@ -2927,6 +2957,86 @@ fn banner(cols: usize, p: &Palette, branch: &str) -> String {
     .join("\n");
     text.push('\n');
     text
+}
+
+/// The Web workspace panel: the logo beside the greeting, then where the
+/// workspace is and how to get back to the terminal, in the welcome box.
+fn web_panel(cols: usize, p: &Palette, opened: &WebOpened) -> String {
+    let body_width = cols.saturating_sub(2 + MARGIN).max(4) - 4;
+    let greeting = [
+        t("DIM Web is ready").to_owned(),
+        if opened.sign_in.is_some() {
+            t("Open the sign-in link below").to_owned()
+        } else {
+            t("Opened in your browser").to_owned()
+        },
+    ];
+    let header = startup_header(&greeting, body_width);
+    let resume = opened.session_id.map(|id| format!("dimcode --resume {id}"));
+    let mut pairs = vec![(t("Web"), opened.url)];
+    if let Some(resume) = &resume {
+        pairs.push((t("Resume"), resume.as_str()));
+    }
+    pairs.push((t("Close"), "dimcode web --close"));
+    let mut info = vec![String::new()];
+    info.extend(labeled_rows(&pairs, body_width));
+    info.extend([
+        String::new(),
+        t("The workspace stays open until the daemon stops.").to_owned(),
+    ]);
+    let rows: Vec<String> = header.iter().chain(info.iter()).cloned().collect();
+    let header_rows = header.len();
+    let last = rows.len() - 1;
+    let mut text = boxed(
+        &rows,
+        cols,
+        &|edge| fg(edge, &p.accent),
+        &|index, body| {
+            let color = if index < header_rows {
+                &p.accent
+            } else if index == last {
+                &p.muted
+            } else {
+                &p.text_soft
+            };
+            fg(body, color)
+        },
+        None,
+    )
+    .join("\n");
+    text.push('\n');
+    text
+}
+
+/// `label  value` rows aligned like the welcome panel's, values wrapped
+/// under their column; stacked when the box is narrow.
+fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
+    let inline = body_width >= 32;
+    let widest = pairs
+        .iter()
+        .map(|(label, _)| width_of(label))
+        .max()
+        .unwrap_or(0);
+    let label_width = if inline {
+        (widest + 2).clamp(8, body_width.saturating_sub(12).max(8))
+    } else {
+        body_width
+    };
+    let value_width = body_width.saturating_sub(label_width).max(1);
+    let mut rows = Vec::new();
+    for (label, value) in pairs {
+        if !inline {
+            rows.push((*label).to_owned());
+            rows.extend(wrap(value, body_width));
+            continue;
+        }
+        for (index, part) in wrap(value, value_width).into_iter().enumerate() {
+            let lead = if index == 0 { *label } else { "" };
+            let pad = " ".repeat(label_width.saturating_sub(width_of(lead)));
+            rows.push(format!("{lead}{pad}{part}"));
+        }
+    }
+    rows
 }
 
 fn git_branch() -> Option<String> {
