@@ -206,13 +206,13 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 已撤回（[#24](https://github.com/arcships/dim/issues/24)）：调用方凭写入时拿到的 `input_id` 撤回，不需要调用方来源。
 
-### 9.4 按启用状态与 `interactive` 安装可选部分
+### 9.4 按启用状态安装可选部分
 
 | 项 | 内容 |
 | --- | --- |
-| 被什么挡住 | ADR 002 后果：可选的 Session 与分支部分只在启用时安装；非交互 Session 不安装 Questions（A.3）。 |
+| 被什么挡住 | ADR 002 后果：可选的 Session 与分支部分只在启用时安装。 |
 | 考虑过的现有机制 | 全部安装、在部分内部检查：这是 ADR 不允许的占位。每个插件在宿主侧调用 `AgentBuilder`：不是语言中立的（D5）。 |
-| 需要的通用能力 | Agent 装配收集每个已安装插件在 `provides` 中声明的具名服务，只在插件启用且其声明的 `SessionConfig` 条件成立时安装该部分。 |
+| 需要的通用能力 | Agent 装配收集每个已安装插件在 `provides` 中声明的具名服务，只在插件启用时安装该部分。安装从不依赖 `interactive` 等 `SessionConfig` 字段，因此 fork 前后工具集合与提示词前缀保持一致（#30）。 |
 | 对序号、批次、中断、重载的影响 | 在 Session 装载时决定，Session 重载时重新决定；启用插件只影响之后装载的 Session。 |
 | 由谁实现、对应 issue | 运行时（Agent 装配）；issue 待开。 |
 
@@ -296,7 +296,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | { "kind": "fork", "sourceSession": "string" }
 ```
 
-`session.create` 增加 `interactive?: bool`（默认 `true`）与 `client?: string`。fork 复制 `cwd`、`resourceNode`、`interactive` 和 `collaborationRole`。这些字段在创建时固定。Session 装配读取 `interactive` 以决定安装哪些可选插件（非交互 Session 中没有 `ask_user`）。
+`session.create` 增加 `interactive?: bool`（默认 `true`）与 `client?: string`。fork 复制 `cwd`、`resourceNode`、`interactive` 和 `collaborationRole`。这些字段在创建时固定。装配不读取 `interactive`；关心它的插件自己读取（例如 `ask_user` 回答当前没有用户可以回答），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache（#30）。
 
 ### A.4 撤回
 

@@ -206,13 +206,13 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 
 Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws by the `input_id` it received when writing the input, so no caller source is needed.
 
-### 9.4 Optional parts per enabled plugin and `interactive`
+### 9.4 Optional parts per enabled plugin
 
 | Item | Content |
 | --- | --- |
-| Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled, and Questions is not installed in non-interactive Sessions (A.3). |
+| Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled. |
 | Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls per plugin: not language-neutral (D5). |
-| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled and its declared condition on `SessionConfig` holds. |
+| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled. Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
 | Effect on sequence, batch, interrupt, reload | Decided at Session load, and a Session reload decides again; enabling a plugin applies to Sessions loaded afterwards. |
 | Owner and issue | Runtime (Agent assembly); issue to be opened. |
 
@@ -296,7 +296,7 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | { "kind": "fork", "sourceSession": "string" }
 ```
 
-`session.create` gains `interactive?: bool` (default `true`) and `client?: string`. A fork copies `cwd`, `resourceNode`, `interactive` and `collaborationRole`. The fields are fixed at creation. The Session assembly reads `interactive` to decide which optional plugins are installed (no `ask_user` in non-interactive Sessions).
+`session.create` gains `interactive?: bool` (default `true`) and `client?: string`. A fork copies `cwd`, `resourceNode`, `interactive` and `collaborationRole`. The fields are fixed at creation. Assembly does not read `interactive`; plugins that care read it themselves (for example `ask_user` answers that no user is available), so the tool set stays the same and a fork keeps the prompt prefix and its KV cache (#30).
 
 ### A.4 Withdrawal
 
