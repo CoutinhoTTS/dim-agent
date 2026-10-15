@@ -45,7 +45,8 @@ impl TypedPlugin for Owner {
                         if method == "fixture.write" {
                             state.entered.notify_one();
                             state.release.notified().await;
-                            assert!(!cancel.is_cancelled());
+                            // The unload signal reaches it, but Rpc still waits.
+                            assert!(cancel.is_cancelled());
                             state.committed.fetch_add(1, Ordering::SeqCst);
                         } else if method == "fixture.wait" {
                             state.entered.notify_one();
@@ -119,36 +120,21 @@ async fn contributor_reload_drains_writes_and_interrupts_waits_before_replacemen
         .await
         .unwrap();
         let (table, stop, commands) = state.entry.lock().unwrap().clone().unwrap();
-        let disconnected = CancellationToken::new();
         let write = table
-            .dispatch(
-                "fixture.write".into(),
-                json!({}),
-                disconnected.clone(),
-                stop.clone(),
-                &commands,
-            )
+            .dispatch("fixture.write".into(), json!({}), stop.clone(), &commands)
             .unwrap();
         state.entered.notified().await;
-        disconnected.cancel();
         let wait = table
-            .dispatch(
-                "fixture.wait".into(),
-                json!({}),
-                CancellationToken::new(),
-                stop,
-                &commands,
-            )
+            .dispatch("fixture.wait".into(), json!({}), stop, &commands)
             .unwrap();
         state.entered.notified().await;
         let restarting = owner.clone();
         let restart = tokio::spawn(async move {
             restarting.restart().await.unwrap();
         });
-        assert_eq!(
-            wait.await.unwrap().unwrap_err().data.unwrap().app_error,
-            "operation_interrupted"
-        );
+        let interrupted = wait.await.unwrap().unwrap_err();
+        assert_eq!(interrupted.data.unwrap().app_error, "operation_interrupted");
+        assert!(interrupted.message.contains("may already have committed"));
         state.cancelled.notified().await;
         assert!(
             !restart.is_finished(),
@@ -170,13 +156,7 @@ async fn contributor_reload_drains_writes_and_interrupts_waits_before_replacemen
         let (table, stop, commands) = state.entry.lock().unwrap().clone().unwrap();
         assert_eq!(
             table
-                .dispatch(
-                    "fixture.read".into(),
-                    json!({}),
-                    CancellationToken::new(),
-                    stop,
-                    &commands,
-                )
+                .dispatch("fixture.read".into(), json!({}), stop, &commands)
                 .unwrap()
                 .await
                 .unwrap()

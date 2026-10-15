@@ -133,7 +133,6 @@ impl Connection {
                 let accepted = rpc.methods.dispatch(
                     method.clone(),
                     params.clone(),
-                    self.closed.clone(),
                     rpc.unloading.clone(),
                     &rpc.commands,
                 )?;

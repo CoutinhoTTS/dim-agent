@@ -205,11 +205,15 @@ impl MethodTable {
 
     /// Called under ConnectionHub's Rpc admission lock. Its disposer removes
     /// that handler before draining its commands, so no accepted call is missed.
+    ///
+    /// Every handler observes `entry_stopping`, the Rpc load's unload signal.
+    /// A `Report` call replies as soon as that signal fires; a `Drain` call
+    /// replies with its own result. Both stay tracked until they settle, and a
+    /// caller's disconnect does not cancel an accepted call.
     pub fn dispatch(
         &self,
         method: String,
         params: Value,
-        caller_gone: CancellationToken,
         entry_stopping: CancellationToken,
         commands: &TaskTracker,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<Value, RpcError>>, RpcError> {
@@ -228,25 +232,24 @@ impl MethodTable {
         let owner = owner.clone();
         let (send, receive) = tokio::sync::oneshot::channel();
         commands.spawn(async move {
-            let cancel = if interruption == Interruption::Report { caller_gone.child_token() } else { CancellationToken::new() };
-            let operation = (owner.handler)(method, params, cancel.clone());
-            tokio::pin!(operation);
-            if interruption == Interruption::Report {
-                tokio::select! {
-                    biased;
-                    result = &mut operation => { let _ = send.send(result); },
-                    _ = entry_stopping.cancelled() => {
-                        cancel.cancel();
-                        let _ = send.send(Err(RpcError::app(-32000, "operation_interrupted", "Method entry unloaded")));
-                        let _ = operation.await;
-                    },
-                    _ = cancel.cancelled() => {
-                        let _ = send.send(Err(RpcError::app(-32000, "operation_interrupted", "Method caller disconnected")));
-                        let _ = operation.await;
-                    },
-                }
-            } else {
+            let operation = (owner.handler)(method, params, entry_stopping.child_token());
+            if interruption == Interruption::Drain {
                 let _ = send.send(operation.await);
+                return;
+            }
+            tokio::pin!(operation);
+            // Unloading wins a tie: a result racing the unload is not reported.
+            tokio::select! {
+                biased;
+                _ = entry_stopping.cancelled() => {
+                    let _ = send.send(Err(RpcError::app(
+                        -32000,
+                        "operation_interrupted",
+                        "Service reloaded; the operation may already have committed. Read the current state before retrying",
+                    )));
+                    let _ = operation.await;
+                },
+                result = &mut operation => { let _ = send.send(result); },
             }
         });
         Ok(receive)

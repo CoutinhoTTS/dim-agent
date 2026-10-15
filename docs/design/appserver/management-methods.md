@@ -60,9 +60,12 @@ methods keep their built-in contracts.
 Rpc admits contributed calls under the same handler lock as built-in commands.
 Both operations and reply delivery belong to Rpc's existing command tracker.
 On unload it removes admission, signals cancellation and drains accepted work
-before dependencies are released. `Drain` methods finish after disconnect or
-reload. `Report` methods signal cancellation and report interruption while their
-accepted operations remain tracked until settled. Provider and
+before dependencies are released. Every accepted call observes that unload
+signal and stays tracked until it settles; a caller's disconnect cancels
+nothing. On unload a `Report` method replies `operation_interrupted`, stating
+that the operation may already have committed and the current state must be
+read before retrying, while Rpc waits for a `Drain` method's own result. This
+reproduces the behaviour before contributions (PR #15 A.4). Provider and
 account methods use `Drain`; MCP and Skills use `Report`. Settings retains its
 accepted-write contract.
 
@@ -105,7 +108,8 @@ their source, not editable loader rows; see [ADR 004](../../adr/004-loader-plugi
 Transport flows cover actual owner methods, hello features, owner/Rpc reloads,
 local/remote and protocol-version boundaries, business source CAS, persistence
 failures and invalidation. A rutis contribution flow verifies reload propagation,
-Report cancellation, disconnected Drain completion and replacement admission.
+Report interruption, Drain completion after the unload signal and replacement
+admission.
 Namespace validation covers reserved names and nested collisions in either
 collection order. Existing tool/prompt contribution flows protect instance
 scoping while the shared collector also supports process services.
