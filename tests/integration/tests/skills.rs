@@ -950,16 +950,27 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
     hold.release.notify_one();
     let session = creating.await.unwrap().unwrap();
     // Publication adopts the change seen during assembly: only `b` is replaced.
-    for _ in 0..200 {
-        if active_content() != initial {
+    // Wait for the replacement to settle, not its first step.
+    let mut adopted = active_content();
+    for _ in 0..1000 {
+        if adopted != initial && adopted.len() == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        adopted = active_content();
+    }
+    assert_eq!(adopted.len(), 3);
+    assert_eq!(adopted.intersection(&initial).count(), 2);
+    // The branch adopts the replacement once it is active.
+    let mut body = String::new();
+    for _ in 0..100 {
+        body = result_text(&load(&env, &session, "b").await);
+        if body.contains("BODY-B-2") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    let adopted = active_content();
-    assert_eq!(adopted.len(), 3);
-    assert_eq!(adopted.intersection(&initial).count(), 2);
-    assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-2"));
+    assert!(body.contains("BODY-B-2"), "{body}");
     env.agent.close().await.unwrap();
 }
 
