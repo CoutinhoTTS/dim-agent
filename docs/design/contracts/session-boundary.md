@@ -273,7 +273,7 @@ Only `progress` is implemented (C1); `notify`, `closed` and `takeFinalReply` are
 | `closed` | async | `{connectionId}` | Resolves when the connection closes |
 | `takeFinalReply` | async | `{callId}` | `{}` after the final reply is written; `handoff` methods only |
 
-Progress is sent as the notification `management.progress {id, method, data}` for Session and management methods, ordered before the response and dropped after disconnect. Notification names must be declared and lie inside the namespace. A `connectionId` stays valid for `notify` until the connection closes.
+Progress is sent as the notification `management.progress {id, method, data}` for Session and management methods, ordered before the response, best effort (below) and dropped after disconnect. Notification names must be declared and lie inside the namespace. A `connectionId` stays valid for `notify` until the connection closes.
 
 How progress of one call reaches its caller:
 
@@ -289,7 +289,18 @@ Client A               Rpc                        call admission              pr
   |                    |              a later progress.send is dropped             |
 ```
 
-Only the calling connection receives it; other clients of the Session do not. After A disconnects its sender is closed, so progress and the reply are dropped while the call continues. A client that stops reading is disconnected like any slow consumer.
+Only the calling connection receives it; other clients of the Session do not. After A disconnects its sender is closed, so progress and the reply are dropped while the call continues.
+
+Progress is best effort: a notice the calling connection cannot take, because the client reads too slowly or the notice is too large, is dropped and the connection stays open. The reply is unaffected; it always follows every notice that arrives. A client that falls behind on replies and durable notifications is still disconnected like any slow consumer. Keep notices small and each useful on its own; whatever the caller must have belongs in the reply.
+
+```text
+                    the calling connection's outbound queue
+progress.send --> progress allowance ------------+
+                  full, or the notice too large: |
+                  dropped, the connection stays  +--> one FIFO queue --> client A
+reply ----------> reply and notice allowance ----+
+                  full: a slow consumer, the connection closes
+```
 
 ### A.3 Entries and export
 
@@ -394,7 +405,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 3. A recorded transcript of every migrated management method matches the pre-migration transcript, and `hello.features` is unchanged for v3 local profiles.
 4. On a RemoteGateway test entry, `session.permission.update` and `session.exec.stop` succeed.
 5. A tool provided as `toolContribution` by a non-Rust plugin is declared to the model and executed through ToolExecutor like a Rust tool. A tool in `SessionConfig.tools` whose provider is missing is omitted and reported in diagnostics, and the Session still starts.
-6. Progress precedes the response, and `notify` reports `gone` after disconnect.
+6. Progress precedes the response; progress the connection cannot take is dropped without closing the connection or losing the response; `notify` reports `gone` after disconnect.
 7. With an enabled management provider that is Pending, `hello` succeeds, every other namespace works, and the provider's namespace returns `service_reloading`; with one that is Failed or Unresolved it returns `service_unavailable`; with a disabled one it returns `unknown_method`. Once PluginManager provides `plugin.set_enabled` (not implemented), it can disable the provider unless it is PluginManager itself. Reloading a management provider neither reloads Rpc nor closes connections.
 
 ## Appendix E. Assumptions
@@ -424,7 +435,7 @@ pub type Handler = Arc<
         -> BoxFuture<'static, Result<Value, RpcError>> + Send + Sync,
 >; // (method, params, cancellation token, progress)
 impl Progress {
-    pub fn send(&self, data: Value); // dropped unless declared, or once the reply is handed over
+    pub fn send(&self, data: Value); // best effort; dropped unless declared, or once the reply is handed over
 }
 pub enum Interruption { Report, Drain }
 pub struct MethodDecl {
@@ -454,7 +465,7 @@ impl ManagementMethods { // Deref<Target = MethodProvider>
 
 `MethodProvider::new` rejects invalid declarations (the A.1 grammar; at least one method, each unique and inside the namespace) and registers the unload effect that interrupts admitted `Report` calls on either unload and waits for every admitted call, so `SessionMethods` and `ManagementMethods` cannot diverge. `ManagementMethods::provide` adds the A.1 reserved-name checks and provides the service under `TypeKey::keyed_dynamic::<ManagementMethods>(namespace)`. `SessionMethods::provide` provides it under `SessionScope::named_key::<SessionMethods>(namespace)`; Rpc checks the namespaces recorded with `AgentBuilder::session_methods` against reserved and management names when it loads. The handler receives the method name, the raw params, a cancellation token that fires on either unload (A.1) and the call's `Progress`. `RpcError`, with its `From<AgentError>`, lives in the same module (A.1 Shared types); dim-app-server keeps `ManagementMethods`, its reserved-name checks and `Owners`.
 
-`Progress` binds A.2 `progress` per call rather than through a `callChannel` process service: Rpc passes each admitted call a sink that writes `management.progress {id, method, data}` to the calling connection, and the admission hands it to the handler only when the method declares `progress` and closes it before it hands over the reply. Management methods use the same path; none declares `progress` today.
+`Progress` binds A.2 `progress` per call rather than through a `callChannel` process service: Rpc passes each admitted call a sink that writes `management.progress {id, method, data}` to the calling connection, and the admission hands it to the handler only when the method declares `progress` and closes it before it hands over the reply. The sink queues progress under its own allowance on the connection, so progress never takes room from the reply or durable notifications. Management methods use the same path; none declares `progress` today.
 
 Not implemented: the neutral `describe`/`call` binding (a provider that takes `MethodCall` and returns `MethodReply` or `MethodError`), `callChannel`'s connection notifications and final-reply handoff, and the `notifications` and `reply` declaration fields. Their shapes are those of A.1 and A.2; the Rust names are chosen when they are implemented.
 

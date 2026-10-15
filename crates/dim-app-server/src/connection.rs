@@ -64,7 +64,7 @@ impl Connection {
     pub fn new(
         hub: Arc<ConnectionHub>,
         local: bool,
-    ) -> (Arc<Self>, tokio::sync::mpsc::Receiver<Frame>) {
+    ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
         let closed = hub.closing.child_token();
         let (sender, receiver) = Sender::new(closed.clone());
         let connection = Arc::new(Self {
@@ -208,8 +208,9 @@ impl Connection {
         let _ = accepted.settled.await;
     }
     /// The progress sink of contributed call `id` (methods contract A.2):
-    /// `management.progress {id, method, data}` on this connection only.
-    /// After a disconnect the sender is closed and progress is dropped.
+    /// `management.progress {id, method, data}` on this connection only, best
+    /// effort. Progress the connection cannot take, also after a disconnect,
+    /// is dropped; it never closes the connection or holds back the reply.
     fn progress(
         self: &Arc<Self>,
         id: &RequestId,
@@ -217,14 +218,13 @@ impl Connection {
     ) -> impl Fn(Value) + Send + Sync + 'static {
         let (connection, id, method) = (self.clone(), id.clone(), method.to_owned());
         move |data| {
-            let _ = connection.sender.send(
-                Outbound::notice(Notification::Progress(ProgressNotice {
+            connection
+                .sender
+                .offer(Outbound::notice(Notification::Progress(ProgressNotice {
                     id: id.clone(),
                     method: method.clone(),
                     data,
-                })),
-                false,
-            );
+                })));
         }
     }
     /// Admits a Session method call (methods contract A.1): reads `sessionId`

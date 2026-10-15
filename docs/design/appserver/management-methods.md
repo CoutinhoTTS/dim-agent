@@ -160,7 +160,11 @@ user-local business document; see ADR 004.
 A method that declares `progress` sends progress on its call through the
 handler's `Progress`; Rpc delivers it as `management.progress {id, method, data}`
 to the calling connection only, before the reply, and drops it after a
-disconnect ([A.2](../contracts/session-boundary.md#a2-call-channel)). Management
+disconnect ([A.2](../contracts/session-boundary.md#a2-call-channel)). Progress
+is best effort: a connection queues at most 256 progress frames and 4 MiB of
+them, beside the 1024 frames and 32 MiB of replies and notifications; it
+drops a notice that does not fit, so one over 4 MiB never arrives, and stays
+open. Management
 and Session methods share this path; no management method declares `progress`
 today. Connection-bound notifications belong to the contract's
 `callChannel.notify`, which is not implemented. Settings source watches invalidate business consumers
@@ -202,5 +206,6 @@ disabled and unconfigured owners answering `unknown_method`, reserved roots, and
 nested ownership with an enabled or a disabled child.
 Session method flows (`transport_flow/session_methods.rs`) contribute a
 namespace from a test plugin and cover dispatch through the Session, the
-routing errors, a provider reload, Session close and restore, `session.methods`
-and per-call progress.
+routing errors, a provider reload, Session close and restore, `session.methods`,
+per-call progress, and progress dropped for a caller that does not read while
+its reply still arrives.

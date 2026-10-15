@@ -148,7 +148,8 @@ type Sink = Box<dyn Fn(Value) + Send + Sync>;
 /// provider sends progress data on the call it serves, and the caller's entry
 /// delivers it to the calling connection only, before the call's reply. Data
 /// sent on a method that does not declare `progress`, or once the reply has
-/// been handed over, is dropped.
+/// been handed over, is dropped. Delivery is best effort: the entry may also
+/// drop progress its connection cannot take, which never affects the reply.
 #[derive(Clone)]
 pub struct Progress(Arc<Mutex<Option<Sink>>>);
 impl Progress {

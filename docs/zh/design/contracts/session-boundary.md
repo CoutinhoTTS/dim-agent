@@ -273,7 +273,7 @@ sequenceDiagram
 | `closed` | async | `{connectionId}` | 连接关闭时完成 |
 | `takeFinalReply` | async | `{callId}` | 最终回复写出后返回 `{}`；仅限 `handoff` 方法 |
 
-进度对 Session 方法和管理方法都以通知 `management.progress {id, method, data}` 发送，排在响应之前，断开后丢弃。通知名必须声明且位于命名空间内。`connectionId` 在连接关闭前对 `notify` 一直有效。
+进度对 Session 方法和管理方法都以通知 `management.progress {id, method, data}` 发送，排在响应之前，尽力送达（见下文），断开后丢弃。通知名必须声明且位于命名空间内。`connectionId` 在连接关闭前对 `notify` 一直有效。
 
 一次调用的进度如何到达调用方：
 
@@ -289,7 +289,18 @@ Client A               Rpc                        call admission              pr
   |                    |              a later progress.send is dropped             |
 ```
 
-只有发起调用的连接收到进度；该 Session 的其他客户端收不到。A 断开后它的发送端已关闭，进度与回复都被丢弃，调用继续执行。停止读取的客户端与任何慢消费者一样被断开。
+只有发起调用的连接收到进度；该 Session 的其他客户端收不到。A 断开后它的发送端已关闭，进度与回复都被丢弃，调用继续执行。
+
+进度尽力送达：客户端读得太慢，或单条进度过大，发起调用的连接收不下这条进度时，它被丢弃，连接保持。回复不受影响，并且总排在所有已送达的进度之后。回复和持久通知跟不上的客户端，仍像任何慢消费者一样被断开。进度应当小，每条单独有意义；调用方必须拿到的内容放在回复里。
+
+```text
+                    发起调用连接的发送队列
+progress.send --> 进度额度 ----------------------+
+                  已满，或单条过大：             |
+                  丢弃，连接保持                 +--> 同一个 FIFO 队列 --> 客户端 A
+reply ----------> 回复与通知额度 ----------------+
+                  已满：慢消费者，关闭连接
+```
 
 ### A.3 入口与导出
 
@@ -394,7 +405,7 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 3. 每个迁移后的管理方法的录制记录与迁移前的记录一致，且 v3 本地 profile 的 `hello.features` 不变。
 4. 在 RemoteGateway 测试入口上，`session.permission.update` 与 `session.exec.stop` 成功。
 5. 由非 Rust 插件以 `toolContribution` 提供的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行。`SessionConfig.tools` 中提供方缺失的工具被省略并在诊断中报告，Session 照常启动。
-6. 进度先于响应，断开后 `notify` 报告 `gone`。
+6. 进度先于响应；连接收不下的进度被丢弃，不关闭连接，也不丢失响应；断开后 `notify` 报告 `gone`。
 7. 某个已启用的管理方法提供方处于 Pending 时，`hello` 成功，其他命名空间都正常，该提供方的命名空间返回 `service_reloading`；处于 Failed 或 Unresolved 时返回 `service_unavailable`；已禁用时返回 `unknown_method`。PluginManager 提供 `plugin.set_enabled`（未实现）之后，除非该提供方就是 PluginManager 本身，否则可以用它禁用该提供方。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
 
 ## 附录 E. 假设
@@ -424,7 +435,7 @@ pub type Handler = Arc<
         -> BoxFuture<'static, Result<Value, RpcError>> + Send + Sync,
 >; // (method, params, 取消令牌, 进度)
 impl Progress {
-    pub fn send(&self, data: Value); // 未声明时、或回复交出之后丢弃
+    pub fn send(&self, data: Value); // 尽力送达；未声明时、或回复交出之后丢弃
 }
 pub enum Interruption { Report, Drain }
 pub struct MethodDecl {
@@ -454,7 +465,7 @@ impl ManagementMethods { // Deref<Target = MethodProvider>
 
 `MethodProvider::new` 拒绝无效的声明（A.1 的语法；至少一个方法，每个方法唯一且位于命名空间内），并注册卸载 effect：任一卸载时中断已受理的 `Report` 调用，并等待每个已受理调用，因此 `SessionMethods` 与 `ManagementMethods` 不会分叉。`ManagementMethods::provide` 另加 A.1 保留名检查，并以 `TypeKey::keyed_dynamic::<ManagementMethods>(namespace)` 提供服务。`SessionMethods::provide` 以 `SessionScope::named_key::<SessionMethods>(namespace)` 提供服务；Rpc 在装载时用保留名和管理命名空间检查用 `AgentBuilder::session_methods` 记录的命名空间。处理函数接收方法名、原始 params、在任一卸载时触发的取消令牌（A.1），以及该调用的 `Progress`。`RpcError`（连同它的 `From<AgentError>`）位于同一模块（A.1 共享类型）；`ManagementMethods`、它的保留名检查与 `Owners` 留在 dim-app-server。
 
-`Progress` 按调用绑定 A.2 的 `progress`，而不是通过 `callChannel` 进程服务：Rpc 给每个已受理调用一个 sink，把 `management.progress {id, method, data}` 写到发起调用的连接；受理逻辑只在方法声明了 `progress` 时把它交给处理函数，并在交出回复之前关闭它。管理方法走同一路径；目前没有管理方法声明 `progress`。
+`Progress` 按调用绑定 A.2 的 `progress`，而不是通过 `callChannel` 进程服务：Rpc 给每个已受理调用一个 sink，把 `management.progress {id, method, data}` 写到发起调用的连接；受理逻辑只在方法声明了 `progress` 时把它交给处理函数，并在交出回复之前关闭它。sink 在连接上按进度自己的额度排队，所以进度不会占用回复和持久通知的空间。管理方法走同一路径；目前没有管理方法声明 `progress`。
 
 未实现：语言中立的 `describe`/`call` 绑定（接收 `MethodCall`、返回 `MethodReply` 或 `MethodError` 的提供方）、`callChannel` 的连接通知与最终回复交接，以及声明字段 `notifications` 和 `reply`。它们的结构见 A.1 与 A.2；Rust 名称在实现时确定。
 

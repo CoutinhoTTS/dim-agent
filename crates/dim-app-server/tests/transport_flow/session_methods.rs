@@ -81,6 +81,8 @@ struct NotesState {
     /// fired.
     release: tokio::sync::Notify,
     streamed: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    /// `notes.flood` sent all its progress.
+    flooded: tokio::sync::Notify,
 }
 impl Notes {
     fn install(&self, builder: &mut AgentBuilder) {
@@ -164,6 +166,10 @@ impl TypedPlugin for NotesProvider {
                         progress: true,
                         ..MethodDecl::new("notes.stream", false, Interruption::Drain)
                     },
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("notes.flood", false, Interruption::Drain)
+                    },
                 ],
                 Arc::new(move |method, params, cancel, progress| {
                     let state = state.clone();
@@ -177,6 +183,14 @@ impl TypedPlugin for NotesProvider {
                                 // After the interrupted reply: dropped.
                                 progress.send(json!("after the reply"));
                                 state.settled.notify_one();
+                            }
+                            // `count` notices of `bytes` bytes each, at once.
+                            "notes.flood" => {
+                                let text = "x".repeat(params["bytes"].as_u64().unwrap() as usize);
+                                for step in 0..params["count"].as_u64().unwrap() {
+                                    progress.send(json!({"step": step, "text": text.as_str()}));
+                                }
+                                state.flooded.notify_one();
                             }
                             _ => {
                                 for step in 0..3 {
@@ -242,6 +256,7 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
             .await["result"],
         json!({"methods": [
             {"name": "notes.echo", "mutating": false},
+            {"name": "notes.flood", "mutating": false},
             {"name": "notes.stream", "mutating": false},
             {"name": "notes.wait", "mutating": true},
         ]})
@@ -484,6 +499,63 @@ async fn call_progress_reaches_only_the_caller_before_its_reply() {
             client.notices
         );
     }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Methods contract A.2: progress is best effort. A caller that reads nothing
+/// while its call floods progress keeps its connection: the progress the
+/// connection cannot queue is dropped, what arrives keeps its order before the
+/// reply, and the reply arrives. A notice over the frame limit is dropped too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_a_caller_cannot_take_is_dropped_and_its_reply_arrives() {
+    let notes = Notes::default();
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        notes.install(builder)
+    })
+    .await;
+    let mut caller = Client::new_version(&server, false, 3).await;
+    let created = caller.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    // 32 MiB of progress, far more than the connection queues for progress
+    // plus what its socket buffers. The caller reads only once all of it has
+    // been sent.
+    let count = 2048;
+    let id = caller
+        .send(
+            "notes.flood",
+            json!({"sessionId": sid, "count": count, "bytes": 16 * 1024}),
+        )
+        .await;
+    notes.0.flooded.notified().await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    let steps: Vec<u64> = progress
+        .iter()
+        .map(|progress| progress["data"]["step"].as_u64().unwrap())
+        .collect();
+    assert!(
+        !steps.is_empty() && steps.len() < count,
+        "{} of {count} arrived",
+        steps.len()
+    );
+    assert!(steps.windows(2).all(|pair| pair[0] < pair[1]), "{steps:?}");
+
+    // One notice over the 16 MiB frame limit is dropped alone; the connection
+    // keeps serving calls and their progress.
+    let id = caller
+        .send(
+            "notes.flood",
+            json!({"sessionId": sid, "count": 1, "bytes": 17 * 1024 * 1024}),
+        )
+        .await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert!(progress.is_empty());
+    let id = caller.send("notes.stream", json!({"sessionId": sid})).await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert_eq!(progress.len(), 3, "{progress:?}");
     server.shutdown();
     server.join().await.unwrap();
 }
