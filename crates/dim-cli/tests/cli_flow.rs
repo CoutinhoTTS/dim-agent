@@ -816,9 +816,50 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
         json!({"mcpServers":{}}).to_string(),
     )
     .unwrap();
-    assert!(run(&["mcp", "disable", "docs"]).status.success());
+    let unlisted = run(&["mcp", "disable", "docs"]);
+    assert!(unlisted.status.success());
+    assert!(String::from_utf8_lossy(&unlisted.stderr).contains("\"docs\" is not in mcp list"));
     fs::write(project.join(".mcp.json"), &written).unwrap();
     assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    // Disabling does not need a readable .mcp.json.
+    assert!(run(&["mcp", "enable", "docs"]).status.success());
+    fs::write(project.join(".mcp.json"), "{broken").unwrap();
+    assert!(!run(&["mcp", "list"]).status.success());
+    let unreadable = run(&["mcp", "disable", "docs"]);
+    assert!(
+        unreadable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unreadable.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(unreadable.stdout).unwrap(),
+        "Disabled \"docs\" (project).\n"
+    );
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("could not be read"));
+    fs::write(project.join(".mcp.json"), &written).unwrap();
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    // A configuration the daemon cannot apply is reported on stderr.
+    fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{"remote":{"type":"http","url":"not a url"}}}).to_string(),
+    )
+    .unwrap();
+    assert!(run(&["mcp", "enable", "remote"]).status.success());
+    let reported = (0..50).any(|_| {
+        let output = run(&["mcp", "list"]);
+        let reported = String::from_utf8_lossy(&output.stderr)
+            .contains("project MCP configuration: MCP configuration is not active");
+        if !reported {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        reported
+    });
+    assert!(
+        reported,
+        "mcp list did not report the inactive configuration"
+    );
+    assert!(run(&["mcp", "disable", "remote"]).status.success());
+    fs::write(project.join(".mcp.json"), &written).unwrap();
     let missing = run(&["mcp", "enable", "absent"]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("No MCP server \"absent\""));

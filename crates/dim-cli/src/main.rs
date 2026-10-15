@@ -143,8 +143,11 @@ async fn run(options: Options) -> Result<i32> {
         }
         Action::McpList => {
             #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
             struct Catalog {
                 servers: Vec<Server>,
+                user_application: Application,
+                project_application: Option<Application>,
             }
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -153,6 +156,12 @@ async fn run(options: Options) -> Result<i32> {
                 source: String,
                 enabled: bool,
                 transport: String,
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Application {
+                error: Option<String>,
+                cleanup_error: Option<String>,
             }
             let catalog: Catalog = client
                 .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
@@ -173,8 +182,21 @@ async fn run(options: Options) -> Result<i32> {
                 );
             }
             eprintln!(
-                "Columns: ID, source, transport, enablement.\nProject entries start disabled; an enabled entry runs the command or endpoint in this workspace's .mcp.json."
+                "Columns: ID, source, transport, enablement.\nAn enabled entry runs its command or endpoint. Project entries, from this workspace's .mcp.json, start disabled until you run mcp enable ID."
             );
+            for (source, application) in std::iter::once(("user", Some(catalog.user_application)))
+                .chain(std::iter::once(("project", catalog.project_application)))
+            {
+                let Some(application) = application else {
+                    continue;
+                };
+                for error in [application.error, application.cleanup_error]
+                    .into_iter()
+                    .flatten()
+                {
+                    eprintln!("{source} MCP configuration: {}", display::safe(&error));
+                }
+            }
             Ok(0)
         }
         Action::McpEnable { id, enabled } => {
@@ -192,17 +214,42 @@ async fn run(options: Options) -> Result<i32> {
             }
             // Target the entry `mcp list` shows: a project entry shadows the
             // user's, and enabling it is recorded for this user only.
-            let catalog: Catalog = client
+            let catalog: Catalog = match client
                 .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
-                .await?;
+                .await
+            {
+                Ok(catalog) => catalog,
+                // Disabling never depends on reading the sources: the user's
+                // record for this workspace is withdrawn without them.
+                Err(error) if !*enabled && error.downcast_ref::<client::RpcError>().is_some() => {
+                    client
+                        .rpc(
+                            "mcp.set_enabled",
+                            serde_json::json!({"cwd":options.cwd,"id":id,"source":"project","expectedVersion":"","enabled":false}),
+                        )
+                        .await?;
+                    println!("Disabled {:?} (project).", id);
+                    eprintln!(
+                        "The MCP catalog could not be read ({}); withdrew this workspace's enablement of {:?}. A user entry with this ID is unchanged.",
+                        display::safe(&error.to_string()),
+                        id
+                    );
+                    return Ok(0);
+                }
+                Err(error) => return Err(error),
+            };
             // Disabling an id the workspace no longer lists still withdraws the
             // user's project record, so the entry stays off if it returns.
-            let server = match catalog.servers.into_iter().find(|server| server.id == *id) {
-                Some(server) => server,
-                None if !*enabled && catalog.project_revision.is_some() => Server {
-                    id: id.clone(),
-                    source: "project".into(),
-                },
+            let (server, listed) = match catalog.servers.into_iter().find(|server| server.id == *id)
+            {
+                Some(server) => (server, true),
+                None if !*enabled && catalog.project_revision.is_some() => (
+                    Server {
+                        id: id.clone(),
+                        source: "project".into(),
+                    },
+                    false,
+                ),
                 None => return Err(format!("No MCP server {:?} in mcp list", id).into()),
             };
             let expected = if server.source == "project" {
@@ -227,6 +274,12 @@ async fn run(options: Options) -> Result<i32> {
             if *enabled && server.source == "project" {
                 eprintln!(
                     "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions."
+                );
+            }
+            if !listed {
+                eprintln!(
+                    "{:?} is not in mcp list; withdrew any stored enablement of it in this workspace.",
+                    id
                 );
             }
             Ok(0)

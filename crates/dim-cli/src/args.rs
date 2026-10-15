@@ -9,7 +9,9 @@ Commands:\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh]       List model IDs and availability\n\
   mcp list                         List MCP servers and their enablement\n\
-  mcp enable ID | mcp disable ID   Enable or disable a listed MCP server\n\
+  mcp enable ID                    Enable an MCP server shown by mcp list\n\
+  mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
+                                   this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\

@@ -70,9 +70,11 @@ A configured MCP server runs when it is enabled; there is no separate approval
 disabled, and the project file cannot enable them. `mcp enable` records the choice for this home,
 workspace and ID only; it never edits `.mcp.json`, and it survives daemon restarts. An enabled
 project entry runs later edits to its command without asking again and can start discovery in
-active sessions. Disabling stops it in every session, including a request that is using it, and
-works even after the entry has left `.mcp.json`; an entry that is removed and later returns starts
-disabled again. A project entry still shadows a same-name user entry. Pass the ID's actual
+active sessions. Disabling stops it in every session before the command returns, including a
+request that is using it, and works even when `.mcp.json` cannot be read or no longer lists the
+entry. Editing the entry out of `.mcp.json` does not withdraw the choice: if the same ID returns, it
+is enabled again, so run `mcp disable ID` to withdraw it. `mcp list` prints configuration errors on
+stderr. A project entry still shadows a same-name user entry. Pass the ID's actual
 value, not its displayed escape spelling, and use the same `--home` and model profile as the daemon
 serving your workspace. See the
 [MCP configuration contract](../dim-app-server/README.md#mcp-configuration-management).
