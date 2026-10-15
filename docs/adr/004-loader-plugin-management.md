@@ -1,12 +1,10 @@
 # 004: Session-owned MCP and business configuration
 
 Status: implementation direction approved by the repository owner for this branch,
-corrected to the authoritative D4 in PR #15 (`origin/pr-15-design`, `213506f`).
-PR #15 owns ADR 002 (plugin scope and configuration placement) and ADR 003
-(approval scope); this branch record is numbered 004 to avoid those numbers.
-This record supersedes ADR 001's process-shared MCP ownership, not issue #3's
-structural editable layer.
-It does not claim completion of issue #3 or the full PR #15 method contract.
+following [ADR 002](002-plugin-scope.md) D4. This record supersedes ADR 001's
+process-shared MCP ownership, not issue #3's structural editable layer. It does
+not claim completion of issue #3 or of the full
+[methods contract](../design/contracts/session-boundary.md).
 
 ## Ownership and updates
 
@@ -49,7 +47,7 @@ per-source CAS. A business owner supplies its namespace, source filenames,
 payload type and validation. MCP owns its types in `mcp/config.rs`; the Skills
 owner implements the existing `SkillSettingsHost`. Settings owns persistence,
 not domain interpretation, connections or discovery. It does not yet provide
-PR #15's P0 Settings supplement: client-facing typed write operations under
+the [overall design](../design/overview.md)'s P0 Settings supplement: client-facing typed write operations under
 plugin-declared schemas and a credential-reference resolver. Until then it has no
 management-method namespace and exposes no generic document bodies over RPC.
 
@@ -71,13 +69,13 @@ API or two-stage bootstrap. Full process assembly is reconciled once. Unsupporte
 databases are rejected and preserved, never reinterpreted as v13. See the
 [native storage contract](../design/appserver/native-storage-format.md).
 
-Settings provides no approval service. PR #15's ADR 003 limits Approval and
-Permission to agent decisions and removes host-local approval: configured servers
-run when enabled, project entries start disabled, and only the user's local
-configuration enables them. PR #16 removes `mcp.approve`/`mcp.revoke` and their
-records from main. Until this branch merges that removal, AGENTS.md rule 11 applies,
-and MCP owns its existing project execution grants in the unchanged version-1
-`mcp-approvals.json`.
+Settings provides no approval service. [ADR 003](003-approval-scope.md) limits
+Approval and Permission to agent decisions and removes host-local approval:
+configured servers run when enabled, project entries start disabled, and only the
+user's local configuration enables them. AGENTS.md rule 11 states that decision.
+The code removal is pending in PR #16. Until this branch merges it, the code, like
+main, still carries the existing project execution approval; MCP owns its grants
+in the unchanged version-1 `mcp-approvals.json`.
 Grants are not business documents, loader intent or replayable authority. Missing
 grants deny execution and damaged stores fail closed. Package acquisition, file-root
 access, tool permission presets and Session replay never confer execution approval.

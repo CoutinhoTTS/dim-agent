@@ -1,14 +1,14 @@
 # Management methods
 
 Status: process-owner contributions implemented. This page describes the implemented
-subset of [PR #15](https://github.com/arcships/dim/pull/15)'s revised plugin-scope
-ADR and method contract (latest inspected branch `213506f`, including D4/D5).
+subset of [ADR 002](../../adr/002-plugin-scope.md) and the
+[methods contract](../contracts/session-boundary.md).
 Management methods belong to process owners, not a Management plugin. There is
 no per-method level; entry admission determines whether this table is served.
 The earlier stable-port and Management-plugin proposals are withdrawn.
 
-The subsequent [language-neutral contract revision](https://github.com/arcships/dim/commit/165174a94b16af0f0fb89b67d43b3b104a5deb00)
-adds ADR D5. This implementation provides the Rust-only subset, not the named
+[ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
+requires language-neutral contracts. This implementation provides the Rust-only subset, not the named
 cross-language `managementMethods` contract. Its namespace keys use
 `TypeKey::keyed_dynamic::<ManagementMethods>` and still identify a Rust type;
 they are not rutis-bridge service names. A non-Rust plugin cannot supply this
@@ -51,7 +51,7 @@ from the parent `account` namespace.
 Entry admission precedes routing for built-in and contributed methods alike:
 a protected profile answers every call except `hello` and `daemon.ping` from a
 non-local transport with `local_transport_required`, as before contributions
-(PR #15 A.3). Local v3 then dispatches management contributions; v1/v2 do not,
+([methods contract A.3](../contracts/session-boundary.md#a3-entries-and-export)). Local v3 then dispatches management contributions; v1/v2 do not,
 and unknown names or methods return `unknown_method`.
 The proposed `ConnectionEntry {name, deviceId}` and paired-device routing remain
 RemoteGateway work; its connections must never be served management methods.
@@ -68,7 +68,8 @@ signal and stays tracked until it settles; a caller's disconnect cancels
 nothing. On unload a `Report` method replies `operation_interrupted`, stating
 that the operation may already have committed and the current state must be
 read before retrying, while Rpc waits for a `Drain` method's own result. This
-reproduces the behaviour before contributions (PR #15 A.4). Provider and
+reproduces the behaviour before contributions
+([methods contract A.4](../contracts/session-boundary.md#a4-migration-and-compatibility)). Provider and
 account methods use `Drain`; MCP and Skills use `Report`. Settings retains its
 accepted-write contract.
 
@@ -77,8 +78,9 @@ execution dependencies may also reload affected consumers and fail in-flight
 turns; this is the accepted cost of rare structural changes, not hidden by
 registration ports. Business configuration edits update the owner's source and
 publish invalidation without reloading the owner or Rpc. MCP connections remain
-Session-owned. MCP keeps its project execution approval until this branch merges
-PR #16's removal under PR #15's approval-scope ADR; see ADR 004.
+Session-owned. Like main, the code still carries the project execution approval
+that [ADR 003](../../adr/003-approval-scope.md) removes, until this branch merges
+PR #16's removal; see ADR 004.
 
 ## Notifications
 

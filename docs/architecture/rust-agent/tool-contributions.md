@@ -100,7 +100,7 @@ project-source invalidation and revocation close old instances across Sessions.
 New bindings automatically adopt the replacement through the existing flow below.
 
 - **收集来源**：宿主工具（`S:ToolHost`）、固定贡献（`S:ToolContribution[name]`，如 `skill`、`branch`、`wait`）、动态来源（`S:SessionToolSource[name]`；当前只有 App Server 的 McpSession：登记名 `mcp`，键 `mcp:<serverId>`，版本随连接代次与工具列表变化且不复用，工具名带 server 前缀避免跨来源重名，连接失败时撤销该键）。`SessionConfig.tools` 只列固定工具；动态来源的可见性由来源方自己的配置决定。
-- **MCP 执行准入**：项目 `.mcp.json` 中的服务器须经宿主本地批准当前作用域配置才可执行（AGENTS 规则 11、[ADR 001](../../adr/001-harness-foundation.md) 信任合同）。未批准、已禁用或删除的服务器不发现、不连接，McpSession 不提供其集合（状态 `ApprovalRequired` / `Disabled`）；配置或批准变化时立即撤销旧集合（仅刷新时保留旧集合至替换就绪）。已绑定请求所持的旧版本 handler 不代替批准：每次 `tools`/`call` 前经 McpPublication 重新检查当前来源与批准，撤销后经保留快照的调用返回需批准错误。文件根授权、工具权限预设与 Session 回放都不授予该批准。
+- **MCP 执行准入**：项目 `.mcp.json` 中的服务器须经宿主本地批准当前作用域配置才可执行（[ADR 001](../../adr/001-harness-foundation.md) 信任合同；[ADR 003](../../adr/003-approval-scope.md) 已决定取消宿主本地批准，代码删除待 #16）。未批准、已禁用或删除的服务器不发现、不连接，McpSession 不提供其集合（状态 `ApprovalRequired` / `Disabled`）；配置或批准变化时立即撤销旧集合（仅刷新时保留旧集合至替换就绪）。已绑定请求所持的旧版本 handler 不代替批准：每次 `tools`/`call` 前经 McpPublication 重新检查当前来源与批准，撤销后经保留快照的调用返回需批准错误。文件根授权、工具权限预设与 Session 回放都不授予该批准。
 - **维护变化**：动态来源按整组校验、原子替换；分支采用新的工具集合，作为 `context/configured` 的工具部分写入 Timeline（工具声明属于模型上下文）。
 - **请求一致**：在 Loop 构造请求时固定本请求的声明与实现（同一版本），供 ToolExecutor 按名取实现；本请求结算后释放。Loop 在 `turn/end` 统一 `retain_only(None)`，不在每种结束路径各自释放。
 

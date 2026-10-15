@@ -2,7 +2,7 @@
 
 Superseded in part by [ADR 004](004-loader-plugin-management.md): MCP now uses
 Session-owned instanced groups. Business documents retain source-local authority;
-PR #15's ADR 002 D4 reserves loader configuration for structural settings.
+[ADR 002](002-plugin-scope.md) D4 reserves loader configuration for structural settings.
 
 Decision status: Recovery design adopted for this branch. ADR 004 records the approved
 configuration scope and its remaining integration work for issue #3. Dynamic-event
@@ -98,7 +98,7 @@ defect requires a corrected compatibility version. Valid snapshots retain suffix
 
 ### Configuration and lifecycle
 
-Business configuration follows PR #15's D4: MCP and Skill documents belong to
+Business configuration follows [ADR 002](002-plugin-scope.md) D4: MCP and Skill documents belong to
 business sources, not the structural editable layer in issue #3. General scope
 and acknowledgement requirements extend beyond these implemented paths; see
 the delivery table and issue alignment below.
@@ -264,7 +264,7 @@ never overwrite a user's existing store to make a test pass.
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
 | #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
-| #3 | Structural plugin configuration uses the persisted editable layer and loader operations; PR #15 ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and host-local approvals remain separate authorities |
+| #3 | Structural plugin configuration uses the persisted editable layer and loader operations; ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and host-local approvals remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
 Source-owned business documents preserve shared workspace files and explicit edit
