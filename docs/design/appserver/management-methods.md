@@ -58,7 +58,12 @@ a protected profile answers every call except `hello` and `daemon.ping` from a
 non-local transport with `local_transport_required`, as before contributions
 ([methods contract A.3](../contracts/session-boundary.md#a3-entries-and-export)). Local v3 then dispatches management contributions; v1/v2 do not,
 and names without an active provider, or that the provider does not declare,
-return `unknown_method`.
+return `unknown_method`. A name outside the declaration grammar (dot-separated
+lowercase segments, at most 128 bytes) is unknown without any lookup, so a
+caller's name bounds the lookups made under the handler lock. Error codes at the
+edges are unchanged: a call before `hello` is `-32600` and one after shutdown has
+begun is `-32603`; an unknown method is `-32601` whatever its params, and only
+the owner of a declared method rejects its params (`-32602`).
 The proposed `ConnectionEntry {name, deviceId}` and paired-device routing remain
 RemoteGateway work; its connections must never be served management methods.
 `hello.features` lists the methods of the providers active at that `hello`.

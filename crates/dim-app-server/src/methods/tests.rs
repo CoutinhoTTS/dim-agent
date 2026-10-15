@@ -316,5 +316,26 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_active_nam
         listed(&root, &["fixture".into(), "fixture.nested".into()]),
         ["fixture.nested.other", "fixture.read"]
     );
+    // A name outside the declaration grammar is unknown without a lookup per
+    // prefix: a long dotted name would otherwise cost quadratic time.
+    let long = format!("fixture.{}read", "a.".repeat(1 << 17));
+    let started = std::time::Instant::now();
+    for method in [
+        "fixture.Read",
+        "fixture..read",
+        "fixture.read.",
+        long.as_str(),
+    ] {
+        assert_eq!(
+            rejected(dispatch(
+                &root,
+                method.into(),
+                json!({}),
+                CancellationToken::new()
+            )),
+            "unknown_method"
+        );
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
     root.shutdown().await.unwrap();
 }

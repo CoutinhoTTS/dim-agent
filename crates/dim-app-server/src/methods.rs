@@ -205,7 +205,12 @@ fn unknown() -> RpcError {
 
 /// The active provider that owns `method`: the longest namespace, among the
 /// method name's prefixes, with an active provider (methods contract §3.2).
+/// A name no provider could declare is rejected before any lookup, which also
+/// bounds the lookups a caller's name causes under the admission lock.
 fn owner(ctx: &Ctx, method: &str) -> Option<Arc<ManagementMethods>> {
+    if !valid_name(method) {
+        return None;
+    }
     let mut prefix = method;
     loop {
         if let Some(owner) =
