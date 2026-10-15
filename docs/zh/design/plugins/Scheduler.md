@@ -202,7 +202,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-`schedule` 由 Approval 和 Permission 按 `persistent_configuration` 准入；FullAccess 允许（E1），其他预设询问或拒绝。运行只写入输入；其工具在运行 Session 的 policy 下准入，上限如 3.3 所述，审批不预先授予。工具创建的任务记录 `created_by`，可供审查。工具只改任务条目，经 Scheduler 代其工具发起的类型化写入；`max_concurrent_runs` 是仅限用户的字段，这类写入若改动它会被拒绝，由用户经客户端方法 `settings.update` 设置（S8b，尚未实现）。任务不存储凭据。运行 Session 只使用自身资源节点的服务；Scheduler 不触及任何节点服务。任何具有管理访问权限的人都能读取任务提示词。
+`schedule` 声明风险 `persistent_configuration`，Permission 按未分类处理：FullAccess 允许（E1），WorkspaceWrite 询问，ReadOnly 拒绝。不需要改 Permission（#45）。运行只写入输入；其工具在运行 Session 的 policy 下准入，上限如 3.3 所述，审批不预先授予。工具创建的任务记录 `created_by`，可供审查。工具只改任务条目，经 Scheduler 代其工具发起的类型化写入；`max_concurrent_runs` 是仅限用户的字段，这类写入若改动它会被拒绝，由用户经客户端方法 `settings.update` 设置（S8b，尚未实现）。任务不存储凭据。运行 Session 只使用自身资源节点的服务；Scheduler 不触及任何节点服务。任何具有管理访问权限的人都能读取任务提示词。
 
 ## 8. 规则检查
 
