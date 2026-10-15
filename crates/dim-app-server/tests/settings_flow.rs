@@ -1,4 +1,6 @@
-use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
+use dim_agent_capabilities::file_storage::{
+    FileLease, FilePath, FileStorage, FileStorageError, FileStoragePlugin,
+};
 use dim_agent_runtime::{capability_plugin, wait_active};
 use dim_app_server::{
     settings::{
@@ -9,7 +11,7 @@ use dim_app_server::{
 };
 use rutis::Ctx;
 use serde::{Deserialize, Serialize};
-use std::{fs, time::Duration};
+use std::{fs, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 struct ProcessSettings(
@@ -84,6 +86,25 @@ async fn saw<E: Clone>(
     .await
     .unwrap()
     .unwrap();
+}
+/// Takes the lease once its holder releases it; retry policy belongs to the consumer.
+async fn lock_when_free(
+    files: &Arc<FileStorage>,
+    path: &FilePath,
+    cancel: &CancellationToken,
+) -> FileLease {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match files.lock(path, cancel).await {
+                Err(FileStorageError::Locked) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                lease => return lease.unwrap(),
+            }
+        }
+    })
+    .await
+    .unwrap()
 }
 fn change(scope: SettingsScope, revision: &str) -> impl Fn(&SettingsChanged) -> bool + '_ {
     move |c| c.source == "example" && c.scope == scope && c.revision == revision
@@ -594,18 +615,24 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         tokio::pin!(update);
         tokio::select! { result = &mut update => panic!("unexpected {result:?}"), _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
     }
+    // Nothing can commit while the test holds the lease.
+    let before = changes.borrow().len();
     drop(lock);
-    let saved = loop {
-        let saved = settings
-            .read::<Document>(SettingsScope::User, &cancel)
-            .await
-            .unwrap();
-        if saved.document == document {
-            break saved;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    saw(&mut changes, change(SettingsScope::User, &saved.revision)).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|log| log.len() > before),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let saved = settings
+        .read::<Document>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        changes.borrow().last().map(|c| c.revision.as_str()),
+        Some(saved.revision.as_str())
+    );
     assert_eq!(saved.document, document);
     #[cfg(unix)]
     {
@@ -620,7 +647,8 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         );
     }
     // Unload cancels lease waiters and drains them before releasing ownership.
-    let lock = files.lock(&path, &cancel).await.unwrap();
+    // The event is published under the writer's lease, so it may still be held.
+    let lock = lock_when_free(&files, &path, &cancel).await;
     {
         let update = settings.update(
             SettingsScope::User,
