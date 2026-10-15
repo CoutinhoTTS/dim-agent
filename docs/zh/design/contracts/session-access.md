@@ -190,7 +190,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | 考虑过的现有机制 | rutis 具名服务（`TypeKey::named`、`host_key`）：只对按名称注册的服务有效，而运行时按 Rust 类型注册这些服务。每个插件手写绑定：D5 不允许。先用 Rust 实现：在此需求落地前的退路。 |
 | 需要的通用能力 | 运行时把每个公开的类型化服务也以稳定的服务名和纯数据方法形式注册，作用域与 key 不变。 |
 | 对序号、批次、中断、重载的影响 | 无：按名称调用沿用类型化服务的顺序、批次和中断规则；具名服务随其所有者重载。 |
-| 由谁实现、对应 issue | 运行时与 rutis；[#4](https://github.com/arcships/dim/issues/4)。 |
+| 由谁实现、对应 issue | 运行时；[#4](https://github.com/arcships/dim/issues/4)。 |
 
 ### 9.2 固定前缀读取
 

@@ -190,7 +190,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | Existing mechanisms considered | rutis named services (`TypeKey::named`, `host_key`): work only for services registered by name, and the runtime registers these by Rust type. Hand-written bindings per plugin: rejected by D5. Starting in Rust: the fallback until this lands. |
 | Generic capability | The runtime registers each public typed service also under a stable service name with a data-only method shape, at the same scope and key. |
 | Effect on sequence, batch, interrupt, reload | None: calls by name keep the typed service's ordering, batch and interrupt rules; a named service reloads with its owner. |
-| Owner and issue | Runtime and rutis; [#4](https://github.com/arcships/dim/issues/4). |
+| Owner and issue | Runtime; [#4](https://github.com/arcships/dim/issues/4). |
 
 ### 9.2 Fixed-prefix read
 
