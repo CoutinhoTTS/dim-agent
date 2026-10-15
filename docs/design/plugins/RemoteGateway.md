@@ -32,7 +32,7 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-RemoteGateway only authenticates upgrades and records the device on the connection; every call afterwards is an ordinary Session method served by its owner. Its own `remote.*` methods are a `managementMethods` process service (key `remote`) that Rpc collects by name into its method table; like every management method they are reachable from the local entry and never from paired devices. Rpc depends on that service, so a RemoteGateway reload reloads Rpc; reloads are rare structural events and that cost is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md)).
+RemoteGateway only authenticates upgrades and records the device on the connection; every call afterwards is an ordinary Session method served by its owner. Its own `remote.*` methods are a `managementMethods` process service (key `remote`) that Rpc looks up by name; like every management method they are reachable from the local entry and never from paired devices. Rpc looks that service up per call and does not depend on it, so a RemoteGateway reload does not reload Rpc ([methods §3.2](../contracts/session-boundary.md#32-management-method)).
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
@@ -205,7 +205,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §1 Capability and App Server boundary | RemoteGateway is a process plugin in its own crate, not a Capability; Transport, Connection and Rpc get only generic entry changes. |
 | ADR 002 D1 Scope follows the owner | Devices and the listener are per host, so RemoteGateway is process-scoped. |
 | ADR 002 D2 No wiring modules | Rpc collects `managementMethods` by name; no wiring module exists. |
-| ADR 002 D3 Dependencies follow scope | RemoteGateway depends one way on Transport's `entryHost`; its own reload reloads Rpc as an accepted rare structural event. |
+| ADR 002 D3 Dependencies follow scope | RemoteGateway depends one way on Transport's `entryHost`; Rpc does not depend on RemoteGateway, so its reload does not reload Rpc. |
 | ADR 002 D4 Structural and business configuration | Only `enabled` is structural and only PluginManager writes it; `bind`, `tls` and `plaintext` are business configuration in the source `remote`, and a change rebinds the listener without a reload. |
 | ADR 002 D5 Language-neutral contracts | `entryHost`, the HTTP surface and the methods are given in neutral form; Appendix G is a binding only. |
 
@@ -295,7 +295,7 @@ RemoteGateway has no start or stop method and never writes its own `enabled` fie
 | Writes | None by RemoteGateway. Remote calls reach owners through Rpc like local calls: `session.submit` → Session input boundary (`Timeline::append`), `approval.respond` → branch Approval (`approval/respond`), `session.stop` → `stop/interrupt`, `session.permission.update` → Permission (`permission/changed`), `session.input.withdraw` → InputQueue's `sessionMethods` (command `input/withdraw`; InputQueue writes `input/deleted` if it still holds the input) |
 | Dispatcher | Not subscribed; devices receive events through their per-connection Session attachment |
 | Concurrent attachers | No exclusive owner (A13); all receive the same events in per-branch order |
-| Reload | Closes the entry: listener and remote connections close (detach); records persist; offers lost; Rpc reloads with it because it collects `managementMethods` (ADR 002 D3, accepted); in-flight calls follow Rpc's reload rules. Transport reload reloads RemoteGateway (it depends on `entryHost`); runtime-settings changes never reload it |
+| Reload | Closes the entry: listener and remote connections close (detach); records persist; offers lost; `remote.*` returns `unknown_method` until RemoteGateway is active again and Rpc does not reload; in-flight `remote.*` calls follow their `interruption`. Transport reload reloads RemoteGateway (it depends on `entryHost`); runtime-settings changes never reload it |
 | Process restart | Entry reopens if `enabled`; devices reconnect and re-attach; committed inputs and pending approvals replay on attach |
 
 ## Appendix B. Full conflict table

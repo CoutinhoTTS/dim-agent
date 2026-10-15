@@ -7,12 +7,12 @@
 | 服务 | 作用域 | Key | 提供方 | 收集方 |
 | --- | --- | --- | --- | --- |
 | `sessionMethods` | Session | 命名空间 | Session 级插件部分（Questions、Goal、SessionTitle、Attachments、ShellInput、Hooks、Notifications）和 InputQueue（`session.input`） | Rpc，经 Session 分发 |
-| `managementMethods` | 进程 | 命名空间 | 只有进程插件（Mcp、Provider、Settings、Scheduler 等） | Rpc 的方法表 |
+| `managementMethods` | 进程 | 命名空间 | 只有进程插件（Mcp、Provider、Settings、Scheduler 等） | Rpc，按调用查找 |
 | `toolContribution` | Session | 工具名 | Session 级插件部分（Questions、Goal、Web、Notifications、Scheduler、Workflow） | ToolRegistry（补充：具名工具服务） |
 
-**管理方法**是关于宿主而不是某个 Session 的客户端 RPC 方法：`account.*`、`provider.*`、`mcp.*`、`skills.*` 和设置，以及新进程插件的方法。`daemon.shutdown` 仍是 Rpc 内建方法，同样从不提供给已配对设备。现在 Rpc 直接注入这些服务（[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `ProductServices` 与 `ExecutionServices`）；本设计改为通过 `managementMethods` 收集。只有进程插件提供管理方法，已配对的远程设备从不获得它们。Session 方法没有级别；唯一的区分是 `sessionMethods`（经 Session 分发）与 `managementMethods`。
+**管理方法**是关于宿主而不是某个 Session 的客户端 RPC 方法：`account.*`、`provider.*`、`mcp.*`、`skills.*` 和设置，以及新进程插件的方法。`daemon.shutdown` 仍是 Rpc 内建方法，同样从不提供给已配对设备。现在 Rpc 直接注入这些服务（[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `ProductServices` 与 `ExecutionServices`）；本设计改为通过 `managementMethods` 按调用查找，不依赖其提供方。只有进程插件提供管理方法，已配对的远程设备从不获得它们。Session 方法没有级别；唯一的区分是 `sessionMethods`（经 Session 分发）与 `managementMethods`。
 
-Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。提供方重载会传播到其收集方，这是 D3 所接受的代价。
+Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。Rpc 在每次调用时查找 `managementMethods` 提供方，不依赖它们，因此未启用、Pending、Failed 或正在重载的提供方只影响自己的命名空间（§3.2）。`toolContribution` 提供方重载会传播到 ToolRegistry，这是 D3 所接受的代价。
 
 在工具调用或输入提交前对其作出处理不是本合同的服务：分支级插件在 `step/tool-call` 或 `input/message` 上注册 Timeline before 回调（运行时 Timeline 补充，[总览附录 B](../overview.md#附录-b-现有插件的补充)），其写入的内容由该插件定义（[Hooks](../plugins/Hooks.md)）。Approval 和 Session 输入路径不变；ToolExecutor 对 `skip` 的处理和 InputQueue 的撤回是各自所有者的变更（[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
 
@@ -41,7 +41,7 @@ flowchart LR
   Local --> Rpc
   Remote --> Rpc
   Link --> Rpc
-  Rpc -->|"按名称收集"| MM
+  Rpc -->|"按名称、按调用查找"| MM
   Rpc -->|"解析 sessionId"| AI
   AI -->|"按命名空间取 sessionMethods"| SM
   SM -->|"分支服务"| BS
@@ -58,7 +58,7 @@ flowchart LR
 
 ## 2. 数据与状态
 
-没有任何服务拥有 Timeline 事件或持久化状态。方法表在 Rpc 或 Session 装载时重建。每个连接在被接受时记录 `ConnectionEntry {name, deviceId}`；它获得的服务范围由这条记录决定（§3.2），从不由用户身份推导。链接的管理方法导出是宿主本地的结构性配置。
+没有任何服务拥有 Timeline 事件或持久化状态。Session 的方法表在 Session 装载时重建；管理方法提供方在每次调用时查找。每个连接在被接受时记录 `ConnectionEntry {name, deviceId}`；它获得的服务范围由这条记录决定（§3.2），从不由用户身份推导。链接的管理方法导出是宿主本地的结构性配置。
 
 ## 3. 流程
 
@@ -106,6 +106,8 @@ sequenceDiagram
 
 连接的入口记录是唯一的检查。获得管理方法即授予宿主管理员权限。
 
+Rpc 在每次调用时，按方法名的前缀从长到短做带 key 的读取，在已激活的进程服务 `managementMethods` 中解析命名空间（附录 F）。Rpc 不依赖这些提供方。没有已激活提供方的命名空间（未启用、Pending、Failed，或重载时新旧两代之间）返回 `unknown_method`，Rpc、已打开的连接和其他命名空间都不受影响。提供方卸载前已受理的调用按该方法的 `interruption` 处理（A.1）：卸载中的提供方以 `operation_interrupted` 结束其 `report` 调用，`drain` 调用会推迟卸载（§9.2）。
+
 ## 4. 时序与冲突
 
 | 场景 | 顺序 | 结果 | 所有者 |
@@ -113,7 +115,7 @@ sequenceDiagram
 | Session 级提供方在调用中途重载 | call < reload | `report`：`operation_interrupted`；`drain`：重载等待 | Rpc |
 | Session 的 Capability 重载期间调用 Session 方法 | — | `service_reloading` | Rpc |
 | 对没有该插件的 Session 调用 Session 方法 | — | `unknown_method` | Rpc |
-| 管理方法所有者重载 | — | Rpc 随之重载（D3）；已打开的连接看到现有的 Rpc 重载行为 | rutis 生命周期 |
+| 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `unknown_method`（有 §9.3 后为 `service_reloading`）；已受理的调用按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法或 `daemon.shutdown` | — | `unknown_method` | Rpc |
 | 两个提供方声明同一命名空间或工具名 | 装配 | 装配失败；key 在每个作用域内唯一 | 装配 |
 | 工具贡献提供方在 turn 期间重载 | call < reload | ToolRegistry 及其依赖方重载；在途 turn 以 `Failed` 结束（D3，已接受） | ToolRegistry |
@@ -150,12 +152,12 @@ sequenceDiagram
 | §4 第 5 条（整个批次） | 不适用：本文没有依据 Timeline 事件做的决定；所有者依据自己的事实决定。 |
 | §4 第 6 条（模型上下文） | 方法对模型不可见，`toolContribution` 只通过其声明和 `ToolResult` 到达模型（§5）。 |
 | §4 第 7 条（公开事件与服务） | 提供方只通过分支的公开服务到达分支，Rpc 只经 Session 的 `sessionMethods` 分发。 |
-| §4 第 8 条（需求） | 按名称查找 Session 服务、收集具名工具、卸载时等待 drain，在 §9 提出。 |
+| §4 第 8 条（需求） | 按名称查找 Session 服务、收集具名工具、卸载时等待 drain、列出进程级服务的已激活提供方，在 §9 提出。 |
 | §4 第 9 条（只有决定用的事实进 Timeline） | 方法表与入口服务范围是装配数据，从不是 Timeline 事实（§2）。 |
 | §1（Capability 与 App Server 边界） | Rpc 只收集和分发；每个方法的业务代码在其提供方插件中。 |
 | ADR 002 D1 | `sessionMethods` 与 `toolContribution` 是 Session 级，`managementMethods` 是进程级，与其所有者一致。 |
 | ADR 002 D2 | 没有注册表、端口或 Management 插件；Rpc 与 ToolRegistry 按名称收集。 |
-| ADR 002 D3 | 提供方只依赖自身或外层作用域，提供方重载会使其收集方重载（§4）。 |
+| ADR 002 D3 | 提供方只依赖自身或外层作用域。`toolContribution` 提供方重载会使 ToolRegistry 重载（§4）；Rpc 不依赖管理方法提供方，它们的重载只影响自己的命名空间（§3.2）。 |
 | ADR 002 D4 | 链接的管理方法导出是宿主本地的结构性配置；本文不定义业务配置。 |
 | ADR 002 D5 | 每个服务都有名称、作用域、key 和纯数据方法；Rust 类型只出现在附录 F。 |
 
@@ -180,6 +182,16 @@ sequenceDiagram
 | 需要的通用能力 | 插件卸载时等待它登记为 drain 的在途工作完成，然后继续。 |
 | 对序号、批次、中断、重载的影响 | 不影响 Timeline；重载最多延后到这些调用结束。 |
 | 由谁实现、对应 issue | rutis 生命周期；issue 待开。 |
+
+### 9.3 列出进程级服务的已激活提供方
+
+| 项 | 内容 |
+| --- | --- |
+| 被什么挡住 | `hello.features` 要列出已激活管理方法提供方的方法（A.1），而 Rpc 必须在不依赖它们的前提下找到它们（§3.2）。正在重载的提供方应得到 `service_reloading`，而不是 `unknown_method`。 |
+| 考虑过的现有机制 | 带 key 的读取 `Ctx::get_as` 能按 key 找到一个已激活的提供方，足以分发调用，Mcp 读取其 loader 行就是这样做的；但它不能列出提供方，也分不清已注册但未激活的提供方和不存在的提供方。把提供方声明为依赖可以列出它们，但会让 Rpc 门控在每一个提供方上（§3.2）。 |
+| 需要的通用能力 | 在进程作用域列出某个服务名的已激活提供方，并报告某个 key 是否有已注册但未激活的提供方。 |
+| 对序号、批次、中断、重载的影响 | 对序号与批次无影响；在某个连接 `hello` 之后才激活的提供方，出现在下一次 `hello` 中。 |
+| 由谁实现、对应 issue | rutis 注册表；issue 待开。 |
 
 非 Rust 插件提供的具名服务依赖 #4，其五项说明见 [Session 访问 §9](session-access.md#9-向机制所有者提出的需求)。
 
@@ -225,8 +237,8 @@ sequenceDiagram
 | 为 Rpc 内建方法保留 | `hello`、`daemon`、`agent`、`approval`、单独的 `session` 根，以及 `session.attach`、`session.branch_create`、`session.close`、`session.create`、`session.detach`、`session.history`、`session.idle`、`session.input_lookup`、`session.list`、`session.state`、`session.stop`、`session.submit`、`session.summaries`、`session.exec`、`session.mcp`、`session.model`、`session.permission`、`session.prompt`、`session.skills`。`session.input` 不保留：InputQueue 通过 `sessionMethods` 提供 `session.input.withdraw`（提议中），因此 Rpc 不点名任何所属服务 |
 | 优先级 | 内建方法，然后是进程表，然后是该 Session 的提供方；共用一个线上名称空间 |
 | Session 级调用 | 需要 `sessionId`（缺少时 `-32602`）。Rpc 对其授权，经 Agents acquire 该 Session（必要时恢复），并调用该 Session 中对应命名空间的 `sessionMethods`。提供方通过该分支的服务到达某个分支 |
-| 不分发 | 命名空间未提供，或在带 `deviceId` 的连接或未导出的链接上调用管理方法 → `-32601 unknown_method`。Session 正在重载 → `-32000 service_reloading`。已开始的 `report` 调用被中断 → `operation_interrupted` |
-| `hello.features`（v3） | 内建方法；连接获得管理方法时再加上进程表方法。Session 级方法按 Session 列在 `session.state.methods` 中 |
+| 不分发 | 命名空间未提供或其提供方未激活，或在带 `deviceId` 的连接或未导出的链接上调用管理方法 → `-32601 unknown_method`。Session 正在重载 → `-32000 service_reloading`。已开始的 `report` 调用被中断 → `operation_interrupted` |
+| `hello.features`（v3） | 内建方法；连接获得管理方法时，再加上 `hello` 时已激活的管理方法提供方的方法。在 §9.3 实现之前，Rpc 对已启用 loader 行在 `provides` 中声明的每个命名空间做带 key 的读取，列出已激活的那些。Session 级方法按 Session 列在 `session.state.methods` 中 |
 | 就绪闩 | 在 loader 的初始装载结算后打开，因此进程提供方在第一个 `hello` 时已存在 |
 
 已知的 Session 级命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`attachment`（Attachments）、`shell`（ShellInput）、`hooks`（Hooks）、`notifications`（Notifications，含 `notifications.test`）。各插件文档对其方法具有权威性。
@@ -270,7 +282,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 | 新的 `session.input.withdraw` | `sessionMethods` | InputQueue（`session.input`） |
 | 新的 Session 方法 | `sessionMethods` | 各所有者（A.1） |
 
-中断行为与如今一致：`mcp.*` 与 `skills.*` 为 `report`，`account.*` 与 `provider.*` 为 `drain`。Rpc 的 `When<ProductServices>` 与 `When<ExecutionServices>` 被收集 `managementMethods` 所取代，因此 Rpc 不再点名任何所属服务。
+中断行为与如今一致：`mcp.*` 与 `skills.*` 为 `report`，`account.*` 与 `provider.*` 为 `drain`。Rpc 的 `When<ProductServices>` 与 `When<ExecutionServices>` 直接删除，不改用收集：Rpc 按调用查找 `managementMethods`（§3.2），不再点名或依赖任何所属服务。如今读取管理服务的内建方法（`session.create` 与 `session.model.update` 的模型选择、`session.mcp` 读取的 Mcp）改为每次调用用同样的带 key 读取，服务缺席时保持现有行为。
 
 | 客户端 | 之前 | 之后 |
 | --- | --- | --- |
@@ -280,7 +292,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 | v3 裸 WebSocket，受保护 profile | `local_transport_required` | 相同 |
 | v3 RemoteGateway（新） | 不存在；execution Session 方法（`session.permission.get/update`、`session.exec.stop`、`session.skills`、`session.model.update`、`session.prompt.refresh`、`session.mcp`、`session.mcp.refresh`）仅限本地 | **兼容性变更（E3）：** 对已配对设备可用；管理名称 `unknown_method` |
 | v3，MCP 已禁用 | `mcp.*` `unknown_method` | 相同，使用 Rpc 的消息 |
-| v3，Mcp 正在重载 | `service_reloading` | Rpc 随 Mcp 重载（D3）；客户端重连并重试 |
+| v3，Mcp 正在重载 | `service_reloading` | §9.3 实现前为**兼容性变更**：Mcp 重新激活前 `mcp.*` 返回 `unknown_method`。Rpc 不重载，连接保持打开；有 §9.3 后恢复为 `service_reloading` |
 
 不增加协议版本，持久化格式不变。
 
@@ -317,7 +329,7 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | 对已关闭分支调用 Session 方法 | — | 所有者的 `BranchMissing` 错误 | 所属插件 |
 | 对未装载 Session 调用 Session 方法 | — | Rpc 经 Agents 恢复后再分发 | Rpc |
 | Session 级提供方在调用中途重载 | admitted < reload | `report`：`operation_interrupted`；`drain`：等待 | Rpc |
-| 进程所有者重载 | — | Rpc 重载（D3） | rutis 生命周期 |
+| 进程所有者重载 | — | 重新激活前其命名空间返回 `unknown_method`；已受理的调用按 `interruption` 处理；Rpc 不重载 | Rpc |
 | 有在途调用时 Rpc 重载 | — | `report` 被中断，`drain` 被排空；`closed` 完成 | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法 | — | `unknown_method` | Rpc |
 | 客户端在调用中途 detach | — | 调用继续；回复被丢弃 | Rpc |
@@ -331,7 +343,7 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 
 | 情况 | 线上结果 |
 | --- | --- |
-| 未提供、不向该连接提供，或 v1/v2 | `-32601`，`unknown_method` |
+| 未提供、提供方未激活、不向该连接提供，或 v1/v2 | `-32601`，`unknown_method` |
 | Session 级方法缺少 `sessionId` | `-32602` |
 | Session 正在重载 | `-32000`，`service_reloading` |
 | `report` 调用被中断 | `-32000`，`operation_interrupted` |
@@ -345,6 +357,7 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 4. 在 RemoteGateway 测试入口上，`session.permission.update` 与 `session.exec.stop` 成功。
 5. 由非 Rust 插件以 `toolContribution` 提供的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行。
 6. 进度先于响应，断开后 `notify` 报告 `gone`。
+7. 某个已启用的管理方法提供方处于 Pending 或 Failed 时，`hello` 成功，其他命名空间都正常，该提供方的命名空间返回 `unknown_method`；除非它就是 PluginManager 本身，否则可以用 `plugin.set_enabled` 禁用它。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
 
 ## 附录 E. 假设
 
@@ -353,6 +366,7 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | A1 | Session 级命名空间可以使用 `session` 以外的根（`attachment`、`shell`） | 现有线上名称 | 全部移到 `session.` 之下 |
 | A2 | Session 能为 Rpc 按名称查找带 key 的 Session 服务 | 现有带 key 的 Session 服务；作为 §9.1 提出 | Rpc 通过一个 Session 服务枚举提供方 |
 | A3 | Session 级方法按 Session 列出，而不在 `hello.features` 中 | 它们因 Session 而异 | 一个全局列表加上按 Session 的可用性 |
+| A4 | Rpc 在每次调用时对已激活的提供方做带 key 的读取（`Ctx::get_as`）来分发管理方法 | Mcp 就是这样读取其 loader 行服务的（[publication.rs](../../../../crates/dim-app-server/src/mcp/publication.rs)） | Rpc 依赖每一个提供方，一个未激活的提供方就会挡住全部 RPC |
 
 ## 附录 F. Rust 绑定
 
@@ -361,7 +375,7 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | 语言中立服务 | Rust 类型与 key | Rust 装配中的注册 | 收集 |
 | --- | --- | --- | --- |
 | `sessionMethods[ns]` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，`SessionScope::named_key::<SessionMethodContribution>(ns)` | `AgentBuilder::session_methods(ns)` | `Session::method(ns)` |
-| `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)` | loader 行 | `Contributions<ManagementMethods>` |
+| `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)`，进程作用域，实例 key 为 `ns` | loader 行 | 按调用：用命名空间 key 执行 `Ctx::get_as::<ManagementMethods>`；不在 Rpc 的 `Deps` 中 |
 | `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | ToolRegistry 中的 `Contributions<ToolContribution>` |
 | `callChannel` | `CallChannel`、传给 `MethodProvider::call` 的 `ConnectionNotifier` | — | — |
 
