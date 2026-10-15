@@ -1,14 +1,16 @@
 # Questions
 
-Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Needs redesign. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)).
 
-The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. The **Session part** provides the `ask_user` tool as a `toolContribution` service (Session scope, key `ask_user`) and the Session method `session.question.respond` through a `sessionMethods` service (Session scope, key `session.question`) ([session-boundary](../contracts/session-boundary.md)). It is installed only in interactive Sessions. The **branch part** records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number from the `stop/interrupt` events it consumes itself, following the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern.
+> **Needs redesign.** This document is not authoritative and must not be implemented as written. The model already receives the answer through the `ask_user` tool result, and the call waits synchronously inside its turn. The three `question/*` events, and the dependency on #2 for client-visible events that they bring, are not justified: a pending question can be derived from the committed `step/tool-call` without a result, and ToolExecutor already settles interrupt, reload and recovery with the call's `step/tool-result`. The redesign must decide which facts, if any, are needed beyond the tool call and its result (for example, closing the prompt on other clients before the batch settles, or keeping an answer across a crash before the batch settles), and justify each one under design rules §4 rule 9.
+
+The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. The **Session part** provides the `ask_user` tool as a `toolContribution` service (Session scope, key `ask_user`) and the Session method `session.question.respond` through a `sessionMethods` service (Session scope, key `session.question`) ([session-boundary](../contracts/session-boundary.md)). It is installed in every Session while the plugin is enabled; in a non-interactive Session `ask_user` answers that no one is available to answer (§3.3). The **branch part** records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number from the `stop/interrupt` events it consumes itself, following the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern.
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
-  subgraph S["Session scope (interactive Sessions only)"]
+  subgraph S["Session scope"]
     QS["QuestionsPlugin: toolContribution ask_user, sessionMethods session.question"]:::new
     TR["ToolRegistry"]
     TC["TreeCommands"]
@@ -38,7 +40,7 @@ Both Session services hold no state; they resolve the `questions` service of the
 | `QuestionsPlugin` | Session | `S:TreeCommands` | `toolContribution` key `ask_user`; `sessionMethods` key `session.question` (`session.question.respond`) |
 | `QuestionsBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher` | `questions` (branch scope; `ask`, `respond`), used only by the Session part |
 
-Installation: both parts declare their services in the plugin's `provides`; the Session part's row is conditioned on `SessionConfig.interactive`, so Agents installs it, and lists `ask_user` in `SessionConfig.tools`, only in interactive Sessions (set by `session.create`; ACP, `exec`, Scheduler and Workflow Sessions are non-interactive). The branch part is installed with it. ToolRegistry and Rpc collect the services by name and scope.
+Installation: both parts declare their services in the plugin's `provides`, and Agents installs them whenever the plugin is enabled. Installation never depends on `SessionConfig.interactive` ([session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin)), so `ask_user` is declared in every Session and a fork keeps the same tool set. The handler reads `SessionConfig.interactive` from its Session's config (set by `session.create`; ACP, `exec`, Scheduler and Workflow Sessions are non-interactive). ToolRegistry and Rpc collect the services by name and scope.
 
 Contracts depended on: `toolContribution` (ToolRegistry accepts named tool services, [tool contribution](../../architecture/rust-agent/tool-contributions.md) supplement); ToolExecutor's batch token (handler cancellation only) and settlement; the `stop/interrupt` data contract; the `Timeline` append contract and Dispatcher protocol of [single-tree](../../architecture/rust-agent/single-tree.md) (typed runtime services; Questions is Rust); `SessionConfig.interactive` ([session-access](../contracts/session-access.md)); `sessionMethods` ([session-boundary](../contracts/session-boundary.md)); client-visible dynamic events (#2, A10; requirement in [§9](#9-requirements-raised-to-mechanism-owners)); Permission risk category `session`.
 
@@ -131,7 +133,7 @@ Anything dispatched before the listener is in history, anything later arrives li
 
 ### 3.3 Non-interactive Sessions
 
-The Session part is not installed: no declaration, and `session.question.respond` gets `unknown_method`. A model calling `ask_user` by name gets `Unknown tool`.
+`ask_user` is declared as in any Session. Its handler reads `SessionConfig.interactive`; when it is `false`, the call returns at once with a result saying that no one is available to answer (A.1), and Questions writes no `question/*` event. Nothing is ever pending, so `session.question.respond` finds no question.
 
 ## 4. Timing and conflicts
 
@@ -186,7 +188,7 @@ Full table: Appendix B.
 
 | What the model sees | Form | Placement |
 | --- | --- | --- |
-| `ask_user` name, description, schema | Fixed tool declaration | Adopted `context/configured`, interactive Sessions only |
+| `ask_user` name, description, schema | Fixed tool declaration | Adopted `context/configured`, every Session |
 | Answers, decline | `ToolResult.content` (Appendix A.1) | Tool result position, after every call of the batch settles |
 | Cancellation | Error text from ToolExecutor | Same position |
 
@@ -219,13 +221,13 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.5 Read the whole batch | `question/answered` is written alone and decided after its batch is consumed; `stop/interrupt` is applied in sequence order after its whole batch is read. |
 | §4.6 Context only from handed-off events | Answers reach the model only through ToolExecutor's `step/tool-result`; `question/*` events are never projected. |
 | §4.7 Public events and services only | Answer versus interrupt is decided from `stop/interrupt` that Questions consumes itself, not from ToolExecutor's batch token or memory. |
-| §4.8 Requirements to mechanism owners | Client-visible dynamic events (#2) are raised in §9; conditional installation links to [session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin-and-interactive); Connection forwarding is a change listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
+| §4.8 Requirements to mechanism owners | Client-visible dynamic events (#2) are raised in §9; installation per enabled plugin links to [session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin); Connection forwarding is a change listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 | §4.9 Only facts later decisions use enter the Timeline | `question/asked` and `question/cancelled` decide pending state at rebuild and `question/answered` is the boundary fact the answer decision reads; client display uses these same events, and no display-only event is added. |
 | §1 Capability and App Server boundary | Both parts are Capabilities in their own crate; Rpc only dispatches `sessionMethods` and holds no Questions logic. |
 | ADR 002 D1 Scope | The tool and method are Session services; pending questions are branch state. |
 | ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect the services by name and scope; nothing names Questions. |
 | ADR 002 D3 Scope dependencies | The Session part depends on Session services only; a reload cancels pending questions, which is accepted. |
-| ADR 002 D4 Configuration | Not applicable: Questions has no configuration; installation follows `SessionConfig.interactive`. |
+| ADR 002 D4 Configuration | Not applicable: Questions has no configuration; installation does not depend on `SessionConfig.interactive`, which the handler reads as Session data. |
 | ADR 002 D5 Language-neutral contracts | Tool, method, branch service and events are given in neutral form; Appendix G is one binding. |
 
 ## 9. Requirements raised to mechanism owners
@@ -240,15 +242,15 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | Effect on sequence, batch, interrupt, reload | None on sequence or batch: the flag is static registration data and notices are published after commit like other events. Interrupt and reload: unchanged; history replay plus live notices merge by event identity. |
 | Owner and issue | Runtime; [#2](https://github.com/arcships/dim/issues/2). |
 
-### R2. Optional parts installed per `interactive` (runtime, Agent assembly)
+### R2. Optional parts installed per enabled plugin (runtime, Agent assembly)
 
-Stated with its five items in [session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin-and-interactive): a plugin's `provides` row may carry a condition on `SessionConfig.interactive`, decided at Session load. Questions needs it so that non-interactive Sessions never offer `ask_user` and no assembly code names Questions.
+Stated with its five items in [session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin): Agent assembly installs a plugin's parts when the plugin is enabled, decided at Session load, and never depending on `SessionConfig.interactive`. Questions needs it so that no assembly code names Questions.
 
 ## Appendix A. Interface details
 
 ### A.1 Tool `ask_user`
 
-Service `toolContribution`, Session scope, key `ask_user`, listed only in interactive Sessions. `declaration(): sync -> ToolDeclaration` returns the name, a fixed description, the parameter schema below and risk `session`; `execute(ToolCall): async -> ToolResult` runs the handler. The consumer cancels by a cancel request on the call (ToolExecutor's batch token).
+Service `toolContribution`, Session scope, key `ask_user`, listed in every Session while Questions is enabled. `declaration(): sync -> ToolDeclaration` returns the name, a fixed description, the parameter schema below and risk `session`; `execute(ToolCall): async -> ToolResult` runs the handler. The consumer cancels by a cancel request on the call (ToolExecutor's batch token).
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
@@ -270,7 +272,7 @@ User answered:
    -> (custom) <text>
 ```
 
-A declined call yields `User declined to answer the question(s).` (A6). `structuredContent` carries `{answers, declined}` for clients only. A cancelled call ends with the error `{code: "cancelled", reason}`, which ToolExecutor reports.
+A declined call yields `User declined to answer the question(s).` (A6). In a non-interactive Session the call yields `No one is available to answer the question(s).` at once, without registering an entry or writing any `question/*` event. `structuredContent` carries `{answers, declined}` for clients only. A cancelled call ends with the error `{code: "cancelled", reason}`, which ToolExecutor reports.
 
 ### A.2 Event payloads
 
@@ -327,7 +329,7 @@ Service `sessionMethods`, Session scope, key `session.question`. `describe()` re
 | `invalid_params` `Question was cancelled` | `Cancelled` |
 | `invalid_params` `<reason>` | `Invalid`: unknown question id, label not offered, several labels without `multiSelect`, `custom` without `allowCustom`, nothing selected and no `custom` while not `declined` |
 | `service_reloading` | `Closed` on a live branch, or the service is reloading |
-| `unknown_method` | Session not interactive (service not installed) |
+| `unknown_method` | Questions not enabled (service not installed) |
 | `session_closed` | Session closed |
 
 Accepted commands belong to the Session and continue after disconnect.
@@ -377,7 +379,7 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 | Client detach, no client ever attached | Q pending | Stays pending, no timeout (A7) | User |
 | `-p` CLI on an interactive Session | Q < I | CLI stops the turn; C via the interrupt | CLI; Questions |
 | Paired remote device answers | Q < A | Accepted like any client | Questions |
-| Non-interactive Session | — | Not installed; call by name → `Unknown tool`; method → `unknown_method` | Agents; ToolBinding; Rpc |
+| Non-interactive Session | — | `ask_user` answers that no one is available to answer; no `Q`; `respond` finds no question | Questions |
 
 ## Appendix C. Errors and recovery
 
@@ -395,7 +397,7 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 Flow tests through RPC, tool calls and events:
 
 1. Single, multiple, multi-question and custom answers produce the specified `content`; invalid answers are rejected at `respond` without facts.
-2. Session created with `interactive: false` (incl. `exec` and ACP): no `ask_user`, `session.question.respond` → `unknown_method`; present otherwise and when `interactive` is omitted.
+2. Session created with `interactive: false` (incl. `exec` and ACP): `ask_user` is declared and answers that no one is available to answer, with no `question/*` event; when `interactive` is omitted, questions are asked as usual. The tool set is the same in both.
 3. Answer then stop: result has the answer. Stop then answer: `Cancelled`, `question/cancelled`, cancelled result. Both orders forced by committing `I` before `A` with a held Dispatcher. `I` committed before `Q` but consumed after it: the question is cancelled; an `ask` after `I` is consumed writes nothing.
 4. Two concurrent `respond`: exactly one accepted.
 5. Two `ask_user` plus a slow tool in one batch: answers held until the single `step/tool-result`.
@@ -408,8 +410,8 @@ Flow tests through RPC, tool calls and events:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | The Session part is installed only in interactive Sessions | [ADR 002](../../adr/002-plugin-scope.md) consequences; decisions §3 (ACP/automation non-interactive) | Tool listed everywhere; non-interactive Sessions would block |
-| A2 | `interactive` omitted on `session.create` means interactive | Judgment (existing clients) | Existing Sessions lose the tool |
+| A1 | `ask_user` is declared in every Session and answers that no one is available to answer when `interactive` is `false` | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30); decisions §3 (ACP/automation non-interactive) | Tool set differs between Sessions; a fork loses the prompt prefix |
+| A2 | `interactive` omitted on `session.create`, or missing in a stored record, means interactive | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) format decision | Existing Sessions stop asking questions |
 | A3 | Payload adds `turn_id`, `request_id`, `declined` | Judgment | Correlation through `step/tool-call`; decline modeled as an answer |
 | A4 | 1..=4 questions, 2..=6 options | Edge-case reference; judgment | Schema limits change |
 | A5 | Custom answers allowed by default | Feature list "custom answers"; default is judgment | Model must opt in |

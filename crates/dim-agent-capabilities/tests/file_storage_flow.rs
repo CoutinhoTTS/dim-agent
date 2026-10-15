@@ -92,6 +92,53 @@ async fn mount(path: PathBuf) -> (Ctx, FiberView, Arc<FileStorage>) {
     (root, plugin, storage)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_first_locks_preserve_exclusion_and_independent_writes() {
+    let directory = Directory::new();
+    let authorized = directory.0.join("authorized");
+    let (root_a, _, a) = mount(authorized.clone()).await;
+    let (root_b, _, b) = mount(authorized.clone()).await;
+    let cancel = CancellationToken::new();
+    for iteration in 0..64 {
+        // Fresh parents exercise first creation of both the business key and
+        // the shared reserved keys, through independent plugin consumers.
+        let same_parent = format!("same-{iteration}");
+        fs::create_dir(authorized.join(&same_parent)).unwrap();
+        let path_a = a.path(0, format!("{same_parent}/mcp.json")).unwrap();
+        let path_b = b.path(0, format!("{same_parent}/mcp.json")).unwrap();
+        let (first, second) = tokio::join!(a.lock(&path_a, &cancel), b.lock(&path_b, &cancel));
+        let mut winner = match (first, second) {
+            (Ok(lease), Err(FileStorageError::Locked))
+            | (Err(FileStorageError::Locked), Ok(lease)) => lease,
+            _ => panic!("first-time contenders must yield one lease and one Locked error"),
+        };
+        winner
+            .replace(b"winner".to_vec(), None, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(b.read(&path_b, &cancel).await.unwrap(), b"winner");
+        drop(winner);
+        let mut next = b.lock(&path_b, &cancel).await.unwrap();
+        next.replace(b"next".to_vec(), None, &cancel).await.unwrap();
+        assert_eq!(a.read(&path_a, &cancel).await.unwrap(), b"next");
+        drop(next);
+
+        let independent_parent = format!("independent-{iteration}");
+        fs::create_dir(authorized.join(&independent_parent)).unwrap();
+        let path_a = a.path(0, format!("{independent_parent}/a.json")).unwrap();
+        let path_b = b.path(0, format!("{independent_parent}/b.json")).unwrap();
+        let (first, second) = tokio::join!(a.lock(&path_a, &cancel), b.lock(&path_b, &cancel));
+        let mut first = first.unwrap();
+        let mut second = second.unwrap();
+        first.replace(b"a".to_vec(), None, &cancel).await.unwrap();
+        second.replace(b"b".to_vec(), None, &cancel).await.unwrap();
+        assert_eq!(a.read(&path_a, &cancel).await.unwrap(), b"a");
+        assert_eq!(b.read(&path_b, &cancel).await.unwrap(), b"b");
+    }
+    root_a.shutdown().await.unwrap();
+    root_b.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn late_roots_preserve_indices_and_generation_boundaries_on_reload() {
     let directory = Directory::new();

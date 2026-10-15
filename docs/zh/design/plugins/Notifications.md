@@ -1,6 +1,8 @@
 # Notifications
 
-状态：草案。总体设计：[overview](../overview.md)（Notifications）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
+状态：已撤回。总体设计：[overview](../overview.md)（Notifications）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
+
+> **已撤回。** 这个插件没有独立的职责，它的每一项职责都有现成的所有者：用户正在使用的 Session 的提醒（任务结束、审批或问题待处理）归客户端，客户端本来就收得到这些事件；定时任务结果的通知归 Scheduler；对外沟通渠道（Slack、飞书等）由各平台各自的插件和工具负责，没有通用渠道，也没有 `notify` 工具。本文仅作参考保留。
 
 Notifications 是一个 Session 插件。当其交互式 leader Session 上的任务完成或失败、有审批待处理或有问题等待回答时，它向已配置的外部渠道（Slack、飞书）投递消息；它依据 Scheduler 的运行结果事件通知，报告在其 Session 中结束的定时运行；以 key 为 `notify` 的 Session 级 `toolContribution` 服务向模型提供 `notify` 工具；并通过 key 为 `notifications` 的 Session 级 `sessionMethods` 服务提供 `notifications.test`（[session-boundary](../contracts/session-boundary.md)）。它只通过既有的 Session 广播观察其 Session，以分支的固定前缀确认每个触发，不向任何 Timeline 写入。终端内提醒（响铃、聚焦）属于 CLI。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 

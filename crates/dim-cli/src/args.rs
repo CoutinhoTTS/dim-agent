@@ -8,9 +8,10 @@ Commands:\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh]       List model IDs and availability\n\
-  mcp list                         List MCP status and approval fingerprints\n\
-  mcp approve ID TOKEN              Approve reviewed project MCP configuration\n\
-  mcp revoke ID                    Revoke project MCP execution and disconnect\n\
+  mcp list                         List MCP servers and their enablement\n\
+  mcp enable ID                    Enable an MCP server shown by mcp list\n\
+  mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
+                                   this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
@@ -37,8 +38,7 @@ pub enum Action {
     Logout(String),
     Models(String),
     McpList,
-    McpApprove { id: String, token: String },
-    McpRevoke(String),
+    McpEnable { id: String, enabled: bool },
     DaemonStop,
     Help,
     Version,
@@ -122,16 +122,11 @@ impl Options {
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
-                        "approve" => Action::McpApprove {
+                        command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
-                            token: value(&mut args)?,
+                            enabled: command == "enable",
                         },
-                        "revoke" => Action::McpRevoke(value(&mut args)?),
-                        _ => {
-                            return Err(
-                                "Use mcp list, mcp approve ID TOKEN, or mcp revoke ID".into()
-                            );
-                        }
+                        _ => return Err("Use mcp list, mcp enable ID or mcp disable ID".into()),
                     };
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {

@@ -1,3 +1,4 @@
+pub(crate) mod management;
 use crate::managed_oauth::{self, Service};
 use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::{Capability, KeysOf, scoped};
@@ -113,10 +114,9 @@ impl TypedPlugin for OpenAICodexOAuthPlugin {
                 service.close().await;
                 return Err(error);
             }
-            ctx.provide_as(
-                TypeKey::of::<OpenAICodexOAuthService>(),
-                Arc::new(OpenAICodexOAuthService(service)),
-            )?;
+            let service = Arc::new(OpenAICodexOAuthService(service));
+            management::provide(ctx, service.clone())?;
+            ctx.provide_as(TypeKey::of::<OpenAICodexOAuthService>(), service)?;
             Ok(Effect::Done)
         })
     }
