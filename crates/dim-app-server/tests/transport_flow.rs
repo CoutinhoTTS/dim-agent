@@ -183,8 +183,10 @@ impl Client {
             Transport::Ws(stream) => stream.send(Message::Text(text.into())).await.unwrap(),
         }
     }
-    async fn read(&mut self, expected: &str) -> Value {
-        tokio::time::timeout(Duration::from_secs(10), async {
+    async fn read(&mut self) -> Value {
+        // Creating a product Session parses the bundled model catalog, which
+        // takes most of 10 s in an unoptimized build.
+        tokio::time::timeout(Duration::from_secs(30), async {
             match &mut self.transport {
                 Transport::Unix(stream) => {
                     let mut line = String::new();

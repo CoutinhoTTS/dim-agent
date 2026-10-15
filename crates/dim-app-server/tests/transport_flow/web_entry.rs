@@ -193,7 +193,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         max_output_tokens: 2048,
         ..Default::default()
     };
-    assert_ok(&local.rpc("provider.save", json!({"provider":{"providerId":"web-fixture","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-secret"},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true}})).await);
+    assert_ok(&local.rpc("provider.save", json!({"provider":{"providerId":"web-fixture","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-secret"},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true}})).await);
     let opened = local.rpc("web.open", json!({})).await["result"].clone();
     let address = opened["address"].as_str().unwrap().to_owned();
     let url = opened["url"].as_str().unwrap();
