@@ -1,11 +1,11 @@
-//! Named management contributions, collected by Rpc through ordinary rutis
-//! dependencies. The method table and accepted calls belong to one Rpc load.
+//! Named management contributions. Rpc looks up a namespace's provider on
+//! each call and does not depend on it, so an inactive or reloading provider
+//! affects only its own namespace. Accepted calls belong to their provider.
 use crate::protocol::RpcError;
-use dim_agent_runtime::Contributions;
-use rutis::{BoxFuture, CordisError, Ctx, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::{Arc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Debug, Default, Deserialize)]
@@ -53,12 +53,15 @@ impl MethodDecl {
     }
 }
 
-/// A process owner's wire methods. Providing this named service creates the
-/// ordinary contributor -> collector reload relationship, not a second lifecycle.
+/// A process owner's wire methods, provided under its namespace. The owner's
+/// generation owns its accepted calls: its unload interrupts `Report` calls
+/// and waits for every call to settle, so `Drain` calls hold the unload.
 pub struct ManagementMethods {
-    namespace: String,
     declarations: Vec<MethodDecl>,
     handler: Handler,
+    gate: Mutex<()>,
+    stopping: CancellationToken,
+    calls: TaskTracker,
 }
 
 impl ManagementMethods {
@@ -99,109 +102,159 @@ impl ManagementMethods {
             ));
         }
         let service = Arc::new(Self {
-            namespace: namespace.into(),
             declarations,
             handler,
+            gate: Mutex::new(()),
+            stopping: CancellationToken::new(),
+            calls: TaskTracker::new(),
         });
+        // Registered after the owner's own effects, so it runs first on unload
+        // and drained calls still reach the owner's services.
+        let owner = service.clone();
+        ctx.effect(move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    {
+                        let _guard = owner.gate.lock().unwrap();
+                        owner.stopping.cancel();
+                        owner.calls.close();
+                    }
+                    owner.calls.wait().await;
+                    Ok(())
+                })
+            }))
+        })?;
         ctx.provide_as(TypeKey::keyed_dynamic::<Self>(namespace), service.clone())?;
         Ok(service)
     }
-}
 
-pub(crate) struct MethodTable {
-    owners: BTreeMap<String, Arc<ManagementMethods>>,
-}
-impl MethodTable {
-    pub fn new(
-        Contributions(owners): Contributions<ManagementMethods>,
-    ) -> Result<Self, CordisError> {
-        let mut table = BTreeMap::new();
-        for (name, owner) in owners {
-            if name != owner.namespace || table.insert(name, owner).is_some() {
-                return Err(CordisError::PluginFailed(
-                    "Duplicate or misnamed management contribution".into(),
-                ));
-            }
-        }
-        // A nested namespace may coexist with its parent, but must never capture
-        // a method that the parent declares, in either assembly order.
-        for owner in table.values() {
-            for declaration in &owner.declarations {
-                if table.values().any(|other| {
-                    other.namespace.len() > owner.namespace.len()
-                        && within(&declaration.name, &other.namespace)
-                }) {
-                    return Err(CordisError::PluginFailed(
-                        "Overlapping management contributions".into(),
-                    ));
-                }
-            }
-        }
-        Ok(Self { owners: table })
-    }
-
-    pub fn methods(&self) -> Vec<String> {
-        let mut names: Vec<_> = self
-            .owners
-            .values()
-            .flat_map(|owner| &owner.declarations)
-            .map(|decl| decl.name.clone())
-            .collect();
-        names.sort();
-        names
-    }
-
-    /// Called under ConnectionHub's Rpc admission lock. Its disposer removes
-    /// that handler before draining its commands, so no accepted call is missed.
-    ///
-    /// Every handler observes `entry_stopping`, the Rpc load's unload signal.
-    /// A `Report` call replies as soon as that signal fires; a `Drain` call
-    /// replies with its own result. Both stay tracked until they settle, and a
-    /// caller's disconnect does not cancel an accepted call.
-    pub fn dispatch(
-        &self,
+    /// Admits one call of this generation. Both this provider's unload and the
+    /// calling Rpc load's unload (`entry_stopping`) interrupt a `Report` call,
+    /// which replies at once and then settles; a `Drain` call replies with its
+    /// own result. The handler's token fires on either unload. A caller's
+    /// disconnect cancels nothing.
+    fn accept(
+        self: &Arc<Self>,
         method: String,
         params: Value,
         entry_stopping: CancellationToken,
-        commands: &TaskTracker,
-    ) -> Result<tokio::sync::oneshot::Receiver<Result<Value, RpcError>>, RpcError> {
-        let owner = self
-            .owners
-            .values()
-            .filter(|owner| within(&method, &owner.namespace))
-            .max_by_key(|owner| owner.namespace.len())
-            .ok_or_else(|| RpcError::app(-32601, "unknown_method", "Unknown method"))?;
-        let interruption = owner
+    ) -> Result<Accepted, RpcError> {
+        let interruption = self
             .declarations
             .iter()
             .find(|decl| decl.name == method)
-            .ok_or_else(|| RpcError::app(-32601, "unknown_method", "Unknown method"))?
+            .ok_or_else(unknown)?
             .interruption;
-        let owner = owner.clone();
-        let (send, receive) = tokio::sync::oneshot::channel();
-        commands.spawn(async move {
-            let operation = (owner.handler)(method, params, entry_stopping.child_token());
-            if interruption == Interruption::Drain {
-                let _ = send.send(operation.await);
-                return;
-            }
+        let _guard = self.gate.lock().unwrap();
+        if self.stopping.is_cancelled() {
+            // Between generations: the next one serves the namespace.
+            return Err(unknown());
+        }
+        let (send, reply) = tokio::sync::oneshot::channel();
+        let (settle, settled) = tokio::sync::oneshot::channel::<()>();
+        let (owner, cancel) = (self.clone(), CancellationToken::new());
+        self.calls.spawn(async move {
+            // Dropped when the operation has settled, after any early reply.
+            let _settle = settle;
+            let operation = (owner.handler)(method, params, cancel.clone());
             tokio::pin!(operation);
-            // Unloading wins a tie: a result racing the unload is not reported.
-            tokio::select! {
+            let unloading = async {
+                tokio::select! {
+                    _ = entry_stopping.cancelled() => {},
+                    _ = owner.stopping.cancelled() => {},
+                }
+            };
+            // An unload wins a tie: a result racing it is not reported.
+            let result = tokio::select! {
                 biased;
-                _ = entry_stopping.cancelled() => {
-                    let _ = send.send(Err(RpcError::app(
-                        -32000,
-                        "operation_interrupted",
-                        "Service reloaded; the operation may already have committed. Read the current state before retrying",
-                    )));
-                    let _ = operation.await;
-                },
-                result = &mut operation => { let _ = send.send(result); },
-            }
+                _ = unloading => None,
+                result = &mut operation => Some(result),
+            };
+            let result = match result {
+                Some(result) => result,
+                None => {
+                    cancel.cancel();
+                    if interruption == Interruption::Report {
+                        let _ = send.send(Err(RpcError::app(
+                            -32000,
+                            "operation_interrupted",
+                            "Service reloaded; the operation may already have committed. Read the current state before retrying",
+                        )));
+                        let _ = operation.await;
+                        return;
+                    }
+                    operation.await
+                }
+            };
+            let _ = send.send(result);
         });
-        Ok(receive)
+        Ok(Accepted { reply, settled })
     }
+}
+
+/// An admitted call: its reply, and a signal that closes once its operation
+/// has settled, which may follow an interrupted reply.
+pub(crate) struct Accepted {
+    pub reply: tokio::sync::oneshot::Receiver<Result<Value, RpcError>>,
+    pub settled: tokio::sync::oneshot::Receiver<()>,
+}
+
+fn unknown() -> RpcError {
+    RpcError::app(-32601, "unknown_method", "Unknown method")
+}
+
+/// The active provider that owns `method`: the longest namespace, among the
+/// method name's prefixes, with an active provider (methods contract §3.2).
+fn owner(ctx: &Ctx, method: &str) -> Option<Arc<ManagementMethods>> {
+    let mut prefix = method;
+    loop {
+        if let Some(owner) =
+            ctx.get_as::<ManagementMethods>(TypeKey::keyed_dynamic::<ManagementMethods>(prefix))
+        {
+            return Some(owner);
+        }
+        prefix = &prefix[..prefix.rfind('.')?];
+    }
+}
+
+/// Called under ConnectionHub's Rpc admission lock with that load's context.
+/// The reply is tracked by the caller; the operation by its provider.
+pub(crate) fn dispatch(
+    ctx: &Ctx,
+    method: String,
+    params: Value,
+    entry_stopping: CancellationToken,
+) -> Result<Accepted, RpcError> {
+    owner(ctx, &method)
+        .ok_or_else(unknown)?
+        .accept(method, params, entry_stopping)
+}
+
+/// The methods `hello.features` lists: those of the providers of `namespaces`
+/// that are active now, each listed only if dispatch would reach its provider,
+/// so a parent's method inside an active child namespace is not listed.
+pub(crate) fn listed(ctx: &Ctx, namespaces: &[String]) -> Vec<String> {
+    let mut names: Vec<_> = namespaces
+        .iter()
+        .filter_map(|namespace| {
+            ctx.get_as::<ManagementMethods>(TypeKey::keyed_dynamic::<ManagementMethods>(
+                namespace.as_str(),
+            ))
+        })
+        .flat_map(|provider| {
+            provider
+                .declarations
+                .iter()
+                .filter(|decl| {
+                    owner(ctx, &decl.name).is_some_and(|owner| Arc::ptr_eq(&owner, &provider))
+                })
+                .map(|decl| decl.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn valid_name(name: &str) -> bool {

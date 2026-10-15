@@ -89,14 +89,17 @@ format, not a schema change; older binaries ignore its row.
 
 ## Management and installation boundaries
 
-Process owners provide named Rust `ManagementMethods` contributions collected
-by Rpc via `Contributions<T>`. Owners retain declarations, wire validation and
-business calls; Rpc owns admission, cancellation, accepted-task drainage and
-generation-fenced delivery. There is no Methods/Management plugin, registration
-port or adapter row. MCP and Skills publish their existing management methods;
-Settings publishes none. Local v3 hello advertises the collected methods;
-non-serving entries return `unknown_method`. Structural reloads follow ordinary
-dependencies; business edits do not reload plugins. See
+Process owners provide named Rust `ManagementMethods` contributions that Rpc
+looks up per call, without a dependency on any owner
+([methods contract §3.2](../design/contracts/session-boundary.md#32-management-method)).
+Owners retain declarations, wire validation, business calls and the calls they
+accept: an owner's unload interrupts its `Report` calls and waits for its
+`Drain` calls. Rpc owns entry admission and reply delivery. There is no
+Methods/Management plugin, registration port or adapter row. MCP and Skills
+publish their existing management methods; Settings publishes none. Local v3
+hello lists the methods of the active owners; a namespace without one, and
+non-serving entries, return `unknown_method`. An owner that is inactive or
+reloading affects only its namespace; business edits do not reload plugins. See
 [Management methods](../design/appserver/management-methods.md).
 
 PluginManager's proposed responsibility remains package acquisition, manifest

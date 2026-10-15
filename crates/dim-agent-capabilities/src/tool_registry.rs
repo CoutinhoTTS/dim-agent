@@ -471,8 +471,8 @@ impl Capability for ToolRegistryPlugin {
         (
             scope,
             scope,
-            (Some(scope.instance), self.contributed.clone()),
-            (Some(scope.instance), self.sources.clone()),
+            (scope, self.contributed.clone()),
+            (scope, self.sources.clone()),
         )
     }
 }

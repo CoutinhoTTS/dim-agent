@@ -662,14 +662,21 @@ async fn run_connection(
                 {
                     // Recording the instance under the handler lock orders this
                     // hello against a generation change, which closes stale ones.
-                    let instance = hub.with_rpc(|rpc| {
-                        let instance = rpc.index.server_instance_id().to_owned();
-                        connection
-                            .instance
-                            .set(instance.clone())
-                            .expect("first handshake");
-                        (instance, rpc.methods.methods())
-                    });
+                    let instance = hub
+                        .with_rpc(|rpc| {
+                            // An unloading load lists no provider: the client
+                            // retries hello against the next load instead.
+                            if rpc.stopping.is_cancelled() {
+                                return Err(RpcError::reloading());
+                            }
+                            let instance = rpc.index.server_instance_id().to_owned();
+                            connection
+                                .instance
+                                .set(instance.clone())
+                                .expect("first handshake");
+                            Ok((instance, crate::methods::listed(&rpc.ctx, &rpc.namespaces)))
+                        })
+                        .and_then(|instance| instance);
                     let (instance_id, methods) = match instance {
                         Ok(instance) => instance,
                         Err(error) => {

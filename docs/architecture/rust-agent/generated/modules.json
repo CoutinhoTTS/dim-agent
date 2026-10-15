@@ -9857,14 +9857,10 @@
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
-        "path Contributions",
         "path KeysOf",
-        "path When",
         "path scoped",
         "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::Contributions",
         "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::When",
         "use dim_agent_runtime::scoped"
       ]
     },
@@ -10001,11 +9997,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods",
-        "path MethodTable",
-        "path MethodTable::new",
-        "use crate::methods::ManagementMethods",
-        "use crate::methods::MethodTable"
+        "path crate::methods::dispatch"
       ]
     },
     {
@@ -11257,14 +11249,6 @@
     },
     {
       "from": "dim_app_server::methods",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Contributions",
-        "use dim_agent_runtime::Contributions"
-      ]
-    },
-    {
-      "from": "dim_app_server::methods",
       "to": "dim_app_server::methods::tests",
       "references": [
         "mod tests"
@@ -11295,7 +11279,6 @@
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
-        "path Contributions",
         "path KeysOf",
         "path capability_plugin",
         "use dim_agent_runtime::Capability",
@@ -11307,11 +11290,21 @@
       "from": "dim_app_server::methods::tests",
       "to": "dim_app_server::methods",
       "references": [
+        "path Accepted",
         "path Handler",
-        "path ManagementMethods",
+        "path Interruption",
         "path ManagementMethods::provide",
-        "path MethodTable",
-        "path MethodTable::new"
+        "path MethodDecl",
+        "path MethodDecl::management",
+        "path dispatch",
+        "path owner"
+      ]
+    },
+    {
+      "from": "dim_app_server::methods::tests",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path RpcError"
       ]
     },
     {
@@ -12605,6 +12598,13 @@
     },
     {
       "from": "dim_app_server::transport",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::listed"
+      ]
+    },
+    {
+      "from": "dim_app_server::transport",
       "to": "dim_app_server::outbound",
       "references": [
         "path MAX_FRAME_BYTES",
@@ -12624,6 +12624,7 @@
         "path Reply::Hello",
         "path Reply::empty",
         "path RpcError::app",
+        "path RpcError::reloading",
         "path RpcError::wire",
         "path SERVER_VERSION",
         "path decode"

@@ -106,41 +106,6 @@
             "service": "dim_app_server::control::ServerControl",
             "scope": null,
             "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account.codex",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account.grok",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#mcp",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#provider",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#skills",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::provider::ProviderService",
-            "scope": null,
-            "status": "Ready"
           }
         ],
         "resolved": [
@@ -167,48 +132,6 @@
             "scope": null,
             "provider": 3,
             "generation": 1
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account",
-            "scope": null,
-            "provider": 9,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account.codex",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account.grok",
-            "scope": null,
-            "provider": 11,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#mcp",
-            "scope": null,
-            "provider": 15,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#provider",
-            "scope": null,
-            "provider": 12,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#skills",
-            "scope": null,
-            "provider": 17,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::provider::ProviderService",
-            "scope": null,
-            "provider": 12,
-            "generation": 1
           }
         ],
         "reads": [
@@ -227,48 +150,6 @@
           {
             "service": "dim_app_server::control::ServerControl",
             "provider": 3,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account",
-            "provider": 9,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account.codex",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#account.grok",
-            "provider": 11,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#mcp",
-            "provider": 15,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#provider",
-            "provider": 12,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::methods::ManagementMethods#skills",
-            "provider": 17,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::provider::ProviderService",
-            "provider": 12,
             "declared": true,
             "external": true
           }
@@ -359,11 +240,6 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::host::ModelSelectionHost",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
             "service": "dim_app_server::agents::AgentDirectory",
             "scope": null,
             "status": "Ready"
@@ -390,12 +266,6 @@
           }
         ],
         "resolved": [
-          {
-            "service": "dim_agent_capabilities::host::ModelSelectionHost",
-            "scope": null,
-            "provider": 12,
-            "generation": 1
-          },
           {
             "service": "dim_app_server::agents::AgentDirectory",
             "scope": null,
@@ -428,12 +298,6 @@
           }
         ],
         "reads": [
-          {
-            "service": "dim_agent_capabilities::host::ModelSelectionHost",
-            "provider": 12,
-            "declared": true,
-            "external": true
-          },
           {
             "service": "dim_app_server::agents::AgentDirectory",
             "provider": 18,

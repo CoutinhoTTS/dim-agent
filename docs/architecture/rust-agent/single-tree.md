@@ -6,9 +6,9 @@ optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses source-owned business documents; MCP connections and Skill content instances belong
 to Sessions. Project MCP entries start disabled until the user enables them. See
 [ADR 004](../../adr/004-loader-plugin-management.md) for implemented configuration
-scope. Rpc collects [management methods](../../design/appserver/management-methods.md)
-as named services from account, provider, MCP and Skills owners.
-Structural reloads propagate through normal rutis dependencies; business
+scope. Rpc looks up [management methods](../../design/appserver/management-methods.md)
+per call as named services of account, provider, MCP and Skills owners, without
+depending on them, so an owner's reload affects only its namespace; business
 configuration changes do not reload those plugins. No Methods or Management
 plugin, registration port or separate management adapter row is required.
 Product assembly preflight and typed capability event declarations remain
@@ -125,13 +125,13 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `SkillsCatalogPlugin` | Skill discovery/catalog and business settings; privately supplies the reusable catalog's SkillSettingsHost | `SkillsCatalog`, Skills management contribution | `HostPlatform`, `SettingsService` |
 | `AgentDirectoryPlugin` | `AgentDirectory`：Agent 表与实例、Session 协议版本与占用、不可用记录、默认 agentId、serverInstanceId；不可重启 | `AgentDirectory` | — |
 | `rutis-loader` | 进程装配的配置行与 `agent` / `session` / `branch` / `trace` instanced 分组的实例 | `Loader` | — |
-| `AgentsPlugin` | `AgentIndex`：目录逻辑、Session 准入、经 loader 创建与关闭 Agent、默认及恢复 Agent 装载入口；进程 builder | `AgentIndex` | `AgentDirectory`、`Loader`；`--database` 另注入 `SqliteStorage`、`SessionStore`，产品 profile 另注入 `SettingsService`、`ModelSelectionHost` |
+| `AgentsPlugin` | `AgentIndex`：目录逻辑、Session 准入、经 loader 创建与关闭 Agent、默认及恢复 Agent 装载入口；进程 builder | `AgentIndex` | `AgentDirectory`、`Loader`；`--database` 另注入 `SqliteStorage`、`SessionStore`，产品 profile 另注入 `SettingsService`；受保护 profile 每次调用时读取 `ModelSelectionHost`，不依赖其提供方（方法合同 §3.2） |
 | `AgentScope`（`agent` 实例中的行） | 一个 `Agent`（Session 建在同一 Agent 实例里）与承载监听的子插件 `Sessions`；`AgentHost`（agent、agentId、default、trace 归档）；apply 登记进目录 | 经 `AgentDirectory` 登记 | `AgentDirectory`、`Loader`；`TimelineStore` 由已配置的 AgentBuilder 传入 |
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |
 | `ConnectionPlugin` | Connection index, admission limits and transport tasks | `ConnectionHub` | `ServerControl` |
-| `RpcPlugin` | Built-in and contributed commands and accepted task drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`, `Contributions<ManagementMethods>`; product profile also uses Provider for model selection |
-| Management contributions | Owner-specific declarations, wire validation and business calls, provided by the business plugin itself | Named `ManagementMethods` services; structural reload propagates to Rpc | Each owner's existing business dependencies |
+| `RpcPlugin` | Built-in commands, per-call routing of contributed methods and reply drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`; reads `ManagementMethods` providers and, in the product profile, Provider per call without depending on them |
+| Management contributions | Owner-specific declarations, wire validation, business calls and their accepted calls, provided by the business plugin itself | Named `ManagementMethods` services; an owner's unload interrupts its `Report` calls and waits for its `Drain` calls, without reloading Rpc | Each owner's existing business dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
 `AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算，最后排空 trace 归档。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算并排空归档，再关闭 Agent 实例；effect 幂等重复这两步。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
@@ -342,10 +342,10 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 重载 | 随之重载 | 结果 |
 | --- | --- | --- |
 | `ServerControl` | Connection、Rpc、Transport | 连接断开，监听器重绑；Session 与协议 instanceId 保留；不提供显式 restart |
-| `Provider` | Rpc、Agents 及其实际下游 | Session 历史保留；新请求使用新一代服务；Aimux 不依赖 Provider |
+| `Provider` | 其实际下游；不含 Rpc 与 Agents | 二者每次调用时读取 Provider 与 `ModelSelectionHost`：重载期间 `provider.*` 返回 `unknown_method`，`session.create`、`session.model.update` 与成员创建得到可重试错误；连接保持；Session 历史保留；Aimux 不依赖 Provider |
 | `Agents` | Rpc、Collaboration 及依赖协作服务的 Session 能力 | 只替换目录逻辑：Agent、Session、serverInstanceId 与连接保留；依赖协作服务的能力按能力重载协议重载，进行中的协作请求以 `capability reloading` 失败结算，对成员只发出停止、不等其结算；窗口期请求得到 `service_reloading` |
 | `Connection` | Rpc、Transport | 连接断开，监听器重绑；Session 保留，client 重新 attach |
-| `Rpc` | — | 已受理命令排空后卸载；等待中的命令（`session.idle`）以 `service_reloading` 结束；未决审批属于各分支的 Approval，不随 Rpc 重载；窗口期请求得到 `service_reloading` |
+| `Rpc` | — | 已受理命令排空后卸载，被打断的管理调用也等其操作结算；等待中的命令（`session.idle`）以 `service_reloading` 结束；未决审批属于各分支的 Approval，不随 Rpc 重载；窗口期请求（含 `hello` 与管理方法）得到 `service_reloading`。管理方法提供方的重载不重载 Rpc |
 
 ## 迁移
 

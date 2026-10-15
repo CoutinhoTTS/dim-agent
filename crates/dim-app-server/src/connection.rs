@@ -2,7 +2,6 @@ use crate::{
     ServerConfig,
     agents::AgentIndex,
     control::ServerControl,
-    methods::{ManagementMethods, MethodTable},
     outbound::{Frame, Sender},
     protocol::*,
 };
@@ -11,7 +10,7 @@ use dim_agent_capabilities::{
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{AgentError, Capability, Contributions, KeysOf, Session, When, scoped};
+use dim_agent_runtime::{AgentError, Capability, KeysOf, Session, scoped};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
@@ -130,15 +129,21 @@ impl Connection {
                         "Management method is unavailable",
                     ));
                 }
-                let accepted = rpc.methods.dispatch(
+                // Lookups from an unloading load see no provider; the next
+                // load serves the call.
+                if rpc.stopping.is_cancelled() {
+                    return Err(RpcError::reloading());
+                }
+                let accepted = crate::methods::dispatch(
+                    &rpc.ctx,
                     method.clone(),
                     params.clone(),
                     rpc.unloading.clone(),
-                    &rpc.commands,
                 )?;
                 rpc.commands.spawn(async move {
                     let _guard = guard;
                     let result = accepted
+                        .reply
                         .await
                         .unwrap_or_else(|_| {
                             Err(RpcError::wire(-32603, "Management operation failed"))
@@ -147,6 +152,9 @@ impl Connection {
                     let _ = this
                         .sender
                         .send(Outbound::result(request.id, result), false);
+                    // An interrupted operation may still commit: this load's
+                    // unload waits for it, so the next load reads its outcome.
+                    let _ = accepted.settled.await;
                 });
                 return Ok(());
             }
@@ -825,8 +833,7 @@ impl Connection {
                         Some(PathBuf::from(&session.config().cwd)),
                         p.model_preferences,
                     )
-                    .await
-                    .map_err(provider_error)?;
+                    .await?;
                 let id = dim_agent_types::ModelId {
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
@@ -896,12 +903,12 @@ impl Connection {
             .to_str()
             .ok_or_else(|| RpcError::invalid("cwd must be UTF-8"))?
             .into();
-        if rpc.index.model_selection.is_none() && params.model_preferences != Default::default() {
+        if !rpc.index.selects_models() && params.model_preferences != Default::default() {
             return Err(RpcError::invalid(
                 "Model preferences require the product provider",
             ));
         }
-        if rpc.index.model_selection.is_some() {
+        if rpc.index.selects_models() {
             if params
                 .model
                 .as_ref()
@@ -932,8 +939,7 @@ impl Connection {
                     Some(cwd.clone()),
                     params.model_preferences,
                 )
-                .await
-                .map_err(provider_error)?;
+                .await?;
         } else if let Some(model) = params.model {
             config.model = dim_agent_types::ModelSelection {
                 provider_id: model.provider.unwrap_or(config.model.provider_id),
@@ -1150,10 +1156,16 @@ impl Capability for ConnectionPlugin {
 /// Typed services behind protocol handlers; accepted commands belong to it.
 pub(crate) struct RpcService {
     pub index: Arc<AgentIndex>,
-    pub methods: MethodTable,
+    /// This load's context for per-call lookups of services Rpc does not depend
+    /// on: management method providers and, in the product profile, Provider.
+    pub ctx: Ctx,
+    /// Management namespaces of the enabled owner rows, listed in `hello`.
+    pub namespaces: Arc<[String]>,
+    /// Cancelled when this load starts unloading, before its handler is
+    /// removed; `ctx` then sees no provider.
+    pub stopping: CancellationToken,
     pub control: Arc<ServerControl>,
     pub config: Arc<ServerConfig>,
-    pub provider: Option<Arc<crate::provider::ProviderService>>,
     /// Session MCP follow/refresh availability, not a host management service.
     /// The actual owners are acquired from the Session and followed across reload.
     pub mcp: Option<()>,
@@ -1169,24 +1181,33 @@ impl RpcService {
         explicit: Option<dim_agent_types::ModelId>,
         cwd: Option<PathBuf>,
         preferences: crate::provider::ModelPreferences,
-    ) -> Result<dim_agent_types::ModelSelection, dim_agent_capabilities::host::HostError> {
-        if let Some(provider) = &self.provider {
+    ) -> Result<dim_agent_types::ModelSelection, RpcError> {
+        // Product models come from Provider, read per call: while it is not
+        // active the call is retryable and every other method keeps working.
+        if self.config.product_home.is_some() {
+            let provider = self
+                .ctx
+                .get::<crate::provider::ProviderService>()
+                .ok_or_else(RpcError::reloading)?;
             return provider
                 .configuration(explicit, cwd.as_deref(), preferences, &self.unloading)
-                .await;
+                .await
+                .map_err(provider_error);
         }
         if preferences != Default::default() {
-            return Err(dim_agent_capabilities::host::HostError::failed(
-                "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
+            return Err(provider_error(
+                dim_agent_capabilities::host::HostError::failed(
+                    "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
+                ),
             ));
         }
         self.index
-            .model_selection
-            .as_ref()
-            .expect("execution profiles declare model selection")
+            .model_selection()
+            .ok_or_else(RpcError::reloading)?
             .0
             .resolve(explicit, cwd, self.unloading.clone())
             .await
+            .map_err(provider_error)
     }
 }
 
@@ -1206,9 +1227,6 @@ impl TypedPlugin for RpcPlugin {
         rutis::Gate<crate::collaboration::Collaboration>,
         Arc<ConnectionHub>,
         Arc<ServerControl>,
-        // Session create/model.update resolve product models through Provider.
-        When<Arc<crate::provider::ProviderService>>,
-        Contributions<ManagementMethods>,
     );
     fn name(&self) -> &str {
         "Rpc"
@@ -1216,15 +1234,16 @@ impl TypedPlugin for RpcPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, _, hub, control, When(provider), methods): Self::Deps,
+        (index, _, hub, control): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(RpcService {
                 index,
-                methods: MethodTable::new(methods)?,
+                ctx: ctx.clone(),
+                namespaces: self.methods.clone(),
+                stopping: ctx.cancellation_token(),
                 control,
                 config: self.config.clone(),
-                provider,
                 mcp: self.config.local_execution().then_some(()),
                 commands: TaskTracker::new(),
                 unloading: CancellationToken::new(),
@@ -1258,14 +1277,6 @@ impl TypedPlugin for RpcPlugin {
 }
 impl Capability for RpcPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        let product = self.config.product_home.is_some();
-        (
-            (),
-            (),
-            (),
-            (),
-            product.then_some(()),
-            (None, self.methods.clone()),
-        )
+        ((), (), (), ())
     }
 }
