@@ -516,6 +516,125 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
 /// Removal holds a bounded number of descriptors and does not recurse: a
 /// directory that used many names and a tree deeper than recursion on a
 /// worker stack could remove go under a small descriptor limit.
+/// Session files create their directories level by level through storage.
+#[tokio::test]
+async fn directory_creation_stays_inside_the_authorized_root() {
+    let directory = Directory::new();
+    let root_path = directory.0.join("authorized");
+    let outside = directory.0.join("outside");
+    let (root, _, storage) = mount(root_path.clone()).await;
+    let cancel = CancellationToken::new();
+    let path = |relative: &str| storage.path(0, relative).unwrap();
+
+    // Created private; an existing directory counts as created.
+    for _ in 0..2 {
+        storage
+            .create_directory(&path("files"), &cancel)
+            .await
+            .unwrap();
+    }
+    storage
+        .create_directory(&path("files/one"), &cancel)
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    for created in ["files", "files/one"] {
+        let mode = fs::metadata(root_path.join(created))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{created}");
+    }
+    storage
+        .replace(
+            &path("files/one/paste.txt"),
+            b"pasted".to_vec(),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.list(&path("files"), &cancel).await.unwrap(),
+        [entry("one", EntryKind::Directory)]
+    );
+
+    // No recursive creation.
+    assert!(matches!(
+        storage.create_directory(&path("missing/child"), &cancel).await,
+        Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert!(!root_path.join("missing").exists());
+
+    // Reserved names are refused by name; filesystem aliases of the reserved
+    // directory and the account marker are refused before anything is made.
+    for reserved in [
+        ".dim-file-storage-locks",
+        "files/.dim-file-storage-temps",
+        "files/auth.json.lock",
+    ] {
+        assert!(matches!(
+            storage.path(0, reserved),
+            Err(FileStorageError::InvalidPath(_))
+        ));
+    }
+    let case_insensitive = root_path.join("FILES").exists();
+    for alias in [".DIM-FILE-STORAGE-LOCKS", "AUTH.JSON.LOCK"] {
+        let created = storage
+            .create_directory(&path(&format!("files/{alias}")), &cancel)
+            .await;
+        if case_insensitive {
+            assert!(
+                matches!(created, Err(FileStorageError::InvalidPath(_))),
+                "{alias}: {created:?}"
+            );
+        } else {
+            created.unwrap();
+        }
+    }
+    assert!(!root_path.join("files/auth.json.lock").exists());
+    assert_eq!(
+        storage.list(&path("files"), &cancel).await.unwrap().len(),
+        if case_insensitive { 1 } else { 3 }
+    );
+
+    // Any other existing entry is refused and left untouched; links are never
+    // followed.
+    fs::write(root_path.join("files/plain"), b"plain").unwrap();
+    symlink(&outside, root_path.join("files/linked")).unwrap();
+    for other in ["files/plain", "files/linked"] {
+        assert!(matches!(
+            storage.create_directory(&path(other), &cancel).await,
+            Err(FileStorageError::Io(_))
+        ));
+    }
+    assert_eq!(fs::read(root_path.join("files/plain")).unwrap(), b"plain");
+    assert!(
+        fs::symlink_metadata(root_path.join("files/linked"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+            || cfg!(windows)
+    );
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+    // Cancellation before the creation creates nothing.
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        storage
+            .create_directory(&path("files/cancelled"), &cancelled)
+            .await,
+        Err(FileStorageError::Cancelled)
+    ));
+    assert!(!root_path.join("files/cancelled").exists());
+
+    // Removal takes the lock keys the alias checks left.
+    storage.remove(&path("files"), &cancel).await.unwrap();
+    assert!(!root_path.join("files").exists());
+    root.shutdown().await.unwrap();
+}
+
 #[test]
 fn removal_scales_with_directory_size() {
     #[cfg(unix)]

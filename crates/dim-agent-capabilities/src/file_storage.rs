@@ -60,9 +60,9 @@ pub enum FileStorageError {
     },
     #[error("file lock cleanup: {0:?}")]
     Release(Vec<io::Error>),
-    /// The replacement is in place and visible, but syncing it failed, so it
-    /// may not survive a crash. It is not an unchanged file.
-    #[error("file replaced, but its durability could not be confirmed: {0}")]
+    /// The replacement or directory is in place and visible, but syncing it
+    /// failed, so it may not survive a crash. It is not an unchanged entry.
+    #[error("file or directory written, but its durability could not be confirmed: {0}")]
     Unsynced(#[source] io::Error),
 }
 
@@ -369,6 +369,44 @@ impl FileStorage {
             .await?
             .replace(bytes, permissions, cancel)
             .await
+    }
+
+    /// Makes `path` an existing business directory: a missing one is created
+    /// with mode 0700 (Windows inherits the parent's DACL), an existing one
+    /// counts as created, and any other existing entry fails `Io` untouched.
+    /// The parent must exist; there is no recursive creation. Aliases of the
+    /// reserved directory or the account marker fail `InvalidPath` before
+    /// anything is created. The parent is synced before returning, in both
+    /// cases, so a retry after `Unsynced` confirms durability. Cancellation is
+    /// checked up to the creation.
+    pub async fn create_directory(
+        self: &Arc<Self>,
+        path: &FilePath,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let relative = path.relative.clone();
+        self.run(path, cancel, move |root, owner, cancel| {
+            let (parent, name) = native::parent(root, &relative)?;
+            // Ensuring the reserved directory first makes every spelling the
+            // filesystem equates with it exist, so `linked` recognizes it.
+            let (locks, _temporary) = native::directories(&parent)?;
+            if native::linked(&parent, &name, &locks)? {
+                return Err(FileStorageError::InvalidPath("reserved storage directory"));
+            }
+            // Keys follow the filesystem's own name equivalence, as for `lock`.
+            let key = native::create_key(&locks, &name)?;
+            let marker = native::create_key(&locks, OsStr::new("auth.json.lock"))?;
+            if native::same_identity(&key, &marker)? {
+                return Err(FileStorageError::InvalidPath("reserved storage lock"));
+            }
+            owner.check(&cancel)?;
+            native::create_directory(&parent, &name)?;
+            // Present: only a business directory counts as created. Links are
+            // never followed and nothing else is touched.
+            native::open_directory(&parent, &name)?;
+            native::sync_directory(&parent).map_err(FileStorageError::Unsynced)
+        })
+        .await
     }
 
     /// Lists a directory below an authorized root, sorted by name. This
@@ -1377,6 +1415,21 @@ mod native {
         let temporary = directory(&locks, OsStr::new(TEMPORARY_DIRECTORY))?;
         Ok((locks, temporary))
     }
+    /// Creates the directory `name` with mode 0700; an existing entry is left
+    /// as it is for the caller to check.
+    pub fn create_directory(parent: &File, name: &OsStr) -> io::Result<()> {
+        let name = c_name(name)?;
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    pub fn sync_directory(directory: &File) -> io::Result<()> {
+        directory.sync_all()
+    }
     pub fn create_key(parent: &File, name: &OsStr) -> io::Result<File> {
         // Concurrent nonexclusive creation can fail with ENOENT on macOS even
         // when the winner created the key. Create once, then open that inode;
@@ -1987,6 +2040,12 @@ mod unsupported {
         Err(unsupported())
     }
     pub fn directories(_: &File) -> io::Result<(File, File)> {
+        Err(unsupported())
+    }
+    pub fn create_directory(_: &File, _: &OsStr) -> io::Result<()> {
+        Err(unsupported())
+    }
+    pub fn sync_directory(_: &File) -> io::Result<()> {
         Err(unsupported())
     }
     pub fn create_key(_: &File, _: &OsStr) -> io::Result<File> {

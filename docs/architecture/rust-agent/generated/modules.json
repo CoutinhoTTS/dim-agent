@@ -3624,6 +3624,7 @@
         "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
+        "path native::create_directory",
         "path native::create_key",
         "path native::create_temp",
         "path native::directories",
@@ -3647,6 +3648,7 @@
         "path native::reserved_directory",
         "path native::same_identity",
         "path native::subdirectory",
+        "path native::sync_directory",
         "path native::sync_replacement",
         "path native::target_name"
       ]
@@ -3659,6 +3661,7 @@
         "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
+        "path native::create_directory",
         "path native::create_key",
         "path native::create_temp",
         "path native::directories",
@@ -3682,6 +3685,7 @@
         "path native::reserved_directory",
         "path native::same_identity",
         "path native::subdirectory",
+        "path native::sync_directory",
         "path native::sync_replacement",
         "path native::target_name",
         "use unsupported"
@@ -3695,6 +3699,7 @@
         "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
+        "path native::create_directory",
         "path native::create_key",
         "path native::create_temp",
         "path native::directories",
@@ -3718,6 +3723,7 @@
         "path native::reserved_directory",
         "path native::same_identity",
         "path native::subdirectory",
+        "path native::sync_directory",
         "path native::sync_replacement",
         "path native::target_name",
         "path native::validate_component",

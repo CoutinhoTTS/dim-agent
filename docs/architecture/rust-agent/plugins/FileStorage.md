@@ -3,7 +3,7 @@
 Owner: [file_storage.rs](../../../../crates/dim-agent-capabilities/src/file_storage.rs)
 and [windows.rs](../../../../crates/dim-agent-capabilities/src/file_storage/windows.rs).
 Provides authorized-root-relative file operations and leases with secure path
-traversal and serialized mutation, plus directory listing and removal.
+traversal and serialized mutation, plus directory creation, listing and removal.
 
 ## Dependencies
 
@@ -58,6 +58,41 @@ marker naming this process counts as live. The exception is a marker this
 process failed to release: it keeps the owner record, whose nonce only that
 marker carries, and reclaims the marker at once, so removal and locking need
 not wait for the process to exit.
+
+## Directory creation
+
+`create_directory` makes a path below an authorized root an existing business
+directory, one level at a time: its parent must exist and is reached as every
+operation reaches it, without following links. A missing directory is created
+relative to the held parent handle, with mode `0700` on Unix (`mkdirat`) and
+the parent's inherited DACL on Windows (`NtCreateFile` with `FILE_CREATE`). An
+existing business directory counts as created, so a retry is safe; any other
+existing entry (a file, link, reparse point or special file) fails with an I/O
+error and is left untouched.
+
+Aliases are checked the way `lock` checks them, before anything is created. The
+parent's reserved directory is ensured first, so a name the filesystem equates
+with it is recognized by identity, and the lock keys for the name and for
+`auth.json.lock` are opened in it; if they are the same file, the name is an
+alias of the account marker. Both fail `InvalidPath`. The keys stay in the
+reserved directory, as keys for file names do, and removal deletes them with
+the directory.
+
+```text
+create_directory(d/x):
+  open d (no links, never the reserved directory)       missing -> NotFound
+  ensure d/.dim-file-storage-locks
+  x is the reserved directory under another spelling?    -> InvalidPath
+  key x is key auth.json.lock?                           -> InvalidPath
+  cancelled?                                             -> Cancelled
+  mkdirat(d, x, 0700); an existing entry is kept
+  x is not a business directory?                         -> Io, untouched
+  fsync d                                                fails -> Unsynced
+```
+
+In both the created and the existing case the parent is synced before the call
+returns, so a retry after `Unsynced` confirms durability. Windows has no
+directory sync, as for replacement. Cancellation is checked up to the creation.
 
 ## Listing and removal
 
@@ -171,6 +206,9 @@ and starts again from its target if a directory it returns to was deleted.
 [file_storage_flow.rs](../../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs):
 `late_roots_preserve_indices_and_generation_boundaries_on_reload`,
 `file_storage_flow` (path, lock, permission and platform checks),
+`directory_creation_stays_inside_the_authorized_root` (mode, an existing
+directory, a missing parent, aliases of the reserved directory and the account
+marker, an existing file or link, cancellation),
 `directory_listing_and_removal_stay_inside_the_authorized_root` (Session-file
 layout, reserved resources and aliases, leases held during partial removal,
 links, cancellation, leftovers with reserved names or of the wrong type, a
