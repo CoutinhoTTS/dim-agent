@@ -66,18 +66,24 @@ impl WebEntry {
         if let Some(open) = open.as_ref().filter(|open| !open.task.is_finished()) {
             return Ok(opened(open));
         }
-        let assets = self
-            .assets
-            .as_ref()
-            .and_then(|path| path.canonicalize().ok())
-            .filter(|path| path.join("index.html").is_file())
-            .ok_or_else(|| {
-                RpcError::app(
-                    -32000,
-                    "web_assets_missing",
-                    "The Web workspace assets are not installed",
-                )
-            })?;
+        let assets = match &self.assets {
+            Some(path) => path
+                .canonicalize()
+                .ok()
+                .filter(|path| path.join("index.html").is_file())
+                .map(Assets::Directory),
+            None => EMBEDDED
+                .iter()
+                .any(|(path, ..)| *path == "/index.html")
+                .then_some(Assets::Embedded),
+        }
+        .ok_or_else(|| {
+            RpcError::app(
+                -32000,
+                "web_assets_missing",
+                "This App Server was built without the Web workspace",
+            )
+        })?;
         let listener = bind(port).await?;
         let address = listener.local_addr().map_err(io_error)?;
         let bootstrap = new_token();
@@ -195,9 +201,47 @@ fn digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
+/// The built frontend `build.rs` embedded: request path, gzip-compressed, bytes.
+static EMBEDDED: &[(&str, bool, &[u8])] = include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
+
+/// Where the entry reads the frontend: the embedded build, or a directory
+/// given with `--web-assets` (development against a live `vite build --watch`).
+enum Assets {
+    Embedded,
+    Directory(PathBuf),
+}
+
+/// One asset, gzip-compressed when `gzip` is set.
+struct Asset {
+    bytes: std::borrow::Cow<'static, [u8]>,
+    gzip: bool,
+}
+
+impl Assets {
+    async fn get(&self, path: &str) -> Option<Asset> {
+        match self {
+            Self::Embedded => EMBEDDED
+                .iter()
+                .find(|(embedded, ..)| *embedded == path)
+                .map(|(_, gzip, bytes)| Asset {
+                    bytes: (*bytes).into(),
+                    gzip: *gzip,
+                }),
+            Self::Directory(root) => {
+                let file = confined(root, path)?;
+                let bytes = tokio::fs::read(file).await.ok()?;
+                Some(Asset {
+                    bytes: bytes.into(),
+                    gzip: false,
+                })
+            }
+        }
+    }
+}
+
 struct Site {
     hub: Arc<ConnectionHub>,
-    assets: PathBuf,
+    assets: Assets,
     port: u16,
     bootstrap: [u8; 32],
     /// Hashes of access tokens issued by `exchange`.
@@ -418,45 +462,68 @@ async fn api_not_found() -> Response {
     error(StatusCode::NOT_FOUND, "not_found", "Unknown endpoint")
 }
 
-/// Serves a file from the assets directory, falling back to `index.html` for
-/// application routes.
-async fn asset(State(site): State<Arc<Site>>, method: Method, uri: Uri) -> Response {
+/// Serves a frontend file, falling back to `index.html` for application
+/// routes.
+async fn asset(
+    State(site): State<Arc<Site>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
     let path = uri.path();
     let immutable = path.starts_with("/assets/");
-    if let Some(file) = confined(&site.assets, path)
-        && let Ok(bytes) = tokio::fs::read(&file).await
-    {
-        let cache = if immutable {
-            "public, max-age=31536000, immutable"
+    let (path, cache) = match site.assets.get(path).await {
+        Some(asset) if immutable => {
+            return send(path, asset, "public, max-age=31536000, immutable", &headers);
+        }
+        Some(asset) => return send(path, asset, "no-cache", &headers),
+        None if immutable => return StatusCode::NOT_FOUND.into_response(),
+        None => ("/index.html", "no-store"),
+    };
+    match site.assets.get(path).await {
+        Some(asset) => send(path, asset, cache, &headers),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn send(path: &str, asset: Asset, cache: &'static str, request: &HeaderMap) -> Response {
+    let accepts_gzip = request
+        .get_all(header::ACCEPT_ENCODING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
+            value
+                .split(',')
+                .any(|coding| coding.trim().starts_with("gzip"))
+        });
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, content_type(Path::new(path))),
+            (header::CACHE_CONTROL, cache),
+            (header::VARY, "Accept-Encoding"),
+        ],
+        Body::from(if asset.gzip && !accepts_gzip {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(
+                &mut flate2::read::GzDecoder::new(&asset.bytes[..]),
+                &mut bytes,
+            )
+            .expect("build.rs embeds valid gzip");
+            bytes.into()
         } else {
-            "no-cache"
-        };
-        return (
-            [
-                (header::CONTENT_TYPE, content_type(&file)),
-                (header::CACHE_CONTROL, cache),
-            ],
-            Body::from(bytes),
-        )
-            .into_response();
+            asset.bytes
+        }),
+    )
+        .into_response();
+    if asset.gzip && accepts_gzip {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     }
-    if immutable {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match tokio::fs::read(site.assets.join("index.html")).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            Body::from(bytes),
-        )
-            .into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
+    response
 }
 
 /// Resolves a request path to a regular file inside `root`, or `None`.

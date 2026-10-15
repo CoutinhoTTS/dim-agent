@@ -60,7 +60,7 @@ async fn web_client(address: &str, cookie: &str) -> Client {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn web_entry_requires_installed_assets_and_a_local_caller() {
+async fn web_entry_serves_the_embedded_build_to_local_callers_only() {
     let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
     let mut local = Client::new_version(&server, false, 3).await;
     assert!(
@@ -69,14 +69,6 @@ async fn web_entry_requires_installed_assets_and_a_local_caller() {
             .as_array()
             .unwrap()
             .contains(&json!("web.open"))
-    );
-    assert_eq!(
-        local.rpc("web.open", json!({})).await["error"]["data"]["appError"],
-        "web_assets_missing"
-    );
-    assert_eq!(
-        local.rpc("web.status", json!({})).await["result"],
-        json!({"open":false,"connections":0})
     );
     let mut bare = Client::new_version(&server, true, 3).await;
     assert_eq!(
@@ -88,6 +80,47 @@ async fn web_entry_requires_installed_assets_and_a_local_caller() {
         old.rpc("web.status", json!({})).await["error"]["data"]["appError"],
         "unknown_method"
     );
+
+    // The binary carries the frontend build, compressed for browsers that
+    // accept gzip and expanded for those that do not.
+    let opened = local.rpc("web.open", json!({})).await;
+    let address = opened["result"]["address"].as_str().unwrap().to_owned();
+    let gzip = get(&address, "/").replace("\r\n\r\n", "\r\nAccept-Encoding: gzip, br\r\n\r\n");
+    let (status, head, _) = http(&address, gzip).await;
+    assert_eq!(status, 200);
+    assert!(
+        head.to_ascii_lowercase().contains("content-encoding: gzip"),
+        "{head}"
+    );
+    let (status, head, body) = http(&address, get(&address, "/chat/new")).await;
+    assert_eq!(status, 200);
+    assert!(!head.to_ascii_lowercase().contains("content-encoding"));
+    assert!(body.starts_with("<!doctype html>"), "{body}");
+    assert_ok(&local.rpc("web.close", json!({})).await);
+    assert_eq!(
+        local.rpc("web.status", json!({})).await["result"],
+        json!({"open":false,"connections":0})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_web_assets_directory_without_a_build_is_reported() {
+    let empty = std::env::temp_dir().join(format!("dim-web-empty-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&empty).unwrap();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            web_assets: Some(empty.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        local.rpc("web.open", json!({})).await["error"]["data"]["appError"],
+        "web_assets_missing"
+    );
+    std::fs::remove_dir_all(empty).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

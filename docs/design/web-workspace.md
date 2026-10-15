@@ -38,7 +38,7 @@ The daemon is shared and normally spawned with `--no-ws`, so the entry is opened
 | `web.status` | `{}` | `{open, address?, connections}` |
 | `web.close` | `{}` | `{}` after the listener and every web connection closed (detach) |
 
-All three are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. The entry stays open until `web.close` or daemon exit; it is not persisted, so after a daemon restart the user runs `dimcode web` again. `web.open` fails with `web_assets_missing` when the daemon was started without an assets directory (§2.4).
+All three are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. The entry stays open until `web.close` or daemon exit; it is not persisted, so after a daemon restart the user runs `dimcode web` again. `web.open` fails with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
 
 ### 2.2 Authentication
 
@@ -63,14 +63,14 @@ Tokens never appear in logs, diagnostics, the Timeline or protocol replies other
 | `POST /api/auth/logout` | Cookie, Origin | 204, clears the cookie and drops that access token |
 | `GET /ws` | Cookie, Origin | WebSocket upgrade into an ordinary App Server connection (`entry: Web`), same framing and admission limits as the existing `/ws`; 401 without a valid cookie |
 | other `/api/*` | — | 404 `{error:{code,message}}` |
-| `GET /assets/*` | None | Static files confined to the assets directory; `Cache-Control: max-age=31536000, immutable` |
+| `GET /assets/*` | None | The embedded frontend (or files confined to the override directory), gzip when the browser accepts it; `Cache-Control: max-age=31536000, immutable` |
 | other `GET` | None | `index.html` (SPA fallback), `Cache-Control: no-store` |
 
 Every response carries `Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'`, plus `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
 ### 2.4 Assets
 
-The release tree gains `web/` next to `runtime/` and `plugins/`. The CLI passes `--web-assets <root>/web` when spawning the daemon, the same way it passes `plugins/dim-oauth`; for development, `DIMCODE_WEB_ASSETS=<dir>` overrides the path the CLI passes. The daemon serves files only from that directory and canonicalizes request paths before opening them.
+The frontend is compiled into `dim-app-server`, like the TypeScript host's `bun build --compile`. The crate's `build.rs` runs `npm ci` in `web/` when `package-lock.json` changed and `npm run build` when the frontend sources changed, gzip-compresses the output (fonts and images stay as built) and embeds it; the entry answers with `Content-Encoding: gzip` or expands the file for a browser that does not accept it. A build host without npm produces a binary without the frontend and a warning. For frontend development, `--web-assets DIR` (passed by the CLI from `DIMCODE_WEB_ASSETS`) replaces the embedded build with a directory; the entry serves files only from that directory and canonicalizes request paths before opening them.
 
 ### 2.5 Protocol on the entry
 
@@ -108,7 +108,7 @@ Open this link to sign in: http://127.0.0.1:43201/#bootstrap=…
 The workspace stays available until the daemon stops or you run `dimcode web --close`.
 ```
 
-The CLI passes `--web-assets` when it spawns the daemon (§2.4). A daemon started before the assets were installed answers `web_assets_missing` until it is restarted with `dimcode daemon stop`.
+The daemon serves the frontend embedded in its binary (§2.4); a running daemon keeps the build it started with until `dimcode daemon stop`.
 
 ## 4. Frontend
 
@@ -127,7 +127,7 @@ Features of the TypeScript UI with no v3 backend yet are left out rather than st
 
 ## 5. Build and release
 
-The release workflow builds `web/` once per target job (`npm ci --ignore-scripts && npm run build`) and passes the output to `scripts/stage-release.mjs` as `DIM_WEB_DIST`; staging requires it and copies it to `<root>/web`, which the release manifest and npm package include. The PR check builds `web/` (type check plus bundle). `cargo build` does not depend on the frontend; development points the CLI at a local build with `DIMCODE_WEB_ASSETS=web/dist`.
+Building `dim-app-server` builds the frontend (§2.4), so `cargo build`, `./dev`, CI and the release workflow need Node and npm from `.node-version`; the release payload and npm packages carry no separate frontend files. `vue-tsc` runs as part of every frontend build, so the PR check type-checks `web/` through `cargo build`.
 
 ## 6. Open questions
 

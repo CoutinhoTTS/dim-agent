@@ -4,7 +4,7 @@ set -euo pipefail
 repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 inherited_names=()
 inherited_values=()
-for setting in DIM_OAUTH_SOURCE_DIR DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL; do
+for setting in DIM_OAUTH_SOURCE_DIR DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL DIMCODE_WEB_ASSETS; do
   if declare -p "$setting" >/dev/null 2>&1; then
     inherited_names+=("$setting")
     inherited_values+=("${!setting}")
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 1; }
       shift
       ;;
-    login|account|logout|models|daemon) chat=false ;;
+    login|account|logout|models|daemon|web) chat=false ;;
     --help|-h|--version|-V) native_help=true ;;
   esac
   shift

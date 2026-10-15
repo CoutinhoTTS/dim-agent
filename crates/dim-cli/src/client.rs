@@ -490,11 +490,9 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
             }
         }
     }
-    let web_assets = std::env::var_os("DIMCODE_WEB_ASSETS")
-        .map(std::path::PathBuf::from)
-        .or_else(|| Some(binary.parent()?.parent()?.join("web")))
-        .filter(|path| path.join("index.html").is_file());
-    if let Some(path) = web_assets {
+    // The App Server embeds the Web workspace; a directory replaces it during
+    // frontend development.
+    if let Some(path) = std::env::var_os("DIMCODE_WEB_ASSETS") {
         command.arg("--web-assets").arg(path);
     }
     #[cfg(unix)]

@@ -39,6 +39,7 @@ With `DIMCODE_MODEL_CONFIG` set, run `./dev` to incrementally build both Rust ex
 ./dev --resume SESSION_ID                   # continue the printed session
 ./dev restart                              # explicitly rebuild and restart
 ./dev stop                                 # normal shutdown, no build
+./dev web                                  # open the Web workspace (also /web in the TUI)
 ./dev check                                # explicit formatting/compilation checks
 ```
 
