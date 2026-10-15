@@ -27,118 +27,159 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 ## 2. 排期原则
 
-1. **基础项跟随第一个消费者落地。** 总体设计 P0 有十几个基础项，全部做完再做插件，会推迟所有可见功能，而且契约在没有真实消费者验证前就被冻结。改为：每个基础项与第一个用到它的插件放在同一里程碑，基础项先合入、插件紧随其后。仍满足总体设计 §8 "前置项早于消费者"。
-2. **按关键路径排，不按阶段号排。** 阶段号（P1/P2/P3）表示产品优先级；同一里程碑内按依赖解锁的数量排序。
-3. **TypeScript first 的插件尽早用 TypeScript 开发，#4 提前。** 用 TypeScript 写，是为了在业务规则还没验证时缩短验证和迭代周期（总体设计附录 C）；开发中设计会变，这些插件最需要快速试错。所以按名访问运行时服务的 [#4](https://github.com/arcships/dim/issues/4) 是基础项，放进 M1 并行轨道，分两段：#4a Session 级（M1，SessionTitle 试点），#4b 分支级（M3，Goal 用）。安全边界、准入、before 回调、输入和 Session 方法边界仍用 Rust（Questions、ShellInput、Attachments、Hooks）。规则稳定后若迁到 Rust，契约、事件名、方法名、存储格式不变，只换 loader 行。
-4. **远期设计晚绑定。** 只细化当前和下一个里程碑的设计；更远的设计保持 Draft，等前置机制落地后再细化，避免反复返工。
-5. **每个里程碑预留 20–30% 容量**给设计细化、契约调整和返工（见 §5）。里程碑结束时重排下一个里程碑。
+1. **core 先改完，再做插件。** 装配代码、Rpc、Timeline 和 Session facade 是所有插件都要改的地方，并行改一定冲突。先依次把这些 core 机制做完；之后插件按 [ADR 002](../adr/002-plugin-scope.md) 只通过已有机制接入，基本只改自己的 crate，可以大面积并行，插件设计的变更也只影响它自己。
+2. **被依赖的先做，不依赖别人的插件先做。** core 之后先做其它插件依赖的现有插件补充（阶段 2），再做不依赖其它插件的插件（阶段 3），最后做依赖阶段 2 的插件（阶段 4）。阶段号（P1/P2/P3）只表示产品优先级，同一阶段内按它解锁的消费者数量排序。
+3. **core 项要等消费者的设计通过复核。** 每个 core 项至少要有一个用它的插件设计已经是 Ready（§5.1），才能开工；暂时没有 Ready 消费者的 core 项推迟。反例是 Questions：按原设计先做 #2，现在就白做了。所以阶段 0 先集中复核 P1/P2 插件设计。
+4. **core 只做到 P2。** 阶段 1、2 只做 P1/P2 插件需要的机制；P3 的设计离得远、变数大，到阶段 5 再开一轮 core。
+5. **TypeScript first 的插件用 TypeScript 开发，#4 放进 core。** 用 TypeScript 写，是为了在业务规则还没验证时缩短验证和迭代周期（总体设计附录 C）。所以按名访问运行时服务的 [#4](https://github.com/arcships/dim/issues/4) 是阶段 1 的 core 项，分两段：#4a Session 级（SessionTitle、Web、Notifications 用），#4b 分支级（Goal 用）。安全边界、准入、before 回调、输入和 Session 方法边界仍用 Rust（Questions、ShellInput、Attachments、Hooks）。规则稳定后若迁到 Rust，契约、事件名、方法名、存储格式不变，只换 loader 行。
+6. **远期设计晚绑定。** 只细化当前和下一个阶段的设计；更远的设计保持 Draft，等前置机制落地后再细化。
 
-## 3. 里程碑
+代价：阶段 1、2 完成前几乎没有可交付的新插件，第一个用户可见的功能会来得更晚。换来的是阶段 3、4 可以高度并行，返工更少。
 
-规模：S（几天）、M（1–2 周）、L（数周或需要 spike）。"设计"列指开工前要做的设计细化（§5.2）。
+## 3. 阶段
 
-### M0 收尾与对齐（立即）
+规模：S（几天）、M（1–2 周）、L（数周或需要 spike）。"消费者"列是该项的复核门槛：其中至少一个设计 Ready 才开工。
+
+### 阶段 0 收尾与设计复核（立即，只改文档的部分可与阶段 1 并行）
 
 | 项 | 规模 | 说明 |
 | --- | --- | --- |
-| 合入 #16，补 ADR 003 D3（项目源默认禁用） | S | 解除总体设计 §6.4 的遗留项 |
-| 合入 #14 | M | `managementMethods` Rust 部分、`SessionLifecycle` |
-| 决定 Goal / Pursuit（D3） | S | 只决定 P2 做哪个，不阻塞 M1 |
-| #2 上下文边界对齐（D1） | S | ADR 001 与 #2 的分歧；#2 目前唯一的消费者 Questions 需要重新设计 |
-| 为附录 F 中 "To be opened" 的需求开 issue | S | 异步 before、fixed-prefix 读、调用方来源、assembly 按 `provides` 收集、keyed 服务查找、drain 卸载、跨语言进程事件、call-scoped 请求、broadcast notice |
+| 合入 #14，再合入 #16 并补 ADR 003 D3（项目源默认禁用） | M | 两个 PR 都改 MCP，先合改动大的 #14 |
+| P1/P2 插件设计复核：ShellInput、Attachments、SessionTitle、Web、Notifications、Hooks、Scheduler、Workflow | M | 按 §5.2 逐个改为 Ready；只改文档，可以并行，但契约文档由一个人统一修改 |
+| Questions 重新设计 | M | 从头设计：模型从工具结果拿到回答；逐一论证 `question/*` 事件是否需要，以及是否还依赖 #2 |
+| 决定 Goal / Pursuit（D3），并复核选中的设计 | S | 决定 #4b 是否有消费者 |
+| 为附录 F 中 "To be opened" 的需求开 issue | S | 异步 before、fixed-prefix 读、调用方来源、assembly 按 `provides` 收集、keyed 服务查找、drain 卸载、跨语言进程事件、broadcast notice |
 
-### M1 Session 边界 + 第一批 P1 交互
+### 阶段 1 core 机制
 
-目标：用户能在 CLI 里用 `!command`、撤回排队消息、贴大段文本，长会话能手动/自动压缩。
+主线改的是同一批文件（`assembly.rs`、App Server `lib.rs`、Rpc 的 `connection.rs`/`protocol.rs`、runtime `config.rs`），依次做；支线改 runtime 里其它文件，可以与主线并行。
 
-| 顺序 | 项 | 类型 | 依赖 | 解锁 | 规模 | 设计 |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | F1 `sessionMethods`：Session facade 按 namespace 查找，Rpc 经 Session 分发 | 基础 | #14 | 几乎所有 P1/P2 插件、InputQueue 撤回 | M | [session-boundary](contracts/session-boundary.md) A.1 复核 |
-| 2 | F2 `SessionConfig` 的 `interactive`/`createdBy`/`resourceNode`（仅控制节点）+ `session.create` 参数；assembly 按 `interactive` 安装可选部件 | 基础 | — | Questions、SessionTitle、Notifications、Scheduler | M | [session-access](contracts/session-access.md) |
-| 3 | InputQueue 撤回：`input/withdraw`、`input/deleted`、`session.input.withdraw` | 扩展 | F1 | `Ctrl+S`、`/queue`；Hooks、Scheduler | M | 事件声明方式取决于 D1 |
-| 4 | F7 HostPlatform argv helper；F9 Agents Session 活动句柄 | 基础 | — | ShellInput、Hooks | S | — |
-| 5 | ShellInput | 插件 | F1、F7、F9 | — | M | 是 |
-| 6 | F8 FileStorage 列目录/删除；SessionStore Session 文件 | 基础 | — | Attachments、删除与 fork | M | — |
-| 7 | Attachments；ModelProvider 图片能力处理（从 Rpc 移出） | 插件 + 扩展 | F1、F8 | — | S | 是 |
-| 8 | 生产压缩宿主、`/compact`、用量查询 | 扩展 | F6（可先用当前模型） | 长会话可用性 | M | ContextPreparation 页 |
-| 并行 | F3 `toolContribution` 按名收集（Rust 侧） | 基础 | — | Web、Goal、Notifications | S | — |
-| 并行 | #4a Session 级 TS 部件：从 TS 提供 `toolContribution`、`sessionMethods`，按名订阅 Session broadcast、调用 Session 级 typed 服务；TS 部件随 Session 装配和卸载 | 基础 | F1、F3 | SessionTitle、Web、Notifications 及 Scheduler/Workflow 的 Session 部件 | L（先 spike） | [session-access](contracts/session-access.md) §9 |
-
-### M2 其余 P1
-
-| 顺序 | 项 | 类型 | 依赖 | 规模 | 设计 |
-| --- | --- | --- | --- | --- | --- |
-| 1 | Questions 重新设计：模型从工具结果拿到回答；逐一论证 `question/*` 事件是否需要，以及是否还依赖 #2 | 设计 | — | M | 是（从头设计，不只是复核） |
-| 2 | Questions 实现 | 插件 | F1、F2；是否需要 F4 由重新设计决定 | M | — |
-| 视需要 | F4 #2 动态事件注册 + client-visible 标志；Connection 转发 | 基础 | D1；只在有消费者需要时做 | L（先 spike） | 是 |
-| 3 | F5 Session broadcast notice；SessionStore 标题元数据 + `setTitle` | 基础 | — | M | — |
-| 4 | F6 Provider purpose 策略 + `AuxiliaryModel` | 基础 | — | M | — |
-| 5 | SessionTitle（TypeScript，#4a 的端到端试点） | 插件 | F1、F2、F5、F6、#4a | S | 是 |
-| 6 | SessionStore 删除、清理、fork（fork 重置权限预设） | 扩展 | F8 | M | — |
-| 7 | Permission 命令规则；模型参数 effort/fast；`/agent` 切换 | 扩展 | — | M | — |
-| 8 | CLI：子命令、图片转换、`/export`、`exec --json` | CLI | 各 owner 的 RPC | M | — |
-| 独立轨道 | HostPlatform OS 隔离（seatbelt / landlock 或 bwrap） | 扩展 | — | L（先 spike） | 是 |
-
-### M3 P2 基础
-
-| 顺序 | 项 | 依赖 | 解锁 | 规模 |
-| --- | --- | --- | --- | --- |
-| 1 | Settings 每插件业务源、typed 写、凭据引用解析 | — | Web、Notifications、Hooks、Scheduler、Workflow、Goal 上限 | M |
-| 2 | Permission 类别 `outbound_message`、`persistent_configuration` | — | Notifications、Scheduler | S |
-| 3 | 异步 Timeline before 回调（fallback draft、`timeout`、`cancel_on`，append 接受即返回）+ `step/tool-call` 的 `skip` 与 ToolExecutor 处理 | M0 开的 issue | Hooks | L（先 spike） |
-| 4 | Agents `sessions` 服务（`launch` 带上限策略、`input`、`idle`、`withdraw`…）；调用方来源 | F2、InputQueue 撤回 | Scheduler、Workflow、fork | L |
-| 5 | `pluginFiles` 扩展（二进制、格式版本） | — | Scheduler、Workflow 及 P3 | S |
-| 6 | #4b 分支级 TS 部件：按名使用 `Dispatcher` 订阅、`Branch::input`、`TreeCommands`；owned work 的注册 | #4a | Goal 的分支部件 | M |
-
-### M4 P2 插件
-
-| 顺序 | 插件 | 依赖 | 理由 |
+| 顺序 | 项 | 消费者（门槛） | 规模 |
 | --- | --- | --- | --- |
-| 1 | Web（TypeScript） | #4a、Settings 源 | 依赖最少、价值高 |
-| 2 | Goal 或 Pursuit（D3，TypeScript） | F1、#4b、InputQueue 撤回（`input/deleted`） | 用户需求明确，规则最需要迭代 |
-| 3 | Hooks（用户和项目源） | 异步 before、`skip`、撤回、argv helper、Settings 源 | 运行时改动最大，放在 spike 之后 |
-| 4 | Scheduler | `sessions`、Settings、`pluginFiles`、Permission 类别 | — |
-| 5 | Workflow | `sessions`、Settings、`pluginFiles` | 与 Scheduler 共享 `sessions` 经验 |
-| 6 | Notifications | Settings、凭据、broadcast；可选 Scheduler 通知 | 外部渠道，失败只影响自身 |
-| 并行 | ModelProvider `ModelCallScope`、模型调用审批；Collaboration 成员审批转给 leader；Transport `EntryHost`；MCP OAuth | — | ExternalAgent、RemoteGateway 的前置 |
+| 主线 1 | F1 `sessionMethods`：Session facade 按 namespace 查找 keyed 服务，Rpc 经 Session 分发；方法提供者卸载等 drain 调用完成 | ShellInput、Attachments、SessionTitle、InputQueue 撤回 | M |
+| 主线 2 | F2 `SessionConfig` 的 `interactive`/`createdBy`/`resourceNode`（仅控制节点）+ `session.create` 参数；Agent assembly 按 `provides` 收集命名服务，按启用插件和 `interactive` 安装可选部件 | SessionTitle、Notifications、Scheduler | M |
+| 主线 3 | F3 `toolContribution` 按名收集 | Web、Goal、Notifications | S |
+| 主线 4 | #4a Session 级 TypeScript 部件：从 TypeScript 提供 `toolContribution`、`sessionMethods`，按名订阅 Session broadcast、调用 Session 级 typed 服务，随 Session 装配和卸载 | SessionTitle、Web、Notifications | L（先 spike，spike 可以提前单独做） |
+| 主线 5 | #4b 分支级 TypeScript 部件：按名使用 `Dispatcher` 订阅、`Branch::input`、`TreeCommands`，owned work 注册 | Goal 或 Pursuit | M |
+| 支线 | 异步 Timeline before 回调（fallback draft、`timeout`、`cancel_on`，append 接受即返回） | Hooks | L（先 spike） |
+| 支线 | Session broadcast notice 记录 `{source, kind, data}`；Rpc 原样转发 | SessionTitle | S |
+| 支线 | fixed-prefix 历史读；调用方来源由调用插件身份固定 | Notifications、Scheduler、Workflow | S |
+| 支线 | 跨语言命名进程事件（rutis） | Scheduler、Notifications；阶段 4 Scheduler 之前完成即可 | M |
+| 推迟 | #2 动态事件注册 + client-visible 标志 | 目前没有 Ready 消费者，等 Questions 重新设计的结论（D1） | L |
 
-### M5 P3 外部集成
+### 阶段 2 被依赖的现有插件补充
 
-顺序：ExternalAgent + AcpGateway → #3 PluginManager → #5 资源节点 + RemoteGateway → Modality。开工前统一做一次设计细化，因为这些设计依赖的机制在 M1–M4 中可能已经变化。
+按 owner 分开，彼此改不同的文件，可以并行。
 
-## 4. 关键路径
+| 项 | 依赖 | 被谁依赖 | 规模 |
+| --- | --- | --- | --- |
+| InputQueue 撤回：`input/withdraw`、`input/deleted`、`session.input.withdraw` | F1 | Goal、Hooks、`sessions`、`Ctrl+S`/`/queue` | M |
+| Loop/ToolExecutor：`step/tool-call` 的 `skip` | — | Hooks | S |
+| Agents `sessions` 服务（`launch` 带上限策略、`input`、`idle`、`withdraw`…）+ Session 活动句柄 | F2、InputQueue 撤回 | Scheduler、Workflow、ShellInput（活动句柄） | L |
+| Provider purpose 策略 + `AuxiliaryModel` | — | SessionTitle、生产压缩宿主 | M |
+| SessionStore：标题元数据 + `setTitle` 与 notice；Session 文件 | broadcast notice、FileStorage | SessionTitle、Attachments | M |
+| FileStorage 列目录、删除 | — | Session 文件、清理 | S |
+| HostPlatform argv helper | — | ShellInput、Hooks | S |
+| Settings 每插件业务源、typed 写、凭据引用解析 | — | Web、Notifications、Hooks、Scheduler、Workflow、Goal | M |
+| Permission 类别 `outbound_message`、`persistent_configuration` | — | Notifications、Scheduler | S |
+| `pluginFiles` 扩展（二进制、格式版本） | — | Scheduler、Workflow | S |
+| ModelProvider 处理图片能力（从 Rpc 移出） | — | Attachments | S |
+
+### 阶段 3 不依赖其它插件的插件（全部并行）
+
+| 项 | 用到的 core / 阶段 2 项 | 语言 |
+| --- | --- | --- |
+| ShellInput | F1、argv helper、活动句柄 | Rust |
+| Attachments | F1、Session 文件、图片处理 | Rust |
+| SessionTitle | F1、F2、#4a、notice、`AuxiliaryModel`、`setTitle` | TypeScript |
+| Web | F3、#4a、Settings 源 | TypeScript |
+| Notifications | F2、F3、#4a、Settings 源、凭据、Permission 类别；Scheduler 通知在阶段 4 前不触发 | TypeScript |
+| Questions（重新设计 Ready 后） | 由重新设计决定 | Rust |
+
+同时可以并行做的现有插件功能（不被其它插件依赖）：生产压缩宿主、`/compact`、用量查询；SessionStore 删除、清理、fork；Permission 命令规则；模型参数 effort/fast、`/agent`；MCP OAuth；HostPlatform OS 隔离（L，先 spike）；CLI 子命令、图片转换、`/export`、`exec --json`。
+
+### 阶段 4 依赖阶段 2 的插件（全部并行）
+
+| 插件 | 依赖 | 语言 |
+| --- | --- | --- |
+| Goal 或 Pursuit（D3） | #4b、InputQueue 撤回 | TypeScript |
+| Hooks（用户和项目源） | 异步 before、`skip`、InputQueue 撤回、argv helper、Settings 源 | Rust |
+| Scheduler | `sessions`、Settings 源、`pluginFiles`、Permission 类别、跨语言进程事件 | TypeScript |
+| Workflow | `sessions`、Settings 源、`pluginFiles` | TypeScript |
+
+Scheduler 和 Workflow 可以并行，但都要接入 `sessions`，建议同一个人先后做。
+
+### 阶段 5 P3
+
+先开第二轮 core：#3 loader editable layer 的 typed 操作、#5 rutis link（断线时导入服务保持注册并逐次失败）、`ConnectionEntry {name, deviceId}` 与 Transport `EntryHost`、ModelProvider `ModelCallScope` 与 `approval_ask`、Approval 的 host-source 准入、Collaboration 成员审批转给 leader、call-scoped 请求。开工前同样集中复核 P3 设计。之后 ExternalAgent + AcpGateway、PluginManager、RemoteGateway、Modality 四组基本互不依赖，可以并行。
+
+### 并发规则
+
+- 阶段 1 主线依次合入；支线和阶段 2、3、4 的各项按 owner 分开并行。
+- `docs/architecture/rust-agent/generated/` 下的生成文件不手工解冲突：rebase 后重跑 `xtask graph`。
+- 存储格式（native 存储，当前 v13）的改动依次做，每次单独做格式决策；SessionStore 的标题、Session 文件、fork 由同一人负责排序。
+- 不给还没落地的接口打桩，等接口合入再开工。
+- 同时进行的工作数不超过维护者能确认的设计 PR 和实现 PR 数量。
+
+## 4. 依赖图
 
 ```mermaid
 flowchart LR
-  PR14["#14 managementMethods"] --> F1["F1 sessionMethods"]
-  F1 --> WD["InputQueue 撤回"]
-  F1 --> SH["ShellInput"]
-  F1 --> AT["Attachments"]
-  F2["F2 SessionConfig"] --> Q["Questions（需重新设计）"]
-  F1 --> Q
-  QR{{"Questions 重新设计"}} --> Q
-  D1{{"D1 #2 对齐"}} -.->|"若重新设计后仍需要"| F4["F4 #2 动态事件"] -.-> Q
-  F5["F5 broadcast notice"] --> ST["SessionTitle"]
-  T4A["#4a Session 级 TS"] --> ST
+  subgraph S1["阶段 1 core"]
+    PR14["#14"] --> F1["F1 sessionMethods"] --> F2["F2 SessionConfig + 装配"] --> F3["F3 toolContribution"] --> T4A["#4a"] --> T4B["#4b"]
+    ASY["异步 before"]
+    NT["broadcast notice"]
+    FP["fixed-prefix 读、调用方来源"]
+  end
+  subgraph S2["阶段 2 现有插件补充"]
+    WD["InputQueue 撤回"]
+    SKIP["skip"]
+    SS["sessions 服务"]
+    AUX["AuxiliaryModel"]
+    STORE["SessionStore 标题、文件"]
+    SET["Settings 业务源"]
+    ARGV["argv helper"]
+  end
+  subgraph S3["阶段 3 叶子插件"]
+    SH["ShellInput"]
+    AT["Attachments"]
+    ST["SessionTitle"]
+    WEB["Web"]
+    NO["Notifications"]
+  end
+  subgraph S4["阶段 4"]
+    GO["Goal / Pursuit"]
+    HK["Hooks"]
+    SC["Scheduler"]
+    WF["Workflow"]
+  end
+  F1 --> WD
+  F2 --> SS
+  WD --> SS
+  NT --> STORE
+  F1 --> SH
+  ARGV --> SH
+  F1 --> AT
+  STORE --> AT
+  T4A --> ST
+  AUX --> ST
+  STORE --> ST
   T4A --> WEB
-  T4A --> T4B["#4b 分支级 TS"] --> GO
-  F6["F6 AuxiliaryModel"] --> ST
-  F1 --> ST
-  SET["Settings 业务源"] --> WEB["Web"]
-  F3["F3 toolContribution"] --> WEB
-  F3 --> GO["Goal / Pursuit"]
+  SET --> WEB
+  T4A --> NO
+  SET --> NO
+  T4B --> GO
   WD --> GO
-  ASY["异步 before + skip"] --> HK["Hooks"]
+  ASY --> HK
+  SKIP --> HK
   WD --> HK
   SET --> HK
-  F2 --> SS["sessions 服务"]
-  WD --> SS
-  SS --> SC["Scheduler"]
-  SS --> WF["Workflow"]
-  SET --> SC
+  SS --> SC
+  SS --> WF
+  FP --> SC
 ```
 
-Questions 需要重新设计，是否依赖 #2 待定，所以 #2 暂时不在关键路径上。最长链：#14 → F1 → InputQueue 撤回 → `sessions` → Scheduler/Workflow；风险最高的链：#4a → 所有 TypeScript 插件，以及异步 before → Hooks。两条高风险链都先做 spike，不阻塞其它工作。#4a 越早可用，TypeScript 插件越早进入快速迭代。
+关键路径是阶段 1 主线：#14 → F1 → F2 → F3 → #4a。#4a 是唯一的 L 级主线项，它的 spike 应在阶段 0 就单独开始。阶段 2 里最长的是 InputQueue 撤回 → `sessions`，它挡住 Scheduler 和 Workflow。风险最高的是 #4a 和异步 before，两者都先做 spike。Questions 需要重新设计，#2 暂时不在任何路径上。
 
 ## 5. 设计变更空间
 
@@ -148,7 +189,7 @@ Questions 需要重新设计，是否依赖 #2 待定，所以 #2 暂时不在�
 
 | 状态 | 含义 | 何时进入 |
 | --- | --- | --- |
-| Draft | 当前所有插件设计 | — |
+| Draft | 当前插件设计（Questions 除外，它需要重新设计） | — |
 | Ready | 已按代码现状复核，开放问题已决定或明确推迟，维护者已确认 | 该项开工前的设计细化 PR 合入 |
 | Implemented | 代码与设计一致；能力页移入或链接到 `architecture/rust-agent/plugins/`，由 `xtask check` 校验 | 实现 PR 合入 |
 
@@ -169,18 +210,19 @@ Questions 需要重新设计，是否依赖 #2 待定，所以 #2 暂时不在�
 - **只影响本插件**：在实现 PR 里同步改设计文档，PR 描述单列"设计变更"一节。
 - **影响共享契约或其它插件**：先停在该点，提契约变更 PR（列出受影响的插件文档），确认后再继续（AGENTS.md："需求与设计冲突时先更新文档并确认"）。其它插件的文档只追加影响说明，不连带细化。
 - **向机制 owner 提的新需求**：按设计规则 §4 rule 8 写五项，加到总体设计附录 F，并开 issue。
-- **中文译文**：`docs/zh/` 在里程碑结束时统一同步，不要求每个 PR 同步。
+- **阶段 1 之后的 core 回改**：插件开发中发现 core 缺东西时，插件不自己改 core。需求交给一个负责 core 的人，攒成一批统一改，按阶段 1 主线的方式依次合入。
+- **中文译文**：`docs/zh/` 在阶段结束时统一同步，不要求每个 PR 同步。
 
 ### 5.4 容量与重排
 
-- 每个里程碑预留 20–30% 容量给 5.2/5.3 的工作。L 级基础项（#2、异步 before、`sessions`、OS 隔离）先做 spike，spike 结论可能改变设计和本文顺序。
-- 里程碑结束时回顾：更新 §1 现状和 §3 后续里程碑；把超出预留的设计变更记为新项排入。
+- 每个阶段预留 20–30% 容量给 5.2/5.3 的工作。L 级项（#4a、异步 before、`sessions`、OS 隔离）先做 spike，spike 结论可能改变设计和本文顺序。
+- 阶段结束时回顾：更新 §1 现状和 §3 后续阶段；把超出预留的设计变更记为新项排入。
 
 ## 6. 待决策
 
 | # | 问题 | 建议 | 影响 |
 | --- | --- | --- | --- |
-| D1 | #2 的上下文边界：ADR 001（只看 adopted input 和工具结果）vs #2（注册投影规则） | 按 ADR 001 推进，与总体设计一致；投影规则以后作为增量 | F4 的开工时间（若 Questions 重新设计后不再需要 #2，D1 可以推迟） |
-| D2 | #4 是否提前，并按 Session 级（#4a）和分支级（#4b）分段交付 | 是（§2 原则 3）；SessionTitle 作为 #4a 试点 | TypeScript 插件何时能进入快速迭代 |
-| D3 | Goal 与 Pursuit | M4 前决定；两者互斥，只实现一个，另一个保留为实验设计 | M4 顺序 2 |
-| D4 | 基础项跟随消费者，而不是先做完整个 P0 | 是（§2 原则 1） | 整体顺序 |
+| D1 | #2 的上下文边界：ADR 001（只看 adopted input 和工具结果）vs #2（注册投影规则） | 按 ADR 001 推进，与总体设计一致；投影规则以后作为增量 | #2 的开工时间（若 Questions 重新设计后不再需要 #2，D1 可以推迟） |
+| D2 | #4 是否放进阶段 1 core，并按 Session 级（#4a）和分支级（#4b）分段交付 | 是（§2 原则 5） | TypeScript 插件何时能进入快速迭代 |
+| D3 | Goal 与 Pursuit | 阶段 0 决定；两者互斥，只实现一个，另一个保留为实验设计 | #4b 是否有消费者；阶段 4 |
+| D4 | core 先改完再做插件，还是基础项跟随第一个消费者 | 已决定：core 先行（§2 原则 1），以消费者设计 Ready 为门槛（原则 3） | 整体顺序 |
