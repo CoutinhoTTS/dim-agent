@@ -11,7 +11,7 @@ flowchart LR
   subgraph PROC["Process"]
     AUX["AuxiliaryModel (Provider)"]
     META["SessionStore title metadata"]
-    Settings["sessionTitle.* (Settings business source)"]
+    Settings["Settings source session-title"]
     Rpc["Rpc"]
   end
   subgraph SESS["Session"]
@@ -34,9 +34,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel`, Settings business source | `sessionMethods` key `session.rename` (declared in its `provides`); purpose key `session-title`; business keys `sessionTitle.enabled`, `sessionTitle.maxLength` |
+| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel`, Settings source `session-title` | `sessionMethods` key `session.rename` (declared in its `provides`); purpose key `session-title`; Settings source `session-title` with fields `enabled`, `maxLength` |
 
-Every dependency is at the Session scope or the enclosing process scope. Most are existing typed services; SessionStore title metadata, the title notice and Settings business sources are proposed supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins); shapes in A.2). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). A reload of SessionStore, Provider or Settings reloads SessionTitle, which cancels an in-flight generation; this is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Business configuration changes never reload ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
+Every dependency is at the Session scope or the enclosing process scope. Most are existing typed services; SessionStore title metadata and the title notice are proposed supplements, and Settings sources exist for Rust owners while the named `settings` service is not implemented (S8b) ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins); shapes in A.2). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). A reload of SessionStore, Provider or Settings reloads SessionTitle, which cancels an in-flight generation; this is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Business configuration changes never reload ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
 ## 2. Data and state
 
@@ -50,7 +50,7 @@ flowchart TB
     MD["revision, title text, source auto or manual"]
   end
   CONF["SessionConfig: interactive, collaborationRole"]
-  CFG["sessionTitle.enabled, sessionTitle.maxLength"]
+  CFG["session-title: enabled, maxLength"]
   MEM["in-flight generation, failed attempts (memory)"]:::new
   FUI -->|"text only"| MEM
   CC -->|"inherit hint"| MEM
@@ -124,7 +124,7 @@ The revision check is the recheck: a manual title always wins.
 
 | Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Member, workflow-stage or other non-interactive Session | `SessionConfig` | Never generated; rename allowed | SessionTitle |
+| Member Session (`collaborationRole`), or a non-interactive Session | `SessionConfig` | Never generated; rename allowed | SessionTitle |
 | Second input before generation finishes | — | Skipped (in flight) | SessionTitle |
 | First input deleted | input < `input/deleted` | Never adopted: no title from it; the next adopted operator input triggers (A9) | SessionTitle |
 | Generation failed | — | Next adopted `main` input while untitled retries from the first adopted input (A5) | SessionTitle |
@@ -149,7 +149,7 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | Set or clear a manual title |
 | `session-title` | Provider purpose key | Model policy for title generation; unconfigured inherits |
-| `sessionTitle.enabled`, `sessionTitle.maxLength` | Business configuration (Settings source) | Turn generation off; title length |
+| `session-title` source: `enabled`, `maxLength` | Business configuration (Settings source) | Turn generation off; title length |
 | `title`, `titleSource` in `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore | Display |
 | Title notice `{sessionId, title, titleSource, revision}` | Session broadcast notice emitted by SessionStore (generic record, §9; SessionStore supplement) | Live title update for subscribed clients |
 
@@ -174,7 +174,7 @@ The first input's text is sent to the model chosen for `session-title`; with the
 | ADR 002 D1 (scope follows state) | Session scope: the title belongs to the Session; the stored title is SessionStore's. |
 | ADR 002 D2 (no wiring modules) | No wiring module; all dependencies are declared services. |
 | ADR 002 D3 (dependencies follow scope) | Dependencies are in the Session or enclosing process scope; their reload cancels a generation, which is accepted. |
-| ADR 002 D4 (structural vs business configuration) | Enabling is structural; `sessionTitle.*` is business configuration in its own Settings source, read at use. |
+| ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `session-title` document is business configuration in its own Settings source, read at use. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
@@ -201,7 +201,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | --- | --- | --- |
 | `{sessionId, title: string \| null}` | `{title: string \| null, titleSource: "auto" \| "manual" \| null, revision}` | `invalid_params`, `session_not_found`, `service_reloading`, `storage_failed`; dispatch errors per [session-boundary](../contracts/session-boundary.md) |
 
-`title` is trimmed; 1..=`sessionTitle.maxLength` characters, no line breaks or control characters (A3). `null` clears the title (A6).
+`title` is trimmed; 1..=`maxLength` (source `session-title`) characters, no line breaks or control characters (A3). `null` clears the title (A6).
 
 ### A.2 Depended-on shapes (owners define them)
 
@@ -214,7 +214,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 
 ### A.3 Configuration
 
-`sessionTitle.enabled: bool` default `true`; `sessionTitle.maxLength: u32` default 80, range 10..=200 (A3). Business configuration read at each decision; it is written only through Settings typed operations into SessionTitle's business source, whose schema SessionTitle declares; a change is a data update with notification, never a reload. Enabling the plugin is structural configuration. Provider policy for `session-title` lives in Provider's per-purpose policy; unconfigured inherits the Session's model (A1).
+Settings source `session-title`, one document: `enabled: bool` default `true`; `maxLength: u32` default 80, range 10..=200 (A3). The schema SessionTitle declares carries the defaults and the range (`minimum`/`maximum`), so Settings rejects an out-of-range value on write and when reading a persisted file, and SessionTitle uses the delivered document without checking it again. Read at each decision. SessionTitle has no tool that writes configuration, so the document is written only through the client methods `settings.read`/`settings.update` (S8b, not implemented). A change is a data update with notification, never a reload. Enabling the plugin is structural configuration. Provider policy for `session-title` lives in Provider's per-purpose policy; unconfigured inherits the Session's model (A1).
 
 ### A.4 Mechanics
 
