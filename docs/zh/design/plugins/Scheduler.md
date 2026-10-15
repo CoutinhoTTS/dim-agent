@@ -2,6 +2,8 @@
 
 状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
+> **设计复核时要改的依赖（[#35](https://github.com/arcships/dim/issues/35)）。** `schedule` 工具在每次调用时查找 `scheduleJobs`，进程部件在每次使用时获取 `sessions`，都不作为依赖持有。这样 Agents 或 Scheduler 重载只会让一次调用失败，不会让每个 Session 重载。
+
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按 rutis 现有的节点行为重新设计。P1/P2 中每个 Session 都使用控制节点。
 
 > **待设计复核时细化。** 运行结果的通知是 Scheduler 自己的功能。为 Notifications 发布的运行结果事件通知，以及它所需的跨语言具名进程事件（§9.1），随 Notifications 一并撤回。

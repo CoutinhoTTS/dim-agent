@@ -352,9 +352,9 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | --- | --- |
 | 控制节点 | 承载 App Server：Timeline、Session、配置来源、Provider、调度 |
 | 资源节点 | 宿主资源所在之处（文件、进程、shell、隔离、本地 CLI）。每个 Session 绑定一个，记为 `SessionConfig.resourceNode`，创建时固定；默认为控制节点 |
-| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，通过 Session 的装配解析（对端节点时为导入的服务）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取；ExternalAgent 通过各节点的 HostPlatform 自己启停桥接，不增加 loader 行 |
+| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取；ExternalAgent 的桥接在其重新设计中改为 loader 行（#37） |
 | 节点绑定数据 | 隔离配置和外部 Agent 目录以节点和路径标识 |
-| 离线 | 对离线资源节点的调用以 `node_unavailable` 失败；依赖方不重载，也不进入 Pending。节点离线期间依赖方如何表现，按 rutis 现有的节点行为在 P3 设计，不向 rutis 提需求。链接断开时，由资源节点自己的 HostPlatform 结束它启动的进程 |
+| 离线 | 对离线资源节点的调用以 `node_unavailable` 失败；依赖方不重载，也不进入 Pending。节点服务在每次调用时按 `resourceNode` 查找，因此节点离线只让这些调用以 `node_unavailable` 失败；不向 rutis 提需求（#38）。链接断开时，由资源节点自己的 HostPlatform 结束它启动的进程 |
 | 认证 | 复用 rutis 链接 token；管理方法只在配置后才导出 |
 | 未来 | 跨控制节点协作不在此设计 |
 
@@ -521,8 +521,8 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、ExternalAgent、Modality、RemoteGateway、PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 在后续代码变更中删除，stdio 服务启用即启动（§6.4 批准范围） | Rpc 迁移 |
 | ManagedProviders | 补充 | 套餐用量查询 | `/usage` |
-| Mcp | 补充 | HTTP/SSE OAuth；来自 `PluginContents`（`mcp`）的配置 | MCP；PluginManager |
-| SkillsCatalog | 补充 | 来自 `PluginContents`（`skills`）的 Skill 根目录 | PluginManager |
+| Mcp | 补充 | HTTP/SSE OAuth；通过自己的类型化操作从 PluginManager 接收插件包中的 MCP 配置（#36） | MCP；PluginManager |
+| SkillsCatalog | 补充 | 通过自己的类型化操作从 PluginManager 接收插件包中的 Skill 根目录（#36） | PluginManager |
 | Trace | 补充 | 模型请求快照导出 | 快照导出 |
 
 ## 附录 C. 实现语言

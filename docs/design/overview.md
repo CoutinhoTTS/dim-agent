@@ -352,9 +352,9 @@ rutis nodes connect through links, export and import services, run plugins on th
 | --- | --- |
 | Control node | Hosts the App Server: Timeline, Sessions, configuration sources, Providers, scheduling |
 | Resource node | Where host resources live (files, processes, shell, isolation, local CLIs). Each Session binds one as `SessionConfig.resourceNode`, fixed at creation; the default is the control node |
-| Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are resolved through the Session's assembly (imported services for a peer node). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own business configuration, read at use time; ExternalAgent starts and stops its bridges itself through each node's HostPlatform, with no loader rows |
+| Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are looked up on each call by the Session's `resourceNode` (#38). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own business configuration, read at use time; ExternalAgent's bridges become loader rows in its redesign (#37) |
 | Node-bound data | Isolation configuration and the external agent directory are identified by node and path |
-| Offline | A call on an offline resource node fails with `node_unavailable`; dependents do not reload or go Pending. How dependents behave while a node is offline follows rutis' existing node behaviour and is designed in P3; no requirement is raised to rutis. When a link drops, the resource node's own HostPlatform ends the processes it started |
+| Offline | A call on an offline resource node fails with `node_unavailable`; dependents do not reload or go Pending. Because node services are looked up on each call by `resourceNode`, an offline node fails only those calls with `node_unavailable`; no requirement is raised to rutis (#38). When a link drops, the resource node's own HostPlatform ends the processes it started |
 | Authentication | Reuses the rutis link token; management methods are exported only when configured |
 | Future | Cross-control-node collaboration is not designed here |
 
@@ -521,8 +521,8 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | `pluginFiles` (`PluginFilesPlugin`) | Supplement | Binary read and write and a format version ([trusted plugin storage](../../crates/dim-app-server/README.md#trusted-plugin-storage)); code location unchanged | Scheduler, Workflow, ExternalAgent, Modality, RemoteGateway, PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth plugins | Change | Provide their existing management methods as `managementMethods` (wire-compatible); Mcp's `mcp.approve`/`mcp.revoke` are removed in a follow-up code change, and stdio servers launch when enabled (§6.4 Approval scope) | Rpc migration |
 | ManagedProviders | Supplement | Plan usage query | `/usage` |
-| Mcp | Supplement | HTTP/SSE OAuth; configuration from `PluginContents` (`mcp`) | MCP; PluginManager |
-| SkillsCatalog | Supplement | Skill roots from `PluginContents` (`skills`) | PluginManager |
+| Mcp | Supplement | HTTP/SSE OAuth; receives package MCP configuration from PluginManager through its typed operations (#36) | MCP; PluginManager |
+| SkillsCatalog | Supplement | Receives package Skill roots from PluginManager through its typed operations (#36) | PluginManager |
 | Trace | Supplement | Model request snapshot export | Snapshot export |
 
 ## Appendix C. Implementation language

@@ -2,6 +2,8 @@
 
 状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
+> **设计复核时要改的依赖（[#35](https://github.com/arcships/dim/issues/35)）。** `workflow` 工具在每次调用时查找 `workflowRuns`，进程部件在每次使用时获取 `sessions`，都不作为依赖持有。这样 Agents 或 Workflow 重载只会让一次调用失败，不会让每个 Session 重载。
+
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按 rutis 现有的节点行为重新设计。P1/P2 中每个 Session 都使用控制节点。
 
 Workflow 拥有工作流定义和运行。一次运行推进一个固定的步骤列表；每个阶段在通过 Agents 启动的一个新非交互 Session 中运行。进程部分拥有运行，并通过进程服务 `sessions`（[session-access](../contracts/session-access.md)）访问启动的 Session，方式与 Collaboration 相同。用户保存的定义存于 Workflow 的 Settings 业务来源，项目定义仍是项目文件，运行记录存于 `pluginFiles`（扩展）。Session 部分以 `toolContribution` 向交互 Session 提供 `workflow` 工具；运维方使用 `workflow.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。运行结束时，其结果以 Steer 输入向起始分支报告一次。Workflow 不写自己的 Timeline 事件。

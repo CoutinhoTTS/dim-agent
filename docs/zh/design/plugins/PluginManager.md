@@ -2,6 +2,8 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md)，[Settings、Mcp、SkillsCatalog 变更](../overview.md)，[约定](../overview.md)，[多节点](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（依赖 [#3](https://github.com/arcships/dim/issues/3)；非 Rust Capability 插件依赖 [#4](https://github.com/arcships/dim/issues/4)；对端节点依赖 [#5](https://github.com/arcships/dim/issues/5)）。语言：Rust。
 
+> **重新设计时的改动。** (1) [#36](https://github.com/arcships/dim/issues/36)：依赖方向反过来。PluginManager 依赖内容所有者（Mcp、SkillsCatalog 等），通过它们的类型化操作把插件包内容交给它们；所有者不依赖 `pluginContents`，PluginManager 失败或重载时，它们照样用用户和项目来源工作。(2) [#41](https://github.com/arcships/dim/issues/41)：PluginManager 在写入或重新启用插件包的行之前校验它；代码行不在 `apply` 中检查完整性（那时 loader 已经执行过入口）。启用的插件包是可信的（ADR 003 D4）；安装后对文件的篡改不在防护范围内。
+
 > **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
 
 PluginManager 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：安装按宿主进行）。它从 Git marketplace、本地路径或 Git URL 将插件包安装到目标节点上；通过类型化的 Settings 操作将插件意图（安装、启用、节点绑定、包路径）记录到 loader 行中；并将已启用包的类型化内容发布为命名进程服务 `pluginContents`。内容所有者（SkillsCatalog、Mcp、Hooks、Workflow，任意语言）按名称依赖 `pluginContents`，定义各自的内容类型 key，并读取它们能理解的内容；PluginManager 对它们一无所知。包启用后其代码即运行：没有宿主本地批准，因为安装和启用是经管理方法完成的宿主配置，不属于 Approval 与 Permission 的范围，后两者只管 agent 决策引起的动作（[overview 约定](../overview.md)）。包从不自动升级。PluginManager 只处理结构性操作（安装、启用、禁用、更新、移除），并且是任何插件行上结构性字段的唯一写入方，包括 [RemoteGateway](RemoteGateway.md) 等内置插件的 `enabled` 字段；每个插件声明自己业务配置的 schema，业务配置经 Settings 类型化操作写入该插件的 Settings 业务来源，从不经过 PluginManager。
