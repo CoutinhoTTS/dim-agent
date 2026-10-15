@@ -11,9 +11,10 @@ use dim_agent_types::{ContentBlock, ToolContent};
 use dim_app_server::{
     mcp::{
         McpChange, McpError, McpPlugin, McpService,
+        config::McpServerSettings,
         server::{McpServerError, McpServerState},
     },
-    settings::{McpServerSettings, SettingsPlugin, SettingsService, SettingsSource},
+    settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use serde_json::{Value, json};
@@ -54,7 +55,7 @@ impl Capability for Capture {
 struct Fixture {
     root: Ctx,
     publication: mcp_host::Host,
-    mcp: Arc<McpService>,
+    mcp: mcp_host::Directory,
     home: PathBuf,
 }
 #[path = "fixtures/mcp_host.rs"]
@@ -85,7 +86,7 @@ impl Fixture {
         file.write_all(&serde_json::to_vec(&json!({"mcpServers":{"docs":configuration}})).unwrap())
             .unwrap();
         let root = Ctx::root().unwrap();
-        let (publication, _) = mcp_host::Host::start(&root).await;
+        let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         let views = vec![
             root.plugin(capability_plugin(FileStoragePlugin::new(vec![
@@ -103,10 +104,11 @@ impl Fixture {
         )
         .await
         .unwrap();
+        let mcp = mcp_host::Directory::new(capture.get().unwrap().clone(), &root, loader);
         Self {
             root,
             publication,
-            mcp: capture.get().unwrap().clone(),
+            mcp,
             home,
         }
     }
@@ -356,7 +358,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     let revision = fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::Put(invalid),
@@ -373,7 +375,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             revision,
             "docs".into(),
             McpChange::Put(valid),
@@ -475,7 +477,7 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
         let mcp = fixture.mcp.clone();
         tokio::spawn(async move {
             mcp.disconnect(
-                SettingsSource::UserMcp,
+                SettingsScope::User,
                 "docs".into(),
                 &CancellationToken::new(),
             )
@@ -507,10 +509,13 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     remote.repeating.store(false, Ordering::SeqCst);
     replacement.tools(&cancel).await.unwrap();
     let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
+    // Disabling returns once the server has stopped, even for a connection a
+    // request still holds, so the remote's DELETE is released beforehand.
+    remote.release_delete.notify_one();
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::SetEnabled(false),
@@ -518,30 +523,23 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
         )
         .await
         .unwrap();
-    remote.release_delete.notify_one();
+    assert_eq!(replacement.state(), McpServerState::Closed);
     assert!(matches!(
         fixture.mcp.server(None, "docs".into(), &cancel).await,
         Err(McpError::Disabled)
     ));
-    // Disabling withdraws future tools, but a bound request retains its lease.
-    assert_eq!(replacement.state(), McpServerState::Connected);
-    replacement.tools(&cancel).await.unwrap();
-    let mut closed = replacement.subscribe();
+    assert!(matches!(
+        replacement.tools(&cancel).await,
+        Err(McpServerError::Closed)
+    ));
     drop(replacement);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while *closed.borrow_and_update() != McpServerState::Closed {
-            closed.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
     assert_eq!(remote.deletes.load(Ordering::SeqCst), 2);
 
     let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::SetEnabled(true),
@@ -631,7 +629,7 @@ async fn connection_generations_live_until_the_last_lease_and_force_close_togeth
     fixture
         .mcp
         .update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             catalog.user_revision,
             "docs".into(),
             McpChange::Put(config),
@@ -657,7 +655,7 @@ async fn connection_generations_live_until_the_last_lease_and_force_close_togeth
         let mcp = fixture.mcp.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            mcp.disconnect(SettingsSource::UserMcp, "docs".into(), &cancel)
+            mcp.disconnect(SettingsScope::User, "docs".into(), &cancel)
                 .await
         })
     };
@@ -869,20 +867,24 @@ async fn stdio_sdk_discovery_call_cancel_and_process_cleanup() {
             );
             assert!(
                 !fixture.home.join("pid").exists(),
-                "unapproved project must not spawn"
+                "a project entry the user has not enabled must not spawn"
             );
-            let token = fixture
+            let revision = fixture
                 .mcp
                 .catalog(Some(project), &cancel)
                 .await
                 .unwrap()
-                .servers["docs"]
-                .approval_token
-                .clone()
+                .project_revision
                 .unwrap();
             fixture
                 .mcp
-                .approve(project, "docs".into(), token, &cancel)
+                .update(
+                    SettingsScope::Project(project),
+                    revision,
+                    "docs".into(),
+                    McpChange::SetEnabled(true),
+                    &cancel,
+                )
                 .await
                 .unwrap();
         }
@@ -929,7 +931,7 @@ async fn stdio_sdk_discovery_call_cancel_and_process_cleanup() {
         if let Some(project) = project {
             fixture
                 .mcp
-                .revoke(project, "docs".into(), &cancel)
+                .disconnect(SettingsScope::Project(project), "docs".into(), &cancel)
                 .await
                 .unwrap();
             assert_eq!(connection.state(), McpServerState::Closed);

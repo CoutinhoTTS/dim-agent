@@ -1552,6 +1552,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_runtime::config::SessionLifecycle@session",
+        "provider": 6,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
         "provider": 6,
         "generation": 1,
@@ -1559,6 +1565,12 @@
       },
       {
         "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
+        "provider": 6,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_runtime::scope::SessionLoader@session",
         "provider": 6,
         "generation": 1,
         "removing": false
