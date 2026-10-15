@@ -45,7 +45,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | D7 | `LaunchRequest.model` 为 `{providerId, modelId}` | 单独的模型 id 字符串 | 模型 id 只在其 provider 内唯一。`{providerId, modelId}` 即 `ModelId`，Agent profile 与 `session.create` 的显式模型都用这个类型 |
 | D8 | `input` 在发布后回复 | 提交时回复 | 回复后立即调用 `history {atLeast: sequence}` 必须成功（第 7 条） |
 | D9 | `lookup` 先等待待发布事件再扫描；Rpc 的 `session.input_lookup` 使用同一份代码 | 立即扫描；另写一个扫描器 | 已提交但尚未发布的输入会读成 `unknown`，Scheduler 就会把一条正在运行的输入记为 `lost` |
-| D10 | `idle` 就是门面的 `Session::idle`。待处理的审批让它保持等待。它不带超时 | 返回“阻塞”状态、在非交互 Session 中拒绝询问，或 `idle {timeoutMs}` | 询问归 Approval。按 AcpGateway 的设计，非交互的 ACP Session 经编辑器回答审批，用户也能从任何客户端回答一次运行的审批。调用方本来就有自己的截止时间，并用 `stop` 结束运行 |
+| D10 | `idle` 就是门面的 `Session::idle`，S2 沿用现状：审批待处理时 `idle` 一直等待，调用方用 `stop` 结束等待。它不带超时 | 返回“阻塞”状态、由 S2 决定非交互 Session 中的询问怎么处理（例如直接拒绝），或 `idle {timeoutMs}` | 非交互 Session 中的询问怎么处理由 Approval 决定，也和 Questions 的重新设计相关。它还没有设计，S2 不预设结论：无论 Approval 怎样处理，`idle` 都跟随 turn。调用方本来就有自己的截止时间，并用 `stop` 结束运行 |
 | D11 | `history` 用 `after`、`limit` 和固定的 `through` 分页读取该分支自己的事件，返回 `AgentEvent` 记录 | 一次回复包含祖先在内的全部历史 | 这样的回复跨桥接时没有大小上限。每个分支各自编号，一个游标无法跨祖先分页。启动的 Session 都在 `main` 上读取，`main` 没有祖先 |
 | D12 | `sessions` 没有 `close` 或 `release`；Agents 拥有启动的 Session | 调用方用完时关闭该次运行的 Session；对释放计数 | 关闭会为该 Session 的所有使用者结束它（设计规则 §4 第 8 条：断开不是关闭）。卸载是宿主的决定，并且必须同样覆盖客户端 Session（§8.6） |
 | D13 | 不提供 `sessions.fork` | 随 S2 一起加入 | 没有使用方。从切点创建归 S5c（`AgentIndex::fork`，[#97](https://github.com/arcships/dim/pull/97)） |
