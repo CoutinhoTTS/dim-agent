@@ -2,7 +2,7 @@
 //! each call and does not depend on it, so an inactive or reloading provider
 //! affects only its own namespace. Accepted calls belong to their provider.
 use crate::protocol::RpcError;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Snapshot, TypeKey};
 use rutis_loader::{EntryStatus, Loader};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -206,10 +206,10 @@ fn unknown() -> RpcError {
 
 /// The management namespaces assembly configures, each with the loader row
 /// of the owner that provides it. Rpc reaches a namespace's provider by key on
-/// each call and reads that row's status only to tell an owner between
-/// generations from one that serves nothing, so it depends on no owner
-/// (methods contract §3.2). Adding an owner adds its pair where its row is
-/// registered.
+/// each call and reads that row's status only when none is active, to tell a
+/// reloading owner from a failed one and from one that serves nothing, so it
+/// depends on no owner (methods contract §3.2). Adding an owner adds its pair
+/// where its row is registered.
 pub(crate) struct Owners {
     loader: Loader,
     /// Longest first: a name belongs to the longest namespace containing it.
@@ -248,11 +248,33 @@ impl Owners {
         let (namespace, row) = self.owner(&method).ok_or_else(unknown)?;
         let provider = match provider(ctx, namespace) {
             Some(provider) => provider,
-            None => match self.status(row) {
-                Status::Changing => return Err(RpcError::reloading()),
+            // No active provider: the owner row's state answers (methods
+            // contract §3.2). A disabled or absent row has no enabled provider.
+            None => match self.loader.get(row).map(|entry| entry.status) {
+                None | Some(EntryStatus::Disabled) => return Err(unknown()),
+                // Unlike `service_reloading`, a retry fails the same way until
+                // the owner is fixed or restarted.
+                Some(
+                    EntryStatus::Unresolved(_)
+                    | EntryStatus::Running(Snapshot {
+                        state: FiberState::Failed,
+                        ..
+                    }),
+                ) => {
+                    return Err(RpcError::app(
+                        -32000,
+                        "service_unavailable",
+                        "Service is unavailable until it is fixed or restarted",
+                    ));
+                }
                 // Active between the lookup and the status read.
-                Status::Active => provider(ctx, namespace).ok_or_else(unknown)?,
-                Status::Unavailable => return Err(unknown()),
+                Some(EntryStatus::Running(Snapshot {
+                    state: FiberState::Active,
+                    ..
+                })) => provider(ctx, namespace).ok_or_else(unknown)?,
+                // Pending, between generations while it reloads, or not
+                // started yet: running, or about to, but not failed.
+                Some(_) => return Err(RpcError::reloading()),
             },
         };
         provider.accept(method, params, entry_stopping)
@@ -280,26 +302,6 @@ impl Owners {
         names.sort();
         names
     }
-
-    /// The owner row's state (methods contract §3.2): an enabled row that is
-    /// not active (Pending, Failed, or between generations while it reloads)
-    /// answers the retryable `service_reloading`; a disabled or absent row
-    /// means no enabled provider.
-    fn status(&self, row: &str) -> Status {
-        match self.loader.get(row).map(|entry| entry.status) {
-            None | Some(EntryStatus::Disabled) => Status::Unavailable,
-            Some(EntryStatus::Running(snapshot)) if snapshot.state == FiberState::Active => {
-                Status::Active
-            }
-            Some(_) => Status::Changing,
-        }
-    }
-}
-
-enum Status {
-    Active,
-    Changing,
-    Unavailable,
 }
 
 fn provider(ctx: &Ctx, namespace: &str) -> Option<Arc<ManagementMethods>> {
