@@ -2,6 +2,8 @@
 
 Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [Transport, Connection changes](../overview.md#b2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
+> **P3: redesign with rutis' existing capabilities.** rutis is an external dependency; the requirements this document raises to rutis are withdrawn ([principles §4 rule 8](../../architecture/rust-agent/principles.md)).
+
 RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only Session methods of the [methods](../contracts/session-boundary.md) contract (Rpc's Session built-ins and every `sessionMethods` service), so devices may call every Session method, including `session.permission.update` and `shell.*` (decision E3), and never a management method: `managementMethods` and Rpc's management built-ins are never served to paired remote devices. The entry is the product UI plane and never carries the rutis link plane between nodes.
 
 ## 1. Structure
@@ -212,6 +214,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 ## 9. Requirements raised to mechanism owners
 
 ### 9.1 Call-scoped requests from provider to caller
+
+Withdrawn: rutis is an external dependency, so no requirement is raised to it. RemoteGateway and Transport solve authentication and handling with dim-side services.
 
 | Item | Content |
 | --- | --- |
