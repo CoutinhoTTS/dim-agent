@@ -18,16 +18,20 @@ contribution merely by declaring `provides` in a loader row.
 
 Each process owner provides `ManagementMethods` under its namespace during
 `apply`. Its ordinary rutis lifetime owns that service and the calls it accepts.
-Rpc does not depend on any owner ([methods contract §3.2](../contracts/session-boundary.md#32-management-method)):
-on each call it makes keyed reads of the method name's prefixes, longest first,
-and dispatches to the first active provider. It reads them from the process root,
-so its own unload hides none. No contributor injects Rpc or
-Connection; neither contains contributor-specific dispatch. Adding a method
-changes its owner's declaration, parsing and implementation. Until rutis can list
-the active providers of a service (contract §9.3), assembly passes Rpc its
-profile's owner namespaces for `hello.features` (`account`, `account.codex`,
-`account.grok` and `provider` with a product home; `mcp` and `skills` with local
-execution); adding an owner adds its namespace there.
+Rpc does not depend on any owner ([methods contract §3.2](../contracts/session-boundary.md#32-management-method)).
+Assembly passes Rpc its profile's namespaces, each with the loader row of the
+owner that provides it (`account`, `account.codex`, `account.grok` and `provider`
+with a product home; `mcp` and `skills` with local execution). Adding an owner
+adds its pair where its row is registered, and Rpc refuses to load when a pair
+names no row. On each call Rpc makes a keyed read of the namespace that owns the
+name and dispatches to its active provider; it reads that owner row's status
+only when there is none (below). Reads go through the process root, so Rpc's own
+unload hides no provider. rutis is an external dependency: this uses its keyed
+reads and the loader's row status as they are, and raises no requirement to it
+([principles §4 rule 8](../../architecture/rust-agent/principles.md)). No
+contributor injects Rpc or Connection; neither contains contributor-specific
+dispatch. Adding a method changes its owner's declaration, parsing and
+implementation.
 
 Account, Codex, Grok, Provider and Mcp provide their methods directly, without
 adapter rows. Settings supplies generic BusinessDocument persistence, not
@@ -45,22 +49,24 @@ Each provider validates its own declarations: it rejects duplicates, invalid
 names, built-in method names, methods outside its namespace and the `hello`,
 `daemon`, `agent`, `approval` and `session` roots, so contributed methods cannot
 impersonate Session traffic. Two providers of one namespace fail assembly, since
-keys are unique per scope. A name belongs to the longest active namespace that
-prefixes it: a parent's method inside an active child namespace is neither
-dispatched nor listed. The contract assigns it to the longest provided namespace;
-until rutis reports registered but inactive providers (§9.3) the two differ only
-while a child is inactive, so an owner must not declare methods inside another
-owner's namespace. Valid nested namespaces such as `account.codex` remain
-independent from the parent `account` namespace.
+keys are unique per scope. A name belongs to the longest configured namespace
+that prefixes or equals it, the contract's longest provided namespace: a
+parent's method inside a child namespace is neither dispatched nor listed, even
+while the child is disabled or not active. Valid nested namespaces such as
+`account.codex` remain independent from the parent `account` namespace.
 
 ## Dispatch and lifecycle
 
 Entry admission precedes routing for built-in and contributed methods alike:
 a protected profile answers every call except `hello` and `daemon.ping` from a
 non-local transport with `local_transport_required`, as before contributions
-([methods contract A.3](../contracts/session-boundary.md#a3-entries-and-export)). Local v3 then dispatches management contributions; v1/v2 do not,
-and names without an active provider, or that the provider does not declare,
-return `unknown_method`. A name outside the declaration grammar (dot-separated
+([methods contract A.3](../contracts/session-boundary.md#a3-entries-and-export)). Local v3 then dispatches management contributions; v1/v2 do not.
+A namespace with no enabled provider (no configured namespace owns the name, or
+its owner row is disabled), or a name its provider does not declare, returns
+`unknown_method`. A namespace whose owner row is enabled but not active (Pending,
+Failed, or between generations while it reloads) returns the retryable
+`service_reloading`; Rpc tells the two from the loader's row status (contract
+§3.2). A name outside the declaration grammar (dot-separated
 lowercase segments, at most 128 bytes) is unknown without any lookup, so a
 caller's name bounds the lookups made under the handler lock. Error codes at the
 edges are unchanged: a call before `hello` is `-32600` and one after shutdown has
@@ -81,7 +87,8 @@ tracks it until it settles. Either unload, the provider's or the calling Rpc loa
 handler. A `Report` call then replies `operation_interrupted`, stating that the
 operation may already have committed and the current state must be read before
 retrying; a `Drain` call replies with its own result. A provider's unload waits
-for every call it accepted, so `Drain` calls hold it (contract §9.2). Rpc's unload
+for every call it accepted, so `Drain` calls hold it; this is the owner's own
+effect within rutis' existing lifecycle. Rpc's unload
 waits for the replies it owes and for each interrupted operation to settle, so the
 next load reads its outcome. Once Rpc's own load is unloading it admits no
 management call or `hello`; they return `service_reloading` and the next load
@@ -92,11 +99,10 @@ account methods use `Drain`; MCP and Skills use `Report`. Settings retains its
 accepted-write contract.
 
 An owner that is disabled, Pending, Failed or reloading affects only its own
-namespace: its methods return `unknown_method` until a generation is active, and
-Rpc and open connections are unaffected. This is a compatibility change for a
-reloading owner, which returned `service_reloading` while Rpc reloaded with it
-(contract A.4); `service_reloading` returns once rutis reports registered but
-inactive providers (§9.3). Rpc and Agents depend on no owner, directly or
+namespace; Rpc and open connections are unaffected. While its row is enabled but
+not active its methods return `service_reloading`, as before contributions when
+Rpc reloaded with it (contract A.4), and a disabled owner's methods return
+`unknown_method`. Rpc and Agents depend on no owner, directly or
 through each other: `session.create`, `session.model.update` and Collaboration
 member creation read Provider and the `ModelSelectionHost` per call and return a
 retryable error while it is not active. A transport flow asserts that no
@@ -132,14 +138,18 @@ The revision's Timeline-driven input withdrawal and peer-node offline behavior
 belong to the Session event contract and rutis link work; neither is implemented here.
 
 Declaration-driven method discovery and cross-language plugin method declarations
-remain deferred: assembly still lists Rust owner namespaces explicitly. Generic
+remain deferred: assembly lists the Rust owner namespaces and their rows
+explicitly. Generic
 credential references/resolution are future work. D4 keeps business documents in
 their source, not editable loader rows; see [ADR 004](../../adr/004-loader-plugin-management.md).
 
 Transport flows cover actual owner methods, hello features, an owner reload
 that keeps the same connection, an Rpc reload, local/remote and protocol-version
-boundaries, business source CAS, persistence failures and invalidation. Unit
-flows cover a provider reload that interrupts `Report` calls while an accepted
-`Drain` call holds it, the namespace being unknown between generations, the
-calling load's unload, a Pending provider that leaves other namespaces and
-`hello` listing intact, reserved roots and nested ownership.
+boundaries, business source CAS, persistence failures and invalidation; every
+flow assembles the real owner rows, so a pair naming no row fails it. Unit flows
+on a real loader cover a provider reload that interrupts `Report` calls while an
+accepted `Drain` call holds it and answers `service_reloading` between
+generations, the calling load's unload, Pending and Failed owners answering
+`service_reloading` while other namespaces and the `hello` listing stay intact,
+disabled and unconfigured owners answering `unknown_method`, reserved roots, and
+nested ownership with an enabled or a disabled child.

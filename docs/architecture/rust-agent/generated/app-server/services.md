@@ -38,6 +38,7 @@ flowchart LR
   p21 -->|"dim_app_server::collaboration::Collaboration"| p23
   p22 -->|"dim_app_server::connection::ConnectionHub"| p23
   p3 -->|"dim_app_server::control::ServerControl"| p23
+  p2 -->|"rutis_loader::loader::Loader"| p23
   p3 -->|"dim_app_server::control::ServerControl"| p22
   p20 -->|"dim_app_server::agents::AgentIndex"| p21
   p19 -->|"dim_app_server::collaboration::CollaborationDirectory"| p21

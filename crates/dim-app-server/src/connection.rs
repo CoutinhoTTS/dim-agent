@@ -133,7 +133,7 @@ impl Connection {
                 if rpc.stopping.is_cancelled() {
                     return Err(RpcError::reloading());
                 }
-                let accepted = crate::methods::dispatch(
+                let accepted = rpc.owners.dispatch(
                     &rpc.ctx,
                     method.clone(),
                     params.clone(),
@@ -1161,9 +1161,8 @@ pub(crate) struct RpcService {
     /// This load's own context sees no provider once it starts unloading,
     /// before `stopping` is cancelled.
     pub ctx: Ctx,
-    /// This profile's management owner namespaces, listed in `hello` while
-    /// their provider is active.
-    pub namespaces: Arc<[String]>,
+    /// This profile's management namespaces and their owner rows.
+    pub owners: crate::methods::Owners,
     /// Cancelled when this load starts unloading, before its handler is
     /// removed; it then admits no management call or `hello`.
     pub stopping: CancellationToken,
@@ -1216,11 +1215,12 @@ impl RpcService {
 
 pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
-    methods: Arc<[String]>,
+    /// Management namespace and the loader row of its owner.
+    methods: Arc<[(String, String)]>,
     root: Ctx,
 }
 impl RpcPlugin {
-    pub fn new(config: Arc<ServerConfig>, methods: Arc<[String]>, root: Ctx) -> Self {
+    pub fn new(config: Arc<ServerConfig>, methods: Arc<[(String, String)]>, root: Ctx) -> Self {
         Self {
             config,
             methods,
@@ -1235,6 +1235,8 @@ impl TypedPlugin for RpcPlugin {
         rutis::Gate<crate::collaboration::Collaboration>,
         Arc<ConnectionHub>,
         Arc<ServerControl>,
+        // Reads management owners' row status; the loader never reloads.
+        Arc<rutis_loader::Loader>,
     );
     fn name(&self) -> &str {
         "Rpc"
@@ -1242,13 +1244,24 @@ impl TypedPlugin for RpcPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, _, hub, control): Self::Deps,
+        (index, _, hub, control, loader): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            // Every configured owner names an assembly row; one that names no
+            // row would answer a reloading owner as absent.
+            if let Some((namespace, row)) = self
+                .methods
+                .iter()
+                .find(|(_, row)| loader.get(row).is_none())
+            {
+                return Err(CordisError::PluginFailed(
+                    format!("management namespace {namespace} names unknown row {row}").into(),
+                ));
+            }
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
-                namespaces: self.methods.clone(),
+                owners: crate::methods::Owners::new((*loader).clone(), &self.methods),
                 stopping: ctx.cancellation_token(),
                 control,
                 config: self.config.clone(),
@@ -1285,6 +1298,6 @@ impl TypedPlugin for RpcPlugin {
 }
 impl Capability for RpcPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        ((), (), (), ())
+        ((), (), (), (), ())
     }
 }

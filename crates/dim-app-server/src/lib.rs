@@ -453,10 +453,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             storage::SessionStorePlugin
         }));
     }
+    // Each management namespace with the row of the owner that provides it;
+    // Rpc reads the row's status to tell a reloading owner from an absent one.
+    let mut owners: Vec<(String, String)> = Vec::new();
+    let mut owner = |namespace: &str, row: String| {
+        owners.push((namespace.to_owned(), row.clone()));
+        row
+    };
     if let Some(home_root) = product_root {
-        rows.push(register_capability(&mut builtins, || {
-            managed_provider::ManagedProvidersPlugin
-        }));
+        rows.push(owner(
+            "account",
+            register_capability(&mut builtins, || managed_provider::ManagedProvidersPlugin),
+        ));
         if let Some(plugin) = &config.managed_plugin {
             rows.push(register_capability(&mut builtins, move || {
                 plugin_files::PluginFilesPlugin(home_root)
@@ -517,15 +525,21 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 serde_json::json!({"id":"ManagedProviderPlugin","name":entry,"config":{"home":config.product_home}}),
             );
         }
-        rows.push(register_capability(&mut builtins, move || {
-            codex_oauth::OpenAICodexOAuthPlugin::new(home_root)
-        }));
-        rows.push(register_capability(&mut builtins, move || {
-            grok_oauth::GrokOAuthPlugin::new(home_root)
-        }));
-        rows.push(register_capability(
-            &mut builtins,
-            provider::ProviderPlugin::default,
+        rows.push(owner(
+            "account.codex",
+            register_capability(&mut builtins, move || {
+                codex_oauth::OpenAICodexOAuthPlugin::new(home_root)
+            }),
+        ));
+        rows.push(owner(
+            "account.grok",
+            register_capability(&mut builtins, move || {
+                grok_oauth::GrokOAuthPlugin::new(home_root)
+            }),
+        ));
+        rows.push(owner(
+            "provider",
+            register_capability(&mut builtins, provider::ProviderPlugin::default),
         ));
     }
     if let Some(home_root) = execution_root.or(product_root) {
@@ -539,7 +553,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
         rows.push(mcp::McpPublication::register(&mut builtins));
-        rows.push(register_capability(&mut builtins, || mcp::McpPlugin));
+        rows.push(owner(
+            "mcp",
+            register_capability(&mut builtins, || mcp::McpPlugin),
+        ));
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                 dim_agent_capabilities::host_platform::HostPlatformConfig {
@@ -547,9 +564,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 },
             )
         }));
-        rows.push(register_capability(&mut builtins, || {
-            skills_management::SkillsCatalogPlugin
-        }));
+        rows.push(owner(
+            "skills",
+            register_capability(&mut builtins, || skills_management::SkillsCatalogPlugin),
+        ));
     }
     agents::register(&mut builtins);
     rows.push(register_capability(&mut builtins, || {
@@ -573,14 +591,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     {
         let config = config.clone();
-        let mut methods = Vec::new();
-        if product_root.is_some() {
-            methods.extend(["account", "account.codex", "account.grok", "provider"]);
-        }
-        if execution_root.is_some() {
-            methods.extend(["mcp", "skills"]);
-        }
-        let methods: Arc<[String]> = methods.into_iter().map(str::to_owned).collect();
+        let methods: Arc<[(String, String)]> = owners.into();
         let root = root.clone();
         rows.push(register_capability(&mut builtins, move || {
             RpcPlugin::new(config.clone(), methods.clone(), root.clone())

@@ -342,7 +342,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 重载 | 随之重载 | 结果 |
 | --- | --- | --- |
 | `ServerControl` | Connection、Rpc、Transport | 连接断开，监听器重绑；Session 与协议 instanceId 保留；不提供显式 restart |
-| `Provider` | 其实际下游；不含 Rpc 与 Agents | 二者每次调用时读取 Provider 与 `ModelSelectionHost`：重载期间 `provider.*` 返回 `unknown_method`，`session.create`、`session.model.update` 与成员创建得到可重试错误；连接保持；Session 历史保留；Aimux 不依赖 Provider |
+| `Provider` | 其实际下游；不含 Rpc 与 Agents | 二者每次调用时读取 Provider 与 `ModelSelectionHost`：重载期间 `provider.*` 返回 `service_reloading`（Rpc 按 loader 行状态区分重载中与未启用），`session.create`、`session.model.update` 与成员创建得到可重试错误；连接保持；Session 历史保留；Aimux 不依赖 Provider |
 | `Agents` | Rpc、Collaboration 及依赖协作服务的 Session 能力 | 只替换目录逻辑：Agent、Session、serverInstanceId 与连接保留；依赖协作服务的能力按能力重载协议重载，进行中的协作请求以 `capability reloading` 失败结算，对成员只发出停止、不等其结算；窗口期请求得到 `service_reloading` |
 | `Connection` | Rpc、Transport | 连接断开，监听器重绑；Session 保留，client 重新 attach |
 | `Rpc` | — | 已受理命令排空后卸载，被打断的管理调用也等其操作结算；等待中的命令（`session.idle`）以 `service_reloading` 结束；未决审批属于各分支的 Approval，不随 Rpc 重载；窗口期请求（含 `hello` 与管理方法）得到 `service_reloading`。管理方法提供方的重载不重载 Rpc |

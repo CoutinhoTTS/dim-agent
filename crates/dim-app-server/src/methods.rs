@@ -2,7 +2,8 @@
 //! each call and does not depend on it, so an inactive or reloading provider
 //! affects only its own namespace. Accepted calls belong to their provider.
 use crate::protocol::RpcError;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypeKey};
+use rutis_loader::{EntryStatus, Loader};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -147,8 +148,8 @@ impl ManagementMethods {
             .interruption;
         let _guard = self.gate.lock().unwrap();
         if self.stopping.is_cancelled() {
-            // Between generations: the next one serves the namespace.
-            return Err(unknown());
+            // This generation is unloading; the next one serves the namespace.
+            return Err(RpcError::reloading());
         }
         let (send, reply) = tokio::sync::oneshot::channel();
         let (settle, settled) = tokio::sync::oneshot::channel::<()>();
@@ -203,63 +204,106 @@ fn unknown() -> RpcError {
     RpcError::app(-32601, "unknown_method", "Unknown method")
 }
 
-/// The active provider that owns `method`: the longest namespace, among the
-/// method name's prefixes, with an active provider (methods contract §3.2).
-/// A name no provider could declare is rejected before any lookup, which also
-/// bounds the lookups a caller's name causes under the admission lock.
-fn owner(ctx: &Ctx, method: &str) -> Option<Arc<ManagementMethods>> {
-    if !valid_name(method) {
-        return None;
+/// The management namespaces assembly configures, each with the loader row
+/// of the owner that provides it. Rpc reaches a namespace's provider by key on
+/// each call and reads that row's status only to tell an owner between
+/// generations from one that serves nothing, so it depends on no owner
+/// (methods contract §3.2). Adding an owner adds its pair where its row is
+/// registered.
+pub(crate) struct Owners {
+    loader: Loader,
+    /// Longest first: a name belongs to the longest namespace containing it.
+    namespaces: Vec<(String, String)>,
+}
+impl Owners {
+    pub(crate) fn new(loader: Loader, namespaces: &[(String, String)]) -> Self {
+        let mut namespaces = namespaces.to_vec();
+        namespaces.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+        Self { loader, namespaces }
     }
-    let mut prefix = method;
-    loop {
-        if let Some(owner) =
-            ctx.get_as::<ManagementMethods>(TypeKey::keyed_dynamic::<ManagementMethods>(prefix))
-        {
-            return Some(owner);
+
+    /// The configured namespace that owns `name`, and its row. A name inside
+    /// a child namespace belongs to the child even while the child serves
+    /// nothing; its parent never answers it.
+    fn owner(&self, name: &str) -> Option<&(String, String)> {
+        self.namespaces
+            .iter()
+            .find(|(namespace, _)| within(name, namespace))
+    }
+
+    /// Called under ConnectionHub's Rpc admission lock, with the process root
+    /// as `ctx`. The reply is tracked by the caller; the operation by its
+    /// provider. A name outside the declaration grammar is unknown without
+    /// any lookup.
+    pub(crate) fn dispatch(
+        &self,
+        ctx: &Ctx,
+        method: String,
+        params: Value,
+        entry_stopping: CancellationToken,
+    ) -> Result<Accepted, RpcError> {
+        if !valid_name(&method) {
+            return Err(unknown());
         }
-        prefix = &prefix[..prefix.rfind('.')?];
+        let (namespace, row) = self.owner(&method).ok_or_else(unknown)?;
+        let provider = match provider(ctx, namespace) {
+            Some(provider) => provider,
+            None => match self.status(row) {
+                Status::Changing => return Err(RpcError::reloading()),
+                // Active between the lookup and the status read.
+                Status::Active => provider(ctx, namespace).ok_or_else(unknown)?,
+                Status::Unavailable => return Err(unknown()),
+            },
+        };
+        provider.accept(method, params, entry_stopping)
+    }
+
+    /// The methods `hello.features` lists: those of the configured namespaces'
+    /// providers that are active now, each under the namespace that owns it.
+    pub(crate) fn listed(&self, ctx: &Ctx) -> Vec<String> {
+        let mut names: Vec<_> = self
+            .namespaces
+            .iter()
+            .filter_map(|(namespace, _)| Some((namespace, provider(ctx, namespace)?)))
+            .flat_map(|(namespace, provider)| {
+                provider
+                    .declarations
+                    .iter()
+                    .filter(|decl| {
+                        self.owner(&decl.name)
+                            .is_some_and(|(owner, _)| owner == namespace)
+                    })
+                    .map(|decl| decl.name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The owner row's state (methods contract §3.2): an enabled row that is
+    /// not active (Pending, Failed, or between generations while it reloads)
+    /// answers the retryable `service_reloading`; a disabled or absent row
+    /// means no enabled provider.
+    fn status(&self, row: &str) -> Status {
+        match self.loader.get(row).map(|entry| entry.status) {
+            None | Some(EntryStatus::Disabled) => Status::Unavailable,
+            Some(EntryStatus::Running(snapshot)) if snapshot.state == FiberState::Active => {
+                Status::Active
+            }
+            Some(_) => Status::Changing,
+        }
     }
 }
 
-/// Called under ConnectionHub's Rpc admission lock with that load's context.
-/// The reply is tracked by the caller; the operation by its provider.
-pub(crate) fn dispatch(
-    ctx: &Ctx,
-    method: String,
-    params: Value,
-    entry_stopping: CancellationToken,
-) -> Result<Accepted, RpcError> {
-    owner(ctx, &method)
-        .ok_or_else(unknown)?
-        .accept(method, params, entry_stopping)
+enum Status {
+    Active,
+    Changing,
+    Unavailable,
 }
 
-/// The methods `hello.features` lists: those of the providers of `namespaces`
-/// that are active now, each listed only if dispatch would reach its provider,
-/// so a parent's method inside an active child namespace is not listed.
-pub(crate) fn listed(ctx: &Ctx, namespaces: &[String]) -> Vec<String> {
-    let mut names: Vec<_> = namespaces
-        .iter()
-        .filter_map(|namespace| {
-            ctx.get_as::<ManagementMethods>(TypeKey::keyed_dynamic::<ManagementMethods>(
-                namespace.as_str(),
-            ))
-        })
-        .flat_map(|provider| {
-            provider
-                .declarations
-                .iter()
-                .filter(|decl| {
-                    owner(ctx, &decl.name).is_some_and(|owner| Arc::ptr_eq(&owner, &provider))
-                })
-                .map(|decl| decl.name.clone())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    names.sort();
-    names.dedup();
-    names
+fn provider(ctx: &Ctx, namespace: &str) -> Option<Arc<ManagementMethods>> {
+    ctx.get_as::<ManagementMethods>(TypeKey::keyed_dynamic::<ManagementMethods>(namespace))
 }
 
 fn valid_name(name: &str) -> bool {

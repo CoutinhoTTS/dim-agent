@@ -1149,6 +1149,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/connection.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "tokio::select",
         "tracing::error",
@@ -1364,6 +1365,8 @@
         "assert_eq",
         "format",
         "json",
+        "matches",
+        "panic",
         "vec"
       ]
     },
@@ -10000,7 +10003,8 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::methods",
       "references": [
-        "path crate::methods::dispatch"
+        "path crate::methods::Owners",
+        "path crate::methods::Owners::new"
       ]
     },
     {
@@ -11283,6 +11287,7 @@
         "path RpcError",
         "path RpcError::app",
         "path RpcError::invalid",
+        "path RpcError::reloading",
         "path RpcError::wire",
         "path crate::protocol::is_builtin_method",
         "use crate::protocol::RpcError"
@@ -11303,9 +11308,11 @@
         "path Capability",
         "path KeysOf",
         "path capability_plugin",
+        "path register_capability",
         "use dim_agent_runtime::Capability",
         "use dim_agent_runtime::KeysOf",
-        "use dim_agent_runtime::capability_plugin"
+        "use dim_agent_runtime::capability_plugin",
+        "use dim_agent_runtime::register_capability"
       ]
     },
     {
@@ -11315,11 +11322,12 @@
         "path Accepted",
         "path Handler",
         "path Interruption",
+        "path Interruption::Drain",
         "path ManagementMethods::provide",
         "path MethodDecl",
         "path MethodDecl::management",
-        "path dispatch",
-        "path owner"
+        "path Owners",
+        "path Owners::new"
       ]
     },
     {
@@ -12617,13 +12625,6 @@
       "references": [
         "path ServerControl",
         "use crate::control::ServerControl"
-      ]
-    },
-    {
-      "from": "dim_app_server::transport",
-      "to": "dim_app_server::methods",
-      "references": [
-        "path crate::methods::listed"
       ]
     },
     {

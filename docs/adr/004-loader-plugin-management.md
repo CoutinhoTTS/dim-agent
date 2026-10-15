@@ -102,9 +102,12 @@ accept: an owner's unload interrupts its `Report` calls and waits for its
 `Drain` calls. Rpc owns entry admission and reply delivery. There is no
 Methods/Management plugin, registration port or adapter row. MCP and Skills
 publish their existing management methods; Settings publishes none. Local v3
-hello lists the methods of the active owners; a namespace without one, and
-non-serving entries, return `unknown_method`. An owner that is inactive or
-reloading affects only its namespace; business edits do not reload plugins. See
+hello lists the methods of the active owners. A namespace whose owner row is
+enabled but not active returns `service_reloading`, as before contributions; one
+with no enabled owner, and non-serving entries, return `unknown_method`. Rpc
+tells them apart from the loader's row status, with no requirement raised to
+rutis. An owner that is inactive or reloading affects only its namespace;
+business edits do not reload plugins. See
 [Management methods](../design/appserver/management-methods.md).
 
 PluginManager's proposed responsibility remains package acquisition, manifest

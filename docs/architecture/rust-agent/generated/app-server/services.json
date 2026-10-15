@@ -106,6 +106,11 @@
             "service": "dim_app_server::control::ServerControl",
             "scope": null,
             "status": "Ready"
+          },
+          {
+            "service": "rutis_loader::loader::Loader",
+            "scope": null,
+            "status": "Ready"
           }
         ],
         "resolved": [
@@ -132,6 +137,12 @@
             "scope": null,
             "provider": 3,
             "generation": 1
+          },
+          {
+            "service": "rutis_loader::loader::Loader",
+            "scope": null,
+            "provider": 2,
+            "generation": 1
           }
         ],
         "reads": [
@@ -152,6 +163,12 @@
             "provider": 3,
             "declared": true,
             "external": true
+          },
+          {
+            "service": "rutis_loader::loader::Loader",
+            "provider": 2,
+            "declared": true,
+            "external": false
           }
         ]
       },

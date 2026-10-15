@@ -674,7 +674,7 @@ async fn run_connection(
                                 .instance
                                 .set(instance.clone())
                                 .expect("first handshake");
-                            Ok((instance, crate::methods::listed(&rpc.ctx, &rpc.namespaces)))
+                            Ok((instance, rpc.owners.listed(&rpc.ctx)))
                         })
                         .and_then(|instance| instance);
                     let (instance_id, methods) = match instance {

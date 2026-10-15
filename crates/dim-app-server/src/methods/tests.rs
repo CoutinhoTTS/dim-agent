@@ -1,7 +1,8 @@
 //! Per-call lookup, provider-owned calls and namespace ownership contracts.
 use super::*;
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin, wait_active};
-use rutis::{FiberState, Gate, TypedPlugin};
+use dim_agent_runtime::{Capability, KeysOf, capability_plugin, register_capability, wait_active};
+use rutis::{Gate, TypedPlugin};
+use rutis_loader::{Builtins, Layer, LoaderPlugin, Patch};
 use serde_json::json;
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -9,15 +10,30 @@ use std::{
 };
 
 /// Provides one namespace with a fixed handler.
+#[derive(Clone)]
 struct Owner {
+    name: &'static str,
     namespace: &'static str,
     declarations: Vec<MethodDecl>,
     handler: Handler,
 }
+impl Owner {
+    fn new(name: &'static str, namespace: &'static str, declarations: &[&str]) -> Self {
+        Self {
+            name,
+            namespace,
+            declarations: declarations
+                .iter()
+                .map(|method| decl(method, Interruption::Drain))
+                .collect(),
+            handler: Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
+        }
+    }
+}
 impl TypedPlugin for Owner {
     type Deps = ();
     fn name(&self) -> &str {
-        "Owner"
+        self.name
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -63,11 +79,96 @@ impl Capability for Waiting {
     fn keys(&self) -> KeysOf<Self> {}
 }
 
+/// A provider whose apply fails before it provides `broken`.
+struct Broken;
+impl TypedPlugin for Broken {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "Broken"
+    }
+    fn apply<'a>(&'a self, _: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async { Err(CordisError::PluginFailed("broken owner".into())) })
+    }
+}
+impl Capability for Broken {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
 fn decl(name: &str, interruption: Interruption) -> MethodDecl {
     MethodDecl::management(name, false, interruption)
 }
 fn rejected(result: Result<Accepted, RpcError>) -> &'static str {
     result.err().unwrap().data.unwrap().app_error
+}
+
+/// Owner rows in a real loader, as the process assembles them, and the
+/// namespace table Rpc receives.
+struct Assembly {
+    root: Ctx,
+    loader: Loader,
+    owners: Owners,
+}
+impl Assembly {
+    /// `rows` registers each row and returns its loader rows.
+    async fn new(
+        rows: impl FnOnce(&mut Builtins) -> Vec<Value>,
+        namespaces: &[(&str, &str)],
+    ) -> Self {
+        let root = Ctx::root().unwrap();
+        let mut builtins = Builtins::new();
+        let rows = rows(&mut builtins);
+        let plugin = LoaderPlugin::new(builtins, Default::default());
+        let loader = plugin.handle();
+        let view = root.plugin(plugin);
+        wait_active(
+            &root,
+            &[view],
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let assembly = Layer::new(
+            "assembly",
+            vec![Patch {
+                insert: Some(rows),
+                ..Default::default()
+            }],
+        );
+        loader.reconcile(vec![assembly], None).await.unwrap();
+        let namespaces: Vec<_> = namespaces
+            .iter()
+            .map(|(namespace, row)| (namespace.to_string(), row.to_string()))
+            .collect();
+        let owners = Owners::new(loader.clone(), &namespaces);
+        Self {
+            root,
+            loader,
+            owners,
+        }
+    }
+    fn dispatch(&self, method: &str, entry: &CancellationToken) -> Result<Accepted, RpcError> {
+        self.owners
+            .dispatch(&self.root, method.into(), json!({}), entry.clone())
+    }
+    async fn state(&self, row: &str, state: FiberState) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                self.loader.get(row).map(|entry| entry.status),
+                Some(EntryStatus::Running(snapshot)) if snapshot.state == state
+            ) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{row} did not reach {state:?}"));
+    }
+}
+fn row(name: String) -> Value {
+    json!({"id": name, "name": name})
+}
+fn disabled(name: String) -> Value {
+    json!({"id": name, "name": name, "disabled": true})
 }
 
 #[derive(Default)]
@@ -81,6 +182,7 @@ struct State {
 }
 /// `fixture.*` with a blocking Drain write, a Report wait and a Drain read
 /// that returns the provider generation.
+#[derive(Clone)]
 struct Fixture(Arc<State>);
 impl TypedPlugin for Fixture {
     type Deps = ();
@@ -129,26 +231,21 @@ impl Capability for Fixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let root = Ctx::root().unwrap();
         let state = Arc::new(State::default());
-        let owner = root.plugin(capability_plugin(Fixture(state.clone())));
-        let cancellation = CancellationToken::new();
-        wait_active(
-            &root,
-            std::slice::from_ref(&owner),
-            Duration::from_secs(5),
-            &cancellation,
+        let fixture = Fixture(state.clone());
+        let assembly = Assembly::new(
+            |builtins| vec![row(register_capability(builtins, move || fixture.clone()))],
+            &[("fixture", "Fixture")],
         )
-        .await
-        .unwrap();
+        .await;
         // The calling load never unloads here: only the provider reloads.
         let entry = CancellationToken::new();
-        let write = dispatch(&root, "fixture.write".into(), json!({}), entry.clone()).unwrap();
+        let write = assembly.dispatch("fixture.write", &entry).unwrap();
         state.entered.notified().await;
-        let wait = dispatch(&root, "fixture.wait".into(), json!({}), entry.clone()).unwrap();
+        let wait = assembly.dispatch("fixture.wait", &entry).unwrap();
         state.entered.notified().await;
-        let restarting = owner.clone();
-        let restart = tokio::spawn(async move { restarting.restart().await.unwrap() });
+        let loader = assembly.loader.clone();
+        let restart = tokio::spawn(async move { loader.restart("Fixture").await.unwrap() });
         let interrupted = wait.reply.await.unwrap().unwrap_err();
         assert_eq!(interrupted.data.unwrap().app_error, "operation_interrupted");
         assert!(interrupted.message.contains("may already have committed"));
@@ -157,25 +254,20 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
             !restart.is_finished(),
             "an accepted drain call holds its provider's unload"
         );
-        // Between generations the namespace is unknown, never a hidden queue.
+        // Between generations the namespace is refused as reloading, never
+        // queued: the client retries once the next generation is active.
         assert_eq!(
-            rejected(dispatch(
-                &root,
-                "fixture.read".into(),
-                json!({}),
-                entry.clone()
-            )),
-            "unknown_method"
+            rejected(assembly.dispatch("fixture.read", &entry)),
+            "service_reloading"
         );
         state.release.notify_one();
         assert_eq!(write.reply.await.unwrap().unwrap(), json!(0));
         restart.await.unwrap();
-        wait_active(&root, &[owner], Duration::from_secs(5), &cancellation)
-            .await
-            .unwrap();
+        assembly.state("Fixture", FiberState::Active).await;
         assert_eq!(state.committed.load(Ordering::SeqCst), 1);
         assert_eq!(
-            dispatch(&root, "fixture.read".into(), json!({}), entry)
+            assembly
+                .dispatch("fixture.read", &entry)
                 .unwrap()
                 .reply
                 .await
@@ -183,7 +275,7 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
                 .unwrap(),
             json!(1)
         );
-        root.shutdown().await.unwrap();
+        assembly.root.shutdown().await.unwrap();
     })
     .await
     .unwrap();
@@ -191,37 +283,58 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_isolated() {
-    let root = Ctx::root().unwrap();
     let state = Arc::new(State::default());
-    let owner = root.plugin(capability_plugin(Fixture(state.clone())));
-    let pending = root.plugin(capability_plugin(Waiting));
-    let cancellation = CancellationToken::new();
-    wait_active(
-        &root,
-        std::slice::from_ref(&owner),
-        Duration::from_secs(5),
-        &cancellation,
+    let fixture = Fixture(state.clone());
+    let off = Owner::new("Off", "off", &["off.read"]);
+    let unlisted = Owner::new("Unlisted", "unlisted", &["unlisted.read"]);
+    let assembly = Assembly::new(
+        |builtins| {
+            vec![
+                row(register_capability(builtins, move || fixture.clone())),
+                row(register_capability(builtins, || Waiting)),
+                row(register_capability(builtins, || Broken)),
+                disabled(register_capability(builtins, move || off.clone())),
+                row(register_capability(builtins, move || unlisted.clone())),
+            ]
+        },
+        &[
+            ("fixture", "Fixture"),
+            ("pending", "Waiting"),
+            ("broken", "Broken"),
+            ("off", "Off"),
+            ("absent", "Absent"),
+        ],
     )
-    .await
-    .unwrap();
-    assert_eq!(pending.state().state, FiberState::Pending);
-    // A provider that never becomes active affects only its own namespace.
+    .await;
+    assembly.state("Waiting", FiberState::Pending).await;
+    assembly.state("Broken", FiberState::Failed).await;
+    assembly.state("Unlisted", FiberState::Active).await;
+    let entry = CancellationToken::new();
+    // An enabled owner that is not active (Pending or Failed) affects only
+    // its own namespace, and its calls are retryable.
+    for method in ["pending.read", "broken.read"] {
+        assert_eq!(
+            rejected(assembly.dispatch(method, &entry)),
+            "service_reloading",
+            "{method}"
+        );
+    }
+    // A disabled owner, a row assembly does not have, and a provider whose
+    // namespace assembly does not configure serve nothing.
+    for method in ["off.read", "absent.read", "unlisted.read", "other.read"] {
+        assert_eq!(
+            rejected(assembly.dispatch(method, &entry)),
+            "unknown_method",
+            "{method}"
+        );
+    }
     assert_eq!(
-        rejected(dispatch(
-            &root,
-            "pending.read".into(),
-            json!({}),
-            CancellationToken::new()
-        )),
-        "unknown_method"
-    );
-    assert_eq!(
-        listed(&root, &["fixture".into(), "pending".into()]),
+        assembly.owners.listed(&assembly.root),
         ["fixture.read", "fixture.wait", "fixture.write"]
     );
     // The calling load's unload interrupts a Report call; the provider stays.
     let entry = CancellationToken::new();
-    let wait = dispatch(&root, "fixture.wait".into(), json!({}), entry.clone()).unwrap();
+    let wait = assembly.dispatch("fixture.wait", &entry).unwrap();
     state.entered.notified().await;
     entry.cancel();
     assert_eq!(
@@ -238,14 +351,13 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
     // for the settle signal never observes it still running.
     let _ = wait.settled.await;
     assert_eq!(state.cancelled_count.load(Ordering::SeqCst), 1);
-    assert_eq!(owner.state().state, FiberState::Active);
-    root.shutdown().await.unwrap();
+    assembly.state("Fixture", FiberState::Active).await;
+    assembly.root.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn namespace_validation_and_nested_ownership_follow_the_longest_active_namespace() {
+async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_namespace() {
     let root = Ctx::root().unwrap();
-    let handler: Handler = Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) }));
     for namespace in [
         "hello.nested",
         "daemon.extra",
@@ -257,11 +369,12 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_active_nam
         "session.mcp.extra",
         "session.create.extra",
     ] {
-        let invalid = root.plugin(capability_plugin(Owner {
+        let read = format!("{namespace}.read");
+        let invalid = root.plugin(capability_plugin(Owner::new(
+            "Owner",
             namespace,
-            declarations: vec![decl(&format!("{namespace}.read"), Interruption::Drain)],
-            handler: handler.clone(),
-        }));
+            &[read.as_str()],
+        )));
         let cancellation = CancellationToken::new();
         assert!(
             wait_active(&root, &[invalid], Duration::from_secs(5), &cancellation)
@@ -270,72 +383,82 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_active_nam
             "{namespace}"
         );
     }
-    let views = [
-        root.plugin(capability_plugin(Owner {
-            namespace: "fixture",
-            declarations: vec![
-                decl("fixture.read", Interruption::Drain),
-                decl("fixture.nested.read", Interruption::Drain),
-            ],
-            handler: handler.clone(),
-        })),
-        root.plugin(capability_plugin(Owner {
-            namespace: "fixture.nested",
-            declarations: vec![decl("fixture.nested.other", Interruption::Drain)],
-            handler,
-        })),
-    ];
-    wait_active(
-        &root,
-        &views,
-        Duration::from_secs(5),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    // An active child owns its namespace: the parent's method inside it is
-    // neither dispatched nor listed, and the parent keeps its other methods.
-    assert_eq!(
-        rejected(dispatch(
-            &root,
-            "fixture.nested.read".into(),
-            json!({}),
-            CancellationToken::new()
-        )),
-        "unknown_method"
+    root.shutdown().await.unwrap();
+
+    let parent = Owner::new(
+        "Parent",
+        "fixture",
+        &["fixture.read", "fixture.nested.read"],
     );
-    for method in ["fixture.read", "fixture.nested.other"] {
-        dispatch(&root, method.into(), json!({}), CancellationToken::new())
+    let child = Owner::new("Child", "fixture.nested", &["fixture.nested.other"]);
+    let entry = CancellationToken::new();
+    for child_enabled in [true, false] {
+        let (parent, child) = (parent.clone(), child.clone());
+        let assembly = Assembly::new(
+            |builtins| {
+                let child = register_capability(builtins, move || child.clone());
+                vec![
+                    row(register_capability(builtins, move || parent.clone())),
+                    if child_enabled {
+                        row(child)
+                    } else {
+                        disabled(child)
+                    },
+                ]
+            },
+            &[("fixture", "Parent"), ("fixture.nested", "Child")],
+        )
+        .await;
+        assembly.state("Parent", FiberState::Active).await;
+        // A child namespace is the child's whether or not it is enabled: the
+        // parent's method inside it is neither dispatched nor listed, and the
+        // parent keeps its other methods.
+        assert_eq!(
+            rejected(assembly.dispatch("fixture.nested.read", &entry)),
+            "unknown_method"
+        );
+        assembly
+            .dispatch("fixture.read", &entry)
             .unwrap()
             .reply
             .await
             .unwrap()
             .unwrap();
+        if child_enabled {
+            assembly.state("Child", FiberState::Active).await;
+            assembly
+                .dispatch("fixture.nested.other", &entry)
+                .unwrap()
+                .reply
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                assembly.owners.listed(&assembly.root),
+                ["fixture.nested.other", "fixture.read"]
+            );
+        } else {
+            assert_eq!(
+                rejected(assembly.dispatch("fixture.nested.other", &entry)),
+                "unknown_method"
+            );
+            assert_eq!(assembly.owners.listed(&assembly.root), ["fixture.read"]);
+        }
+        // A name outside the declaration grammar is unknown without a lookup.
+        let long = format!("fixture.{}read", "a.".repeat(1 << 17));
+        let started = std::time::Instant::now();
+        for method in [
+            "fixture.Read",
+            "fixture..read",
+            "fixture.read.",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                rejected(assembly.dispatch(method, &entry)),
+                "unknown_method"
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assembly.root.shutdown().await.unwrap();
     }
-    assert_eq!(
-        listed(&root, &["fixture".into(), "fixture.nested".into()]),
-        ["fixture.nested.other", "fixture.read"]
-    );
-    // A name outside the declaration grammar is unknown without a lookup per
-    // prefix: a long dotted name would otherwise cost quadratic time.
-    let long = format!("fixture.{}read", "a.".repeat(1 << 17));
-    let started = std::time::Instant::now();
-    for method in [
-        "fixture.Read",
-        "fixture..read",
-        "fixture.read.",
-        long.as_str(),
-    ] {
-        assert_eq!(
-            rejected(dispatch(
-                &root,
-                method.into(),
-                json!({}),
-                CancellationToken::new()
-            )),
-            "unknown_method"
-        );
-    }
-    assert!(started.elapsed() < Duration::from_secs(1));
-    root.shutdown().await.unwrap();
 }
