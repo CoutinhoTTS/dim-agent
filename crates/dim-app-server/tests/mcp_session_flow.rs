@@ -1080,3 +1080,45 @@ async fn an_unpublished_session_never_starts_discovery() {
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 0);
     env.close().await;
 }
+
+#[tokio::test]
+async fn a_shadowed_user_server_closes_its_unused_connection() {
+    let env = Env::new().await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    // The branch adopts the user tools, so a binding holds the connection.
+    env.turn(&session, Action::Text).await;
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
+    // A project entry shadows the user server even while disabled.
+    let mut shadow = configuration(&env.url, "project");
+    shadow["enabled"] = json!(false);
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(shadow).unwrap()),
+    )
+    .await;
+    let mut state = session.session_service::<McpSession>().unwrap().subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            state.borrow_and_update().servers.get("docs"),
+            Some(McpSourceState::Disabled)
+        ) {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // The next request adopts the tool set without it, releasing the binding;
+    // the user generation is still current but now unused, so it closes.
+    env.turn(&session, Action::Text).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while env.remote.deletes.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the unused user connection closes");
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
+    env.close().await;
+}

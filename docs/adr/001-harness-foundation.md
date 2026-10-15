@@ -130,9 +130,9 @@ Skills implements its existing SkillSettingsHost. Full process assembly uses one
 reconcile, without an editable-user bootstrap or configuration management namespace.
 
 MCP generations are private immutable instances within each Session's loader
-subtree. Retained user bindings pin superseded generations until release;
-project changes, disablement or loss of approval retire generations even with
-retained bindings. Disconnect drains every selected source/server generation
+subtree. Retained user bindings pin superseded generations until release, and a
+generation no lease uses closes; project generations retire on configuration
+change, disablement or loss of approval even with retained bindings. Disconnect drains every selected source/server generation
 across affected Sessions and reports cleanup errors independently of persistence.
 Ordinary Session closure stops only its own connections. No business document or
 secret enters loader row options; there is no second lifecycle manager.

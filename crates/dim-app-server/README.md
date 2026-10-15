@@ -107,7 +107,8 @@ The host coordinates source selection and retirement without rewriting root laye
 Catalog reads and connection operations also request refresh of external workspace-file edits;
 there is no background filesystem watcher. A catalog reply is not a refresh-completion barrier.
 Already bound user-source tools retain their connection generation during replacement. After the last old
-binding is released, the coordinator closes that instance through the loader's fiber.
+binding is released, the coordinator closes that instance through the loader's fiber. A generation
+that no lease uses closes even while current, such as a user server that a project entry now shadows.
 Session closure drains all its instances, including those retained by old bindings,
 without affecting another Session using the same server configuration.
 Project generations instead close on configuration change, disablement or revoked approval,

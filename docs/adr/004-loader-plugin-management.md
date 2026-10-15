@@ -25,8 +25,10 @@ generation retired meanwhile.
 Configuration changes are adopted automatically. New bindings use replacement
 generations; retained user bindings keep their old generation until release,
 Session closure or explicit disconnect. Preparing replacements does not await an
-old model request. Project changes, disablement, unreadable authority and
-revocation retire old generations even with retained bindings. Each project
+old model request. A generation that no lease uses closes even while current,
+such as a user server that a project entry now shadows. Project generations
+retire on configuration change, disablement, unreadable authority or revocation
+even with retained bindings. Each project
 operation checks current authorization. Revocation persists the grant removal,
 rejects new work and drains affected instances across this host's Sessions before
 successful acknowledgement. Cleanup failure does not roll back revocation.

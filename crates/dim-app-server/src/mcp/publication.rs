@@ -495,15 +495,13 @@ impl Projection {
         let retired: Vec<_> = self
             .generations
             .iter()
+            // A generation exists only for its Session's leases: an unused one
+            // closes even while current, such as a user server that a project
+            // entry now shadows. Stale project generations close despite leases.
             .filter(|(_, g)| {
                 g.owner.closed.is_cancelled()
-                    || (g.lease.strong_count() == 0
-                        && matches!(
-                            g.service.state(),
-                            McpServerState::Failed | McpServerState::Closed
-                        ))
-                    || (!self.current(g)
-                        && (g.source != SettingsScope::User || g.lease.strong_count() == 0))
+                    || g.lease.strong_count() == 0
+                    || (!self.current(g) && g.source != SettingsScope::User)
             })
             .map(|(reference, _)| reference.clone())
             .collect();
