@@ -32,7 +32,7 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。Modality 按名称收集每个进程作用域的 `modalityAdapter` 服务，因此适配器重载会重载 Modality；Rpc 收集 Modality 的 `managementMethods` 服务，因此 Modality 重载会重载 Rpc。两者都是少见的结构性事件；其传播是可接受的代价，任务恢复（§4）使其影响有界：存有句柄的提供方任务通过轮询恢复，其余变为 `interrupted`。没有 Session 或分支插件依赖 Modality。
+所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。Modality 按名称收集每个进程作用域的 `modalityAdapter` 服务，因此适配器重载会重载 Modality。Rpc 按调用查找 Modality 的 `managementMethods` 服务，不随它重载（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。适配器重载是少见的结构性事件；其传播是可接受的代价，任务恢复（§4）使其影响有界：存有句柄的提供方任务通过轮询恢复，其余变为 `interrupted`。没有 Session 或分支插件依赖 Modality。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
@@ -175,7 +175,7 @@ sequenceDiagram
 | 场景 | 结果 | 负责方 |
 | --- | --- | --- |
 | 适配器插件重载 | Modality 随之重载（D3）；适用启动规则：有句柄的任务通过轮询恢复，其余 `interrupted`；实时连接关闭 | Modality |
-| Modality 重载 | Rpc 随之重载（D3）；在途调用遵循[方法](../contracts/session-boundary.md)契约；disposer 取消本地工作，终止 OCR 进程，关闭实时连接，为宿主任务和无句柄任务写入 `interrupted` | Rpc、Modality |
+| Modality 重载 | Modality 重新激活前 `modality.*` 返回 `unknown_method`，Rpc 不重载；在途调用遵循[方法](../contracts/session-boundary.md)契约；disposer 取消本地工作，终止 OCR 进程，关闭实时连接，为宿主任务和无句柄任务写入 `interrupted` | Rpc、Modality |
 | 设置变更 | 下次使用时读取；重新计算可用性；已有任务保留其已解析的执行方；不重载 | Modality |
 | 以相同 `client_task_id` 重复 `submit` | 返回已有任务 | Modality |
 | 等待期间客户端脱离 | 任务继续；该客户端的实时连接关闭 | Modality |
@@ -421,7 +421,7 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 | A14 | OCR 组件以输入读权限且无网络的方式运行 | 判断；overview 隔离补充 | 隔离更弱 |
 | A15 | OCR 在控制节点上运行，除非调用方指定已配置节点 | Modality 没有 Session | 由 Session 派生的默认节点需要 Session 参数 |
 | A16 | Modality 设置（每节点 OCR 组件路径、并发与保留上限）是 Settings 业务来源 `modality` 中的业务配置 | ADR 002 D4；该路径按任务读取，不改变已装载的行 | 路径变更会作为结构性 loader 字段重载 Modality |
-| A17 | 适配器是由 Modality 收集的命名进程服务 `modalityAdapter`；适配器重载会重载 Modality，并经方法表重载 Rpc | ADR 002 D2、D3、D5 | 适配器只能内置于 Modality |
+| A17 | 适配器是由 Modality 收集的命名进程服务 `modalityAdapter`；适配器重载会重载 Modality；Rpc 按调用查找 Modality，不随之重载 | ADR 002 D2、D3、D5 | 适配器只能内置于 Modality |
 
 ## 附录 F. 待对齐问题
 

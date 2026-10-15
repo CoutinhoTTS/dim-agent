@@ -28,7 +28,7 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Content owners depend on `pluginContents`, accepted per D3: installing, enabling or removing a package changes published sources as a data update (`changed`), never a reload, while a PluginManager reload (upgrade, crash) reloads the content owners. Rpc collects PluginManager's `managementMethods` service (key `plugin`), so a PluginManager reload also reloads Rpc. Both are rare structural events whose propagation is documented, not prevented. Package code rows are ordinary loader rows: they offer the named services their code declares in its `provides` (for example `toolContribution`, `sessionMethods`, `modalityAdapter`), consumers collect them by service name and scope, and when one unloads its dependents reload under the same rule. A code row on an offline peer node does not unload: its imported services stay registered and fail calls with `node_unavailable`, and its dependents neither reload nor go Pending (requirement on [#5](https://github.com/arcships/dim/issues/5), [§9](#9-requirements-raised-to-mechanism-owners)).
+All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Content owners depend on `pluginContents`, accepted per D3: installing, enabling or removing a package changes published sources as a data update (`changed`), never a reload, while a PluginManager reload (upgrade, crash) reloads the content owners. Rpc looks up PluginManager's `managementMethods` service (key `plugin`) per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). A PluginManager reload is a rare structural event whose propagation to content owners is documented, not prevented. Package code rows are ordinary loader rows: they offer the named services their code declares in its `provides` (for example `toolContribution`, `sessionMethods`, `modalityAdapter`), consumers collect them by service name and scope, and when one unloads its dependents reload under the same rule. A code row on an offline peer node does not unload: its imported services stay registered and fail calls with `node_unavailable`, and its dependents neither reload nor go Pending (requirement on [#5](https://github.com/arcships/dim/issues/5), [§9](#9-requirements-raised-to-mechanism-owners)).
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
@@ -152,7 +152,7 @@ Install is ordered stage, commit, Settings write; the Settings revision is the c
 | Plugin business configuration changed (Settings typed operation) while the plugin runs | Business data update and notification; no reload; next use reads the new value | Plugin, Settings |
 | Two installs of one id | Second waits on the lock, then `plugin_exists` | PluginManager |
 | Package disabled while a branch uses its Skill | Branch keeps its adopted prompt until it re-adopts | Skills owner |
-| PluginManager reload | Content owners and Rpc reload with it (D3); in-flight install/remove `operation_interrupted` | PluginManager |
+| PluginManager reload | Content owners reload with it (D3); `plugin.*` returns `unknown_method` until it is active again, and Rpc does not reload; in-flight install/remove `operation_interrupted` | PluginManager |
 
 Full table: [Appendix B](#appendix-b-full-conflict-table).
 
@@ -324,7 +324,7 @@ Packages live under PluginManager's package root on their node, written through 
 | Install | Lock `(node, id)` (A10), `stage`, compare with intent, `commit`, `plugins.install`, publish sources, reply; a failed Settings write leaves an unreferenced directory collected later (A11) |
 | Publication | On `apply`, verify each enabled package and build sources; after each operation, update sources and bump the revision; a package that fails verification is withdrawn and reported `failed` |
 | Code rows | `apply` verifies integrity, else fails `integrity_failed`; `set_enabled`/`update` restart them through the `Loader`; each code row reads its own business configuration at use time |
-| PluginManager reload | Content owners and Rpc reload with it (D3); in-flight install/remove return `operation_interrupted`; code rows are unaffected |
+| PluginManager reload | Content owners reload with it (D3); `plugin.*` returns `unknown_method` until it is active again, and Rpc does not reload; in-flight install/remove return `operation_interrupted`; code rows are unaffected |
 | Process restart | Loader restores rows; packages re-verify; staging deleted; orphans collected after the loader settled |
 
 ## Appendix B. Full conflict table

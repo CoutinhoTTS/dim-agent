@@ -98,7 +98,7 @@ Plugins never add wiring plugins (ADR 002 D2). Each need maps to a mechanism tha
 | Put content into the model context | Branch input (raw blocks, keyed blocks) or tool results ([session access](contracts/session-access.md#a2-source-input-conventions)) | Goal, Hooks, ShellInput, Scheduler, Workflow |
 | Act on a write before it is committed | A Timeline before callback registered by a branch-scoped plugin ([single-tree](../architecture/rust-agent/single-tree.md)), asynchronous with the runtime supplement ([Appendix B.1](#b1-session-and-branch-capabilities)); the callback transforms the draft or appends to the same batch only commands to an event's owner or events it declares itself, and never fails or blocks the write | Hooks `user_prompt_submit`, `pre_tool_use` |
 | Client method about a Session | `sessionMethods`, which Rpc dispatches through the Session ([A.1](contracts/session-boundary.md#a1-method-contributions)) | Questions, Goal, SessionTitle, Attachments, ShellInput, Hooks, Notifications, InputQueue (`session.input.withdraw`) |
-| Host management method | `managementMethods` of a process plugin, collected by Rpc into its method table | Existing management methods, Settings (business configuration), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
+| Host management method | `managementMethods` of a process plugin, looked up by Rpc per call | Existing management methods, Settings (business configuration), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | Reach other Sessions | Agents' `sessions` service (`launch`, `input`, `history`, `idle`, ...), as Collaboration does ([session access](contracts/session-access.md#a1-the-sessions-service)) | Scheduler, Workflow |
 | React to another process plugin's outcome | An event notice, not a dependency | Scheduler run outcomes |
 
@@ -123,7 +123,7 @@ flowchart LR
     IQ["InputQueue"]
     BP["Branch parts"]:::new
   end
-  Rpc -->|"collect managementMethods"| MM
+  Rpc -.->|"look up per call"| MM
   Rpc -->|"sessionMethods"| SP
   TR -->|"collect toolContribution"| SP
   SP -->|"listen"| BC
@@ -134,7 +134,7 @@ flowchart LR
   SP -->|"branch services"| BP
 ```
 
-The arrows are dependency edges, and they point to the same or an enclosing scope (D3). A collector depends on its contributions (ToolRegistry on tools, Rpc on method owners), so a contributor reload reloads its collector. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
+The arrows are dependency edges, and they point to the same or an enclosing scope (D3). A collector depends on its contributions (ToolRegistry on tools), so a contributor reload reloads its collector. Rpc does not depend on management method owners: the dotted arrow is a per-call lookup, so an inactive or reloading owner affects only its own namespace ([methods §3.2](contracts/session-boundary.md#32-management-method)). Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
 
 ### 3.1 Contract form
 
@@ -502,7 +502,7 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 
 | Plugin | Type | Content | Reason |
 | --- | --- | --- | --- |
-| Rpc | Change | Method table: built-ins, then the collected `managementMethods` (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Management methods and `daemon.shutdown` are never served to a connection with a `deviceId`. `session.create {interactive, client}`. Session broadcast notice records forwarded to subscribed clients unchanged (SessionTitle). `title`/`titleSource` in Session lists. Validation only at the external boundary (param shape, `sessionId` authorization, own-source checks); `session.submit` checks shape only and no longer validates images ([methods](contracts/session-boundary.md)) | All method owners; SessionTitle |
+| Rpc | Change | Method table: built-ins, then `managementMethods` looked up per call without depending on their owners (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Management methods and `daemon.shutdown` are never served to a connection with a `deviceId`. `session.create {interactive, client}`. Session broadcast notice records forwarded to subscribed clients unchanged (SessionTitle). `title`/`titleSource` in Session lists. Validation only at the external boundary (param shape, `sessionId` authorization, own-source checks); `session.submit` checks shape only and no longer validates images ([methods](contracts/session-boundary.md)) | All method owners; SessionTitle |
 | Transport, Connection | Change | `EntryHost` with upgrade authenticators; `ConnectionEntry {name, deviceId}`; Connection forwards every event declared client-visible (#2) as `session.event`, without knowing its meaning | RemoteGateway; Questions |
 | Agents | Supplement | The `sessions` service; `SessionConfig` fields; `launch` with a policy capped by the starter, `LaunchRequest.agent` optional (absent: Agents' default profile; request `model` over the profile's model); creation from another Session's cut; a Session activity handle a Session part holds so that Agents does not idle-unload the Session (proposed); profiles with an external agent as model, written through Agents' typed public write operation ([session access](contracts/session-access.md)) | Scheduler, Workflow, fork, ExternalAgent; ShellInput |
 | Collaboration | Change | Member models by purpose `collaboration.member`; member approvals forwarded to the leader | ExternalAgent |

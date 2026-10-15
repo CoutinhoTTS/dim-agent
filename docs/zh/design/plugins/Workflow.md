@@ -420,7 +420,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | 中立 | Rust |
 | --- | --- |
 | `toolContribution` key `workflow` | 在 `WorkflowSession` 的 `provides` 中注册的 Session 级 `ToolContribution` |
-| `managementMethods` key `workflow` | 由 Rpc 收集的 `Contributions<ManagementMethods>` 条目 |
+| `managementMethods` key `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
 | `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` 租约，然后 `Session::input`、`local_page`、`idle`、`stop`、`service::<InputQueue>(branch).withdraw` |
 | `workflowRuns` | 由 `Workflow` 提供、由 `WorkflowSession` 使用的进程级命名服务 |

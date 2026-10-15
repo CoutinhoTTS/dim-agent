@@ -7,12 +7,12 @@ This contract defines three named services in the language-neutral form of ADR 0
 | Service | Scope | Key | Provided by | Collected by |
 | --- | --- | --- | --- | --- |
 | `sessionMethods` | Session | namespace | Session-scoped plugin parts (Questions, Goal, SessionTitle, Attachments, ShellInput, Hooks, Notifications) and InputQueue (`session.input`) | Rpc, dispatching through the Session |
-| `managementMethods` | Process | namespace | Process plugins only (Mcp, Provider, Settings, Scheduler, ...) | Rpc's method table |
+| `managementMethods` | Process | namespace | Process plugins only (Mcp, Provider, Settings, Scheduler, ...) | Rpc, looked up per call |
 | `toolContribution` | Session | tool name | Session-scoped plugin parts (Questions, Goal, Web, Notifications, Scheduler, Workflow) | ToolRegistry (supplement: named tool services) |
 
-**Management methods** are client RPC methods about the host rather than a Session: `account.*`, `provider.*`, `mcp.*`, `skills.*` and settings, plus the methods of new process plugins. `daemon.shutdown` stays an Rpc built-in and is likewise never served to paired devices. Today Rpc injects their services directly (`ProductServices` and `ExecutionServices` in [connection.rs](../../../crates/dim-app-server/src/connection.rs)); this design collects them through `managementMethods` instead. Only process plugins provide them, and they are never served to paired remote devices. Session methods have no level; the only split is `sessionMethods` (dispatched through a Session) versus `managementMethods`.
+**Management methods** are client RPC methods about the host rather than a Session: `account.*`, `provider.*`, `mcp.*`, `skills.*` and settings, plus the methods of new process plugins. `daemon.shutdown` stays an Rpc built-in and is likewise never served to paired devices. Today Rpc injects their services directly (`ProductServices` and `ExecutionServices` in [connection.rs](../../../crates/dim-app-server/src/connection.rs)); this design looks them up through `managementMethods` instead, per call and without a dependency on their providers. Only process plugins provide them, and they are never served to paired remote devices. Session methods have no level; the only split is `sessionMethods` (dispatched through a Session) versus `managementMethods`.
 
-Rpc decides what a connection is served from its `ConnectionEntry {name, deviceId}`: a local connection gets Session and management methods, a connection with a `deviceId` (a paired device through RemoteGateway) never gets management methods, and an exported rutis link gets management methods only when exported. There is no registry, no port and no Management plugin. Providers are optional plugins installed only when enabled. A provider reload propagates to its collector, which is the accepted cost of D3.
+Rpc decides what a connection is served from its `ConnectionEntry {name, deviceId}`: a local connection gets Session and management methods, a connection with a `deviceId` (a paired device through RemoteGateway) never gets management methods, and an exported rutis link gets management methods only when exported. There is no registry, no port and no Management plugin. Providers are optional plugins installed only when enabled. Rpc looks up a `managementMethods` provider on each call and does not depend on it, so a provider that is disabled, Pending, Failed or reloading affects only its own namespace (§3.2). A `toolContribution` provider reload propagates to ToolRegistry, which is the accepted cost of D3.
 
 Acting on a tool call or an input before it is committed is not a service of this contract: a branch-scoped plugin registers a Timeline before callback on `step/tool-call` or `input/message` (the runtime Timeline supplement, [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)), and what it writes is defined by that plugin ([Hooks](../plugins/Hooks.md)). Approval and the Session input path are unchanged; ToolExecutor's `skip` handling and InputQueue's withdrawal are their owners' changes ([overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)).
 
@@ -41,7 +41,7 @@ flowchart LR
   Local --> Rpc
   Remote --> Rpc
   Link --> Rpc
-  Rpc -->|"collect by name"| MM
+  Rpc -->|"look up by name, per call"| MM
   Rpc -->|"resolve sessionId"| AI
   AI -->|"sessionMethods by namespace"| SM
   SM -->|"branch service"| BS
@@ -58,7 +58,7 @@ Contracts defined here: the three services, `MethodDecl`, `MethodCall`, `MethodR
 
 ## 2. Data and state
 
-No service owns a Timeline event or persisted state. Method tables are rebuilt when Rpc or a Session loads. Each connection records `ConnectionEntry {name, deviceId}` when it is accepted; what it is served follows from that record (§3.2), never from a user identity. A link's management export is host-local structural configuration.
+No service owns a Timeline event or persisted state. A Session's method table is rebuilt when the Session loads; management providers are looked up on each call. Each connection records `ConnectionEntry {name, deviceId}` when it is accepted; what it is served follows from that record (§3.2), never from a user identity. A link's management export is host-local structural configuration.
 
 ## 3. Flows
 
@@ -106,6 +106,8 @@ sequenceDiagram
 
 The connection's entry record is the only check. Being served management methods grants host administrator rights.
 
+Rpc resolves the namespace on each call by keyed reads of the method name's prefixes, longest first, among the active process services `managementMethods` (Appendix F). Rpc does not depend on these providers. A namespace with no active provider (disabled, Pending, Failed, or between generations while it reloads) returns `unknown_method`, and Rpc, open connections and the other namespaces are unaffected. A call admitted before its provider unloads follows the method's `interruption` (A.1): the unloading provider ends its `report` calls with `operation_interrupted`, and `drain` calls hold the unload (§9.2).
+
 ## 4. Timing and conflicts
 
 | Scenario | Order | Outcome | Owner |
@@ -113,7 +115,7 @@ The connection's entry record is the only check. Being served management methods
 | Session-scoped provider reloads mid-call | call < reload | `report`: `operation_interrupted`; `drain`: reload waits | Rpc |
 | Session method while the Session's capabilities reload | — | `service_reloading` | Rpc |
 | Session method on a Session without that plugin | — | `unknown_method` | Rpc |
-| Management owner reloads | — | Rpc reloads with it (D3); open connections see the existing Rpc reload behaviour | rutis lifecycle |
+| Management owner reloads | — | Calls into its namespace return `unknown_method` until the new generation is active (`service_reloading` once §9.3 exists); admitted calls follow their `interruption`; Rpc does not reload and connections stay open | Rpc |
 | Management method or `daemon.shutdown` on a connection with a `deviceId` | — | `unknown_method` | Rpc |
 | Two providers claim one namespace or tool name | assembly | Assembly fails; keys are unique per scope | Assembly |
 | Tool-contribution provider reloads during a turn | call < reload | ToolRegistry and dependants reload; the in-flight turn ends `Failed` (D3, accepted) | ToolRegistry |
@@ -150,12 +152,12 @@ The connection's `ConnectionEntry {name, deviceId}` is the only authority for wh
 | §4 rule 5 (whole batch) | Not applicable: no decision here is taken on a Timeline event; owners decide from their own facts. |
 | §4 rule 6 (model context) | Methods have no model-visible effect, and a `toolContribution` reaches the model only through its declaration and `ToolResult` (§5). |
 | §4 rule 7 (public events and services) | Providers reach branches only through the branch's public services, and Rpc dispatches only through the Session's `sessionMethods`. |
-| §4 rule 8 (requirements) | Session lookup by name, named tool collection and drain on unload are raised in §9. |
+| §4 rule 8 (requirements) | Session lookup by name, named tool collection, drain on unload and listing the active providers of a process-scoped service are raised in §9. |
 | §4 rule 9 (only decision facts in the Timeline) | Method tables and served entries are assembly data, never Timeline facts (§2). |
 | §1 (Capability and App Server boundary) | Rpc only collects and dispatches; the business code of every method lives in its provider's plugin. |
 | ADR 002 D1 | `sessionMethods` and `toolContribution` are Session-scoped, `managementMethods` process-scoped, matching their owners. |
 | ADR 002 D2 | No registry, port or Management plugin; Rpc and ToolRegistry collect by name. |
-| ADR 002 D3 | Providers depend on their own or an enclosing scope, and a provider reload reloads its collector (§4). |
+| ADR 002 D3 | Providers depend on their own or an enclosing scope. A `toolContribution` provider reload reloads ToolRegistry (§4); Rpc does not depend on management providers, so their reloads stay within their namespace (§3.2). |
 | ADR 002 D4 | A link's management export is structural host-local configuration; no business configuration is defined here. |
 | ADR 002 D5 | Every service is named with scope, key and data-only methods; Rust types appear only in Appendix F. |
 
@@ -180,6 +182,16 @@ The connection's `ConnectionEntry {name, deviceId}` is the only authority for wh
 | Generic capability | A plugin's unload waits for in-flight work it registered as draining, then proceeds. |
 | Effect on sequence, batch, interrupt, reload | No Timeline effect; a reload is delayed by at most the drained calls. |
 | Owner and issue | rutis lifecycle; issue to be opened. |
+
+### 9.3 Listing the active providers of a process-scoped service
+
+| Item | Content |
+| --- | --- |
+| Blocked by | `hello.features` lists the methods of the active management providers (A.1), and Rpc must find them without depending on them (§3.2). A reloading provider should get `service_reloading`, not `unknown_method`. |
+| Existing mechanisms considered | The keyed read `Ctx::get_as` finds one active provider by key, which is enough to dispatch a call; Mcp reads its loader rows this way. It does not list providers, and it does not tell a registered but inactive provider from a missing one. Declaring the providers as dependencies lists them, but gates Rpc on every one of them (§3.2). |
+| Generic capability | List the active providers of one service name at process scope, and report whether a key has a registered provider that is not active. |
+| Effect on sequence, batch, interrupt, reload | None on sequence or batches. A provider that becomes active after a connection's `hello` appears in the next `hello`. |
+| Owner and issue | rutis registry; issue to be opened. |
 
 Named services from non-Rust plugins rely on #4; its five items are in [session access §9](session-access.md#9-requirements-raised-to-mechanism-owners).
 
@@ -225,8 +237,8 @@ Cancellation: when a `report` call is interrupted, Rpc sends a cancel request fo
 | Reserved for Rpc built-ins | `hello`, `daemon`, `agent`, `approval`, the bare `session` root and `session.attach`, `session.branch_create`, `session.close`, `session.create`, `session.detach`, `session.history`, `session.idle`, `session.input_lookup`, `session.list`, `session.state`, `session.stop`, `session.submit`, `session.summaries`, `session.exec`, `session.mcp`, `session.model`, `session.permission`, `session.prompt`, `session.skills`. `session.input` is not reserved: InputQueue provides `session.input.withdraw` through `sessionMethods` (proposed), so Rpc names no owning service |
 | Precedence | Built-ins, then the process table, then the Session's providers; one wire name space |
 | Session-scoped call | Requires `sessionId` (`-32602` without it). Rpc authorizes it, acquires the Session through Agents (restoring if needed) and calls the Session's `sessionMethods` for the namespace. The provider reaches a branch through that branch's services |
-| Not dispatched | Namespace not provided, or a management method on a connection with a `deviceId` or an unexported link → `-32601 unknown_method`. Session reloading → `-32000 service_reloading`. A started `report` call interrupted → `operation_interrupted` |
-| `hello.features` (v3) | Built-ins, plus process-table methods when the connection is served management methods. Session-scoped methods are listed per Session in `session.state.methods` |
+| Not dispatched | Namespace not provided or its provider not active, or a management method on a connection with a `deviceId` or an unexported link → `-32601 unknown_method`. Session reloading → `-32000 service_reloading`. A started `report` call interrupted → `operation_interrupted` |
+| `hello.features` (v3) | Built-ins, plus the methods of the management providers active at `hello` when the connection is served management methods. Until §9.3 exists, Rpc makes a keyed read of each namespace that enabled loader rows declare in their `provides` and lists the active ones. Session-scoped methods are listed per Session in `session.state.methods` |
 | Ready latch | Opens after the loader's initial load settles, so process providers are present at the first `hello` |
 
 Known Session-scoped namespaces: `session.question` (Questions), `session.goal` (Goal), `session.rename` (SessionTitle), `session.input` (InputQueue), `attachment` (Attachments), `shell` (ShellInput), `hooks` (Hooks), `notifications` (Notifications, including `notifications.test`). Each plugin document is authoritative for its methods.
@@ -270,7 +282,7 @@ Sources: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS`, `Call::
 | New `session.input.withdraw` | `sessionMethods` | InputQueue (`session.input`) |
 | New Session methods | `sessionMethods` | Each owner (A.1) |
 
-Interruption reproduces today's behaviour: `mcp.*` and `skills.*` are `report`, and `account.*` and `provider.*` are `drain`. Rpc's `When<ProductServices>` and `When<ExecutionServices>` are replaced by collecting `managementMethods`, so Rpc no longer names any owning service.
+Interruption reproduces today's behaviour: `mcp.*` and `skills.*` are `report`, and `account.*` and `provider.*` are `drain`. Rpc's `When<ProductServices>` and `When<ExecutionServices>` are removed, not replaced by a collection: Rpc looks up `managementMethods` per call (§3.2) and no longer names or depends on any owning service. Built-ins that read a management service today (model selection for `session.create` and `session.model.update`, Mcp for `session.mcp`) read it per call with the same keyed read and keep today's behaviour when it is absent.
 
 | Client | Before | After |
 | --- | --- | --- |
@@ -280,7 +292,7 @@ Interruption reproduces today's behaviour: `mcp.*` and `skills.*` are `report`, 
 | v3 bare WebSocket, protected profile | `local_transport_required` | Same |
 | v3 RemoteGateway (new) | Did not exist; execution Session methods (`session.permission.get/update`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp`, `session.mcp.refresh`) were local-only | **Compatibility change (E3):** available to paired devices; management names `unknown_method` |
 | v3, MCP disabled | `mcp.*` `unknown_method` | Same, with Rpc's message |
-| v3, Mcp reloading | `service_reloading` | Rpc reloads with Mcp (D3); the client reconnects and retries |
+| v3, Mcp reloading | `service_reloading` | **Compatibility change** until §9.3: `mcp.*` returns `unknown_method` until Mcp is active again. Rpc does not reload and the connection stays open; with §9.3 it is `service_reloading` again |
 
 No protocol version is added and persistence formats are unchanged.
 
@@ -317,7 +329,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 | Session method on a closed branch | — | Owner's `BranchMissing` error | Owning plugin |
 | Session method on an unloaded Session | — | Rpc restores through Agents, then dispatches | Rpc |
 | Session-scoped provider reloads mid-call | admitted < reload | `report`: `operation_interrupted`; `drain`: waits | Rpc |
-| Process owner reloads | — | Rpc reloads (D3) | rutis lifecycle |
+| Process owner reloads | — | Its namespace returns `unknown_method` until it is active again; admitted calls follow their `interruption`; Rpc does not reload | Rpc |
 | Rpc reload with calls in flight | — | `report` interrupted, `drain` drained; `closed` resolves | Rpc |
 | Management method on a connection with a `deviceId` | — | `unknown_method` | Rpc |
 | Client detaches mid-call | — | Call continues; reply discarded | Rpc |
@@ -331,7 +343,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 
 | Case | Wire result |
 | --- | --- |
-| Not provided, or not served to the connection, or v1/v2 | `-32601`, `unknown_method` |
+| Not provided, provider not active, or not served to the connection, or v1/v2 | `-32601`, `unknown_method` |
 | Session-scoped method without `sessionId` | `-32602` |
 | Session reloading | `-32000`, `service_reloading` |
 | `report` call interrupted | `-32000`, `operation_interrupted` |
@@ -345,6 +357,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 4. On a RemoteGateway test entry, `session.permission.update` and `session.exec.stop` succeed.
 5. A tool provided as `toolContribution` by a non-Rust plugin is declared to the model and executed through ToolExecutor like a Rust tool.
 6. Progress precedes the response, and `notify` reports `gone` after disconnect.
+7. With an enabled management provider that is Pending or Failed, `hello` succeeds, every other namespace works, and the provider's namespace returns `unknown_method`; `plugin.set_enabled` can disable the provider unless it is PluginManager itself. Reloading a management provider neither reloads Rpc nor closes connections.
 
 ## Appendix E. Assumptions
 
@@ -353,6 +366,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 | A1 | Session-scoped namespaces may use roots other than `session` (`attachment`, `shell`) | Existing wire names | All move under `session.` |
 | A2 | The Session can look up a keyed Session service by name for Rpc | Existing keyed Session services; raised as §9.1 | Rpc enumerates providers through a Session service |
 | A3 | Session-scoped methods are listed per Session, not in `hello.features` | They differ per Session | A global list with per-Session availability |
+| A4 | Rpc dispatches a management method by a keyed read of the active provider on each call (`Ctx::get_as`) | Mcp reads its loader-row servers this way ([publication.rs](../../../crates/dim-app-server/src/mcp/publication.rs)) | Rpc depends on every provider, and one inactive provider blocks all RPC |
 
 ## Appendix F. Rust binding
 
@@ -361,7 +375,7 @@ The neutral services above map to Rust as follows. Rust plugins may use these ty
 | Neutral service | Rust type and key | Registration in Rust assemblies | Collection |
 | --- | --- | --- | --- |
 | `sessionMethods[ns]` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, `SessionScope::named_key::<SessionMethodContribution>(ns)` | `AgentBuilder::session_methods(ns)` | `Session::method(ns)` |
-| `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)` | loader row | `Contributions<ManagementMethods>` |
+| `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)`, process scope, instance key `ns` | loader row | Per call: `Ctx::get_as::<ManagementMethods>` with the namespace key; not in Rpc's `Deps` |
 | `toolContribution[tool]` | `ToolContribution {definition, handler}`, `SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)` (existing) | `Contributions<ToolContribution>` in ToolRegistry |
 | `callChannel` | `CallChannel`, `ConnectionNotifier` passed to `MethodProvider::call` | — | — |
 

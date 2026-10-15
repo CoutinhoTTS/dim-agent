@@ -32,7 +32,7 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Modality collects every process-scoped `modalityAdapter` service by name, so an adapter reload reloads Modality, and Rpc collects Modality's `managementMethods` service, so a Modality reload reloads Rpc. Both are rare structural events; their propagation is an accepted cost, and task recovery (§4) keeps it bounded: provider tasks with a stored handle resume by polling, others become `interrupted`. No Session or branch plugin depends on Modality.
+All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Modality collects every process-scoped `modalityAdapter` service by name, so an adapter reload reloads Modality. Rpc looks up Modality's `managementMethods` service per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). Adapter reloads are rare structural events; their propagation is an accepted cost, and task recovery (§4) keeps it bounded: provider tasks with a stored handle resume by polling, others become `interrupted`. No Session or branch plugin depends on Modality.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
@@ -175,7 +175,7 @@ sequenceDiagram
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
 | Adapter plugin reloads | Modality reloads with it (D3); startup rule applies: tasks with a handle resume by polling, others `interrupted`; realtime connections close | Modality |
-| Modality reload | Rpc reloads with it (D3); in-flight calls follow the [methods](../contracts/session-boundary.md) contract; disposer cancels local work, terminates OCR processes, closes realtime connections, writes `interrupted` for host tasks and tasks without handle | Rpc, Modality |
+| Modality reload | `modality.*` returns `unknown_method` until Modality is active again, and Rpc does not reload; in-flight calls follow the [methods](../contracts/session-boundary.md) contract; disposer cancels local work, terminates OCR processes, closes realtime connections, writes `interrupted` for host tasks and tasks without handle | Rpc, Modality |
 | Settings change | Read at next use; availability recomputed; existing tasks keep their resolved executor; no reload | Modality |
 | Duplicate `submit` with the same `client_task_id` | Existing task returned | Modality |
 | Client detach while waiting | Task continues; that client's realtime connections close | Modality |
@@ -421,7 +421,7 @@ Flow tests through `modality.*` methods with a fake adapter plugin (controllable
 | A14 | OCR component runs with input read access and no network | Judgment; overview isolation supplement | Weaker isolation |
 | A15 | OCR runs on the control node unless the caller names a configured node | Modality has no Session | A Session-derived default node needs a Session parameter |
 | A16 | Modality settings (OCR component path per node, concurrency and retention limits) are business configuration in a Settings business source `modality` | ADR 002 D4; the path is read per task and changes no loaded row | A path change would reload Modality as a structural loader field |
-| A17 | Adapters are named process services `modalityAdapter` collected by Modality; an adapter reload reloads Modality and, through the method table, Rpc | ADR 002 D2, D3, D5 | Adapters built into Modality only |
+| A17 | Adapters are named process services `modalityAdapter` collected by Modality; an adapter reload reloads Modality; Rpc looks up Modality per call and does not reload | ADR 002 D2, D3, D5 | Adapters built into Modality only |
 
 ## Appendix F. Open questions
 

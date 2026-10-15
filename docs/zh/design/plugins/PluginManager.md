@@ -28,7 +28,7 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。内容所有者依赖 `pluginContents`，按 D3 予以接受：安装、启用或移除包会以数据更新（`changed`）的方式改变已发布的来源，从不触发重载；而 PluginManager 重载（升级、崩溃）会重载内容所有者。Rpc 收集 PluginManager 的 `managementMethods` 服务（key `plugin`），因此 PluginManager 重载也会重载 Rpc。两者都是少见的结构性事件，其传播被记录在案，而非被阻止。包代码行是普通的 loader 行：它们提供其代码在 `provides` 中声明的命名服务（例如 `toolContribution`、`sessionMethods`、`modalityAdapter`），消费方按服务名和作用域收集它们；当某一行卸载时，其依赖方按同一规则重载。离线对端节点上的代码行不会卸载：其导入的服务保持注册并以 `node_unavailable` 使调用失败，其依赖方既不重载也不变为 Pending（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 [§9](#9-向机制所有者提出的需求)）。
+所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。内容所有者依赖 `pluginContents`，按 D3 予以接受：安装、启用或移除包会以数据更新（`changed`）的方式改变已发布的来源，从不触发重载；而 PluginManager 重载（升级、崩溃）会重载内容所有者。Rpc 按调用查找 PluginManager 的 `managementMethods` 服务（key `plugin`），不随它重载（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。PluginManager 重载是少见的结构性事件，它向内容所有者的传播被记录在案，而非被阻止。包代码行是普通的 loader 行：它们提供其代码在 `provides` 中声明的命名服务（例如 `toolContribution`、`sessionMethods`、`modalityAdapter`），消费方按服务名和作用域收集它们；当某一行卸载时，其依赖方按同一规则重载。离线对端节点上的代码行不会卸载：其导入的服务保持注册并以 `node_unavailable` 使调用失败，其依赖方既不重载也不变为 Pending（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 [§9](#9-向机制所有者提出的需求)）。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
@@ -152,7 +152,7 @@ sequenceDiagram
 | 插件运行时其业务配置变更（Settings 类型化操作） | 业务数据更新与通知；不重载；下次使用读取新值 | 插件、Settings |
 | 同一 id 的两次安装 | 第二次等待锁，然后 `plugin_exists` | PluginManager |
 | 分支使用某包的 Skill 时该包被禁用 | 分支保留其已采纳的提示词，直至重新采纳 | Skills 所有者 |
-| PluginManager 重载 | 内容所有者与 Rpc 随之重载（D3）；在途的 install/remove `operation_interrupted` | PluginManager |
+| PluginManager 重载 | 内容所有者随之重载（D3）；重新激活前 `plugin.*` 返回 `unknown_method`，Rpc 不重载；在途的 install/remove `operation_interrupted` | PluginManager |
 
 完整表格：[附录 B](#附录-b-完整冲突表)。
 
@@ -324,7 +324,7 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 | 安装 | 锁定 `(node, id)`（A10），`stage`，与意图比较，`commit`，`plugins.install`，发布来源，回复；Settings 写入失败会留下一个未被引用的目录，稍后回收（A11） |
 | 发布 | `apply` 时校验每个已启用包并构建来源；每次操作后更新来源并递增 revision；校验失败的包被撤回并报告为 `failed` |
 | 代码行 | `apply` 校验完整性，否则以 `integrity_failed` 失败；`set_enabled`/`update` 通过 `Loader` 重启它们；每个代码行在使用时读取自己的业务配置 |
-| PluginManager 重载 | 内容所有者与 Rpc 随之重载（D3）；在途的 install/remove 返回 `operation_interrupted`；代码行不受影响 |
+| PluginManager 重载 | 内容所有者随之重载（D3）；重新激活前 `plugin.*` 返回 `unknown_method`，Rpc 不重载；在途的 install/remove 返回 `operation_interrupted`；代码行不受影响 |
 | 进程重启 | Loader 恢复各行；包重新校验；暂存区删除；孤立目录在 loader 稳定后回收 |
 
 ## 附录 B. 完整冲突表
