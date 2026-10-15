@@ -160,7 +160,7 @@ Queue inputs are consumed when Loop starts the turn they drive. Steer inputs are
 
 ## 7. Security
 
-Only plugins in the control node's process hold `sessions`, and it is never exported over RPC entries or rutis links. Process callers withdraw an input by the `input_id` they received when writing it, and clients withdraw through Rpc's Session authorization. Markers are model-facing text: shared components (InputQueue, Agents, the runtime) never parse them; the plugin that wrote a marker may interpret its own content. Writing input confers no authority, because the resulting tool calls are admitted by Approval and Permission under the Session's policy. Inputs are replayed into model context, so callers must not put credentials or host security settings into them.
+Only plugins in the control node's process hold `sessions`, and it is never exported over RPC entries or rutis links. Process callers withdraw an input by the `input_id` they received when writing it, and clients withdraw through Rpc's Session authorization. Markers are model-facing text: shared components (InputQueue, Agents, the runtime) never parse them; the plugin that wrote a marker may interpret its own content. Writing input confers no authority, because the resulting tool calls are admitted by Approval and Permission under the Session's policy. The policy cap of `launch` is a convention for well-behaved callers, not a security boundary: the caller supplies `starter` itself, and without one the cap is the host's Session defaults ([sessions service §11](../appserver/sessions-service.md#11-security-and-authority)). Inputs are replayed into model context, so callers must not put credentials or host security settings into them.
 
 ## 8. Rule check
 

@@ -30,8 +30,10 @@ forwards to the InputQueue withdrawal service that S1 adds.
   `stop`.
 - **Withdraw.** `withdraw` forwards to S1's branch withdrawal service. S1 owns the semantics.
 - **Lifecycle.** Agents owns launched Sessions like any other Session; `sessions` neither closes nor unloads them.
-  Loaded Sessions accumulate (§2, finding 6), so idle unload is raised as a follow-up that comes before
-  Scheduler's create-mode jobs ship (§8.6).
+  Loaded Sessions accumulate (§2, finding 6), so idle unload is raised as a follow-up
+  ([#126](https://github.com/arcships/dim/issues/126)) that comes before Scheduler's create-mode jobs ship (§8.6).
+  Stored Sessions accumulate too, so a consumer deletes each run's Session when it drops the run's record, through a
+  `sessions.delete` that forwards to S5c's delete once that exists (§8.7).
 
 No new plugin, no Timeline event, no storage format change, no runtime or facade change, and no requirement on
 rutis.
@@ -72,6 +74,7 @@ the contract refinements in §12.
 | D11 | `history` pages the branch's own events with `after`, `limit` and a fixed `through`, as `AgentEvent` records | One reply with the whole history, ancestors included | That reply has no size bound across the bridge. Each branch numbers its own sequences, so one cursor cannot page across ancestors. Launched Sessions are read on `main`, which has no ancestors |
 | D12 | `sessions` has no `close` or `release`; Agents owns launched Sessions | Closing a run's Session when the caller is done; counting releases | Closing ends the Session for every user of it (design rules §4 rule 8: detaching is not closing). Unloading is a host decision, and it must cover client Sessions too (§8.6) |
 | D13 | No `sessions.fork` | Adding one with S2 | It has no consumer. S5c owns creation from a cut (`AgentIndex::fork`, [#97](https://github.com/arcships/dim/pull/97)) |
+| D14 | The consumer that launched a Session deletes it when it drops the last record that names it, through `sessions.delete`, which forwards to S5c's `AgentIndex::delete` (§8.7) | The user cleans up by hand; deleting the Session when its run ends | One job every five minutes adds about 288 Sessions a day to every client's list, and once a run record expires nothing ties its Session to the job. A run must stay readable while its record exists. The consumer's run retention (Scheduler A8, Workflow A9) already decides how long that is, so Sessions are bounded by it and none is left that no record names |
 
 ## 4. Structure
 
@@ -333,8 +336,9 @@ A run with one input, a second input withdrawn while it is held, and the wait:
 
 Agents owns a launched Session's instance and record like any other Session. Current clients list it, and a user can
 attach to it, answer its approvals, stop, close or delete it. The caller owns only its own records that name the
-Session (run records) and the inputs it wrote. Lifetimes are not linked: closing or deleting the starter does not
-touch a launched Session, and closing a launched Session only makes the caller's later calls fail `session_closed`.
+Session (run records) and the inputs it wrote, and deletes the Session when it drops the last such record (§8.7).
+Closing or deleting the starter does not touch a launched Session, and a user closing or deleting a launched Session
+only makes the caller's later calls fail `session_closed`.
 
 ### 8.2 Loading, closing and unloading
 
@@ -373,11 +377,40 @@ roughly 86 MB of allocations and 12,000 tasks, and each later creation is slower
 - **Scope.** It applies to every Session, not only launched ones.
 - **Open questions it owns.** Those #57 left open: whether detached work blocks the unload, and when to check (when
   the last lease drops, and when a Session without leases becomes idle).
-- **Dependency order.** S2, then idle unload (Agents lane; it reopens S3/#57 with this measurement), then Scheduler's
-  `create`-mode jobs at volume (P6).
+- **Dependency order.** S2, then idle unload (Agents lane, [#126](https://github.com/arcships/dim/issues/126); it
+  reopens S3/#57 with this measurement), then Scheduler's `create`-mode jobs at volume (P6).
 
 S2 needs no change for it. Every call holds a lease, `sessions` keeps no state in a loaded Session, and an `idle` wait
 ends at the first idle point, so a stale wait never pins a Session past it.
+
+### 8.7 Target: deleting run Sessions (follow-up)
+
+Idle unload bounds memory, but every launched Session also stays in storage and in every client's Session list. One
+job every five minutes adds about 288 a day. The target (D14):
+
+- **Who and when.** The consumer that launched a Session deletes it when it drops the last record that names it.
+  Scheduler does so when a run falls out of its run history (A8, the last 100 runs per job) or when the job is
+  deleted; a `reuse` Session is named by its job, so it goes with the job. Workflow does so when a run record falls
+  out of its retention (A9, the last 100 runs); the record names every stage Session of the run.
+- **Finished runs only.** A delete closes the Session and so stops its turn. A consumer deletes a run's Session only
+  once the run is terminal; a run that outlives its job's deletion (Scheduler A14) has its Session deleted when it
+  ends.
+- **Order.** The consumer deletes the Session first and drops the record after. A failed delete keeps the record, so
+  the next pass retries; a delete of a Session that is already gone succeeds, so a crash between the two steps is
+  harmless.
+- **Keeping a run.** A user who wants to keep a run's conversation forks it (S5c's `session.fork`). No record names
+  the fork, so it stays until the user deletes it.
+- **Left to the user.** A Session left by a lost `launch` reply (§6.1) is named by no record. The user removes it
+  with the CLI's cleanup by age or count, composed from `session.summaries` and `session.delete` (S5c §5.1; F6,
+  [#77](https://github.com/arcships/dim/issues/77)).
+- **Method.** `sessions.delete {sessionId}` → `{}` forwards to S5c's `AgentIndex::delete`
+  ([#97](https://github.com/arcships/dim/pull/97)): admission gate, close, then the Session's rows and files. S5c's
+  `session.delete` is an Rpc built-in, which a process plugin cannot call. Like every `sessions` method it carries no
+  caller identity, so it does not check that the caller launched the Session (§11).
+- **Dependency order.** S5c's `AgentIndex::delete`, then `sessions.delete` in the Agents lane: with S2's
+  implementation if S5c has merged by then, otherwise right after it, adding the method to A.1 at that point (nothing
+  is stubbed, roadmap §3.6). Then the consumers' deletes (P6 [#70](https://github.com/arcships/dim/issues/70), P7
+  [#71](https://github.com/arcships/dim/issues/71)).
 
 ## 9. Errors
 
@@ -416,10 +449,12 @@ ends at the first idle point, so a stale wait never pins a Session past it.
 - **Trust.** `sessions` serves only trusted plugins in the control node's process. `HostDispatch` carries no caller
   identity, so `sessions` does not authorize callers. A trusted in-process plugin is not sandboxed by its dependency
   declarations (AGENTS.md, Agent v4 rule 11).
-- **Launch never widens.** The cap (§6.1) guarantees that automation cannot get a wider policy than its starter, or
-  than the host defaults when there is no starter
-  ([ADR 003 D5](../../adr/003-approval-scope.md#d5-unchanged)). A user can still change a launched Session's policy
-  through `session.permission.update`, as for any Session.
+- **Policy cap.** The cap (§6.1) keeps a launched Session within its starter's current policy, or within the host
+  defaults when the request names no starter. It is a convention for well-behaved consumers, not a security boundary:
+  the caller fills in `starter` itself, and without one the cap is the host defaults, which can be wider than the
+  starter's policy. Callers are trusted in-process plugins (above), so `sessions` cannot tell a run with no starter
+  from one that left it out. A user can still change a launched Session's policy through `session.permission.update`,
+  as for any Session.
 - **Approval.** Tool calls in a launched Session go through Approval and Permission under its own policy. A run started
   by configuration (a job, a definition) needs no host-local approval
   ([ADR 003 D2](../../adr/003-approval-scope.md#d2-no-host-local-approval-for-configuration)).
@@ -433,6 +468,7 @@ ends at the first idle point, so a stale wait never pins a Session past it.
 - **Intro, §4, Appendix B, §8 (D3).** An Agents reload fails the calls in flight with `reloading`; callers do not
   reload (D1, #35).
 - **§3.1.** The `launch` arrow loses `source` and the reply gains `policy`.
+- **§7.** The policy cap is a convention for trusted callers, not a security boundary (§11).
 - **A.1.**
   - The sentence "A caller's `source` is fixed by Agents …" is removed: rutis passes no caller identity, and §9.3
     already withdrew the requirement.
@@ -475,7 +511,7 @@ contract proposal is needed.
 | ADR 002 D3 | Consumers depend on Agents; no core part depends on a consumer. The per-call index lookup keeps consumers out of index reloads (#35) |
 | ADR 002 D4 | No configuration added; the host bound is the host's existing Session defaults |
 | ADR 002 D5 | Neutral contract in §6 and A.1; Rust binding in Appendix A; errors as data; cancellation by dropping the call |
-| ADR 003 | Launch never widens authority; tool calls in launched Sessions are admitted by Approval and Permission |
+| ADR 003 | The launch cap keeps a well-behaved consumer within its starter's policy, a convention rather than a security boundary (§11); tool calls in launched Sessions are admitted by Approval and Permission under the launched Session's own policy |
 
 ## 14. Requirements raised to mechanism owners
 
@@ -507,7 +543,7 @@ contract proposal is needed.
 | Existing mechanisms considered | Closing runs: ends the Session for every user of it (D12). `Session::unload_if_idle`: exists, but has no caller |
 | Generic capability | §8.6: the host unloads a loaded Session when it is idle and no lease holds it; `acquire` restores it |
 | Effect on sequence, batch, interrupt, reload | None on the Timeline: idle release records no events, and the next use restores the Session |
-| Owner and issue | Agents lane (yyhhyyyyyy), reopening S3 ([#57](https://github.com/arcships/dim/issues/57)); due before Scheduler's create-mode jobs ship |
+| Owner and issue | Agents lane (yyhhyyyyyy), [#126](https://github.com/arcships/dim/issues/126), reopening S3 ([#57](https://github.com/arcships/dim/issues/57)); due before Scheduler's create-mode jobs ship |
 
 Nothing is raised to rutis.
 
@@ -518,13 +554,22 @@ For the Scheduler and Workflow design reviews (zerob13); S2 does not edit those 
 - **Rust binding.** Their Appendix G's `AgentIndex::launch -> SessionUse` and `service::<InputQueue>` become the named
   service (§5); `SessionUse` is internal to Agents.
 - **Model.** `model` is `{providerId, modelId}`.
+- **Starter.** The cap holds only for a consumer that passes `starter` whenever a Session started the run (§11): the
+  Session that created a Scheduler job (A15), or a Workflow run's starter branch.
 - **Policy reads.** `sessions` has no policy read. A launch caps the policy and replies with the effective one (D6). A
   cap captured at save (Scheduler A15) or Workflow's start-time check needs the starter's policy from the calling
   Session's own part, or a read method proposed in their review. The same holds for Scheduler's reuse check.
 - **History.** `sessions.history` pages with `after` and `limit`.
 - **Reloads.** `inject: ['sessions']` does not reload with the Agents index (D1), so a run no longer has to end
   `interrupted` on an Agents reload; an in-flight call fails `reloading`.
-- **Accumulation.** Run Sessions stay loaded until idle unload lands (§8.6), and `launch` is not idempotent (§6.1).
+- **Loaded Sessions.** Run Sessions stay loaded until idle unload lands (§8.6,
+  [#126](https://github.com/arcships/dim/issues/126)), which comes before `create`-mode jobs ship. `launch` is not
+  idempotent (§6.1).
+- **Deleting run Sessions.** A requirement on both designs (§8.7): Scheduler and Workflow delete each Session they
+  launched when they drop the last record that names it (Scheduler: a run leaving the last 100 of its job, or the job
+  deleted; Workflow: a run leaving the last 100), once the run is terminal, Session first and record after, through
+  `sessions.delete`. Users keep a run by forking it, and remove the Sessions of lost `launch` replies with the CLI's
+  cleanup.
 - **Waiting again.** "Not consumed yet, wait again" must not loop on `idle`: on an idle branch it returns at once.
   An input with neither result at the cutoff is held (§6.4, item 2).
 
@@ -538,6 +583,8 @@ is stubbed before then (roadmap §3.6).
    assembly lane).
 3. The lookup moves into Agents; Rpc's `session.input_lookup` calls it.
 4. `xtask graph` and `xtask check` for the new service.
+5. If S5c's `AgentIndex::delete` has merged by then, `sessions.delete` and its A.1 row (§8.7); otherwise it follows
+   S5c.
 
 Flow tests, in `crates/dim-app-server/tests/`, use a Rust test process plugin that injects `sessions` by name
 (`Keyed<dyn HostDispatch>`, as `plugin_files_flow` does), so they exercise the neutral path:
@@ -555,7 +602,8 @@ Flow tests, in `crates/dim-app-server/tests/`, use a Rust test process plugin th
    open until `stop`.
 5. **Reload.** An Agents index reload during `idle` ends it with `reloading`; the test plugin stays active and its
    next call succeeds.
-6. **Delete (with S5c).** A delete during `idle` ends it with `session_closed`.
+6. **Delete (with S5c).** A delete during `idle` ends it with `session_closed`. With `sessions.delete`: the plugin
+   deletes a launched Session after its run, later calls on it fail `session_closed`, and a second delete succeeds.
 
 ## Appendix A. Rust binding
 

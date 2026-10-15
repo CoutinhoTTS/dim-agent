@@ -160,7 +160,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ## 7. 安全
 
-只有控制节点进程中的插件持有 `sessions`，它从不经 RPC 入口或 rutis 链接导出。进程调用方凭写入时拿到的 `input_id` 撤回输入，客户端通过 Rpc 的 Session 授权撤回。标记是写给模型看的文本：共享组件（InputQueue、Agents、运行时）从不解析它；写入标记的插件可以解释自己写的内容。写入输入不授予任何权限，因为由此产生的工具调用由 Approval 与 Permission 按该 Session 的策略准入。输入会重放进模型上下文，因此调用方不得把凭据或宿主安全设置放入其中。
+只有控制节点进程中的插件持有 `sessions`，它从不经 RPC 入口或 rutis 链接导出。进程调用方凭写入时拿到的 `input_id` 撤回输入，客户端通过 Rpc 的 Session 授权撤回。标记是写给模型看的文本：共享组件（InputQueue、Agents、运行时）从不解析它；写入标记的插件可以解释自己写的内容。写入输入不授予任何权限，因为由此产生的工具调用由 Approval 与 Permission 按该 Session 的策略准入。`launch` 的策略上限是给守规矩的调用方用的约定，不是安全边界：`starter` 由调用方自己填，不传时上限是宿主的 Session 默认值（[sessions 服务 §11](../appserver/sessions-service.md#11-安全与权限)）。输入会重放进模型上下文，因此调用方不得把凭据或宿主安全设置放入其中。
 
 ## 8. 规则检查
 
