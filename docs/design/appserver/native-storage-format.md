@@ -5,6 +5,8 @@ Startup requires the exact v13 SQL schema and a single format marker of 13
 before writable PRAGMAs. Older databases and the removed branch-only v14
 `user_configuration` format are unsupported and preserved, never migrated,
 downgraded or interpreted as v13. No migration API or startup option is provided.
+Roadmap item S5a plans the first in-place upgrade, from exactly v13 to v15; it is
+not implemented yet ([S5a v15 decision](#s5a-v15-格式决定)).
 Existing v13 schemas and document bytes remain compatible. Storage versions are
 independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
@@ -194,7 +196,28 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件设计为下一版本作出的决定见下节。
+
+### S5a v15 格式决定
+
+[路线图](../roadmap.md) S5a（[Session 文件](session-files.md#8-storage-format)，尚未实现）的格式决定：升级到 **v15**，不是 v13 内的增量，也不用 14。实现前，本文其余部分描述的当前格式仍是 v13。
+
+- **新增两张表与一个索引**：`session_files(file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)` 与 `session_file_owners(session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), file_id TEXT NOT NULL REFERENCES session_files(file_id), PRIMARY KEY (session_id, file_id))`，索引 `session_file_owners_by_file(file_id)`。`agent_store_format` 的约束改为 `CHECK (version = 15)`。
+  - `file_id` 是小写带连字符的 UUID v4，也是目录名。
+  - `node` 是写入时 Session 的 `resourceNode`，NULL 表示控制节点。
+  - `writer` 在写入未完成时是 SessionStore 代次 ID，提交或放弃后为 NULL。
+  - 删除 Session 时，先删其 `session_file_owners` 行，再删 `agent_sessions`。
+  - S5c 的分叉与删除只增删 `session_file_owners` 行，清扫只读 `session_files`，不为 Session 文件再改格式。
+- **不能留在 v13**：启动要求精确的 v13 SQL 结构，v13 守护进程会拒绝多出表的库。旧守护进程无法打开新库，不满足本节"旧读取器能正确解释新值"的保持条件。C2 和 S8a 留在 v13，是因为它们只在现有表内增加 JSON 字段或行。
+- **不用 14**：分支专用的 v14（`user_configuration`）曾经提交（e41ceaf），后被移除（fb3748e）；带 14 标记的开发库可能存在，本文承诺永不解释它们。复用 14 就是给不兼容的已提交格式复用版本号。
+- **读取或转换路径**：在现有的启动准入事务（`IMMEDIATE`，写入型 PRAGMA 之前）内处理：
+  - 空库直接建 v15。
+  - 结构恰为 v13 且标记为 13 的库，在同一事务内重建 `agent_store_format`、写入 15，并建新表和索引。不读取、不改写任何已有行；失败则回滚，原 v13 库保持不变。
+  - 恰为 v15 的库直接打开。
+  - 其他库（更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
+- **单向**：v13 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。这是增量改动，代价可以接受；另一种做法是拒绝所有 v13 库，会丢失用户的 Session。之后的格式各自追加从前一版本出发的一步。
+- **升级日志**：升级事务提交后，打开存储的调用方得知已升级，守护进程向 stderr 写一行 `Upgraded native store <path> from format v13 to v15; earlier dimcode versions cannot open it.`。只有执行升级的那次启动写这一行。它直接写 stderr，不走 `tracing`，因为守护进程默认的日志过滤只保留错误。CLI 启动的守护进程的 stderr 就是数据库目录下私有的 `daemon.log`，回退旧版本的用户能在旧守护进程的拒绝信息旁找到原因。
+- **验证**：测试用 v13 结构的冻结副本构建一次性 v13 库，从不打开用户已有的库。
 
 ## 索引与实际查询
 
