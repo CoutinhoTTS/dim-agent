@@ -13,7 +13,7 @@ Goal keeps a standing objective on a branch. While the goal is open, every `turn
    └─ session.goal.set ─▶ goal/open ─▶ Goal queues the objective ─▶ turn runs
  turn/end N ─▶ goal open ─▶ evaluator branch cut at N
                               checks the facts, ends with a verdict
-            ◀─ goal/verdict{after N}
+            ◀─ goal/verdict{after N, open G}
                ├─ continue → Queue input: objective + feedback ─▶ next turn
                ├─ done     → goal/close{completed}   (user sees the summary)
                └─ blocked  → goal/close{blocked}     (user sees what is needed)
@@ -52,7 +52,7 @@ Goal declares three events on the branch Timeline. They are not model context, s
 | --- | --- | --- | --- |
 | `goal/open` | `{objective?: string}`; present: set or edit, absent: resume | `B:Goal.write` | Goal: opens the goal and queues the objective |
 | `goal/close` | `{reason: "paused" \| "cleared" \| "interrupted" \| "completed" \| "blocked" \| "limit", summary?: string}` | `B:Goal.write` (paused, cleared); Goal itself (the rest) | Goal: closes the goal |
-| `goal/verdict` | `{after: N, result: "done" \| "continue" \| "blocked", feedback: string}` | Goal, when its evaluator for `turn/end` N ends | Goal: closes or continues (§5.2) |
+| `goal/verdict` | `{after: N, open: G, result: "done" \| "continue" \| "blocked", feedback: string}`; `G` is the sequence of the `goal/open` in effect when the evaluator started | Goal, when its evaluator for `turn/end` N ends, or at load for an evaluator that did not survive recovery (§8) | Goal: closes or continues (§5.2) |
 
 Why they cannot be derived: whether a goal is open and what the evaluator decided are not facts of any existing event. `goal/verdict` is also the terminal fact of the evaluator, which Goal started on this branch ([time bus §2](../../architecture/rust-agent/time-bus.md)); the evaluator's start is the existing `branch/create` on this branch.
 
@@ -66,7 +66,7 @@ Goal reads only its branch's **local** events; `goal/*` events in the ancestor p
 | --- | --- |
 | `objective` | The latest `objective` in a `goal/open`; none after `goal/close{cleared}` |
 | `open` | The latest of `goal/open`, `goal/close` and `stop/interrupt {scope: turn}` is `goal/open`, and `objective` exists. An interrupt closes the goal at its own sequence, so the cancelled `turn/end` that follows it starts no evaluator even before Goal's `goal/close{interrupted}` commits |
-| `count` | `goal/verdict` events with `result = continue` after the latest `goal/open` |
+| `count` | Goal's continuation inputs (`kind="continuation"`) after the latest `goal/open`, so only continuations actually written use the budget |
 
 All of it is rebuilt by folding the local events at load. In memory only: the evaluator task in flight.
 
@@ -80,15 +80,15 @@ All decisions are taken after the whole batch of the consumed event.
 | `turn/end` N, goal open | Start the evaluator for N (§5.3) |
 | `stop/interrupt {scope: turn}` that closed an open goal | Write `goal/close{interrupted}`, the record and the closing note for it |
 | `goal/close` | Write the closing note (Append); close the evaluator in flight, if any |
-| `goal/verdict` for N | Ignored unless the goal is open and there is no `turn/start` after N. Then: `done` → `goal/close{completed}`; `blocked` → `goal/close{blocked}`; `continue` → `goal/close{limit}` if `count > maxContinuations`, else the continuation input (Queue) |
+| `goal/verdict` for N | Applies only if the goal is open, `G` is still the latest `goal/open` and there is no `turn/start` after N; otherwise ignored. Then: `done` → `goal/close{completed}`; `blocked` → `goal/close{blocked}`; `continue` → `goal/close{limit}` if `count >= maxContinuations`, else the continuation input (Queue) |
 
-The single staleness rule (no `turn/start` after N) covers user input that arrived during evaluation: that input's turn ends with its own `turn/end`, which is evaluated instead. Reaching the limit is treated like a blocked goal: the goal closes, and `resume` reopens it with the count restarted.
+A verdict therefore applies only to the goal and the turn it evaluated. A `goal/open` after `G` (set, edit or resume, including after a pause or clear) makes it stale even before any new turn starts; a `turn/start` after N means user input arrived during evaluation, and that turn's own `turn/end` is evaluated instead. Reaching the limit is treated like a blocked goal: the goal closes, and `resume` reopens it with the count restarted.
 
 ### 5.3 Evaluator
 
-1. `S:TreeCommands.branch(parent = this branch, at = N, {source: host, operation_id: "goal:N", prompt})`. The child inherits the branch history up to N, and its permission policy is the branch's own at N (Permission replays the ancestor prefix). The prompt is the evaluator input (§7).
+1. Record `G`, the latest `goal/open` consumed through N. `S:TreeCommands.branch(parent = this branch, at = N, {source: host, operation_id: "goal:N", prompt})`. The child inherits the branch history up to N, and its permission policy is the branch's own at N (Permission replays the ancestor prefix). The prompt is the evaluator input (§7).
 2. Await the child's idle, read its last assistant message, and parse the verdict at this boundary: a last line `DONE: <summary>`, `CONTINUE: <feedback>` or `BLOCKED: <reason>`. Anything else is `continue` with the message as feedback.
-3. Write `goal/verdict{after: N, ...}`, then close the child. A failed child (creation or turn failure) yields `blocked` with feedback "evaluation failed".
+3. Write `goal/verdict{after: N, open: G, ...}`, then close the child. A failed child (creation or turn failure) yields `blocked` with feedback "evaluation failed".
 
 At most one evaluator runs per branch: a new `turn/end` only happens after a new turn, which already makes the running evaluator's verdict stale, so Goal closes it and starts the new one.
 
@@ -124,7 +124,7 @@ Everything the model sees is an `input/message` written by Goal, whose first raw
 | --- | --- |
 | Interrupt during a turn or during evaluation | `goal/close{interrupted}`; the evaluator is closed; its verdict, if written, is ignored |
 | Pause or clear during evaluation | Same as above, with its own reason |
-| Goal reload or process restart with an evaluator in flight | The task ends with the generation. At load, if the goal is open and the latest `turn/end` has no `goal/verdict`, Goal closes the leftover child (`operation_id = "goal:N"`) and starts a new evaluator for N |
+| Goal reload or process restart with an evaluator in flight | The task ends with the generation. Started work is not re-executed ([overview constraint 4](../overview.md#3-integration-methods)): at load, for an evaluator `branch/create` (`operation_id = "goal:N"`) without a later `goal/verdict` for N, Goal closes the leftover child and writes `goal/verdict{after: N, open: G, blocked, "evaluation did not survive recovery"}`. If it still applies, the goal closes as blocked; the user resumes it explicitly |
 | Evaluator branch fails to create or its turn fails | `goal/verdict{blocked, "evaluation failed"}` |
 | Branch close | Goal unloads; the evaluator is closed with the parent branch |
 | Unknown branch, closed Session | `branch_missing`, `session_closed` |
@@ -139,13 +139,15 @@ Flow tests through the Session methods and Timeline events, with a fake model fo
 
 1. Set on an idle branch: the objective input starts a turn; at its end an evaluator branch is created at that `turn/end`; `CONTINUE` queues a continuation with the feedback; `DONE` writes `goal/close{completed}` and no further turn.
 2. `BLOCKED` closes with the reason; an unparsable verdict counts as `continue`.
-3. Limit: with `maxContinuations = 2`, the third `continue` writes `goal/close{limit}`; `resume` reopens with the count restarted.
+3. Limit: with `maxContinuations = 2`, two continuations are written and the third applicable `continue` writes `goal/close{limit}`; `resume` reopens with the count restarted.
 4. Interrupt during a turn and during evaluation: `goal/close{interrupted}`, evaluator closed, a late verdict ignored.
 5. User input during evaluation: the verdict is ignored (a `turn/start` follows N); the user turn's end is evaluated.
-6. Reload and restart with an evaluator in flight: exactly one verdict for that `turn/end`.
+6. Reload and restart with an evaluator in flight: the evaluator is not rerun; one `blocked` verdict settles it and the goal closes; `resume` continues.
 7. A child branch of a branch with an open goal has no goal; the evaluator branch does not start evaluators.
 8. The evaluator's policy equals the branch's policy at N.
 9. Pause twice, resume without an objective, clear then resume: no state change and no error.
+10. Reopen before the next turn: while evaluating N under `G`, `clear` then `set` (and separately `pause` then `resume`) before any `turn/start`; the old evaluator's `DONE` or `BLOCKED` is ignored and the new goal stays open.
+11. A stale `continue` (user input started a turn during evaluation) writes no continuation and does not use the budget.
 
 ## 11. Open questions
 

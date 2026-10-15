@@ -454,7 +454,7 @@ A tool call that "has a call but no result" does not mean "waiting for an answer
 | Integration | The `session.goal.*` methods call the branch capability through Rpc, as Approval is reached; they only write `goal/*` events and never read the state. At each `turn/end` of an open goal, Goal creates an evaluator child branch at that `turn/end` through `TreeCommands`; it inherits the history and the permission policy at that point, checks the facts and ends with a verdict. Continue: Goal writes a Queue continuation input with the objective and the evaluator's feedback. Done or blocked: Goal closes the goal. All model-visible text is input Goal writes when it consumes its events; no keyed blocks |
 | Events | `goal/open`, `goal/close`, `goal/verdict` (see the [Goal design](plugins/Goal.md)) |
 | Interfaces | Session methods `session.goal.set/edit/pause/resume/clear/get`; no model tool |
-| Relations | The only staleness rule: a verdict for `turn/end` N applies only if no `turn/start` follows N. An interrupt closes the goal at its own sequence. Reaching the limit closes the goal like a blocked one; `resume` reopens it. Details: [Goal](plugins/Goal.md) |
+| Relations | A verdict applies only to the goal and turn it evaluated: its `goal/open` is still the latest and no `turn/start` follows its `turn/end`. An evaluator interrupted by reload or restart is not rerun; it settles as blocked. An interrupt closes the goal at its own sequence. Reaching the limit closes the goal like a blocked one; `resume` reopens it. Details: [Goal](plugins/Goal.md) |
 
 ### 5.3 ShellInput
 
