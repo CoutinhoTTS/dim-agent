@@ -2,6 +2,8 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
 
+> **To refine in design review.** Notifying a run's outcome is Scheduler's own feature. The run-outcome event notice for Notifications and the cross-language named process events it requires (§9.1) are withdrawn with Notifications.
+
 Scheduler keeps scheduled jobs, which are user-written configuration, in its Settings business source `schedule`, and their run history in its process storage, [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage). While the daemon is alive and a window is due, the process part creates a non-interactive Session through `sessions.launch` (or reuses one) and writes the job prompt as a Queue input with its own source marker through `sessions.input` ([session-access](../contracts/session-access.md)), as Collaboration reaches its members. The Session part offers the `schedule` tool (risk `persistent_configuration`) to interactive leader Sessions as a `toolContribution`. Operators use the `schedule.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). Scheduler writes no Timeline event of its own: a run's outcome is read from the run Session's history and published as a run-outcome event notice.
 
 ## 1. Structure

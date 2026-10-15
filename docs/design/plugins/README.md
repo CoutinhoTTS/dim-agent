@@ -2,7 +2,7 @@
 
 Designs of the new plugins planned in the [overall design](../overview.md). Implemented plugins and their capabilities are documented in [architecture/rust-agent/plugins](../../architecture/rust-agent/plugins/README.md). Rules: [design rules](../../architecture/rust-agent/principles.md) §1 and §4, [ADR 002](../../adr/002-plugin-scope.md). Shared contracts: [session-access](../contracts/session-access.md), [session-boundary](../contracts/session-boundary.md).
 
-A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft, except Questions and ExternalAgent, which need redesign, and Hooks, which is to be designed.
+A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft, except Questions and ExternalAgent, which need redesign, Hooks, which is to be designed, and Notifications, which is withdrawn.
 
 ## Index
 
@@ -15,7 +15,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:objective` and `goal:status` blocks, continuation | P2 |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2 |
 | [Hooks](Hooks.md) | — | rules, Session-start hooks | before callbacks, post-tool and turn-end hooks | To be designed |
-| [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | P2 |
+| [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
 | [ExternalAgent](ExternalAgent.md) | connections, ModelHost kind | — | — | P3 (needs redesign) |
@@ -29,5 +29,5 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | Scope | Parts |
 | --- | --- |
 | Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
-| Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Hooks, Notifications, Scheduler, Workflow |
+| Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Hooks, Scheduler, Workflow |
 | Branch Capabilities | Questions, Goal, Hooks |

@@ -28,7 +28,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 ## 2. 排期原则
 
-1. **契约先行。** 多个插件共用的契约先定稿（只改文档），再开工：`sessionMethods`（5 个插件和 InputQueue 撤回用）、Settings 业务源（6 个插件用）、`SessionConfig.interactive`（3 个插件读）。契约定稿后再改，所有使用方都要跟着改。
+1. **契约先行。** 多个插件共用的契约先定稿（只改文档），再开工：`sessionMethods`（4 个插件和 InputQueue 撤回用）、Settings 业务源（5 个插件用）、`SessionConfig.interactive`（2 个插件读）。契约定稿后再改，所有使用方都要跟着改。
 2. **core 按项拆 PR。** 每个工作项单独一个 PR。集中修改的文件（Rpc、装配、`agents.rs`、存储）各由一个负责人依次合入（§3.4）。
 3. **插件按自己的依赖开工。** 一个插件依赖的工作项全部合入，它就开工，不等无关的 core 工作。第一个真实使用者负责验收对应的机制。
 4. **core 项要有已 Ready 的使用者才开工。** 暂时没有使用者的项推迟，例如 #2 动态事件（Questions 要重新设计）。
@@ -43,12 +43,14 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 1. 合入 #14，再合入 #16 并补 ADR 003 D3。两个 PR 都改 MCP，先合改动大的 #14。
 2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8 Settings 业务源（§5.2）。
-3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle、Notifications（§5.2）。
+3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
 4. 决定 Goal 还是 Pursuit（D3）。
 5. 确认三项可能不需要的工作：固定前缀读（现有 `history(branch, Some(n))`）、Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
 6. 为确定要做的运行时和 rutis 需求开 issue（总体设计附录 F）。
 
 不排期，等设计完成：Questions（需要重新设计）、Hooks（待设计，作为第三方插件兼容机制单独设计）、ExternalAgent（需要重新设计）、#2 动态事件（没有使用者）。
+
+已撤回：Notifications。提醒归客户端，定时任务结果通知归 Scheduler，对外沟通渠道由各平台各自的插件和工具负责。
 
 ### 3.2 core 工作项
 
@@ -56,10 +58,10 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 | ID | 内容 | 规模 | 负责线 | 前置 | 使用者 |
 | --- | --- | --- | --- | --- | --- |
-| C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发 | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Notifications、Goal、S1 |
-| C2 | `SessionConfig.interactive` 与 `session.create` 参数 | S | Rpc | — | SessionTitle、Notifications、Questions |
+| C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发 | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Goal、S1 |
+| C2 | `SessionConfig.interactive` 与 `session.create` 参数 | S | Rpc | — | SessionTitle、Questions |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
-| C3 | `toolContribution` 按名收集 | S | 装配 | — | Web、Goal、Notifications、Scheduler、Workflow |
+| C3 | `toolContribution` 按名收集 | S | 装配 | — | Web、Goal、Scheduler、Workflow |
 | C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载 | L，先 spike | 装配 | C3 | 所有 TypeScript 插件 |
 | C5 | #4 分支级：TypeScript 部件按名使用 `Dispatcher`、`Branch::input`、`TreeCommands` | M | 装配 | C4 | Goal |
 | S1 | InputQueue 撤回：`input/withdraw`、`input/deleted`、`session.input.withdraw`（新事件需做格式决定） | M | 事件类型 | C1 | `Ctrl+S`/`/queue`、Goal、S2 |
@@ -67,14 +69,13 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | S3 | Session 活动句柄（先确认是否需要） | S | `agents.rs` | — | ShellInput |
 | S4 | Provider 用途策略与 `AuxiliaryModel` | M | Provider | — | SessionTitle、生产压缩宿主 |
 | S5a | SessionStore：Session 文件 | M | 存储 | S6 | Attachments |
-| S5b | SessionStore：标题元数据与 `setTitle` | S | 存储 | C6 | SessionTitle、Notifications |
+| S5b | SessionStore：标题元数据与 `setTitle` | S | 存储 | C6 | SessionTitle |
 | S5c | SessionStore：删除、清理、fork | M | 存储 | S5a | fork 功能 |
 | S6 | FileStorage 列目录与删除 | S | 独立 | — | S5a |
 | S7 | HostPlatform argv 辅助、每次启动时读 shell 配置 | S | 独立 | — | ShellInput |
-| S8 | Settings 每插件业务源、类型化写入、凭据引用解析 | M | Settings | #14 | Web、SessionTitle、Notifications、Goal、Scheduler、Workflow |
+| S8 | Settings 每插件业务源、类型化写入、凭据引用解析 | M | Settings | #14 | Web、SessionTitle、Goal、Scheduler、Workflow |
 | S10 | `pluginFiles` 格式版本（二进制留给 P3） | S | 独立 | — | Scheduler、Workflow |
 | S11 | ModelProvider：模型不支持图片时换成文本占位 | S | 独立 | — | Attachments |
-| C9 | 跨语言命名进程事件（rutis） | M | rutis | — | Scheduler、Notifications（可选） |
 
 ### 3.3 插件开工顺序
 
@@ -86,10 +87,9 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | 2 | Attachments | Rust | C1、S5a、S6、S11 |
 | 3 | Web | TypeScript | C3、C4、S8 |
 | 4 | SessionTitle | TypeScript | C1、C2、C4、C6、S4、S5b、S8 |
-| 5 | Notifications | TypeScript | C1、C2、C4、S5b、S8（Scheduler 通知需 C9） |
-| 6 | Goal 或 Pursuit（D3） | TypeScript | C1、C3、C4、C5、S1、S8 |
-| 7 | Scheduler | TypeScript | C4、S2、S8、S10、C9 |
-| 8 | Workflow | TypeScript | C4、S2、S8、S10 |
+| 5 | Goal 或 Pursuit（D3） | TypeScript | C1、C3、C4、C5、S1、S8 |
+| 6 | Scheduler | TypeScript | C4、S2、S8、S10 |
+| 7 | Workflow | TypeScript | C4、S2、S8、S10 |
 
 不被其他插件依赖、随时可以单独做的功能：生产压缩宿主与 `/compact`、用量查询（依赖 S4）；Session 删除和 fork（S5c）；Permission 命令规则；模型参数 effort/fast 与 `/agent`；MCP OAuth；HostPlatform OS 隔离（L，先 spike）；CLI 子命令、`/export`、`exec --json`。
 
@@ -138,9 +138,6 @@ flowchart LR
   S4["S4 AuxiliaryModel"] --> ST
   S5b --> ST
   S8 --> ST
-  C4 --> NO["Notifications"]
-  S5b --> NO
-  S8 --> NO
   C5 --> GO["Goal / Pursuit"]
   S1 --> GO
   S8 --> GO
@@ -150,7 +147,6 @@ flowchart LR
   S8 --> WF
   S10["S10 pluginFiles"] --> SC
   S10 --> WF
-  C9["C9 进程事件"] --> SC
 ```
 
 最早能交付的是 ShellInput 和 Attachments：只依赖 C1 和几个独立的小项。TypeScript 插件都卡在 C4，它是唯一的 L 级共用项，spike 应立即单独开始。Scheduler 和 Workflow 最晚，卡在 S1 → S2。
@@ -197,5 +193,5 @@ flowchart LR
 | --- | --- | --- | --- |
 | D1 | #2 的上下文边界 | 已决定：插件事件只通过已采纳的输入和工具结果进入上下文；#2 已修订为同一口径 | #2 只剩运行时注册事件类型、写入时检查类型已注册 |
 | D2 | #4 是否尽早做，按 Session 级和分支级分段 | 是（§2 第 5 条） | TypeScript 插件何时能进入快速迭代 |
-| D3 | Goal 与 Pursuit | 待定：两者互斥，只实现一个，另一个保留为实验设计 | C5 是否有使用者；插件顺序 6 |
+| D3 | Goal 与 Pursuit | 待定：两者互斥，只实现一个，另一个保留为实验设计 | C5 是否有使用者；插件顺序 5 |
 | D4 | 是否先做完全部 core 再做插件 | 已决定：不设全局阶段屏障；契约先行、core 按项拆 PR、插件按自己的依赖开工（§2） | 整体顺序 |

@@ -2,6 +2,8 @@
 
 状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
+> **待设计复核时细化。** 运行结果的通知是 Scheduler 自己的功能。为 Notifications 发布的运行结果事件通知，以及它所需的跨语言具名进程事件（§9.1），随 Notifications 一并撤回。
+
 Scheduler 把定时任务（用户写的配置）保存在自己的 Settings 业务来源 `schedule` 中，把运行历史保存在自己的进程存储 [`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage) 中。守护进程存活且某个窗口到期时，进程部分通过 `sessions.launch` 创建一个非交互 Session（或复用一个），并通过 `sessions.input`（[session-access](../contracts/session-access.md)）把任务提示词写成带自身来源标记的 Queue 输入，方式与 Collaboration 访问其成员相同。Session 部分以 `toolContribution` 向交互式 leader Session 提供 `schedule` 工具（风险 `persistent_configuration`）。运维方使用 `schedule.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。Scheduler 不写自己的 Timeline 事件：一次运行的结果从运行 Session 的历史中读取，并作为运行结果事件通知发布。
 
 ## 1. 结构
