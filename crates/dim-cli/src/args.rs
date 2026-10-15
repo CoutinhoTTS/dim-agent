@@ -9,6 +9,7 @@ Commands:\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh]       List model IDs and availability\n\
   mcp list                         List MCP servers and their enablement\n\
+  mcp enable ID | mcp disable ID   Enable or disable a listed MCP server\n\
   daemon stop                      Gracefully stop an existing daemon\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
@@ -35,6 +36,7 @@ pub enum Action {
     Logout(String),
     Models(String),
     McpList,
+    McpEnable { id: String, enabled: bool },
     DaemonStop,
     Help,
     Version,
@@ -118,7 +120,11 @@ impl Options {
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
-                        _ => return Err("Use mcp list".into()),
+                        command @ ("enable" | "disable") => Action::McpEnable {
+                            id: value(&mut args)?,
+                            enabled: command == "enable",
+                        },
+                        _ => return Err("Use mcp list, mcp enable ID or mcp disable ID".into()),
                     };
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {

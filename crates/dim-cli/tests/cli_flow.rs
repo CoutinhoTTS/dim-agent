@@ -748,7 +748,7 @@ impl Drop for OwnedDaemon {
 
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
-fn project_mcp_list_starts_project_entries_disabled_without_secrets() {
+fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
     let home = Home::new();
     let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
@@ -786,13 +786,49 @@ fn project_mcp_list_starts_project_entries_disabled_without_secrets() {
         output
     };
     assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    let written = fs::read(project.join(".mcp.json")).unwrap();
+    let enabled = run(&["mcp", "enable", "docs"]);
+    assert!(
+        enabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(enabled.stdout).unwrap(),
+        "Enabled \"docs\" (project).\n"
+    );
+    assert!(String::from_utf8_lossy(&enabled.stderr).contains(".mcp.json"));
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tenabled\n");
+    // The choice belongs to this user and home, not the shared project file.
+    assert_eq!(fs::read(project.join(".mcp.json")).unwrap(), written);
+    assert!(run(&["daemon", "stop"]).status.success());
+    assert_eq!(
+        list(),
+        "\"docs\"\tproject\tstdio\tenabled\n",
+        "restart lost the choice"
+    );
+    assert!(run(&["mcp", "disable", "docs"]).status.success());
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    // An entry that leaves the file can still be disabled, and comes back off.
+    assert!(run(&["mcp", "enable", "docs"]).status.success());
+    fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{}}).to_string(),
+    )
+    .unwrap();
+    assert!(run(&["mcp", "disable", "docs"]).status.success());
+    fs::write(project.join(".mcp.json"), &written).unwrap();
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    let missing = run(&["mcp", "enable", "absent"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("No MCP server \"absent\""));
     for removed in [
         &["mcp", "approve", "docs", "token"][..],
         &["mcp", "revoke", "docs"],
     ] {
         let output = run(removed);
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Use mcp list"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("mcp enable ID"));
     }
     let id = "untrusted\u{9b}2J\u{202e}\nname";
     fs::write(

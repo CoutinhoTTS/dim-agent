@@ -177,6 +177,60 @@ async fn run(options: Options) -> Result<i32> {
             );
             Ok(0)
         }
+        Action::McpEnable { id, enabled } => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Catalog {
+                user_revision: String,
+                project_revision: Option<String>,
+                servers: Vec<Server>,
+            }
+            #[derive(serde::Deserialize)]
+            struct Server {
+                id: String,
+                source: String,
+            }
+            // Target the entry `mcp list` shows: a project entry shadows the
+            // user's, and enabling it is recorded for this user only.
+            let catalog: Catalog = client
+                .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
+                .await?;
+            // Disabling an id the workspace no longer lists still withdraws the
+            // user's project record, so the entry stays off if it returns.
+            let server = match catalog.servers.into_iter().find(|server| server.id == *id) {
+                Some(server) => server,
+                None if !*enabled && catalog.project_revision.is_some() => Server {
+                    id: id.clone(),
+                    source: "project".into(),
+                },
+                None => return Err(format!("No MCP server {:?} in mcp list", id).into()),
+            };
+            let expected = if server.source == "project" {
+                catalog
+                    .project_revision
+                    .ok_or("Invalid mcp.catalog response")?
+            } else {
+                catalog.user_revision
+            };
+            client
+                .rpc(
+                    "mcp.set_enabled",
+                    serde_json::json!({"cwd":options.cwd,"id":id,"source":server.source,"expectedVersion":expected,"enabled":enabled}),
+                )
+                .await?;
+            println!(
+                "{} {:?} ({}).",
+                if *enabled { "Enabled" } else { "Disabled" },
+                id,
+                display::safe(&server.source)
+            );
+            if *enabled && server.source == "project" {
+                eprintln!(
+                    "It runs this workspace's .mcp.json entry, including later edits to it, in active and new sessions."
+                );
+            }
+            Ok(0)
+        }
         Action::Chat => session::chat(&mut client, &options).await,
         Action::Help | Action::Version | Action::DaemonStop => unreachable!(),
     }

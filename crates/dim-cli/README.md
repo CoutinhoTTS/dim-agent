@@ -48,21 +48,33 @@ The configuration references credentials by environment-variable name. The share
 ## MCP servers
 
 `mcp list` prints tab-separated rows: quoted and escaped ID, source, transport and enablement.
-It does not print commands, environment values, headers or credentials.
+It does not print commands, environment values, headers or credentials. `mcp enable ID` and
+`mcp disable ID` change the entry that `mcp list` shows for the workspace.
 
 ```bash
 dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp list
+# Review the entry in .mcp.json and the code or endpoint it runs, then:
+dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/project mcp enable docs
 ```
 
 ```text
 "docs"  project  stdio  disabled
+                  |
+             mcp enable docs
+                  v
+"docs"  project  stdio  enabled
 ```
 
 A configured MCP server runs when it is enabled; there is no separate approval
 ([ADR 003](../../docs/adr/003-approval-scope.md)). Entries from a project's `.mcp.json` start
-disabled, and the project file cannot enable them; only the user's local configuration can.
-A project entry still shadows a same-name user entry. Use the same `--home` and model profile as
-the daemon serving your workspace. See the
+disabled, and the project file cannot enable them. `mcp enable` records the choice for this home,
+workspace and ID only; it never edits `.mcp.json`, and it survives daemon restarts. An enabled
+project entry runs later edits to its command without asking again and can start discovery in
+active sessions. Disabling stops it in every session, including a request that is using it, and
+works even after the entry has left `.mcp.json`; an entry that is removed and later returns starts
+disabled again. A project entry still shadows a same-name user entry. Pass the ID's actual
+value, not its displayed escape spelling, and use the same `--home` and model profile as the daemon
+serving your workspace. See the
 [MCP configuration contract](../dim-app-server/README.md#mcp-configuration-management).
 
 ## Scrollback and session recovery
