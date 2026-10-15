@@ -1,6 +1,8 @@
 # ExternalAgent
 
-状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程）。阶段：P3。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：需要重新设计。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程）。阶段：P3。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+
+> **需要重新设计。** 本文中审批相关的部分已撤回，不得实现（[#28](https://github.com/arcships/dim/issues/28)）：模型流中不加 `approval_ask` / `approval_ask_withdrawn` 条目，ModelProvider 不依赖 Approval，`modelKind` 不加 `answerApproval`，不发伪造的 thinking 行，Approval 不做补充。重新设计的方向：外部 agent 的权限请求作为一条 `input/message` 写入主模型所在的分支，ExternalAgent 提供一个工具让主模型决定；这次工具调用照常经过 dim 的 Approval 与 Permission。
 
 ExternalAgent 让本地安装的编码 agent（Claude Code、Codex、Cursor、OpenCode、ZCode 等）可作为一种模型连接使用。模型为外部 agent 的 Session 照常经由 Loop 和 ModelProvider 运行：ExternalAgent 为类型 `external-agent` 提供 `modelKind` 服务，由 Aimux 的 ModelHost 路由到该服务（Aimux 补充），它把每个 dim 模型请求转换为一次外部轮次，再把外部流转换回模型输出块。外部 agent 使用自己的工具；它们的权限请求在流中以审批询问的形式返回，由 ModelProvider 在执行该调用的 Session 中作为普通 dim 审批准入。ExternalAgent 不写自己的 Timeline 事件。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。
 

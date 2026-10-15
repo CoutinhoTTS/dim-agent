@@ -2,7 +2,7 @@
 
 [总体设计](../overview.md)中规划的新插件的设计文档。已实现的插件及其 Capability 见 [architecture/rust-agent/plugins](../../../architecture/rust-agent/plugins/README.md)。规则：[设计规则](../../../architecture/rust-agent/principles.md) 第 1、4 节，[ADR 002](../../adr/002-plugin-scope.md)。共享合同：[session-access](../contracts/session-access.md)、[session-boundary](../contracts/session-boundary.md)。
 
-插件按状态归属拆分：进程级部分是进程插件；Session 级和分支级部分是 Capability。所有文档状态：草案；Questions 需要重新设计，Hooks 待设计。
+插件按状态归属拆分：进程级部分是进程插件；Session 级和分支级部分是 Capability。所有文档状态：草案；Questions 与 ExternalAgent 需要重新设计，Hooks 待设计。
 
 ## 索引
 
@@ -18,7 +18,7 @@
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | P2 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
-| [ExternalAgent](ExternalAgent.md) | 连接、ModelHost 连接类型 | — | — | P3 |
+| [ExternalAgent](ExternalAgent.md) | 连接、ModelHost 连接类型 | — | — | P3（需要重新设计） |
 | [AcpGateway](AcpGateway.md) | —（CLI 进程中的客户端，不是守护进程插件） | — | — | P3 |
 | [RemoteGateway](RemoteGateway.md) | 远程入口、设备 | — | — | P3 |
 | [Modality](Modality.md) | 任务、实时连接 | — | — | P3 |

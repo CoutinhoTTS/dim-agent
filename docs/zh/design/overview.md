@@ -146,7 +146,7 @@ flowchart LR
 | `managementMethods` | 进程 | 命名空间 | 同上 | [方法 A.1](contracts/session-boundary.md#a1-方法贡献) |
 | `toolContribution` | Session | 工具名 | `declaration(): sync -> ToolDeclaration`；`execute(ToolCall): async -> ToolResult` | [方法 A.5](contracts/session-boundary.md#a5-工具贡献) |
 | `sessions` | 进程 | — | `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle` | [Session 访问 A.1](contracts/session-access.md#a1-sessions-服务) |
-| `modelKind` | 进程 | 种类 | `invoke(ModelRequest, target, ModelCallScope): async -> 模型流`；`answerApproval(requestId, askId, outcome): async` | [ExternalAgent](plugins/ExternalAgent.md) |
+| `modelKind` | 进程 | 种类 | `invoke(ModelRequest, target, ModelCallScope): async -> 模型流` | [ExternalAgent](plugins/ExternalAgent.md) |
 | `scheduleJobs`（提议） | 进程 | — | 供 `schedule` 工具使用的 Session 到进程的任务操作 | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns`（提议） | 进程 | — | 供 `workflow` 工具使用的 Session 到进程的运行操作 | [Workflow](plugins/Workflow.md) |
 
@@ -168,7 +168,7 @@ flowchart LR
 | Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果通知 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md) |
-| ExternalAgent | 进程 | 外部 Agent 作为 ModelHost provider kind | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
+| ExternalAgent | 进程 | 外部 Agent 作为 ModelHost provider kind | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md)（需要重新设计） |
 | AcpGateway | CLI 进程 | 基于本地 RPC 的 ACP 服务器 | P3 | TypeScript 优先 | [AcpGateway](plugins/AcpGateway.md) |
 | RemoteGateway | 进程 | 远程入口、配对、设备 | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | 进程 | 多模态任务与实时连接 | P3 | TypeScript 优先 | [Modality](plugins/Modality.md) |
@@ -287,6 +287,8 @@ sequenceDiagram
 `schedule.ended` 通知由运行所属 Session 的 Notifications 实例投递；通知发布时该 Session 未装载，则这条通知丢失。这一点被接受（[Notifications](plugins/Notifications.md)）。
 
 ### 5.6 Collaboration 委派给外部 Agent
+
+> 已撤回：下面的审批路径随 ExternalAgent 重新设计一并撤回（[#28](https://github.com/arcships/dim/issues/28)）。
 
 ```mermaid
 sequenceDiagram
@@ -412,7 +414,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Notifications 获取定时任务结果 | 已决定：任务 Session 是非交互的，因此 Scheduler 发布运行结果通知，Notifications 监听它，二者无依赖；通知由运行所属 Session 的 Notifications 实例投递，该 Session 未装载时丢失（§5.5） |
 | 定时任务存活 | 已决定：守护进程必须存活（[Scheduler](plugins/Scheduler.md)） |
 | FullAccess 与新类别 | 已决定：自动允许（约束 7） |
-| 外部 Agent 权限 | 已决定：普通 dim 审批，Collaboration 成员的审批转发给 leader（§5.6，[ExternalAgent](plugins/ExternalAgent.md)） |
+| 外部 Agent 权限 | 重新设计（#28）：请求作为一条 `input/message` 写入主模型所在分支，主模型通过工具决定（[ExternalAgent](plugins/ExternalAgent.md)） |
 | 外部会话延续 | 提议：从分支历史重新初始化（[ExternalAgent](plugins/ExternalAgent.md)） |
 | fork 时的权限预设 | 已决定：不特殊处理；预设随事实一起复制，应用层如需不同的预设，在 fork 后自行设置（#26） |
 | 重载传播 | 已决定：罕见结构性操作的可接受代价（[ADR 002](../adr/002-plugin-scope.md) D3） |
@@ -488,14 +490,14 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 插件 | 类型 | 内容 | 理由 |
 | --- | --- | --- | --- |
 | **已撤回（Hooks 待设计，#21）。** Timeline（运行时） | 补充 | `Timeline::before` 增加异步回调。当某分支写入匹配已注册的异步回调时，该写入保持其在序号顺序中的位置，只在回调完成后才提交；该分支上后续的写入排在它之后；等待期间不持有提交锁。回调收到草稿（其事件 id 在写入占位时即已固定），返回变换后的草稿和/或追加到同一原子批次的事件（只能是发给事件所有者的指令或注册方自己声明的事件，不能是别的模块的结果事件）；随后同步 `before` 处理器像现在一样在提交锁内应用，追加的事件不再被匹配。before 回调从不使写入失败或阻止写入：回调开始时返回一份兜底草稿，运行期间持续更新；回调无法完成时（超时、回调故障、注册方卸载、分支关闭，或排队了 `cancel_on` 中某种事件的写入），运行时提交最新的兜底草稿。注册选项全部由注册方决定：`timeout`；`cancel_on`（一组事件种类，其排队写入会取消待定回调）。写入方的追加在被接受时返回，提交结果经 Dispatcher 报告，因此 Loop 等同步写入方不会阻塞。回调从不等待其自身分支上的写入。通用：不含业务语义。五项说明见 [Hooks §9](plugins/Hooks.md#9-向机制所有者提出的需求) | Hooks |
-| Approval | 补充 | 在模型步骤打开期间，接受宿主来源的准入（由 ModelProvider 针对 `approval_ask` 流条目发起），写入普通的 `approval/request`、`approval/respond`、`approval/cancelled` 事实；通用，不了解 model kind | ExternalAgent（首个使用方） |
+| **已撤回（#28）。** Approval | 补充 | 在模型步骤打开期间，接受宿主来源的准入（由 ModelProvider 针对 `approval_ask` 流条目发起），写入普通的 `approval/request`、`approval/respond`、`approval/cancelled` 事实；通用，不了解 model kind | ExternalAgent（首个使用方） |
 | InputQueue | 变更 | 按序消费 `input/withdraw {input_id, reason?}`（`reason`：提议的通用可选文本，最多 2 KiB，任何生产方都可写入，由客户端显示，例如 Hooks 拒绝提示词；InputQueue 做决定时忽略它；不带它的事件不变；设计规则 §4 第 9 条允许必需事件带描述性字段；设计见 [Hooks](plugins/Hooks.md)），只为它仍持有且未应用的输入写入 `input/deleted {input_id}`（否则不写入，`notHeld`）；经 `sessionMethods` 提供 `session.input.withdraw`（命名空间 `session.input`，提议中）；“撤回并作为 Steer 重新提交”作为一个批次；队列状态从事件重建（[Session 访问 A.4](contracts/session-access.md#a4-撤回)） | `Ctrl+S`、`/queue`；Hooks、AcpGateway、Scheduler |
 | 运行时 Session 门面 | 补充 | 按命名空间查找 `sessionMethods`；固定前缀历史读取 | Rpc；进程调用方 |
 | ToolRegistry | 补充 | 除现有注册外，接受具名的 `toolContribution` 服务（[方法 A.5](contracts/session-boundary.md#a5-工具贡献)） | 非 Rust 的 Session 工具 |
 | Agent 装配 | 补充 | 收集每个已安装插件在 `provides` 中声明的具名服务；可选的 Session 与分支部分按已启用插件及 `interactive` 安装 | 所有 Session 插件 |
 | **已撤回（Hooks 待设计，#21）。** Loop, ToolExecutor | 变更 | `step/tool-call` 的调用增加通用可选字段 `skip: {reason: string}`（提议的数据合同变更，不带业务含义）。ToolExecutor 对被跳过的调用不询问 Approval 与 Permission，也不执行，并在其正常批次的 `step/tool-result` 中写入错误结果（`reason` 作为错误文本）。设计见 [Hooks](plugins/Hooks.md) | Hooks |
 | Permission | 补充 | 类别 `outbound_message`、`persistent_configuration`（FullAccess 下允许）；命令规则在使用时读取 | Notifications、Scheduler；`/approvals` |
-| ModelProvider | 补充 | 向 model kind 传递 `ModelCallScope`（session、branch、request 与 step id，`SessionConfig`）；经其分支的 Approval 对 `approval_ask` 流条目准入，并以 `answerApproval` 返回结果；收到 `approval_ask_withdrawn` 时取消该准入；构建请求时发送图像，模型不支持图像时改为文本占位；历史不变（从 Rpc 移出） | ExternalAgent；Attachments |
+| ModelProvider | 补充 | 向 model kind 传递 `ModelCallScope`（session、branch、request 与 step id，`SessionConfig`）；构建请求时发送图像，模型不支持图像时改为文本占位；历史不变（从 Rpc 移出） | ExternalAgent；Attachments |
 | Prompt, ModelProvider | 补充 | 模型参数（effort、fast 模式）；切换 Agent 配置作为一次采纳 | `/effort`、`/fast`、`/agent` |
 | PromptSources | 补充 | 提示词语言来源 | `/language` |
 | ContextPreparation | 补充 | 用量查询；手动压缩；用途为 `compaction` 的生产环境压缩宿主 | `/usage`、`/compact` |
