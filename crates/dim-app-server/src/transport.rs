@@ -710,6 +710,7 @@ async fn run_connection(
                                             "session.input_lookup",
                                             "session.create",
                                             "session.model.progress",
+                                            "session.methods",
                                         ]);
                                     }
                                     if local && hub.config().local_execution() {

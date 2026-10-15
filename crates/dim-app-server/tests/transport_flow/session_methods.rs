@@ -199,6 +199,23 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
         reply["result"],
         json!({"method": "notes.echo", "params": params})
     );
+    // `session.methods` lists a Session's methods; `hello` announces it.
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.methods"))
+    );
+    assert_eq!(
+        client
+            .rpc("session.methods", json!({"sessionId": sid}))
+            .await["result"],
+        json!({"methods": [
+            {"name": "notes.echo", "mutating": false},
+            {"name": "notes.wait", "mutating": true},
+        ]})
+    );
     // This profile serves Session methods to every transport, as built-ins.
     let mut remote = Client::new_version(&server, true, 3).await;
     assert_ok(&remote.rpc("notes.echo", json!({"sessionId": sid})).await);
@@ -235,8 +252,10 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
     // Session methods are protocol v3, and a Session belongs to the version
     // that created it.
     let mut v2 = Client::new_version(&server, false, 2).await;
-    let reply = v2.rpc("notes.echo", json!({"sessionId": sid})).await;
-    assert_eq!(app_error(&reply), "unknown_method");
+    for method in ["notes.echo", "session.methods"] {
+        let reply = v2.rpc(method, json!({"sessionId": sid})).await;
+        assert_eq!(app_error(&reply), "unknown_method", "{method}");
+    }
     let created = v2.rpc("session.create", create(json!([]))).await;
     let other = created["result"]["sessionId"].as_str().unwrap();
     let reply = client.rpc("notes.echo", json!({"sessionId": other})).await;
@@ -276,8 +295,15 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
     let reloading = client.rpc("notes.echo", json!({"sessionId": sid})).await;
     assert_eq!(reloading["error"]["code"], -32000);
     assert_eq!(app_error(&reloading), "service_reloading");
-    // Rpc and the Session's built-ins are unaffected.
+    // Rpc and the Session's built-ins are unaffected; the listing omits the
+    // namespace until its provider is active again.
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
+    assert_eq!(
+        client
+            .rpc("session.methods", json!({"sessionId": sid}))
+            .await["result"],
+        json!({"methods": []})
+    );
     gate.notify_one();
     restart.await.unwrap();
     assert_ok(&client.rpc("notes.echo", json!({"sessionId": sid})).await);
@@ -290,8 +316,10 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
         app_error(&client.response(wait).await),
         "operation_interrupted"
     );
-    let closed = client.rpc("notes.echo", json!({"sessionId": sid})).await;
-    assert_eq!(app_error(&closed), "session_closed");
+    for method in ["notes.echo", "session.methods"] {
+        let closed = client.rpc(method, json!({"sessionId": sid})).await;
+        assert_eq!(app_error(&closed), "session_closed", "{method}");
+    }
     server.shutdown();
     server.join().await.unwrap();
 }

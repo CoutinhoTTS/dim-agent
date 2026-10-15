@@ -318,7 +318,10 @@ impl Connection {
         if self.protocol_version() < 3
             && matches!(
                 call,
-                Call::InputLookup(_) | Call::History(_) | Call::Summaries(_)
+                Call::InputLookup(_)
+                    | Call::History(_)
+                    | Call::Summaries(_)
+                    | Call::SessionMethods(_)
             )
         {
             return Err(RpcError::app(
@@ -358,9 +361,11 @@ impl Connection {
             Call::ExecStop(p) => (Some(&p.session_id), None),
             Call::ModelUpdate(p) => (Some(&p.session_id), None),
             Call::Attach(p) => (Some(&p.session_id), None),
-            Call::Detach(p) | Call::Close(p) | Call::SessionMcp(p) | Call::McpRefresh(p) => {
-                (Some(&p.session_id), None)
-            }
+            Call::Detach(p)
+            | Call::Close(p)
+            | Call::SessionMcp(p)
+            | Call::McpRefresh(p)
+            | Call::SessionMethods(p) => (Some(&p.session_id), None),
             Call::Create(p) => {
                 if p.agent_id.is_some() && self.protocol_version() < 3 {
                     return Err(RpcError::invalid("agentId requires protocol v3"));
@@ -492,6 +497,7 @@ impl Connection {
             Call::SessionMcp(p) | Call::McpRefresh(p) => Some(&p.session_id),
             Call::Attach(p) => Some(&p.session_id),
             Call::BranchCreate(p) => Some(&p.session_id),
+            Call::SessionMethods(p) => Some(&p.session_id),
             Call::Close(p) if rpc.index.session_available(&p.session_id) => Some(&p.session_id),
             _ => None,
         };
@@ -762,6 +768,10 @@ impl Connection {
                 })
             }
             Call::BranchCreate(params) => self.create_branch(rpc, params).await,
+            Call::SessionMethods(_) => rpc
+                .sessions
+                .listed(&usage.expect("session.methods pins its Session").session)
+                .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
             Call::AgentCreate(params) => rpc
                 .index
                 .create(uuid::Uuid::new_v4(), params.profile)

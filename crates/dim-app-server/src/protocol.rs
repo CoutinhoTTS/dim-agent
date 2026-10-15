@@ -89,6 +89,7 @@ pub enum Call {
     PromptRefresh(BranchRequest),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
+    SessionMethods(SessionId),
 }
 
 impl Call {
@@ -188,6 +189,12 @@ pub struct ConfigurationResult {
 pub struct ModelUpdateResult {
     pub model: ModelId,
     pub outcome: &'static str,
+}
+/// The `session.methods` reply: the declared methods of the namespaces the
+/// Session lists whose providers are active, each `{name, mutating}`.
+#[derive(Debug, Serialize)]
+pub struct SessionMethodsResult {
+    pub methods: Vec<dim_agent_capabilities::methods::MethodDecl>,
 }
 #[derive(Debug, Serialize)]
 pub struct SessionSkillsResult {
@@ -355,7 +362,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 19] = [
+const BUILTIN_METHODS: [&str; 20] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -375,6 +382,7 @@ const BUILTIN_METHODS: [&str; 19] = [
     "agent.create",
     "agent.list",
     "agent.close",
+    "session.methods",
 ];
 
 /// Every exact built-in method name.
@@ -461,6 +469,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
+            "session.methods" => Call::SessionMethods(params(raw_params)?),
             _ => Call::Contributed {
                 method,
                 params: raw_params,
@@ -582,6 +591,7 @@ pub enum Reply {
     ModelUpdate(ModelUpdateResult),
     Configuration(ConfigurationResult),
     McpState(McpStateResult),
+    SessionMethods(SessionMethodsResult),
     Empty(Empty),
 }
 impl Reply {

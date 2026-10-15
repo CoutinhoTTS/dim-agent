@@ -2,8 +2,9 @@
 //! each call and does not depend on it, so an inactive or reloading provider
 //! affects only its own namespace. Accepted calls belong to their provider.
 use dim_agent_capabilities::methods::{
-    Accepted, Handler, MethodDecl, MethodProvider, RpcError, valid_name, within,
+    Accepted, Handler, MethodDecl, MethodProvider, RpcError, SessionMethods, valid_name, within,
 };
+use dim_agent_runtime::{AgentError, Session};
 use rutis::{CordisError, Ctx, FiberState, Snapshot, TypeKey};
 use rutis_loader::{EntryStatus, Loader};
 use serde::Deserialize;
@@ -240,6 +241,29 @@ impl SessionNamespaces {
             .iter()
             .find(|namespace| within(name, namespace))
             .map(String::as_str)
+    }
+
+    /// The methods `session.methods` lists: those of the namespaces whose
+    /// providers are active in this Session, each under the namespace that
+    /// owns it.
+    pub(crate) fn listed(&self, session: &Session) -> Result<Vec<MethodDecl>, RpcError> {
+        let mut methods = vec![];
+        for namespace in &self.namespaces {
+            let provider = match session.session_named_service::<SessionMethods>(namespace) {
+                Ok(provider) => provider,
+                Err(AgentError::Reloading(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            methods.extend(
+                provider
+                    .declarations()
+                    .iter()
+                    .filter(|decl| self.owner(&decl.name) == Some(namespace))
+                    .cloned(),
+            );
+        }
+        methods.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(methods)
     }
 }
 
