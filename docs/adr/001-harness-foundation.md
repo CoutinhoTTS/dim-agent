@@ -1,10 +1,10 @@
 # 001: Extensible harness foundation
 
-Superseded in part by [ADR 003](003-loader-plugin-management.md): MCP now uses
+Superseded in part by [ADR 004](004-loader-plugin-management.md): MCP now uses
 Session-owned instanced groups. Business documents retain source-local authority;
 PR #15's ADR 002 D4 reserves loader configuration for structural settings.
 
-Decision status: Recovery design adopted for this branch. ADR 003 records the approved
+Decision status: Recovery design adopted for this branch. ADR 004 records the approved
 configuration scope and its remaining integration work for issue #3. Dynamic-event
 registration, its model-context boundary and dependency-loss refinements remain Proposed
 for issues #2 and #6. This ADR does not supersede those issues' decisions.
@@ -224,7 +224,7 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Production compression host | Not implemented: the real executable binds `ContextModelHost(None)` | Real model compaction uses the existing host contract and records replayable completion facts |
 | Dynamic events and declarations | Not implemented | External Rust capability owns durable events; declaration lifetime and stale writes are enforced |
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
-| Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance. See ADR 003. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
+| Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance. See ADR 004. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
 | Loader-owned MCP instances | Implemented: Session-owned nested instanced groups with private immutable configuration, automatic replacement, explicit disconnect and cleanup receipts. Session closure stops only its connections; revocation drains all affected Sessions | Bound user-source tools survive replacement; project tools obey current approval; all generations drain; logical identities survive restart and root reordering |
 | Project MCP execution approval | Implemented: host-local scoped configuration grants, protected-local approval/revocation, per-operation checks and generation disposal. General workspace sandboxing and constrained plugins are not implemented | Unapproved project MCP cannot execute or connect; stale configuration, restart, retained tool bindings and revocation respect the grant |
@@ -260,11 +260,11 @@ never overwrite a user's existing store to make a test pass.
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
 | #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
-| #3 | Structural plugin configuration uses the persisted editable layer and loader operations; PR #15 ADR 002 D4 separates business sources | ADR 003 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and host-local approvals remain separate authorities |
+| #3 | Structural plugin configuration uses the persisted editable layer and loader operations; PR #15 ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and host-local approvals remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
 Source-owned business documents preserve shared workspace files and explicit edit
-targets without using loader edits as persistence transactions. ADR 003 preserves
+targets without using loader edits as persistence transactions. ADR 004 preserves
 the original v13 plain payloads and uses private immutable Session instance
 configuration. Issue #3's editable layer remains structural configuration work;
 business persistence does not create applied-unsaved loader intent.

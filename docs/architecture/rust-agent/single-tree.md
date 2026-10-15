@@ -5,7 +5,7 @@ and recovery are implemented. FileStorage, process Aimux, product Provider and
 optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses source-owned business documents; MCP connections and Skill content instances belong
 to Sessions. Project MCP execution requires host-local approval. See
-[ADR 003](../../adr/003-loader-plugin-management.md) for implemented configuration
+[ADR 004](../../adr/004-loader-plugin-management.md) for implemented configuration
 scope. Rpc collects [management methods](../../design/plugins/management.md)
 as named services from account, provider, MCP and Skills owners.
 Structural reloads propagate through normal rutis dependencies; business
@@ -30,7 +30,7 @@ Its plugin declares Settings as a dependency and owns the publication worker in
 an asynchronous effect. Reload and disposal stop admission, settle the current
 operation and retire retained connections before withdrawing the service. The
 process shutdown coordinator neither starts nor joins MCP-specific tasks.
-See [ADR 003](../../adr/003-loader-plugin-management.md).
+See [ADR 004](../../adr/004-loader-plugin-management.md).
 
 `SettingsPlugin` 不作为 `SessionScopePlugin` 的 `Deps` 依赖：Session 创建入口传入已校验的配置快照，既有 Session 的设置变更由受影响能力按业务合同更新（如 McpSession 观察目录修订）。普通配置写入不通过 rutis 重载重建 Session。
 
@@ -142,7 +142,7 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 
 Native v13 settings retain plain business payloads in `settings_documents` with
 source-local CAS and lazy atomic import, as described by
-[ADR 003](../../adr/003-loader-plugin-management.md). Generic SettingsService
+[ADR 004](../../adr/004-loader-plugin-management.md). Generic SettingsService
 persists BusinessDocument values; MCP owns its types in `mcp/config.rs`, and
 Skills owns its SkillSettingsHost implementation. Successful persistence precedes
 invalidation; no unsaved loader intent, configuration namespace or flush exists.

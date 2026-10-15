@@ -47,7 +47,7 @@ plain payload JSON (not `{kind, document}`), source-local versions and opaque
 edits. Successful writes notify consumers after persistence; failed persistence
 does not publish unsaved intent. Business edits do not reload plugins. Structural
 loader configuration and package installation remain separate work. See
-[ADR 003](../../docs/adr/003-loader-plugin-management.md).
+[ADR 004](../../docs/adr/004-loader-plugin-management.md).
 
 ### MCP configuration management
 

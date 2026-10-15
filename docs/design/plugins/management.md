@@ -2,7 +2,7 @@
 
 Status: process-owner contributions implemented. This page describes the implemented
 subset of [PR #15](https://github.com/arcships/dim/pull/15)'s revised plugin-scope
-ADR and method contract (latest inspected branch `e4184b4`, including D4/D5).
+ADR and method contract (latest inspected branch `213506f`, including D4/D5).
 Management methods belong to process owners, not a Management plugin. There is
 no per-method level; entry admission determines whether this table is served.
 The earlier stable-port and Management-plugin proposals are withdrawn.
@@ -68,8 +68,8 @@ execution dependencies may also reload affected consumers and fail in-flight
 turns; this is the accepted cost of rare structural changes, not hidden by
 registration ports. Business configuration edits update the owner's source and
 publish invalidation without reloading the owner or Rpc. MCP connections remain
-Session-owned. MCP keeps its project execution approval until the follow-up that
-PR #15 schedules to remove host-local approval; see ADR 003.
+Session-owned. MCP keeps its project execution approval until this branch merges
+PR #16's removal under PR #15's approval-scope ADR; see ADR 004.
 
 ## Notifications
 
@@ -97,7 +97,7 @@ belong to the Session event contract and rutis link work; neither is implemented
 Declaration-driven method discovery and cross-language plugin method declarations
 remain deferred: assembly still lists Rust owner namespaces explicitly. Generic
 credential references/resolution are future work. D4 keeps business documents in
-their source, not editable loader rows; see [ADR 003](../../adr/003-loader-plugin-management.md).
+their source, not editable loader rows; see [ADR 004](../../adr/004-loader-plugin-management.md).
 
 Transport flows cover actual owner methods, hello features, owner/Rpc reloads,
 local/remote and protocol-version boundaries, business source CAS, persistence

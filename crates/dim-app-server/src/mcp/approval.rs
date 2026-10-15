@@ -1,8 +1,7 @@
 //! Project MCP execution grants in the host's private `mcp-approvals.json`
 //! (version 1): hashed workspace/server identities mapped to configuration
-//! fingerprints, never commands, environment values or tokens. PR #15 drops
-//! host-local approval; its follow-up removes this record together with
-//! `mcp.approve`/`mcp.revoke`. Settings provides no approval service.
+//! fingerprints, never commands, environment values or tokens. MCP owns this
+//! record; Settings provides no approval service.
 use crate::settings::{Result, SettingsError};
 use dim_agent_capabilities::file_storage::{FileLease, FileStorage, FileStorageError};
 use dim_agent_runtime::StateCell;
