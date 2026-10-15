@@ -295,12 +295,15 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
                 row(register_capability(builtins, || Broken)),
                 disabled(register_capability(builtins, move || off.clone())),
                 row(register_capability(builtins, move || unlisted.clone())),
+                // Names a module the loader cannot resolve.
+                json!({"id": "Unresolvable", "name": "unregistered"}),
             ]
         },
         &[
             ("fixture", "Fixture"),
             ("pending", "Waiting"),
             ("broken", "Broken"),
+            ("unresolvable", "Unresolvable"),
             ("off", "Off"),
             ("absent", "Absent"),
         ],
@@ -309,13 +312,27 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
     assembly.state("Waiting", FiberState::Pending).await;
     assembly.state("Broken", FiberState::Failed).await;
     assembly.state("Unlisted", FiberState::Active).await;
+    assert!(matches!(
+        assembly
+            .loader
+            .get("Unresolvable")
+            .map(|entry| entry.status),
+        Some(EntryStatus::Unresolved(_))
+    ));
     let entry = CancellationToken::new();
-    // An enabled owner that is not active (Pending or Failed) affects only
-    // its own namespace, and its calls are retryable.
-    for method in ["pending.read", "broken.read"] {
+    // An enabled owner that is not active affects only its own namespace. A
+    // Pending one is retryable; a Failed or Unresolved one fails the same way
+    // until it is fixed or restarted, so clients must not retry it.
+    assert_eq!(
+        rejected(assembly.dispatch("pending.read", &entry)),
+        "service_reloading"
+    );
+    for method in ["broken.read", "unresolvable.read"] {
+        let error = assembly.dispatch(method, &entry).err().unwrap();
+        assert_eq!(error.code, -32000, "{method}");
         assert_eq!(
-            rejected(assembly.dispatch(method, &entry)),
-            "service_reloading",
+            error.data.unwrap().app_error,
+            "service_unavailable",
             "{method}"
         );
     }

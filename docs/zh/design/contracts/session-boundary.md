@@ -106,7 +106,7 @@ sequenceDiagram
 
 连接的入口记录是唯一的检查。获得管理方法即授予宿主管理员权限。
 
-装配在 [lib.rs](../../../../crates/dim-app-server/src/lib.rs) 中构建一组固定的已配置 `(namespace, row)` 对并交给 Rpc；Rpc 的 `apply`（[connection.rs](../../../../crates/dim-app-server/src/connection.rs)）拒绝 loader 不认识其行的对，并用它们构建 `Owners`（[methods.rs](../../../../crates/dim-app-server/src/methods.rs)）。一个名称属于作为其前缀或与其相等的最长已配置命名空间，即使该命名空间的所有者已禁用；父命名空间从不应答它。Rpc 在每次调用时按 key 读取该命名空间的提供方（`TypeKey::keyed_dynamic::<ManagementMethods>(ns)`，附录 F），不依赖它。没有已激活的提供方时，Rpc 用 `loader.get(row)` 读取所有者行的状态：已启用且处于 Pending 或重载时新旧两代之间的行，返回可重试的 `service_reloading`；处于 Failed 或 Unresolved 的行，返回不可重试的 `service_unavailable`；已禁用或不存在的行，或没有任何已配置命名空间拥有的名称，返回 `unknown_method`。目前的代码（methods.rs）对 Failed 和 Unresolved 的行仍返回 `service_reloading`；issue #116 会修改这一点。Rpc、已打开的连接和其他命名空间都不受影响。提供方卸载前已受理的调用属于该提供方，由它按方法的 `interruption` 回复（A.1）：`report` 调用以 `operation_interrupted` 结束，`drain` 调用回复自己的结果，提供方的卸载等待它受理的每个调用。
+装配在 [lib.rs](../../../../crates/dim-app-server/src/lib.rs) 中构建一组固定的已配置 `(namespace, row)` 对并交给 Rpc；Rpc 的 `apply`（[connection.rs](../../../../crates/dim-app-server/src/connection.rs)）拒绝 loader 不认识其行的对，并用它们构建 `Owners`（[methods.rs](../../../../crates/dim-app-server/src/methods.rs)）。一个名称属于作为其前缀或与其相等的最长已配置命名空间，即使该命名空间的所有者已禁用；父命名空间从不应答它。Rpc 在每次调用时按 key 读取该命名空间的提供方（`TypeKey::keyed_dynamic::<ManagementMethods>(ns)`，附录 F），不依赖它。没有已激活的提供方时，Rpc 用 `loader.get(row)` 读取所有者行的状态：未运行且未失败的行（Pending、尚未启动，或新旧两代之间）返回可重试的 `service_reloading`；修复或重启之前无法再运行的行（Failed、Unresolved，或 Disposed：已移除且不能重启）返回不可重试的 `service_unavailable`；已禁用或不存在的行，或没有任何已配置命名空间拥有的名称，返回 `unknown_method`。Rpc、已打开的连接和其他命名空间都不受影响。提供方卸载前已受理的调用属于该提供方，由它按方法的 `interruption` 回复（A.1）：`report` 调用以 `operation_interrupted` 结束，`drain` 调用回复自己的结果，提供方的卸载等待它受理的每个调用。
 
 ## 4. 时序与冲突
 
@@ -115,7 +115,7 @@ sequenceDiagram
 | Session 级提供方在调用中途重载 | call < reload | `report`：`operation_interrupted`；`drain`：调用自己的结果；提供方的卸载等待每个已受理的调用（AGENTS.md 规则 8） | 提供方 |
 | Session 的 Capability 重载期间调用 Session 方法 | — | `service_reloading` | Rpc |
 | 对未列出该命名空间的 Session 调用 Session 方法 | — | `unknown_method` | Rpc |
-| 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `service_reloading`；处于 Failed 或 Unresolved 的所有者返回 `service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
+| 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `service_reloading`；处于 Failed、Unresolved 或 Disposed 的所有者返回 `service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法或 `daemon.shutdown` | — | `unknown_method` | Rpc |
 | 两个提供方声明同一命名空间或工具名 | 装配 | 装配失败；key 在每个作用域内唯一 | 装配 |
 | Session 命名空间与已配置的管理命名空间重叠 | 装配 | 装配失败（A.1） | 装配 |
@@ -226,16 +226,39 @@ sequenceDiagram
 | 命名空间 | `<segment>(.<segment>)*`，段为 `[a-z][a-z0-9_]*`，最多 128 字节，由提供方拥有；命名空间本身可以是一个方法（`session.rename`）。不符合该语法的名称不做任何查找，直接为 `unknown_method` |
 | 所有权 | 管理方法名称属于作为其前缀或与其相等的最长已配置管理命名空间（`Owners`），即使该命名空间的所有者已禁用。Session 方法名称属于该 Session 列出的最长命名空间（C1） |
 | 保留名 | 分两部分。精确内建名：`is_builtin_method` 接受的每个名称（[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs)）；贡献的命名空间、命名空间的任何前缀以及声明的方法都不能等于其中之一，精确内建名也不能落在贡献的命名空间之内。对管理命名空间，最后这一条目前成立只是因为每个精确内建名都位于某个保留根之下；`provide` 并不检查它。Session 命名空间可以位于 `session` 之下，C1 必须检查这一条（例如 `session.mcp` 是精确内建名，因此 Session 命名空间 `session.mcp` 或包含它的命名空间会被拒绝）。保留根：`hello`、`daemon`、`agent`、`approval` 和 `session`；管理命名空间不能位于其中任何一个之内（`ManagementMethods::provide` 会拒绝）。Session 命名空间可以位于 `session` 之下（`session.goal`、`session.input`），但不能是单独的 `session` 根。`session.input` 不保留：InputQueue 通过 `sessionMethods` 提供 `session.input.withdraw`（提议中），因此 Rpc 不点名任何所属服务 |
-| 优先级与路由 | 内建方法；否则已配置的管理命名空间；否则走 Session 路径，仅限协议 v3+，且仅当连接的入口获得 Session 方法时。共用一个线上名称空间 |
+| 优先级与路由 | 内建方法；否则已配置的管理命名空间；否则，仅限协议 v3+ 且仅当连接的入口获得 Session 方法时，装配时记录的 Session 命名空间（见已知命名空间）；否则 `unknown_method`。共用一个线上名称空间 |
 | 命名空间冲突 | Session 命名空间与已配置的管理命名空间相等、包含它或位于它之内时，装配失败，因此没有名称会同时有管理所有者和 Session 所有者（C1） |
-| Session 级调用（C1，未实现） | 既不是内建方法、也不在已配置管理命名空间内的名称，是 Session 方法候选。Rpc 从原始 params 读取 `sessionId`；缺少时结果为 `-32602`。Rpc 对其授权，并通过 `index.acquire` 获取该 Session，未装载的 Session 会被恢复（不同于 `approval.respond`：对未装载的 Session 它返回 `session_closed`）。然后 Rpc 解析该 Session 列出的最长命名空间：没有 → `unknown_method`；已列出但未激活 → `service_reloading`。Rpc 在调用期间一直持有该 Session 的使用权。`sessionId` 与 `branchId` 留在 `params` 中；Rpc 读取 `sessionId` 只为授权和解析。提供方通过该分支的服务到达某个分支。对不在任何已配置管理命名空间内的名称，这一顺序先返回 `-32602` 再判断 `unknown_method`，与[管理方法](../../../design/appserver/management-methods.md)不同（那里未知方法无论 params 如何都是 `-32601`）；此处以本合同为准，因为这类名称只能通过 Session 解析，而 Session 的 id 是 params 的一部分。在已配置命名空间之内仍以 management-methods.md 为准 |
+| Session 级调用（C1，未实现） | 既不是内建方法、也不在已配置管理命名空间内，且位于装配时记录的某个 Session 命名空间之内的名称，是 Session 方法候选；其他名称无论 params 如何都是 `unknown_method`，与[管理方法](../../../design/appserver/management-methods.md)一致。Rpc 从候选的原始 params 读取 `sessionId`；缺少时结果为 `-32602`。Rpc 对其授权，并通过 `index.acquire` 获取该 Session，未装载的 Session 会被恢复（不同于 `approval.respond`：对未装载的 Session 它返回 `session_closed`）。然后 Rpc 解析该 Session 列出的最长命名空间：没有 → `unknown_method`；已列出但未激活 → `service_reloading`。Rpc 在调用期间一直持有该 Session 的使用权。`sessionId` 与 `branchId` 留在 `params` 中；Rpc 读取 `sessionId` 只为授权和解析。提供方通过该分支的服务到达某个分支。不可能属于任何 Session 命名空间的名称，既不读取 params，也不恢复 Session |
 | 调用归属 | Session 级提供方这一代拥有它受理的调用，与 `ManagementMethods` 相同：由它回复，它的卸载按 `interruption` 中断这些调用并等待它们（见上文取消与中断） |
-| 已知命名空间（C1，未实现） | 运行时的 `Session::session_service` 对任何缺失的 key 都返回 `Reloading`，因此单靠读取分不清不存在的命名空间与正在重载的命名空间。C1 让装配用 `AgentBuilder::session_methods(ns)` 记录每个 Session 的已知命名空间，作为 `Owners` 的对应物：不在列表中的命名空间 → `unknown_method`；在列表中但提供方未激活 → `service_reloading` |
-| 共享类型（C1） | `MethodDecl`、`Interruption`、`Handler` 与 `RpcError` 目前位于 dim-app-server，而 dim-agent-capabilities 中的 Session Capability 不能依赖它。C1 把共享的声明、处理函数与错误类型移到 dim-agent-types |
-| 不分发 | 没有已配置命名空间拥有该名称且它不是 Session 方法候选、所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称、在带 `deviceId` 的连接或未导出的链接上调用管理方法，或 v1/v2 → `-32601 unknown_method`。Session 正在重载、已列出的 Session 命名空间的提供方未激活，或管理方法所有者行处于 Pending 或新旧两代之间 → `-32000 service_reloading`（可重试）。管理方法所有者行处于 Failed 或 Unresolved → `-32000 service_unavailable`（不可重试；#116 之前代码返回 `service_reloading`）。已开始的 `report` 调用被中断 → `operation_interrupted` |
+| 已知命名空间（C1，未实现） | 运行时的 `Session::session_service` 对任何缺失的 key 都返回 `Reloading`，因此单靠读取分不清不存在的命名空间与正在重载的命名空间。C1 让装配用 `AgentBuilder::session_methods(ns)` 记录每个 Session 的已知命名空间，作为 `Owners` 的对应物：不在列表中的命名空间 → `unknown_method`；在列表中但提供方未激活 → `service_reloading`。Rpc 拿到的是整个装配记录的命名空间，因此在读取任何 Session 之前，它们也决定一个名称是否为 Session 方法候选（见上文 Session 级调用） |
+| 共享类型（C1） | `MethodDecl`、`Interruption`、`Handler` 与 `RpcError` 目前位于 dim-app-server，而 dim-agent-capabilities 中的 Session Capability 不能依赖它。C1 把它们移到 dim-agent-capabilities 的 `methods` 模块，与 Session 级对应物 `SessionMethods` 放在一起（附录 F），如同 `ToolContribution` 与同样接收 `CancellationToken` 的 `ToolHandler` 和 ToolRegistry 放在一起。不放在 dim-agent-types：它只允许依赖 serde 与 serde_json（`xtask check`；[架构](../../../architecture/README.md)：不依赖 Tokio 或 rutis），而 `Handler` 接收 tokio-util 的 `CancellationToken` 并返回 rutis 的 `BoxFuture`；并且 `RpcError` 放在那里时，`From<AgentError> for RpcError` 只能在 dim-agent-runtime 中实现（孤儿规则）。放在 dim-agent-capabilities 时，这个转换随 `RpcError` 一起移动，Rpc 与 Session 提供方仍可对运行时错误使用 `?` |
+| 不分发 | 没有已配置命名空间拥有该名称且它不是 Session 方法候选、所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称、在带 `deviceId` 的连接或未导出的链接上调用管理方法，或 v1/v2 → `-32601 unknown_method`。Session 正在重载、已列出的 Session 命名空间的提供方未激活，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间）→ `-32000 service_reloading`（可重试）。管理方法所有者行处于 Failed、Unresolved 或 Disposed → `-32000 service_unavailable`（不可重试）。已开始的 `report` 调用被中断 → `operation_interrupted` |
 | `hello.features`（v3） | 内建方法；连接获得管理方法时（本地 v3），再加上已配置命名空间中已激活提供方的方法，每个方法只列在拥有它的命名空间下。从 loader 行的 `provides` 发现命名空间是后续工作（[ADR 004](../../../adr/004-loader-plugin-management.md)）。Session 级方法不在这里列出，由 `session.methods` 按 Session 列出 |
-| `session.methods`（C1，未实现） | 新的公开接口，Rpc 内建方法：`session.methods {sessionId}` → `{ "methods": [ { "name": "string", "mutating": true } ] }`，即该 Session 列出且提供方已激活的命名空间所声明的方法。它与其他 Session 级内建方法一样授权和解析，并增加一个精确内建名 |
+| `session.methods`（C1，未实现） | 新的公开接口，Rpc 内建方法，与它列出的方法一样仅限协议 v3：`session.methods {sessionId}` → `{ "methods": [ { "name": "string", "mutating": true } ] }`，即该 Session 列出且提供方已激活的命名空间所声明的方法。它与其他 Session 级内建方法一样授权和解析，并增加一个精确内建名 |
 | 就绪闩 | 在 loader 的初始装载结算后打开，因此进程提供方在第一个 `hello` 时已存在 |
+
+连接的入口接纳调用后，Rpc 如何路由（C1，未实现）：
+
+```text
+调用
+  |
+  内建方法？ ---------------------------------- 是 --> 内建处理
+  | 否
+  在已配置的管理命名空间内？ ------------------- 是 --> managementMethods（§3.2）
+  | 否
+  v3+、入口获得 Session 方法，且位于装配时
+  记录的某个 Session 命名空间内？ -------------- 否 --> -32601 unknown_method
+  | 是
+  params 中有 sessionId？ ---------------------- 否 --> -32602
+  | 是
+  授权；index.acquire（恢复未装载的 Session）
+  |
+  该 Session 列出的最长命名空间？ -------------- 没有 -> -32601 unknown_method
+  |
+  Session::session_named_service（§9.1） ------- 未激活 -> -32000 service_reloading
+  |
+  SessionMethods 调用 --> 回复（未声明的名称：-32601 unknown_method）
+```
 
 已知的 Session 级命名空间：`session.question`（Questions）、`session.goal`（Goal）、`session.rename`（SessionTitle）、`session.input`（InputQueue）、`attachment`（Attachments）、`shell`（ShellInput）；`hooks`（Hooks）待设计。各插件文档对其方法具有权威性。
 
@@ -326,7 +349,7 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 | 对已关闭分支调用 Session 方法 | — | 所有者的 `BranchMissing` 错误 | 所属插件 |
 | 对未装载 Session 调用 Session 方法 | — | Rpc 通过 `index.acquire` 恢复后再分发（不同于 `approval.respond`，它返回 `session_closed`） | Rpc |
 | Session 级提供方在调用中途重载 | admitted < reload | `report`：`operation_interrupted`；`drain`：调用自己的结果；卸载等待两者 | 提供方 |
-| 进程所有者重载 | — | Pending 或新旧两代之间：重新激活前返回 `service_reloading`；Failed 或 Unresolved：`service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载 | Rpc |
+| 进程所有者重载 | — | Pending、尚未启动，或新旧两代之间：重新激活前返回 `service_reloading`；Failed、Unresolved 或 Disposed：`service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载 | Rpc |
 | 有在途调用时 Rpc 重载 | — | 处理函数的取消令牌触发：`report` 回复 `operation_interrupted`，`drain` 回复自己的结果；Rpc 卸载时等待它应发出的回复以及每个被中断操作结算；`closed` 完成（`callChannel`，未实现） | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法 | — | `unknown_method` | Rpc |
 | 客户端在调用中途 detach | — | 调用继续；回复被丢弃 | Rpc |
@@ -343,8 +366,8 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 | --- | --- |
 | 没有所有者（管理方法所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称）、不向该连接提供，或 v1/v2 | `-32601`，`unknown_method` |
 | Session 方法候选缺少 `sessionId` | `-32602` |
-| Session 正在重载、已列出的 Session 命名空间未激活，或管理方法所有者行处于 Pending 或新旧两代之间 | `-32000`，`service_reloading`（可重试） |
-| 管理方法所有者行处于 Failed 或 Unresolved | `-32000`，`service_unavailable`（不可重试；#116 之前代码返回 `service_reloading`） |
+| Session 正在重载、已列出的 Session 命名空间未激活，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间） | `-32000`，`service_reloading`（可重试） |
+| 管理方法所有者行处于 Failed、Unresolved 或 Disposed | `-32000`，`service_unavailable`（不可重试） |
 | `report` 调用被中断 | `-32000`，`operation_interrupted` |
 | 提供方错误 | `-32000`，提供方的 `appError` |
 
@@ -356,7 +379,7 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 4. 在 RemoteGateway 测试入口上，`session.permission.update` 与 `session.exec.stop` 成功。
 5. 由非 Rust 插件以 `toolContribution` 提供的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行。`SessionConfig.tools` 中提供方缺失的工具被省略并在诊断中报告，Session 照常启动。
 6. 进度先于响应，断开后 `notify` 报告 `gone`。
-7. 某个已启用的管理方法提供方处于 Pending 时，`hello` 成功，其他命名空间都正常，该提供方的命名空间返回 `service_reloading`；处于 Failed 或 Unresolved 时返回 `service_unavailable`（目前为 `service_reloading`，#116）；已禁用时返回 `unknown_method`。PluginManager 提供 `plugin.set_enabled`（未实现）之后，除非该提供方就是 PluginManager 本身，否则可以用它禁用该提供方。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
+7. 某个已启用的管理方法提供方处于 Pending 时，`hello` 成功，其他命名空间都正常，该提供方的命名空间返回 `service_reloading`；处于 Failed 或 Unresolved 时返回 `service_unavailable`；已禁用时返回 `unknown_method`。PluginManager 提供 `plugin.set_enabled`（未实现）之后，除非该提供方就是 PluginManager 本身，否则可以用它禁用该提供方。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
 
 ## 附录 E. 假设
 
@@ -374,7 +397,7 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 | 语言中立服务 | Rust 类型与 key | Rust 装配中的注册 | 收集 | 状态 |
 | --- | --- | --- | --- | --- |
 | `managementMethods[ns]` | `ManagementMethods`，进程作用域，key 为 `TypeKey::keyed_dynamic::<ManagementMethods>(ns)` | 在所有者的 `apply` 中调用 `ManagementMethods::provide(ctx, ns, Vec<MethodDecl>, Handler)`；装配把 `(ns, row)` 对加入 `Owners` | 按调用经 `Owners`：用 `Ctx::get_as` 按 key 读取，行状态来自 `loader.get(row)`；不在 Rpc 的 `Deps` 中 | 已实现（#14） |
-| `sessionMethods[ns]` | 用 dim-agent-types 中的共享类型构建的、`ManagementMethods` 的 Session 级对应物，key 为 `SessionScope::named_key::<T>(ns)` | `AgentBuilder::session_methods(ns)`，同时记录该 Session 的已知命名空间 | `Session::session_named_service::<T>(ns)`（§9.1） | 未实现（C1） |
+| `sessionMethods[ns]` | `SessionMethods`，`ManagementMethods` 的 Session 级对应物，与共享类型一起位于 dim-agent-capabilities 的 `methods`（A.1），key 为 `SessionScope::named_key::<SessionMethods>(ns)` | `AgentBuilder::session_methods(ns)`，同时记录该 Session 的已知命名空间 | `Session::session_named_service::<T>(ns)`（§9.1） | 未实现（C1） |
 | `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | 目前是 `Contributions<ToolContribution>`，属于硬依赖；已启用工具缺少提供方会使 Session 失败。C3：在 `SessionLifecycle::activated()` 时按 key 读取，缺失或未激活的提供方被省略并在诊断中报告 | 由 C3 修改 |
 | `callChannel` | — | — | — | 未实现 |
 
@@ -397,7 +420,7 @@ impl ManagementMethods {
 }
 ```
 
-`provide` 拒绝无效的声明（A.1 保留名），注册中断并等待已受理调用的卸载 effect，并以 `TypeKey::keyed_dynamic::<ManagementMethods>(namespace)` 提供服务。处理函数接收方法名、原始 params，以及在任一卸载时触发的取消令牌（A.1）。C1 把 `MethodDecl`、`Interruption`、`Handler` 和错误类型移到 dim-agent-types，使 dim-agent-capabilities 中的 Session Capability 可以使用它们；`ManagementMethods` 与 `Owners` 留在 dim-app-server。
+`provide` 拒绝无效的声明（A.1 保留名），注册中断并等待已受理调用的卸载 effect，并以 `TypeKey::keyed_dynamic::<ManagementMethods>(namespace)` 提供服务。处理函数接收方法名、原始 params，以及在任一卸载时触发的取消令牌（A.1）。C1 把 `MethodDecl`、`Interruption`、`Handler` 和 `RpcError`（连同它的 `From<AgentError>`）移到 dim-agent-capabilities 的 `methods`，使 Session Capability 可以使用它们（A.1 共享类型）。两个服务都需要的调用受理逻辑（任一卸载时中断 `Report` 调用、等待每个已受理调用）随之移动，因此 `SessionMethods` 与 `ManagementMethods` 不会分叉；`ManagementMethods`、它的保留名检查与 `Owners` 留在 dim-app-server。
 
 未实现：语言中立的 `describe`/`call` 绑定（接收 `MethodCall`、返回 `MethodReply` 或 `MethodError` 的提供方）、`callChannel`（进度、连接通知、最终回复交接），以及声明字段 `progress`、`notifications` 和 `reply`。它们的结构见 A.1 与 A.2；Rust 名称在实现时确定。
 
