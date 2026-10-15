@@ -3602,6 +3602,7 @@
       "to": "dim_agent_capabilities::file_storage::native",
       "references": [
         "mod native",
+        "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
         "path native::create_key",
@@ -3635,6 +3636,7 @@
       "to": "dim_agent_capabilities::file_storage::unsupported",
       "references": [
         "mod unsupported",
+        "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
         "path native::create_key",
@@ -3669,6 +3671,7 @@
       "to": "dim_agent_capabilities::file_storage::windows",
       "references": [
         "mod windows",
+        "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
         "path native::create_key",

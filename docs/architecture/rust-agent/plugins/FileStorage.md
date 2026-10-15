@@ -61,10 +61,16 @@ resources are omitted, including names the filesystem equates with them.
 `remove` makes an entry absent. Files, including those beneath a directory,
 are removed under the lock leases use, so removing a leased file, or a directory
 with a lease held anywhere beneath it, returns `Locked`. A link is removed
-itself. A directory is emptied through held directory handles, without following
-links or entering a filesystem mounted at or inside it (a Linux bind mount of
-the same filesystem is not detected). Its FileStorage resources go last and
-hold one key at a time, however many names the directory has used:
+itself. A directory is emptied depth first through directory handles, without
+following links or entering a filesystem mounted at or inside it (a Linux bind
+mount of the same filesystem is not detected). An explicit stack replaces
+recursion, so depth costs no thread stack. On Unix, removal holds one directory
+descriptor at a time: it returns to each parent through `..` and fails if that
+is no longer the directory it descended from, or starts again from the target if
+a concurrent removal deleted it. Windows holds a handle per level,
+since it cannot reopen a parent from a handle without a path. Each directory's
+FileStorage resources go last and hold one key at a time, however many names
+the directory has used:
 
 ```text
 remove(d), once d's other entries are gone:
@@ -97,7 +103,8 @@ marker cannot be listed or removed.
 `directory_listing_and_removal_stay_inside_the_authorized_root` (Session-file
 layout, reserved resources and aliases, leases held during partial removal,
 links, cancellation) and `removal_scales_with_directory_size` (a directory that
-used 300 names, removed under a 64-descriptor limit). The unit test
+used 300 names and a 1,000-level tree, removed under a 64-descriptor limit on a
+256 KiB worker stack, where recursion overflowed at a few hundred levels). The unit test
 `lock_keys_stay_exclusive_across_concurrent_directory_removal` in the owner
 module drives the lock, removal and temporary-file interleavings that the public
 API cannot produce reliably.

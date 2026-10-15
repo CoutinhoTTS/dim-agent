@@ -404,14 +404,18 @@ impl FileStorage {
     ) -> Result<()> {
         let relative = path.relative.clone();
         self.run(path, cancel, move |root, owner, cancel| {
-            absent_is_removed(
-                native::parent(root, &relative)
-                    .map_err(Into::into)
-                    .and_then(|(parent, name)| match native::entry_kind(&parent, &name)? {
-                        Some(kind) => remove_entry(&parent, &name, kind, &owner, &cancel),
-                        None => Ok(()),
-                    }),
-            )
+            // An absent entry, or an absent parent, counts as removed.
+            let (parent, name) = match native::parent(root, &relative) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                result => result?,
+            };
+            match native::entry_kind(&parent, &name)? {
+                Some(EntryKind::Directory) => remove_tree(&parent, &name, &owner, &cancel),
+                Some(kind) => {
+                    absent_is_removed(remove_entry(&parent, &name, kind, &owner, &cancel))
+                }
+                None => Ok(()),
+            }
         })
         .await
     }
@@ -686,15 +690,15 @@ fn create_temporary(
 /// omitted by name and by the identity the filesystem gives them.
 fn business_entries(directory: &File) -> Result<Vec<DirectoryEntry>> {
     let reserved = native::reserved(directory)?;
-    Ok(native::entries(directory)?
+    Ok(remaining_entries(directory)?
         .into_iter()
         .filter(|(entry, identity)| !reserved_name(&entry.name) && !reserved.contains(identity))
         .map(|(entry, _)| entry)
         .collect())
 }
 
-/// Removes one entry below `parent`. A link is removed, never followed; a
-/// directory is emptied through held handles and never on another filesystem.
+/// Removes a non-directory entry below `parent`: a file under the lock leases
+/// use, a link or special file itself, never followed.
 fn remove_entry(
     parent: &File,
     name: &OsString,
@@ -702,17 +706,58 @@ fn remove_entry(
     owner: &Arc<FileStorage>,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    match kind {
-        EntryKind::File => {
-            let (name, _lock) = physical_lock(parent, name, owner)?;
+    if kind == EntryKind::File {
+        let (name, _lock) = physical_lock(parent, name, owner)?;
+        owner.check(cancel)?;
+        Ok(native::remove(parent, &name)?)
+    } else {
+        Ok(native::remove(parent, name)?)
+    }
+}
+
+/// Removes the directory `name` below `parent` and everything beneath it,
+/// depth first through directory handles and never on another filesystem.
+/// An explicit stack replaces recursion, so tree depth costs no thread
+/// stack; `native::Ancestors` bounds what returning to each parent holds.
+fn remove_tree(
+    parent: &File,
+    name: &OsString,
+    owner: &Arc<FileStorage>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    /// A directory being emptied: its name in its parent and the entries left.
+    struct Level {
+        name: OsString,
+        entries: std::vec::IntoIter<DirectoryEntry>,
+    }
+    // A concurrent removal of the same tree can delete the directory being
+    // emptied together with its parent; the traversal then starts again.
+    'tree: loop {
+        let mut directory = match native::subdirectory(parent, name) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            result => result?,
+        };
+        let mut levels = vec![Level {
+            name: name.clone(),
+            entries: business_entries(&directory)?.into_iter(),
+        }];
+        let mut ancestors = native::Ancestors::default();
+        while let Some(level) = levels.last_mut() {
             owner.check(cancel)?;
-            Ok(native::remove(parent, &name)?)
-        }
-        EntryKind::Other => Ok(native::remove(parent, name)?),
-        EntryKind::Directory => {
-            let directory = native::subdirectory(parent, name)?;
-            for entry in business_entries(&directory)? {
-                owner.check(cancel)?;
+            let Some(entry) = level.entries.next() else {
+                remove_resources(&directory)?;
+                let name = levels.pop().expect("emptied level").name;
+                if levels.is_empty() {
+                    return absent_is_removed(native::remove_directory(parent, &name));
+                }
+                directory = match ancestors.pop(&directory) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue 'tree,
+                    result => result?,
+                };
+                absent_is_removed(native::remove_directory(&directory, &name))?;
+                continue;
+            };
+            if entry.kind != EntryKind::Directory {
                 absent_is_removed(remove_entry(
                     &directory,
                     &entry.name,
@@ -720,11 +765,23 @@ fn remove_entry(
                     owner,
                     cancel,
                 ))?;
+                continue;
             }
-            owner.check(cancel)?;
-            remove_resources(&directory)?;
-            Ok(native::remove_directory(parent, name)?)
+            match native::subdirectory(&directory, &entry.name) {
+                Ok(child) => {
+                    let entries = business_entries(&child)?.into_iter();
+                    ancestors.push(std::mem::replace(&mut directory, child))?;
+                    levels.push(Level {
+                        name: entry.name,
+                        entries,
+                    });
+                }
+                // Removed meanwhile.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        unreachable!("emptying the target directory returns")
     }
 }
 
@@ -808,9 +865,9 @@ fn remove_key(
     absent_is_removed(native::remove(locks, name))
 }
 
-/// Entries of a reserved directory that a concurrent removal may have
-/// deleted since it was opened; a deleted directory has none. Removing it
-/// by name afterwards reports what is there now.
+/// Entries of a directory that a concurrent removal may have deleted since
+/// it was opened; a deleted directory has none. Removing it by name
+/// afterwards reports what is there now.
 fn remaining_entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, native::Identity)>> {
     match native::entries(directory) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -1489,6 +1546,33 @@ mod native {
     pub fn remove_directory(parent: &File, name: &OsStr) -> io::Result<()> {
         unlink(parent, name, libc::AT_REMOVEDIR)
     }
+    /// The directories a removal descended from. Each is reopened through
+    /// `..` on the way back and must still be the directory it was, so a
+    /// removal holds one directory descriptor however deep the tree is.
+    #[derive(Default)]
+    pub struct Ancestors(Vec<(u64, u64)>);
+    impl Ancestors {
+        pub fn push(&mut self, directory: File) -> io::Result<()> {
+            let metadata = directory.metadata()?;
+            self.0.push((metadata.dev(), metadata.ino()));
+            Ok(())
+        }
+        /// The directory `child` was entered from.
+        pub fn pop(&mut self, child: &File) -> io::Result<File> {
+            let entered_from = self.0.pop().expect("a directory removal descended from");
+            let parent = open(
+                child,
+                OsStr::new(".."),
+                libc::O_RDONLY | libc::O_DIRECTORY,
+                0,
+            )?;
+            let metadata = parent.metadata()?;
+            if (metadata.dev(), metadata.ino()) != entered_from {
+                return Err(io::Error::other("directory moved during removal"));
+            }
+            Ok(parent)
+        }
+    }
 
     // The empty-file reader window cannot be sampled reliably through replace.
     // Check this security boundary directly, with umask isolated in a child.
@@ -1734,6 +1818,16 @@ mod unsupported {
     }
     pub fn remove_directory(_: &File, _: &OsStr) -> io::Result<()> {
         Err(unsupported())
+    }
+    #[derive(Default)]
+    pub struct Ancestors;
+    impl Ancestors {
+        pub fn push(&mut self, _: File) -> io::Result<()> {
+            Err(unsupported())
+        }
+        pub fn pop(&mut self, _: &File) -> io::Result<File> {
+            Err(unsupported())
+        }
     }
     pub fn same_identity(_: &File, _: &File) -> io::Result<bool> {
         Err(unsupported())

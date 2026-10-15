@@ -835,6 +835,20 @@ pub(super) fn remove_directory(parent: &File, name: &OsStr) -> io::Result<()> {
         null_mut(),
     )?)
 }
+/// The directories a removal descended from, held open: Windows reopens no
+/// parent from a handle without a path, and has no small handle limit.
+#[derive(Default)]
+pub(super) struct Ancestors(Vec<File>);
+impl Ancestors {
+    pub(super) fn push(&mut self, directory: File) -> io::Result<()> {
+        self.0.push(directory);
+        Ok(())
+    }
+    /// The directory `child` was entered from.
+    pub(super) fn pop(&mut self, _: &File) -> io::Result<File> {
+        Ok(self.0.pop().expect("a directory removal descended from"))
+    }
+}
 pub(super) fn process_alive(pid: u32) -> io::Result<bool> {
     let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
     if handle.is_null() {

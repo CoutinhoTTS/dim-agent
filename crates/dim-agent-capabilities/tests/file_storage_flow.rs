@@ -364,8 +364,9 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     ));
 }
 
-/// Removal holds a bounded number of descriptors: a directory that used many
-/// names is removed under a small descriptor limit.
+/// Removal holds a bounded number of descriptors and does not recurse: a
+/// directory that used many names and a tree deeper than recursion on a
+/// worker stack could remove go under a small descriptor limit.
 #[test]
 fn removal_scales_with_directory_size() {
     #[cfg(unix)]
@@ -396,8 +397,11 @@ fn removal_scales_with_directory_size() {
         limit.rlim_cur = 64;
         assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
     }
+    // A small stack keeps a tree too deep for recursion cheap to build: APFS
+    // spends time quadratic in depth creating and removing a chain.
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        .thread_stack_size(256 * 1024)
         .enable_all()
         .build()
         .unwrap()
@@ -420,12 +424,60 @@ fn removal_scales_with_directory_size() {
             storage.remove(&names, &cancel).await.unwrap();
             assert!(fs::symlink_metadata(root_path.join("names")).is_err());
 
+            let relative = deep_tree(&root_path.join("deep"), SCALE_DEPTH);
+            let leaf = storage.path(0, relative.join("leaf.txt")).unwrap();
+            storage
+                .replace(&leaf, b"deep".to_vec(), None, &cancel)
+                .await
+                .unwrap();
+            let deep = storage.path(0, "deep").unwrap();
+            storage.remove(&deep, &cancel).await.unwrap();
+            assert!(fs::symlink_metadata(root_path.join("deep")).is_err());
             root.shutdown().await.unwrap();
         });
 }
 
 #[cfg(unix)]
 const SCALE_PROBE: &str = "DIM_FILE_STORAGE_SCALE_PROBE";
+// Recursion on the small worker stack above overflows at a few hundred levels.
+const SCALE_DEPTH: usize = 1_000;
+
+/// Creates `base` with a chain of `depth` directories below it and returns
+/// the chain's path relative to the authorized root.
+fn deep_tree(base: &std::path::Path, depth: usize) -> PathBuf {
+    let relative: PathBuf = std::iter::once("deep")
+        .chain(std::iter::repeat_n("d", depth))
+        .collect();
+    #[cfg(unix)]
+    {
+        // The chain is longer than PATH_MAX, so it is built relative to a
+        // held descriptor.
+        use std::os::fd::{AsRawFd, FromRawFd};
+        fs::create_dir(base).unwrap();
+        let mut current = fs::File::open(base).unwrap();
+        for _ in 0..depth {
+            let created = unsafe { libc::mkdirat(current.as_raw_fd(), c"d".as_ptr(), 0o755) };
+            assert_eq!(created, 0, "{}", std::io::Error::last_os_error());
+            let fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    c"d".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+            current = unsafe { fs::File::from_raw_fd(fd) };
+        }
+    }
+    #[cfg(windows)]
+    {
+        // The root is a verbatim path, which may exceed MAX_PATH.
+        let mut path = base.to_path_buf();
+        path.extend(std::iter::repeat_n("d", depth));
+        fs::create_dir_all(path).unwrap();
+    }
+    relative
+}
 
 #[tokio::test]
 async fn late_roots_preserve_indices_and_generation_boundaries_on_reload() {
