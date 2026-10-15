@@ -152,6 +152,20 @@ file IDs during enumeration, such as NTFS or ReFS. Elsewhere, such as on FAT,
 exFAT or some network shares, they fail with an `Unsupported` I/O error rather
 than list entries whose aliases of reserved names could not be recognized.
 
+A directory deleted while an operation runs inside it has the same effect on
+both platforms. Unix fails an operation in a deleted directory, or on a deleted
+entry, with not found. Windows fails it with access denied, as it does a real
+denial (`STATUS_DELETE_PENDING` or `STATUS_FILE_DELETED`). FileStorage then
+checks whether the handle's directory or entry is pending deletion and, if
+so, reports not found. A real denial in a live directory stays an error. A
+file deleted while a lock resolves its stored name counts as missing, rather
+than taking the name NTFS gives deleted files, and a key that fails to lock
+once a removal unlinked it is stale on either platform. A lock racing the
+removal of its directory therefore resolves its key again or returns
+`Locked`, or not found once the directory is gone. A removal racing
+another removal of the same tree treats what the other deleted as removed,
+and starts again from its target if a directory it returns to was deleted.
+
 ## Tests
 
 [file_storage_flow.rs](../../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs):

@@ -645,7 +645,8 @@ fn lock_name(
 /// Opens the key `name` in `locks` with `open` and locks it. None if a
 /// removal took the key, or the reserved directory, before it was held: only
 /// a removal holding a key unlinks it, so a key still linked once held stays
-/// linked while held.
+/// linked while held. Such a key is stale whatever error locking it gives,
+/// since Windows may refuse to lock a deleted file.
 fn lock_key(
     locks: &File,
     name: &OsStr,
@@ -657,7 +658,13 @@ fn lock_key(
     };
     #[cfg(test)]
     before_key_lock(name);
-    let key = HeldKey::lock(key)?;
+    match key.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(FileStorageError::Locked),
+        Err(TryLockError::Error(_)) if !native::linked(locks, name, &key)? => return Ok(None),
+        Err(TryLockError::Error(error)) => return Err(error.into()),
+    }
+    let key = HeldKey(Some(key));
     Ok(native::linked(locks, name, key.file())?.then_some(key))
 }
 
@@ -1144,13 +1151,6 @@ impl Drop for PhysicalLock {
 /// defer the implicit unlock after CloseHandle.
 struct HeldKey(Option<File>);
 impl HeldKey {
-    fn lock(file: File) -> Result<Self> {
-        file.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => FileStorageError::Locked,
-            TryLockError::Error(error) => FileStorageError::Io(error),
-        })?;
-        Ok(Self(Some(file)))
-    }
     fn file(&self) -> &File {
         self.0.as_ref().expect("held lock key")
     }

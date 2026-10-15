@@ -116,7 +116,7 @@ fn create(
     };
     let mut handle = null_mut();
     let mut status = IO_STATUS_BLOCK::default();
-    nt_result(unsafe {
+    let created = nt_result(unsafe {
         NtCreateFile(
             &mut handle,
             access | SYNCHRONIZE,
@@ -130,8 +130,44 @@ fn create(
             null(),
             0,
         )
-    })?;
+    });
+    if let Err(error) = created {
+        return Err(match parent {
+            Some(parent) => absent_if_deleted(error, parent),
+            None => error,
+        });
+    }
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+/// Whether the file or directory behind `file` has been deleted. POSIX
+/// semantics deletion unlinks the name at once while open handles stay
+/// valid; those handles report the deletion.
+fn deleted(file: &File) -> io::Result<bool> {
+    let mut standard = FILE_STANDARD_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStandardInfo,
+            (&mut standard as *mut FILE_STANDARD_INFO).cast(),
+            size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(standard.DeletePending || standard.NumberOfLinks == 0)
+}
+/// Unix fails an operation on a deleted entry, or inside a deleted
+/// directory, with ENOENT. Windows fails it with access denied
+/// (`STATUS_DELETE_PENDING` or `STATUS_FILE_DELETED`), as it does a real
+/// denial, so this checks whether `file` is deleted and then reports
+/// NotFound, which removal treats as absent and locking as a stale key.
+fn absent_if_deleted(error: io::Error, file: &File) -> io::Error {
+    if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) && deleted(file).unwrap_or(false) {
+        io::Error::new(io::ErrorKind::NotFound, "deleted by a concurrent removal")
+    } else {
+        error
+    }
 }
 /// Opens or creates a disk file or directory of the requested type, never a
 /// reparse point.
@@ -259,23 +295,10 @@ pub(super) fn same_identity(a: &File, b: &File) -> io::Result<bool> {
     let (a, b) = (identity(a)?, identity(b)?);
     Ok(a.VolumeSerialNumber == b.VolumeSerialNumber && a.FileId.Identifier == b.FileId.Identifier)
 }
-/// Whether `name` in `directory` still refers to `file`. POSIX-semantics
-/// deletion unlinks the name at once while open handles stay valid; those
-/// handles report the deletion, also once the directory itself is gone.
+/// Whether `name` in `directory` still refers to `file`. A deleted file's
+/// handle reports the deletion, also once the directory itself is gone.
 pub(super) fn linked(directory: &File, name: &OsStr, file: &File) -> io::Result<bool> {
-    let mut standard = FILE_STANDARD_INFO::default();
-    if unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileStandardInfo,
-            (&mut standard as *mut FILE_STANDARD_INFO).cast(),
-            size_of::<FILE_STANDARD_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if standard.DeletePending || standard.NumberOfLinks == 0 {
+    if deleted(file)? {
         return Ok(false);
     }
     match create(
@@ -443,7 +466,7 @@ pub(super) fn entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, Ident
                     io::ErrorKind::Unsupported,
                     "directory listing needs file IDs, as on NTFS or ReFS",
                 )),
-                _ => Err(error),
+                _ => Err(absent_if_deleted(error, directory)),
             };
         }
         class = FileIdExtdDirectoryInfo;
@@ -497,8 +520,17 @@ pub(super) fn target_name(parent: &File, name: &OsString) -> io::Result<OsString
                 FILE_NAME_NORMALIZED | VOLUME_NAME_NT,
             )
         };
+        // A file a concurrent removal deleted counts as missing, as on Unix,
+        // where no name is resolved. NTFS then reports a path inside
+        // `\$Extend\$Deleted`, or fails; only a name that still links the file
+        // in `parent` is its stored name.
         if length == 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            return if deleted(&file).unwrap_or(false) {
+                Ok(name.clone())
+            } else {
+                Err(error)
+            };
         }
         if length as usize >= wide.len() {
             wide.resize(length as usize + 1, 0);
@@ -506,7 +538,12 @@ pub(super) fn target_name(parent: &File, name: &OsString) -> io::Result<OsString
         }
         wide.truncate(length as usize);
         let basename = wide.rsplit(|c| *c == u16::from(b'\\')).next().unwrap();
-        return Ok(OsString::from_wide(basename));
+        let basename = OsString::from_wide(basename);
+        return Ok(if linked(parent, &basename, &file)? {
+            basename
+        } else {
+            name.clone()
+        });
     }
 }
 pub(super) fn create_account_file(parent: &File, name: &OsStr) -> io::Result<File> {
@@ -813,7 +850,7 @@ fn delete(file: &File) -> io::Result<()> {
         )
     } == 0
     {
-        return Err(io::Error::last_os_error());
+        return Err(absent_if_deleted(io::Error::last_os_error(), file));
     }
     Ok(())
 }
@@ -902,7 +939,7 @@ fn volume_mount_point(entry: &File) -> io::Result<bool> {
         )
     } == 0
     {
-        return Err(io::Error::last_os_error());
+        return Err(absent_if_deleted(io::Error::last_os_error(), entry));
     }
     let data =
         unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned as usize) };
@@ -952,9 +989,18 @@ impl Ancestors {
         self.0.push(directory);
         Ok(())
     }
-    /// The directory `child` was entered from.
+    /// The directory `child` was entered from. NotFound once a concurrent
+    /// removal deleted it, so the removal starts again from its target
+    /// rather than empty a deleted directory.
     pub(super) fn pop(&mut self, _: &File) -> io::Result<File> {
-        Ok(self.0.pop().expect("a directory removal descended from"))
+        let parent = self.0.pop().expect("a directory removal descended from");
+        if deleted(&parent)? {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "directory deleted during removal",
+            ));
+        }
+        Ok(parent)
     }
 }
 pub(super) fn process_alive(pid: u32) -> io::Result<bool> {
