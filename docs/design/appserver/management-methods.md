@@ -79,6 +79,21 @@ A provider that becomes active later appears in the next `hello`. The withdrawn
 `management.methods` endpoint is not provided. Existing Session and daemon
 methods keep their built-in contracts.
 
+How Rpc answers a local v3 call whose name a configured namespace owns, and
+what the client does with each reply (contract §3.2, Appendix C):
+
+```text
+provider of the namespace active? --yes--> provider answers
+        |                                  (a name it does not declare: unknown_method)
+        no
+        v
+owner row status (loader)         reply                         client
+-------------------------------   ---------------------------   ----------------------------------
+absent or Disabled                -32601 unknown_method         stop: nothing serves the name
+Pending or between generations    -32000 service_reloading      retry: the owner is coming back
+Failed or Unresolved              -32000 service_unavailable    stop: retry after a fix or restart
+```
+
 Rpc admits contributed calls under the same handler lock as built-in commands
 and tracks reply delivery in its command tracker. A request id is the client's
 again once its reply is sent, even while an interrupted operation settles. The
