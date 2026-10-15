@@ -314,6 +314,11 @@ pub struct Create {
     pub trace: Option<TraceOption>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub agent_id: Option<String>,
+    /// Absent keeps the Agent's Session config value, interactive by default;
+    /// clients send it only when `false` because older daemons reject
+    /// unknown fields.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub interactive: Option<bool>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
