@@ -47,8 +47,8 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 1. ~~合入 #14、#16 并补 ADR 003 D3~~：已由 #14 完成（#16 关闭）。
 2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8a Settings 业务源（§5.2）。核心部件（Session 装配、ToolRegistry）不硬依赖任何可选插件，可选插件没起来时只有它自己的功能不可用（#34），在契约里一并写明。
 3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
-4. 决定 Goal 还是 Pursuit（D3）。
-5. 确认两项可能不需要的工作：Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
+4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
+5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 
 不排期，等设计完成：Questions（需要重新设计）、Hooks（待设计，作为第三方插件兼容机制单独设计）、ExternalAgent（需要重新设计）、#2 动态事件（没有使用者）。
@@ -238,5 +238,5 @@ flowchart LR
 | --- | --- | --- | --- |
 | D1 | #2 的上下文边界 | 已决定：插件事件只通过已采纳的输入和工具结果进入上下文；#2 已修订为同一口径 | #2 只剩运行时注册事件类型、写入时检查类型已注册 |
 | D2 | #4 是否尽早做，按 Session 级和分支级分段 | 是（§2 第 6 条） | TypeScript 插件何时能进入快速迭代 |
-| D3 | Goal 与 Pursuit | 待定：两者互斥，只实现一个，另一个保留为实验设计 | C5 是否有使用者；插件顺序 5 |
+| D3 | Goal 与 Pursuit | 已决定：先做 Goal。Pursuit 暂缓：用评审分支判断完成的方案需要更大的设计，不在本轮排期 | C5 的使用者是 Goal；插件顺序 5 |
 | D4 | 是否先做完全部 core 再做插件 | 已决定：不设全局阶段屏障；契约先行、core 按项拆 PR、插件按自己的依赖开工（§2） | 整体顺序 |
