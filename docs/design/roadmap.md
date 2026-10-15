@@ -64,6 +64,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发 | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Goal、S1 |
 | C2 | `SessionConfig.interactive` 与 `session.create` 参数（只做这一个字段；存储保持 v13，旧记录缺省为交互） | S | Rpc | — | SessionTitle、S2（Questions 待重新设计） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
+| C8 | Session 方法的每次调用进度：声明了 `progress` 的方法在调用期间发进度，Rpc 以 `management.progress` 只发给调用方连接，先于回复，断开后丢弃（session-boundary A.2；`callChannel` 的其余部分不在内） | S | Rpc | C1 | ShellInput |
 | C7 | 固定前缀读：Session 门面只读已发布到指定序号的事件（session-access A.5） | S | 独立 | — | SessionTitle、Scheduler、Workflow |
 | C3 | `toolContribution` 按名收集；不硬依赖可选插件：在 `SessionLifecycle::activated()` 时接入当时已起来的提供方，之后起来的在下次重载时接入；`SessionConfig.tools` 里提供方没起来的工具直接省略（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
 | C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载；Session 装配不等可选插件的部件（#34） | L，先 spike | 装配 | C3 | 所有 TypeScript 插件 |
@@ -89,7 +90,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 | 顺序 | 插件 | 语言 | 依赖 |
 | --- | --- | --- | --- |
-| 1 | ShellInput | Rust | C1、S7 |
+| 1 | ShellInput | Rust | C1、C8、S7 |
 | 2 | Attachments | Rust | C1、S5a、S6、S11 |
 | 3 | Web | TypeScript | C3、C4、S8b |
 | 4 | SessionTitle | TypeScript | C1、C2、C4、C6、C7、S4、S5b、S8b |
@@ -105,7 +106,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 
 | 负责线 | 依次合入 | 说明 |
 | --- | --- | --- |
-| Rpc（`connection.rs`、`protocol.rs`、`methods.rs`），yyhhyyyyyy | R1 → C1 → C2 → C6 → S5b/S5c 的 Session 方法 | 冲突最多的地方 |
+| Rpc（`connection.rs`、`protocol.rs`、`methods.rs`），yyhhyyyyyy | R1 → C1 → C2 → C8 → C6 → S5b/S5c 的 Session 方法 | 冲突最多的地方 |
 | 装配（`assembly.rs`、App Server `lib.rs`），zerob13 | C3 → C4 → C5；每个新插件的登记在这之后追加 | 新插件登记只加几行，按合入顺序 rebase |
 | `agents.rs`，yyhhyyyyyy | S2 | |
 | 存储（`storage/timeline.rs`），yyhhyyyyyy | S5a → S5b → S5c →（#32） | 存储格式的改动依次做，每次单独做格式决定 |
@@ -122,7 +123,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | --- | --- | --- | --- |
 | 1（现在） | A2 契约定稿、A3 Goal（已决定）、~~A4 权限类别~~（已完成） | S6 FileStorage、R1 Failed 错误码 | C3 工具接入、C4 spike、S7 argv 辅助、S10 pluginFiles |
 | 2 | S8a Settings 源（等 A2）、S4 AuxiliaryModel、C7 固定前缀读 | C1 sessionMethods（等 A2）、C2 interactive、S5a Session 文件 | C4 TS 桥接（等 C3）、F5 隔离 spike |
-| 3 | S1 InputQueue 撤回（等 C1）、S8b Settings 服务（等 C4）、S11 图片占位、F2 权限命令规则 | C6 广播通知、P1 ShellInput（等 C1、S7）、S5b 标题、~~S3 活动句柄~~（不需要） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
+| 3 | S1 InputQueue 撤回（等 C1）、S8b Settings 服务（等 C4）、S11 图片占位、F2 权限命令规则 | C8 调用进度（等 C1）、C6 广播通知、P1 ShellInput（等 C1、C8、S7）、S5b 标题、~~S3 活动句柄~~（不需要） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
 | 4 | F1 压缩宿主（等 S4）、P5 Goal（等 C5、S1、S8b） | S2 sessions（等 C2、S1）、P2 Attachments（等 S5a、S11）、S5c 删除和 fork、F4 MCP OAuth | P3 Web（等 C4、S8b）、P4 SessionTitle（等 C6、S4、S5b、S8b） |
 | 5 | — | — | P6 Scheduler、P7 Workflow（等 S2） |
 
@@ -162,7 +163,7 @@ flowchart LR
   C6["C6 广播通知"] --> S5b["S5b 标题"]
   S6["S6 FileStorage"] --> S5a["S5a Session 文件"]
 
-  C1 --> SH["ShellInput"]
+  C1 --> C8["C8 调用进度"] --> SH["ShellInput"]
   S7["S7 argv"] --> SH
   C1 --> AT["Attachments"]
   S5a --> AT
@@ -193,7 +194,7 @@ flowchart LR
   S10 --> WF
 ```
 
-最早能交付的是 ShellInput 和 Attachments：只依赖 C1 和几个独立的小项。TypeScript 插件都卡在 C4，它是唯一的 L 级共用项，spike 应立即单独开始。Scheduler 和 Workflow 最晚，既要等 C4，也要等 S1 → S2。
+最早能交付的是 ShellInput 和 Attachments：只依赖 C1 和几个小项。TypeScript 插件都卡在 C4，它是唯一的 L 级共用项，spike 应立即单独开始。Scheduler 和 Workflow 最晚，既要等 C4，也要等 S1 → S2。
 
 ## 5. 设计变更空间
 
