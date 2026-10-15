@@ -83,6 +83,8 @@ pub struct ToolSourceRejection {
 
 #[derive(Default)]
 struct Sources {
+    /// In `SessionConfig.tools` order.
+    fixed: Vec<Arc<ToolContribution>>,
     current: BTreeMap<String, Arc<ToolSourceSet>>,
     /// Replaced versions, reachable while someone still holds them.
     replaced: HashMap<(String, String), Weak<ToolSourceSet>>,
@@ -91,8 +93,6 @@ struct Sources {
 }
 
 pub struct ToolRegistry {
-    /// In `SessionConfig.tools` order.
-    fixed: Mutex<Vec<Arc<ToolContribution>>>,
     /// Omitted providers still reserve their registered tool names.
     contributed: Arc<[String]>,
     /// Registered name and provider of every dynamic source.
@@ -109,9 +109,8 @@ impl ToolRegistry {
     /// set order.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let sources = self.sources.lock().unwrap();
-        self.fixed
-            .lock()
-            .unwrap()
+        sources
+            .fixed
             .iter()
             .chain(sources.current.values().flat_map(|set| set.tools.iter()))
             .map(|tool| tool.definition.clone())
@@ -121,10 +120,8 @@ impl ToolRegistry {
     pub fn snapshot(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
         let sources = self.sources.lock().unwrap();
         let sets: Vec<_> = sources.current.values().cloned().collect();
-        let definitions = self
+        let definitions = sources
             .fixed
-            .lock()
-            .unwrap()
             .iter()
             .chain(sets.iter().flat_map(|set| set.tools.iter()))
             .map(|tool| tool.definition.clone())
@@ -133,9 +130,10 @@ impl ToolRegistry {
     }
     /// The fixed tool of this name.
     pub fn fixed(&self, name: &str) -> Option<Arc<ToolContribution>> {
-        self.fixed
+        self.sources
             .lock()
             .unwrap()
+            .fixed
             .iter()
             .find(|tool| tool.definition.name == name)
             .cloned()
@@ -297,7 +295,12 @@ impl ToolRegistry {
             if !names.insert(tool_name.as_str()) {
                 return Err(format!("duplicate tool {tool_name}"));
             }
-            if self.fixed(tool_name).is_some() || self.contributed.contains(tool_name) {
+            if sources
+                .fixed
+                .iter()
+                .any(|tool| tool.definition.name == *tool_name)
+                || self.contributed.contains(tool_name)
+            {
                 return Err(format!("tool {tool_name} is a fixed tool"));
             }
             if let Some(other) = sources.current.values().find(|other| {
@@ -431,11 +434,13 @@ impl TypedPlugin for ToolRegistryPlugin {
                 .map(|(_, provider)| provider.changed())
                 .collect();
             let registry = Arc::new(ToolRegistry {
-                fixed: Mutex::new(fixed),
                 contributed: self.contributed.clone(),
                 providers,
                 refreshing: Mutex::default(),
-                sources: Mutex::default(),
+                sources: Mutex::new(Sources {
+                    fixed,
+                    ..Sources::default()
+                }),
                 changed: watch::Sender::new(()),
                 state: watch::Sender::new(ToolSourcesState::default()),
             });
@@ -467,7 +472,6 @@ impl TypedPlugin for ToolRegistryPlugin {
             let owner = registry.clone();
             let context = ctx.clone();
             let scope = self.scope;
-            let contributed = self.contributed.clone();
             tasks.spawn(async move {
                 tokio::select! {
                     biased;
@@ -476,7 +480,7 @@ impl TypedPlugin for ToolRegistryPlugin {
                 }
                 let mut fixed = Vec::new();
                 for name in &config.tools {
-                    let tool = if contributed.contains(name) {
+                    let tool = if owner.contributed.contains(name) {
                         context
                             .get_as::<ToolContribution>(scope.named_key::<ToolContribution>(name))
                     } else {
@@ -494,8 +498,7 @@ impl TypedPlugin for ToolRegistryPlugin {
                         }
                     }
                 }
-                *owner.fixed.lock().unwrap() = fixed;
-                owner.refresh();
+                owner.sources.lock().unwrap().fixed = fixed;
                 owner.changed.send_replace(());
             });
             ctx.provide_as(

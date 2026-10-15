@@ -355,14 +355,6 @@ impl TypedPlugin for OptionalContributor {
         _: Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let stopping = CancellationToken::new();
-            let cleanup = stopping.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    cleanup.cancel();
-                    Ok(())
-                }))
-            })?;
             let generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
             ctx.provide_as(
                 self.scope.named_key::<ToolContribution>("optional"),
@@ -374,7 +366,7 @@ impl TypedPlugin for OptionalContributor {
                     ),
                     handler: Arc::new(OptionalHandler {
                         generation,
-                        stopping,
+                        stopping: ctx.cancellation_token(),
                         hold: self.hold.clone(),
                     }),
                 }),

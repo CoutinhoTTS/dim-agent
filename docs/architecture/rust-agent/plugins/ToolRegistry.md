@@ -23,6 +23,7 @@ tools and unknown host tools still fail initialization. Generic source
 providers can have tracked change watchers, but this local graph has no
 SessionToolSource injections. Cleanup joins watchers; reload rebuilds the
 registry from fresh services. ToolBinding owns adoption and request pins.
+Fixed tools and dynamic sets share the registry's existing synchronized state.
 Host tools are available during assembly. Publication attachment notifies the
 existing ToolBinding watch; Prompt adopts the new tool declarations before they
 enter a later request prefix. Already bound requests retain their handlers.
