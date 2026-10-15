@@ -507,7 +507,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 插件 | 类型 | 内容 | 理由 |
 | --- | --- | --- | --- |
 | Rpc | 变更 | 方法表：内建方法，然后是收集到的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive, client}`。把 Session 广播通知记录原样转发给已订阅的客户端（SessionTitle）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权、自有来源检查）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
-| Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}`；Connection 把每个声明为客户端可见（#2）的事件作为 `session.event` 转发，不了解其含义 | RemoteGateway；Questions |
+| Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
 | Agents | 补充 | `sessions` 服务；`SessionConfig` 字段；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建；Session 部分持有的活动句柄，持有期间 Agents 不因空闲卸载该 Session（提议）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)） | Scheduler、Workflow、fork、ExternalAgent；ShellInput |
 | Collaboration | 变更 | 按用途 `collaboration.member` 选择成员模型；成员审批转发给 leader | ExternalAgent |
 | SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）；删除与清理；fork（复制切点之前的事实，重置权限预设）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除 | SessionTitle、Attachments、fork |
@@ -565,7 +565,7 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | Agent 装配从 `provides` 收集具名服务，并按插件启用状态与 `interactive` 安装可选部分 | 运行时 | 待开 | 所有 Session 插件 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
 | 按名称查找带 key 的 Session 服务（按命名空间查 `sessionMethods`）及收集具名 `toolContribution` | 运行时 | 待开 | Rpc、ToolRegistry | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
 | Session 级方法提供方卸载时等待其 `drain` 调用 | rutis 生命周期 | 待开 | Rpc | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
-| 插件在运行时注册自己的事件类型，并可声明为客户端可见（Connection 转发见附录 B.2） | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | Questions（需要重新设计，可能不再需要） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
+| 插件在运行时注册自己的事件类型 | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | 目前没有消费者（Questions 需要重新设计） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
 | 经 rutis 链接导入的服务在链接断开期间保持登记，每次调用以 `node_unavailable` 失败（该节点上的进程由该节点自己的 HostPlatform 结束） | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent、Modality、ShellInput、Hooks、Attachments、Workflow、Scheduler、PluginManager、RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-向机制所有者提出的需求) |
 | 跨语言发出和监听具名进程事件 | rutis | 待开 | Scheduler、Notifications | [Scheduler §9](plugins/Scheduler.md#9-向机制所有者提出的需求) |
 | 提供方在一次调用内向调用方发请求 | rutis | 待开 | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-提供方在调用内向调用方发请求) |

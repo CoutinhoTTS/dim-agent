@@ -65,7 +65,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | 支线 | Session broadcast notice 记录 `{source, kind, data}`；Rpc 原样转发 | SessionTitle | S |
 | 支线 | fixed-prefix 历史读；调用方来源由调用插件身份固定 | Notifications、Scheduler、Workflow | S |
 | 支线 | 跨语言命名进程事件（rutis） | Scheduler、Notifications；阶段 4 Scheduler 之前完成即可 | M |
-| 推迟 | #2 动态事件注册 + client-visible 标志 | 目前没有 Ready 消费者，等 Questions 重新设计的结论 | L |
+| 推迟 | #2 动态事件注册 | 目前没有 Ready 消费者，等 Questions 重新设计的结论 | L |
 
 ### 阶段 2 被依赖的现有插件补充
 
