@@ -3678,8 +3678,7 @@
       "references": [
         "path FileStorage",
         "path FileStorageError::InvalidPath",
-        "path FileStorageError::Io",
-        "path FileStorageError::Locked",
+        "path HeldKey::lock",
         "path PhysicalLock",
         "path Result",
         "path account_lock"
@@ -3703,7 +3702,7 @@
         "path FileStorageError::Cleanup",
         "path FileStorageError::InvalidPath",
         "path FileStorageError::Io",
-        "path FileStorageError::Locked",
+        "path HeldKey::lock",
         "path PhysicalLock",
         "path Result",
         "path account_lock"

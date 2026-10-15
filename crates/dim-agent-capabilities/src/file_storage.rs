@@ -17,7 +17,7 @@ use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
-    fs::{File, Permissions},
+    fs::{File, Permissions, TryLockError},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, Weak},
@@ -586,9 +586,37 @@ impl Drop for PhysicalLock {
     }
 }
 
+/// A business lock key held while its PhysicalLock is built. Every early
+/// return unlocks it explicitly, as PhysicalLock's drop does: Windows may
+/// defer the implicit unlock after CloseHandle.
+struct HeldKey(Option<File>);
+impl HeldKey {
+    fn lock(file: File) -> Result<Self> {
+        file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => FileStorageError::Locked,
+            TryLockError::Error(error) => FileStorageError::Io(error),
+        })?;
+        Ok(Self(Some(file)))
+    }
+    fn file(&self) -> &File {
+        self.0.as_ref().expect("held lock key")
+    }
+    /// Hands the locked file to its PhysicalLock, which unlocks it.
+    fn into_file(mut self) -> File {
+        self.0.take().expect("held lock key")
+    }
+}
+impl Drop for HeldKey {
+    fn drop(&mut self) {
+        if let Some(file) = &self.0 {
+            let _ = file.unlock();
+        }
+    }
+}
+
 fn account_lock(
     parent: &File,
-    alias_lock: File,
+    alias_lock: HeldKey,
     storage: &Arc<FileStorage>,
 ) -> Result<PhysicalLock> {
     let account_parent = parent.try_clone()?;
@@ -598,7 +626,7 @@ fn account_lock(
             Ok(file) => {
                 let mut lock = PhysicalLock {
                     file,
-                    _alias_lock: Some(alias_lock),
+                    _alias_lock: Some(alias_lock.into_file()),
                     account_parent: Some(account_parent),
                     owner: None,
                     storage: Arc::downgrade(storage),
@@ -717,7 +745,6 @@ mod native {
     use super::*;
     use std::{
         ffi::{CString, OsStr},
-        fs::TryLockError,
         os::{
             fd::{AsRawFd, FromRawFd},
             unix::{
@@ -786,21 +813,17 @@ mod native {
         }
         // Raw names on the same volume share its case/Unicode equivalence. Hashes
         // or string folding cannot reproduce the filesystem's name identity.
-        let alias_lock = lock_key(&directory, name)?;
-        alias_lock.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => FileStorageError::Locked,
-            TryLockError::Error(error) => FileStorageError::Io(error),
-        })?;
+        let alias_lock = HeldKey::lock(lock_key(&directory, name)?)?;
         let marker_key = lock_key(&directory, OsStr::new("auth.json.lock"))?;
-        if same_inode(&alias_lock.metadata()?, &marker_key.metadata()?) {
+        if same_inode(&alias_lock.file().metadata()?, &marker_key.metadata()?) {
             return Err(FileStorageError::InvalidPath("reserved storage lock"));
         }
         let auth_key = lock_key(&directory, OsStr::new("auth.json"))?;
-        if same_inode(&alias_lock.metadata()?, &auth_key.metadata()?) {
+        if same_inode(&alias_lock.file().metadata()?, &auth_key.metadata()?) {
             return account_lock(parent, alias_lock, storage);
         }
         Ok(PhysicalLock {
-            file: alias_lock,
+            file: alias_lock.into_file(),
             _alias_lock: None,
             account_parent: None,
             owner: None,
