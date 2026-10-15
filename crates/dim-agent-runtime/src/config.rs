@@ -33,6 +33,25 @@ pub struct SessionConfig {
     /// Fixed at creation; only the collaboration host creates members.
     #[serde(default)]
     pub collaboration_role: CollaborationRole,
+    /// Fixed at creation: whether an interaction counterpart (the user
+    /// through a client, or an agent in another Session or branch) can
+    /// answer this Session's questions and approvals. Assembly never reads
+    /// it. A stored record without it predates the field and was a client
+    /// Session, so absence means `true`; only `false` is written, keeping
+    /// interactive records in their earlier v13 form. The omission belongs to
+    /// this serde form, which only the native store serializes; exposing
+    /// `SessionConfig` anywhere else inherits it and needs its own decision.
+    #[serde(
+        default = "default_interactive",
+        skip_serializing_if = "is_interactive"
+    )]
+    pub interactive: bool,
+}
+fn default_interactive() -> bool {
+    true
+}
+fn is_interactive(interactive: &bool) -> bool {
+    *interactive
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +76,7 @@ impl Default for SessionConfig {
             system_prompt: String::new(),
             tools: vec!["echo".into(), "wait".into(), "branch".into()],
             collaboration_role: CollaborationRole::Leader,
+            interactive: default_interactive(),
         }
     }
 }

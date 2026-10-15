@@ -292,6 +292,13 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 
 格式决定：原生存储保持版本 13。`interactive` 是存储的配置 JSON 中一个增量的可选字段，缺少它的已存储记录表示 `true`，因为在该字段出现之前创建的每个 Session 都是客户端 Session。旧版守护进程忽略该字段，把非交互记录读成交互式；这一点可以接受。不升级到版本 14。
 
+已实现（C2）：`session.create` 设置该字段，原生存储只在它为 `false` 时写入，因此交互式记录保持该字段出现之前的记录格式。这一省略规则属于 `SessionConfig` 的 serde 形式，目前只有原生存储序列化它；在其他地方（例如协议响应）暴露 `SessionConfig` 会沿用这一规则，须另行决定。它的读取方（Questions、SessionTitle）尚未实现。Session fork 尚未实现（S5c）。
+
+| 已存储的 `config` | 含 C2 的守护进程 | 旧版守护进程 |
+| --- | --- | --- |
+| 不含 `interactive`（C2 之前的全部记录，C2 之后的交互式记录） | 交互 | 交互 |
+| `"interactive": false` | 非交互 | 交互（忽略该字段；可以接受） |
+
 不在本合同中：`createdBy`（Session 来源）和 `session.create` 的 `client` 参数，等到有功能依据它们做决定时再加入。资源节点在 P3 加入（总览 §6.3）：一个增量的可选 `SessionConfig` 字段，缺省表示控制节点。
 
 ### A.4 撤回
@@ -396,7 +403,8 @@ impl AgentIndex {
 }
 pub struct SessionConfig {
     // 已有：permission_policy, cwd, model, system_prompt, tools, collaboration_role
-    #[serde(default = "default_true")]   // 已存储记录中缺省：true
+    // 已存储记录中缺省：true；只写入 false
+    #[serde(default = "default_interactive", skip_serializing_if = "is_interactive")]
     pub interactive: bool,
 }
 pub enum WithdrawOutcome {
