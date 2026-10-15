@@ -36,9 +36,8 @@ The daemon is shared and normally spawned with `--no-ws`, so the entry is opened
 | --- | --- | --- |
 | `web.open` | `{port?}` | `{url, address}`; idempotent: an open entry returns its existing address. `url` is `http://127.0.0.1:<port>/#bootstrap=<token>` |
 | `web.status` | `{}` | `{open, address?, connections}` |
-| `web.close` | `{}` | `{}` after the listener and every web connection closed (detach) |
 
-All three are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. The entry stays open until `web.close` or daemon exit; it is not persisted, so after a daemon restart the user runs `dimcode web` again. `web.open` fails with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
+Both are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; it stays open while any holder is connected and closes when the last one disconnects: the listener stops, every token is dropped and web connections detach. There is no close method: ending the holder process, however it ends (Ctrl+C, a closed terminal, a crash), is the close. Nothing is persisted, so after a daemon restart the user runs `dimcode web` again. `web.open` fails with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
 
 ### 2.2 Authentication
 
@@ -87,25 +86,31 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 | RemoteGateway | Phase 1 web entry |
 | --- | --- |
 | `entryHost` on Transport, call-scoped `authenticate`/`handle` | WebEntry owns its own listener and authenticates in process |
-| Pairing codes, per-device tokens in `remote-devices.json`, rotation, revocation | One bootstrap token per open entry, access tokens in memory; `web.close` revokes everything |
-| `plugin.set_enabled` and Settings source `remote` | `web.open` / `web.close` management methods; no persisted state |
+| Pairing codes, per-device tokens in `remote-devices.json`, rotation, revocation | One bootstrap token per open entry, access tokens in memory; the last holder's exit revokes everything |
+| `plugin.set_enabled` and Settings source `remote` `web.open`, held by the calling connection; no persisted state |
 | Loopback by default, TLS or explicit plaintext for other addresses | Loopback only |
 | `ConnectionEntry {name, deviceId}` | `entry: Web` on the connection |
 
 ## 3. CLI
 
-`dimcode web [--port N] [--no-open]` connects to (or spawns) the daemon, calls `web.open`, prints the address and opens the sign-in URL with `browser::open`. With `--no-open`, `DIMCODE_OAUTH_MANUAL=1` or no browser, it prints the full sign-in URL instead; it is the local user's own terminal. It then exits; the entry lives in the daemon. `dimcode web --close` calls `web.close`. `/web` in the TUI hands the Session to the browser, as the TypeScript `dim` did: the interface closes (a detach, so a running turn keeps going in the App Server), then the same process opens the entry at `/chat/<sessionId>` and prints where the Session continues and how to resume it in the terminal, in place of the goodbye panel.
+`dimcode web [--port N] [--no-open]` connects to (or spawns) the daemon, calls `web.open`, prints where the workspace is in the welcome panel's box and opens the sign-in URL with `browser::open`. With `--no-open`, `DIMCODE_OAUTH_MANUAL=1` or no browser, it prints the full sign-in URL under the box instead; it is the local user's own terminal. It then stays in the foreground holding the entry, as the TypeScript `dim web` did, until Ctrl+C or SIGTERM; its exit closes the entry (§2.1). If the daemon stops first, it reports that and exits. Piped output is plain lines.
+
+`/web` in the TUI hands the Session to the browser the same way: the interface closes (a detach, so a running turn keeps going in the App Server), then the same process opens the entry at `/chat/<sessionId>`, prints the panel in place of the goodbye panel and holds the entry until Ctrl+C.
 
 ```
-$ dimcode web
-Web workspace  http://127.0.0.1:43201/
-Opened in your browser.
-The workspace stays available until the daemon stops or you run `dimcode web --close`.
-
-$ dimcode web --no-open
-Web workspace  http://127.0.0.1:43201/
-Open this link to sign in: http://127.0.0.1:43201/#bootstrap=…
-The workspace stays available until the daemon stops or you run `dimcode web --close`.
+╭──────────────────────────────────────────────────────────────╮
+│   ▓▓▓▓                                                       │
+│ ▓▓    ▓▓  DIM Web is ready                                   │
+│ ░░    ░░  Opened in your browser                             │
+│   ░░░░                                                       │
+│                                                              │
+│ Web     http://127.0.0.1:43201/chat/<sessionId>              │
+│ Resume  dimcode --resume <sessionId>                         │
+│                                                              │
+│ Press Ctrl+C to stop the Web workspace.                      │
+╰──────────────────────────────────────────────────────────────╯
+^C
+Web workspace stopped.
 ```
 
 The daemon serves the frontend embedded in its binary (§2.4); a running daemon keeps the build it started with until `dimcode daemon stop`.

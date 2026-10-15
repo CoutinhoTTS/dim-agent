@@ -104,7 +104,7 @@ pub enum Leave {
     Exit(i32),
     /// `/web`: the interface closed so the browser carries on with the
     /// session. Detaching leaves any running turn going in the App Server.
-    Web(WebHandoff),
+    Web(Box<WebHandoff>),
 }
 
 /// What the interface hands to the browser: the session (`None` before the
@@ -119,7 +119,7 @@ pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
     let mut web = None;
     let code = run_terminal(host, surroundings, &mut web);
     match web {
-        Some(handoff) => Leave::Web(handoff),
+        Some(handoff) => Leave::Web(Box::new(handoff)),
         None => Leave::Exit(code),
     }
 }
@@ -150,6 +150,7 @@ pub fn print_web_panel(opened: &WebOpened, handoff: Option<&WebHandoff>) {
                 Some(url) => println!("Open this link to sign in: {url}"),
                 None => println!("Opened in your browser."),
             }
+            println!("Press Ctrl+C to stop the Web workspace.");
             return;
         }
     };
@@ -2977,12 +2978,11 @@ fn web_panel(cols: usize, p: &Palette, opened: &WebOpened) -> String {
     if let Some(resume) = &resume {
         pairs.push((t("Resume"), resume.as_str()));
     }
-    pairs.push((t("Close"), "dimcode web --close"));
     let mut info = vec![String::new()];
     info.extend(labeled_rows(&pairs, body_width));
     info.extend([
         String::new(),
-        t("The workspace stays open until the daemon stops.").to_owned(),
+        t("Press Ctrl+C to stop the Web workspace.").to_owned(),
     ]);
     let rows: Vec<String> = header.iter().chain(info.iter()).cloned().collect();
     let header_rows = header.len();

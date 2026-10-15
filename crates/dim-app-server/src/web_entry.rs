@@ -36,7 +36,10 @@ const FREE_FAILURES: u32 = 5;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const CSP: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'";
 
-/// Process-wide owner of the entry; at most one is open.
+/// Process-wide owner of the entry; at most one is open. It stays open while
+/// a local connection that asked for it with `web.open` (its holder) is
+/// connected: `dimcode web` holds it in the foreground, and its exit, however
+/// it ends, closes the entry.
 pub(crate) struct WebEntry {
     assets: Option<PathBuf>,
     open: tokio::sync::Mutex<Option<Open>>,
@@ -45,6 +48,8 @@ struct Open {
     address: SocketAddr,
     /// Kept so that `web.open` stays idempotent; only in this process.
     bootstrap: String,
+    /// Ids of the local connections holding the entry open.
+    holders: HashSet<String>,
     stop: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -60,10 +65,12 @@ impl WebEntry {
     pub async fn open(
         &self,
         hub: &Arc<ConnectionHub>,
+        holder: &str,
         port: Option<u16>,
     ) -> Result<WebOpened, RpcError> {
         let mut open = self.open.lock().await;
-        if let Some(open) = open.as_ref().filter(|open| !open.task.is_finished()) {
+        if let Some(open) = open.as_mut().filter(|open| !open.task.is_finished()) {
+            open.holders.insert(holder.to_owned());
             return Ok(opened(open));
         }
         let assets = match &self.assets {
@@ -122,6 +129,7 @@ impl WebEntry {
         let entry = Open {
             address,
             bootstrap,
+            holders: HashSet::from([holder.to_owned()]),
             stop,
             task,
         };
@@ -143,11 +151,18 @@ impl WebEntry {
         }
     }
 
-    /// Closes the listener, drops every token and detaches web connections.
-    pub async fn close(&self, hub: &ConnectionHub) {
-        let Some(open) = self.open.lock().await.take() else {
+    /// Called as a local connection ends. When it was the last holder, the
+    /// listener closes, every token is dropped and web connections detach.
+    pub async fn release(&self, hub: &ConnectionHub, holder: &str) {
+        let mut guard = self.open.lock().await;
+        let Some(open) = guard.as_mut() else {
             return;
         };
+        if !open.holders.remove(holder) || !open.holders.is_empty() {
+            return;
+        }
+        let open = guard.take().expect("checked above");
+        drop(guard);
         open.stop.cancel();
         hub.close_entry(Entry::Web);
         let _ = open.task.await;

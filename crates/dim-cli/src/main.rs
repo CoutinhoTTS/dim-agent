@@ -308,18 +308,9 @@ async fn run(options: Options) -> Result<i32> {
             }
             Ok(0)
         }
-        Action::Web {
-            port,
-            open_browser,
-            close,
-        } if *close => {
-            client.rpc("web.close", serde_json::json!({})).await?;
-            println!("Web workspace closed.");
-            Ok(0)
+        Action::Web { port, open_browser } => {
+            open_web(&mut client, *port, *open_browser, None).await
         }
-        Action::Web {
-            port, open_browser, ..
-        } => open_web(&mut client, *port, *open_browser, None).await,
         Action::Chat | Action::Tui | Action::Exec => session::chat(&mut client, &options).await,
         Action::Help
         | Action::Version
@@ -362,5 +353,23 @@ async fn open_web(
         },
         handoff,
     );
+    // The entry stays open while this connection does: wait in the
+    // foreground until Ctrl+C or SIGTERM, then exit, which closes it.
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let terminated = terminate.recv();
+    #[cfg(not(unix))]
+    let terminated = std::future::pending::<Option<()>>();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminated => {}
+        // Nothing is subscribed, so the stream ends only with the daemon.
+        error = async { loop { if let Err(error) = client.next().await { break error } } } => {
+            return Err(format!("The App Server stopped; the Web workspace is closed ({error})").into());
+        }
+    }
+    println!();
+    println!("Web workspace stopped.");
     Ok(0)
 }

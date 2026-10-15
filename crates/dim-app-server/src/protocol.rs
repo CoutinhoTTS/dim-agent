@@ -104,7 +104,6 @@ pub enum Call {
     SessionMethods(SessionId),
     WebOpen(WebOpen),
     WebStatus,
-    WebClose,
 }
 
 impl Call {
@@ -121,13 +120,13 @@ impl Call {
                 | Self::McpRefresh(_)
         )
     }
-    /// Methods that open and close the local web entry; local transport only.
+    /// Methods that open and report the local web entry; local transport only.
     pub(crate) fn is_web_entry(&self) -> bool {
-        matches!(self, Self::WebOpen(_) | Self::WebStatus | Self::WebClose)
+        matches!(self, Self::WebOpen(_) | Self::WebStatus)
     }
 }
 
-pub const WEB_ENTRY_METHODS: [&str; 3] = ["web.open", "web.status", "web.close"];
+pub const WEB_ENTRY_METHODS: [&str; 2] = ["web.open", "web.status"];
 
 /// Management reads served to web entry connections besides the Session
 /// methods; their replies carry no credentials.
@@ -403,13 +402,12 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 25] = [
+const BUILTIN_METHODS: [&str; 24] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
     "web.open",
     "web.status",
-    "web.close",
     "session.create",
     "session.list",
     "session.summaries",
@@ -522,10 +520,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "web.status" => {
                 let _: Empty = params(raw_params)?;
                 Call::WebStatus
-            }
-            "web.close" => {
-                let _: Empty = params(raw_params)?;
-                Call::WebClose
             }
             _ => Call::Contributed {
                 method,

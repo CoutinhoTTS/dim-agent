@@ -109,6 +109,9 @@ impl Connection {
     }
     pub async fn finish(&self) {
         self.closed.cancel();
+        if self.entry == Entry::Local {
+            self.hub.web.release(&self.hub, &self.id).await;
+        }
         self.attachments.lock().expect("attachments").clear();
         self.subscriptions.close();
         self.subscriptions.wait().await;
@@ -1238,12 +1241,10 @@ impl Connection {
     async fn web(&self, call: Call) -> Result<Reply, RpcError> {
         let web = &self.hub.web;
         Ok(match call {
-            Call::WebOpen(params) => Reply::WebOpened(web.open(&self.hub, params.port).await?),
-            Call::WebStatus => Reply::WebStatus(web.status(&self.hub).await),
-            Call::WebClose => {
-                web.close(&self.hub).await;
-                Reply::empty()
+            Call::WebOpen(params) => {
+                Reply::WebOpened(web.open(&self.hub, &self.id, params.port).await?)
             }
+            Call::WebStatus => Reply::WebStatus(web.status(&self.hub).await),
             _ => unreachable!("validated web entry method"),
         })
     }

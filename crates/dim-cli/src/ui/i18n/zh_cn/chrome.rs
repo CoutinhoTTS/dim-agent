@@ -74,10 +74,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Web" => "Web",
         "Sign-in link:" => "登录链接：",
         "Resume" => "回到终端",
-        "Close" => "关闭",
-        "The workspace stays open until the daemon stops." => {
-            "守护进程停止前，Web 工作区会一直可用。"
-        }
+        "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作区。",
         "To resume this session:" => "恢复此会话：",
 
         // composer/commands.rs: categories

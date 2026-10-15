@@ -22,8 +22,7 @@ Commands:\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\
-  web [--port N] [--no-open]       Open the Web workspace in the browser\n\
-  web --close                      Close the Web workspace entry\n\n\
+  web [--port N] [--no-open]       Serve the Web workspace until Ctrl+C\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
@@ -79,11 +78,10 @@ pub enum Action {
         enabled: bool,
     },
     DaemonStop,
-    /// `web`: open (or with `close`, close) the daemon's local web entry.
+    /// `web`: hold the daemon's local web entry open in the foreground.
     Web {
         port: Option<u16>,
         open_browser: bool,
-        close: bool,
     },
     /// `--fullscreen default` / `--scrollback default`: save the terminal
     /// UI mode used when neither flag is given.
@@ -283,7 +281,6 @@ impl Options {
                     options.action = Action::Web {
                         port: None,
                         open_browser: true,
-                        close: false,
                     };
                 }
                 "--port" if matches!(options.action, Action::Web { .. }) => {
@@ -299,11 +296,6 @@ impl Options {
                 "--no-open" if matches!(options.action, Action::Web { .. }) => {
                     if let Action::Web { open_browser, .. } = &mut options.action {
                         *open_browser = false;
-                    }
-                }
-                "--close" if matches!(options.action, Action::Web { .. }) => {
-                    if let Action::Web { close, .. } = &mut options.action {
-                        *close = true;
                     }
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {

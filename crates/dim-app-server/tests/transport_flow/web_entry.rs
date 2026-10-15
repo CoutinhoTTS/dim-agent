@@ -96,11 +96,26 @@ async fn web_entry_serves_the_embedded_build_to_local_callers_only() {
     assert_eq!(status, 200);
     assert!(!head.to_ascii_lowercase().contains("content-encoding"));
     assert!(body.starts_with("<!doctype html>"), "{body}");
-    assert_ok(&local.rpc("web.close", json!({})).await);
+
+    // The entry stays open while any local connection that opened it is
+    // connected, and closes with the last one.
+    let mut second = Client::new_version(&server, false, 3).await;
+    assert_eq!(second.rpc("web.open", json!({})).await, opened);
+    drop(local);
+    let mut observer = Client::new_version(&server, false, 3).await;
     assert_eq!(
-        local.rpc("web.status", json!({})).await["result"],
-        json!({"open":false,"connections":0})
+        observer.rpc("web.status", json!({})).await["result"]["open"],
+        true
     );
+    drop(second);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while observer.rpc("web.status", json!({})).await["result"]["open"] == true {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the entry closes with its last holder");
+    assert!(TcpStream::connect(&address).await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -304,7 +319,6 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     }
     for (method, params) in [
         ("daemon.shutdown", json!({})),
-        ("web.close", json!({})),
         (
             "provider.delete",
             json!({"providerId":"x","expectedVersion":1}),
@@ -323,8 +337,9 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         1
     );
 
-    // Closing revokes every token and detaches web connections.
-    assert_ok(&local.rpc("web.close", json!({})).await);
+    // The holder's exit revokes every token and detaches web connections.
+    let mut observer = Client::new_version(&server, false, 3).await;
+    drop(local);
     let closed = tokio::time::timeout(Duration::from_secs(5), async {
         let Transport::Ws(stream) = &mut web.transport else {
             unreachable!()
@@ -340,7 +355,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     assert!(closed.is_ok());
     assert!(TcpStream::connect(&address).await.is_err());
     assert_eq!(
-        local.rpc("web.status", json!({})).await["result"],
+        observer.rpc("web.status", json!({})).await["result"],
         json!({"open":false,"connections":0})
     );
     server.shutdown();
