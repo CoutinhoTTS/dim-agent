@@ -45,6 +45,19 @@ pub enum McpSourceState {
     Ready { version: String },
     Failed { message: String },
 }
+impl McpSourceState {
+    /// `session.mcp` state name with its version and failure message. MCP owns
+    /// this vocabulary; the protocol projection only copies it.
+    pub fn into_wire(self) -> (&'static str, Option<String>, Option<String>) {
+        match self {
+            Self::Disabled => ("disabled", None, None),
+            Self::ApprovalRequired => ("approval_required", None, None),
+            Self::Connecting => ("connecting", None, None),
+            Self::Ready { version } => ("ready", Some(version), None),
+            Self::Failed { message } => ("failed", None, Some(message)),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct McpSessionState {

@@ -3,7 +3,7 @@ use super::*;
 pub(super) use crate::mcp::management::error;
 use crate::{
     agents::AgentHost,
-    mcp::{McpSession, McpSessionState, McpSourceState},
+    mcp::{McpSession, McpSessionState},
 };
 use dim_agent_capabilities::tool_registry::{ToolSourcesState, ToolSourcesView};
 use rutis::{EventKey, FiberState, FiberStatusChanged, Listener};
@@ -17,13 +17,7 @@ fn project_state(id: &str, state: McpSessionState, tools: ToolSourcesState) -> M
             .into_iter()
             .map(|(id, state)| {
                 let status = tools.0.get(&format!("mcp:{id}"));
-                let (state, version, message) = match state {
-                    McpSourceState::Disabled => ("disabled", None, None),
-                    McpSourceState::ApprovalRequired => ("approval_required", None, None),
-                    McpSourceState::Connecting => ("connecting", None, None),
-                    McpSourceState::Ready { version } => ("ready", Some(version), None),
-                    McpSourceState::Failed { message } => ("failed", None, Some(message)),
-                };
+                let (state, version, message) = state.into_wire();
                 McpServerStatus {
                     id,
                     state,

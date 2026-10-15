@@ -10175,14 +10175,8 @@
       "references": [
         "path McpSession",
         "path McpSessionState",
-        "path McpSourceState::ApprovalRequired",
-        "path McpSourceState::Connecting",
-        "path McpSourceState::Disabled",
-        "path McpSourceState::Failed",
-        "path McpSourceState::Ready",
         "use crate::mcp::McpSession",
-        "use crate::mcp::McpSessionState",
-        "use crate::mcp::McpSourceState"
+        "use crate::mcp::McpSessionState"
       ]
     },
     {
