@@ -121,12 +121,12 @@ configuration; a later acquisition can reconnect. It reports cleanup failure rat
 loader reconciliation as proof of successful cleanup.
 
 Standalone hosts using `McpPlugin` register `McpPublication` and its
-`standalone_template` with their `Builtins`, include both rows in the immutable
-assembly, and run `publication.run(stop)` outside plugin apply/dispose after
-assembly activation. Pass an explicit `McpOwner::new(ctx, loader)` when acquiring
-connections. Agent hosts instead use `mcp::install` and the declared Session loader.
-Join the publisher before root shutdown. Its typed port is a dependency of
-`McpPlugin`; connection leases never become a second lifecycle engine. No second
+`standalone_template` with their `Builtins` and include both rows in the immutable
+assembly. The publication plugin owns its coordinator worker: it starts after
+apply and is settled, with its cleanup result, when the plugin unloads. Pass an
+explicit `McpOwner::new(ctx, loader)` when acquiring connections. Agent hosts
+instead use `mcp::install` and the declared Session loader. Its typed port is a
+dependency of `McpPlugin`; connection leases never become a second lifecycle engine. No second
 loader, editable-layer target or SQLite dependency is required by this port.
 
 `--mock-model` selects the explicit deterministic test profile. It uses mock model/tool hosts. Product, configured and mock daemons identify themselves in `hello.daemonProfile`:

@@ -267,7 +267,7 @@ Progress is sent as the notification `management.progress {id, method, data}` fo
 
 ### A.4 Migration and compatibility
 
-Sources: `MANAGEMENT_METHODS`, `MCP_METHODS`, `LOCAL_EXECUTION_METHODS`, `Call::is_management` in [protocol.rs](../../../crates/dim-app-server/src/protocol.rs); `validate_call` in [connection.rs](../../../crates/dim-app-server/src/connection.rs).
+Sources, as before the migration: `MANAGEMENT_METHODS`, `MCP_METHODS` and `Call::is_management` in [protocol.rs](../../../crates/dim-app-server/src/protocol.rs), removed once owners provide their methods; `LOCAL_EXECUTION_METHODS` there and `validate_call` in [connection.rs](../../../crates/dim-app-server/src/connection.rs) remain.
 
 | Methods | Destination | Provider (namespace) |
 | --- | --- | --- |

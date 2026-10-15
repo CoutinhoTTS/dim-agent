@@ -72,9 +72,10 @@ v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、
 Settings owns each source independently. Original v13 rows under `user/mcp` or
 `user/skills` contain the plain MCP or Skill document JSON, not a tagged envelope.
 `user/mcp-projects` holds MCP's user-local project enablement
-(`{"enabled":{"<canonical workspace>":["<server id>"]}}`, ADR 003 D3). Its legacy
-import file is `mcp-projects.json`, which no earlier version wrote, so the first
-read imports `missing` and an empty record. The row is an additive source within
+(`{"enabled":{"<canonical workspace>":["<server id>"]}}`, ADR 003 D3). Its import
+file is `mcp-projects.json`, which only the standalone file backend writes; a
+native home normally has none, so the first read imports `missing` and an empty
+record. The row is an additive source within
 v13: the schema and format version are unchanged, and older binaries ignore it.
 Generic Settings persistence retains these exact payload shapes, not loader
 patches or UUID snapshots. Business interpretation and validation belong to the namespace owner.

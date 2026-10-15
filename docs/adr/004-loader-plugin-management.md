@@ -1,7 +1,7 @@
 # 004: Session-owned MCP and business configuration
 
-Status: implementation direction approved by the repository owner for this branch,
-following [ADR 002](002-plugin-scope.md) D4. This record supersedes ADR 001's
+Status: implementation direction approved by the repository owner, following
+[ADR 002](002-plugin-scope.md) D4. This record supersedes ADR 001's
 process-shared MCP ownership, not issue #3's structural editable layer. It does
 not claim completion of issue #3 or of the full
 [methods contract](../design/contracts/session-boundary.md).
@@ -77,8 +77,9 @@ workspace and server id, written by `mcp.set_enabled` for a project entry. That
 call checks its `expectedVersion` against the project source; the record keeps no
 configuration, so later edits to an enabled entry take effect (ADR 003 D4).
 Disabling, or removing the entry through `mcp.remove`, withdraws the record first
-and does not depend on the project file, so an entry that disappears and returns,
-for example through a checkout, starts disabled again. An unreadable record
+and does not depend on the project file. Only these calls withdraw it: an entry
+that leaves the file through an edit or a checkout keeps its record and is
+enabled again if it returns. An unreadable record
 disables every project entry and is reported in the project application; user
 entries stay available. A disable returns once the entry's running generations
 have closed in every Session, including while the project file is unreadable. A

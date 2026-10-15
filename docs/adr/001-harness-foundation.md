@@ -204,7 +204,7 @@ separate work. Host safety settings do not belong to replayable business facts: 
 restore authority from a Session that once had it.
 
 Configuration precedence never overrides host safety limits or workspace trust. Generic credential
-references and resolution remain future work; exclude resolved secrets from management notifications,
+references and resolution remain future work; exclude resolved secrets from management replies,
 diagnostics, declarations and event history. Trust, authorization and OS isolation are distinct.
 Native trusted code is not isolated by `Deps`; constrained callers require host checks of caller,
 scope and work ownership. Shared language runtimes are not security sandboxes.
@@ -265,7 +265,7 @@ never overwrite a user's existing store to make a test pass.
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
 | #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
-| #3 | Structural plugin configuration uses the persisted editable layer and loader operations; ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and host-local approvals remain separate authorities |
+| #3 | Structural plugin configuration uses the persisted editable layer and loader operations; ADR 002 D4 separates business sources | ADR 004 implements Session instanced groups and source-owned MCP/Skill documents with existing protected-local business methods. Generic structural plugin management remains unimplemented. Project files and the user's local MCP enablement record remain separate authorities |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
 Source-owned business documents preserve shared workspace files and explicit edit

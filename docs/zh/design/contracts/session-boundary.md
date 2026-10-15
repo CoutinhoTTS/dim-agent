@@ -267,7 +267,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 
 ### A.4 迁移与兼容性
 
-来源：[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs) 中的 `MANAGEMENT_METHODS`、`MCP_METHODS`、`LOCAL_EXECUTION_METHODS`、`Call::is_management`；[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `validate_call`。
+来源（迁移前）：[protocol.rs](../../../../crates/dim-app-server/src/protocol.rs) 中的 `MANAGEMENT_METHODS`、`MCP_METHODS` 与 `Call::is_management`，在所有者自行提供方法后已移除；该文件中的 `LOCAL_EXECUTION_METHODS` 与 [connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `validate_call` 仍在。
 
 | 方法 | 去向 | 提供方（命名空间） |
 | --- | --- | --- |

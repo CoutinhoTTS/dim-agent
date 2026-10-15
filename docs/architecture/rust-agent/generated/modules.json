@@ -1361,6 +1361,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "json",
         "vec"
       ]
@@ -12760,6 +12761,7 @@
       "references": [
         "mod client",
         "path client",
+        "path client::RpcError",
         "path client::connect",
         "path client::stop"
       ]
