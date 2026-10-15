@@ -78,24 +78,13 @@ impl ManagementMethods {
         handler: Handler,
     ) -> Result<Arc<Self>, CordisError> {
         let mut unique = std::collections::HashSet::new();
+        // Management methods are about the host, never a Session. The `session`
+        // root belongs to built-ins and Session-scoped methods, so contributed
+        // methods and notifications cannot impersonate Session traffic.
         if !valid_name(namespace)
-            || namespace == "session"
-            || [
-                "hello",
-                "daemon",
-                "agent",
-                "approval",
-                "session.state",
-                "session.exec",
-                "session.mcp",
-                "session.model",
-                "session.permission",
-                "session.prompt",
-                "session.skills",
-                "session.input",
-            ]
-            .iter()
-            .any(|reserved| within(namespace, reserved))
+            || ["hello", "daemon", "agent", "approval", "session"]
+                .iter()
+                .any(|reserved| within(namespace, reserved))
             || namespace
                 .split('.')
                 .scan(String::new(), |prefix, part| {
@@ -159,12 +148,16 @@ impl MethodTable {
             }
         }
         // A nested namespace may coexist with its parent, but must never capture
-        // a method that the parent declares, in either assembly order.
+        // a method or notification that the parent declares, in either order.
         for owner in table.values() {
-            for declaration in &owner.declarations {
+            let names = owner
+                .declarations
+                .iter()
+                .map(|decl| &decl.name)
+                .chain(&owner.notifications);
+            for name in names {
                 if table.values().any(|other| {
-                    other.namespace.len() > owner.namespace.len()
-                        && within(&declaration.name, &other.namespace)
+                    other.namespace.len() > owner.namespace.len() && within(name, &other.namespace)
                 }) {
                     return Err(CordisError::PluginFailed(
                         "Overlapping management contributions".into(),

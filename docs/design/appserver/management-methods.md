@@ -38,10 +38,13 @@ MCP management and built-in Session methods share the MCP owner's error mapping.
 
 `Contributions<T>` collects named services at the process scope (`None`) or a
 Session/branch instance (`Some(instance)`). A listed but missing provider gates
-the collector. Namespace and method validation rejects reserved built-ins,
-duplicates, invalid names and nested ownership that would capture another
-contributor's declared method. Valid nested namespaces such as `account.codex`
-remain independent from the parent `account` namespace.
+the collector. Namespace and method validation rejects duplicates, invalid names,
+built-in method names and the `hello`, `daemon`, `agent`, `approval` and
+`session` roots: management methods are about the host, so contributed methods
+and notifications cannot impersonate Session traffic. It also rejects nested
+ownership that would capture another contributor's declared method or
+notification. Valid nested namespaces such as `account.codex` remain independent
+from the parent `account` namespace.
 
 ## Dispatch and lifecycle
 
@@ -109,7 +112,6 @@ Transport flows cover actual owner methods, hello features, owner/Rpc reloads,
 local/remote and protocol-version boundaries, business source CAS, persistence
 failures and invalidation. A rutis contribution flow verifies reload propagation,
 Report interruption, Drain completion after the unload signal and replacement
-admission.
-Namespace validation covers reserved names and nested collisions in either
-collection order. Existing tool/prompt contribution flows protect instance
+admission. Namespace validation covers reserved roots and nested method and
+notification collisions in either collection order. Existing tool/prompt contribution flows protect instance
 scoping while the shared collector also supports process services.
