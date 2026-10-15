@@ -48,8 +48,10 @@ SettingsService provides generic `BusinessDocument` read/update operations with
 per-source CAS. A business owner supplies its namespace, source filenames,
 payload type and validation. MCP owns its types in `mcp/config.rs`; the Skills
 owner implements the existing `SkillSettingsHost`. Settings owns persistence,
-not domain interpretation, connections or discovery. It has no management-method
-namespace and does not expose generic private document bodies over RPC.
+not domain interpretation, connections or discovery. It does not yet provide
+PR #15's P0 Settings supplement: client-facing typed write operations under
+plugin-declared schemas and a credential-reference resolver. Until then it has no
+management-method namespace and exposes no generic document bodies over RPC.
 
 Native user sources retain the exact original v13 `settings_documents` contract:
 `user/mcp` and `user/skills`, plain payload JSON (no `{kind, document}` envelope),
