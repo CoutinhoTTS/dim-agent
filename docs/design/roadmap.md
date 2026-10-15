@@ -65,7 +65,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | 支线 | Session broadcast notice 记录 `{source, kind, data}`；Rpc 原样转发 | SessionTitle | S |
 | 支线 | fixed-prefix 历史读；调用方来源由调用插件身份固定 | Notifications、Scheduler、Workflow | S |
 | 支线 | 跨语言命名进程事件（rutis） | Scheduler、Notifications；阶段 4 Scheduler 之前完成即可 | M |
-| 推迟 | #2 动态事件注册 + client-visible 标志 | 目前没有 Ready 消费者，等 Questions 重新设计的结论（D1） | L |
+| 推迟 | #2 动态事件注册 + client-visible 标志 | 目前没有 Ready 消费者，等 Questions 重新设计的结论 | L |
 
 ### 阶段 2 被依赖的现有插件补充
 
@@ -222,7 +222,7 @@ flowchart LR
 
 | # | 问题 | 建议 | 影响 |
 | --- | --- | --- | --- |
-| D1 | #2 的上下文边界：ADR 001（只看 adopted input 和工具结果）vs #2（注册投影规则） | 按 ADR 001 推进，与总体设计一致；投影规则以后作为增量 | #2 的开工时间（若 Questions 重新设计后不再需要 #2，D1 可以推迟） |
+| D1 | #2 的上下文边界 | 已决定：插件事件只通过 adopted input 和工具结果进入上下文（ADR 001）；#2 正文已于 2026-10-15 修订，去掉了投影规则 | #2 只剩运行时注册事件类型和写入校验 |
 | D2 | #4 是否放进阶段 1 core，并按 Session 级（#4a）和分支级（#4b）分段交付 | 是（§2 原则 5） | TypeScript 插件何时能进入快速迭代 |
 | D3 | Goal 与 Pursuit | 阶段 0 决定；两者互斥，只实现一个，另一个保留为实验设计 | #4b 是否有消费者；阶段 4 |
 | D4 | core 先改完再做插件，还是基础项跟随第一个消费者 | 已决定：core 先行（§2 原则 1），以消费者设计 Ready 为门槛（原则 3） | 整体顺序 |

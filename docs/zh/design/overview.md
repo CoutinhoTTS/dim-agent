@@ -16,7 +16,7 @@
 | 多模态 | 覆盖全部类别（图像、视频、语音、音乐、音频、3D 资产、动作、实时、OCR）。“仅特定 Desktop 构建”是可用性约束（[Modality](plugins/Modality.md)） |
 | 不计划 | Todo 状态与 `plan` Skill |
 | 动态事件 | 以 [#2](https://github.com/arcships/dim/issues/2) 为前提：插件在运行时注册自己的事件类型，注册跟随插件生命周期，Timeline 校验写入 |
-| 模型上下文 | 依据 [ADR 001](../../adr/001-harness-foundation.md)：模型只看到被采纳的输入和工具结果，插件事件不投影。与 #2 的分歧待对齐（[§9](#9-待对齐问题)） |
+| 模型上下文 | 依据 [ADR 001](../../adr/001-harness-foundation.md)：模型只看到被采纳的输入和工具结果，插件事件不投影。#2 采用同一边界（[§9](#9-待对齐问题)） |
 | 配置 | [ADR 002](../adr/002-plugin-scope.md) D4：结构性插件配置（启用、运行时与包路径、节点绑定）位于 loader 行（#3 可编辑层），可能重载该行。业务配置位于所有者的业务来源，使用时读取，永不重载。项目文件保持自己的权威（ADR 001）；这类配置运行的命令不需要批准（§6.4 批准范围）。项目目录为 `.dimcode/` |
 | 现有设计 | [时间总线](../../architecture/rust-agent/time-bus.md)、[设计规则](../../architecture/rust-agent/principles.md)、[单树装配](../../architecture/rust-agent/single-tree.md)、[生命周期](../../architecture/rust-agent/lifecycle.md)、[事件驱动流程](../../architecture/rust-agent/event-driven-flows.md)、[工具贡献](../../architecture/rust-agent/tool-contributions.md)以及 ADR 001 信任合同均适用 |
 
@@ -403,7 +403,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 
 | 问题 | 状态 |
 | --- | --- |
-| 事件如何进入上下文 | 待定（需维护者对齐）：#2 主张注册投影规则；ADR 001 主张只有输入和工具结果。本设计遵循 ADR 001 |
+| 事件如何进入上下文 | 已决定：只有被采纳的输入和工具结果（ADR 001）。#2 已于 2026-10-15 修订，不再有投影规则 |
 | MCP stdio 隔离 | 待定：MCP stdio 进程是否默认隔离 |
 | 远程访问取舍 | 待定：认证、断连与 TLS 部署，与 [#5](https://github.com/arcships/dim/issues/5) 相关（[RemoteGateway](plugins/RemoteGateway.md)） |
 | TypeScript Session 部分 | 待定：SessionTitle、Goal、Web、Notifications 以及 Scheduler 和 Workflow 的 Session 部分按名称提供语言中立合同；其中还使用运行时类型化服务（Timeline、Dispatcher、InputQueue）的部分，需要 #4 按名称暴露这些服务，否则从 Rust 开始 |
