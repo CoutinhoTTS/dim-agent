@@ -1,7 +1,8 @@
 //! RPC layer of branch approvals; the capability is
 //! `dim_agent_capabilities::approval`.
-use crate::protocol::{ApprovalDecision, RpcError};
+use crate::protocol::ApprovalDecision;
 use dim_agent_capabilities::approval::{Approval, ApprovalRespondError};
+use dim_agent_capabilities::methods::RpcError;
 use dim_agent_runtime::{AgentError, Session};
 use dim_agent_types::ApprovalRequestData;
 

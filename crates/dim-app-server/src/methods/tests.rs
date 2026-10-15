@@ -1,7 +1,8 @@
 //! Per-call lookup, provider-owned calls and namespace ownership contracts.
 use super::*;
+use dim_agent_capabilities::methods::Interruption;
 use dim_agent_runtime::{Capability, KeysOf, capability_plugin, register_capability, wait_active};
-use rutis::{Gate, TypedPlugin};
+use rutis::{BoxFuture, Effect, Gate, TypedPlugin};
 use rutis_loader::{Builtins, Layer, LoaderPlugin, Patch};
 use serde_json::json;
 use std::{
@@ -26,7 +27,7 @@ impl Owner {
                 .iter()
                 .map(|method| decl(method, Interruption::Drain))
                 .collect(),
-            handler: Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
+            handler: Arc::new(|_, _, _, _| Box::pin(async { Ok(json!({})) })),
         }
     }
 }
@@ -69,7 +70,7 @@ impl TypedPlugin for Waiting {
                 ctx,
                 "pending",
                 vec![decl("pending.read", Interruption::Drain)],
-                Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
+                Arc::new(|_, _, _, _| Box::pin(async { Ok(json!({})) })),
             )?;
             Ok(Effect::Done)
         })
@@ -95,7 +96,7 @@ impl Capability for Broken {
 }
 
 fn decl(name: &str, interruption: Interruption) -> MethodDecl {
-    MethodDecl::management(name, false, interruption)
+    MethodDecl::new(name, false, interruption)
 }
 fn rejected(result: Result<Accepted, RpcError>) -> &'static str {
     result.err().unwrap().data.unwrap().app_error
@@ -149,7 +150,7 @@ impl Assembly {
     }
     fn dispatch(&self, method: &str, entry: &CancellationToken) -> Result<Accepted, RpcError> {
         self.owners
-            .dispatch(&self.root, method.into(), json!({}), entry.clone())
+            .dispatch(&self.root, method.into(), json!({}), entry.clone(), |_| {})
     }
     async fn state(&self, row: &str, state: FiberState) {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -201,7 +202,7 @@ impl TypedPlugin for Fixture {
                     decl("fixture.wait", Interruption::Report),
                     decl("fixture.read", Interruption::Drain),
                 ],
-                Arc::new(move |method, _, cancel| {
+                Arc::new(move |method, _, cancel, _| {
                     let state = state.clone();
                     Box::pin(async move {
                         if method == "fixture.write" {

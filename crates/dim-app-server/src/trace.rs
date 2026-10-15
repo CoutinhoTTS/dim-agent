@@ -1,7 +1,8 @@
 use crate::{
     agents::{AgentHost, AgentIndex},
-    protocol::{RpcError, TraceOption},
+    protocol::TraceOption,
 };
+use dim_agent_capabilities::methods::RpcError;
 use dim_agent_capabilities::trace::{
     TraceHost, TracePlugin,
     archive::{ArchiveContent, TraceArchive},
