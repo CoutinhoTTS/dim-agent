@@ -4,13 +4,13 @@
 use crate::host::*;
 use dim_agent_runtime::{
     AgentError, Capability, Contributions, Diagnostics, InSession, KeysOf, SessionConfig,
-    SessionLifecycle, SessionScope, SessionService, ToolNames,
+    SessionScope, SessionService, ToolNames,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, LazyLock, Mutex, Weak},
 };
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -90,13 +90,13 @@ struct Sources {
     held: HashSet<(String, String)>,
 }
 
+type FixedTools = Vec<Arc<ToolContribution>>;
+
 pub struct ToolRegistry {
-    /// Configured host tools available before publication attachment.
-    host_tools: Vec<Arc<ToolContribution>>,
-    /// Complete fixed table, published once in `SessionConfig.tools` order.
-    fixed: OnceLock<Vec<Arc<ToolContribution>>>,
-    /// Omitted providers still reserve their registered tool names.
-    contributed: Arc<[String]>,
+    /// Collected once on first use, after the Session services are Active.
+    fixed: LazyLock<FixedTools, Box<dyn FnOnce() -> FixedTools + Send>>,
+    /// Configured fixed tools and every registered contributor reserve names.
+    reserved: HashSet<String>,
     /// Registered name and provider of every dynamic source.
     providers: Vec<(String, Arc<dyn ToolProvider>)>,
     /// Serializes refreshes from read to commit, so an earlier read never
@@ -112,8 +112,6 @@ impl ToolRegistry {
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let sources = self.sources.lock().unwrap();
         self.fixed
-            .get()
-            .unwrap_or(&self.host_tools)
             .iter()
             .chain(sources.current.values().flat_map(|set| set.tools.iter()))
             .map(|tool| tool.definition.clone())
@@ -125,8 +123,6 @@ impl ToolRegistry {
         let sets: Vec<_> = sources.current.values().cloned().collect();
         let definitions = self
             .fixed
-            .get()
-            .unwrap_or(&self.host_tools)
             .iter()
             .chain(sets.iter().flat_map(|set| set.tools.iter()))
             .map(|tool| tool.definition.clone())
@@ -136,8 +132,6 @@ impl ToolRegistry {
     /// The fixed tool of this name.
     pub fn fixed(&self, name: &str) -> Option<Arc<ToolContribution>> {
         self.fixed
-            .get()
-            .unwrap_or(&self.host_tools)
             .iter()
             .find(|tool| tool.definition.name == name)
             .cloned()
@@ -299,7 +293,7 @@ impl ToolRegistry {
             if !names.insert(tool_name.as_str()) {
                 return Err(format!("duplicate tool {tool_name}"));
             }
-            if self.fixed(tool_name).is_some() || self.contributed.contains(tool_name) {
+            if self.reserved.contains(tool_name) {
                 return Err(format!("tool {tool_name} is a fixed tool"));
             }
             if let Some(other) = sources.current.values().find(|other| {
@@ -372,7 +366,6 @@ impl TypedPlugin for ToolRegistryPlugin {
         InSession<ToolHost>,
         InSession<SessionConfig>,
         Contributions<SessionToolSource>,
-        InSession<SessionLifecycle>,
         InSession<Diagnostics>,
     );
     fn name(&self) -> &str {
@@ -385,7 +378,6 @@ impl TypedPlugin for ToolRegistryPlugin {
             InSession(host),
             InSession(config),
             Contributions(sources),
-            InSession(session),
             InSession(diagnostics),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
@@ -404,7 +396,6 @@ impl TypedPlugin for ToolRegistryPlugin {
                     )
                 })
                 .collect();
-            let mut fixed: Vec<Arc<ToolContribution>> = Vec::new();
             let mut selected = HashSet::new();
             for name in &config.tools {
                 if !selected.insert(name)
@@ -412,17 +403,18 @@ impl TypedPlugin for ToolRegistryPlugin {
                 {
                     return Err(AgentError::InvalidInput(format!("duplicate tool {name}")).into());
                 }
-                match host_tools.get(name) {
-                    Some(tool) => fixed.push(tool.clone()),
-                    None if self.contributed.contains(name) => {}
-                    None => {
-                        return Err(AgentError::InvalidInput(format!(
-                            "tool {name} is not provided by the host"
-                        ))
-                        .into());
-                    }
+                if !host_tools.contains_key(name) && !self.contributed.contains(name) {
+                    return Err(AgentError::InvalidInput(format!(
+                        "tool {name} is not provided by the host"
+                    ))
+                    .into());
                 }
             }
+            let reserved = selected
+                .into_iter()
+                .cloned()
+                .chain(self.contributed.iter().cloned())
+                .collect();
             let providers: Vec<_> = sources
                 .into_iter()
                 .map(|(name, provider)| (name, provider.0.clone()))
@@ -432,10 +424,35 @@ impl TypedPlugin for ToolRegistryPlugin {
                 .iter()
                 .map(|(_, provider)| provider.changed())
                 .collect();
+            let context = ctx.clone();
+            let scope = self.scope;
+            let contributed = self.contributed.clone();
             let registry = Arc::new(ToolRegistry {
-                host_tools: fixed,
-                fixed: OnceLock::new(),
-                contributed: self.contributed.clone(),
+                fixed: LazyLock::new(Box::new(move || {
+                    let mut fixed = Vec::new();
+                    for name in &config.tools {
+                        let tool = if contributed.contains(name) {
+                            context.get_as::<ToolContribution>(
+                                scope.named_key::<ToolContribution>(name),
+                            )
+                        } else {
+                            host_tools.get(name).cloned()
+                        };
+                        match tool {
+                            Some(tool) => fixed.push(tool),
+                            None => {
+                                let span = diagnostics.span("tool.attach", None, None, None);
+                                span.record("outcome", format!("unavailable:{name}"));
+                                tracing::warn!(
+                                    tool = name,
+                                    "optional tool provider is unavailable at registry initialization"
+                                );
+                            }
+                        }
+                    }
+                    fixed
+                })),
+                reserved,
                 providers,
                 refreshing: Mutex::default(),
                 sources: Mutex::default(),
@@ -467,38 +484,6 @@ impl TypedPlugin for ToolRegistryPlugin {
                     }
                 });
             }
-            let owner = registry.clone();
-            let context = ctx.clone();
-            let scope = self.scope;
-            tasks.spawn(async move {
-                tokio::select! {
-                    biased;
-                    _ = lifecycle.cancelled() => return,
-                    active = session.activated() => if !active { return },
-                }
-                let mut fixed = Vec::new();
-                for name in &config.tools {
-                    let tool = if owner.contributed.contains(name) {
-                        context
-                            .get_as::<ToolContribution>(scope.named_key::<ToolContribution>(name))
-                    } else {
-                        host_tools.get(name).cloned()
-                    };
-                    match tool {
-                        Some(tool) => fixed.push(tool),
-                        None => {
-                            let span = diagnostics.span("tool.attach", None, None, None);
-                            span.record("outcome", format!("unavailable:{name}"));
-                            tracing::warn!(
-                                tool = name,
-                                "optional tool provider is unavailable at Session publication"
-                            );
-                        }
-                    }
-                }
-                owner.fixed.get_or_init(|| fixed);
-                owner.changed.send_replace(());
-            });
             ctx.provide_as(
                 self.scope.key::<ToolSourcesView>(),
                 Arc::new(ToolSourcesView(registry.sources_state())),
@@ -511,6 +496,6 @@ impl TypedPlugin for ToolRegistryPlugin {
 impl Capability for ToolRegistryPlugin {
     fn keys(&self) -> KeysOf<Self> {
         let scope = self.scope;
-        (scope, scope, (scope, self.sources.clone()), scope, scope)
+        (scope, scope, (scope, self.sources.clone()), scope)
     }
 }

@@ -2,7 +2,25 @@
 
 状态：Implemented；`branch`、`agent` 以贡献提供；没有通用的 `task` 工具，脱离工作的查询、等待与停止由所属能力各自的工具提供。基线为[单树装配](single-tree.md)与[能力重载协议](single-tree.md#能力重载协议)。
 
-C3 验收缺口：[Session boundary A.5](../../design/contracts/session-boundary.md#a5-tool-contribution) 要求工具接入在 Session 接受输入之前完成。当前发布后任务与 ToolBinding 后台采用没有提供该就绪保证，C3 尚不能交付。现有 `BranchOpening` 在 Session 发布前结束，不能等待依赖发布的接入任务；未增加 core 就绪机制，也未改变该合同。
+## 首次工具表与分支初始化
+
+固定表由 ToolRegistry 在第一次实际读取时同步构建并缓存。当前调用路径中，Session 级 PrepareModelHost 只保存注册表句柄；首次读取发生在分支 ToolBinding 的初始化/打开处理中。此时 Session 服务已经完成装配，ToolRegistry 自身已 Active，可按现有作用域键查找已 Active 的贡献；分支随后沿已有 Prompt / BranchOpening 完成采用，Session 才发布。
+
+```text
+Session services Active
+    -> ToolBinding reads ToolRegistry
+    -> build the complete fixed table once
+    -> existing Prompt adoption and BranchOpening finish
+    -> Session publication and first input
+```
+
+没有初始模型配置时，ToolBinding 仍在初始化中读取注册表，固定本次装载的提供方；请求可以沿既有 PrepareModelHost / `bind_current` 路径声明并绑定工具。有已采用配置时，ToolBinding 在初始化与既有 BranchOpening 中完成匹配和必要的 Prompt 采用，Session 接受输入前工具表已经确定。
+
+固定表使用标准库 `LazyLock` 一次性同步初始化，没有宿主表与完整表之间的后台切换。取样发生在分支首次读取注册表时，而非 Session 发布时；该读取之后才 Active 的提供方，包括发布前才 Active 的提供方，都留到下次注册表或 Session 重载。每代注册表只取样一次，新分支复用同一固定表。装配等待规则保持不变，取样不等待 Pending 提供方。
+
+已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。C3 移除的是 ToolRegistry 对可选固定贡献的硬依赖，不跳过装配中的 Pending 插件。
+
+影响面限于 ToolRegistry 的固定表与 ToolBinding 的初始化读取；不增加 core 阶段、门面等待、公开服务或事件。动态来源继续沿已有刷新、采用和请求快照路径工作；名称冲突按配置与已登记名称判定，不为检查名称而提前触发固定表收集。
 
 ## 1. 范围
 
@@ -30,7 +48,7 @@ flowchart LR
     A["ApprovalPlugin"]
   end
   B -->|装配时登记名称| R
-  R -->|published Session: named lookup| C
+  R -->|first branch read: named lookup| C
   R -->|injects| H
   TB -->|injects| R
   L -->|injects| TB
@@ -54,16 +72,16 @@ impl SessionService for ToolContribution {}
 | 登记 | `AgentBuilder::session_tool(name)` 在装配时登记贡献名称；同一名称只登记一次 |
 | 提供 | 贡献方能力在自身状态就绪后，于 `apply` 中以上述键提供；`definition` 可按本 Session 配置生成，`definition.name` 等于登记名称 |
 | 宿主工具名 | 宿主工具名经 `AgentBuilder::host_tools` 登记：产品根由 `workspace_tools::install` 登记，测试与开发宿主由 `defaults::tool_host` 登记；其他提供 `ToolHost` 的装配须自行登记，否则显式 profile 不能列出这些工具 |
-| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 只接入宿主工具，后台任务在 `SessionLifecycle::activated()` 后按名称读取本 Session 已可用的贡献，不建立对可选贡献方的硬依赖 |
+| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置，分支首次读取工具表时同步按名称读取本 Session 已 Active 的贡献，不建立对可选贡献方的硬依赖 |
 | 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 诊断；稍后才 Active 的贡献在下次注册表重载时接入 |
 
-固定表在每代注册表内只发布一次：装配时宿主工具表不可变，发布后的接入任务私下构建按 `SessionConfig.tools` 排序的完整表，通过 `OnceLock` 一次性发布。读取不等待接入完成：发布前使用宿主表，发布后使用完整表；固定工具查找不获取 `Mutex`。动态来源继续使用自己的既有同步机制。
+固定表按 `SessionConfig.tools` 顺序一次性构建并缓存，首次读取返回完整结果，后续读取复用不可变表。`LazyLock` 只协调一次性初始化；固定工具查找不获取每次读取的 `Mutex`。动态来源继续使用自己的既有同步机制。
 
 ## 3. 依赖方向
 
 | 方向 | 规定 |
 | --- | --- |
-| `ToolRegistry` → 贡献方 | Session 发布后按登记名读取一次，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`SessionLifecycle`、`Diagnostics` 和既有动态来源的真实依赖 |
+| `ToolRegistry` → 贡献方 | 分支初始化首次读取时按登记名取样一次，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`Diagnostics` 和既有动态来源的真实依赖 |
 | 贡献方 → `ToolRegistry` | 不注入；贡献方不读取、不修改注册表 |
 | 贡献方状态 | 不因 `ToolRegistry` 或其上游重载而卸载 |
 
@@ -92,7 +110,7 @@ impl SessionService for ToolContribution {}
 3. `ToolHost` 重载后贡献方状态保持，工具表恢复一致。
 4. 可选贡献方 Pending、缺失或退出时不传播硬依赖失效；来源所有者仍负责旧 handler 的停止，新一代只在下次注册表重载后接入。
 5. 未启用的贡献不出现在工具声明中。
-6. 初次发布后的工具接入沿用 ToolBinding 的变化通知与 Prompt 采用，不直接修改模型请求；接入前已确定前缀的请求保持原工具快照。
+6. Session 返回后立即提交的首个请求声明并绑定初始化时已接入的固定工具；没有初始模型配置时也在分支初始化取样，之后才 Active 的提供方不被首个请求临时接入。恢复流程在首个请求前采用本次装载的工具表，已绑定请求保持原工具快照。
 
 ## 7. 动态工具来源
 

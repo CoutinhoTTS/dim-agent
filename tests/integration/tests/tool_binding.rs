@@ -390,30 +390,6 @@ async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
     .unwrap();
 }
 
-async fn fixed_tools_adopted(session: &Session, expected: &[&str]) {
-    let mut progress = session.dispatch_watch("main").unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let history = session.history("main", None).await.unwrap();
-            let tools = history.iter().rev().find_map(|event| match &event.kind {
-                EventKind::ContextConfigured(data) => data.settings.tools.as_ref(),
-                _ => None,
-            });
-            if tools.is_some_and(|tools| {
-                tools
-                    .iter()
-                    .map(|tool| tool.name.as_str())
-                    .eq(expected.iter().copied())
-            }) {
-                return;
-            }
-            progress.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for_reload() {
     let root = Ctx::root().unwrap();
@@ -452,12 +428,12 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
         })
         .await
         .unwrap();
-    fixed_tools_adopted(&session, &["optional", "echo"]).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
         .await
         .unwrap();
     session.idle("main").await.unwrap();
+    assert_eq!(declared(&requests(&session).await[0]), ["optional", "echo"]);
     assert_eq!(last_result(&session, "main").await, "generation 1");
     let snapshot = session.diagnostics().unwrap();
     let registry = snapshot
@@ -563,7 +539,6 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
     })
     .await
     .unwrap();
-    fixed_tools_adopted(&session, &["optional", "echo"]).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
         .await
@@ -571,6 +546,91 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
     session.idle("main").await.unwrap();
     assert_eq!(last_result(&session, "main").await, "generation 2");
     agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixed_contributors_are_sampled_before_the_first_request_without_initial_configuration() {
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let store = Arc::new(MemoryTimelineStore::default());
+    let generations = Arc::new(AtomicUsize::new(0));
+    let hold = Arc::new(Gate::default());
+    let build = || {
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::mock_hosts(&mut builder);
+        defaults::install(&mut builder);
+        builder
+            .timeline_store(store.clone())
+            .session_tool("optional")
+            .session_plugin({
+                let generations = generations.clone();
+                let hold = hold.clone();
+                move |scope| OptionalContributor {
+                    scope: *scope,
+                    generations: generations.clone(),
+                    hold: hold.clone(),
+                }
+            });
+        builder.build_in(&root)
+    };
+    let agent = build();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["optional".into(), "echo".into()],
+            permission_policy: PermissionPolicy {
+                allowed_tools: vec!["echo".into(), "optional".into()],
+                ..PermissionPolicy::default()
+            },
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+    let provider = root
+        .view(
+            session
+                .diagnostics()
+                .unwrap()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.name == "OptionalContributor")
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&provider, rutis::FiberState::Active).await;
+    session
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(declared(&requests(&session).await[0]), ["optional", "echo"]);
+    assert!(
+        last_result(&session, "main")
+            .await
+            .contains("provider unloaded")
+    );
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+
+    let agent = build();
+    let restored = agent.restore_session(id).await.unwrap();
+    restored
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    restored.idle("main").await.unwrap();
+    assert_eq!(
+        declared(requests(&restored).await.last().unwrap()),
+        ["optional", "echo"]
+    );
+    assert_eq!(last_result(&restored, "main").await, "generation 3");
+    agent.close().await.unwrap();
+    enabled.dispose().await.unwrap();
     root.shutdown().await.unwrap();
 }
 

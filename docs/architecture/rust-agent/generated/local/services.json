@@ -2156,11 +2156,6 @@
             "status": "Ready"
           },
           {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
             "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
             "scope": null,
             "status": "Ready"
@@ -2175,12 +2170,6 @@
           },
           {
             "service": "dim_agent_runtime::config::SessionConfig@session",
-            "scope": null,
-            "provider": 10,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
             "scope": null,
             "provider": 10,
             "generation": 1
@@ -2201,12 +2190,6 @@
           },
           {
             "service": "dim_agent_runtime::config::SessionConfig@session",
-            "provider": 10,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::config::SessionLifecycle@session",
             "provider": 10,
             "declared": true,
             "external": true
