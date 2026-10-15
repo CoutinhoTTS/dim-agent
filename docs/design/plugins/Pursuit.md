@@ -38,7 +38,7 @@ Pursuit is one branch capability, `PursuitPlugin`. There is no Session or proces
 | `B:Timeline` | Write `pursuit/*` events and Pursuit's inputs |
 | `B:Dispatcher` | Consume `pursuit/*`, `turn/start`, `turn/end` and `stop/interrupt` in sequence order |
 | `S:TreeCommands` | Create, await, read and close evaluator branches |
-| Settings business source | `pursuit.maxContinuations`, read at each verdict |
+| Settings source `pursuit` | Field `maxContinuations`, read at each verdict and used as delivered |
 
 | Provides | Purpose |
 | --- | --- |

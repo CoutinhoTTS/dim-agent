@@ -4,13 +4,13 @@
 
 > **需要重新设计。** 本文不具权威性，不得按现文实现。模型已经通过 `ask_user` 的工具结果拿到回答，调用在所属 turn 内同步等待。三个 `question/*` 事件以及由此带来的对 #2（客户端可见事件）的依赖缺少依据：待答问题可以从已提交、尚无结果的 `step/tool-call` 推导出来，中断、重载和恢复已由 ToolExecutor 用该调用的 `step/tool-result` 结算。重新设计要决定在工具调用和结果之外是否还需要事实（例如在批次完成前让其他客户端关闭提示，或在批次完成前崩溃时保留回答），并按设计规则 §4 rule 9 逐一说明理由。
 
-模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `ask_user`）提供 `ask_user` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.question`）提供 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。它只安装在交互 Session 中。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并依据自己消费到的 `stop/interrupt` 按序号判定回答与中断，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
+模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `ask_user`）提供 `ask_user` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.question`）提供 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。插件启用时，它安装在每个 Session 中；在非交互 Session 中，`ask_user` 回答当前没有用户可以回答（§3.3）。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并依据自己消费到的 `stop/interrupt` 按序号判定回答与中断，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
 
 ## 1. 结构
 
 ```mermaid
 flowchart LR
-  subgraph S["Session 作用域（仅交互 Session）"]
+  subgraph S["Session 作用域"]
     QS["QuestionsPlugin：toolContribution ask_user，sessionMethods session.question"]:::new
     TR["ToolRegistry"]
     TC["TreeCommands"]
@@ -40,7 +40,7 @@ flowchart LR
 | `QuestionsPlugin` | Session | `S:TreeCommands` | `toolContribution` key `ask_user`；`sessionMethods` key `session.question`（`session.question.respond`） |
 | `QuestionsBranchPlugin` | 分支 | `B:Timeline`、`B:Dispatcher` | `questions`（分支作用域；`ask`、`respond`），仅供 Session 部分使用 |
 
-安装：两个部分都在插件的 `provides` 中声明各自的服务；Session 部分那一行以 `SessionConfig.interactive` 为条件，因此 Agents 只在交互 Session 中安装它，并在 `SessionConfig.tools` 中列出 `ask_user`（由 `session.create` 设置；ACP、`exec`、Scheduler 和 Workflow 的 Session 都是非交互的）。分支部分随之安装。ToolRegistry 和 Rpc 按名称和作用域收集这些服务。
+安装：两个部分都在插件的 `provides` 中声明各自的服务，插件启用时 Agents 就安装它们。安装从不依赖 `SessionConfig.interactive`（[session access §9.4](../contracts/session-access.md#94-按启用状态安装可选部分)），因此每个 Session 都声明 `ask_user`，fork 前后工具集合不变。处理器从所属 Session 的配置读取 `SessionConfig.interactive`（由 `session.create` 设置；ACP、`exec`、Scheduler 和 Workflow 的 Session 都是非交互的）。ToolRegistry 和 Rpc 按名称和作用域收集这些服务。
 
 依赖的契约：`toolContribution`（ToolRegistry 接受按名称提供的工具服务，[工具贡献](../../../architecture/rust-agent/tool-contributions.md)补充）；ToolExecutor 的批次 token（只用于取消处理器）与结算；`stop/interrupt` 数据契约；[single-tree](../../../architecture/rust-agent/single-tree.md) 的 `Timeline` 追加契约和 Dispatcher 协议（类型化运行时服务；Questions 用 Rust 实现）；`SessionConfig.interactive`（[session-access](../contracts/session-access.md)）；`sessionMethods`（[session-boundary](../contracts/session-boundary.md)）；客户端可见的动态事件（#2，A10；需求见 [§9](#9-向机制所有者提出的需求)）；Permission 风险类别 `session`。
 
@@ -133,7 +133,7 @@ sequenceDiagram
 
 ### 3.3 非交互 Session
 
-Session 部分不安装：没有声明，`session.question.respond` 得到 `unknown_method`。模型按名称调用 `ask_user` 得到 `Unknown tool`。
+`ask_user` 与其他 Session 中一样被声明。处理器读取 `SessionConfig.interactive`；为 `false` 时，调用立即返回一个说明当前没有用户可以回答的结果（A.1），Questions 不写任何 `question/*` 事件。从不会有待回答的问题，因此 `session.question.respond` 找不到问题。
 
 ## 4. 时序与冲突
 
@@ -188,7 +188,7 @@ sequenceDiagram
 
 | 模型看到的内容 | 形式 | 位置 |
 | --- | --- | --- |
-| `ask_user` 名称、描述、schema | 固定的工具声明 | 已采用的 `context/configured`，仅交互 Session |
+| `ask_user` 名称、描述、schema | 固定的工具声明 | 已采用的 `context/configured`，每个 Session |
 | 回答、拒绝回答 | `ToolResult.content`（附录 A.1） | 工具结果位置，在批次中所有调用结算之后 |
 | 取消 | ToolExecutor 给出的错误文本 | 同一位置 |
 
@@ -221,13 +221,13 @@ sequenceDiagram
 | §4.5 决定前读完整个批次 | `question/answered` 单独写入，读完其批次后才决定；`stop/interrupt` 在读完其整个批次后按序号顺序处理。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 回答只经 ToolExecutor 的 `step/tool-result` 进入模型；`question/*` 事件从不投影。 |
 | §4.7 插件之间只通过公开事件和服务交互 | 回答与中断依据 Questions 自己消费的 `stop/interrupt` 判定，不依据 ToolExecutor 的批次 token 或内存。 |
-| §4.8 向机制所有者提通用需求 | 客户端可见的动态事件（#2）见 §9；按条件安装链接到 [session access](../contracts/session-access.md) §9.4；Connection 转发是列在 [overview 附录 B.2](../overview.md) 的改动。 |
+| §4.8 向机制所有者提通用需求 | 客户端可见的动态事件（#2）见 §9；按启用状态安装链接到 [session access](../contracts/session-access.md) §9.4；Connection 转发是列在 [overview 附录 B.2](../overview.md) 的改动。 |
 | §4.9 只有后续决定要用的事实进入 Timeline | `question/asked` 与 `question/cancelled` 在重建时决定待回答状态，`question/answered` 是回答判定读取的边界事实；客户端显示用的也是这些事件，没有新增只供显示的事件。 |
 | §1 Capability 与 App Server 边界 | 两个部分都是各自包中的 Capability；Rpc 只分派 `sessionMethods`，不含 Questions 逻辑。 |
 | ADR 002 D1 作用域跟随状态所有者 | 工具与方法是 Session 服务；待回答的问题是分支状态。 |
 | ADR 002 D2 不设接线模块 | ToolRegistry 与 Rpc 按名字和作用域收集服务；没有模块指名 Questions。 |
 | ADR 002 D3 依赖跟随作用域 | Session 部分只依赖 Session 服务；重载会取消待回答的问题，可接受。 |
-| ADR 002 D4 结构性配置与业务配置分离 | 不适用：Questions 没有配置；是否安装取决于 `SessionConfig.interactive`。 |
+| ADR 002 D4 结构性配置与业务配置分离 | 不适用：Questions 没有配置；安装不依赖 `SessionConfig.interactive`，处理器把它当作 Session 数据读取。 |
 | ADR 002 D5 合同语言中立 | 工具、方法、分支服务与事件以中立形式给出；附录 G 只是一种绑定。 |
 
 ## 9. 向机制所有者提出的需求
@@ -242,15 +242,15 @@ sequenceDiagram
 | 对序号、批次、中断、重载的影响 | 对序号与批次无影响：该标记是静态登记数据，通知与其他事件一样在提交后发布。中断与重载不变；历史重放与实时通知按事件身份合并。 |
 | 由谁实现，对应 issue | 运行时；[#2](https://github.com/arcships/dim/issues/2)。 |
 
-### R2. 按 `interactive` 安装可选部件（运行时，Agent 装配）
+### R2. 按启用状态安装可选部件（运行时，Agent 装配）
 
-五项内容见 [session access](../contracts/session-access.md) §9.4：插件的 `provides` 行可以带 `SessionConfig.interactive` 上的条件，在 Session 加载时决定。Questions 需要它，使非交互 Session 从不提供 `ask_user`，且装配代码不指名 Questions。
+五项内容见 [session access](../contracts/session-access.md) §9.4：Agent 装配在插件启用时安装其部分，在 Session 加载时决定，且从不依赖 `SessionConfig.interactive`。Questions 需要它，使装配代码不指名 Questions。
 
 ## 附录 A. 接口细节
 
 ### A.1 工具 `ask_user`
 
-服务 `toolContribution`，Session 作用域，key `ask_user`，仅在交互 Session 中列出。`declaration(): sync -> ToolDeclaration` 返回名称、固定描述、下列参数 schema 和风险 `session`；`execute(ToolCall): async -> ToolResult` 运行处理器。消费方通过对调用发出取消请求来取消（ToolExecutor 的批次 token）。
+服务 `toolContribution`，Session 作用域，key `ask_user`，Questions 启用时在每个 Session 中列出。`declaration(): sync -> ToolDeclaration` 返回名称、固定描述、下列参数 schema 和风险 `session`；`execute(ToolCall): async -> ToolResult` 运行处理器。消费方通过对调用发出取消请求来取消（ToolExecutor 的批次 token）。
 
 | 参数 | 类型 | 规则 |
 | --- | --- | --- |
@@ -272,7 +272,7 @@ User answered:
    -> (custom) <text>
 ```
 
-被拒绝回答的调用得到 `User declined to answer the question(s).`（A6）。`structuredContent` 携带 `{answers, declined}`，仅供客户端使用。被取消的调用以错误 `{code: "cancelled", reason}` 结束，由 ToolExecutor 报告。
+被拒绝回答的调用得到 `User declined to answer the question(s).`（A6）。在非交互 Session 中，调用立即得到 `No user is available to answer the question(s).`，不登记条目，也不写任何 `question/*` 事件。`structuredContent` 携带 `{answers, declined}`，仅供客户端使用。被取消的调用以错误 `{code: "cancelled", reason}` 结束，由 ToolExecutor 报告。
 
 ### A.2 事件载荷
 
@@ -329,7 +329,7 @@ User answered:
 | `invalid_params` `Question was cancelled` | `Cancelled` |
 | `invalid_params` `<reason>` | `Invalid`：未知的问题 id、未提供的标签、没有 `multiSelect` 时选了多个标签、没有 `allowCustom` 时给了 `custom`、未 `declined` 时既无选择也无 `custom` |
 | `service_reloading` | 存活分支上的 `Closed`，或服务正在重载 |
-| `unknown_method` | Session 非交互（服务未安装） |
+| `unknown_method` | Questions 未启用（服务未安装） |
 | `session_closed` | Session 已关闭 |
 
 已接受的指令属于 Session，断开连接后继续执行。
@@ -379,7 +379,7 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 | 客户端断开，从未有客户端附着 | Q 待回答 | 保持待回答，无超时（A7） | 用户 |
 | 交互 Session 上的 `-p` CLI | Q < I | CLI 停止轮次；中断导致 C | CLI；Questions |
 | 已配对的远程设备回答 | Q < A | 与任何客户端一样被接受 | Questions |
-| 非交互 Session | — | 未安装；按名称调用 → `Unknown tool`；方法 → `unknown_method` | Agents；ToolBinding；Rpc |
+| 非交互 Session | — | `ask_user` 回答当前没有用户可以回答；没有 `Q`；`respond` 找不到问题 | Questions |
 
 ## 附录 C. 错误与恢复
 
@@ -397,7 +397,7 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 通过 RPC、工具调用和事件进行的流程测试：
 
 1. 单选、多选、多问题和自定义回答产生规定的 `content`；无效回答在 `respond` 时被拒绝，不产生事实。
-2. 以 `interactive: false` 创建的 Session（包括 `exec` 和 ACP）：没有 `ask_user`，`session.question.respond` → `unknown_method`；其他情况以及省略 `interactive` 时存在。
+2. 以 `interactive: false` 创建的 Session（包括 `exec` 和 ACP）：`ask_user` 被声明，并回答当前没有用户可以回答，不产生 `question/*` 事件；省略 `interactive` 时照常提问。两种情况下工具集合相同。
 3. 先回答后停止：结果包含回答。先停止后回答：`Cancelled`、`question/cancelled`、已取消结果。两种顺序都通过在 Dispatcher 被挂起时先提交 `I` 再提交 `A` 来强制产生。`I` 在 `Q` 之前提交、在其之后被消费：问题被取消；`I` 被消费之后的 `ask` 不写任何内容。
 4. 两个并发 `respond`：恰好接受一个。
 5. 一个批次中两个 `ask_user` 加一个慢工具：回答保留到唯一的 `step/tool-result`。
@@ -410,8 +410,8 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
-| A1 | Session 部分只安装在交互 Session 中 | [ADR 002](../../adr/002-plugin-scope.md) 后果；决定 §3（ACP/自动化为非交互） | 工具在所有地方列出；非交互 Session 会阻塞 |
-| A2 | `session.create` 省略 `interactive` 表示交互 | 判断（现有客户端） | 现有 Session 失去该工具 |
+| A1 | 每个 Session 都声明 `ask_user`，`interactive` 为 `false` 时回答当前没有用户可以回答 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30）；决定 §3（ACP/自动化为非交互） | 各 Session 工具集合不同；fork 丢失提示词前缀 |
+| A2 | `session.create` 省略 `interactive`，或已存储记录缺少该字段，表示交互 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段) 的格式决定 | 现有 Session 不再提问 |
 | A3 | 载荷增加 `turn_id`、`request_id`、`declined` | 判断 | 通过 `step/tool-call` 关联；拒绝回答建模为一种回答 |
 | A4 | 1..=4 个问题，2..=6 个选项 | 边界情况参考；判断 | schema 限制改变 |
 | A5 | 默认允许自定义回答 | 功能列表"自定义回答"；默认值是判断 | 模型必须显式开启 |

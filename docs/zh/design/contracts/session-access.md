@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[总览 §3 集成](../overview.md#3-基于现有机制的集成)、[附录 B Agents 与 InputQueue](../overview.md#附录-b-现有插件的补充)；规则：[ADR 002](../../adr/002-plugin-scope.md) D1–D3、D5。阶段：P0。语言：语言中立合同；Rust 绑定见[附录 E](#附录-e-rust-绑定)。
 
-> **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
+> **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 Session 的资源节点查找，该字段在 P3 加入 `SessionConfig`（[A.3](#a3-sessionconfig-字段)）。P1/P2 中每个 Session 都使用控制节点。
 
 进程插件以 Collaboration 已有的方式访问 Session：通过 Agents 和公共的 Session 接口。本文把这种访问定义为语言中立的进程服务 `sessions`（ADR 002 D5），由 Agents 提供，因此 TypeScript 或 Python 进程插件（Scheduler、Workflow）可以按名称使用它。其方法为 `launch`、`input`、`lookup`、`history`、`withdraw`、`stop` 和 `idle`，请求与回复均为数据（[A.1](#a1-sessions-服务)）。在 Rust 中，它是 `AgentIndex` 加上 `Session` 门面（[附录 E](#附录-e-rust-绑定)）。本文不增加任何宿主或门面插件，依赖 Agents 的调用方随其重载（D3）。
 
@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `sessions` 服务：按名称、纯数据地访问 Session | Agents | Scheduler、Workflow 进程部分 |
 | 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow |
-| `SessionConfig` 字段 `interactive`、`resourceNode`、`createdBy` | Agents | 所有作用域，通过所属 Session 的 `SessionConfig` |
+| `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 与 Hooks 分支部分写入相同形式 |
 | 固定前缀读取 | 运行时门面（需求，§9） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
 | 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、Hooks、AcpGateway、Scheduler、Workflow |
@@ -50,17 +50,17 @@ flowchart LR
 | 部分 | 作用域 | 状态 |
 | --- | --- | --- |
 | `sessions`（Agents） | 进程 | 补充；映射到现有的 `acquire` 与门面，外加 `launch` |
-| `SessionConfig` 字段 | Session 记录 | 补充 |
+| `SessionConfig` 字段 `interactive` | Session 记录 | 补充 |
 | Session 门面（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)） | Session、分支 | 已存在；固定前缀读取（§9.2）是需求 |
 | InputQueue | 分支 | 变更：消费 `input/withdraw`，写入 `input/deleted`；撤回服务 |
 
-本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`LookupReply`、`WithdrawRequest`、`WithdrawReply` 与 `SessionsError`；`SessionOrigin` 与三个 `SessionConfig` 字段；`session.create` 的 `interactive` 与 `client` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、以及 Session 输入路径。
+本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`LookupReply`、`WithdrawRequest`、`WithdrawReply` 与 `SessionsError`；`SessionConfig` 字段 `interactive` 与 `session.create` 的 `interactive` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、以及 Session 输入路径。
 
 ## 2. 数据与状态
 
 | 状态 | 所有者 | 重建 |
 | --- | --- | --- |
-| 含新字段的 `SessionConfig` | Agents、Session 记录 | 恢复时从记录重建 |
+| 含 `interactive` 的 `SessionConfig` | Agents、Session 记录 | 恢复时从记录重建 |
 | 输入及其 applied、consumed 与 deleted 事实；InputQueue 的持有集合 | InputQueue、Loop | 重载时从本地历史重建：某输入既无 `input/applied` 也无 `input/deleted` 时即被持有 |
 | `sessions` 调用期间持有的租约 | Agents | 仅运行时 |
 | 带 key 块的效果 | 历史投影（[history.rs](../../../../crates/dim-agent-capabilities/src/history.rs)） | 从固定前缀与压缩事实重建 |
@@ -81,7 +81,7 @@ sequenceDiagram
   participant L as InputQueue, Loop
   C->>AI: launch {source scheduler, policy, starter}
   AI->>AI: 以启动方当前策略为上限限制策略
-  AI-->>C: {sessionId}，createdBy launch scheduler
+  AI-->>C: {sessionId}
   C->>AI: input {sessionId, main, queue, marker dim-scheduler, submissionId}
   AI->>S: input
   S->>TL: input/message
@@ -155,8 +155,8 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | `sessions.withdraw(WithdrawRequest) -> WithdrawReply` | async | 按 `input_id` 为调用方写入的输入写入 `input/withdraw`，并返回 InputQueue 的决定 |
 | `sessions.stop({sessionId, branchId}) -> {sequence}` | async | 中断该分支的 turn |
 | `sessions.idle({sessionId, branchId}) -> {sequence}` | async | 等待分支空闲；返回的序号是最后提交的序号，位于整批次边界 |
-| `SessionConfig` 字段 | 数据 | 创建时配置（`interactive`、`resourceNode`、`createdBy`） |
-| `session.create {interactive, client}` | RPC | 非交互创建与客户端来源 |
+| `SessionConfig.interactive` | 数据 | 创建时配置 |
+| `session.create {interactive}` | RPC | 非交互创建 |
 
 ## 7. 安全
 
@@ -179,7 +179,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | ADR 002 D1 | `sessions` 是 Agents 的进程服务；InputQueue 的撤回留在其分支部分，由其 Session 部分提供给客户端。 |
 | ADR 002 D2 | 没有访问宿主或门面插件；调用方像 Collaboration 一样使用 Agents。 |
 | ADR 002 D3 | 依赖 Agents 的调用方随其重载，并用 `lookup` 解决结果不确定的写入。 |
-| ADR 002 D4 | `SessionConfig` 字段是 Session 记录的创建数据，不是插件配置。 |
+| ADR 002 D4 | `SessionConfig.interactive` 是 Session 记录的创建数据，不是插件配置。 |
 | ADR 002 D5 | `sessions` 是具名服务，方法与错误都是纯数据；Rust 类型只出现在附录 E。 |
 
 ## 9. 向机制所有者提出的需求
@@ -240,7 +240,6 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 // LaunchRequest
 { "agent?": "string",                // Agent profile id；缺省：Agents 的默认 profile
   "cwd": "string",
-  "resourceNode?": "string",         // 缺省：控制节点
   "model?": "string",                // 模型 id；优先于 profile 的模型
   "policy?": { /* PermissionPolicy 数据 */ },  // 收窄后的请求；缺省：启动方策略或只读默认值
   "starter?": { "sessionId": "string", "branchId": "string" } } // 上限；缺省：以宿主配置为界
@@ -273,7 +272,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 取消：调用方丢弃 `idle` 或 `history` 调用即结束它，没有任何效果。在回复前丢弃 `input` 会使结果不确定；调用方用 `lookup` 确认。
 
-`launch` 创建一个 `createdBy = {kind: "launch", source}` 的非交互 Session。生效策略是请求的策略，并以启动方的当前策略为上限；该策略是启动时读取的 Timeline 事实。没有启动方时，由管理方法启动的运行除非请求声明了策略，否则默认只读，并始终受宿主配置约束。
+`launch` 创建一个 `interactive = false` 的 Session。生效策略是请求的策略，并以启动方的当前策略为上限；该策略是启动时读取的 Timeline 事实。没有启动方时，由管理方法启动的运行除非请求声明了策略，否则默认只读，并始终受宿主配置约束。
 
 ### A.2 来源输入约定
 
@@ -288,17 +287,18 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ```text
 // SessionConfig（新字段；已有：permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole）
-{ "interactive": true,              // false：exec、ACP、自动化；缺少该字段的已存储记录：true
-  "resourceNode?": "string",        // 缺省：控制节点
-  "createdBy": SessionOrigin }
-// SessionOrigin
-{ "kind": "client", "client?": "acp" }
-| { "kind": "collaboration", "leaderSession": "string" }
-| { "kind": "launch", "source": "scheduler" }
-| { "kind": "fork", "sourceSession": "string" }
+{ "interactive": true }             // false：exec、ACP、自动化；缺省：true
 ```
 
-`session.create` 增加 `interactive?: bool`（默认 `true`）与 `client?: string`。fork 复制 `cwd`、`resourceNode`、`interactive` 和 `collaborationRole`。这些字段在创建时固定。装配不读取 `interactive`；关心它的插件自己读取（例如 `ask_user` 回答当前没有用户可以回答），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache（#30）。
+`interactive` 在创建时固定。装配从不读取它（ADR 002 D3，#30），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache。关心它的插件直接从 Session 的配置读取：Questions（`ask_user` 照常声明，并回答当前没有用户可以回答）和 SessionTitle（只为交互式的 leader Session 起标题）。
+
+`session.create` 增加 `interactive?: bool`（默认 `true`），只在边界检查。`session.create` 拒绝未知字段，旧版守护进程会以 invalid params 拒绝带 `interactive` 的请求；因此客户端只在它为 `false` 时发送。
+
+fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来的 `permission/changed` 事实一起带过去（#26）。
+
+格式决定：原生存储保持版本 13。`interactive` 是存储的配置 JSON 中一个增量的可选字段，缺少它的已存储记录表示 `true`，因为在该字段出现之前创建的每个 Session 都是客户端 Session。旧版守护进程忽略该字段，把非交互记录读成交互式；这一点可以接受。不升级到版本 14。
+
+不在本合同中：`createdBy`（Session 来源）和 `session.create` 的 `client` 参数，等到有功能依据它们做决定时再加入。资源节点在 P3 加入（总览 §6.3）：一个增量的可选 `SessionConfig` 字段，缺省表示控制节点。
 
 ### A.4 撤回
 
@@ -357,8 +357,8 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ## 附录 C. 验收
 
-1. `sessions.launch` 创建一个非交互 Session，其策略以启动方为上限，且 `createdBy.kind = launch`；TypeScript 进程插件可以按名称调用它。
-2. `session.create {interactive: false, client: "acp"}` 产生的字段可在该 Session 的 `SessionConfig` 中看到，且没有 `ask_user`。
+1. `sessions.launch` 创建一个 `interactive = false` 的 Session，其策略以启动方为上限；TypeScript 进程插件可以按名称调用它。
+2. `session.create {interactive: false}` 使该 Session 的 `SessionConfig` 中 `interactive = false`；`ask_user` 照常声明，并回答当前没有用户可以回答。缺少该字段的已存储记录装载为交互式。
 3. 在工具批次期间写入的 Queue、Steer 与 Append 按文档所述顺序被消费，标记位于用户内容之前。
 4. 带 key 的块在压缩后保留，已 retire 的 key 不保留，子分支独立继承 key。
 5. InputQueue 持有输入时的 `input/withdraw` 产生 `input/deleted`，且该输入永不被应用；在 `input/applied` 之后则不写入任何内容并回复 `notHeld`；对于一个输入，`input/applied` 与 `input/deleted` 至多存在其一。已删除输入的 raw 块与带 key 的块从不到达模型。
@@ -369,7 +369,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
 | A1 | 每个来源输入都以一个标记块开头 | 现有 context-block 格式 | 每个插件自行定义识别方式 |
-| A2 | 缺少 `interactive` 的已存储 Session 是交互式的 | 判断 | 客户端必须始终发送该字段 |
+| A2 | 已移入 [A.3](#a3-sessionconfig-字段) 的格式决定 | — | — |
 | A3 | 进程调用方可以对自己启动的 Session 调用 `idle` 和 `stop` | Collaboration 先例 | 另设停止路径 |
 | A4 | “撤回并作为 Steer 重新提交”由 InputQueue 的 `session.input.withdraw` 通过另一个可选参数写成一个批次（提议；本文不定义其格式） | 判断 | 单独的内建方法 |
 
@@ -385,14 +385,13 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | 带 `atLeast` 的 `history` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>`（补充）；否则为 `Session::history`，设置了 `after` 时为 `Session::local_page(branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`：追加 `input/withdraw`，等待 InputQueue 对它的决定；`WithdrawOutcome::Deleted { sequence }` 或 `WithdrawOutcome::NotHeld` |
 | `stop`、`idle` | `Session::stop`、`Session::idle`（已有） |
-| `SessionConfig`、`SessionOrigin` | 下方的 Rust 结构体 |
+| `SessionConfig` | 下方的 Rust 结构体 |
 | 错误 | `AgentError`：`SessionClosed`、`BranchMissing`、`Reloading`、`Rejected(reason)`（包括 `FutureSequence`）、`PublicationUnknown`、`Failed` |
 
 ```rust
 pub struct LaunchRequest {
     pub agent: Option<String>,            // 缺省：Agents 的默认 profile
     pub cwd: PathBuf,
-    pub resource_node: Option<NodeId>,
     pub model: Option<String>,            // 优先于 profile 的模型
     // 没有 source 字段：Agents 按调用插件的身份确定（§9.3）
     pub policy: Option<PermissionPolicy>,
@@ -403,19 +402,12 @@ impl AgentIndex {
 }
 pub struct SessionConfig {
     // 已有：permission_policy, cwd, model, system_prompt, tools, collaboration_role
+    #[serde(default = "default_true")]   // 已存储记录中缺省：true
     pub interactive: bool,
-    pub resource_node: Option<NodeId>,
-    pub created_by: SessionOrigin,
 }
 pub enum WithdrawOutcome {
     Deleted { sequence: u64 },            // input/deleted 的序号
     NotHeld,                              // 未知、已应用或已删除
-}
-pub enum SessionOrigin {
-    Client { client: Option<String> },
-    Collaboration { leader_session: String },
-    Launch { source: String },
-    Fork { source_session: String },
 }
 ```
 
