@@ -364,6 +364,69 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     ));
 }
 
+/// Removal holds a bounded number of descriptors: a directory that used many
+/// names is removed under a small descriptor limit.
+#[test]
+fn removal_scales_with_directory_size() {
+    #[cfg(unix)]
+    if std::env::var_os(SCALE_PROBE).is_none() {
+        // The limit is lowered in a child, so the result does not depend on
+        // the host's limit and other tests keep theirs.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "removal_scales_with_directory_size",
+                "--nocapture",
+            ])
+            .env(SCALE_PROBE, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    #[cfg(unix)]
+    unsafe {
+        let mut limit = std::mem::zeroed::<libc::rlimit>();
+        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit), 0);
+        limit.rlim_cur = 64;
+        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let directory = Directory::new();
+            let root_path = directory.0.join("authorized");
+            let (root, _, storage) = mount(root_path.clone()).await;
+            let cancel = CancellationToken::new();
+
+            // Every distinct name leaves a lock key beside its file.
+            fs::create_dir(root_path.join("names")).unwrap();
+            for index in 0..300 {
+                let file = storage.path(0, format!("names/{index}.json")).unwrap();
+                storage
+                    .replace(&file, b"{}".to_vec(), None, &cancel)
+                    .await
+                    .unwrap();
+            }
+            let names = storage.path(0, "names").unwrap();
+            storage.remove(&names, &cancel).await.unwrap();
+            assert!(fs::symlink_metadata(root_path.join("names")).is_err());
+
+            root.shutdown().await.unwrap();
+        });
+}
+
+#[cfg(unix)]
+const SCALE_PROBE: &str = "DIM_FILE_STORAGE_SCALE_PROBE";
+
 #[tokio::test]
 async fn late_roots_preserve_indices_and_generation_boundaries_on_reload() {
     let directory = Directory::new();
@@ -629,6 +692,10 @@ fn file_storage_flow() {
             symlink(directory.0.join("outside"), root_path.join("linked-temps/.dim-file-storage-locks/.dim-file-storage-temps")).unwrap();
             let linked_temps = storage.path(0, "linked-temps/secret").unwrap();
             assert!(matches!(storage.replace(&linked_temps, b"overwrite".to_vec(), None, &cancel).await, Err(FileStorageError::Io(_))));
+            assert_eq!(fs::read(&outside).unwrap(), b"outside");
+            // Removal unlinks a link in place of the temporary directory itself.
+            storage.remove(&storage.path(0, "linked-temps").unwrap(), &cancel).await.unwrap();
+            assert!(fs::symlink_metadata(root_path.join("linked-temps")).is_err());
             assert_eq!(fs::read(&outside).unwrap(), b"outside");
             let missing = storage.path(0, "missing").unwrap();
             assert!(matches!(storage.read(&missing, &cancel).await, Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound));

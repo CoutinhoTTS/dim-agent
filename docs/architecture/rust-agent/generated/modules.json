@@ -260,9 +260,12 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/file_storage.rs",
       "unexpandedMacros": [
+        "assert",
         "cfg",
         "format",
-        "matches"
+        "matches",
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -3599,11 +3602,14 @@
       "to": "dim_agent_capabilities::file_storage::native",
       "references": [
         "mod native",
+        "path native::Identity",
         "path native::create_account_file",
+        "path native::create_key",
         "path native::create_temp",
+        "path native::directories",
         "path native::entries",
         "path native::entry_kind",
-        "path native::lock",
+        "path native::linked",
         "path native::open_directory",
         "path native::open_key",
         "path native::open_root",
@@ -3621,8 +3627,7 @@
         "path native::same_identity",
         "path native::subdirectory",
         "path native::sync_replacement",
-        "path native::target_name",
-        "path native::temporary_directory"
+        "path native::target_name"
       ]
     },
     {
@@ -3630,11 +3635,14 @@
       "to": "dim_agent_capabilities::file_storage::unsupported",
       "references": [
         "mod unsupported",
+        "path native::Identity",
         "path native::create_account_file",
+        "path native::create_key",
         "path native::create_temp",
+        "path native::directories",
         "path native::entries",
         "path native::entry_kind",
-        "path native::lock",
+        "path native::linked",
         "path native::open_directory",
         "path native::open_key",
         "path native::open_root",
@@ -3653,7 +3661,6 @@
         "path native::subdirectory",
         "path native::sync_replacement",
         "path native::target_name",
-        "path native::temporary_directory",
         "use unsupported"
       ]
     },
@@ -3662,11 +3669,14 @@
       "to": "dim_agent_capabilities::file_storage::windows",
       "references": [
         "mod windows",
+        "path native::Identity",
         "path native::create_account_file",
+        "path native::create_key",
         "path native::create_temp",
+        "path native::directories",
         "path native::entries",
         "path native::entry_kind",
-        "path native::lock",
+        "path native::linked",
         "path native::open_directory",
         "path native::open_key",
         "path native::open_root",
@@ -3685,7 +3695,6 @@
         "path native::subdirectory",
         "path native::sync_replacement",
         "path native::target_name",
-        "path native::temporary_directory",
         "path native::validate_component",
         "use windows"
       ]
@@ -3709,11 +3718,8 @@
         "path EntryKind::Directory",
         "path EntryKind::File",
         "path EntryKind::Other",
-        "path FileStorage",
         "path FileStorageError::InvalidPath",
-        "path HeldKey::lock",
         "path LOCK_DIRECTORY",
-        "path PhysicalLock",
         "path Result",
         "path TEMPORARY_DIRECTORY",
         "path account_lock"
@@ -3725,9 +3731,7 @@
       "references": [
         "path DirectoryEntry",
         "path EntryKind",
-        "path FileStorage",
         "path FileStorageError::Unsupported",
-        "path PhysicalLock",
         "path Result"
       ]
     },
@@ -3740,16 +3744,12 @@
         "path EntryKind::Directory",
         "path EntryKind::File",
         "path EntryKind::Other",
-        "path FileStorage",
         "path FileStorageError::Cleanup",
         "path FileStorageError::InvalidPath",
         "path FileStorageError::Io",
-        "path HeldKey::lock",
         "path LOCK_DIRECTORY",
-        "path PhysicalLock",
         "path Result",
-        "path TEMPORARY_DIRECTORY",
-        "path account_lock"
+        "path TEMPORARY_DIRECTORY"
       ]
     },
     {
@@ -13022,6 +13022,10 @@
     {
       "module": "dim_agent_capabilities::file_storage::windows",
       "path": "FILE_ID_INFO::default"
+    },
+    {
+      "module": "dim_agent_capabilities::file_storage::windows",
+      "path": "FILE_STANDARD_INFO::default"
     },
     {
       "module": "dim_agent_capabilities::host",

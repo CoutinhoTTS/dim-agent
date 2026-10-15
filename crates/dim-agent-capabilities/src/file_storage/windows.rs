@@ -175,13 +175,11 @@ fn directory(parent: &File, name: &OsStr) -> io::Result<File> {
         null_mut(),
     )
 }
-fn directories(parent: &File) -> io::Result<(File, File)> {
+/// Opens or creates the reserved directory and the temporary directory in it.
+pub(super) fn directories(parent: &File) -> io::Result<(File, File)> {
     let locks = directory(parent, OsStr::new(LOCK_DIRECTORY))?;
     let temporary = directory(&locks, OsStr::new(TEMPORARY_DIRECTORY))?;
     Ok((locks, temporary))
-}
-pub(super) fn temporary_directory(parent: &File) -> io::Result<File> {
-    Ok(directories(parent)?.1)
 }
 pub(crate) fn open_root(path: &Path) -> Result<File> {
     if !path.is_absolute() {
@@ -259,6 +257,38 @@ pub(super) fn same_identity(a: &File, b: &File) -> io::Result<bool> {
     let (a, b) = (identity(a)?, identity(b)?);
     Ok(a.VolumeSerialNumber == b.VolumeSerialNumber && a.FileId.Identifier == b.FileId.Identifier)
 }
+/// Whether `name` in `directory` still refers to `file`. POSIX-semantics
+/// deletion unlinks the name at once while open handles stay valid; those
+/// handles report the deletion, also once the directory itself is gone.
+pub(super) fn linked(directory: &File, name: &OsStr, file: &File) -> io::Result<bool> {
+    let mut standard = FILE_STANDARD_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStandardInfo,
+            (&mut standard as *mut FILE_STANDARD_INFO).cast(),
+            size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if standard.DeletePending || standard.NumberOfLinks == 0 {
+        return Ok(false);
+    }
+    match create(
+        Some(directory),
+        name,
+        FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        0,
+        null_mut(),
+    ) {
+        Ok(entry) => same_identity(&entry, file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 pub(super) fn parent(mut root: File, path: &Path) -> io::Result<(File, OsString)> {
     let mut components = path.iter().peekable();
     while let Some(name) = components.next() {
@@ -280,7 +310,7 @@ pub(super) fn open_directory(parent: &File, name: &OsStr) -> io::Result<File> {
         FILE_DIRECTORY_FILE,
         null_mut(),
     )?;
-    match reserved_directory(parent)? {
+    match reserved_directory(parent, OsStr::new(LOCK_DIRECTORY))? {
         Some(reserved) if same_identity(&next, &reserved)? => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "reserved storage directory",
@@ -293,10 +323,11 @@ pub(super) fn open_directory(parent: &File, name: &OsStr) -> io::Result<File> {
 pub(super) fn subdirectory(parent: &File, name: &OsStr) -> io::Result<File> {
     open_directory(parent, name)
 }
-pub(super) fn reserved_directory(directory: &File) -> io::Result<Option<File>> {
+/// Opens one of this module's directories in `directory`, if present.
+pub(super) fn reserved_directory(directory: &File, name: &OsStr) -> io::Result<Option<File>> {
     match open(
         Some(directory),
-        OsStr::new(LOCK_DIRECTORY),
+        name,
         DIRECTORY_ACCESS,
         FILE_OPEN,
         FILE_DIRECTORY_FILE,
@@ -313,6 +344,16 @@ pub(super) fn open_key(locks: &File, name: &OsStr) -> io::Result<File> {
         name,
         FILE_GENERIC_READ | FILE_GENERIC_WRITE,
         FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+        null_mut(),
+    )
+}
+pub(super) fn create_key(locks: &File, name: &OsStr) -> io::Result<File> {
+    open(
+        Some(locks),
+        name,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        FILE_OPEN_IF,
         FILE_NON_DIRECTORY_FILE,
         null_mut(),
     )
@@ -442,52 +483,6 @@ pub(super) fn target_name(parent: &File, name: &OsString) -> io::Result<OsString
         let basename = wide.rsplit(|c| *c == u16::from(b'\\')).next().unwrap();
         return Ok(OsString::from_wide(basename));
     }
-}
-pub(super) fn lock(
-    parent: &File,
-    name: &OsStr,
-    storage: &Arc<FileStorage>,
-) -> Result<PhysicalLock> {
-    let (directory, _temporary) = directories(parent)?;
-    match open(
-        Some(parent),
-        name,
-        FILE_READ_ATTRIBUTES,
-        FILE_OPEN,
-        0,
-        null_mut(),
-    ) {
-        Ok(target) if same_identity(&target, &directory)? => {
-            return Err(FileStorageError::InvalidPath("reserved storage directory"));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let key = |name: &OsStr| {
-        open(
-            Some(&directory),
-            name,
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-            FILE_OPEN_IF,
-            FILE_NON_DIRECTORY_FILE,
-            null_mut(),
-        )
-    };
-    let alias_lock = HeldKey::lock(key(name)?)?;
-    if same_identity(alias_lock.file(), &key(OsStr::new("auth.json.lock"))?)? {
-        return Err(FileStorageError::InvalidPath("reserved storage lock"));
-    }
-    if same_identity(alias_lock.file(), &key(OsStr::new("auth.json"))?)? {
-        return account_lock(parent, alias_lock, storage);
-    }
-    Ok(PhysicalLock {
-        file: alias_lock.into_file(),
-        _alias_lock: None,
-        account_parent: None,
-        owner: None,
-        storage: Arc::downgrade(storage),
-    })
 }
 pub(super) fn create_account_file(parent: &File, name: &OsStr) -> io::Result<File> {
     open(
@@ -813,7 +808,7 @@ pub(super) fn remove_account(_: &File, _: &OsString, file: &File) -> io::Result<
     delete(file)
 }
 /// Removes a non-directory entry; a reparse point is removed, never followed.
-pub(super) fn remove(parent: &File, name: &OsString) -> io::Result<()> {
+pub(super) fn remove(parent: &File, name: &OsStr) -> io::Result<()> {
     let entry = create(
         Some(parent),
         name,
