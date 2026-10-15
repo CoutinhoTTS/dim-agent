@@ -2,8 +2,8 @@
 
 Decision status: Recovery design adopted for this branch. Configuration is implemented on
 this branch but remains Proposed for maintainer alignment with issue #3. For dynamic events,
-the model-context boundary, declaration retention in history and terminal writes during drain
-are decided (issue #2, revised 2026-10-15). The rest of dynamic-event registration and the
+the model-context boundary, the type-key-only write check, history of unloaded declarations and
+terminal writes during drain are decided (issue #2, revised 2026-10-15). The rest of dynamic-event registration and the
 dependency-loss refinements remain Proposed for issues #2 and #6. This ADR does not supersede those issues' decisions.
 
 Implementation status: The recovery, configuration and common-assembly batch is implemented;
@@ -27,12 +27,16 @@ SQLite, Node, a TUI or a private account plugin.
 
 ### Events and ownership (issue #2)
 
-Status: the model-context boundary and lifetimes 2 and 3 below are Decided (2026-10-15, issue #2
+Status: the model-context boundary, the write check and lifetimes 2 and 3 below are Decided (2026-10-15, issue #2
 revised to match). The rest of this section remains Proposed.
 
 Model-context boundary: events never enter model context directly. The model sees only adopted
 inputs and tool results; a capability that needs content in context writes an adopted input with
 the final content or returns it in a tool result.
+
+Write check: Timeline checks only the envelope and rejects a write whose type key is not currently
+registered. The payload is the declaring module's data contract, guaranteed by its producer;
+Timeline does not validate it.
 
 Runtime mechanism facts, public capability protocol events and domain events share one
 registration and persistence mechanism. A Rust core-event enum is a convenience view, not
@@ -41,13 +45,13 @@ their own events. Changes to shared protocol semantics require a decision record
 
 Distinguish three lifetimes:
 
-1. A module declares a stable identity, event keys and payload schemas. Do not persist
+1. A module declares a stable identity and event keys. Do not persist
    loader-generated names or process-local instance IDs as declaration identities.
 2. (Decided) An instance adopts declarations within a scope and generation. Stop new work before
    draining accepted work; retain the ability to write required terminal facts until drain
    completes. Reject stale-generation operations afterward.
-3. (Decided) History retains immutable declaration content and references. Reading or importing a
-   declaration never installs code, grants permissions or resumes external work.
+3. (Decided) History keeps events whose declaration is gone, unchanged. Reading or importing
+   history never installs code, grants permissions or resumes external work.
 
 Use stable type keys and reject conflicting declarations. Namespaces express ownership conventions,
 not authentication or a central approval process. The declaration owner defines the data contract;
@@ -272,7 +276,7 @@ never overwrite a user's existing store to make a test pass.
 
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
-| #2 | Events enter model context only through adopted inputs and tool results; history keeps the declarations of its events; an unloading plugin keeps its declarations until accepted work drains, so it can write required terminal facts (revised 2026-10-15); registration follows the plugin lifecycle | Decided: these three. The rest of the Events section remains Proposed; resolve it before implementing the dynamic public event format |
+| #2 | Events enter model context only through adopted inputs and tool results; Timeline checks only that a written type key is registered, not the payload; history keeps events of unloaded plugins; an unloading plugin keeps its declarations until accepted work drains, so it can write required terminal facts (revised 2026-10-15); registration follows the plugin lifecycle | Decided: these four. The rest of the Events section remains Proposed; resolve it before implementing the dynamic public event format |
 | #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | Implemented alternative: each named source persists first, then a publisher reconciles root-loader layers without an editable target. Distinct rows retain overlapping MCP generations. Obtain maintainer agreement on these differences before merging the configuration implementation; otherwise revise the affected implementation and format decisions |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
