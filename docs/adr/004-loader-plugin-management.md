@@ -17,7 +17,10 @@ not serialized loader entries or mutable shared templates. Closing a Session
 closes only its generations. The loader owns instances and disposal; the MCP
 publication owner coordinates source selection, authorization and retirement.
 Transport tasks belong to the server plugin and settle before disposal completes.
-No second loader or lifecycle manager is introduced.
+No second loader or lifecycle manager is introduced. Session discovery starts
+only after the Agent publishes the Session (`SessionLifecycle`): a Session that
+fails assembly never connects, and assembly readiness never observes a
+generation retired meanwhile.
 
 Configuration changes are adopted automatically. New bindings use replacement
 generations; retained user bindings keep their old generation until release,

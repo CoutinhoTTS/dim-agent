@@ -11257,7 +11257,9 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
-        "use dim_agent_runtime::SessionConfig"
+        "path SessionLifecycle",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionLifecycle"
       ]
     },
     {

@@ -11,8 +11,8 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionLoader,
-    SessionScope, SessionService, StateCell, scoped,
+    AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionLifecycle,
+    SessionLoader, SessionScope, SessionService, StateCell, scoped,
 };
 use dim_agent_types::{ToolCall, ToolDefinition, ToolMetadata, ToolResult, ToolSource};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -137,6 +137,7 @@ impl TypedPlugin for McpSessionPlugin {
         Arc<McpService>,
         InSession<SessionConfig>,
         InSession<SessionLoader>,
+        InSession<SessionLifecycle>,
     );
     fn name(&self) -> &str {
         "McpSession"
@@ -144,7 +145,7 @@ impl TypedPlugin for McpSessionPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (directory, InSession(config), InSession(loader)): Self::Deps,
+        (directory, InSession(config), InSession(loader), InSession(session)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let project = directory.settings.project_root(Path::new(&config.cwd));
@@ -190,10 +191,19 @@ impl TypedPlugin for McpSessionPlugin {
                 Arc::new(SessionToolSource(Arc::new(Sources(owner.clone())))),
             )?;
             // No network await in apply, and all owned resources have a disposer.
+            // Discovery creates Session-owned instances and may start servers,
+            // so it waits for publication; an unpublished Session never starts it.
             let workers = tasks.clone();
-            tasks.spawn(reconcile(
-                directory, owner, project, settings, approvals, refresh, workers,
-            ));
+            tasks.spawn(async move {
+                tokio::select! {
+                    _ = owner.stopped.cancelled() => return,
+                    published = session.activated() => if !published { return },
+                }
+                reconcile(
+                    directory, owner, project, settings, approvals, refresh, workers,
+                )
+                .await
+            });
             Ok(Effect::Done)
         })
     }

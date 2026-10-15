@@ -222,6 +222,10 @@ struct Env {
 mod mcp_host;
 impl Env {
     async fn new() -> Self {
+        Self::with(|_, _| {}).await
+    }
+    /// `configure` adds Session capabilities after the MCP Session part.
+    async fn with(configure: impl FnOnce(&mut AgentBuilder, &Arc<Remote>)) -> Self {
         let remote = Remote::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -285,6 +289,7 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
+        configure(&mut builder, &remote);
         let agent = builder.build_in(&root);
         Self {
             root,
@@ -351,6 +356,41 @@ impl Env {
         std::fs::remove_dir_all(self.home).unwrap();
     }
 }
+/// Fails Session assembly after McpSession applied, once discovery started
+/// during assembly would have reached the server.
+struct FailAfterMcp {
+    scope: SessionScope,
+    remote: Arc<Remote>,
+}
+impl rutis::TypedPlugin for FailAfterMcp {
+    type Deps = InSession<McpSession>;
+    fn name(&self) -> &str {
+        "FailAfterMcp"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                while self.remote.initializes.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            Err(rutis::CordisError::PluginFailed(
+                "assembly failed after McpSession".into(),
+            ))
+        })
+    }
+}
+impl Capability for FailAfterMcp {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
 fn configuration(url: &str, generation: &str) -> Value {
     json!({"type":"http","url":url,"headers":{"X-Generation":generation}})
 }
@@ -1010,5 +1050,33 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     )
     .await;
     assert_eq!(env.remote.calls.lock().unwrap().len(), calls + 1);
+    env.close().await;
+}
+
+#[tokio::test]
+async fn an_unpublished_session_never_starts_discovery() {
+    let env = Env::with(|builder, remote| {
+        let remote = remote.clone();
+        builder.session_plugin(move |scope| FailAfterMcp {
+            scope: *scope,
+            remote: remote.clone(),
+        });
+    })
+    .await;
+    let created = env
+        .agent
+        .create_session(SessionConfig {
+            cwd: env.home.join("other").to_string_lossy().into(),
+            tools: vec![],
+            ..Default::default()
+        })
+        .await;
+    let error = created.err().expect("assembly fails").to_string();
+    assert!(
+        error.contains("assembly failed after McpSession"),
+        "{error}"
+    );
+    // An enabled user server is eligible; only publication may start discovery.
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 0);
     env.close().await;
 }
