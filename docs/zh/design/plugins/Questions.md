@@ -4,7 +4,7 @@
 
 > **需要重新设计。** 本文不具权威性，不得按现文实现。模型已经通过 `ask_user` 的工具结果拿到回答，调用在所属 turn 内同步等待。三个 `question/*` 事件以及由此带来的对 #2（客户端可见事件）的依赖缺少依据：待答问题可以从已提交、尚无结果的 `step/tool-call` 推导出来，中断、重载和恢复已由 ToolExecutor 用该调用的 `step/tool-result` 结算。重新设计要决定在工具调用和结果之外是否还需要事实（例如在批次完成前让其他客户端关闭提示，或在批次完成前崩溃时保留回答），并按设计规则 §4 rule 9 逐一说明理由。
 
-模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `ask_user`）提供 `ask_user` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.question`）提供 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。插件启用时，它安装在每个 Session 中；在非交互 Session 中，`ask_user` 回答当前没有用户可以回答（§3.3）。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并依据自己消费到的 `stop/interrupt` 按序号判定回答与中断，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
+模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `ask_user`）提供 `ask_user` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.question`）提供 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。插件启用时，它安装在每个 Session 中；在非交互 Session 中，`ask_user` 回答当前没有可以回答的对象（§3.3）。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并依据自己消费到的 `stop/interrupt` 按序号判定回答与中断，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
 
 ## 1. 结构
 
@@ -133,7 +133,7 @@ sequenceDiagram
 
 ### 3.3 非交互 Session
 
-`ask_user` 与其他 Session 中一样被声明。处理器读取 `SessionConfig.interactive`；为 `false` 时，调用立即返回一个说明当前没有用户可以回答的结果（A.1），Questions 不写任何 `question/*` 事件。从不会有待回答的问题，因此 `session.question.respond` 找不到问题。
+`ask_user` 与其他 Session 中一样被声明。处理器读取 `SessionConfig.interactive`；为 `false` 时，调用立即返回一个说明当前没有可以回答的对象的结果（A.1），Questions 不写任何 `question/*` 事件。从不会有待回答的问题，因此 `session.question.respond` 找不到问题。
 
 ## 4. 时序与冲突
 
@@ -272,7 +272,7 @@ User answered:
    -> (custom) <text>
 ```
 
-被拒绝回答的调用得到 `User declined to answer the question(s).`（A6）。在非交互 Session 中，调用立即得到 `No user is available to answer the question(s).`，不登记条目，也不写任何 `question/*` 事件。`structuredContent` 携带 `{answers, declined}`，仅供客户端使用。被取消的调用以错误 `{code: "cancelled", reason}` 结束，由 ToolExecutor 报告。
+被拒绝回答的调用得到 `User declined to answer the question(s).`（A6）。在非交互 Session 中，调用立即得到 `No one is available to answer the question(s).`，不登记条目，也不写任何 `question/*` 事件。`structuredContent` 携带 `{answers, declined}`，仅供客户端使用。被取消的调用以错误 `{code: "cancelled", reason}` 结束，由 ToolExecutor 报告。
 
 ### A.2 事件载荷
 
@@ -379,7 +379,7 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 | 客户端断开，从未有客户端附着 | Q 待回答 | 保持待回答，无超时（A7） | 用户 |
 | 交互 Session 上的 `-p` CLI | Q < I | CLI 停止轮次；中断导致 C | CLI；Questions |
 | 已配对的远程设备回答 | Q < A | 与任何客户端一样被接受 | Questions |
-| 非交互 Session | — | `ask_user` 回答当前没有用户可以回答；没有 `Q`；`respond` 找不到问题 | Questions |
+| 非交互 Session | — | `ask_user` 回答当前没有可以回答的对象；没有 `Q`；`respond` 找不到问题 | Questions |
 
 ## 附录 C. 错误与恢复
 
@@ -397,7 +397,7 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 通过 RPC、工具调用和事件进行的流程测试：
 
 1. 单选、多选、多问题和自定义回答产生规定的 `content`；无效回答在 `respond` 时被拒绝，不产生事实。
-2. 以 `interactive: false` 创建的 Session（包括 `exec` 和 ACP）：`ask_user` 被声明，并回答当前没有用户可以回答，不产生 `question/*` 事件；省略 `interactive` 时照常提问。两种情况下工具集合相同。
+2. 以 `interactive: false` 创建的 Session（包括 `exec` 和 ACP）：`ask_user` 被声明，并回答当前没有可以回答的对象，不产生 `question/*` 事件；省略 `interactive` 时照常提问。两种情况下工具集合相同。
 3. 先回答后停止：结果包含回答。先停止后回答：`Cancelled`、`question/cancelled`、已取消结果。两种顺序都通过在 Dispatcher 被挂起时先提交 `I` 再提交 `A` 来强制产生。`I` 在 `Q` 之前提交、在其之后被消费：问题被取消；`I` 被消费之后的 `ask` 不写任何内容。
 4. 两个并发 `respond`：恰好接受一个。
 5. 一个批次中两个 `ask_user` 加一个慢工具：回答保留到唯一的 `step/tool-result`。
@@ -410,7 +410,7 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
-| A1 | 每个 Session 都声明 `ask_user`，`interactive` 为 `false` 时回答当前没有用户可以回答 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30）；决定 §3（ACP/自动化为非交互） | 各 Session 工具集合不同；fork 丢失提示词前缀 |
+| A1 | 每个 Session 都声明 `ask_user`，`interactive` 为 `false` 时回答当前没有可以回答的对象 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30）；决定 §3（ACP/自动化为非交互） | 各 Session 工具集合不同；fork 丢失提示词前缀 |
 | A2 | `session.create` 省略 `interactive`，或已存储记录缺少该字段，表示交互 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段) 的格式决定 | 现有 Session 不再提问 |
 | A3 | 载荷增加 `turn_id`、`request_id`、`declined` | 判断 | 通过 `step/tool-call` 关联；拒绝回答建模为一种回答 |
 | A4 | 1..=4 个问题，2..=6 个选项 | 边界情况参考；判断 | schema 限制改变 |

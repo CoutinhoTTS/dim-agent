@@ -172,7 +172,7 @@ sequenceDiagram
 | `resource_link` | `Text` 行 `"@<uri>"`（A6） | 同一消息 |
 | `session/set_mode` | 无：`permission/changed` 是 Session 配置，不是模型文本 | — |
 
-网关不写入 raw 块、key、提示词来源或工具声明；before 回调可能向同一输入添加其自身的带归属 raw 块（Hooks `user_prompt_submit` 上下文），放在网关的用户内容之前。其输入在压缩后只经由摘要保留；子分支在切点前已消费时可以看到它们。ACP Session 是非交互的，因此那里声明的 `ask_user` 回答当前没有用户可以回答；除此之外上下文与任何 Queue 输入相同。模型永远看不到 ACP 身份、`mcpServers`、客户端 Capability、更新或诊断信息。
+网关不写入 raw 块、key、提示词来源或工具声明；before 回调可能向同一输入添加其自身的带归属 raw 块（Hooks `user_prompt_submit` 上下文），放在网关的用户内容之前。其输入在压缩后只经由摘要保留；子分支在切点前已消费时可以看到它们。ACP Session 是非交互的，因此那里声明的 `ask_user` 回答当前没有可以回答的对象；除此之外上下文与任何 Queue 输入相同。模型永远看不到 ACP 身份、`mcpServers`、客户端 Capability、更新或诊断信息。
 
 ## 6. 接口（摘要）
 
@@ -283,7 +283,7 @@ sequenceDiagram
 | 审批已在别处回答 | 更早的 `approval/respond` | 编辑器之后的回答被拒，忽略 | Approval |
 | 编辑器询问期间审批被 stop 取消 | `approval/cancelled` | ACP 请求无法收回；之后的回答被忽略 | Approval |
 | 已加载交互 Session 中的提问 | `question/asked` | 等待其他客户端；取消会中断 → `question/cancelled`（A13） | Questions |
-| ACP 创建的 Session | — | 非交互：`ask_user` 回答当前没有用户可以回答 | Questions |
+| ACP 创建的 Session | — | 非交互：`ask_user` 回答当前没有可以回答的对象 | Questions |
 | prompt 期间压缩 | — | 无更新；流式传输不受影响 | — |
 | 模型创建的子分支 | — | 无消息更新；其审批被转发 | Gateway（A7） |
 | Session 关闭 | `session.closed` | 在途 prompt `cancelled`；之后为 `session_not_found` | Gateway |
@@ -313,7 +313,7 @@ sequenceDiagram
 
 通过 stdio 驱动 `dimcode acp`，对接 mock 模型守护进程进行流程测试，外加共享一致性测试套件（agent 侧）：
 
-1. initialize、new、prompt → 块在 progress 与已提交文本之间无重复；`end_turn`；创建的 Session 是非交互的，`ask_user` 回答当前没有用户可以回答。
+1. initialize、new、prompt → 块在 progress 与已提交文本之间无重复；`end_turn`；创建的 Session 是非交互的，`ask_user` 回答当前没有可以回答的对象。
 2. 工具调用更新；权限 allow 和 deny；由另一个客户端回答的审批。
 3. 采纳前取消（已删除）、采纳后取消（`notHeld`，stop）、消费后取消；stop 与轮次结束竞争；另一个客户端的撤回。
 4. `session/load` 按顺序重放历史；已加载交互 Session 的提问显示等待更新，取消使其结束。

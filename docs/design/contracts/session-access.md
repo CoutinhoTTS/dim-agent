@@ -290,7 +290,7 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 { "interactive": true }             // false: exec, ACP, automation; absent: true
 ```
 
-`interactive` is fixed at creation. Assembly never reads it (ADR 002 D3, #30), so the tool set stays the same and a fork keeps the prompt prefix and its KV cache. Plugins that care read it from the Session's config directly: Questions (`ask_user` stays declared and answers that no user is available) and SessionTitle (titles interactive leader Sessions only).
+`interactive` means the Session has an interaction counterpart that can answer its questions and approvals: the user through a client, or another Session's or branch's agent (for example a Collaboration leader). It does not require a human. `interactive` is fixed at creation. Assembly never reads it (ADR 002 D3, #30), so the tool set stays the same and a fork keeps the prompt prefix and its KV cache. Plugins that care read it from the Session's config directly: Questions (`ask_user` stays declared and answers that no one is available to answer) and SessionTitle (titles interactive leader Sessions only).
 
 `session.create` gains `interactive?: bool` (default `true`), checked at the boundary only. `session.create` rejects unknown fields, so an older daemon fails a request that carries `interactive` with invalid params; clients therefore send it only when it is `false`.
 
@@ -358,7 +358,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 ## Appendix C. Acceptance
 
 1. `sessions.launch` creates a Session with `interactive = false` whose policy is capped by the starter, and a TypeScript process plugin can call it by name.
-2. `session.create {interactive: false}` produces `interactive = false` in the Session's `SessionConfig`; `ask_user` is declared and answers that no user is available. A stored record without the field loads as interactive.
+2. `session.create {interactive: false}` produces `interactive = false` in the Session's `SessionConfig`; `ask_user` is declared and answers that no one is available to answer. A stored record without the field loads as interactive.
 3. Queue, Steer and Append written during a tool batch are consumed in the documented order, with the marker before the user content.
 4. A keyed block survives compaction, a retired key does not, and a child branch inherits keys independently.
 5. `input/withdraw` while InputQueue holds the input yields `input/deleted` and the input is never applied; after `input/applied` it writes nothing and replies `notHeld`; for one input at most one of `input/applied` and `input/deleted` exists. A deleted input's raw and keyed blocks never reach the model.

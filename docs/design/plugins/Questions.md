@@ -4,7 +4,7 @@ Status: Needs redesign. Overall design: [overview §4](../overview.md#4-plugin-c
 
 > **Needs redesign.** This document is not authoritative and must not be implemented as written. The model already receives the answer through the `ask_user` tool result, and the call waits synchronously inside its turn. The three `question/*` events, and the dependency on #2 for client-visible events that they bring, are not justified: a pending question can be derived from the committed `step/tool-call` without a result, and ToolExecutor already settles interrupt, reload and recovery with the call's `step/tool-result`. The redesign must decide which facts, if any, are needed beyond the tool call and its result (for example, closing the prompt on other clients before the batch settles, or keeping an answer across a crash before the batch settles), and justify each one under design rules §4 rule 9.
 
-The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. The **Session part** provides the `ask_user` tool as a `toolContribution` service (Session scope, key `ask_user`) and the Session method `session.question.respond` through a `sessionMethods` service (Session scope, key `session.question`) ([session-boundary](../contracts/session-boundary.md)). It is installed in every Session while the plugin is enabled; in a non-interactive Session `ask_user` answers that no user is available (§3.3). The **branch part** records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number from the `stop/interrupt` events it consumes itself, following the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern.
+The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer. The **Session part** provides the `ask_user` tool as a `toolContribution` service (Session scope, key `ask_user`) and the Session method `session.question.respond` through a `sessionMethods` service (Session scope, key `session.question`) ([session-boundary](../contracts/session-boundary.md)). It is installed in every Session while the plugin is enabled; in a non-interactive Session `ask_user` answers that no one is available to answer (§3.3). The **branch part** records the pending question and the answer as Timeline facts and decides answer versus interrupt by sequence number from the `stop/interrupt` events it consumes itself, following the [Approval](../../architecture/rust-agent/plugins/Approval.md) pattern.
 
 ## 1. Structure
 
@@ -133,7 +133,7 @@ Anything dispatched before the listener is in history, anything later arrives li
 
 ### 3.3 Non-interactive Sessions
 
-`ask_user` is declared as in any Session. Its handler reads `SessionConfig.interactive`; when it is `false`, the call returns at once with a result saying that no user is available (A.1), and Questions writes no `question/*` event. Nothing is ever pending, so `session.question.respond` finds no question.
+`ask_user` is declared as in any Session. Its handler reads `SessionConfig.interactive`; when it is `false`, the call returns at once with a result saying that no one is available to answer (A.1), and Questions writes no `question/*` event. Nothing is ever pending, so `session.question.respond` finds no question.
 
 ## 4. Timing and conflicts
 
@@ -272,7 +272,7 @@ User answered:
    -> (custom) <text>
 ```
 
-A declined call yields `User declined to answer the question(s).` (A6). In a non-interactive Session the call yields `No user is available to answer the question(s).` at once, without registering an entry or writing any `question/*` event. `structuredContent` carries `{answers, declined}` for clients only. A cancelled call ends with the error `{code: "cancelled", reason}`, which ToolExecutor reports.
+A declined call yields `User declined to answer the question(s).` (A6). In a non-interactive Session the call yields `No one is available to answer the question(s).` at once, without registering an entry or writing any `question/*` event. `structuredContent` carries `{answers, declined}` for clients only. A cancelled call ends with the error `{code: "cancelled", reason}`, which ToolExecutor reports.
 
 ### A.2 Event payloads
 
@@ -379,7 +379,7 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 | Client detach, no client ever attached | Q pending | Stays pending, no timeout (A7) | User |
 | `-p` CLI on an interactive Session | Q < I | CLI stops the turn; C via the interrupt | CLI; Questions |
 | Paired remote device answers | Q < A | Accepted like any client | Questions |
-| Non-interactive Session | — | `ask_user` answers that no user is available; no `Q`; `respond` finds no question | Questions |
+| Non-interactive Session | — | `ask_user` answers that no one is available to answer; no `Q`; `respond` finds no question | Questions |
 
 ## Appendix C. Errors and recovery
 
@@ -397,7 +397,7 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 Flow tests through RPC, tool calls and events:
 
 1. Single, multiple, multi-question and custom answers produce the specified `content`; invalid answers are rejected at `respond` without facts.
-2. Session created with `interactive: false` (incl. `exec` and ACP): `ask_user` is declared and answers that no user is available, with no `question/*` event; when `interactive` is omitted, questions are asked as usual. The tool set is the same in both.
+2. Session created with `interactive: false` (incl. `exec` and ACP): `ask_user` is declared and answers that no one is available to answer, with no `question/*` event; when `interactive` is omitted, questions are asked as usual. The tool set is the same in both.
 3. Answer then stop: result has the answer. Stop then answer: `Cancelled`, `question/cancelled`, cancelled result. Both orders forced by committing `I` before `A` with a held Dispatcher. `I` committed before `Q` but consumed after it: the question is cancelled; an `ask` after `I` is consumed writes nothing.
 4. Two concurrent `respond`: exactly one accepted.
 5. Two `ask_user` plus a slow tool in one batch: answers held until the single `step/tool-result`.
@@ -410,7 +410,7 @@ Flow tests through RPC, tool calls and events:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | `ask_user` is declared in every Session and answers that no user is available when `interactive` is `false` | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30); decisions §3 (ACP/automation non-interactive) | Tool set differs between Sessions; a fork loses the prompt prefix |
+| A1 | `ask_user` is declared in every Session and answers that no one is available to answer when `interactive` is `false` | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30); decisions §3 (ACP/automation non-interactive) | Tool set differs between Sessions; a fork loses the prompt prefix |
 | A2 | `interactive` omitted on `session.create`, or missing in a stored record, means interactive | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) format decision | Existing Sessions stop asking questions |
 | A3 | Payload adds `turn_id`, `request_id`, `declined` | Judgment | Correlation through `step/tool-call`; decline modeled as an answer |
 | A4 | 1..=4 questions, 2..=6 options | Edge-case reference; judgment | Schema limits change |

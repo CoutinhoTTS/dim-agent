@@ -67,7 +67,7 @@ flowchart TB
 
 | 插件 | 进程 | Session | 分支 | 理由 |
 | --- | --- | --- | --- | --- |
-| Questions | — | `ask_user` 工具；`session.question.*` 方法；非交互 Session 中 `ask_user` 回答当前没有用户可以回答 | 待答问题、`question/*` 事实，沿用 Approval 的做法 | 问题属于某个分支的 turn |
+| Questions | — | `ask_user` 工具；`session.question.*` 方法；非交互 Session 中 `ask_user` 回答当前没有可以回答的对象 | 待答问题、`question/*` 事实，沿用 Approval 的做法 | 问题属于某个分支的 turn |
 | Goal | — | `goal_update` 工具与 `session.goal.*` 方法，只写一条带 `goal:objective` 和/或 `goal:status` 块的 `input/message` | 目标状态由已消费的目标变更块按序号折叠得出；Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定续跑 | 一个目标只属于一个分支：折叠只用该分支自己的事件，因此子分支和分叉 Session 从没有目标开始；续跑按序跟随其事件 |
 | Hooks | — | 来自业务来源的规则；Session 启动 Hook | `input/message`（`user_prompt_submit`）与 `step/tool-call`（`pre_tool_use`）上的 before 回调；来自 Dispatcher 的工具后与 turn 结束 Hook | 规则作用于 Session；执行发生在分支 |
 | ShellInput | — | `shell.*` Session 方法；在 Session 的工作区中运行并写入其输入 | — | 命令属于 Session |
@@ -342,7 +342,7 @@ sequenceDiagram
 12. **撤回**：由 InputQueue 拥有的单一合同。`input/withdraw {input_id, reason?}` 是一个指令事件，可由任何合法生产方写入：客户端经 `session.input.withdraw`（InputQueue 通过 `sessionMethods` 提供的 Session 方法），进程调用方经 `sessions.withdraw`。InputQueue 按序消费它；只有当它仍持有该输入且尚未应用（无 `input/applied`）时，才写入结果事实 `input/deleted {input_id}`，且永不应用该输入。否则（未知、已应用或已删除）不写入任何内容，调用方收到的回复为 `notHeld`。已应用的输入无法撤回，Loop 不变。“撤回并作为 Steer 重新提交”是一个原子批次。每个待处理输入推导都排除已删除的输入，它们从不进入模型上下文（其带 key 的块从不生效）。
 13. **提交前处理**：插件只能通过 Timeline before 回调，在另一个所有者的写入提交前对其作出处理，回调同步变换草稿，不阻止写入，不等待外部工作；该写入的消费方不做任何特定于插件的改动。
 14. **低业务耦合**：raw 块标记与 key、配置 key 和方法命名空间都带所有者前缀。传给共享服务的用途是消费方拥有的 key（`session-title`、`compaction`、`collaboration.member`、`modality.<category>`）。收集方从不点名贡献方。
-15. **交互式 Session**：`session.create` 设置 `interactive`（客户端只在其为 false 时发送）。Exec、ACP 和自动化创建非交互 Session。装配不依赖 `interactive`，因此 fork 前后工具集合与提示词前缀保持一致（#30）；这类 Session 中 `ask_user` 回答当前没有用户可以回答。SessionTitle 只作用于交互式 leader Session。
+15. **交互式 Session**：`interactive` 表示 Session 有可交互的对象，能回答它的提问和审批，可以是用户，也可以是另一个 Session 或分支的 agent（[Session 访问 A.3](contracts/session-access.md)）。`session.create` 设置 `interactive`（客户端只在其为 false 时发送）。Exec、ACP 和自动化创建非交互 Session。装配不依赖 `interactive`，因此 fork 前后工具集合与提示词前缀保持一致（#30）；这类 Session 中 `ask_user` 回答当前没有可以回答的对象。SessionTitle 只作用于交互式 leader Session。
 
 ### 6.3 多节点
 

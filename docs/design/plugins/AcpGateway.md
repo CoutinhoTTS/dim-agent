@@ -172,7 +172,7 @@ All other rows: [Appendix B](#appendix-b-full-conflict-table).
 | `resource_link` | `Text` line `"@<uri>"` (A6) | Same message |
 | `session/set_mode` | Nothing: `permission/changed` is Session configuration, not model text | — |
 
-The gateway writes no raw blocks, keys, prompt sources or tool declarations; a before callback may add its own attributed raw blocks (Hooks `user_prompt_submit` context) to the same input, placed before the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are non-interactive, so `ask_user` is declared but answers that no user is available; otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
+The gateway writes no raw blocks, keys, prompt sources or tool declarations; a before callback may add its own attributed raw blocks (Hooks `user_prompt_submit` context) to the same input, placed before the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are non-interactive, so `ask_user` is declared but answers that no one is available to answer; otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
 
 ## 6. Interfaces (summary)
 
@@ -283,7 +283,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | Approval answered elsewhere | earlier `approval/respond` | Later editor answer rejected, ignored | Approval |
 | Approval cancelled by stop while the editor asks | `approval/cancelled` | ACP request cannot be retracted; later answer ignored | Approval |
 | Question in a loaded interactive Session | `question/asked` | Waits for another client; cancel interrupts → `question/cancelled` (A13) | Questions |
-| ACP-created Session | — | Non-interactive: `ask_user` answers that no user is available | Questions |
+| ACP-created Session | — | Non-interactive: `ask_user` answers that no one is available to answer | Questions |
 | Compaction during the prompt | — | No update; streaming unaffected | — |
 | Child branch created by the model | — | No message updates; its approvals forwarded | Gateway (A7) |
 | Session closed | `session.closed` | In-flight prompt `cancelled`; later `session_not_found` | Gateway |
@@ -313,7 +313,7 @@ Parameters are validated at the stdio boundary against the shared schema. Gatewa
 
 Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus the shared conformance suite (agent side):
 
-1. initialize, new, prompt → chunks without duplication across progress and committed text; `end_turn`; the created Session is non-interactive, and `ask_user` answers that no user is available.
+1. initialize, new, prompt → chunks without duplication across progress and committed text; `end_turn`; the created Session is non-interactive, and `ask_user` answers that no one is available to answer.
 2. Tool call updates; permission allow and deny; approval answered by another client.
 3. Cancel before adoption (deleted), after adoption (`notHeld`, stop), after consumption; stop racing turn end; another client's withdrawal.
 4. `session/load` replays history in order; a loaded interactive Session's question shows the waiting update and cancel ends it.

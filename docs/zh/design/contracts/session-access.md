@@ -290,7 +290,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 { "interactive": true }             // false：exec、ACP、自动化；缺省：true
 ```
 
-`interactive` 在创建时固定。装配从不读取它（ADR 002 D3，#30），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache。关心它的插件直接从 Session 的配置读取：Questions（`ask_user` 照常声明，并回答当前没有用户可以回答）和 SessionTitle（只为交互式的 leader Session 起标题）。
+`interactive` 表示 Session 有可交互的对象，能回答它的提问和审批：可以是通过客户端操作的用户，也可以是另一个 Session 或分支的 agent（例如 Collaboration 的 leader），不要求必须是人。`interactive` 在创建时固定。装配从不读取它（ADR 002 D3，#30），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache。关心它的插件直接从 Session 的配置读取：Questions（`ask_user` 照常声明，并回答当前没有可以回答的对象）和 SessionTitle（只为交互式的 leader Session 起标题）。
 
 `session.create` 增加 `interactive?: bool`（默认 `true`），只在边界检查。`session.create` 拒绝未知字段，旧版守护进程会以 invalid params 拒绝带 `interactive` 的请求；因此客户端只在它为 `false` 时发送。
 
@@ -358,7 +358,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 ## 附录 C. 验收
 
 1. `sessions.launch` 创建一个 `interactive = false` 的 Session，其策略以启动方为上限；TypeScript 进程插件可以按名称调用它。
-2. `session.create {interactive: false}` 使该 Session 的 `SessionConfig` 中 `interactive = false`；`ask_user` 照常声明，并回答当前没有用户可以回答。缺少该字段的已存储记录装载为交互式。
+2. `session.create {interactive: false}` 使该 Session 的 `SessionConfig` 中 `interactive = false`；`ask_user` 照常声明，并回答当前没有可以回答的对象。缺少该字段的已存储记录装载为交互式。
 3. 在工具批次期间写入的 Queue、Steer 与 Append 按文档所述顺序被消费，标记位于用户内容之前。
 4. 带 key 的块在压缩后保留，已 retire 的 key 不保留，子分支独立继承 key。
 5. InputQueue 持有输入时的 `input/withdraw` 产生 `input/deleted`，且该输入永不被应用；在 `input/applied` 之后则不写入任何内容并回复 `notHeld`；对于一个输入，`input/applied` 与 `input/deleted` 至多存在其一。已删除输入的 raw 块与带 key 的块从不到达模型。
