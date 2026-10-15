@@ -298,6 +298,13 @@ A fork copies the source Session's whole `SessionConfig`; the permission preset 
 
 Format decision: the native store stays on version 13. `interactive` is an additive optional field of the stored config JSON, and a stored record without it means `true`, because every Session created before the field existed was a client Session. An older daemon ignores the field and reads a non-interactive record as interactive; this is accepted. No version 14.
 
+Implemented (C2): `session.create` sets the field, and the native store writes it only when it is `false`, so an interactive record keeps the form records had before the field existed. Its readers (Questions, SessionTitle) are not implemented yet. Session fork is not implemented yet (S5c).
+
+| Stored `config` | Daemon with C2 | Older daemon |
+| --- | --- | --- |
+| No `interactive` (every record before C2, interactive records after it) | Interactive | Interactive |
+| `"interactive": false` | Non-interactive | Interactive (field ignored; accepted) |
+
 Not in this contract: `createdBy` (the Session's origin) and the `client` parameter of `session.create` are added when something decides with them. The resource node is a P3 addition (overview §6.3): an additive optional `SessionConfig` field, where a missing value means the control node.
 
 ### A.4 Withdrawal
@@ -402,7 +409,8 @@ impl AgentIndex {
 }
 pub struct SessionConfig {
     // existing: permission_policy, cwd, model, system_prompt, tools, collaboration_role
-    #[serde(default = "default_true")]   // absent in stored records: true
+    // absent in stored records: true; only false is written
+    #[serde(default = "default_interactive", skip_serializing_if = "is_interactive")]
     pub interactive: bool,
 }
 pub enum WithdrawOutcome {

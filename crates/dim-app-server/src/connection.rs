@@ -964,6 +964,7 @@ impl Connection {
         if let Some(policy) = params.permission_policy {
             config.permission_policy = policy;
         }
+        config.interactive = params.interactive;
         let (session, trace_path) = if let Some(trace) = params.trace {
             let (session, path) = host
                 .traces
