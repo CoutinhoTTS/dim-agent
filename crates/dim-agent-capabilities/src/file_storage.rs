@@ -410,7 +410,9 @@ impl FileStorage {
                 result => result?,
             };
             match native::entry_kind(&parent, &name)? {
-                Some(EntryKind::Directory) => remove_tree(&parent, &name, &owner, &cancel),
+                Some(EntryKind::Directory) => {
+                    remove_tree(&parent, &name, Tree::Business, &owner, &cancel)
+                }
                 Some(kind) => {
                     absent_is_removed(remove_entry(&parent, &name, kind, &owner, &cancel))
                 }
@@ -700,13 +702,31 @@ fn business_entries(directory: &File) -> Result<Vec<DirectoryEntry>> {
         .collect())
 }
 
+/// How removal treats the entries of a directory tree.
+#[derive(Clone, Copy)]
+enum Tree<'a> {
+    /// Below an authorized root: files go under the lock leases use, and
+    /// each directory's FileStorage resources go last by their protocols.
+    Business,
+    /// Inside the lock directory `locks`, which no `FilePath` reaches, so no
+    /// lease holds anything there but the keys: every entry is unlinked as
+    /// it is. Its temporary directory is never a leftover tree.
+    Leftover { locks: &'a File },
+}
+
 /// Entries removal empties from `directory` before its FileStorage
-/// resources: all but the lock directory and a regular account marker, which
-/// have their own protocols and are recognized by name or, for aliases, by
-/// identity. Leftovers with reserved names go first; a stray marker that is a
-/// directory or link would otherwise block locking `auth.json` beside it.
-fn removal_entries(directory: &File) -> Result<Vec<DirectoryEntry>> {
+/// resources. In a business tree the lock directory and a regular account
+/// marker have their own protocols and are left out, recognized by name or,
+/// for aliases, by identity. Leftovers go first: entries with a reserved
+/// name, or with the identity of one of those resources but another type. A
+/// marker that is a directory or a link would otherwise block locking
+/// `auth.json` beside it. Leftovers follow the business rules: on a
+/// case-insensitive volume, an alias of a reserved name can be leased.
+fn removal_entries(directory: &File, tree: Tree) -> Result<Vec<DirectoryEntry>> {
     let entries = remaining_entries(directory)?;
+    if let Tree::Leftover { .. } = tree {
+        return Ok(entries.into_iter().map(|(entry, _)| entry).collect());
+    }
     let [locks, marker] = native::reserved(directory)?;
     let resources = [
         (LOCK_DIRECTORY, locks, EntryKind::Directory),
@@ -714,19 +734,85 @@ fn removal_entries(directory: &File) -> Result<Vec<DirectoryEntry>> {
     ];
     let mut entries: Vec<_> = entries
         .into_iter()
-        .filter(|(entry, identity)| {
-            !resources.iter().any(|(name, resource, kind)| {
-                entry.kind == *kind && (entry.name == *name || resource.as_ref() == Some(identity))
-            })
+        .filter_map(|(entry, identity)| {
+            let names = |(name, id, _): &(&str, Option<native::Identity>, EntryKind)| {
+                entry.name == *name || id.as_ref() == Some(&identity)
+            };
+            if resources
+                .iter()
+                .any(|resource| names(resource) && entry.kind == resource.2)
+            {
+                return None;
+            }
+            let leftover = reserved_name(&entry.name) || resources.iter().any(names);
+            Some((leftover, entry))
         })
-        .map(|(entry, _)| entry)
         .collect();
-    entries.sort_by_key(|entry| !reserved_name(&entry.name));
-    Ok(entries)
+    entries.sort_by_key(|(leftover, _)| !leftover);
+    Ok(entries.into_iter().map(|(_, entry)| entry).collect())
+}
+
+/// Clears leftovers that would stop every file in `directory` from being
+/// locked, before removal locks its files: a non-directory in place of the
+/// lock directory or of the temporary directory inside it, and in the lock
+/// directory any link, or directory other than the temporary one, such as one
+/// in place of a key. Keys are regular files and the lock directory is not a
+/// business directory, so no lease holds these, except a regular file in
+/// place of the temporary directory, which can be a key and goes under its
+/// lock.
+fn clear_lock_leftovers(
+    directory: &File,
+    owner: &Arc<FileStorage>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let locks_name = OsStr::new(LOCK_DIRECTORY);
+    match native::entry_kind(directory, locks_name)? {
+        Some(EntryKind::Directory) => {}
+        Some(_) => return absent_is_removed(native::remove(directory, locks_name)),
+        None => return Ok(()),
+    }
+    let Some(locks) = native::reserved_directory(directory, locks_name)? else {
+        return Ok(());
+    };
+    let temporary_name = OsStr::new(TEMPORARY_DIRECTORY);
+    match native::entry_kind(&locks, temporary_name)? {
+        Some(EntryKind::File) => remove_key(
+            &locks,
+            None,
+            temporary_name,
+            native::open_key,
+            owner,
+            cancel,
+        )?,
+        Some(EntryKind::Other) => {
+            absent_is_removed(native::remove_other(&locks, temporary_name))?;
+        }
+        Some(EntryKind::Directory) | None => {}
+    }
+    for (entry, _) in remaining_entries(&locks)? {
+        owner.check(cancel)?;
+        match entry.kind {
+            EntryKind::File => {}
+            EntryKind::Other => absent_is_removed(native::remove_other(&locks, &entry.name))?,
+            // The walk skips the temporary directory, however it is spelled.
+            EntryKind::Directory => remove_tree(
+                &locks,
+                &entry.name,
+                Tree::Leftover { locks: &locks },
+                owner,
+                cancel,
+            )?,
+        }
+    }
+    Ok(())
 }
 
 /// Removes a non-directory entry below `parent`: a file under the lock leases
-/// use, a link or special file itself, never followed.
+/// use, a link or special file itself, never followed, and only while it is
+/// still one. A file whose key the filesystem equates with the temporary
+/// directory, as a leftover of that name or a case alias of it, cannot be
+/// locked, so no lease holds it; it is unlinked without a lock, but never
+/// when it is the account marker under another name.
 fn remove_entry(
     parent: &File,
     name: &OsString,
@@ -734,22 +820,50 @@ fn remove_entry(
     owner: &Arc<FileStorage>,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    if kind == EntryKind::File {
-        let (name, _lock) = physical_lock(parent, name, owner)?;
-        owner.check(cancel)?;
-        Ok(native::remove(parent, &name)?)
-    } else {
-        Ok(native::remove(parent, name)?)
+    if kind != EntryKind::File {
+        return Ok(native::remove_other(parent, name)?);
     }
+    match physical_lock(parent, name, owner) {
+        Ok((name, _lock)) => {
+            owner.check(cancel)?;
+            Ok(native::remove(parent, &name)?)
+        }
+        Err(error)
+            if !matches!(
+                native::reserved_directory(parent, OsStr::new(LOCK_DIRECTORY)),
+                Ok(Some(locks)) if key_is_temporary_directory(&locks, name)
+            ) =>
+        {
+            Err(error)
+        }
+        Err(_) => {
+            native::permissions(parent, name)?;
+            owner.check(cancel)?;
+            Ok(native::remove(parent, name)?)
+        }
+    }
+}
+
+/// Whether the filesystem resolves the key `name` in `locks` to the
+/// temporary directory, as it can an alias of that directory's name. Such a
+/// key cannot be locked, so no lease holds its name.
+fn key_is_temporary_directory(locks: &File, name: &OsStr) -> bool {
+    matches!(
+        native::reserved_directory(locks, OsStr::new(TEMPORARY_DIRECTORY)),
+        Ok(Some(temporary)) if matches!(native::linked(locks, name, &temporary), Ok(true))
+    )
 }
 
 /// Removes the directory `name` below `parent` and everything beneath it,
 /// depth first through directory handles and never on another filesystem.
 /// An explicit stack replaces recursion, so tree depth costs no thread
-/// stack; `native::Ancestors` bounds what returning to each parent holds.
+/// stack; `native::Ancestors` bounds what returning to each parent holds. A
+/// business tree removes leftover trees in its lock directory, which never
+/// nest further.
 fn remove_tree(
     parent: &File,
     name: &OsString,
+    tree: Tree,
     owner: &Arc<FileStorage>,
     cancel: &CancellationToken,
 ) -> Result<()> {
@@ -758,22 +872,37 @@ fn remove_tree(
         name: OsString,
         entries: std::vec::IntoIter<DirectoryEntry>,
     }
+    let entries = |directory: &File| {
+        if let Tree::Business = tree {
+            clear_lock_leftovers(directory, owner, cancel)?;
+        }
+        Ok::<_, FileStorageError>(removal_entries(directory, tree)?.into_iter())
+    };
     // A concurrent removal of the same tree can delete the directory being
     // emptied together with its parent; the traversal then starts again.
     'tree: loop {
-        let mut directory = match native::subdirectory(parent, name) {
+        let mut directory = match native::subdirectory(parent, name, tree) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             result => result?,
         };
+        // Checked on the handle the walk uses, so a temporary directory
+        // created since, under any spelling, is never taken for a leftover.
+        if let Tree::Leftover { locks } = tree
+            && native::linked(locks, OsStr::new(TEMPORARY_DIRECTORY), &directory)?
+        {
+            return Ok(());
+        }
         let mut levels = vec![Level {
             name: name.clone(),
-            entries: removal_entries(&directory)?.into_iter(),
+            entries: entries(&directory)?,
         }];
         let mut ancestors = native::Ancestors::default();
         while let Some(level) = levels.last_mut() {
             owner.check(cancel)?;
             let Some(entry) = level.entries.next() else {
-                remove_resources(&directory)?;
+                if let Tree::Business = tree {
+                    remove_resources(&directory, owner, cancel)?;
+                }
                 let name = levels.pop().expect("emptied level").name;
                 if levels.is_empty() {
                     return absent_is_removed(native::remove_directory(parent, &name));
@@ -786,18 +915,19 @@ fn remove_tree(
                 continue;
             };
             if entry.kind != EntryKind::Directory {
-                absent_is_removed(remove_entry(
-                    &directory,
-                    &entry.name,
-                    entry.kind,
-                    owner,
-                    cancel,
-                ))?;
+                absent_is_removed(match tree {
+                    Tree::Business => {
+                        remove_entry(&directory, &entry.name, entry.kind, owner, cancel)
+                    }
+                    Tree::Leftover { .. } => {
+                        native::remove(&directory, &entry.name).map_err(FileStorageError::from)
+                    }
+                })?;
                 continue;
             }
-            match native::subdirectory(&directory, &entry.name) {
+            match native::subdirectory(&directory, &entry.name, tree) {
                 Ok(child) => {
-                    let entries = removal_entries(&child)?.into_iter();
+                    let entries = entries(&child)?;
                     ancestors.push(std::mem::replace(&mut directory, child))?;
                     levels.push(Level {
                         name: entry.name,
@@ -815,9 +945,13 @@ fn remove_tree(
 
 /// Removes this module's resources from a directory whose other entries are
 /// gone. A live account marker returns `Locked`. Lock keys go one at a time,
-/// each with the temporary file named after it and only while holding that
+/// each with the temporary entry named after it and only while holding that
 /// key, so a key or temporary file a holder has locked is never removed.
-fn remove_resources(directory: &File) -> Result<()> {
+fn remove_resources(
+    directory: &File,
+    owner: &Arc<FileStorage>,
+    cancel: &CancellationToken,
+) -> Result<()> {
     // A live account marker belongs to another holder of `auth.json`. A stale
     // one is reclaimed under the `auth.json` key, as account locks do, so the
     // reclaim cannot unlink a marker a concurrent lock has just written.
@@ -834,22 +968,20 @@ fn remove_resources(directory: &File) -> Result<()> {
         return Ok(());
     };
     let temporary_name = OsStr::new(TEMPORARY_DIRECTORY);
-    let temporary = match native::entry_kind(&locks, temporary_name)? {
-        Some(EntryKind::Directory) => native::reserved_directory(&locks, temporary_name)?,
-        // A link or file in its place is not this module's directory.
-        Some(_) => {
-            absent_is_removed(native::remove(&locks, temporary_name))?;
-            None
-        }
-        None => None,
-    };
+    let temporary = native::reserved_directory(&locks, temporary_name)?;
     for (entry, _) in remaining_entries(&locks)? {
         match entry.kind {
-            EntryKind::File => {
-                remove_key(&locks, temporary.as_ref(), &entry.name, native::open_key)?;
-            }
-            // A link cannot be a key. The temporary directory goes after the keys.
-            EntryKind::Other => absent_is_removed(native::remove(&locks, &entry.name))?,
+            EntryKind::File => remove_key(
+                &locks,
+                temporary.as_ref(),
+                &entry.name,
+                native::open_key,
+                owner,
+                cancel,
+            )?,
+            // A link cannot be a key. The temporary directory goes after the
+            // keys; `clear_lock_leftovers` took any other directory.
+            EntryKind::Other => absent_is_removed(native::remove_other(&locks, &entry.name))?,
             EntryKind::Directory => {}
         }
     }
@@ -857,12 +989,16 @@ fn remove_resources(directory: &File) -> Result<()> {
         // Left without a key listed above: written under a key created since,
         // or named at random by an earlier version.
         for (entry, _) in remaining_entries(temporary)? {
-            remove_key(&locks, Some(temporary), &entry.name, native::create_key)?;
+            remove_key(
+                &locks,
+                Some(temporary),
+                &entry.name,
+                native::create_key,
+                owner,
+                cancel,
+            )?;
         }
-        absent_is_removed(native::remove_directory(
-            &locks,
-            OsStr::new(TEMPORARY_DIRECTORY),
-        ))?;
+        absent_is_removed(native::remove_directory(&locks, temporary_name))?;
     }
     absent_is_removed(native::remove_directory(
         directory,
@@ -870,25 +1006,40 @@ fn remove_resources(directory: &File) -> Result<()> {
     ))
 }
 
-/// Removes the key `name` and the temporary file of that name while holding
-/// the key. `open_key` skips a key another removal took first; `create_key`
-/// takes a key for a temporary file whose key is gone.
+/// Removes the key `name` and the temporary entry of that name while holding
+/// the key; a directory there is a leftover tree. `open_key` skips a key
+/// another removal took first; `create_key` takes a key for a temporary entry
+/// whose key is gone. A name whose key would be the temporary directory has
+/// no key, so no holder writes its temporary entry.
 fn remove_key(
     locks: &File,
     temporary: Option<&File>,
     name: &OsStr,
     open: fn(&File, &OsStr) -> io::Result<File>,
+    owner: &Arc<FileStorage>,
+    cancel: &CancellationToken,
 ) -> Result<()> {
-    let _key = match lock_key(locks, name, open) {
-        Ok(Some(key)) => key,
+    let key = match lock_key(locks, name, open) {
+        Ok(Some(key)) => Some(key),
         Ok(None) => return Ok(()),
         Err(FileStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(());
         }
+        Err(_) if key_is_temporary_directory(locks, name) => None,
         Err(error) => return Err(error),
     };
     if let Some(temporary) = temporary {
-        absent_is_removed(native::remove(temporary, name))?;
+        let name = name.to_os_string();
+        match native::entry_kind(temporary, &name)? {
+            Some(EntryKind::Directory) => {
+                remove_tree(temporary, &name, Tree::Leftover { locks }, owner, cancel)?;
+            }
+            Some(_) => absent_is_removed(native::remove(temporary, &name))?,
+            None => {}
+        }
+    }
+    if key.is_none() {
+        return Ok(());
     }
     absent_is_removed(native::remove(locks, name))
 }
@@ -1366,9 +1517,13 @@ mod native {
             _ => Ok(next),
         }
     }
-    /// Opens a directory to remove; a filesystem mounted there is never entered.
-    pub fn subdirectory(parent: &File, name: &OsStr) -> io::Result<File> {
-        let directory = open_directory(parent, name)?;
+    /// Opens a directory to remove; a filesystem mounted there is never
+    /// entered. A leftover tree may itself hold the reserved directory's name.
+    pub fn subdirectory(parent: &File, name: &OsStr, tree: Tree<'_>) -> io::Result<File> {
+        let directory = match tree {
+            Tree::Business => open_directory(parent, name)?,
+            Tree::Leftover { .. } => open(parent, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?,
+        };
         if directory.metadata()?.dev() != parent.metadata()?.dev() {
             return Err(io::Error::new(
                 io::ErrorKind::CrossesDevices,
@@ -1588,6 +1743,16 @@ mod native {
     pub fn remove(parent: &File, name: &OsStr) -> io::Result<()> {
         unlink(parent, name, 0)
     }
+    /// Removes a link or special file. One replaced since it was listed, as
+    /// by a key or business file, fails instead; a replacement right before
+    /// the unlink stays possible, since nothing is unlinked through a handle.
+    pub fn remove_other(parent: &File, name: &OsStr) -> io::Result<()> {
+        match stat(parent, name)? {
+            None => Ok(()),
+            Some(stat) if kind(&stat) == EntryKind::Other => remove(parent, name),
+            Some(_) => Err(io::Error::other("entry replaced during removal")),
+        }
+    }
     pub fn remove_directory(parent: &File, name: &OsStr) -> io::Result<()> {
         unlink(parent, name, libc::AT_REMOVEDIR)
     }
@@ -1732,7 +1897,7 @@ fn lock_keys_stay_exclusive_across_concurrent_directory_removal() {
         let directory = directory.try_clone().unwrap();
         let (name, storage, held) = (name.clone(), storage.clone(), held.clone());
         Box::new(move || {
-            remove_resources(&directory).unwrap();
+            remove_resources(&directory, &storage, &CancellationToken::new()).unwrap();
             let (_, lock) = physical_lock(&directory, &name, &storage).unwrap();
             held.lock().unwrap().push(lock);
         })
@@ -1753,7 +1918,7 @@ fn lock_keys_stay_exclusive_across_concurrent_directory_removal() {
     // rather than unlinking the holder's, and fails.
     let (remover, name) = directory("remover");
     on_key_lock(&name, remove_and_relock(&remover, &name));
-    let removal = remove_resources(&remover);
+    let removal = remove_resources(&remover, &storage, &CancellationToken::new());
     assert!(
         matches!(&removal, Err(FileStorageError::Io(error)) if error.kind() == io::ErrorKind::DirectoryNotEmpty),
         "{removal:?}"
@@ -1778,7 +1943,7 @@ fn lock_keys_stay_exclusive_across_concurrent_directory_removal() {
         })
     });
     assert!(matches!(
-        remove_resources(&writer),
+        remove_resources(&writer, &storage, &CancellationToken::new()),
         Err(FileStorageError::Locked)
     ));
     let (_lock, (temporary, temp)) = writing.lock().unwrap().take().unwrap();
@@ -1839,11 +2004,14 @@ mod unsupported {
     pub fn remove(_: &File, _: &OsStr) -> io::Result<()> {
         Err(unsupported())
     }
+    pub fn remove_other(_: &File, _: &OsStr) -> io::Result<()> {
+        Err(unsupported())
+    }
     pub type Identity = ();
     pub fn open_directory(_: &File, _: &OsStr) -> io::Result<File> {
         Err(unsupported())
     }
-    pub fn subdirectory(_: &File, _: &OsStr) -> io::Result<File> {
+    pub fn subdirectory(_: &File, _: &OsStr, _: Tree<'_>) -> io::Result<File> {
         Err(unsupported())
     }
     pub fn reserved_directory(_: &File, _: &OsStr) -> io::Result<Option<File>> {

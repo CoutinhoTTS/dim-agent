@@ -3622,6 +3622,7 @@
         "path native::remove",
         "path native::remove_account",
         "path native::remove_directory",
+        "path native::remove_other",
         "path native::replace",
         "path native::reserved",
         "path native::reserved_directory",
@@ -3656,6 +3657,7 @@
         "path native::remove",
         "path native::remove_account",
         "path native::remove_directory",
+        "path native::remove_other",
         "path native::replace",
         "path native::reserved",
         "path native::reserved_directory",
@@ -3691,6 +3693,7 @@
         "path native::remove",
         "path native::remove_account",
         "path native::remove_directory",
+        "path native::remove_other",
         "path native::replace",
         "path native::reserved",
         "path native::reserved_directory",
@@ -3725,6 +3728,9 @@
         "path LOCK_DIRECTORY",
         "path Result",
         "path TEMPORARY_DIRECTORY",
+        "path Tree",
+        "path Tree::Business",
+        "path Tree::Leftover",
         "path account_lock"
       ]
     },
@@ -3735,7 +3741,8 @@
         "path DirectoryEntry",
         "path EntryKind",
         "path FileStorageError::Unsupported",
-        "path Result"
+        "path Result",
+        "path Tree"
       ]
     },
     {
@@ -3752,7 +3759,10 @@
         "path FileStorageError::Io",
         "path LOCK_DIRECTORY",
         "path Result",
-        "path TEMPORARY_DIRECTORY"
+        "path TEMPORARY_DIRECTORY",
+        "path Tree",
+        "path Tree::Business",
+        "path Tree::Leftover"
       ]
     },
     {

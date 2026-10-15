@@ -78,25 +78,60 @@ is no longer the directory it descended from, or starts again from the target if
 a concurrent removal deleted it. Windows holds a handle per level, since it
 cannot reopen a parent from a handle without a path.
 
-In each directory, leftovers go first: entries the listing hides by name, other
-than the lock directory and a regular account marker. Examples are a resource
-from an earlier version, or a marker that is a directory or a link. They follow
-the same rules as business entries, and going first means a stray marker cannot
-block locking `auth.json` beside it. The directory's FileStorage resources go
-last and hold one key at a time, however many names the directory has used:
+Before emptying a directory, removal clears the leftovers that would stop
+every file in it from being locked: a non-directory in place of the lock
+directory or of the temporary directory inside it, and in the lock directory
+any link, or any directory other than the temporary one, such as a directory
+in place of a key. Keys are regular files and no `FilePath` reaches inside the lock
+directory, so no lease holds these. The one exception is a regular file in
+place of the temporary directory, which can be a key, so it goes under its
+lock. Trees there are removed without locks, entering directories with
+reserved names as well, but never another filesystem. The temporary
+directory, however it is spelled, is never taken for such a tree: that is
+checked on the handle the removal walks, so a temporary directory created
+meanwhile is not either.
+
+Then the directory's other leftovers go first: entries with a reserved name,
+or with the identity of the lock directory or the account marker but another
+type. Examples are a resource from an earlier version and a marker that is a
+directory or a link. They follow the business rules, since on a
+case-insensitive volume an alias of a reserved name can be leased. Going first
+means a stray marker cannot block locking `auth.json` beside it. A file whose
+key the filesystem equates with the temporary directory, such as a file named
+`.dim-file-storage-temps`, or `.DIM-FILE-STORAGE-TEMPS` on a case-insensitive
+volume, cannot be locked, so no lease holds it; it is unlinked without a lock
+unless it is the account marker under another name. The directory's FileStorage resources go last and hold one
+key at a time, however many names the directory has used:
 
 ```text
+remove(d), per directory, before its entries:
+  a non-directory in place of .dim-file-storage-locks  -> unlink it
+  in .dim-file-storage-locks:
+    a file in place of temps                           -> lock it as a key, unlink
+    any link                                           -> unlink it
+    any directory but temps                            -> remove it as a tree
 remove(d), once d's other entries are gone:
   auth.json.lock: holding key auth.json, reclaim it if stale; live -> Locked
   for each key k in .dim-file-storage-locks:
-    lock k                                         held -> Locked
-    k unlinked by a concurrent removal?            -> skip it
-    unlink temps/k, unlink k, release k
+    lock k                                             held -> Locked
+    k unlinked by a concurrent removal?                -> skip it
+    remove temps/k (a directory as a tree), unlink k, release k
   for each temps/t still left (written under a key taken since,
-  or named at random by an earlier version): the same, under key t
+  or named at random by an earlier version): the same, under key t,
+  or without a key if key t would be temps itself
   rmdir temps, rmdir .dim-file-storage-locks, rmdir d
                     an entry or key created meanwhile -> DirectoryNotEmpty
 ```
+
+A link or special file is unlinked only while it still is one. If a key or
+file has replaced it since it was listed, removal fails instead. Windows
+checks the type through the handle that deletes the entry; Unix checks it
+just before unlinking, which narrows the race without closing it.
+
+Locking and replacement never delete leftovers. A non-directory in place of
+the lock or temporary directory, or a directory in place of a key or a
+temporary file, makes `lock` or `replace` fail with an I/O error, without
+following or writing through it, until the directory is removed.
 
 Removal therefore never unlinks a key or temporary file that a holder has
 locked. An absent entry counts as removed. Removal is neither atomic nor
@@ -124,10 +159,12 @@ than list entries whose aliases of reserved names could not be recognized.
 `file_storage_flow` (path, lock, permission and platform checks),
 `directory_listing_and_removal_stay_inside_the_authorized_root` (Session-file
 layout, reserved resources and aliases, leases held during partial removal,
-links, cancellation, leftovers with reserved names, a marker whose release
-failed) and `removal_scales_with_directory_size` (a directory that used 300
-names and a 1,000-level tree, removed under a 64-descriptor limit on a 256 KiB
-worker stack, where recursion overflowed at a few hundred levels). The unit
+links, cancellation, leftovers with reserved names or of the wrong type, a
+leased alias of a reserved name, stray entries in the lock and temporary
+directories, a marker whose release failed) and
+`removal_scales_with_directory_size` (a directory that used 300 names and a
+1,000-level tree, removed under a 64-descriptor limit on a 256 KiB worker
+stack, where recursion overflowed at a few hundred levels). The unit
 test `lock_keys_stay_exclusive_across_concurrent_directory_removal` in the
 owner module drives the lock, removal and temporary-file interleavings that the
 public API cannot produce reliably.

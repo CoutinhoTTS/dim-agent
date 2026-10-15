@@ -335,13 +335,118 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     fs::create_dir(leftovers.join("marker-link")).unwrap();
     symlink(&outside, leftovers.join("marker-link/auth.json.lock")).unwrap();
     fs::write(leftovers.join("marker-link/auth.json"), b"{}").unwrap();
+    // A marker directory stored under an alias also goes before `auth.json`.
+    fs::create_dir_all(leftovers.join("marker-alias/AUTH.JSON.LOCK/nested")).unwrap();
+    fs::write(leftovers.join("marker-alias/auth.json"), b"{}").unwrap();
+    // Leftovers that stop every file beside them from being locked go
+    // before those files: a file in place of the lock directory, or of the
+    // temporary directory. Until then locking fails closed.
+    let wrong_types = leftovers.join("wrong-types");
+    fs::create_dir(&wrong_types).unwrap();
+    fs::write(wrong_types.join(".dim-file-storage-locks"), b"old").unwrap();
+    fs::write(wrong_types.join(".dim-file-storage-temps"), b"old").unwrap();
+    fs::write(wrong_types.join("data.json"), b"{}").unwrap();
+    fs::create_dir_all(leftovers.join("temps-file/.dim-file-storage-locks")).unwrap();
+    fs::write(
+        leftovers.join("temps-file/.dim-file-storage-locks/.dim-file-storage-temps"),
+        b"old",
+    )
+    .unwrap();
+    fs::write(leftovers.join("temps-file/data.json"), b"{}").unwrap();
+    for file in [
+        "leftovers/wrong-types/data.json",
+        "leftovers/temps-file/data.json",
+    ] {
+        assert!(matches!(
+            storage.lock(&path(file), &cancel).await,
+            Err(FileStorageError::Io(_))
+        ));
+    }
+    // Stray entries inside the lock and temporary directories: trees, which
+    // may hold reserved names themselves; directories in place of a key
+    // beside its file, of the `auth.json.lock` key every lock takes, or of a
+    // temporary file; and a temporary file whose key would be the temporary
+    // directory. A file whose key a case-insensitive volume equates with the
+    // temporary directory can hold no lease either.
+    fs::create_dir(leftovers.join("stray")).unwrap();
+    storage
+        .replace(
+            &path("leftovers/stray/data.json"),
+            b"{}".to_vec(),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let locks = leftovers.join("stray/.dim-file-storage-locks");
+    let temps = locks.join(".dim-file-storage-temps");
+    fs::create_dir_all(locks.join("tree/.dim-file-storage-locks/.dim-file-storage-temps")).unwrap();
+    fs::write(locks.join("tree/.dim-file-storage-locks/key"), b"old").unwrap();
+    fs::create_dir(locks.join("blocked.json")).unwrap();
+    fs::write(leftovers.join("stray/blocked.json"), b"{}").unwrap();
+    fs::remove_file(locks.join("auth.json.lock")).unwrap();
+    fs::create_dir(locks.join("auth.json.lock")).unwrap();
+    fs::create_dir_all(temps.join("tree/nested")).unwrap();
+    fs::write(temps.join("tree/nested/file"), b"old").unwrap();
+    fs::create_dir(temps.join("data.json")).unwrap();
+    fs::write(temps.join(".dim-file-storage-temps"), b"old").unwrap();
+    fs::write(leftovers.join("stray/.DIM-FILE-STORAGE-TEMPS"), b"user").unwrap();
+    assert!(matches!(
+        storage
+            .lock(&path("leftovers/stray/blocked.json"), &cancel)
+            .await,
+        Err(FileStorageError::Io(_))
+    ));
+    assert!(matches!(
+        storage
+            .replace(
+                &path("leftovers/stray/data.json"),
+                b"[]".to_vec(),
+                None,
+                &cancel
+            )
+            .await,
+        Err(FileStorageError::Io(_))
+    ));
+    assert_eq!(
+        storage
+            .list(&path("leftovers/stray"), &cancel)
+            .await
+            .unwrap(),
+        [
+            entry(".DIM-FILE-STORAGE-TEMPS", EntryKind::File),
+            entry("blocked.json", EntryKind::File),
+            entry("data.json", EntryKind::File)
+        ]
+    );
     assert_eq!(
         storage.list(&path("leftovers"), &cancel).await.unwrap(),
         [
+            entry("marker-alias", EntryKind::Directory),
             entry("marker-directory", EntryKind::Directory),
-            entry("marker-link", EntryKind::Directory)
+            entry("marker-link", EntryKind::Directory),
+            entry("stray", EntryKind::Directory),
+            entry("temps-file", EntryKind::Directory),
+            entry("wrong-types", EntryKind::Directory)
         ]
     );
+    // A case-insensitive volume lets an alias of a reserved name be leased,
+    // so a leftover file still goes under its lock.
+    if leftovers.join(".DIM-FILE-STORAGE-STRAY").exists() {
+        let alias = storage
+            .lock(&path("leftovers/.DIM-FILE-STORAGE-STRAY"), &cancel)
+            .await
+            .unwrap();
+        assert!(matches!(
+            storage.remove(&path("leftovers"), &cancel).await,
+            Err(FileStorageError::Locked)
+        ));
+        assert_eq!(
+            fs::read(leftovers.join(".dim-file-storage-stray")).unwrap(),
+            b"old"
+        );
+        drop(alias);
+    }
     storage.remove(&path("leftovers"), &cancel).await.unwrap();
     assert!(fs::symlink_metadata(&leftovers).is_err());
     assert_eq!(fs::read(outside.join("secret")).unwrap(), b"outside");

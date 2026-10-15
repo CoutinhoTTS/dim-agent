@@ -321,9 +321,20 @@ pub(super) fn open_directory(parent: &File, name: &OsStr) -> io::Result<File> {
     }
 }
 /// Opens a directory to remove. Mount points are reparse points, which
-/// `open` refuses, so another volume is never entered.
-pub(super) fn subdirectory(parent: &File, name: &OsStr) -> io::Result<File> {
-    open_directory(parent, name)
+/// `open` refuses, so another volume is never entered. A leftover tree may
+/// itself hold the reserved directory's name.
+pub(super) fn subdirectory(parent: &File, name: &OsStr, tree: Tree<'_>) -> io::Result<File> {
+    match tree {
+        Tree::Business => open_directory(parent, name),
+        Tree::Leftover { .. } => open(
+            Some(parent),
+            name,
+            DIRECTORY_ACCESS,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
+            null_mut(),
+        ),
+    }
 }
 /// Opens one of this module's directories in `directory`, if present.
 pub(super) fn reserved_directory(directory: &File, name: &OsStr) -> io::Result<Option<File>> {
@@ -825,6 +836,30 @@ pub(super) fn remove_account(_: &File, _: &OsString, file: &File) -> io::Result<
 /// followed, except that a volume mounted there is refused, as Unix refuses
 /// to remove a directory on another filesystem.
 pub(super) fn remove(parent: &File, name: &OsStr) -> io::Result<()> {
+    let (entry, kind) = deletable(parent, name)?;
+    if kind == EntryKind::Directory {
+        return Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "expected a non-directory entry",
+        ));
+    }
+    delete_entry(&entry, kind)
+}
+/// Removes a link or other reparse point through the handle that checked
+/// it, so an entry replaced since it was listed, as by a key or business
+/// file, fails instead.
+pub(super) fn remove_other(parent: &File, name: &OsStr) -> io::Result<()> {
+    let (entry, kind) = match deletable(parent, name) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        result => result?,
+    };
+    if kind != EntryKind::Other {
+        return Err(io::Error::other("entry replaced during removal"));
+    }
+    delete_entry(&entry, kind)
+}
+/// Opens an entry itself for deletion, with its type.
+fn deletable(parent: &File, name: &OsStr) -> io::Result<(File, EntryKind)> {
     let entry = create(
         Some(parent),
         name,
@@ -833,20 +868,18 @@ pub(super) fn remove(parent: &File, name: &OsStr) -> io::Result<()> {
         0,
         null_mut(),
     )?;
-    let attributes = entry.metadata()?.file_attributes();
-    if kind(attributes) == EntryKind::Directory {
-        return Err(io::Error::new(
-            io::ErrorKind::IsADirectory,
-            "expected a non-directory entry",
-        ));
-    }
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && volume_mount_point(&entry)? {
+    let kind = kind(entry.metadata()?.file_attributes());
+    Ok((entry, kind))
+}
+/// Deletes an opened non-directory entry, refusing a volume mount point.
+fn delete_entry(entry: &File, kind: EntryKind) -> io::Result<()> {
+    if kind == EntryKind::Other && volume_mount_point(entry)? {
         return Err(io::Error::new(
             io::ErrorKind::CrossesDevices,
             "volume mounted here",
         ));
     }
-    delete(&entry)
+    delete(entry)
 }
 /// Whether a reparse point mounts a volume: a mount point whose target is a
 /// volume GUID path, not a directory as a junction's is. Reads the reparse
