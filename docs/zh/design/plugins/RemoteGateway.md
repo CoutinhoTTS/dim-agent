@@ -2,6 +2,8 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md)，[Transport、Connection 变更](../overview.md)，[多节点](../overview.md)，[通用约束](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（认证、断连与 TLS 的取舍与 [#5](https://github.com/arcships/dim/issues/5) 一起决定）。语言：Rust。
 
+> **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
+
 RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一个经认证的入口：通过二维码或配对码配对，每设备令牌及其轮换与吊销，以及 Web 工作区的静态资源。已配对设备使用现有的 App Server 协议；该入口只提供[方法](../contracts/session-boundary.md)契约中的 Session 方法（Rpc 的 Session 内置方法和每个 `sessionMethods` 服务），因此设备可以调用每个 Session 方法，包括 `session.permission.update` 和 `shell.*`（决策 E3），但从不能调用管理方法：`managementMethods` 与 Rpc 的管理类内置方法从不提供给已配对的远程设备。该入口是产品 UI 面，从不承载节点之间的 rutis 链路面。
 
 ## 1. 结构
@@ -212,6 +214,8 @@ sequenceDiagram
 ## 9. 向机制所有者提出的需求
 
 ### 9.1 提供方在调用内向调用方发请求
+
+已撤回：rutis 是外部依赖，不向它提需求。认证与处理由 RemoteGateway 和 Transport 用 dim 侧的服务解决。
 
 | 项 | 内容 |
 | --- | --- |
