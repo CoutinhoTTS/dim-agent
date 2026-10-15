@@ -214,7 +214,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | --- | --- |
 | Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled. |
 | Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls per plugin: not language-neutral (D5). |
-| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled. Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
+| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled, and does not wait for an optional part to become active: the Session is built without it, and only that plugin's features are unavailable until it is (ADR 002 D3, #34). Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
 | Effect on sequence, batch, interrupt, reload | Decided at Session load, and a Session reload decides again; enabling a plugin applies to Sessions loaded afterwards. |
 | Owner and issue | Runtime (Agent assembly); issue to be opened. |
 
