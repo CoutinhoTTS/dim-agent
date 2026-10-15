@@ -236,7 +236,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | --- | --- | --- | --- |
 | First input's turn interrupted or failed | input < `stop/interrupt` | Generation proceeds | SessionTitle |
 | Inputs without `user` content (Goal blocks, source markers) | — | Never trigger, never used | SessionTitle |
-| First input withdrawn in its own batch (Hook deny) or later (`session.input.withdraw`) | input < withdraw < `input/deleted` | Never applied: no generation, text never sent; the first applied operator input triggers | SessionTitle |
+| First input withdrawn (`session.input.withdraw`) before it is applied | input < withdraw < `input/deleted` | Never applied: no generation, text never sent; the first applied operator input triggers | SessionTitle |
 | First user input carries only images | — | No automatic title (A8) | SessionTitle |
 | Rename before the check | rename < check | Title present: skip | SessionTitle |
 | Rename during generation | check (r) < rename (r+1) < write | `conflict`: automatic title discarded | SessionStore revision |
@@ -292,7 +292,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | A7 | Session fork does not copy the title | Judgment | Fork shows the source title |
 | A8 | A first user input without text produces no automatic title | Decision: title from first user input | Later inputs or a placeholder |
 | A9 | Generation waits for adoption (`input/applied`); a deleted input never titles the Session | Maintainer decision | Deleted text could reach the auxiliary model |
-| A10 | "User input" means operator input: `user` content without a source marker | Judgment | Source-written inputs could title a Session |
+| A10 | "User input" means operator input: `user` content (source-written inputs carry raw blocks only) | Judgment | Source-written inputs could title a Session |
 | A11 | SessionStore announces title changes with a Session broadcast notice; a client that is not subscribed sees the change at its next `session.list` | Principles §4 rule 9 | Clients poll `session.list` |
 
 ## Appendix F. Open questions

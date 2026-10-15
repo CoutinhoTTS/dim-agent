@@ -12,7 +12,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | --- | --- | --- |
 | 同步 `Timeline::before`（一个草稿进、一个草稿出，失败提交原草稿） | `dim-agent-runtime/src/core/timeline.rs` | 不变（[原则 §4 第 3 条](../architecture/rust-agent/principles.md)） |
 | `ToolContribution` / `SessionToolSource`，经 `AgentBuilder` 静态登记 | `dim-agent-capabilities/src/tool_registry.rs` | C3 |
-| `history(branch, through)`：超过已发布头部时失败 | `dim-agent-runtime/src/agent.rs` | 固定前缀读，现有接口可能已够用 |
+| `history(branch, through)`：上限是已分配的头部，会读到尚未发布的事件 | `dim-agent-runtime/src/agent.rs` | C7（固定前缀读仍要做） |
 | `PluginFilesPlugin`（UTF-8、锁） | `dim-app-server/src/plugin_files.rs` | S10 |
 | Settings `subscribe()`，仅 MCP/Skills 源 | `dim-app-server/src/settings.rs` | S8 |
 | 自动压缩事实；生产压缩宿主仍是 `ContextModelHost(None)` | `context_preparation.rs`、`main.rs` | 独立功能 |
@@ -45,7 +45,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8 Settings 业务源（§5.2）。
 3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
 4. 决定 Goal 还是 Pursuit（D3）。
-5. 确认三项可能不需要的工作：固定前缀读（现有 `history(branch, Some(n))`）、Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
+5. 确认两项可能不需要的工作：Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 
 不排期，等设计完成：Questions（需要重新设计）、Hooks（待设计，作为第三方插件兼容机制单独设计）、ExternalAgent（需要重新设计）、#2 动态事件（没有使用者）。
@@ -59,8 +59,9 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | ID | 内容 | 规模 | 负责线 | 前置 | 使用者 |
 | --- | --- | --- | --- | --- | --- |
 | C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发 | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Goal、S1 |
-| C2 | `SessionConfig.interactive` 与 `session.create` 参数 | S | Rpc | — | SessionTitle、Questions |
+| C2 | `SessionConfig.interactive` 与 `session.create` 参数 | S | Rpc | — | SessionTitle、S2（Questions 待重新设计） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
+| C7 | 固定前缀读：Session 门面只读已发布到指定序号的事件（session-access A.5） | S | 独立 | — | SessionTitle、Scheduler、Workflow |
 | C3 | `toolContribution` 按名收集 | S | 装配 | — | Web、Goal、Scheduler、Workflow |
 | C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载 | L，先 spike | 装配 | C3 | 所有 TypeScript 插件 |
 | C5 | #4 分支级：TypeScript 部件按名使用 `Dispatcher`、`Branch::input`、`TreeCommands` | M | 装配 | C4 | Goal |
@@ -86,10 +87,10 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | 1 | ShellInput | Rust | C1、S7（S3 视确认结果） |
 | 2 | Attachments | Rust | C1、S5a、S6、S11 |
 | 3 | Web | TypeScript | C3、C4、S8 |
-| 4 | SessionTitle | TypeScript | C1、C2、C4、C6、S4、S5b、S8 |
+| 4 | SessionTitle | TypeScript | C1、C2、C4、C6、C7、S4、S5b、S8 |
 | 5 | Goal 或 Pursuit（D3） | TypeScript | C1、C3、C4、C5、S1、S8 |
-| 6 | Scheduler | TypeScript | C4、S2、S8、S10 |
-| 7 | Workflow | TypeScript | C4、S2、S8、S10 |
+| 6 | Scheduler | TypeScript | C4、C7、S2、S8、S10 |
+| 7 | Workflow | TypeScript | C4、C7、S2、S8、S10 |
 
 不被其他插件依赖、随时可以单独做的功能：生产压缩宿主与 `/compact`、用量查询（依赖 S4）；Session 删除和 fork（S5c）；Permission 命令规则；模型参数 effort/fast 与 `/agent`；MCP OAuth；HostPlatform OS 隔离（L，先 spike）；CLI 子命令、`/export`、`exec --json`。
 
@@ -135,6 +136,9 @@ flowchart LR
   C4 --> WEB["Web"]
   S8["S8 Settings 源"] --> WEB
   C4 --> ST["SessionTitle"]
+  C1 --> ST
+  C2 --> ST
+  C7["C7 固定前缀读"] --> ST
   S4["S4 AuxiliaryModel"] --> ST
   S5b --> ST
   S8 --> ST
@@ -143,13 +147,17 @@ flowchart LR
   S8 --> GO
   S2 --> SC["Scheduler"]
   S2 --> WF["Workflow"]
+  C4 --> SC
+  C4 --> WF
+  C7 --> SC
+  C7 --> WF
   S8 --> SC
   S8 --> WF
   S10["S10 pluginFiles"] --> SC
   S10 --> WF
 ```
 
-最早能交付的是 ShellInput 和 Attachments：只依赖 C1 和几个独立的小项。TypeScript 插件都卡在 C4，它是唯一的 L 级共用项，spike 应立即单独开始。Scheduler 和 Workflow 最晚，卡在 S1 → S2。
+最早能交付的是 ShellInput 和 Attachments：只依赖 C1 和几个独立的小项。TypeScript 插件都卡在 C4，它是唯一的 L 级共用项，spike 应立即单独开始。Scheduler 和 Workflow 最晚，既要等 C4，也要等 S1 → S2。
 
 ## 5. 设计变更空间
 

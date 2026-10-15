@@ -86,7 +86,7 @@ sequenceDiagram
   Rpc-->>CL: result
 ```
 
-The namespace is resolved by the longest prefix among the namespaces provided in that Session. If the Session has no such namespace, because the plugin is disabled or the Session is non-interactive and the plugin is not installed, the result is `unknown_method`. Session methods carry no level: every connection that is served Session methods is served all of them, including `shell.*`.
+The namespace is resolved by the longest prefix among the namespaces provided in that Session. If the Session has no such namespace, because the plugin is disabled, the result is `unknown_method`. Session methods carry no level: every connection that is served Session methods is served all of them, including `shell.*`.
 
 ### 3.2 Management method
 
@@ -106,7 +106,7 @@ sequenceDiagram
 
 The connection's entry record is the only check. Being served management methods grants host administrator rights.
 
-Rpc resolves the namespace on each call by keyed reads of the method name's prefixes, longest first, among the active process services `managementMethods` (Appendix F). Rpc does not depend on these providers. A namespace with no active provider (disabled, Pending, Failed, or between generations while it reloads) returns `unknown_method`, and Rpc, open connections and the other namespaces are unaffected. A call admitted before its provider unloads follows the method's `interruption` (A.1): the unloading provider ends its `report` calls with `operation_interrupted`, and `drain` calls hold the unload (§9.2).
+Rpc resolves the namespace on each call by keyed reads of the method name's prefixes, longest first, among the active process services `managementMethods` (Appendix F). Rpc does not depend on these providers. A namespace whose provider row is enabled but not active (Pending, Failed, or between generations while it reloads) returns `service_reloading`; Rpc tells this from the loader's row status (`Loader::entries`). A namespace with no enabled provider returns `unknown_method`. Rpc, open connections and the other namespaces are unaffected. A call admitted before its provider unloads follows the method's `interruption` (A.1): the unloading provider ends its `report` calls with `operation_interrupted`, and how a `drain` call holds the unload follows rutis' existing lifecycle (§9.2 is withdrawn).
 
 ## 4. Timing and conflicts
 
@@ -115,7 +115,7 @@ Rpc resolves the namespace on each call by keyed reads of the method name's pref
 | Session-scoped provider reloads mid-call | call < reload | `report`: `operation_interrupted`; `drain`: reload waits | Rpc |
 | Session method while the Session's capabilities reload | — | `service_reloading` | Rpc |
 | Session method on a Session without that plugin | — | `unknown_method` | Rpc |
-| Management owner reloads | — | Calls into its namespace return `unknown_method` until the new generation is active (`service_reloading` once §9.3 exists); admitted calls follow their `interruption`; Rpc does not reload and connections stay open | Rpc |
+| Management owner reloads | — | Calls into its namespace return `service_reloading` until the new generation is active; admitted calls follow their `interruption`; Rpc does not reload and connections stay open | Rpc |
 | Management method or `daemon.shutdown` on a connection with a `deviceId` | — | `unknown_method` | Rpc |
 | Two providers claim one namespace or tool name | assembly | Assembly fails; keys are unique per scope | Assembly |
 | Tool-contribution provider reloads during a turn | call < reload | ToolRegistry and dependants reload; the in-flight turn ends `Failed` (D3, accepted) | ToolRegistry |
@@ -149,7 +149,7 @@ The connection's `ConnectionEntry {name, deviceId}` is the only authority for wh
 | §4 rule 2 (handover) | Not applicable: methods and tool contributions hand nothing over; a tool call is handed to ToolExecutor by the existing `step/tool-call` contract. |
 | §4 rule 3 (before callbacks only) | Rpc validates only param shape and `sessionId` authorization; feature checks belong to the method's owner, and acting before a commit is left to Timeline before callbacks. |
 | §4 rule 4 (no business meaning in core) | Rpc and ToolRegistry collect services by name and never name a provider or interpret a method. |
-| §4 rule 5 (whole batch) | Not applicable: no decision here is taken on a Timeline event; owners decide from their own facts. |
+| §4 rule 5 (batch) | Not applicable: no decision here is taken on a Timeline event; owners decide from their own facts. |
 | §4 rule 6 (model context) | Methods have no model-visible effect, and a `toolContribution` reaches the model only through its declaration and `ToolResult` (§5). |
 | §4 rule 7 (public events and services) | Providers reach branches only through the branch's public services, and Rpc dispatches only through the Session's `sessionMethods`. |
 | §4 rule 8 (requirements) | Session lookup by name, named tool collection, drain on unload and listing the active providers of a process-scoped service are raised in §9. |
@@ -241,7 +241,7 @@ Cancellation: when a `report` call is interrupted, Rpc sends a cancel request fo
 | Reserved for Rpc built-ins | `hello`, `daemon`, `agent`, `approval`, the bare `session` root and `session.attach`, `session.branch_create`, `session.close`, `session.create`, `session.detach`, `session.history`, `session.idle`, `session.input_lookup`, `session.list`, `session.state`, `session.stop`, `session.submit`, `session.summaries`, `session.exec`, `session.mcp`, `session.model`, `session.permission`, `session.prompt`, `session.skills`. `session.input` is not reserved: InputQueue provides `session.input.withdraw` through `sessionMethods` (proposed), so Rpc names no owning service |
 | Precedence | Built-ins, then the process table, then the Session's providers; one wire name space |
 | Session-scoped call | Requires `sessionId` (`-32602` without it). Rpc authorizes it, acquires the Session through Agents (restoring if needed) and calls the Session's `sessionMethods` for the namespace. The provider reaches a branch through that branch's services |
-| Not dispatched | Namespace not provided or its provider not active, or a management method on a connection with a `deviceId` or an unexported link → `-32601 unknown_method`. Session reloading → `-32000 service_reloading`. A started `report` call interrupted → `operation_interrupted` |
+| Not dispatched | Namespace not provided (no enabled provider), or a management method on a connection with a `deviceId` or an unexported link → `-32601 unknown_method`. Session reloading, or a management provider enabled but not active → `-32000 service_reloading`. A started `report` call interrupted → `operation_interrupted` |
 | `hello.features` (v3) | Built-ins, plus the methods of the management providers active at `hello` when the connection is served management methods. Until §9.3 exists, Rpc makes a keyed read of each namespace that enabled loader rows declare in their `provides` and lists the active ones. Session-scoped methods are listed per Session in `session.state.methods` |
 | Ready latch | Opens after the loader's initial load settles, so process providers are present at the first `hello` |
 
@@ -296,7 +296,7 @@ Interruption reproduces today's behaviour: `mcp.*` and `skills.*` are `report`, 
 | v3 bare WebSocket, protected profile | `local_transport_required` | Same |
 | v3 RemoteGateway (new) | Did not exist; execution Session methods (`session.permission.get/update`, `session.exec.stop`, `session.skills`, `session.model.update`, `session.prompt.refresh`, `session.mcp`, `session.mcp.refresh`) were local-only | **Compatibility change (E3):** available to paired devices; management names `unknown_method` |
 | v3, MCP disabled | `mcp.*` `unknown_method` | Same, with Rpc's message |
-| v3, Mcp reloading | `service_reloading` | **Compatibility change** until §9.3: `mcp.*` returns `unknown_method` until Mcp is active again. Rpc does not reload and the connection stays open; with §9.3 it is `service_reloading` again |
+| v3, Mcp reloading | `service_reloading` | Same: `mcp.*` returns `service_reloading` until Mcp is active again; Rpc does not reload and the connection stays open |
 
 No protocol version is added and persistence formats are unchanged.
 

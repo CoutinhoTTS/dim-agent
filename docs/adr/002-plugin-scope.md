@@ -46,7 +46,7 @@ own scope:
 | Observe and act on a branch's events in order | the branch Dispatcher, from a branch-scoped plugin |
 | Put content into the model context | Session or branch input (adopted inputs), tool results |
 | Act on a write before it is committed | a Timeline before callback registered by a branch-scoped plugin: it synchronously transforms the draft inside the commit lock, never blocks the write, never waits for external work, and the original draft commits on failure ([principles §4 rule 3](../architecture/rust-agent/principles.md)) |
-| Withdraw an input before it is applied | the `input/withdraw {input_id, reason?}` command event (clients, process callers, or a before callback in the input's own batch); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
+| Withdraw an input before it is applied | the `input/withdraw {input_id, reason?}` command event (clients or process callers); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
 | Expose a client method about a Session | a Session-scoped `sessionMethods` service that Rpc dispatches through the Session |
 | Expose a host management method | a process plugin's `managementMethods` service in Rpc's method table; connections from paired devices are never served management methods |
 | Reach other Sessions | Agents' `sessions` service (AgentIndex and the Session public interface), as Collaboration does |

@@ -236,7 +236,7 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- | --- | --- |
 | 第一条输入的 turn 被中断或失败 | input < `stop/interrupt` | 生成继续 | SessionTitle |
 | 不含 `user` 内容的输入（Goal 块、来源标记） | — | 从不触发，从不使用 | SessionTitle |
-| 第一条输入在自己的批次中被撤回（Hook 拒绝）或之后被撤回（`session.input.withdraw`） | input < withdraw < `input/deleted` | 从未被应用：不生成，文本从不发送；第一条被应用的操作者输入触发 | SessionTitle |
+| 第一条输入在被应用前被撤回（`session.input.withdraw`） | input < withdraw < `input/deleted` | 从未被应用：不生成，文本从不发送；第一条被应用的操作者输入触发 | SessionTitle |
 | 第一条用户输入只含图片 | — | 无自动标题（A8） | SessionTitle |
 | 检查之前重命名 | rename < check | 已有标题：跳过 | SessionTitle |
 | 生成期间重命名 | check (r) < rename (r+1) < write | `conflict`：自动标题被丢弃 | SessionStore revision |
@@ -292,7 +292,7 @@ revision 检查就是复检：手动标题总是胜出。
 | A7 | Session fork 不复制标题 | 判断 | fork 显示源标题 |
 | A8 | 不含文本的第一条用户输入不产生自动标题 | 决定：标题取自第一条用户输入 | 使用后续输入或占位符 |
 | A9 | 生成等待输入被采用（`input/applied`）；被删除的输入从不产生标题 | 维护者决定 | 被删除的文本可能发给辅助模型 |
-| A10 | “用户输入”指操作者输入：不带来源标记的 `user` 内容 | 判断 | 来源写入的输入可能为 Session 命名 |
+| A10 | “用户输入”指操作者输入：`user` 内容（来源写入的输入只带 raw 块） | 判断 | 来源写入的输入可能为 Session 命名 |
 | A11 | SessionStore 用 Session 广播通知宣布标题变更；未订阅的客户端在下一次 `session.list` 时看到变更 | 原则 §4 第 9 条 | 客户端轮询 `session.list` |
 
 ## 附录 F. 待对齐问题

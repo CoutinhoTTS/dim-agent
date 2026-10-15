@@ -86,7 +86,7 @@ sequenceDiagram
   Rpc-->>CL: 结果
 ```
 
-命名空间按该 Session 中所提供命名空间的最长前缀解析。如果该 Session 没有此命名空间（插件被禁用，或 Session 为非交互且未安装该插件），结果为 `unknown_method`。Session 方法没有级别：获得 Session 方法的连接获得全部 Session 方法，包括 `shell.*`。
+命名空间按该 Session 中所提供命名空间的最长前缀解析。如果该 Session 没有此命名空间（插件被禁用），结果为 `unknown_method`。Session 方法没有级别：获得 Session 方法的连接获得全部 Session 方法，包括 `shell.*`。
 
 ### 3.2 管理方法
 
@@ -106,7 +106,7 @@ sequenceDiagram
 
 连接的入口记录是唯一的检查。获得管理方法即授予宿主管理员权限。
 
-Rpc 在每次调用时，按方法名的前缀从长到短做带 key 的读取，在已激活的进程服务 `managementMethods` 中解析命名空间（附录 F）。Rpc 不依赖这些提供方。没有已激活提供方的命名空间（未启用、Pending、Failed，或重载时新旧两代之间）返回 `unknown_method`，Rpc、已打开的连接和其他命名空间都不受影响。提供方卸载前已受理的调用按该方法的 `interruption` 处理（A.1）：卸载中的提供方以 `operation_interrupted` 结束其 `report` 调用，`drain` 调用会推迟卸载（§9.2）。
+Rpc 在每次调用时，按方法名的前缀从长到短做带 key 的读取，在已激活的进程服务 `managementMethods` 中解析命名空间（附录 F）。Rpc 不依赖这些提供方。提供方的行已启用但未激活（Pending、Failed，或重载时新旧两代之间）的命名空间返回 `service_reloading`；Rpc 根据 loader 的行状态（`Loader::entries`）判断。没有已启用提供方的命名空间返回 `unknown_method`。Rpc、已打开的连接和其他命名空间都不受影响。提供方卸载前已受理的调用按该方法的 `interruption` 处理（A.1）：卸载中的提供方以 `operation_interrupted` 结束其 `report` 调用，`drain` 调用如何推迟卸载，按 rutis 现有的生命周期处理（§9.2 已撤回）。
 
 ## 4. 时序与冲突
 
@@ -115,7 +115,7 @@ Rpc 在每次调用时，按方法名的前缀从长到短做带 key 的读取�
 | Session 级提供方在调用中途重载 | call < reload | `report`：`operation_interrupted`；`drain`：重载等待 | Rpc |
 | Session 的 Capability 重载期间调用 Session 方法 | — | `service_reloading` | Rpc |
 | 对没有该插件的 Session 调用 Session 方法 | — | `unknown_method` | Rpc |
-| 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `unknown_method`（有 §9.3 后为 `service_reloading`）；已受理的调用按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
+| 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `service_reloading`；已受理的调用按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法或 `daemon.shutdown` | — | `unknown_method` | Rpc |
 | 两个提供方声明同一命名空间或工具名 | 装配 | 装配失败；key 在每个作用域内唯一 | 装配 |
 | 工具贡献提供方在 turn 期间重载 | call < reload | ToolRegistry 及其依赖方重载；在途 turn 以 `Failed` 结束（D3，已接受） | ToolRegistry |
@@ -149,7 +149,7 @@ Rpc 在每次调用时，按方法名的前缀从长到短做带 key 的读取�
 | §4 第 2 条（交接） | 不适用：方法与工具贡献不交接任何对象；工具调用按现有 `step/tool-call` 合同交给 ToolExecutor。 |
 | §4 第 3 条（只用 before 回调） | Rpc 只校验参数格式和 `sessionId` 授权；功能检查归方法所有者，提交前的处理只用 Timeline before 回调。 |
 | §4 第 4 条（核心不带业务含义） | Rpc 与 ToolRegistry 按名称收集服务，从不点名提供方，也不解释方法。 |
-| §4 第 5 条（整个批次） | 不适用：本文没有依据 Timeline 事件做的决定；所有者依据自己的事实决定。 |
+| §4 第 5 条（批次） | 不适用：本文没有依据 Timeline 事件做的决定；所有者依据自己的事实决定。 |
 | §4 第 6 条（模型上下文） | 方法对模型不可见，`toolContribution` 只通过其声明和 `ToolResult` 到达模型（§5）。 |
 | §4 第 7 条（公开事件与服务） | 提供方只通过分支的公开服务到达分支，Rpc 只经 Session 的 `sessionMethods` 分发。 |
 | §4 第 8 条（需求） | 按名称查找 Session 服务、收集具名工具、卸载时等待 drain、列出进程级服务的已激活提供方，在 §9 提出。 |
@@ -241,7 +241,7 @@ Rpc 在每次调用时，按方法名的前缀从长到短做带 key 的读取�
 | 为 Rpc 内建方法保留 | `hello`、`daemon`、`agent`、`approval`、单独的 `session` 根，以及 `session.attach`、`session.branch_create`、`session.close`、`session.create`、`session.detach`、`session.history`、`session.idle`、`session.input_lookup`、`session.list`、`session.state`、`session.stop`、`session.submit`、`session.summaries`、`session.exec`、`session.mcp`、`session.model`、`session.permission`、`session.prompt`、`session.skills`。`session.input` 不保留：InputQueue 通过 `sessionMethods` 提供 `session.input.withdraw`（提议中），因此 Rpc 不点名任何所属服务 |
 | 优先级 | 内建方法，然后是进程表，然后是该 Session 的提供方；共用一个线上名称空间 |
 | Session 级调用 | 需要 `sessionId`（缺少时 `-32602`）。Rpc 对其授权，经 Agents acquire 该 Session（必要时恢复），并调用该 Session 中对应命名空间的 `sessionMethods`。提供方通过该分支的服务到达某个分支 |
-| 不分发 | 命名空间未提供或其提供方未激活，或在带 `deviceId` 的连接或未导出的链接上调用管理方法 → `-32601 unknown_method`。Session 正在重载 → `-32000 service_reloading`。已开始的 `report` 调用被中断 → `operation_interrupted` |
+| 不分发 | 命名空间未提供（没有已启用的提供方），或在带 `deviceId` 的连接或未导出的链接上调用管理方法 → `-32601 unknown_method`。Session 正在重载，或管理方法提供方已启用但未激活 → `-32000 service_reloading`。已开始的 `report` 调用被中断 → `operation_interrupted` |
 | `hello.features`（v3） | 内建方法；连接获得管理方法时，再加上 `hello` 时已激活的管理方法提供方的方法。在 §9.3 实现之前，Rpc 对已启用 loader 行在 `provides` 中声明的每个命名空间做带 key 的读取，列出已激活的那些。Session 级方法按 Session 列在 `session.state.methods` 中 |
 | 就绪闩 | 在 loader 的初始装载结算后打开，因此进程提供方在第一个 `hello` 时已存在 |
 
@@ -296,7 +296,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 | v3 裸 WebSocket，受保护 profile | `local_transport_required` | 相同 |
 | v3 RemoteGateway（新） | 不存在；execution Session 方法（`session.permission.get/update`、`session.exec.stop`、`session.skills`、`session.model.update`、`session.prompt.refresh`、`session.mcp`、`session.mcp.refresh`）仅限本地 | **兼容性变更（E3）：** 对已配对设备可用；管理名称 `unknown_method` |
 | v3，MCP 已禁用 | `mcp.*` `unknown_method` | 相同，使用 Rpc 的消息 |
-| v3，Mcp 正在重载 | `service_reloading` | §9.3 实现前为**兼容性变更**：Mcp 重新激活前 `mcp.*` 返回 `unknown_method`。Rpc 不重载，连接保持打开；有 §9.3 后恢复为 `service_reloading` |
+| v3，Mcp 正在重载 | `service_reloading` | 不变：Mcp 重新激活前 `mcp.*` 返回 `service_reloading`；Rpc 不重载，连接保持打开 |
 
 不增加协议版本，持久化格式不变。
 

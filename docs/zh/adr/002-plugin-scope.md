@@ -42,7 +42,7 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 |
 | 把内容放入模型上下文 | Session 或分支输入（被采纳的输入）、工具结果 |
 | 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调：在提交锁内同步变换草稿，不阻止写入，不等待外部工作，失败时提交原草稿（[原则 §4 第 3 条](../../architecture/rust-agent/principles.md)） |
-| 在输入被应用前撤回它 | `input/withdraw {input_id, reason?}` 指令事件（由客户端、进程内调用方，或该输入所在批次中的 before 回调发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
+| 在输入被应用前撤回它 | `input/withdraw {input_id, reason?}` 指令事件（由客户端或进程内调用方发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
 | 暴露关于某个 Session 的客户端方法 | Session 级 `sessionMethods` 服务，由 Rpc 经该 Session 分发 |
 | 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的 `managementMethods` 服务；已配对设备的连接不会获得管理方法 |
 | 访问其他 Session | Agents 的 `sessions` 服务（AgentIndex 和 Session 公共接口），与 Collaboration 的做法相同 |
