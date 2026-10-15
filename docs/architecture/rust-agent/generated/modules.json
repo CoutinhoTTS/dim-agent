@@ -1609,6 +1609,7 @@
       "file": "crates/dim-cli/src/main.rs",
       "unexpandedMacros": [
         "eprintln",
+        "format",
         "matches",
         "print",
         "println",
@@ -12728,6 +12729,7 @@
         "path Action::Help",
         "path Action::Login",
         "path Action::Logout",
+        "path Action::McpEnable",
         "path Action::McpList",
         "path Action::Models",
         "path Action::Version",
