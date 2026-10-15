@@ -272,7 +272,7 @@ CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)
 | 结构恰为 v15、标记为 15 | 打开 |
 | 其他（更旧的格式、分支专用 v14、未知结构） | 照旧拒绝并保留 |
 
-升级是单向的。v13 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库，降级需要能读 v15 的守护进程。这是可以接受的：改动是增量的，而另一种做法，即拒绝所有 v13 库，会丢失用户的 Session。之后的格式各自追加从前一版本出发的一步。测试用 v13 结构的冻结副本构建一次性 v13 库，从不打开用户的库（AGENTS.md）。
+升级是单向的。v13 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。这是可以接受的：改动是增量的，而另一种做法，即拒绝所有 v13 库，会丢失用户的 Session。之后的格式各自追加从前一版本出发的一步。测试用 v13 结构的冻结副本构建一次性 v13 库，从不打开用户的库（AGENTS.md）。
 
 ## 9. 接口
 

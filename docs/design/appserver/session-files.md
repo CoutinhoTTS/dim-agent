@@ -370,10 +370,10 @@ before writable PRAGMAs):
 | Anything else (older formats, the branch-only v14, unknown schemas) | Refuse and preserve, as today |
 
 The upgrade is one-way. A v13 daemon refuses an upgraded store with the existing "unsupported
-SQLite schema … preserved" error, so downgrading needs a v15-capable daemon. This is accepted
-because the change is additive and the alternative, refusing every v13 store, loses users'
-Sessions. Later formats append their own step from their predecessor. Tests build disposable v13
-stores from a frozen copy of the v13 schema and never open a user's store (AGENTS.md).
+SQLite schema … preserved" error. This is accepted because the change is additive and the
+alternative, refusing every v13 store, loses users' Sessions. Later formats append their own step
+from their predecessor. Tests build disposable v13 stores from a frozen copy of the v13 schema and
+never open a user's store (AGENTS.md).
 
 ## 9. Interface
 
