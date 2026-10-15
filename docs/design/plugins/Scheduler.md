@@ -4,7 +4,7 @@ Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); 
 
 > **Dependencies to change in design review ([#35](https://github.com/arcships/dim/issues/35)).** The `schedule` tool looks up `scheduleJobs` on each call, and the process part gets `sessions` on each use, instead of holding them as dependencies. A reload of Agents or Scheduler then fails one call and never reloads every Session.
 
-> **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned with rutis' existing node behaviour in P3. In P1/P2 every Session uses the control node.
+> **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
 > **To refine in design review.** Notifying a run's outcome is Scheduler's own feature. The run-outcome event notice for Notifications and the cross-language named process events it requires (§9.1) are withdrawn with Notifications.
 

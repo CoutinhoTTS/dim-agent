@@ -172,7 +172,7 @@ sequenceDiagram
 | 原则 §4 第 2 条（交接） | 不适用：Web 不接手任何对象，只执行 ToolExecutor 交给它的调用。 |
 | 原则 §4 第 3 条（只用 before 回调） | 不在写入前干预；参数检查在工具处理函数内部。 |
 | 原则 §4 第 4 条（核心不带业务含义） | 不改核心；工具使用通用的 `toolContribution` 合同。 |
-| 原则 §4 第 5 条（读完整个批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
+| 原则 §4 第 5 条（批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 结果只以 ToolExecutor 写入的 `step/tool-result` 事实进入模型。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolContribution`、Settings 业务来源和凭据解析器。 |
 | 原则 §4 第 8 条（向机制所有者提需求） | 没有自己对运行时或 rutis 的需求；所用的 Settings 补充列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)；#4 写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。 |

@@ -277,7 +277,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title.
 8. Reload during generation writes nothing; the next input generates. Three failures stop attempts.
 9. Invalid rename inputs return `invalid_params`.
-10. A first input denied by a Hook (withdrawn in its own batch) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
+10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
 
 ## Appendix E. Assumptions
 
@@ -292,7 +292,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | A7 | Session fork does not copy the title | Judgment | Fork shows the source title |
 | A8 | A first user input without text produces no automatic title | Decision: title from first user input | Later inputs or a placeholder |
 | A9 | Generation waits for adoption (`input/applied`); a deleted input never titles the Session | Maintainer decision | Deleted text could reach the auxiliary model |
-| A10 | "User input" means operator input: `user` content (source-written inputs carry raw blocks only) | Judgment | Source-written inputs could title a Session |
+| A10 | "User input" means operator input: in an interactive leader Session it is the input with `user` content, since Collaboration, Goal and ShellInput write raw blocks only (Scheduler and Workflow inputs carry `user` content but run in non-interactive Sessions, which SessionTitle does not title) | Judgment | Source-written inputs could title a Session |
 | A11 | SessionStore announces title changes with a Session broadcast notice; a client that is not subscribed sees the change at its next `session.list` | Principles §4 rule 9 | Clients poll `session.list` |
 
 ## Appendix F. Open questions

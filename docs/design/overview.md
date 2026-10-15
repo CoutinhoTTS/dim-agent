@@ -125,7 +125,7 @@ flowchart LR
   end
   Rpc -.->|"look up per call"| MM
   Rpc -->|"sessionMethods"| SP
-  TR -.->|"attach toolContribution while active"| SP
+  TR -.->|"attach toolContribution at Session load"| SP
   SP -->|"listen"| BC
   BP -->|"before callback"| TL
   BP -->|"subscribe in order"| DP
@@ -134,7 +134,7 @@ flowchart LR
   SP -->|"branch services"| BP
 ```
 
-The arrows are dependency edges, and they point to the same or an enclosing scope (D3). Dependencies point from extensions to the core (D3): a core collector never depends on optional contributors. ToolRegistry attaches an optional plugin's tools while it is active, Rpc looks up management method owners on each call (the dotted arrow, [methods §3.2](contracts/session-boundary.md#32-management-method)), and Session assembly does not wait for optional parts, so an inactive or reloading provider affects only its own features. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
+The arrows are dependency edges, and they point to the same or an enclosing scope (D3). Dependencies point from extensions to the core (D3): a core collector never depends on optional contributors. ToolRegistry attaches the tools of optional plugins active when the Session loads (later ones on the next reload), Rpc looks up management method owners on each call (the dotted arrow, [methods §3.2](contracts/session-boundary.md#32-management-method)), and Session assembly does not wait for optional parts, so an inactive or reloading provider affects only its own features. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
 
 ### 3.1 Contract form
 
@@ -399,9 +399,9 @@ Prerequisites always land in an earlier phase than their consumers.
 | Phase | Content |
 | --- | --- |
 | P0 Foundation | `SessionConfig` fields set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; `ConnectionEntry {name, deviceId}`; `toolContribution` in ToolRegistry; Permission categories; Settings business sources with change notification, credential resolver; `pluginFiles` (extended: binary, format version); Provider purpose policy and `AuxiliaryModel`; SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
-| P1 Core interaction | Questions, ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
+| P1 Core interaction | Questions (needs redesign), ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
 | P2 Feature extension | Goal, Web, Scheduler, Workflow; ModelProvider `ModelCallScope`; Collaboration member approvals delivered to the leader as input; Transport `EntryHost`; Mcp OAuth; production compaction host |
-| P3 External integration | ExternalAgent, AcpGateway, RemoteGateway, Modality; PluginManager (#3, #4); resource node import (#5) |
+| P3 External integration | ExternalAgent, AcpGateway, RemoteGateway, Modality; PluginManager; resource nodes (services looked up per call by `resourceNode`) |
 
 The HostPlatform exec-shell change recorded in ADR 002 (business configuration read per spawn) is separate work and blocks no phase. So is the follow-up code change that removes the existing `mcp.approve`/`mcp.revoke` methods and their approval records (§6.4 Approval scope).
 

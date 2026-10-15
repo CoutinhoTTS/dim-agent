@@ -172,7 +172,7 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 | Principles §4 rule 2 (handover) | Not applicable: Web takes over no object; it only runs calls ToolExecutor hands it. |
 | Principles §4 rule 3 (before callbacks only) | No intervention before a write; argument checks are inside the tool handler. |
 | Principles §4 rule 4 (no business meaning in core) | No core change; the tools use the generic `toolContribution` contract. |
-| Principles §4 rule 5 (read the whole batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
+| Principles §4 rule 5 (batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
 | Principles §4 rule 6 (context from handed-over events) | Results reach the model only as `step/tool-result` facts written by ToolExecutor. |
 | Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution`, the Settings business source and the credential resolver. |
 | Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement of its own; the Settings supplements it uses are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins); #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |

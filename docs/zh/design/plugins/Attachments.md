@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
 
-> **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按 rutis 现有的节点行为重新设计。P1/P2 中每个 Session 都使用控制节点。
+> **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
 让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（拟议的 ModelProvider 补充，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。Attachments 是一个小型 Session 插件，通过 `sessionMethods` 服务（Session 作用域，key `attachment`）提供一个 Session 方法 `attachment.put`（[session-boundary](../contracts/session-boundary.md)）；契约以语言中立形式给出，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法把文本附件（一次大段粘贴）存为由 SessionStore 拥有、位于 Session 资源节点上的不可变 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为。没有事件。
 
@@ -141,7 +141,7 @@ CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请�
 | 原则 §4 第 2 条（交接） | Attachments 不处理输入；图片只在 `input/message` 中进入，照常由 `input/applied` 交给 Loop。 |
 | 原则 §4 第 3 条（只用 before 回调） | RPC 入口和 Session 入口不加检查：Rpc 只查参数形状，图片检查在 CLI 和 ModelProvider 构建请求时进行（原则 §4 第 3 条）。 |
 | 原则 §4 第 4 条（核心不带业务含义） | 不改核心；ModelProvider 的图片处理对所有图片块一样，不区分写入方。 |
-| 原则 §4 第 5 条（读完整个批次） | 不适用：Attachments 不依据事件做决定。 |
+| 原则 §4 第 5 条（批次） | 不适用：Attachments 不依据事件做决定。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 图片只从已消费的输入进入模型；被删除的输入不进入上下文。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | Attachments 只使用 `sessionMethods` 和 SessionStore 公开的 Session 文件操作。 |
 | 原则 §4 第 8 条（向机制所有者提需求） | 唯一的运行时或 rutis 需求 #5 写在 [ExternalAgent §9](ExternalAgent.md#9-向机制所有者提出的需求)。ModelProvider 补充是对其他插件的需求，列在[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)，理由见 A.1。 |

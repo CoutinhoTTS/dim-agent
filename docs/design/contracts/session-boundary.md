@@ -106,19 +106,19 @@ sequenceDiagram
 
 The connection's entry record is the only check. Being served management methods grants host administrator rights.
 
-Rpc resolves the namespace on each call by keyed reads of the method name's prefixes, longest first, among the active process services `managementMethods` (Appendix F). Rpc does not depend on these providers. A namespace whose provider row is enabled but not active (Pending, Failed, or between generations while it reloads) returns `service_reloading`; Rpc tells this from the loader's row status (`Loader::entries`). A namespace with no enabled provider returns `unknown_method`. Rpc, open connections and the other namespaces are unaffected. A call admitted before its provider unloads follows the method's `interruption` (A.1): the unloading provider ends its `report` calls with `operation_interrupted`, and how a `drain` call holds the unload follows rutis' existing lifecycle (§9.2 is withdrawn).
+Rpc resolves the namespace on each call by keyed reads of the method name's prefixes, longest first, among the active process services `managementMethods` (Appendix F). Rpc does not depend on these providers. A namespace whose provider row is enabled but Pending or between generations while it reloads returns the retryable `service_reloading`; one whose row is Failed or Unresolved returns the non-retryable `service_unavailable`. Rpc tells these apart from the loader's row status (`Loader::entries`). A namespace with no enabled provider returns `unknown_method`. Rpc, open connections and the other namespaces are unaffected. A call admitted before its provider unloads follows the method's `interruption` (A.1): the unloading provider ends its `report` calls with `operation_interrupted`, and how a `drain` call holds the unload follows rutis' existing lifecycle (§9.2 is withdrawn).
 
 ## 4. Timing and conflicts
 
 | Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Session-scoped provider reloads mid-call | call < reload | `report`: `operation_interrupted`; `drain`: reload waits | Rpc |
+| Session-scoped provider reloads mid-call | call < reload | `report`: `operation_interrupted`; `drain`: the provider settles its admitted calls in its own cleanup before it unloads (AGENTS.md rule 8) | Rpc |
 | Session method while the Session's capabilities reload | — | `service_reloading` | Rpc |
 | Session method on a Session without that plugin | — | `unknown_method` | Rpc |
 | Management owner reloads | — | Calls into its namespace return `service_reloading` until the new generation is active; admitted calls follow their `interruption`; Rpc does not reload and connections stay open | Rpc |
 | Management method or `daemon.shutdown` on a connection with a `deviceId` | — | `unknown_method` | Rpc |
 | Two providers claim one namespace or tool name | assembly | Assembly fails; keys are unique per scope | Assembly |
-| Tool-contribution provider reloads during a turn | call < reload | ToolRegistry and dependants reload; the in-flight turn ends `Failed` (D3, accepted) | ToolRegistry |
+| Tool-contribution provider reloads during a turn | call < reload | The in-flight call fails; that provider's tools are absent until the Session's next reload; ToolRegistry and Loop keep running (D3) | ToolRegistry |
 
 Full table: [Appendix B](#appendix-b-full-conflict-table).
 
@@ -152,7 +152,7 @@ The connection's `ConnectionEntry {name, deviceId}` is the only authority for wh
 | §4 rule 5 (batch) | Not applicable: no decision here is taken on a Timeline event; owners decide from their own facts. |
 | §4 rule 6 (model context) | Methods have no model-visible effect, and a `toolContribution` reaches the model only through its declaration and `ToolResult` (§5). |
 | §4 rule 7 (public events and services) | Providers reach branches only through the branch's public services, and Rpc dispatches only through the Session's `sessionMethods`. |
-| §4 rule 8 (requirements) | Session lookup by name, named tool collection, drain on unload and listing the active providers of a process-scoped service are raised in §9. |
+| §4 rule 8 (requirements) | Session lookup by name and named tool collection are raised in §9; drain on unload and listing active providers are withdrawn (rutis is an external dependency). |
 | §4 rule 9 (only decision facts in the Timeline) | Method tables and served entries are assembly data, never Timeline facts (§2). |
 | §1 (Capability and App Server boundary) | Rpc only collects and dispatches; the business code of every method lives in its provider's plugin. |
 | ADR 002 D1 | `sessionMethods` and `toolContribution` are Session-scoped, `managementMethods` process-scoped, matching their owners. |
@@ -241,8 +241,8 @@ Cancellation: when a `report` call is interrupted, Rpc sends a cancel request fo
 | Reserved for Rpc built-ins | `hello`, `daemon`, `agent`, `approval`, the bare `session` root and `session.attach`, `session.branch_create`, `session.close`, `session.create`, `session.detach`, `session.history`, `session.idle`, `session.input_lookup`, `session.list`, `session.state`, `session.stop`, `session.submit`, `session.summaries`, `session.exec`, `session.mcp`, `session.model`, `session.permission`, `session.prompt`, `session.skills`. `session.input` is not reserved: InputQueue provides `session.input.withdraw` through `sessionMethods` (proposed), so Rpc names no owning service |
 | Precedence | Built-ins, then the process table, then the Session's providers; one wire name space |
 | Session-scoped call | Requires `sessionId` (`-32602` without it). Rpc authorizes it, acquires the Session through Agents (restoring if needed) and calls the Session's `sessionMethods` for the namespace. The provider reaches a branch through that branch's services |
-| Not dispatched | Namespace not provided (no enabled provider), or a management method on a connection with a `deviceId` or an unexported link → `-32601 unknown_method`. Session reloading, or a management provider enabled but not active → `-32000 service_reloading`. A started `report` call interrupted → `operation_interrupted` |
-| `hello.features` (v3) | Built-ins, plus the methods of the management providers active at `hello` when the connection is served management methods. Until §9.3 exists, Rpc makes a keyed read of each namespace that enabled loader rows declare in their `provides` and lists the active ones. Session-scoped methods are listed per Session in `session.state.methods` |
+| Not dispatched | Namespace not provided (no enabled provider), or a management method on a connection with a `deviceId` or an unexported link → `-32601 unknown_method`. Session reloading, or a management provider that is Pending or between generations → `-32000 service_reloading` (retryable). A management provider whose row is Failed or Unresolved → `-32000 service_unavailable` (not retryable). A started `report` call interrupted → `operation_interrupted` |
+| `hello.features` (v3) | Built-ins, plus the methods of the management providers active at `hello` when the connection is served management methods. Rpc makes a keyed read of each namespace that enabled loader rows declare in their `provides` and lists the active ones. Session-scoped methods are listed per Session in `session.state.methods` |
 | Ready latch | Opens after the loader's initial load settles, so process providers are present at the first `hello` |
 
 Known Session-scoped namespaces: `session.question` (Questions), `session.goal` (Goal), `session.rename` (SessionTitle), `session.input` (InputQueue), `attachment` (Attachments), `shell` (ShellInput), `hooks` (Hooks), `notifications` (Notifications, including `notifications.test`). Each plugin document is authoritative for its methods.
@@ -302,7 +302,7 @@ No protocol version is added and persistence formats are unchanged.
 
 ### A.5 Tool contribution
 
-ToolRegistry supplement: besides tools registered today, ToolRegistry accepts named tool services. A plugin declares `toolContribution[<tool name>]` at Session scope in its `provides`, and ToolRegistry attaches each tool service while its provider is active, without a hard dependency on it; a provider that is missing, Pending or reloading means its tools are absent and nothing else stops (ADR 002 D3, #34). Existing rules for name uniqueness, collisions with host tools and enablement through `SessionConfig.tools` are unchanged ([tool contributions](../../architecture/rust-agent/tool-contributions.md)).
+ToolRegistry supplement: besides tools registered today, ToolRegistry accepts named tool services. A plugin declares `toolContribution[<tool name>]` at Session scope in its `provides`, and ToolRegistry attaches the tool services whose providers are active when the Session loads, without a hard dependency on them; a provider that is missing, Pending or reloading means its tools are absent and nothing else stops, and a provider that becomes active later is attached on the next Session reload (ADR 002 D3, #34). Existing rules for name uniqueness, collisions with host tools and enablement through `SessionConfig.tools` are unchanged ([tool contributions](../../architecture/rust-agent/tool-contributions.md)).
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
@@ -349,7 +349,8 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 | --- | --- |
 | Not provided, provider not active, or not served to the connection, or v1/v2 | `-32601`, `unknown_method` |
 | Session-scoped method without `sessionId` | `-32602` |
-| Session reloading | `-32000`, `service_reloading` |
+| Session reloading, or a management provider Pending or between generations | `-32000`, `service_reloading` (retryable) |
+| Management provider Failed or Unresolved | `-32000`, `service_unavailable` (not retryable) |
 | `report` call interrupted | `-32000`, `operation_interrupted` |
 | Provider error | `-32000`, provider's `appError` |
 
@@ -380,7 +381,7 @@ The neutral services above map to Rust as follows. Rust plugins may use these ty
 | --- | --- | --- | --- |
 | `sessionMethods[ns]` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, `SessionScope::named_key::<SessionMethodContribution>(ns)` | `AgentBuilder::session_methods(ns)` | `Session::method(ns)` |
 | `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)`, process scope, instance key `ns` | loader row | Per call: `Ctx::get_as::<ManagementMethods>` with the namespace key; not in Rpc's `Deps` |
-| `toolContribution[tool]` | `ToolContribution {definition, handler}`, `SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)` (existing) | ToolRegistry attaches it while active, no hard dependency (D3); today's `Contributions<ToolContribution>` is a hard dependency and changes |
+| `toolContribution[tool]` | `ToolContribution {definition, handler}`, `SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)` (existing) | ToolRegistry attaches it if active at Session load, no hard dependency (D3); today's `Contributions<ToolContribution>` is a hard dependency and changes |
 | `callChannel` | `CallChannel`, `ConnectionNotifier` passed to `MethodProvider::call` | — | — |
 
 ```rust
