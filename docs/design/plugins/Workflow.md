@@ -420,7 +420,7 @@ One binding of the neutral contracts, for a Rust implementation; a TypeScript im
 | Neutral | Rust |
 | --- | --- |
 | `toolContribution` key `workflow` | Session-scoped `ToolContribution` registered in `WorkflowSession`'s `provides` |
-| `managementMethods` key `workflow` | Entry of `Contributions<ManagementMethods>` collected by Rpc |
+| `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions.launch` | `AgentIndex::launch(LaunchRequest) -> SessionUse` |
 | `sessions.input` / `history` / `idle` / `stop` / `withdraw` | `AgentIndex::acquire(id)` lease, then `Session::input`, `local_page`, `idle`, `stop`, `service::<InputQueue>(branch).withdraw` |
 | `workflowRuns` | Process-scoped named service provided by `Workflow`, consumed by `WorkflowSession` |

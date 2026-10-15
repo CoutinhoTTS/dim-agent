@@ -455,7 +455,7 @@ One binding of the neutral contracts, for a Rust implementation; a TypeScript im
 | Model chunks (A.4) | `ModelChunk::{MessageStart, Text, Thinking, TextEnd, Usage, MessageStop}` |
 | Process storage | `pluginFiles` (extended) scope opened in `apply` |
 | `sessions.history` | `AgentIndex` get, then `Session::local_page(branch_id, after, limit, through)` |
-| `managementMethods` key `external_agents` | Entry of `Contributions<ManagementMethods>` collected by Rpc |
+| `managementMethods` key `external_agents` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 
 ```rust
 trait Bridge { // internal, not exported

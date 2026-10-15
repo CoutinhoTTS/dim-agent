@@ -455,7 +455,7 @@ ExternalAgent 本身不追加任何内容，不订阅任何 Dispatcher，也不�
 | 模型块（A.4） | `ModelChunk::{MessageStart, Text, Thinking, TextEnd, Usage, MessageStop}` |
 | 进程存储 | 在 `apply` 中打开的 `pluginFiles`（扩展）作用域 |
 | `sessions.history` | `AgentIndex` get，然后 `Session::local_page(branch_id, after, limit, through)` |
-| `managementMethods` key `external_agents` | 由 Rpc 收集的 `Contributions<ManagementMethods>` 条目 |
+| `managementMethods` key `external_agents` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 
 ```rust
 trait Bridge { // 内部，不导出
