@@ -1,6 +1,8 @@
 #![cfg(any(unix, windows))]
 
-use dim_agent_capabilities::file_storage::{FileStorage, FileStorageError, FileStoragePlugin};
+use dim_agent_capabilities::file_storage::{
+    DirectoryEntry, EntryKind, FileStorage, FileStorageError, FileStoragePlugin,
+};
 use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, TypedPlugin};
 #[cfg(unix)]
@@ -137,6 +139,229 @@ async fn concurrent_first_locks_preserve_exclusion_and_independent_writes() {
     }
     root_a.shutdown().await.unwrap();
     root_b.shutdown().await.unwrap();
+}
+
+fn entry(name: &str, kind: EntryKind) -> DirectoryEntry {
+    DirectoryEntry {
+        name: name.into(),
+        kind,
+    }
+}
+
+#[tokio::test]
+async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
+    let directory = Directory::new();
+    let root_path = directory.0.join("authorized");
+    let outside = directory.0.join("outside");
+    fs::write(outside.join("secret"), b"outside").unwrap();
+    let (root, _, storage) = mount(root_path.clone()).await;
+    let cancel = CancellationToken::new();
+    let path = |relative: &str| storage.path(0, relative).unwrap();
+
+    // Session files: one directory per attachment, written through storage,
+    // which leaves its lock resources beside each file.
+    for id in ["a1", "a2"] {
+        fs::create_dir_all(root_path.join(format!("sessions/s1/attachments/{id}"))).unwrap();
+        let file = path(&format!("sessions/s1/attachments/{id}/paste.txt"));
+        storage
+            .replace(&file, b"pasted".to_vec(), None, &cancel)
+            .await
+            .unwrap();
+    }
+    // A held account marker and the reserved directory are never listed.
+    let account = storage
+        .lock(&path("sessions/s1/auth.json"), &cancel)
+        .await
+        .unwrap();
+    assert!(root_path.join("sessions/s1/auth.json.lock").exists());
+    assert_eq!(
+        storage.list(&path("sessions/s1"), &cancel).await.unwrap(),
+        [entry("attachments", EntryKind::Directory)]
+    );
+    assert_eq!(
+        storage
+            .list(&path("sessions/s1/attachments"), &cancel)
+            .await
+            .unwrap(),
+        [
+            entry("a1", EntryKind::Directory),
+            entry("a2", EntryKind::Directory)
+        ]
+    );
+    assert_eq!(
+        storage
+            .list(&path("sessions/s1/attachments/a1"), &cancel)
+            .await
+            .unwrap(),
+        [entry("paste.txt", EntryKind::File)]
+    );
+    assert!(matches!(
+        storage
+            .list(&path("sessions/s1/attachments/a1/paste.txt"), &cancel)
+            .await,
+        Err(FileStorageError::Io(_))
+    ));
+    // Filesystem aliases of the marker and reserved directory stay protected.
+    if root_path.join("sessions/s1/AUTH.JSON.LOCK").exists() {
+        let marker = path("sessions/s1/AUTH.JSON.LOCK");
+        assert!(storage.remove(&marker, &cancel).await.is_err());
+        let reserved = path("sessions/s1/.DIM-FILE-STORAGE-LOCKS");
+        assert!(matches!(
+            storage.list(&reserved, &cancel).await,
+            Err(FileStorageError::Io(_))
+        ));
+        assert!(storage.remove(&reserved, &cancel).await.is_err());
+        assert!(root_path.join("sessions/s1/auth.json.lock").exists());
+        assert!(
+            root_path
+                .join("sessions/s1/.dim-file-storage-locks")
+                .is_dir()
+        );
+    }
+    // A reserved directory first created under an alias is hidden by identity.
+    fs::create_dir_all(root_path.join("aliased/.DIM-FILE-STORAGE-LOCKS")).unwrap();
+    storage
+        .replace(&path("aliased/data.json"), b"{}".to_vec(), None, &cancel)
+        .await
+        .unwrap();
+    let aliased = storage.list(&path("aliased"), &cancel).await.unwrap();
+    if same_file(
+        &root_path.join("aliased/.DIM-FILE-STORAGE-LOCKS"),
+        &root_path.join("aliased/.dim-file-storage-locks"),
+    ) {
+        assert_eq!(aliased, [entry("data.json", EntryKind::File)]);
+    } else {
+        assert_eq!(
+            aliased,
+            [
+                entry(".DIM-FILE-STORAGE-LOCKS", EntryKind::Directory),
+                entry("data.json", EntryKind::File)
+            ]
+        );
+    }
+
+    // A file is removed under the lock leases use.
+    let leased = path("sessions/s1/attachments/a2/paste.txt");
+    let mut retained = storage.lock(&leased, &cancel).await.unwrap();
+    assert!(matches!(
+        storage.remove(&leased, &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    assert_eq!(retained.read(&cancel).await.unwrap(), b"pasted");
+
+    // Removing an attachment directory takes its storage resources with it.
+    storage
+        .remove(&path("sessions/s1/attachments/a1"), &cancel)
+        .await
+        .unwrap();
+    assert!(!root_path.join("sessions/s1/attachments/a1").exists());
+    assert_eq!(
+        storage
+            .list(&path("sessions/s1/attachments"), &cancel)
+            .await
+            .unwrap(),
+        [entry("a2", EntryKind::Directory)]
+    );
+
+    // A lease anywhere beneath a directory stops its removal, and a partial
+    // removal never gives up a held lock: leased files stay exclusive.
+    let session = path("sessions/s1");
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        storage.remove(&session, &cancelled).await,
+        Err(FileStorageError::Cancelled)
+    ));
+    assert!(matches!(
+        storage.list(&session, &cancelled).await,
+        Err(FileStorageError::Cancelled)
+    ));
+    assert!(matches!(
+        storage.remove(&session, &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    assert!(matches!(
+        storage.lock(&leased, &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    retained
+        .replace(b"still leased".to_vec(), None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.read(&leased, &cancel).await.unwrap(),
+        b"still leased"
+    );
+    drop(retained);
+    // A held lock on a missing file stops it too, after earlier entries went.
+    assert!(matches!(
+        storage.remove(&session, &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    assert!(!root_path.join("sessions/s1/attachments").exists());
+    assert!(root_path.join("sessions/s1/auth.json.lock").exists());
+    assert!(matches!(
+        storage.lock(&path("sessions/s1/auth.json"), &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    drop(account);
+    storage.remove(&session, &cancel).await.unwrap();
+    assert!(!root_path.join("sessions/s1").exists());
+    let sessions = path("sessions");
+    assert!(storage.list(&sessions, &cancel).await.unwrap().is_empty());
+    storage.remove(&path("aliased"), &cancel).await.unwrap();
+    assert!(!root_path.join("aliased").exists());
+
+    // Removal ensures absence; listing an absent directory reports it.
+    storage.remove(&path("sessions/s1"), &cancel).await.unwrap();
+    storage
+        .remove(&path("missing/parent/file"), &cancel)
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage.list(&path("sessions/s1"), &cancel).await,
+        Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+
+    // Links are listed and removed themselves, never followed.
+    fs::create_dir_all(root_path.join("sessions/s2")).unwrap();
+    symlink(&outside, root_path.join("sessions/s2/linked-directory")).unwrap();
+    symlink(
+        outside.join("secret"),
+        root_path.join("sessions/s2/linked-file"),
+    )
+    .unwrap();
+    assert_eq!(
+        storage.list(&path("sessions/s2"), &cancel).await.unwrap(),
+        [
+            entry("linked-directory", EntryKind::Other),
+            entry("linked-file", EntryKind::Other)
+        ]
+    );
+    symlink(&outside, root_path.join("linked")).unwrap();
+    assert!(matches!(
+        storage.list(&path("linked"), &cancel).await,
+        Err(FileStorageError::Io(_))
+    ));
+    assert!(matches!(
+        storage.remove(&path("linked/secret"), &cancel).await,
+        Err(FileStorageError::Io(_))
+    ));
+    storage.remove(&path("sessions/s2"), &cancel).await.unwrap();
+    storage.remove(&path("linked"), &cancel).await.unwrap();
+    assert!(fs::symlink_metadata(root_path.join("sessions/s2")).is_err());
+    assert!(fs::symlink_metadata(root_path.join("linked")).is_err());
+    assert_eq!(fs::read(outside.join("secret")).unwrap(), b"outside");
+
+    root.shutdown().await.unwrap();
+    assert!(matches!(
+        storage.list(&sessions, &cancel).await,
+        Err(FileStorageError::Closed)
+    ));
+    assert!(matches!(
+        storage.remove(&sessions, &cancel).await,
+        Err(FileStorageError::Closed)
+    ));
 }
 
 #[tokio::test]

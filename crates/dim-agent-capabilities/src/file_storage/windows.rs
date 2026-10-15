@@ -23,8 +23,8 @@ use windows_sys::{
     },
     Win32::{
         Foundation::{
-            ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, LocalFree, RtlNtStatusToDosError,
-            UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, LocalFree,
+            RtlNtStatusToDosError, UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
@@ -41,8 +41,6 @@ use windows_sys::{
     },
 };
 
-const LOCK_DIRECTORY: &str = ".dim-file-storage-locks";
-const TEMPORARY_DIRECTORY: &str = ".dim-file-storage-temps";
 const DIRECTORY_ACCESS: u32 =
     FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL;
 
@@ -88,7 +86,8 @@ fn nt_result(status: i32) -> io::Result<()> {
         ))
     }
 }
-fn open(
+/// Opens or creates the entry itself: a reparse point is opened, not followed.
+fn create(
     parent: Option<&File>,
     name: &OsStr,
     access: u32,
@@ -130,7 +129,19 @@ fn open(
             0,
         )
     })?;
-    let file = unsafe { File::from_raw_handle(handle) };
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+/// Opens or creates a disk file or directory of the requested type, never a
+/// reparse point.
+fn open(
+    parent: Option<&File>,
+    name: &OsStr,
+    access: u32,
+    disposition: u32,
+    options: u32,
+    security: PSECURITY_DESCRIPTOR,
+) -> io::Result<File> {
+    let file = create(parent, name, access, disposition, options, security)?;
     let validated = (|| {
         let metadata = file.metadata()?;
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -229,22 +240,22 @@ pub(crate) fn open_root(path: &Path) -> Result<File> {
     }
     Ok(root)
 }
-pub(super) fn same_identity(a: &File, b: &File) -> io::Result<bool> {
-    fn identity(file: &File) -> io::Result<FILE_ID_INFO> {
-        let mut id = FILE_ID_INFO::default();
-        if unsafe {
-            GetFileInformationByHandleEx(
-                file.as_raw_handle(),
-                FileIdInfo,
-                (&mut id as *mut FILE_ID_INFO).cast(),
-                size_of::<FILE_ID_INFO>() as u32,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(id)
+fn identity(file: &File) -> io::Result<FILE_ID_INFO> {
+    let mut id = FILE_ID_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&mut id as *mut FILE_ID_INFO).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
     }
+    Ok(id)
+}
+pub(super) fn same_identity(a: &File, b: &File) -> io::Result<bool> {
     let (a, b) = (identity(a)?, identity(b)?);
     Ok(a.VolumeSerialNumber == b.VolumeSerialNumber && a.FileId.Identifier == b.FileId.Identifier)
 }
@@ -254,35 +265,148 @@ pub(super) fn parent(mut root: File, path: &Path) -> io::Result<(File, OsString)
         if components.peek().is_none() {
             return Ok((root, name.to_os_string()));
         }
-        let next = open(
-            Some(&root),
-            name,
-            DIRECTORY_ACCESS,
+        root = open_directory(&root, name)?;
+    }
+    unreachable!("validated file path")
+}
+/// Opens a business directory below `parent`; the reserved directory is
+/// refused under every spelling the filesystem equates with it.
+pub(super) fn open_directory(parent: &File, name: &OsStr) -> io::Result<File> {
+    let next = open(
+        Some(parent),
+        name,
+        DIRECTORY_ACCESS,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE,
+        null_mut(),
+    )?;
+    match reserved_directory(parent)? {
+        Some(reserved) if same_identity(&next, &reserved)? => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reserved storage directory",
+        )),
+        _ => Ok(next),
+    }
+}
+/// Opens a directory to remove. Mount points are reparse points, which
+/// `open` refuses, so another volume is never entered.
+pub(super) fn subdirectory(parent: &File, name: &OsStr) -> io::Result<File> {
+    open_directory(parent, name)
+}
+pub(super) fn reserved_directory(directory: &File) -> io::Result<Option<File>> {
+    match open(
+        Some(directory),
+        OsStr::new(LOCK_DIRECTORY),
+        DIRECTORY_ACCESS,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE,
+        null_mut(),
+    ) {
+        Ok(locks) => Ok(Some(locks)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+pub(super) fn open_key(locks: &File, name: &OsStr) -> io::Result<File> {
+    open(
+        Some(locks),
+        name,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+        null_mut(),
+    )
+}
+/// The 128-bit file id within the listed directory's volume.
+pub(super) type Identity = [u8; 16];
+fn kind(attributes: u32) -> EntryKind {
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        EntryKind::Other
+    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        EntryKind::Directory
+    } else {
+        EntryKind::File
+    }
+}
+pub(super) fn entry_kind(parent: &File, name: &OsStr) -> io::Result<Option<EntryKind>> {
+    match create(
+        Some(parent),
+        name,
+        FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        0,
+        null_mut(),
+    ) {
+        Ok(entry) => Ok(Some(kind(entry.metadata()?.file_attributes()))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+/// Identities of the reserved directory and account marker in `directory`.
+pub(super) fn reserved(directory: &File) -> io::Result<Vec<Identity>> {
+    let mut identities = Vec::new();
+    for name in [LOCK_DIRECTORY, "auth.json.lock"] {
+        match create(
+            Some(directory),
+            OsStr::new(name),
+            FILE_READ_ATTRIBUTES,
             FILE_OPEN,
-            FILE_DIRECTORY_FILE,
-            null_mut(),
-        )?;
-        match open(
-            Some(&root),
-            OsStr::new(LOCK_DIRECTORY),
-            DIRECTORY_ACCESS,
-            FILE_OPEN,
-            FILE_DIRECTORY_FILE,
+            0,
             null_mut(),
         ) {
-            Ok(reserved) if same_identity(&next, &reserved)? => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "reserved storage directory",
-                ));
-            }
-            Ok(_) => {}
+            Ok(entry) => identities.push(identity(&entry)?.FileId.Identifier),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        root = next;
     }
-    unreachable!("validated file path")
+    Ok(identities)
+}
+pub(super) fn entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, Identity)>> {
+    // Records are 8-byte aligned within the buffer.
+    let mut buffer = vec![0u64; 8 * 1024];
+    let mut entries = Vec::new();
+    loop {
+        if unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                FileIdExtdDirectoryInfo,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * size_of::<u64>()) as u32,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(code) if code as u32 == ERROR_NO_MORE_FILES => Ok(entries),
+                _ => Err(error),
+            };
+        }
+        let base = buffer.as_ptr().cast::<u8>();
+        let mut offset = 0;
+        loop {
+            let record = unsafe { &*base.add(offset).cast::<FILE_ID_EXTD_DIR_INFO>() };
+            let name = unsafe {
+                std::slice::from_raw_parts(
+                    base.add(offset + offset_of!(FILE_ID_EXTD_DIR_INFO, FileName))
+                        .cast::<u16>(),
+                    record.FileNameLength as usize / 2,
+                )
+            };
+            if name != [46] && name != [46, 46] {
+                entries.push((
+                    DirectoryEntry {
+                        name: OsString::from_wide(name),
+                        kind: kind(record.FileAttributes),
+                    },
+                    record.FileId.Identifier,
+                ));
+            }
+            if record.NextEntryOffset == 0 {
+                break;
+            }
+            offset += record.NextEntryOffset as usize;
+        }
+    }
 }
 pub(super) fn target_name(parent: &File, name: &OsString) -> io::Result<OsString> {
     let file = match open(
@@ -688,13 +812,31 @@ fn cleanup_created(file: &File, error: io::Error) -> io::Error {
 pub(super) fn remove_account(_: &File, _: &OsString, file: &File) -> io::Result<()> {
     delete(file)
 }
+/// Removes a non-directory entry; a reparse point is removed, never followed.
 pub(super) fn remove(parent: &File, name: &OsString) -> io::Result<()> {
-    delete(&open(
+    let entry = create(
         Some(parent),
         name,
         DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
         FILE_OPEN,
-        FILE_NON_DIRECTORY_FILE,
+        0,
+        null_mut(),
+    )?;
+    if kind(entry.metadata()?.file_attributes()) == EntryKind::Directory {
+        return Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "expected a non-directory entry",
+        ));
+    }
+    delete(&entry)
+}
+pub(super) fn remove_directory(parent: &File, name: &OsStr) -> io::Result<()> {
+    delete(&open(
+        Some(parent),
+        name,
+        DELETE | FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE,
         null_mut(),
     )?)
 }
