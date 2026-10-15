@@ -135,7 +135,9 @@ revocation and cleanup failures. Documentation describes implementation scope,
 not a substitute for those tests or proof of completing the linked proposals.
 
 `xtask check` guards the source dependency boundary: Settings may use its own
-modules, native storage and FileStorage, but not business owners or wire methods;
-shared protocol must not import management modules. Built-in Session contracts
+modules, native storage and FileStorage, but not business owners or wire methods,
+and it implements no `BusinessDocument` itself; shared protocol must not import
+management modules. At run time, a namespace or file belongs to the first
+document type that uses it, so two owners cannot share a persisted source. Built-in Session contracts
 and Connection's Session-specific MCP calls remain allowed. This source analysis
 resolves aliases and re-exports but does not expand macros or infer receiver types.

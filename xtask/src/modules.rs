@@ -41,6 +41,8 @@ struct Module {
     imports: Vec<Import>,
     paths: BTreeSet<Vec<String>>,
     macros: BTreeSet<String>,
+    /// Implements BusinessDocument: the module owns a business source.
+    business_document: bool,
 }
 #[derive(Default)]
 struct SourceGraph {
@@ -244,6 +246,7 @@ impl SourceGraph {
             imports: vec![],
             paths: BTreeSet::new(),
             macros: BTreeSet::new(),
+            business_document: false,
         };
         let mut children = vec![];
         for item in items {
@@ -302,6 +305,7 @@ impl SourceGraph {
             visitor.visit_item(&item);
             module.paths.extend(visitor.paths);
             module.macros.extend(visitor.macros);
+            module.business_document |= visitor.business_document;
         }
         self.modules.insert(id.to_owned(), module);
         for (child, source, child_directory, items) in children {
@@ -551,6 +555,16 @@ impl SourceGraph {
                 return Err(format!("protocol management dependency: {from} -> {to}").into());
             }
         }
+        // Nor does it define a business document of its own: each belongs to
+        // the owner of its namespace.
+        if let Some(id) = self.modules.iter().find_map(|(id, module)| {
+            (module.business_document
+                && (id == "dim_app_server::settings"
+                    || id.starts_with("dim_app_server::settings::")))
+            .then_some(id)
+        }) {
+            return Err(format!("settings business document: {id}").into());
+        }
         Ok(())
     }
 }
@@ -614,8 +628,17 @@ fn item_name(item: &Item) -> Option<String> {
 struct Paths {
     paths: BTreeSet<Vec<String>>,
     macros: BTreeSet<String>,
+    business_document: bool,
 }
 impl<'ast> Visit<'ast> for Paths {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.business_document |= node.trait_.as_ref().is_some_and(|(_, path, _)| {
+            path.segments
+                .last()
+                .is_some_and(|segment| segment.ident == "BusinessDocument")
+        });
+        syn::visit::visit_item_impl(self, node);
+    }
     fn visit_visibility(&mut self, _: &'ast syn::Visibility) {}
     fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
     fn visit_item_use(&mut self, _: &'ast syn::ItemUse) {}
@@ -685,6 +708,18 @@ mod tests {
                 "mod hooks { pub struct Rule; }
                  mod settings { pub type Document = crate::hooks::Rule; }",
                 Some("settings business dependency"),
+            ),
+            (
+                "mod settings {
+                     pub trait BusinessDocument {}
+                     mod native { struct Approvals; impl super::BusinessDocument for Approvals {} }
+                 }",
+                Some("settings business document"),
+            ),
+            (
+                "mod settings { pub trait BusinessDocument {} }
+                 mod hooks { struct Rules; impl crate::settings::BusinessDocument for Rules {} }",
+                None,
             ),
             (
                 "mod protocol { use crate::aliases::*; pub fn decode(_: Request) {} }",

@@ -70,6 +70,9 @@ pub struct SettingsService {
     updates: TaskTracker,
     changed: StateCell<u64>,
     documents: Mutex<BTreeMap<&'static str, StateCell<String>>>,
+    /// The document type that first used each namespace and file; another
+    /// type naming one of them would share its persisted source.
+    claims: Mutex<BTreeMap<String, std::any::TypeId>>,
 }
 impl SettingsService {
     pub async fn authorize_project(
@@ -120,6 +123,8 @@ impl SettingsService {
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changed.subscribe()
     }
+    /// The revision of `D`'s user source after each successful write. Project
+    /// sources notify only through `subscribe`.
     pub fn subscribe_document<D: BusinessDocument>(&self) -> tokio::sync::watch::Receiver<String> {
         self.documents
             .lock()
@@ -145,6 +150,7 @@ impl SettingsService {
         if let Some(file) = D::PROJECT_FILE {
             validate_file(file)?;
         }
+        self.claim::<D>()?;
         let (root, file) = match scope {
             SettingsScope::User => (self.home_root, D::USER_FILE),
             SettingsScope::Project(root) => {
@@ -157,6 +163,29 @@ impl SettingsService {
             }
         };
         Ok(self.files.path(root, file)?)
+    }
+    fn claim<D: BusinessDocument>(&self) -> Result<()> {
+        let owner = std::any::TypeId::of::<D>();
+        let names = [
+            format!("namespace {}", D::NAMESPACE),
+            format!("user {}", D::USER_FILE),
+        ]
+        .into_iter()
+        .chain(D::PROJECT_FILE.map(|file| format!("project {file}")));
+        let mut claims = self.claims.lock().unwrap();
+        let names: Vec<_> = names.collect();
+        if names
+            .iter()
+            .any(|name| claims.get(name).is_some_and(|claimed| *claimed != owner))
+        {
+            return Err(SettingsError::Invalid(
+                "settings source belongs to another document type",
+            ));
+        }
+        for name in names {
+            claims.insert(name, owner);
+        }
+        Ok(())
     }
     fn check_open(&self, cancel: &CancellationToken) -> Result<()> {
         if self.stopping.is_cancelled() {
@@ -343,6 +372,7 @@ impl TypedPlugin for SettingsPlugin {
                 updates: TaskTracker::new(),
                 changed: StateCell::new(0),
                 documents: Mutex::new(BTreeMap::new()),
+                claims: Mutex::new(BTreeMap::new()),
             });
             let owner = service.clone();
             ctx.effect(move || {

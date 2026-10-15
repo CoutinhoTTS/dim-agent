@@ -626,6 +626,45 @@ async fn business_documents_reject_escaping_filenames() {
         settings.read::<BadPath>(SettingsScope::User, &cancel).await,
         Err(SettingsError::Invalid(_))
     ));
+    // A namespace or file belongs to the first document type that used it.
+    #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+    struct SameNamespace;
+    impl BusinessDocument for SameNamespace {
+        const NAMESPACE: &'static str = "example";
+        const USER_FILE: &'static str = "same-namespace.json";
+        fn validate(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+    struct SameFile;
+    impl BusinessDocument for SameFile {
+        const NAMESPACE: &'static str = "same-file";
+        const USER_FILE: &'static str = "example.json";
+        fn validate(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    settings
+        .read::<Document>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    for result in [
+        settings
+            .read::<SameNamespace>(SettingsScope::User, &cancel)
+            .await
+            .map(drop),
+        settings
+            .read::<SameFile>(SettingsScope::User, &cancel)
+            .await
+            .map(drop),
+    ] {
+        assert!(matches!(result, Err(SettingsError::Invalid(_))));
+    }
+    settings
+        .read::<Document>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
     root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();
 }
