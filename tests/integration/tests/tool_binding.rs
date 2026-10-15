@@ -443,7 +443,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
     let agent = builder.build_in(&root);
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["echo".into(), "absent".into(), "optional".into()],
+            tools: vec!["optional".into(), "absent".into(), "echo".into()],
             permission_policy: PermissionPolicy {
                 allowed_tools: vec!["echo".into(), "optional".into()],
                 ..PermissionPolicy::default()
@@ -452,7 +452,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
         })
         .await
         .unwrap();
-    fixed_tools_adopted(&session, &["echo", "optional"]).await;
+    fixed_tools_adopted(&session, &["optional", "echo"]).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
         .await
@@ -563,7 +563,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for
     })
     .await
     .unwrap();
-    fixed_tools_adopted(&session, &["echo", "optional"]).await;
+    fixed_tools_adopted(&session, &["optional", "echo"]).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
         .await

@@ -55,6 +55,8 @@ impl SessionService for ToolContribution {}
 | 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 只接入宿主工具，后台任务在 `SessionLifecycle::activated()` 后按名称读取本 Session 已可用的贡献，不建立对可选贡献方的硬依赖 |
 | 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 诊断；稍后才 Active 的贡献在下次注册表重载时接入 |
 
+固定表在每代注册表内只发布一次：装配时宿主工具表不可变，发布后的接入任务私下构建按 `SessionConfig.tools` 排序的完整表，通过 `OnceLock` 一次性发布。读取不等待接入完成：发布前使用宿主表，发布后使用完整表；固定工具查找不获取 `Mutex`。动态来源继续使用自己的既有同步机制。
+
 ## 3. 依赖方向
 
 | 方向 | 规定 |

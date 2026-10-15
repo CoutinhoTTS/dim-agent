@@ -23,8 +23,12 @@ tools and unknown host tools still fail initialization. Generic source
 providers can have tracked change watchers, but this local graph has no
 SessionToolSource injections. Cleanup joins watchers; reload rebuilds the
 registry from fresh services. ToolBinding owns adoption and request pins.
-Fixed tools and dynamic sets share the registry's existing synchronized state.
-Host tools are available during assembly. Publication attachment notifies the
+Configured host tools form an immutable table available during assembly.
+Publication attachment builds the complete fixed table in configuration order
+and publishes it once per registry generation through `OnceLock`. Fixed lookups
+read the host table until attachment completes, then the complete immutable table,
+without acquiring a mutex or waiting for attachment. Dynamic source sets retain their
+existing synchronization. Publication attachment notifies the
 existing ToolBinding watch; Prompt adopts the new tool declarations before they
 enter a later request prefix. Already bound requests retain their handlers.
 Registry refresh is neither a durable configuration save nor permission

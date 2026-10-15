@@ -10,7 +10,7 @@ use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -83,8 +83,6 @@ pub struct ToolSourceRejection {
 
 #[derive(Default)]
 struct Sources {
-    /// In `SessionConfig.tools` order.
-    fixed: Vec<Arc<ToolContribution>>,
     current: BTreeMap<String, Arc<ToolSourceSet>>,
     /// Replaced versions, reachable while someone still holds them.
     replaced: HashMap<(String, String), Weak<ToolSourceSet>>,
@@ -93,6 +91,10 @@ struct Sources {
 }
 
 pub struct ToolRegistry {
+    /// Configured host tools available before publication attachment.
+    host_tools: Vec<Arc<ToolContribution>>,
+    /// Complete fixed table, published once in `SessionConfig.tools` order.
+    fixed: OnceLock<Vec<Arc<ToolContribution>>>,
     /// Omitted providers still reserve their registered tool names.
     contributed: Arc<[String]>,
     /// Registered name and provider of every dynamic source.
@@ -109,8 +111,9 @@ impl ToolRegistry {
     /// set order.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let sources = self.sources.lock().unwrap();
-        sources
-            .fixed
+        self.fixed
+            .get()
+            .unwrap_or(&self.host_tools)
             .iter()
             .chain(sources.current.values().flat_map(|set| set.tools.iter()))
             .map(|tool| tool.definition.clone())
@@ -120,8 +123,10 @@ impl ToolRegistry {
     pub fn snapshot(&self) -> (Vec<ToolDefinition>, Vec<Arc<ToolSourceSet>>) {
         let sources = self.sources.lock().unwrap();
         let sets: Vec<_> = sources.current.values().cloned().collect();
-        let definitions = sources
+        let definitions = self
             .fixed
+            .get()
+            .unwrap_or(&self.host_tools)
             .iter()
             .chain(sets.iter().flat_map(|set| set.tools.iter()))
             .map(|tool| tool.definition.clone())
@@ -130,10 +135,9 @@ impl ToolRegistry {
     }
     /// The fixed tool of this name.
     pub fn fixed(&self, name: &str) -> Option<Arc<ToolContribution>> {
-        self.sources
-            .lock()
-            .unwrap()
-            .fixed
+        self.fixed
+            .get()
+            .unwrap_or(&self.host_tools)
             .iter()
             .find(|tool| tool.definition.name == name)
             .cloned()
@@ -295,12 +299,7 @@ impl ToolRegistry {
             if !names.insert(tool_name.as_str()) {
                 return Err(format!("duplicate tool {tool_name}"));
             }
-            if sources
-                .fixed
-                .iter()
-                .any(|tool| tool.definition.name == *tool_name)
-                || self.contributed.contains(tool_name)
-            {
+            if self.fixed(tool_name).is_some() || self.contributed.contains(tool_name) {
                 return Err(format!("tool {tool_name} is a fixed tool"));
             }
             if let Some(other) = sources.current.values().find(|other| {
@@ -434,13 +433,12 @@ impl TypedPlugin for ToolRegistryPlugin {
                 .map(|(_, provider)| provider.changed())
                 .collect();
             let registry = Arc::new(ToolRegistry {
+                host_tools: fixed,
+                fixed: OnceLock::new(),
                 contributed: self.contributed.clone(),
                 providers,
                 refreshing: Mutex::default(),
-                sources: Mutex::new(Sources {
-                    fixed,
-                    ..Sources::default()
-                }),
+                sources: Mutex::default(),
                 changed: watch::Sender::new(()),
                 state: watch::Sender::new(ToolSourcesState::default()),
             });
@@ -498,7 +496,7 @@ impl TypedPlugin for ToolRegistryPlugin {
                         }
                     }
                 }
-                owner.sources.lock().unwrap().fixed = fixed;
+                owner.fixed.get_or_init(|| fixed);
                 owner.changed.send_replace(());
             });
             ctx.provide_as(
