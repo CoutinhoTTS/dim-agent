@@ -1,23 +1,23 @@
 # Rust 会话存储格式
 
-The current native format is **v13**, with source-owned `settings_documents`.
-Startup requires the exact v13 SQL schema and a single format marker of 13
-before writable PRAGMAs. Older databases and the removed branch-only v14
-`user_configuration` format are unsupported and preserved, never migrated,
-downgraded or interpreted as v13. No migration API or startup option is provided.
-Roadmap item S5a plans the first in-place upgrade, from exactly v13 to v15; it is
-not implemented yet ([S5a v15 decision](#s5a-v15-格式决定)).
-Existing v13 schemas and document bytes remain compatible. Storage versions are
+The current native format is **v15**, with source-owned `settings_documents`
+and SessionStore's Session-file rows. Startup requires the exact v15 SQL schema
+and a single format marker of 15 before writable PRAGMAs, or the exact v13
+schema with marker 13, which the same startup transaction upgrades in place to
+v15 ([S5a v15 decision](#s5a-v15-格式决定)). Older databases and the removed
+branch-only v14 `user_configuration` format are unsupported and preserved, never
+migrated, downgraded or interpreted as v13 or v15. No migration API or startup
+option is provided. v13 document bytes remain valid in v15. Storage versions are
 independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v13 tables
+## Current v15 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 13)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 15)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills` or `user/mcp-projects`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -64,6 +64,11 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `timeline_snapshots.interpreter` | `TEXT` | 否 | — | 联合主键第 3 列；解码前可检查的解释器兼容合同 |
 | `timeline_snapshots.event_id` | `TEXT` | 否 | — | 锚点的精确事件 ID，写入和候选查询校验 |
 | `timeline_snapshots.state` | `TEXT` | 否 | — | 不透明原始字符串；SQLite 不解析或反序列化 |
+| `session_files.file_id` | `TEXT` | 否 | — | 主键；小写带连字符的 UUID v4，也是 `<db>.session-files/` 下的目录名（v15） |
+| `session_files.node` | `TEXT` | 是 | 隐式 `NULL` | 写入时 Session 的资源节点；`NULL` 表示控制节点。owner 全部删除后仍保留，供清扫定位 |
+| `session_files.writer` | `TEXT` | 是 | 隐式 `NULL` | 写入未完成时是 SessionStore 代次 ID；提交或放弃后为 `NULL` |
+| `session_file_owners.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)` |
+| `session_file_owners.file_id` | `TEXT` | 否 | — | 联合主键第 2 列；外键到 `session_files(file_id)` |
 
 v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、before 轨迹和检查点位置都是 JSON 内关系，必须在存储读取边界校验。`timeline_content` 的地址是小写十六进制 `SHA-256(kind + NUL + body)`，其中 `body` 是写入的原始 JSON 字符串字节；同一内容只在同一 Session 内共享。创建 Session、owner 和 `main` 分支是同一事务；写入轮把事件、首次出现的内容、由 `branch/create` 生成的分支目录及分支 head 放在同一事务，提交后才发布。
 
@@ -158,7 +163,7 @@ diagnostics, not snapshots. Disposable snapshots commit separately without
 affecting fact durability. `RecoverySnapshot={sequence,event_id,interpreter,state}`;
 the default `dim/context-projection/v2` interpreter encodes `{payload,sha256}`,
 with the complete ProjectionCheckpoint JSON string below as payload. SQLite
-continues to treat state as opaque TEXT; the database format remains v13.
+continues to treat state as opaque TEXT; the snapshot change needed no new database format.
 
 摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照直接绕过，不通过补算摘要升级；v2 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
 
@@ -200,7 +205,7 @@ ProjectionCheckpoint = {
 
 ### S5a v15 格式决定
 
-[路线图](../roadmap.md) S5a（[Session 文件](session-files.md#8-storage-format)，尚未实现）的格式决定：升级到 **v15**，不是 v13 内的增量，也不用 14。实现前，本文其余部分描述的当前格式仍是 v13。
+[路线图](../roadmap.md) S5a（[Session 文件](session-files.md#8-storage-format)，已实现）的格式决定：升级到 **v15**，不是 v13 内的增量，也不用 14。
 
 - **新增两张表与一个索引**：`session_files(file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)` 与 `session_file_owners(session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), file_id TEXT NOT NULL REFERENCES session_files(file_id), PRIMARY KEY (session_id, file_id))`，索引 `session_file_owners_by_file(file_id)`。`agent_store_format` 的约束改为 `CHECK (version = 15)`。
   - `file_id` 是小写带连字符的 UUID v4，也是目录名。
@@ -217,7 +222,7 @@ ProjectionCheckpoint = {
   - 其他库（更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
 - **单向**：v13 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。这是增量改动，代价可以接受；另一种做法是拒绝所有 v13 库，会丢失用户的 Session。之后的格式各自追加从前一版本出发的一步。
 - **升级日志**：升级事务提交后，打开存储的调用方得知已升级，守护进程向 stderr 写一行 `Upgraded native store <path> from format v13 to v15; earlier dimcode versions cannot open it.`。只有执行升级的那次启动写这一行。它直接写 stderr，不走 `tracing`，因为守护进程默认的日志过滤只保留错误。CLI 启动的守护进程的 stderr 就是数据库目录下私有的 `daemon.log`，回退旧版本的用户能在旧守护进程的拒绝信息旁找到原因。
-- **验证**：测试用 v13 结构的冻结副本构建一次性 v13 库，从不打开用户已有的库。
+- **验证**：测试用 v13 结构的冻结副本和下面的完整记录示例构建一次性 v13 库，升级后核对结构恰为 v15、业务行逐行不变，从不打开用户已有的库（`storage_flow.rs` 的 `a_v13_store_upgrades_in_place_once`）。
 
 ## 索引与实际查询
 
@@ -230,6 +235,9 @@ ProjectionCheckpoint = {
 | v1 主键 `timeline_content` | `(session_id, hash)` | 请求引用的定点读取和 Session 内去重 |
 | v1 唯一 `agents_default_unique` | `(is_default) WHERE is_default = 1` | 至多一个默认 Agent；不保证其存在 |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
+| v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
+| v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
+| v15 `session_file_owners_by_file` | `(file_id)` | 清扫判断文件是否已无 owner |
 
 ## 分页查询
 
@@ -246,17 +254,19 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v13）
+## 完整记录示例（v15）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面两个 hash 可以按上文算法复核。
 
 The example retains an old `dim/context-projection/v1` snapshot: the default v2
 interpreter bypasses that unchecked cache and restores from facts. Existing v13
-databases need no migration for this snapshot interpreter change.
+databases needed no migration for this snapshot interpreter change. `s1` owns
+one Session file, stored at `<db>.session-files/<file_id>/<name>`; its name and
+bytes live only on disk.
 
 ```json
 {
-  "agent_store_format": [{"version": 13}],
+  "agent_store_format": [{"version": 15}],
   "settings_documents": [],
   "providers": [],
   "provider_selections": [],
@@ -381,8 +391,10 @@ databases need no migration for this snapshot interpreter change.
   "timeline_snapshots": [{"session_id": "s1", "branch_id": "main", "sequence": 3,
     "interpreter": "dim/context-projection/v1", "event_id": "e3",
     "state": "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2},\"state\":{\"compacted_through\":\"e2\",\"prompts\":{\"entries\":[],\"revision\":null,\"system_revision\":null,\"system\":\"\",\"turns\":[],\"tasks\":[]},\"delivered\":[],\"inputs\":[[\"e1\",{\"user\":{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}]],\"configuration\":null,\"output\":[],\"open_tools\":[],\"output_open\":false}}"
-  }]
+  }],
+  "session_files": [{"file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90", "node": null, "writer": null}],
+  "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}]
 }
 ```
 
-这十条逻辑事件占九条物理事件行；`main` 的已发布 head 为 8，`child` 为 2。`input/consumed` 把 `e1` 转成 ID 为 `e2` 的用户历史条目，因此压缩游标指向 `e2`；可选快照从第 2 条事件重放，所保存的前缀状态含尚未采纳的 `e1` 输入。`main` 的输出行合并两个增量，读出后各自恢复 `turn_id`/`request_id`，两者的原子批次终点都是 6。子分支通过 `branch_point=7` 共享 `main` 的前缀 1–7，不复制父事件；`create_anchor=8` 指向父分支的 `branch/create`。`model/call` 的两个 hash 在同一 Session 的 `timeline_content` 命中。`timeline_snapshots` 的独立行锚定主分支第 3 条 completed 事实，事件本身没有快照数据；删除该快照不影响事实重放或 summary。回滚 Session 时先删除快照，再删除事件、分支、内容和 owner；Agent 只有在不再被任何 Session 引用时才能删除。
+这十条逻辑事件占九条物理事件行；`main` 的已发布 head 为 8，`child` 为 2。`input/consumed` 把 `e1` 转成 ID 为 `e2` 的用户历史条目，因此压缩游标指向 `e2`；可选快照从第 2 条事件重放，所保存的前缀状态含尚未采纳的 `e1` 输入。`main` 的输出行合并两个增量，读出后各自恢复 `turn_id`/`request_id`，两者的原子批次终点都是 6。子分支通过 `branch_point=7` 共享 `main` 的前缀 1–7，不复制父事件；`create_anchor=8` 指向父分支的 `branch/create`。`model/call` 的两个 hash 在同一 Session 的 `timeline_content` 命中。`timeline_snapshots` 的独立行锚定主分支第 3 条 completed 事实，事件本身没有快照数据；删除该快照不影响事实重放或 summary。回滚 Session 时先删除快照，再删除事件、分支、内容、owner 和 Session 文件 owner 行，最后删除 `agent_sessions`；Agent 只有在不再被任何 Session 引用时才能删除。
