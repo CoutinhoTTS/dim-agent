@@ -115,8 +115,7 @@ hello lists the methods of the active owners. A namespace whose owner row is
 Pending or between generations returns the retryable `service_reloading`, as
 before contributions; one whose owner row is Failed or Unresolved returns the
 non-retryable `service_unavailable`; one with no enabled owner, and non-serving
-entries, return `unknown_method`. The code still returns `service_reloading`
-for Failed and Unresolved rows until #116. Rpc
+entries, return `unknown_method`. Rpc
 tells them apart from the loader's row status, with no requirement raised to
 rutis. An owner that is inactive or reloading affects only its namespace;
 business edits do not reload plugins. See

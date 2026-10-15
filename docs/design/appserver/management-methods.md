@@ -66,8 +66,8 @@ its owner row is disabled), or a name its provider does not declare, returns
 `unknown_method`. A namespace whose owner row is Pending or between generations
 while it reloads returns the retryable `service_reloading`; one whose owner row
 is Failed or Unresolved returns the non-retryable `service_unavailable`. Rpc
-tells these apart from the loader's row status (contract §3.2). The code still
-returns `service_reloading` for Failed and Unresolved rows until #116. A name outside the declaration grammar (dot-separated
+tells these apart from the loader's row status (contract §3.2). A name outside
+the declaration grammar (dot-separated
 lowercase segments, at most 128 bytes) is unknown without any lookup, so a
 caller's name bounds the lookups made under the handler lock. Error codes at the
 edges are unchanged: a call before `hello` is `-32600` and one after shutdown has
@@ -118,8 +118,7 @@ An owner that is disabled, Pending, Failed or reloading affects only its own
 namespace; Rpc and open connections are unaffected. While its row is Pending or
 between generations its methods return `service_reloading`, as before
 contributions when Rpc reloaded with it (contract A.4); while it is Failed or
-Unresolved they return `service_unavailable` (the code returns
-`service_reloading` until #116); a disabled owner's methods return
+Unresolved they return `service_unavailable`; a disabled owner's methods return
 `unknown_method`. Rpc and Agents depend on no owner, directly or
 through each other: `session.create`, `session.model.update` and Collaboration
 member creation read Provider and the `ModelSelectionHost` per call and return a
@@ -168,7 +167,7 @@ flow assembles the real owner rows, so a pair naming no row fails it. Unit flows
 on a real loader cover a provider reload that interrupts `Report` calls while an
 accepted `Drain` call holds it and answers `service_reloading` between
 generations, the calling load's unload, Pending owners answering
-`service_reloading` and Failed owners answering it too until #116 (then
-`service_unavailable`) while other namespaces and the `hello` listing stay intact,
+`service_reloading` and Failed and Unresolved owners answering
+`service_unavailable` while other namespaces and the `hello` listing stay intact,
 disabled and unconfigured owners answering `unknown_method`, reserved roots, and
 nested ownership with an enabled or a disabled child.
