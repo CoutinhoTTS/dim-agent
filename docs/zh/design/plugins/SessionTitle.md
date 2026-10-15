@@ -11,7 +11,7 @@ flowchart LR
   subgraph PROC["进程"]
     AUX["AuxiliaryModel（Provider）"]
     META["SessionStore 标题元数据"]
-    Settings["sessionTitle.*（Settings 业务来源）"]
+    Settings["Settings 来源 session-title"]
     Rpc["Rpc"]
   end
   subgraph SESS["Session"]
@@ -34,9 +34,9 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | 其所在 Session 的 Session 广播、TimelineTree（`main` 的固定前缀）、`SessionConfig`；进程服务 SessionStore 标题元数据、Provider `AuxiliaryModel`、Settings 业务来源 | `sessionMethods` key `session.rename`（在其 `provides` 中声明）；用途 key `session-title`；业务 key `sessionTitle.enabled`、`sessionTitle.maxLength` |
+| `SessionTitle` | Session | 其所在 Session 的 Session 广播、TimelineTree（`main` 的固定前缀）、`SessionConfig`；进程服务 SessionStore 标题元数据、Provider `AuxiliaryModel`、Settings 来源 `session-title` | `sessionMethods` key `session.rename`（在其 `provides` 中声明）；用途 key `session-title`；Settings 来源 `session-title`，字段 `enabled`、`maxLength` |
 
-每个依赖都位于 Session 作用域或外层进程作用域。多数是既有的类型化服务；SessionStore 标题元数据、标题通知和 Settings 业务来源是拟议的补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)；形状见 A.2）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。SessionStore、Provider 或 Settings 重载会重载 SessionTitle，从而取消在途的生成；这是可接受的（[ADR 002 D3](../../adr/002-plugin-scope.md)）。业务配置变更从不触发重载（[D4](../../adr/002-plugin-scope.md)）。
+每个依赖都位于 Session 作用域或外层进程作用域。多数是既有的类型化服务；SessionStore 标题元数据和标题通知是拟议的补充；Settings 来源已为 Rust 所有者提供，具名的 `settings` 服务尚未实现（S8b）（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)；形状见 A.2）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。SessionStore、Provider 或 Settings 重载会重载 SessionTitle，从而取消在途的生成；这是可接受的（[ADR 002 D3](../../adr/002-plugin-scope.md)）。业务配置变更从不触发重载（[D4](../../adr/002-plugin-scope.md)）。
 
 ## 2. 数据与状态
 
@@ -50,7 +50,7 @@ flowchart TB
     MD["revision、标题文本、来源 auto 或 manual"]
   end
   CONF["SessionConfig：interactive、collaborationRole"]
-  CFG["sessionTitle.enabled、sessionTitle.maxLength"]
+  CFG["session-title：enabled、maxLength"]
   MEM["在途生成、失败次数（内存）"]:::new
   FUI -->|"仅文本"| MEM
   CC -->|"继承提示"| MEM
@@ -124,7 +124,7 @@ revision 检查就是复检：手动标题总是胜出。
 
 | 场景 | 顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
-| 成员、workflow 阶段或其他非交互 Session | `SessionConfig` | 从不生成；允许重命名 | SessionTitle |
+| 成员 Session（`collaborationRole`），或非交互 Session | `SessionConfig` | 从不生成；允许重命名 | SessionTitle |
 | 生成完成前出现第二条输入 | — | 跳过（在途） | SessionTitle |
 | 第一条输入已删除 | input < `input/deleted` | 从未被采用：不用它生成标题；下一条被采用的操作者输入触发（A9） | SessionTitle |
 | 生成失败 | — | 无标题期间下一条被采用的 `main` 输入从第一条被采用的输入重试（A5） | SessionTitle |
@@ -149,7 +149,7 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | 设置或清除手动标题 |
 | `session-title` | Provider 用途 key | 标题生成的模型策略；未配置时继承 |
-| `sessionTitle.enabled`、`sessionTitle.maxLength` | 业务配置（Settings 来源） | 关闭生成；标题长度 |
+| `session-title` 来源：`enabled`、`maxLength` | 业务配置（Settings 来源） | 关闭生成；标题长度 |
 | `session.list`/`session.summaries` 中的 `title`、`titleSource` | 从 SessionStore 读取的 Rpc 协议字段 | 展示 |
 | 标题通知 `{sessionId, title, titleSource, revision}` | SessionStore 发出的 Session 广播通知（通用记录，§9；SessionStore 补充） | 已订阅的客户端实时更新标题 |
 
@@ -174,7 +174,7 @@ revision 检查就是复检：手动标题总是胜出。
 | ADR 002 D1（作用域跟随状态） | Session 作用域：标题属于 Session；存储的标题归 SessionStore。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；所有依赖都是声明的服务。 |
 | ADR 002 D3（依赖跟随作用域） | 依赖位于 Session 或外层进程作用域；它们重载会取消生成，这是可接受的。 |
-| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`sessionTitle.*` 是其自己 Settings 来源中的业务配置，使用时读取。 |
+| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`session-title` 文档是其自己 Settings 来源中的业务配置，使用时读取。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
 
 ## 9. 向机制所有者提出的需求
@@ -201,7 +201,7 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- | --- |
 | `{sessionId, title: string \| null}` | `{title: string \| null, titleSource: "auto" \| "manual" \| null, revision}` | `invalid_params`、`session_not_found`、`service_reloading`、`storage_failed`；分派错误见 [session-boundary](../contracts/session-boundary.md) |
 
-`title` 去除首尾空白；1..=`sessionTitle.maxLength` 个字符，不含换行或控制字符（A3）。`null` 清除标题（A6）。
+`title` 去除首尾空白；1..=`maxLength`（来源 `session-title`）个字符，不含换行或控制字符（A3）。`null` 清除标题（A6）。
 
 ### A.2 依赖的形状（由所有者定义）
 
@@ -214,7 +214,7 @@ revision 检查就是复检：手动标题总是胜出。
 
 ### A.3 配置
 
-`sessionTitle.enabled: bool` 默认 `true`；`sessionTitle.maxLength: u32` 默认 80，范围 10..=200（A3）。业务配置在每次决定时读取；只通过 Settings 的类型化操作写入 SessionTitle 的业务来源，其 schema 由 SessionTitle 声明；变更是带通知的数据更新，从不触发重载。启用插件属于结构性配置。`session-title` 的 Provider 策略位于 Provider 的按用途策略中；未配置时继承 Session 的模型（A1）。
+Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`；`maxLength: u32` 默认 80，范围 10..=200（A3）。SessionTitle 声明的 schema 带有默认值和范围（`minimum`/`maximum`），因此 Settings 在写入和读取持久化文件时拒绝超出范围的值，SessionTitle 直接使用交付的文档，不再检查。每次决定时读取。SessionTitle 没有写配置的工具，因此文档只经客户端方法 `settings.read`/`settings.update` 写入（S8b，尚未实现）。变更是带通知的数据更新，从不触发重载。启用插件属于结构性配置。`session-title` 的 Provider 策略位于 Provider 的按用途策略中；未配置时继承 Session 的模型（A1）。
 
 ### A.4 机制
 

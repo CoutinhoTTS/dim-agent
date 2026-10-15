@@ -11,7 +11,7 @@ Hooks runs user-configured commands at fixed points of a Session's work. Its Ses
 ```mermaid
 flowchart LR
   subgraph PROC["Process"]
-    Settings["Hooks business source (Settings)"]
+    Settings["Settings source hooks"]
   end
   subgraph SESS["Session"]
     HS["HooksSession: catalog, runner, Session-start"]:::new
@@ -39,7 +39,7 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `HooksSession` | Session (installed only when enabled) | Settings business source (`hooks` document); the Session's `HostPlatform` and `FileStorage`; `SessionConfig` | `sessionMethods` key `hooks` with `hooks.catalog`; Session-start Hook results for `main`; an internal catalog and command runner used by `HooksBranch` (not a contract) |
+| `HooksSession` | Session (installed only when enabled) | Settings source `hooks`; the Session's `HostPlatform` and `FileStorage` (which reads `.dimcode/hooks.json`); `SessionConfig` | `sessionMethods` key `hooks` with `hooks.catalog`; Session-start Hook results for `main`; an internal catalog and command runner used by `HooksBranch` (not a contract) |
 | `HooksBranch` | Branch | `HooksSession`'s runner; the branch Timeline (before callbacks), `Branch::input`, Dispatcher and ToolBinding | Before callbacks on `input/message` and `step/tool-call`, registered when the part loads and removed when it unloads |
 
 Nothing collects Hooks: the callbacks are registrations on the branch Timeline and follow `HooksBranch`'s lifecycle, so no consumer depends on Hooks or names it.
@@ -217,7 +217,7 @@ Non-interactive Sessions: identical, except that Session-start Hooks run only fo
 | Before callback on `step/tool-call` | Branch Timeline registration by `HooksBranch` | Run `pre_tool_use` Hooks; mark denied calls `skip` |
 | Before callback on `input/message` | Branch Timeline registration by `HooksBranch` | Run `user_prompt_submit` Hooks; add context blocks, or append `input/withdraw {input_id, reason?}` |
 | `hooks.catalog {sessionId}` | `sessionMethods` key `hooks` | Effective Hooks of the Session with their enabled state |
-| `hooks` document | Settings business source | User Hooks, `disable_all`, enable overrides (project Hooks keyed by workspace and Hook ID) |
+| `hooks` document | Settings source `hooks` | User Hooks, `disable_all`, enable overrides (project Hooks keyed by workspace and Hook ID) |
 | Configuration format, command protocol | Defined here | Appendix A |
 
 ## 7. Security
@@ -266,7 +266,7 @@ Linked: #4 named typed services ([session access §9](../contracts/session-acces
 
 ### A.1 Configuration format
 
-One JSON document per source, the same shape for user configuration (`hooks` document in Settings) and the project file `.dimcode/hooks.json`:
+One JSON document per source, the same shape for user configuration (the document in the Settings source `hooks`) and the project file `.dimcode/hooks.json`. The project file is not a Settings source: Hooks reads it itself through FileStorage under project-file authority.
 
 ```json
 {
@@ -339,7 +339,7 @@ Served through `sessionMethods` key `hooks` (`describe(): async -> MethodDecl[]`
 | --- | --- |
 | `{sessionId}` | Hooks per source: `id`, `source`, `event`, matcher, `command`, `enabled`, `invalid?`; global `disabled` |
 
-Enabling, disabling and `disable_all` are typed Settings operations on the `hooks` document, made only by the user (A9); there is no approval.
+Enabling, disabling and `disable_all` are user-only fields of the `hooks` document: the user writes them through the client method `settings.update` (S8b, not implemented), and Hooks has no tool that writes configuration (A9); there is no approval.
 
 ### A.6 Mechanics
 

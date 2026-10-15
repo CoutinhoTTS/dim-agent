@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integration-by-existing-mechanisms), [Appendix B Agents and InputQueue](../overview.md#appendix-b-supplements-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D1–D3, D5. Phase: P0. Language: neutral contract; Rust binding in [Appendix E](#appendix-e-rust-binding).
 
-> **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
+> **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by the Session's resource node, which P3 adds to `SessionConfig` ([A.3](#a3-sessionconfig-fields)). In P1/P2 every Session uses the control node.
 
 Process plugins reach Sessions the way Collaboration already does: through Agents and the public Session interface. This document defines that access as the language-neutral process service `sessions` (ADR 002 D5), provided by Agents, so a TypeScript or Python process plugin (Scheduler, Workflow) uses it by name. Its methods are `launch`, `input`, `lookup`, `history`, `withdraw`, `stop` and `idle`, with request and reply as data ([A.1](#a1-the-sessions-service)). In Rust it is `AgentIndex` plus the `Session` facade ([Appendix E](#appendix-e-rust-binding)). It adds no host or facade plugin, and a caller that depends on Agents reloads with it (D3).
 
@@ -10,10 +10,10 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | --- | --- | --- |
 | `sessions` service: named, data-only access to Sessions | Agents | Scheduler, Workflow process parts |
 | `launch` with a policy capped by the starter | Agents | Scheduler, Workflow |
-| `SessionConfig` fields `interactive`, `resourceNode`, `createdBy` | Agents | Every scope, through the Session's `SessionConfig` |
-| Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal and Hooks branch parts write the same form |
+| `SessionConfig` field `interactive` | Agents | Plugins that read it from the Session's `SessionConfig` (Questions, SessionTitle) |
+| Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal branch parts write the same form, and Hooks branch parts (to be designed) would too |
 | Fixed-prefix read | Runtime facade (requirement, §9) | Process callers and branch parts deciding from Timeline facts |
-| Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`) | InputQueue | Clients, Hooks, AcpGateway, Scheduler, Workflow |
+| Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`) | InputQueue | Clients, Hooks (to be designed), AcpGateway, Scheduler, Workflow |
 
 Session-scoped and branch-scoped plugins do not use this interface to reach their own Session. They use their Session's and branch's services, the branch Dispatcher and the Session broadcast directly.
 
@@ -50,23 +50,23 @@ flowchart LR
 | Part | Scope | Status |
 | --- | --- | --- |
 | `sessions` (Agents) | Process | Supplement; maps to the existing `acquire` and facade, plus `launch` |
-| `SessionConfig` fields | Session record | Supplement |
+| `SessionConfig` field `interactive` | Session record | Supplement |
 | Session facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) | Session, branch | Existing; fixed-prefix read (§9.2) is a requirement |
 | InputQueue | Branch | Change: consumes `input/withdraw`, writes `input/deleted`; withdrawal service |
 
-Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWrite`, `RawBlock`, `HistoryRequest`, `HistoryPage`, `LookupReply`, `WithdrawRequest`, `WithdrawReply` and `SessionsError`; `SessionOrigin` and the three `SessionConfig` fields; the `interactive` and `client` parameters of `session.create`; the source marker, key and `submissionId` conventions; and the withdrawal contract. Contracts used are the runtime facade, Agents loading, the `input/message` data and consumption contract, the existing context-block element format and the Session input path.
+Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWrite`, `RawBlock`, `HistoryRequest`, `HistoryPage`, `LookupReply`, `WithdrawRequest`, `WithdrawReply` and `SessionsError`; the `SessionConfig` field `interactive` and the `interactive` parameter of `session.create`; the source marker, key and `submissionId` conventions; and the withdrawal contract. Contracts used are the runtime facade, Agents loading, the `input/message` data and consumption contract, the existing context-block element format and the Session input path.
 
 ## 2. Data and state
 
 | State | Owner | Rebuild |
 | --- | --- | --- |
-| `SessionConfig` with the new fields | Agents, Session record | From the record on restore |
+| `SessionConfig` with `interactive` | Agents, Session record | From the record on restore |
 | Inputs and their applied, consumed and deleted facts; InputQueue's held set | InputQueue, Loop | From local history on reload: an input is held while it has neither `input/applied` nor `input/deleted` |
 | Leases held during a `sessions` call | Agents | Runtime only |
 | Keyed block effect | History projection ([history.rs](../../../crates/dim-agent-capabilities/src/history.rs)) | From the fixed prefix and compaction facts |
 | Caller progress (runs, pending `submissionId`s) | Caller's process storage | Caller's document |
 
-An input is pending from its `input/message` until either `input/applied` followed by `input/consumed`, or `input/deleted`, references its event id. `input/withdraw` alone never changes whether an input is pending; only InputQueue's result fact does. Every "pending input" derivation (Goal, Notifications, AcpGateway, Scheduler, Workflow) uses exactly this rule.
+An input is pending from its `input/message` until either `input/applied` followed by `input/consumed`, or `input/deleted`, references its event id. `input/withdraw` alone never changes whether an input is pending; only InputQueue's result fact does. Every "pending input" derivation (Goal, AcpGateway, Scheduler, Workflow) uses exactly this rule.
 
 ## 3. Flows
 
@@ -81,7 +81,7 @@ sequenceDiagram
   participant L as InputQueue, Loop
   C->>AI: launch {source scheduler, policy, starter}
   AI->>AI: cap policy by the starter's current policy
-  AI-->>C: {sessionId}, createdBy launch scheduler
+  AI-->>C: {sessionId}
   C->>AI: input {sessionId, main, queue, marker dim-scheduler, submissionId}
   AI->>S: input
   S->>TL: input/message
@@ -155,8 +155,8 @@ Queue inputs are consumed when Loop starts the turn they drive. Steer inputs are
 | `sessions.withdraw(WithdrawRequest) -> WithdrawReply` | async | Write `input/withdraw` for an input the caller wrote, by its `input_id`, and return InputQueue's decision |
 | `sessions.stop({sessionId, branchId}) -> {sequence}` | async | Interrupt the branch's turn |
 | `sessions.idle({sessionId, branchId}) -> {sequence}` | async | Wait until the branch is idle; the returned sequence is the last committed one, a whole-batch boundary |
-| `SessionConfig` fields | data | Creation-time configuration (`interactive`, `resourceNode`, `createdBy`) |
-| `session.create {interactive, client}` | RPC | Non-interactive creation and client origin |
+| `SessionConfig.interactive` | data | Creation-time configuration |
+| `session.create {interactive}` | RPC | Non-interactive creation |
 
 ## 7. Security
 
@@ -179,7 +179,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | ADR 002 D1 | `sessions` is a process service of Agents; InputQueue's withdrawal stays in its branch part, served to clients by its Session part. |
 | ADR 002 D2 | No access host or facade plugin; callers use Agents as Collaboration does. |
 | ADR 002 D3 | A caller depending on Agents reloads with it, and resolves uncertain writes with `lookup`. |
-| ADR 002 D4 | `SessionConfig` fields are creation data of the Session record, not plugin configuration. |
+| ADR 002 D4 | `SessionConfig.interactive` is creation data of the Session record, not plugin configuration. |
 | ADR 002 D5 | `sessions` is named with data-only methods and errors; Rust types appear only in Appendix E. |
 
 ## 9. Requirements raised to mechanism owners
@@ -188,7 +188,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 
 | Item | Content |
 | --- | --- |
-| Blocked by | ADR 002 D5: non-Rust parts (SessionTitle, Goal, Web, Notifications, the Scheduler and Workflow Session parts, ExternalAgent, PluginManager) must use the runtime's typed services (Timeline, Dispatcher, InputQueue, Session broadcast) without a hand-written Rust binding. App Server services they also use (SessionStore metadata, Settings, `AuxiliaryModel`) are named by their owners' supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
+| Blocked by | ADR 002 D5: non-Rust parts (SessionTitle, Goal, Web, the Scheduler and Workflow Session parts, ExternalAgent, PluginManager) must use the runtime's typed services (Timeline, Dispatcher, InputQueue, Session broadcast) without a hand-written Rust binding. App Server services they also use (SessionStore metadata, Settings, `AuxiliaryModel`) are named by their owners' supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
 | Existing mechanisms considered | rutis named services (`TypeKey::named`, `host_key`): work only for services registered by name, and the runtime registers these by Rust type. Hand-written bindings per plugin: rejected by D5. Starting in Rust: the fallback until this lands. |
 | Generic capability | The runtime registers each public typed service also under a stable service name with a data-only method shape, at the same scope and key. |
 | Effect on sequence, batch, interrupt, reload | None: calls by name keep the typed service's ordering, batch and interrupt rules; a named service reloads with its owner. |
@@ -214,8 +214,8 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | --- | --- |
 | Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled. |
 | Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls per plugin: not language-neutral (D5). |
-| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled, and does not wait for an optional part to become active: the Session is built without it and only that plugin's features are unavailable. Whether a part is attached is decided at Session load; a part that becomes active later is attached on the next Session reload, so the tool set stays the same within one load (ADR 002 D3, #34). Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
-| Effect on sequence, batch, interrupt, reload | Decided at Session load, and a Session reload decides again; enabling a plugin applies to Sessions loaded afterwards. |
+| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled, and does not wait for an optional part to become active: the Session is built without it and only that plugin's features are unavailable. Whether a part is attached is decided when the Session is published (at `SessionLifecycle::activated()`); a part that becomes active later is attached on the next Session reload, so the tool set stays the same within one load (ADR 002 D3, #34). Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
+| Effect on sequence, batch, interrupt, reload | Decided when the Session is published, and a Session reload decides again; enabling a plugin applies to Sessions loaded afterwards. |
 | Owner and issue | Runtime (Agent assembly); issue to be opened. |
 
 #5, used by the offline rows, in [ExternalAgent §9](../plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The optional `reason` on `input/withdraw` and the `LaunchRequest.agent` default are changes of InputQueue and Agents, listed in [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins).
@@ -240,7 +240,6 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 // LaunchRequest
 { "agent?": "string",                // Agent profile id; absent: Agents' default profile
   "cwd": "string",
-  "resourceNode?": "string",         // absent: control node
   "model?": "string",                // model id; takes precedence over the profile's model
   "policy?": { /* PermissionPolicy data */ },  // narrowed request; absent: starter's or read-only default
   "starter?": { "sessionId": "string", "branchId": "string" } } // upper bound; absent: host configuration bound
@@ -273,7 +272,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 
 Cancellation: the caller dropping an `idle` or `history` call ends it with no effect. Dropping an `input` before the reply leaves the outcome uncertain; the caller resolves it with `lookup`.
 
-`launch` creates a non-interactive Session with `createdBy = {kind: "launch", source}`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the request declares a policy, and it is always capped by host configuration.
+`launch` creates a Session with `interactive = false`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the request declares a policy, and it is always capped by host configuration.
 
 ### A.2 Source input conventions
 
@@ -287,18 +286,19 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 ### A.3 SessionConfig fields
 
 ```text
-// SessionConfig (new fields; existing: permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole)
-{ "interactive": true,              // false: exec, ACP, automation; stored records without it: true
-  "resourceNode?": "string",        // absent: control node
-  "createdBy": SessionOrigin }
-// SessionOrigin
-{ "kind": "client", "client?": "acp" }
-| { "kind": "collaboration", "leaderSession": "string" }
-| { "kind": "launch", "source": "scheduler" }
-| { "kind": "fork", "sourceSession": "string" }
+// SessionConfig (new field; existing: permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole)
+{ "interactive": true }             // false: exec, ACP, automation; absent: true
 ```
 
-`session.create` gains `interactive?: bool` (default `true`) and `client?: string`. A fork copies `cwd`, `resourceNode`, `interactive` and `collaborationRole`. The fields are fixed at creation. Assembly does not read `interactive`; plugins that care read it themselves (for example `ask_user` answers that no user is available), so the tool set stays the same and a fork keeps the prompt prefix and its KV cache (#30).
+`interactive` means the Session has an interaction counterpart that can answer its questions and approvals: the user through a client, or another Session's or branch's agent (for example a Collaboration leader). It does not require a human. `interactive` is fixed at creation. Assembly never reads it (ADR 002 D3, #30), so the tool set stays the same and a fork keeps the prompt prefix and its KV cache. Plugins that care read it from the Session's config directly: Questions (`ask_user` stays declared and answers that no one is available to answer) and SessionTitle (titles interactive leader Sessions only).
+
+`session.create` gains `interactive?: bool` (default `true`), checked at the boundary only. `session.create` rejects unknown fields, so an older daemon fails a request that carries `interactive` with invalid params; clients therefore send it only when it is `false`.
+
+A fork copies the source Session's whole `SessionConfig`; the permission preset follows with the copied `permission/changed` facts (#26).
+
+Format decision: the native store stays on version 13. `interactive` is an additive optional field of the stored config JSON, and a stored record without it means `true`, because every Session created before the field existed was a client Session. An older daemon ignores the field and reads a non-interactive record as interactive; this is accepted. No version 14.
+
+Not in this contract: `createdBy` (the Session's origin) and the `client` parameter of `session.create` are added when something decides with them. The resource node is a P3 addition (overview §6.3): an additive optional `SessionConfig` field, where a missing value means the control node.
 
 ### A.4 Withdrawal
 
@@ -357,8 +357,8 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 
 ## Appendix C. Acceptance
 
-1. `sessions.launch` creates a non-interactive Session whose policy is capped by the starter, with `createdBy.kind = launch`, and a TypeScript process plugin can call it by name.
-2. `session.create {interactive: false, client: "acp"}` produces the fields visible in the Session's `SessionConfig`, and no `ask_user`.
+1. `sessions.launch` creates a Session with `interactive = false` whose policy is capped by the starter, and a TypeScript process plugin can call it by name.
+2. `session.create {interactive: false}` produces `interactive = false` in the Session's `SessionConfig`; `ask_user` is declared and answers that no one is available to answer. A stored record without the field loads as interactive.
 3. Queue, Steer and Append written during a tool batch are consumed in the documented order, with the marker before the user content.
 4. A keyed block survives compaction, a retired key does not, and a child branch inherits keys independently.
 5. `input/withdraw` while InputQueue holds the input yields `input/deleted` and the input is never applied; after `input/applied` it writes nothing and replies `notHeld`; for one input at most one of `input/applied` and `input/deleted` exists. A deleted input's raw and keyed blocks never reach the model.
@@ -369,7 +369,7 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
 | A1 | Every source input starts with one marker block | Existing context-block format | Each plugin defines recognition |
-| A2 | Stored Sessions without `interactive` are interactive | Judgment | Clients must always send the field |
+| A2 | Moved to the format decision in [A.3](#a3-sessionconfig-fields) | — | — |
 | A3 | Process callers may call `idle` and `stop` on Sessions they started | Collaboration precedent | Another stop path |
 | A4 | "Withdraw and re-submit as Steer" is written as one batch by InputQueue's `session.input.withdraw` through a further optional parameter (proposed; its shape is not defined here) | Judgment | A separate built-in |
 
@@ -385,14 +385,13 @@ Cancellation: the caller dropping an `idle` or `history` call ends it with no ef
 | `history` with `atLeast` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>` (supplement); otherwise `Session::history`, or `Session::local_page(branch, after, limit, through)` when `after` is set |
 | `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`: appends `input/withdraw`, awaits InputQueue's decision for it; `WithdrawOutcome::Deleted { sequence }` or `WithdrawOutcome::NotHeld` |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
-| `SessionConfig`, `SessionOrigin` | Rust structs below |
+| `SessionConfig` | Rust struct below |
 | Errors | `AgentError`: `SessionClosed`, `BranchMissing`, `Reloading`, `Rejected(reason)` (including `FutureSequence`), `PublicationUnknown`, `Failed` |
 
 ```rust
 pub struct LaunchRequest {
     pub agent: Option<String>,            // absent: Agents' default profile
     pub cwd: PathBuf,
-    pub resource_node: Option<NodeId>,
     pub model: Option<String>,            // takes precedence over the profile's model
     // no source field: Agents fixes it from the calling plugin's identity (§9.3)
     pub policy: Option<PermissionPolicy>,
@@ -403,19 +402,12 @@ impl AgentIndex {
 }
 pub struct SessionConfig {
     // existing: permission_policy, cwd, model, system_prompt, tools, collaboration_role
+    #[serde(default = "default_true")]   // absent in stored records: true
     pub interactive: bool,
-    pub resource_node: Option<NodeId>,
-    pub created_by: SessionOrigin,
 }
 pub enum WithdrawOutcome {
     Deleted { sequence: u64 },            // sequence of input/deleted
     NotHeld,                              // unknown, applied or already deleted
-}
-pub enum SessionOrigin {
-    Client { client: Option<String> },
-    Collaboration { leader_session: String },
-    Launch { source: String },
-    Fork { source_session: String },
 }
 ```
 
