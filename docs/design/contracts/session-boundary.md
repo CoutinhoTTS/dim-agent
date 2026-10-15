@@ -175,6 +175,8 @@ The connection's `ConnectionEntry {name, deviceId}` is the only authority for wh
 
 ### 9.2 Unload waits for `drain` calls
 
+Withdrawn: rutis is an external dependency, so no requirement is raised to it. Rpc already waits for the commands it admitted before it unloads.
+
 | Item | Content |
 | --- | --- |
 | Blocked by | A `drain` method (`account.*`, `provider.*`) must finish before its provider unloads (A.4, today's behaviour). |
@@ -184,6 +186,8 @@ The connection's `ConnectionEntry {name, deviceId}` is the only authority for wh
 | Owner and issue | rutis lifecycle; issue to be opened. |
 
 ### 9.3 Listing the active providers of a process-scoped service
+
+Withdrawn: rutis is an external dependency, so no requirement is raised to it. Rpc dispatches management methods with what rutis provides today (keyed reads); how `hello.features` reports them is Rpc's own design.
 
 | Item | Content |
 | --- | --- |

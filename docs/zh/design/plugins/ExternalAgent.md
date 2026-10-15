@@ -244,6 +244,8 @@ sequenceDiagram
 
 ### 9.1 链路断开期间导入的服务保持登记（#5）
 
+已撤回：rutis 是外部依赖，不向它提需求。节点离线时的行为按 rutis 现有的节点行为设计。
+
 | 项 | 内容 |
 | --- | --- |
 | 被哪条规则挡住 | ADR 002 D3 与 overview §6.3（离线规则）：对等节点的 `HostPlatform`（及其他节点服务）经 rutis 链路导入；如果链路断开时撤销导入，每个依赖方（ExternalAgent、绑定该节点的 Session、Hooks、RemoteGateway、PluginManager 代码行）都会重载或变为 Pending，一个离线节点会影响无关的工作。 |

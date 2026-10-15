@@ -244,6 +244,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ### 9.1 Imported services stay registered while a link is down (#5)
 
+Withdrawn: rutis is an external dependency, so no requirement is raised to it. Behaviour while a node is offline follows rutis' existing node behaviour.
+
 | Item | Content |
 | --- | --- |
 | Blocked by | ADR 002 D3 and overview §6.3 (offline rule): a peer node's `HostPlatform` (and other node services) is imported over a rutis link; if the import is withdrawn when the link drops, every dependent (ExternalAgent, Sessions bound to that node, Hooks, RemoteGateway, PluginManager code rows) reloads or goes Pending, so one offline node disturbs unrelated work. |

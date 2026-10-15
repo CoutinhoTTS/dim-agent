@@ -2,6 +2,8 @@
 
 Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [Settings, Mcp, SkillsCatalog changes](../overview.md#b2-app-server-process-plugins), [conventions](../overview.md#64-conventions), [multiple nodes](../overview.md#63-multiple-nodes), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (depends on [#3](https://github.com/arcships/dim/issues/3); non-Rust capability plugins on [#4](https://github.com/arcships/dim/issues/4); peer nodes on [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
+> **P3: redesign with rutis' existing capabilities.** rutis is an external dependency; the requirements this document raises to rutis are withdrawn ([principles §4 rule 8](../../architecture/rust-agent/principles.md)).
+
 PluginManager is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): installation is per host). It installs plugin packages from Git marketplaces, local paths or Git URLs onto a target node, records plugin intent (install, enable, node binding, package paths) through typed Settings operations into loader rows, and publishes the typed content of enabled packages as the named process service `pluginContents`. Content owners (SkillsCatalog, Mcp, Hooks, Workflow, in any language) depend on `pluginContents` by name, define their own content type keys and read the content they understand; PluginManager knows none of them. Package code runs when its package is enabled: there is no host-local approval, because installing and enabling are host configuration done through management methods, outside Approval and Permission, which govern only agent-initiated actions ([overview conventions](../overview.md#64-conventions)). Packages are never upgraded automatically. PluginManager handles only structural operations (install, enable, disable, update, remove), and it is the only writer of structural fields of any plugin row, including the `enabled` field of built-in plugins such as [RemoteGateway](RemoteGateway.md); each plugin declares the schema of its own business configuration, which is written through Settings typed operations into that plugin's Settings business source, never through PluginManager.
 
 ## 1. Structure
@@ -203,6 +205,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 ## 9. Requirements raised to mechanism owners
 
 ### 9.1 Typed operations on the loader editable layer ([#3](https://github.com/arcships/dim/issues/3))
+
+Withdrawn: rutis is an external dependency, so no requirement is raised to it. PluginManager uses the existing rutis-loader operations, checks revisions itself as the only writer, and verifies package integrity before it writes rows.
 
 | Item | Content |
 | --- | --- |
