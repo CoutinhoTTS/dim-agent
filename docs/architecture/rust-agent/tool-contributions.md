@@ -28,7 +28,7 @@ flowchart LR
     A["ApprovalPlugin"]
   end
   B -->|装配时登记名称| R
-  R -->|injects| C
+  R -->|published Session: named lookup| C
   R -->|injects| H
   TB -->|injects| R
   L -->|injects| TB
@@ -52,14 +52,14 @@ impl SessionService for ToolContribution {}
 | 登记 | `AgentBuilder::session_tool(name)` 在装配时登记贡献名称；同一名称只登记一次 |
 | 提供 | 贡献方能力在自身状态就绪后，于 `apply` 中以上述键提供；`definition` 可按本 Session 配置生成，`definition.name` 等于登记名称 |
 | 宿主工具名 | 宿主工具名经 `AgentBuilder::host_tools` 登记：产品根由 `workspace_tools::install` 登记，测试与开发宿主由 `defaults::tool_host` 登记；其他提供 `ToolHost` 的装配须自行登记，否则显式 profile 不能列出这些工具 |
-| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称，作为 `Contributions<ToolContribution>` 的键；`apply` 中按 `SessionConfig.tools` 注册：名称已登记则注册对应贡献，否则按宿主工具注册 |
-| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；已登记而未列出的贡献仍被注入，不注册 |
+| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 只接入宿主工具，后台任务在 `SessionLifecycle::activated()` 后按名称读取本 Session 已可用的贡献，不建立对可选贡献方的硬依赖 |
+| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 诊断；稍后才 Active 的贡献在下次注册表重载时接入 |
 
 ## 3. 依赖方向
 
 | 方向 | 规定 |
 | --- | --- |
-| `ToolRegistry` → 贡献方 | `Deps` 中的 `Contributions<ToolContribution>` |
+| `ToolRegistry` → 贡献方 | Session 发布后按登记名读取一次，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`SessionLifecycle`、`Diagnostics` 和既有动态来源的真实依赖 |
 | 贡献方 → `ToolRegistry` | 不注入；贡献方不读取、不修改注册表 |
 | 贡献方状态 | 不因 `ToolRegistry` 或其上游重载而卸载 |
 
@@ -67,7 +67,7 @@ impl SessionService for ToolContribution {}
 
 | 情况 | 结果 |
 | --- | --- |
-| 贡献方重载 | `ToolRegistry` 及其下游按[能力重载协议](single-tree.md#能力重载协议)重载；旧代处理器上的在途调用由 `ToolExecutor` 以重载结算 |
+| 固定贡献方重载或退出 | 不重载 ToolRegistry；旧 handler 的停止与在途工作归贡献方结算。新一代在下次注册表重载时接入，不把已绑定请求改绑到新 handler |
 | `ToolHost` 重载 | `ToolRegistry` 重载并重新收集全部贡献；贡献方不受影响 |
 | 旧代处理器 | 被继续持有时调用返回明确的停止错误 |
 
@@ -75,7 +75,7 @@ impl SessionService for ToolContribution {}
 
 | 情况 | 结果 |
 | --- | --- |
-| 登记名称无提供方 | 缺失依赖，Session 构建失败 |
+| 已登记的可选贡献无 Active 提供方 | 该工具不进入声明；记录诊断，ToolRegistry 与 Loop 正常工作 |
 | 贡献名称与宿主工具重名 | 注册时重复，Session 构建失败 |
 | `SessionConfig.tools` 含未登记且宿主未提供的名称 | 沿用现有错误：`tool <name> is not provided by the host` |
 
@@ -84,8 +84,9 @@ impl SessionService for ToolContribution {}
 1. 贡献方提供的工具出现在模型工具声明中，调用经 `ToolExecutor` 到达其处理器。
 2. `branch`、`agent` 以贡献提供，分支与协作流程测试经贡献路径通过。
 3. `ToolHost` 重载后贡献方状态保持，工具表恢复一致。
-4. 贡献方重载时在途调用以重载结算，新一代处理器接管后续调用。
+4. 可选贡献方 Pending、缺失或退出时不传播硬依赖失效；来源所有者仍负责旧 handler 的停止，新一代只在下次注册表重载后接入。
 5. 未启用的贡献不出现在工具声明中。
+6. 初次发布后的工具接入沿用 ToolBinding 的变化通知与 Prompt 采用，不直接修改模型请求；接入前已确定前缀的请求保持原工具快照。
 
 ## 7. 动态工具来源
 
@@ -253,7 +254,7 @@ Loop 释放:
 | 情况 | 结果 |
 | --- | --- |
 | 来源版本变化 | 不是重载：替换、采用；在途调用按旧快照结算 |
-| 来源方、`ToolHost` 或 ToolRegistry 重载 | 下游重载，ToolExecutor 以重载结算在途批次；新注册表只含当前版本，前缀版本不可取得的分支在 `apply` 重新采用，一致的直接 pin、不写新事实 |
+| 动态来源方、`ToolHost` 或 ToolRegistry 重载 | 下游重载，ToolExecutor 以重载结算在途批次；新注册表只含当前版本，前缀版本不可取得的分支在 `apply` 重新采用，一致的直接 pin、不写新事实。固定贡献按第 4 节处理 |
 | Prompt 重载 | ToolBinding 及下游重载，快照随旧 ToolBinding 释放 |
 | Loop 单独重载 | ToolBinding 与快照保留；新 Loop 重建后 `retain_only` |
 | ToolBinding 重载后预算恢复 | `transfer` 因无快照失败，turn Failed |

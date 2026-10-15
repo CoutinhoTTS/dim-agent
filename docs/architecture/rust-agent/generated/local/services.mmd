@@ -135,10 +135,9 @@ flowchart LR
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p16
   p10 -->|"dim_agent_runtime::config::SessionIdentity@session"| p16
   p16 -->|"dim_agent_capabilities::host::ToolHost@session"| p15
-  p14 -->|"dim_agent_capabilities::tool_registry::ToolContribution#branch@session"| p15
-  p21 -->|"dim_agent_capabilities::tool_registry::ToolContribution#skill@session"| p15
-  p17 -->|"dim_agent_capabilities::tool_registry::ToolContribution#wait@session"| p15
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p15
+  p10 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p15
+  p10 -->|"dim_agent_runtime::diagnostics::Diagnostics@session"| p15
   p10 -->|"dim_agent_runtime::assembly::TimelineFactory@session"| p14
   p10 -->|"dim_agent_runtime::config::SessionIdentity@session"| p14
   p10 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p14
