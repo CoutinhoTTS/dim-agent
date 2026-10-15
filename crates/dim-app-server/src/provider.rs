@@ -2,6 +2,7 @@
 //! managed credentials; this plugin owns provider configuration and SQLite records.
 mod drivers;
 mod legacy;
+pub(crate) mod management;
 mod new_api;
 mod preferences;
 mod remote;
@@ -2172,6 +2173,7 @@ impl TypedPlugin for ProviderPlugin {
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver))?;
+            management::provide(ctx, service.clone())?;
             ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
             Ok(Effect::Done)
         })

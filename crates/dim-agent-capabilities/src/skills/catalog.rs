@@ -258,53 +258,65 @@ impl TypedPlugin for SkillsCatalogPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, settings): Self::Deps,
+        deps: Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let settings = settings.0.clone();
-            let lifecycle = ctx.cancellation_token();
-            let mut changes = settings.changes();
-            let initial = settings
-                .skills(lifecycle.child_token())
-                .await
-                .map_err(|error| SkillsError::SettingsRead(error.to_string()));
-            let catalog = Arc::new(SkillsCatalog {
-                user_root: platform.home.join(SKILLS_DIR),
-                settings: settings.clone(),
-                state: tokio::sync::Mutex::new(CatalogState {
-                    user: None,
-                    projects: HashMap::new(),
-                    settings: initial,
-                }),
-                reloading: tokio::sync::Mutex::new(()),
-                version: watch::channel(0).0,
-                closed: lifecycle.clone(),
-            });
-            let tasks = TaskTracker::new();
-            let owner = catalog.clone();
-            tasks.spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = owner.closed.cancelled() => return,
-                        changed = changes.changed() => if changed.is_err() { return },
-                    }
-                    if let Err(error) = owner.reload_settings().await {
-                        tracing::warn!(%error, "Skill settings read failed");
-                    }
-                }
-            });
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        tasks.close();
-                        tasks.wait().await;
-                        Ok(())
-                    })
-                }))
-            })?;
+            let catalog = Self::mount(ctx, deps).await?;
             ctx.provide_as(TypeKey::of::<SkillsCatalog>(), catalog)?;
             Ok(Effect::Done)
         })
+    }
+}
+impl SkillsCatalogPlugin {
+    /// Initializes the catalog in its owner's context. An embedding host may
+    /// publish additional interfaces in the same plugin without an adapter row.
+    pub async fn mount(
+        ctx: &Ctx,
+        (platform, settings): <Self as TypedPlugin>::Deps,
+    ) -> Result<Arc<SkillsCatalog>, CordisError> {
+        let settings = settings.0.clone();
+        let lifecycle = ctx.cancellation_token();
+        let mut changes = settings.changes();
+        let initial = settings
+            .skills(lifecycle.child_token())
+            .await
+            .map_err(|error| SkillsError::SettingsRead(error.to_string()));
+        let catalog = Arc::new(SkillsCatalog {
+            user_root: platform.home.join(SKILLS_DIR),
+            settings: settings.clone(),
+            state: tokio::sync::Mutex::new(CatalogState {
+                user: None,
+                projects: HashMap::new(),
+                settings: initial,
+            }),
+            reloading: tokio::sync::Mutex::new(()),
+            version: watch::channel(0).0,
+            closed: lifecycle.clone(),
+        });
+        let tasks = TaskTracker::new();
+        let draining = tasks.clone();
+        ctx.effect(move || {
+            Effect::AsyncDisposer(Box::new(move || {
+                Box::pin(async move {
+                    draining.close();
+                    draining.wait().await;
+                    Ok(())
+                })
+            }))
+        })?;
+        let owner = catalog.clone();
+        tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = owner.closed.cancelled() => return,
+                    changed = changes.changed() => if changed.is_err() { return },
+                }
+                if let Err(error) = owner.reload_settings().await {
+                    tracing::warn!(%error, "Skill settings read failed");
+                }
+            }
+        });
+        Ok(catalog)
     }
 }
 impl Capability for SkillsCatalogPlugin {
