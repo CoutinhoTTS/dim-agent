@@ -127,7 +127,7 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
   使用者只看到文本、停止原因和用量。
 - 错误消息不含秘密：`failed` 使用现有 `HostError` 的消息，它不包含凭据值；Provider 从不把连接
   格式化进消息。
-- 诊断：`complete` 发出进程级 `tracing` span `auxiliary.complete`，含 provider id、model id、
+- 诊断：`complete` 记录一条进程级 `tracing` 事件（target 为 `auxiliary.complete`），含 provider id、model id、
   结果、耗时和 token 用量，从不包含请求或回复内容。使用者在自己的 Session 诊断中记录结果。辅助
   调用不是 Session 事实，不进入任何 Timeline。
 
@@ -169,4 +169,4 @@ S4 没有开放问题。按用途的推理强度（功能清单）如果以后�
 2. 模型被禁用或不存在：`model_unavailable`，不发请求，不回退。
 3. 删除模型所属的 Provider：下一次调用返回 `model_unavailable`。
 4. 流进行中丢弃调用会取消请求；卸载 Provider 会以 `cancelled` 结束进行中的调用。
-5. 回复、错误和 trace span 都不含 API key；调用后 Session 的 Timeline 没有新事件。
+5. 回复、错误和 trace 事件都不含 API key；调用后 Session 的 Timeline 没有新事件。
