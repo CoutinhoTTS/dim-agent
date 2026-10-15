@@ -51,8 +51,16 @@ the [overall design](../design/overview.md)'s P0 Settings supplement: client-fac
 plugin-declared schemas and a credential-reference resolver. Until then it has no
 management-method namespace and exposes no generic document bodies over RPC.
 
+Note: the overall design now splits that supplement ([§6.4](../design/overview.md#64-conventions)).
+S8a keeps `BusinessDocument` as the Rust binding and adds change notification
+for both user and project scope. S8b, with the TypeScript bridge and not yet
+implemented, adds the language-neutral named `settings` service, the client
+management methods `settings.read`/`settings.update` and the credential
+resolver. MCP bearer tokens, `env` and `headers` values stay inline in the `mcp`
+documents until they move to credential references; that move is not part of S8.
+
 Native user sources retain the exact original v13 `settings_documents` contract:
-`user/mcp` and `user/skills`, plain payload JSON (no `{kind, document}` envelope),
+`user/mcp`, `user/mcp-projects` and `user/skills`, plain payload JSON (no `{kind, document}` envelope),
 positive source-local versions and opaque `native:<source>:<version>` CAS tokens.
 The first successful read imports that source's legacy file, committing the
 document and provenance atomically. Concurrent imports adopt one winner. Originals
@@ -101,10 +109,14 @@ Owners retain declarations, wire validation, business calls and the calls they
 accept: an owner's unload interrupts its `Report` calls and waits for its
 `Drain` calls. Rpc owns entry admission and reply delivery. There is no
 Methods/Management plugin, registration port or adapter row. MCP and Skills
-publish their existing management methods; Settings publishes none. Local v3
+publish their existing management methods; Settings publishes none (S8b will
+add `settings.read`/`settings.update`, see D4). Local v3
 hello lists the methods of the active owners. A namespace whose owner row is
-enabled but not active returns `service_reloading`, as before contributions; one
-with no enabled owner, and non-serving entries, return `unknown_method`. Rpc
+Pending or between generations returns the retryable `service_reloading`, as
+before contributions; one whose owner row is Failed or Unresolved returns the
+non-retryable `service_unavailable`; one with no enabled owner, and non-serving
+entries, return `unknown_method`. The code still returns `service_reloading`
+for Failed and Unresolved rows until #116. Rpc
 tells them apart from the loader's row status, with no requirement raised to
 rutis. An owner that is inactive or reloading affects only its namespace;
 business edits do not reload plugins. See
