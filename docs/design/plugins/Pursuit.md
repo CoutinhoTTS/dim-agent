@@ -1,6 +1,8 @@
 # Pursuit
 
-Status: Experimental. Scope: branch. Not part of the [overall design](../overview.md) plugin catalog.
+Status: Deferred. Scope: branch. Not part of the [overall design](../overview.md) plugin catalog.
+
+> **Deferred ([#44](https://github.com/arcships/dim/issues/44)).** Goal is implemented first. Judging completion with evaluator branches needs a larger design than this document, which also depends on dynamic events (#2) for its own `pursuit/*` events and on Rpc reaching it by type. It is kept for reference and is not scheduled.
 
 Pursuit is an experimental alternative to [Goal](Goal.md) for the same requirement ([feature list](../../feature-list.md), Agent behavior: keep working toward an explicit objective and record its completion or blockage). It differs in who decides completion: Goal continues until the working model reports completion through `goal_update`; Pursuit asks an **evaluator**, a separate branch of the same Session, after every turn. Both continue the same branch automatically, so a Session enables at most one of them. Pursuit uses its own names (`pursuit/*` events, `session.pursuit.*` methods, `/pursue`) and shares no contract with Goal.
 
