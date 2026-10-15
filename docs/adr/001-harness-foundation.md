@@ -152,6 +152,10 @@ external outcomes. Use existing rutis lifecycle hooks and the harness fault path
 
 ### Trust and cross-language calls
 
+> Superseded in part by [ADR 003](003-approval-scope.md): project MCP execution approval
+> (grants, fingerprints, `mcp.approve`/`mcp.revoke`) is removed; project entries start disabled
+> and the user enables them. The rest of this section stands.
+
 Project MCP execution approval is implemented at the host boundary. It is not a complete
 workspace sandbox or a cross-language Capability implementation. Authorizing a FileStorage root,
 selecting FullAccess tool permissions or restoring a Session never grants project MCP execution.
