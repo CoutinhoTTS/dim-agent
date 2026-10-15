@@ -39,7 +39,7 @@ async fn configuration_management_preserves_live_intent_and_separates_save_ackno
     );
     assert_eq!(
         remote.rpc("mcp.catalog", json!({})).await["error"]["data"]["appError"],
-        "unknown_method"
+        "local_transport_required"
     );
     let before = client.rpc("mcp.catalog", json!({"cwd":home})).await;
     assert_ok(&before);
@@ -505,7 +505,7 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
                 json!({"sourcePath":"/unused/legacy.sqlite"})
             )
             .await["error"]["data"]["appError"],
-        "unknown_method"
+        "local_transport_required"
     );
     for method in [
         "account.status",
@@ -527,7 +527,7 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
                     }
                 )
                 .await["error"]["data"]["appError"],
-            "unknown_method"
+            "local_transport_required"
         );
     }
     let mut old = Client::new_version(&server, false, 2).await;
@@ -581,7 +581,7 @@ async fn local_product_management_starts_without_configuration_and_isolates_inva
         assert!(local.features.as_array().unwrap().contains(&json!(method)));
         assert_eq!(
             remote.rpc(method, params.clone()).await["error"]["data"]["appError"],
-            "unknown_method"
+            "local_transport_required"
         );
         assert_eq!(
             old.rpc(method, params).await["error"]["data"]["appError"],
@@ -850,11 +850,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     ] {
         assert_eq!(
             remote.rpc(method, params).await["error"]["data"]["appError"],
-            if method.starts_with("session.") {
-                "local_transport_required"
-            } else {
-                "unknown_method"
-            }
+            "local_transport_required"
         );
     }
     let entry = |id: &str, max: u64| {

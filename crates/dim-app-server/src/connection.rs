@@ -120,6 +120,7 @@ impl Connection {
                 return Err(RpcError::reloading());
             }
             let guard = self.admit(&request)?;
+            self.admit_entry(rpc, &request.call)?;
             let this = self.clone();
             if let Call::Management { method, params } = &request.call {
                 if self.protocol_version() < 3 || !self.local {
@@ -170,6 +171,22 @@ impl Connection {
             let _ = self.sender.send(Outbound::result(id, Err(error)), false);
         }
     }
+    /// The connection's entry decides what it may call before any method is
+    /// routed, for built-in and contributed methods alike: protected profiles
+    /// serve only `hello` and `daemon.ping` to non-local transports.
+    fn admit_entry(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
+        if rpc.config.protected_profile()
+            && !self.local
+            && !matches!(call, Call::Hello(_) | Call::Ping)
+        {
+            return Err(RpcError::app(
+                -32000,
+                "local_transport_required",
+                "Execution and management require a protected local connection",
+            ));
+        }
+        Ok(())
+    }
     fn admit(self: &Arc<Self>, request: &Request) -> Result<Inflight, RpcError> {
         let mut ids = self.ids.lock().expect("request identities");
         if ids.contains(&request.id) {
@@ -208,16 +225,6 @@ impl Connection {
         *self.version.get().expect("handshake precedes requests")
     }
     fn validate_call(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
-        if rpc.config.protected_profile()
-            && !self.local
-            && !matches!(call, Call::Hello(_) | Call::Ping)
-        {
-            return Err(RpcError::app(
-                -32000,
-                "local_transport_required",
-                "Execution and management require a protected local connection",
-            ));
-        }
         if call.is_execution_session() {
             let available = rpc.config.local_execution();
             if self.protocol_version() < 3 || !available {

@@ -45,8 +45,11 @@ remain independent from the parent `account` namespace.
 
 ## Dispatch and lifecycle
 
-Local v3 dispatches management contributions; v1/v2 and WebSocket do not.
-Unknown names and methods on non-serving entries return `unknown_method`.
+Entry admission precedes routing for built-in and contributed methods alike:
+a protected profile answers every call except `hello` and `daemon.ping` from a
+non-local transport with `local_transport_required`, as before contributions
+(PR #15 A.3). Local v3 then dispatches management contributions; v1/v2 do not,
+and unknown names or methods return `unknown_method`.
 The proposed `ConnectionEntry {name, deviceId}` and paired-device routing remain
 RemoteGateway work; its connections must never be served management methods.
 `hello.features` snapshots the collected methods and declared notifications

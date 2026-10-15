@@ -56,18 +56,22 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
     }
     let mut remote = Client::new_version(&server, true, 3).await;
     let mut legacy = Client::new_version(&server, false, 2).await;
-    for client in [&mut remote, &mut legacy] {
-        for method in [
-            "mcp.catalog",
-            "skills.catalog",
-            "provider.catalog",
-            "configuration.catalog",
-        ] {
-            assert_eq!(
-                client.rpc(method, json!({})).await["error"]["data"]["appError"],
-                "unknown_method"
-            );
-        }
+    for method in [
+        "mcp.catalog",
+        "skills.catalog",
+        "provider.catalog",
+        "configuration.catalog",
+    ] {
+        // The entry decides first: a protected profile serves only hello and
+        // ping to non-local transports, whether or not a method exists.
+        assert_eq!(
+            remote.rpc(method, json!({})).await["error"]["data"]["appError"],
+            "local_transport_required"
+        );
+        assert_eq!(
+            legacy.rpc(method, json!({})).await["error"]["data"]["appError"],
+            "unknown_method"
+        );
     }
     server.shutdown();
     server.join().await.unwrap();
