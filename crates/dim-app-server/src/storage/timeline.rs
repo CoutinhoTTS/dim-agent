@@ -1,8 +1,10 @@
 use super::{
     SqliteStorage,
     codec::{self, ContentCache, WireEvent},
+    files::SessionFiles,
     sqlite::error,
 };
+use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::{
     AgentError, BoxFuture, Capability, KeysOf, PublishCallback, Result, SessionConfig,
     StoredBranch, StoredEvent, TimelineInfo, TimelineKey, TimelineStore, TimelineTrace, scoped,
@@ -171,12 +173,14 @@ impl SqliteTimelineStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        // Session-file owner rows go before the Session they reference.
         for table in [
             "timeline_snapshots",
             "timeline_events",
             "timeline_branches",
             "timeline_content",
             "session_owners",
+            "session_file_owners",
             "agent_sessions",
         ] {
             tx.execute(
@@ -448,7 +452,16 @@ impl SessionStore {
     }
 }
 
-pub struct SessionStorePlugin;
+/// The Session directory and the `sessionFiles` service. Session files live
+/// below the FileStorage root `files_root`, which is the database directory.
+pub struct SessionStorePlugin {
+    files_root: usize,
+}
+impl SessionStorePlugin {
+    pub fn new(files_root: usize) -> Self {
+        Self { files_root }
+    }
+}
 impl TypedPlugin for SessionStorePlugin {
     type Deps = (Arc<SqliteStorage>,);
     fn name(&self) -> &str {
@@ -460,14 +473,23 @@ impl TypedPlugin for SessionStorePlugin {
         (db,): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let store = Arc::new(SessionStore::new(db));
-            let owned = store.timeline.clone();
+            let store = Arc::new(SessionStore::new(db.clone()));
+            let files = SessionFiles::new(db, ctx.clone(), self.files_root);
+            let (timeline, owned_files) = (store.timeline.clone(), files.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move { owned.close().await.map_err(Into::into) })
+                    Box::pin(async move {
+                        // Puts settle before the native store stops writing.
+                        owned_files.close().await;
+                        timeline.close().await.map_err(Into::into)
+                    })
                 }))
             })?;
             ctx.provide_as(TypeKey::of::<SessionStore>(), store)?;
+            ctx.provide_as(
+                TypeKey::of::<SessionFilesHost>(),
+                Arc::new(SessionFilesHost(Arc::new(files))),
+            )?;
             Ok(Effect::Done)
         })
     }

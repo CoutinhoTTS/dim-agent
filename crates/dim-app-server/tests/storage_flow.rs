@@ -1114,7 +1114,7 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
         dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone()),
     ));
     let session = root.plugin(capability_plugin(
-        dim_app_server::storage::SessionStorePlugin,
+        dim_app_server::storage::SessionStorePlugin::new(0),
     ));
     (&sqlite).await.unwrap();
     (&session).await.unwrap();

@@ -401,6 +401,29 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
+    // SessionStore keeps Session files next to the native database, below
+    // the database directory as a FileStorage root (session-files §3.1).
+    let session_files_root = match &config.database_path {
+        Some(path) => {
+            let directory = std::env::current_dir()?
+                .join(path)
+                .parent()
+                .map(PathBuf::from)
+                .ok_or_else(|| ServerError::Configuration("database must name a file".into()))?;
+            std::fs::create_dir_all(&directory)?;
+            let directory = std::fs::canonicalize(directory)?;
+            Some(
+                match config.file_roots.iter().position(|root| root == &directory) {
+                    Some(index) => index,
+                    None => {
+                        config.file_roots.push(directory);
+                        config.file_roots.len() - 1
+                    }
+                },
+            )
+        }
+        None => None,
+    };
     let config = Arc::new(config);
     let root = Ctx::root_with_sink(
         tokio::runtime::Handle::current(),
@@ -444,13 +467,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             dim_agent_aimux::ConfiguredModelsPlugin(models.clone())
         }));
     }
-    if let Some(path) = &config.database_path {
+    if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
         let path = path.clone();
         rows.push(register_capability(&mut builtins, move || {
             storage::SqliteStoragePlugin::new(path.clone())
         }));
-        rows.push(register_capability(&mut builtins, || {
-            storage::SessionStorePlugin
+        rows.push(register_capability(&mut builtins, move || {
+            storage::SessionStorePlugin::new(files_root)
         }));
     }
     // Each management namespace with the row of the owner that provides it;
