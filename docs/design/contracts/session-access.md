@@ -12,7 +12,7 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | `launch` with a policy capped by the starter | Agents | Scheduler, Workflow |
 | `SessionConfig` field `interactive` | Agents | Plugins that read it from the Session's `SessionConfig` (Questions, SessionTitle) |
 | Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal branch parts write the same form, and Hooks branch parts (to be designed) would too |
-| Fixed-prefix read | Runtime facade (requirement, §9) | Process callers and branch parts deciding from Timeline facts |
+| Fixed-prefix read | Runtime facade (existing `sequence` and `history`, A.5) | Process callers and branch parts deciding from Timeline facts |
 | Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`) | InputQueue | Clients, Hooks (to be designed), AcpGateway, Scheduler, Workflow |
 
 Session-scoped and branch-scoped plugins do not use this interface to reach their own Session. They use their Session's and branch's services, the branch Dispatcher and the Session broadcast directly.
@@ -51,7 +51,7 @@ flowchart LR
 | --- | --- | --- |
 | `sessions` (Agents) | Process | Supplement; maps to the existing `acquire` and facade, plus `launch` |
 | `SessionConfig` field `interactive` | Session record | Supplement |
-| Session facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) | Session, branch | Existing; fixed-prefix read (§9.2) is a requirement |
+| Session facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)) | Session, branch | Existing |
 | InputQueue | Branch | Change: consumes `input/withdraw`, writes `input/deleted`; withdrawal service |
 
 Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWrite`, `RawBlock`, `HistoryRequest`, `HistoryPage`, `LookupReply`, `WithdrawRequest`, `WithdrawReply` and `SessionsError`; the `SessionConfig` field `interactive` and the `interactive` parameter of `session.create`; the source marker, key and `submissionId` conventions; and the withdrawal contract. Contracts used are the runtime facade, Agents loading, the `input/message` data and consumption contract, the existing context-block element format and the Session input path.
@@ -173,7 +173,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | §4 rule 5 (batch) | InputQueue handles `input/message` and `input/withdraw` in sequence order; "withdraw and re-submit as Steer" writes the withdraw first in one batch. |
 | §4 rule 6 (model context) | A deleted input never enters context; consumed inputs are placed at their consumed position (§5). |
 | §4 rule 7 (public events and services) | Process callers reach Sessions only through `sessions`, and withdraw only through InputQueue's public withdrawal service. |
-| §4 rule 8 (requirements) | #4, fixed-prefix read and optional-part assembly are raised in §9. |
+| §4 rule 8 (requirements) | #4 and optional-part assembly are raised in §9; the fixed-prefix read is composed from the existing facade (§9.2). |
 | §4 rule 9 (only decision facts in the Timeline) | `SessionConfig`, leases and caller progress stay out of the Timeline; only inputs, withdrawal commands and results, and `stop/interrupt` from `stop` are events; the descriptive `reason` on the required `input/withdraw` is allowed by rule 9. |
 | §1 (Capability and App Server boundary) | Agents only exposes access; callers keep their business logic in their own plugins. |
 | ADR 002 D1 | `sessions` is a process service of Agents; InputQueue's withdrawal stays in its branch part, served to clients by its Session part. |
@@ -196,13 +196,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 
 ### 9.2 Fixed-prefix read
 
-| Item | Content |
-| --- | --- |
-| Blocked by | §4 rule 5 and time bus §4: a process caller deciding from history must read through a known published sequence, never the uncommitted or unconsumed tail. |
-| Existing mechanisms considered | `Session::history`: no lower bound on the head, so a read may miss the event that triggered it. Subscribing to the Dispatcher: process callers have no branch part. |
-| Generic capability | Read a branch's published history through at least a given sequence, failing `future_sequence` if the head is below it (A.5). |
-| Effect on sequence, batch, interrupt, reload | Reads only; the returned head is a whole-batch boundary. A reload makes the read fail `reloading`. |
-| Owner and issue | Runtime (Session facade, `Session::prefix`); issue to be opened. |
+Withdrawn ([#50](https://github.com/arcships/dim/issues/50)): the existing Session facade composes it, so no runtime change is needed. `Session::sequence(branch)` returns the published head; if it is below `atLeast` the read fails `future_sequence`, otherwise `Session::history(branch, Some(head))` reads through that head. Both read only published events and the head only grows, so the prefix is fixed (A.5).
 
 ### 9.3 Caller source fixed from plugin identity
 
@@ -298,6 +292,13 @@ A fork copies the source Session's whole `SessionConfig`; the permission preset 
 
 Format decision: the native store stays on version 13. `interactive` is an additive optional field of the stored config JSON, and a stored record without it means `true`, because every Session created before the field existed was a client Session. An older daemon ignores the field and reads a non-interactive record as interactive; this is accepted. No version 14.
 
+Implemented (C2): `session.create` sets the field, and the native store writes it only when it is `false`, so an interactive record keeps the form records had before the field existed. The omission is part of `SessionConfig`'s serde form, which only the native store serializes; exposing `SessionConfig` anywhere else (for example in a protocol reply) inherits it and needs its own decision. Its readers (Questions, SessionTitle) are not implemented yet. Session fork is not implemented yet (S5c).
+
+| Stored `config` | Daemon with C2 | Older daemon |
+| --- | --- | --- |
+| No `interactive` (every record before C2, interactive records after it) | Interactive | Interactive |
+| `"interactive": false` | Non-interactive | Interactive (field ignored; accepted) |
+
 Not in this contract: `createdBy` (the Session's origin) and the `client` parameter of `session.create` are added when something decides with them. The resource node is a P3 addition (overview §6.3): an additive optional `SessionConfig` field, where a missing value means the control node.
 
 ### A.4 Withdrawal
@@ -316,7 +317,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 
 ### A.5 Fixed-prefix read
 
-`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the history through that head, including ancestors. Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
+`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the history through that head, including ancestors. It is composed from the existing facade: read the head with `Session::sequence(branch)`, then `Session::history(branch, Some(head))` (§9.2). Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
 
 ### A.6 Errors
 
@@ -382,7 +383,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | per-call acquire | `AgentIndex::acquire(id)` (existing) returning a `SessionUse` lease |
 | `input` | `Session::input(InputMessageData, branch)` (existing), keys as `KeyUse::Live(name)` / `Retire(name)` |
 | `lookup` | `session.input_lookup` semantics on the facade |
-| `history` with `atLeast` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>` (supplement); otherwise `Session::history`, or `Session::local_page(branch, after, limit, through)` when `after` is set |
+| `history` with `atLeast` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `Session::history(branch, Some(head))`; otherwise `Session::history`, or `Session::local_page(branch, after, limit, through)` when `after` is set |
 | `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`: appends `input/withdraw`, awaits InputQueue's decision for it; `WithdrawOutcome::Deleted { sequence }` or `WithdrawOutcome::NotHeld` |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
 | `SessionConfig` | Rust struct below |
@@ -402,7 +403,8 @@ impl AgentIndex {
 }
 pub struct SessionConfig {
     // existing: permission_policy, cwd, model, system_prompt, tools, collaboration_role
-    #[serde(default = "default_true")]   // absent in stored records: true
+    // absent in stored records: true; only false is written
+    #[serde(default = "default_interactive", skip_serializing_if = "is_interactive")]
     pub interactive: bool,
 }
 pub enum WithdrawOutcome {

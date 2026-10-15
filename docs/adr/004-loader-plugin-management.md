@@ -112,11 +112,12 @@ Methods/Management plugin, registration port or adapter row. MCP and Skills
 publish their existing management methods; Settings publishes none (S8b will
 add `settings.read`/`settings.update`, see D4). Local v3
 hello lists the methods of the active owners. A namespace whose owner row is
-Pending or between generations returns the retryable `service_reloading`, as
-before contributions; one whose owner row is Failed or Unresolved returns the
-non-retryable `service_unavailable`; one with no enabled owner, and non-serving
-entries, return `unknown_method`. The code still returns `service_reloading`
-for Failed and Unresolved rows until #116. Rpc
+not running and has not failed (Pending, not started yet, or between
+generations) returns the retryable `service_reloading`, as before
+contributions; one whose owner row cannot run again until it is fixed or
+restarted (Failed, Unresolved or Disposed) returns the non-retryable
+`service_unavailable`; one with no enabled owner, and non-serving
+entries, return `unknown_method`. Rpc
 tells them apart from the loader's row status, with no requirement raised to
 rutis. An owner that is inactive or reloading affects only its namespace;
 business edits do not reload plugins. See
