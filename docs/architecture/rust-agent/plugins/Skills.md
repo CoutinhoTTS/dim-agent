@@ -12,6 +12,7 @@ aggregates their contributions into the skill tool and instructions/list prompt 
 | `S:SessionConfig` | Select the Session working directory. |
 | `S:SessionLoader` | Lock-free creation of Session-owned content instances. |
 | `S:Contributions` | Private ready content services, registered and withdrawn by content leaves. |
+| `S:SessionLifecycle` | Start catalog-driven replacement only after the Session is published. |
 
 ## Content instances
 
@@ -29,7 +30,15 @@ The catalog still owns source precedence, shadowing and enablement. Skills owns
 selection and reconciliation, not a second lifecycle tree. Unchanged definitions
 retain their instances. Body-only refresh replaces only changed content and changes
 the view digest, without repeating unchanged list text. Views are built from ready
-content services, never directly from enabled catalog definitions.
+content services, never directly from enabled catalog definitions. A view is
+rebuilt at each catalog change; a leaf withdrawn on its own does not change the
+current view until then.
+
+Apply creates the initial instances as part of Session assembly. Replacement
+after a catalog change waits for `SessionLifecycle::activated()`, so assembly
+readiness never observes an instance that the watcher retires, and a Session
+that fails assembly never replaces content. Changes seen meanwhile are adopted
+by the first update after publication.
 
 ## Events and lifetime
 
@@ -56,13 +65,14 @@ loading uses the current view rather than an old model-visible list.
 `load_returns_the_body_as_a_plain_tool_result`,
 `skill_loads_the_latest_view_after_queue_and_steer_interleave`,
 `content_instances_are_session_owned_and_only_changed_content_is_replaced`,
+`catalog_changes_during_assembly_wait_for_session_publication`,
 `unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessions`.
 
 <!-- generated:plugin Skills — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SkillsCatalog`、`S:Contributions`、`S:SessionConfig`、`S:SessionLoader` |
+| 注入 | `P:SkillsCatalog`、`S:Contributions`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader` |
 | 提供 | `S:PromptSource#dim/skills/instructions`、`S:PromptSource#dim/skills/list`、`S:SessionSkills`、`S:ToolContribution#skill` |
 | 被注入于 | `PromptRegistry`、`SkillsBranch`、`ToolRegistry` |
 <!-- /generated -->

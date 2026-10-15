@@ -5545,8 +5545,10 @@
       "references": [
         "path BranchLifecycle",
         "path SessionConfig",
+        "path SessionLifecycle",
         "use dim_agent_runtime::BranchLifecycle",
-        "use dim_agent_runtime::SessionConfig"
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionLifecycle"
       ]
     },
     {

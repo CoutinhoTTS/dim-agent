@@ -17,7 +17,7 @@ service container or lifecycle manager. See [Skills](Skills.md).
 ## Tests
 
 [skills.rs](../../../../tests/integration/tests/skills.rs) covers isolated Session
-contributions and withdrawal when content becomes unavailable.
+contributions and their replacement when a catalog change retires content.
 
 <!-- generated:plugin SkillContributions — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

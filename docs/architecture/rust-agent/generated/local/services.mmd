@@ -115,6 +115,7 @@ flowchart LR
   p4 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p21
   p20 -->|"dim_agent_capabilities::skills::content::Contributions@session"| p21
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p21
+  p10 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p21
   p10 -->|"dim_agent_runtime::scope::SessionLoader@session"| p21
   p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p19
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p19

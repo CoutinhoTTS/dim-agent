@@ -199,6 +199,43 @@ impl ToolDriver for GateTools {
     }
 }
 
+/// Holds the next Session's assembly open until released, after its other
+/// capabilities applied: a window before the Session is published.
+#[derive(Default)]
+pub struct AssemblyHold {
+    armed: std::sync::atomic::AtomicBool,
+    pub entered: Notify,
+    pub release: Notify,
+}
+impl AssemblyHold {
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+struct AssemblyHoldPlugin(Arc<AssemblyHold>);
+impl rutis::TypedPlugin for AssemblyHoldPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "AssemblyHold"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        (): (),
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            if self.0.armed.swap(false, Ordering::SeqCst) {
+                self.0.entered.notify_one();
+                self.0.release.notified().await;
+            }
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for AssemblyHoldPlugin {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
 pub struct Env {
     pub root: rutis::Ctx,
     pub agent: Agent,
@@ -228,6 +265,7 @@ pub struct Options {
     pub settings: Arc<dyn SkillSettings>,
     pub today: Arc<Mutex<String>>,
     pub timezone: &'static str,
+    pub hold: Option<Arc<AssemblyHold>>,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -236,6 +274,7 @@ impl Default for Options {
             settings: Arc::new(MemorySkillSettings::default()),
             today: Arc::new(Mutex::new("2026-09-30".into())),
             timezone: "Asia/Shanghai",
+            hold: None,
         }
     }
 }
@@ -280,6 +319,9 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         std::time::Duration::from_millis(10),
     );
     skills::install(&mut builder);
+    if let Some(hold) = options.hold {
+        builder.session_plugin(move |_| AssemblyHoldPlugin(hold.clone()));
+    }
     Env {
         agent: builder.build_in(&root),
         root,

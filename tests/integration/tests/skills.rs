@@ -877,3 +877,88 @@ async fn content_instances_are_session_owned_and_only_changed_content_is_replace
     assert!(content_ids().is_empty());
     env.agent.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_changes_during_assembly_wait_for_session_publication() {
+    let dirs = Dirs::new();
+    let layout = layout(&dirs);
+    let hold = std::sync::Arc::new(AssemblyHold::default());
+    let env = env(
+        &dirs,
+        Options {
+            hold: Some(hold.clone()),
+            ..Options::default()
+        },
+    )
+    .await;
+    let active_content = || {
+        env.agent
+            .diagnostics()
+            .map(|snapshot| {
+                snapshot
+                    .plugins
+                    .into_iter()
+                    .filter(|plugin| {
+                        plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+                    })
+                    .map(|plugin| plugin.id)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default()
+    };
+    hold.arm();
+    let agent = env.agent.clone();
+    let cwd = layout.cwd.to_string_lossy().into_owned();
+    let creating = tokio::spawn(async move {
+        agent
+            .create_session(SessionConfig {
+                cwd,
+                tools: vec!["skill".into(), "gate".into()],
+                ..SessionConfig::default()
+            })
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), hold.entered.notified())
+        .await
+        .expect("assembly reached the hold");
+    // Skills applied with its initial instances while the Session is unpublished.
+    let mut initial = active_content();
+    for _ in 0..200 {
+        if initial.len() == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        initial = active_content();
+    }
+    assert_eq!(initial.len(), 3);
+
+    dirs.write(
+        &layout.project.join("b/SKILL.md"),
+        &skill_file("b", "project b", "BODY-B-2"),
+    );
+    env.catalog()
+        .refresh(RefreshTarget {
+            user: true,
+            project: Some(layout.cwd.clone()),
+        })
+        .await
+        .unwrap();
+    // Replacing an instance now would race the Session's readiness checks.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(active_content(), initial);
+
+    hold.release.notify_one();
+    let session = creating.await.unwrap().unwrap();
+    // Publication adopts the change seen during assembly: only `b` is replaced.
+    for _ in 0..200 {
+        if active_content() != initial {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let adopted = active_content();
+    assert_eq!(adopted.len(), 3);
+    assert_eq!(adopted.intersection(&initial).count(), 2);
+    assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-2"));
+    env.agent.close().await.unwrap();
+}

@@ -7,7 +7,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     BranchLifecycle, BranchScope, Capability, ConfigureControl, ConfigureUpdate, InBranch,
-    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionLoader, SessionScope, scoped,
+    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionLifecycle, SessionLoader,
+    SessionScope, scoped,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -129,6 +130,7 @@ impl TypedPlugin for SkillsPlugin {
         InSession<SessionConfig>,
         InSession<SessionLoader>,
         InSession<super::content::Contributions>,
+        InSession<SessionLifecycle>,
     );
     fn name(&self) -> &str {
         "Skills"
@@ -136,7 +138,13 @@ impl TypedPlugin for SkillsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (catalog, InSession(config), InSession(loader), InSession(contributions)): Self::Deps,
+        (
+            catalog,
+            InSession(config),
+            InSession(loader),
+            InSession(contributions),
+            InSession(session),
+        ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let cwd = PathBuf::from(&config.cwd);
@@ -191,6 +199,12 @@ impl TypedPlugin for SkillsPlugin {
             let stopped = lifecycle.clone();
             let context = ctx.clone();
             tasks.spawn(async move {
+                // Replacing instances during assembly would race Session readiness.
+                // The receiver keeps changes seen meanwhile for the first update.
+                tokio::select! {
+                    _ = stopped.cancelled() => return,
+                    published = session.activated() => if !published { return },
+                }
                 loop {
                     tokio::select! {
                         _ = stopped.cancelled() => return,
