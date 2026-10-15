@@ -39,11 +39,13 @@ With `DIMCODE_MODEL_CONFIG` set, run `./dev` to incrementally build both Rust ex
 ./dev --resume SESSION_ID                   # continue the printed session
 ./dev restart                              # explicitly rebuild and restart
 ./dev stop                                 # normal shutdown, no build
-./dev web                                  # open the Web workspace (also /web in the TUI)
+./dev web                                  # serve the Web workspace until Ctrl+C (also /web in the TUI)
 ./dev check                                # explicit formatting/compilation checks
 ```
 
 The working directory remains the caller's workspace. Pass `--cwd /absolute/path/to/project` to select another workspace. Startup does not run tests or produce release/npm distributions. See the [development contract](docs/architecture/development.md) for configuration precedence and runtime boundaries. Optional managed-provider packages document their own setup and login steps.
+
+To try standalone binaries for every platform, as the TypeScript CLI's `build:all` did, run `node scripts/build-all.mjs` (or `--target darwin-arm64` and so on). It cross-compiles `dimcode` and `dim-app-server`, with the Web workspace embedded, into `dist/<platform>/`; keep the two files together, since the CLI starts the App Server next to it. Linux and Windows targets need Zig and `cargo install --locked cargo-zigbuild`, plus `rustup target add` for each triple the script names.
 
 Use `--prompt TEXT` or redirected stdin for a single noninteractive turn. Use `--resume SESSION_ID` to continue a persisted session. Run `dimcode --help` for account, model and runtime options. Help and version commands do not start a daemon.
 
