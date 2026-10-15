@@ -57,7 +57,12 @@ pub struct Request {
 #[derive(Debug)]
 pub enum Call {
     Hello(Hello),
-    Management { method: String, params: Value },
+    /// A method no built-in decodes: a management or Session method, routed
+    /// by Rpc with its raw params.
+    Contributed {
+        method: String,
+        params: Value,
+    },
     Ping,
     Shutdown(Shutdown),
     Create(Create),
@@ -456,7 +461,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
-            _ => Call::Management {
+            _ => Call::Contributed {
                 method,
                 params: raw_params,
             },
@@ -559,7 +564,7 @@ pub enum InputLookupResult {
 #[serde(untagged)]
 pub enum Reply {
     Hello(HelloResult),
-    Management(Value),
+    Contributed(Value),
     Ping(PingResult),
     Create(CreateResult),
     List(Vec<SessionInfo>),

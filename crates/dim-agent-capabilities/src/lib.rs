@@ -48,6 +48,7 @@ impl SessionService for host::ContextModelHost {}
 impl SessionService for host::PromptHost {}
 impl SessionService for host::ModelHost {}
 impl SessionService for host::ToolHost {}
+impl SessionService for methods::SessionMethods {}
 impl BranchService for input_queue::InputQueue {}
 impl BranchService for agent_loop::AgentLoop {}
 impl BranchService for prompt::Prompt {}
@@ -75,4 +76,5 @@ impl PublicService for workspace_tools::file_reads::FileReads {}
 impl PublicService for wait::Wait {}
 impl PublicService for skills::SkillsBranch {}
 impl PublicService for tool_registry::ToolSourcesView {}
+impl PublicService for methods::SessionMethods {}
 impl SessionService for tool_registry::ToolSourcesView {}

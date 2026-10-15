@@ -185,36 +185,62 @@ impl Owners {
     }
 }
 
-/// Fails assembly for a Session namespace recorded with
-/// `AgentBuilder::session_methods` that could shadow a built-in or share a
-/// name with a configured management namespace, so no name has two owners
-/// (methods contract A.1). A Session namespace may lie under `session`, but
-/// never equals, contains or lies inside an exact built-in, and never lies
-/// under another reserved root.
-pub(crate) fn check_session_namespaces(
-    management: &[(String, String)],
-    sessions: &[String],
-) -> Result<(), CordisError> {
-    for namespace in sessions {
-        let overlaps = |other: &str| within(namespace, other) || within(other, namespace);
-        if !valid_name(namespace)
-            || ["hello", "daemon", "agent", "approval"]
-                .iter()
-                .any(|root| within(namespace, root))
-            || crate::protocol::builtin_methods().any(overlaps)
-        {
-            return Err(CordisError::PluginFailed(
-                format!("invalid Session namespace {namespace}").into(),
-            ));
+/// The `sessionMethods` namespaces assembly recorded with
+/// `AgentBuilder::session_methods`, the counterpart of `Owners` (methods
+/// contract A.1, "Known namespaces"). Every Agent of the process is built from
+/// one assembly, so every Session lists all of them. They decide whether a
+/// name is a Session method candidate before any Session is read, and a
+/// recorded namespace whose provider is not active is reloading, not absent.
+pub(crate) struct SessionNamespaces {
+    /// Longest first: a name belongs to the longest namespace containing it.
+    namespaces: Vec<String>,
+}
+impl SessionNamespaces {
+    /// Fails assembly for a recorded namespace that could shadow a built-in
+    /// or share a name with a configured management namespace, so no name has
+    /// two owners. A Session namespace may lie under `session`, but never
+    /// equals, contains or lies inside an exact built-in, and never lies under
+    /// another reserved root.
+    pub(crate) fn new(
+        management: &[(String, String)],
+        recorded: &[String],
+    ) -> Result<Self, CordisError> {
+        for namespace in recorded {
+            let overlaps = |other: &str| within(namespace, other) || within(other, namespace);
+            if !valid_name(namespace)
+                || ["hello", "daemon", "agent", "approval"]
+                    .iter()
+                    .any(|root| within(namespace, root))
+                || crate::protocol::builtin_methods().any(overlaps)
+            {
+                return Err(CordisError::PluginFailed(
+                    format!("invalid Session namespace {namespace}").into(),
+                ));
+            }
+            if let Some((owner, _)) = management.iter().find(|(owner, _)| overlaps(owner)) {
+                return Err(CordisError::PluginFailed(
+                    format!("Session namespace {namespace} overlaps management namespace {owner}")
+                        .into(),
+                ));
+            }
         }
-        if let Some((owner, _)) = management.iter().find(|(owner, _)| overlaps(owner)) {
-            return Err(CordisError::PluginFailed(
-                format!("Session namespace {namespace} overlaps management namespace {owner}")
-                    .into(),
-            ));
-        }
+        let mut namespaces = recorded.to_vec();
+        namespaces.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        Ok(Self { namespaces })
     }
-    Ok(())
+
+    /// The recorded namespace that owns `name`, if it is a Session method
+    /// candidate. A name outside the declaration grammar owns none, without
+    /// any lookup.
+    pub(crate) fn owner(&self, name: &str) -> Option<&str> {
+        if !valid_name(name) {
+            return None;
+        }
+        self.namespaces
+            .iter()
+            .find(|namespace| within(name, namespace))
+            .map(String::as_str)
+    }
 }
 
 fn provider(ctx: &Ctx, namespace: &str) -> Option<Arc<ManagementMethods>> {

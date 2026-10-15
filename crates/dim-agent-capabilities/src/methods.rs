@@ -2,12 +2,13 @@
 //! Appendix F): declarations, the handler, wire errors and the call admission
 //! that both `ManagementMethods` (App Server, process scope) and
 //! `SessionMethods` (Session scope) build on, so the two cannot diverge.
-use dim_agent_runtime::AgentError;
+use dim_agent_runtime::{AgentError, SessionScope};
 use rutis::{BoxFuture, CordisError, Ctx, Effect};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     collections::HashSet,
+    ops::Deref,
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -299,4 +300,41 @@ impl MethodProvider {
 pub struct Accepted {
     pub reply: tokio::sync::oneshot::Receiver<Result<Value, RpcError>>,
     pub settled: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// A Session capability's wire methods, `sessionMethods[namespace]`: the
+/// Session-scoped counterpart of App Server's `ManagementMethods`, with the
+/// same call admission. Rpc dispatches a call through the Session it names,
+/// reading this service by namespace (`Session::session_named_service`), and
+/// never names its provider.
+pub struct SessionMethods(Arc<MethodProvider>);
+impl Deref for SessionMethods {
+    type Target = MethodProvider;
+    fn deref(&self) -> &MethodProvider {
+        &self.0
+    }
+}
+impl SessionMethods {
+    /// Provides the methods of `namespace` for this Session, from the
+    /// provider's `apply` after its own effects. Assembly records the
+    /// namespace with `AgentBuilder::session_methods`, which Rpc checks
+    /// against built-in and management names; every Session of that assembly
+    /// must provide it, since a recorded namespace without an active provider
+    /// answers `service_reloading`.
+    pub fn provide(
+        ctx: &Ctx,
+        scope: &SessionScope,
+        namespace: &str,
+        declarations: Vec<MethodDecl>,
+        handler: Handler,
+    ) -> Result<Arc<Self>, CordisError> {
+        let service = Arc::new(Self(MethodProvider::new(
+            ctx,
+            namespace,
+            declarations,
+            handler,
+        )?));
+        ctx.provide_as(scope.named_key::<Self>(namespace), service.clone())?;
+        Ok(service)
+    }
 }

@@ -2218,7 +2218,7 @@ fn contributed_management_methods_decode_with_unvalidated_raw_params() {
             )
             .unwrap();
             match request.call {
-                Call::Management {
+                Call::Contributed {
                     method: routed,
                     params: raw,
                 } => {
