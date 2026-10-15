@@ -1,6 +1,6 @@
 # MCP OAuth
 
-Status: Draft (design stage, awaiting the maintainer's Ready). Roadmap item F4
+Status: Accepted (maintainer review on [#111](https://github.com/arcships/dim/pull/111)). Roadmap item F4
 ([#75](https://github.com/arcships/dim/issues/75)). Overview:
 [Appendix B.2, Mcp row](../overview.md#b2-app-server-process-plugins). Phase: P2. Language: Rust.
 Scope: inside the existing Mcp process plugin ([ADR 002](../../adr/002-plugin-scope.md)). Basis:
@@ -219,10 +219,11 @@ The specification's priority, first match wins:
 2. **CIMD.** Used when the build carries a client metadata URL and the authorization server
    advertises `client_id_metadata_document_supported`. The client ID is the HTTPS URL of Dim's
    published document: `client_name` `Dim`, `redirect_uris`
-   `["http://localhost:1456/callback"]`, `token_endpoint_auth_method` `none`. F4 ships no URL,
-   and this step is skipped until the project publishes the document and sets the constant
-   (Appendix C). It is also skipped when `callbackPort` is not 1456, because the document lists
-   only that redirect URI.
+   `["http://localhost:1456/callback"]`, `token_endpoint_auth_method` `none`. Maintainer
+   decision (#111): Dim publishes no client metadata document for now and uses DCR; the question
+   is decided again when a server requires CIMD. Until then F4 ships no URL and skips this step
+   (Appendix C). Once enabled, it is also skipped when `callbackPort` is not 1456, because the
+   document lists only that redirect URI.
 3. **DCR.** Used when the authorization server has a `registration_endpoint`. The request
    carries `client_name` `Dim` (never taken from configuration), the redirect URI, grant types
    `authorization_code` and `refresh_token`, `token_endpoint_auth_method` `none` and
@@ -447,7 +448,7 @@ callback URLs or authorization server `error_description` text from an unvalidat
 | D6 | The callback always returns through `mcp.auth.complete {attemptId, callbackUrl}`; the CLI captures it with a loopback listener, or the user pastes it | A loopback listener in the daemon is a new external entry inside a business owner and is unreachable over SSH anyway; one long call with progress would hold an RPC open for minutes and still need a listener; the device flow is not in the MCP specification |
 | D7 | Three methods, all `report`; no cancel and no attempt-status polling | `drain` would hold Mcp's unload behind authorization-server calls and break the uniform `mcp.*` rule. A cancel method would undo nothing, since a pending attempt has no effect and expires; polling has nothing to poll, because no background party completes an attempt |
 | D8 | Credential key = server `id` + canonical URL, process-wide; the record binds `resource` and `issuer` | A URL-only key allows one account per server; `(source, id)` lets a token follow a name to a new URL; per-Session keys contradict process ownership (ADR 002 D1) |
-| D9 | Store `mcp-oauth.json` under the home root through FileStorage, atomic 0600 replace, versioned; token requests hold the store lock and settle once sent. When S8b lands nothing migrates: tokens are owner state that each refresh rewrites, while `credentials.resolve` is a read-only resolver of configured references | The Settings rows in SQLite hold business documents, not secrets; `pluginFiles` is FileStorage's bridge API for non-Rust plugins, while a Rust owner uses FileStorage directly, as the managed OAuth host does; an OS keychain needs a host-wide secret-store decision that covers every OAuth owner; waiting for S8b blocks on an API that cannot hold rotating secrets |
+| D9 | Store `mcp-oauth.json` under the home root through FileStorage, atomic 0600 replace, versioned; token requests hold the store lock and settle once sent. When S8b lands nothing migrates: tokens are owner state that each refresh rewrites, while `credentials.resolve` is a read-only resolver of configured references. Boundary: an S8b credential reference is a user-configured secret that is resolved read-only, while an OAuth token is state its owner obtains itself and rewrites on every refresh; they are different things, and every other OAuth holder follows the same rule | The Settings rows in SQLite hold business documents, not secrets; `pluginFiles` is FileStorage's bridge API for non-Rust plugins, while a Rust owner uses FileStorage directly, as the managed OAuth host does; an OS keychain needs a host-wide secret-store decision that covers every OAuth owner; waiting for S8b blocks on an API that cannot hold rotating secrets |
 | D10 | Refresh on use with a 30 s margin, plus refresh and one retry on `401`; single flight per key; persist rotation before use | Background refresh timers wake the daemon for idle servers and rotate tokens nobody uses |
 | D11 | Step-up is user-initiated: the call fails with fixed text, and the next sign-in requests the union | Automatic re-authorization from a tool call needs a browser in the middle of a turn |
 | D12 | Sign-out revokes (RFC 7009, best effort) then deletes the whole record; `mcp.remove` leaves credentials | Deleting on `mcp.remove` cannot know whether another source's entry with the same key still uses them |
@@ -546,8 +547,9 @@ Requirements on the CLI owner (zerob13), stated as behaviour; the CLI's internal
 
 Other follow-up, not a requirement:
 
-- **CIMD.** The maintainer decides whether the project publishes a client metadata document
-  (Appendix C). Until then, DCR covers servers without pre-registration.
+- **CIMD.** Maintainer decision (#111): the project publishes no client metadata document for
+  now, and DCR covers servers without pre-registration. It is decided again when a server
+  requires CIMD (Appendix C).
 
 ## Appendix A. rmcp 3.5.0 `auth`: used and closed gaps
 
@@ -610,4 +612,4 @@ tests, using an isolated home:
 
 | Item | Why it does not block F4 | Owner |
 | --- | --- | --- |
-| Publishing Dim's client metadata document (CIMD) | Needs a stable project HTTPS URL. Until it exists, DCR and `clientId` cover every server the specification allows, and turning it on only sets the URL constant | Maintainer (release) |
+| Publishing Dim's client metadata document (CIMD) | Maintainer decision (#111): not published for now; DCR and `clientId` cover servers without it. Decided again when a server requires CIMD; turning it on then needs a stable project HTTPS URL | Maintainer (release) |

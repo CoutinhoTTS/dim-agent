@@ -1,6 +1,6 @@
 # MCP OAuth
 
-状态：草案（设计阶段，待维护者确认 Ready）。路线图项 F4
+状态：已接受（维护者在 [#111](https://github.com/arcships/dim/pull/111) 评审通过）。路线图项 F4
 （[#75](https://github.com/arcships/dim/issues/75)）。总体设计：
 [附录 B.2 Mcp 行](../overview.md#b2-app-server-进程插件)。阶段：P2。语言：Rust。
 作用域：放在现有的 Mcp 进程插件内（[ADR 002](../../adr/002-plugin-scope.md)）。依据：
@@ -192,8 +192,9 @@ PKCE verifier 与 `state` 从不持久化。守护进程重启会放弃待完成
 2. **CIMD。** 构建中带有客户端元数据 URL，且授权服务器声明了
    `client_id_metadata_document_supported` 时使用。客户端 ID 是 Dim 发布的文档的 HTTPS URL：
    `client_name` 为 `Dim`，`redirect_uris` 为 `["http://localhost:1456/callback"]`，
-   `token_endpoint_auth_method` 为 `none`。F4 不带这个 URL；项目发布文档并设置该常量之前，
-   跳过这一步（附录 C）。`callbackPort` 不是 1456 时也跳过，因为文档只列出那一个重定向 URI。
+   `token_endpoint_auth_method` 为 `none`。维护者决定（#111）：Dim 目前不发布客户端元数据文档，
+   先用 DCR；等有服务器要求 CIMD 时再定。在此之前 F4 不带这个 URL，跳过这一步（附录 C）。
+   启用后，`callbackPort` 不是 1456 时也跳过，因为文档只列出那一个重定向 URI。
 3. **DCR。** 授权服务器有 `registration_endpoint` 时使用。请求带 `client_name` `Dim`（从不取自
    配置）、重定向 URI、授权类型 `authorization_code` 与 `refresh_token`、
    `token_endpoint_auth_method` `none` 和 `application_type` `native`。服务器仍签发的密钥存入记录。
@@ -397,7 +398,7 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 | D6 | 回调总是经 `mcp.auth.complete {attemptId, callbackUrl}` 送回；CLI 用回环监听捕获，或由用户粘贴 | 守护进程中的回环监听是业务所有者内部的新外部入口，而且经 SSH 时本来就够不着；一次带进度的长调用会让 RPC 挂上几分钟，仍然需要监听；设备流不在 MCP 规范中 |
 | D7 | 三个方法，全部 `report`；没有取消方法，也不轮询尝试状态 | `drain` 会让 Mcp 的卸载等待授权服务器调用，并打破 `mcp.*` 统一的规则。取消方法无事可撤，因为待完成的尝试没有效果且会过期；轮询无物可轮，因为没有后台方会完成尝试 |
 | D8 | 凭据 key = 服务器 `id` + 规范化 URL，进程级；记录绑定 `resource` 与 `issuer` | 只用 URL 作 key 时，一个服务器只能有一个账号；`(source, id)` 会让令牌跟着名字去到新 URL；按 Session 作 key 与进程所有权相悖（ADR 002 D1） |
-| D9 | 存储为 home 根目录下的 `mcp-oauth.json`，经 FileStorage 原子替换为 0600，带版本；令牌请求持有存储锁，发出即结算。S8b 落地时没有东西需要迁移：令牌是所有者状态，每次刷新都会重写，而 `credentials.resolve` 只读地解析配置中的引用 | SQLite 中的 Settings 行存放业务文档，不放密钥；`pluginFiles` 是 FileStorage 给非 Rust 插件的桥接 API，Rust 所有者直接用 FileStorage，托管 OAuth 宿主就是这样；OS 钥匙串需要一个覆盖所有 OAuth 所有者的宿主级密钥存储决定；等待 S8b 会卡在一个无法保存轮换密钥的 API 上 |
+| D9 | 存储为 home 根目录下的 `mcp-oauth.json`，经 FileStorage 原子替换为 0600，带版本；令牌请求持有存储锁，发出即结算。S8b 落地时没有东西需要迁移：令牌是所有者状态，每次刷新都会重写，而 `credentials.resolve` 只读地解析配置中的引用。边界：S8b 的凭据引用是用户配置的密钥，只读解析；OAuth 令牌是所有者自己取得、每次刷新都会改写的状态，两者不是一回事，其他 OAuth 持有方照此办理 | SQLite 中的 Settings 行存放业务文档，不放密钥；`pluginFiles` 是 FileStorage 给非 Rust 插件的桥接 API，Rust 所有者直接用 FileStorage，托管 OAuth 宿主就是这样；OS 钥匙串需要一个覆盖所有 OAuth 所有者的宿主级密钥存储决定；等待 S8b 会卡在一个无法保存轮换密钥的 API 上 |
 | D10 | 使用时刷新，余量 30 秒；`401` 时刷新并重试一次；每个 key 单飞；轮换在使用前持久化 | 后台刷新定时器会为空闲服务器唤醒守护进程，并轮换没人用的令牌 |
 | D11 | 提升授权由用户发起：调用以固定文本失败，下一次登录请求并集 | 从工具调用自动重新授权，需要在一轮中途打开浏览器 |
 | D12 | 登出先撤销（RFC 7009，尽力而为），再删除整条记录；`mcp.remove` 不动凭据 | 在 `mcp.remove` 时删除，无法知道另一来源中同 key 的条目是否仍在使用 |
@@ -481,8 +482,8 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 
 其他后续事项，不是需求：
 
-- **CIMD。** 由维护者决定项目是否发布客户端元数据文档（附录 C）。在此之前，DCR 覆盖没有预注册的
-  服务器。
+- **CIMD。** 维护者决定（#111）：项目目前不发布客户端元数据文档，没有预注册的服务器由 DCR 覆盖；
+  等有服务器要求 CIMD 时再定（附录 C）。
 
 ## 附录 A. rmcp 3.5.0 `auth`：使用的部分与补上的缺口
 
@@ -537,4 +538,4 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 
 | 事项 | 为何不阻塞 F4 | 负责人 |
 | --- | --- | --- |
-| 发布 Dim 的客户端元数据文档（CIMD） | 需要一个稳定的项目 HTTPS URL。在此之前，DCR 和 `clientId` 覆盖规范允许的所有服务器；开启它只需设置 URL 常量 | 维护者（发布） |
+| 发布 Dim 的客户端元数据文档（CIMD） | 维护者决定（#111）：目前不发布，没有它的服务器由 DCR 和 `clientId` 覆盖。等有服务器要求 CIMD 时再定；届时开启需要一个稳定的项目 HTTPS URL | 维护者（发布） |
