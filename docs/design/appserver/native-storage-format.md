@@ -6,7 +6,8 @@ before writable PRAGMAs. Older databases and the removed branch-only v14
 `user_configuration` format are unsupported and preserved, never migrated,
 downgraded or interpreted as v13. No migration API or startup option is provided.
 Roadmap item S5a plans the first in-place upgrade, from exactly v13 to v15; it is
-not implemented yet ([S5a v15 decision](#s5a-v15-格式决定)).
+not implemented yet ([S5a v15 decision](#s5a-v15-格式决定)). S5c (Session deletion
+and fork) keeps that format unchanged ([S5c decision](#s5c-格式决定)).
 Existing v13 schemas and document bytes remain compatible. Storage versions are
 independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
@@ -218,6 +219,16 @@ ProjectionCheckpoint = {
 - **单向**：v13 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。这是增量改动，代价可以接受；另一种做法是拒绝所有 v13 库，会丢失用户的 Session。之后的格式各自追加从前一版本出发的一步。
 - **升级日志**：升级事务提交后，打开存储的调用方得知已升级，守护进程向 stderr 写一行 `Upgraded native store <path> from format v13 to v15; earlier dimcode versions cannot open it.`。只有执行升级的那次启动写这一行。它直接写 stderr，不走 `tracing`，因为守护进程默认的日志过滤只保留错误。CLI 启动的守护进程的 stderr 就是数据库目录下私有的 `daemon.log`，回退旧版本的用户能在旧守护进程的拒绝信息旁找到原因。
 - **验证**：测试用 v13 结构的冻结副本构建一次性 v13 库，从不打开用户已有的库。
+
+### S5c 格式决定
+
+[路线图](../roadmap.md) S5c（[Session 删除、清理与分叉](session-deletion-and-fork.md#8-storage-format)，尚未实现）的格式决定：**不改格式**，沿用 S5a 的 v15，不升级到 v16。
+
+- **删除**：在一个事务内按 `session_id` 删除该 Session 在各表中的全部行（顺序为 `session_file_owners`、`timeline_snapshots`、`timeline_events`、`timeline_branches`、`timeline_content`、`session_owners`、`agent_sessions`），与创建回滚是同一操作。不写墓碑行：命令输出目录在提交之前移除，Session 文件由 S5a 的行和清扫处理。
+- **分叉**：在一个事务内为新 Session 插入现有表的行。`agent_sessions.config` 按存储的文本原样复制；`main` 截至分叉点的事件行、分叉点之前由 `main` 创建的分支及其下属分支的全部行、被复制事件引用的内容行、锚定在被复制事件上的快照，以及 S5a 的 `session_file_owners` 行，都按原字节复制。持久化 JSON 类型和事件格式样本不变。
+- **事件 ID**：事件 ID 在所属 Session 内唯一；分叉在另一个 Session 中重复源 Session 的 ID。现有校验和 `timeline_events_by_id` 索引本就按 Session 划分，这是对不变量的说明，不是格式变化。
+- **不记来源**：不加记录分叉来源的列，也不写事件；目前没有任何决定使用它，[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields) 规定 Session 来源在有使用方时连同其格式决定一起加入。
+- **旧版本**：没有 S5c 的守护进程把分叉出的 Session 当作普通 Session 读取，把已删除的 Session 当作从未存在。
 
 ## 索引与实际查询
 

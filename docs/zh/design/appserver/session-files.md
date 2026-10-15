@@ -165,7 +165,7 @@ SELECT :fork, file_id FROM session_file_owners WHERE session_id = :source
                                                      移除失去所有者的文件
 ```
 
-所有者行要在 `agent_sessions` 之前删除，因为 `session_file_owners` 引用它。Session 创建回滚（`rollback_creation`）也同样删除所有者行。分叉的创建被回滚时，它的文件仍以源为所有者；除非源在此期间已被删除，那时文件变为无主并被清扫。提交后，最后一个所有者是 S 的文件变为无主，由清扫移除。节点离线时删除照样提交，文件以无主行的形式等待，直到清扫到达该节点。
+所有者行要在 `agent_sessions` 之前删除，因为 `session_file_owners` 引用它。Session 创建回滚（`rollback_creation`）也同样删除所有者行。分叉的创建被回滚时，它的文件仍以源为所有者；除非源在此期间已被删除，那时文件变为无主并被清扫。提交后，最后一个所有者是 S 的文件变为无主，由清扫移除。这一步不需要节点：节点离线时它的行照样提交，文件以无主行的形式等待，直到清扫到达该节点。整个删除还会先在节点上移除该 Session 的命令输出（[删除与分叉 §11](session-deletion-and-fork.md#11-资源节点p3)）。
 
 ### 5.4 清扫
 
@@ -404,7 +404,7 @@ SessionStore 从 `session_file_owners` 回答"S 拥有哪些文件"，其主键 
 | 同一 Session 的两次写入 | 两个独立的文件 | — |
 | 写入时节点离线 | `node_unavailable`；什么都不保存；不重载任何东西 | SessionStore |
 | 分叉时节点离线 | 不受影响：不碰任何文件 | 原生存储 |
-| 删除时节点离线 | 删除提交；无主行等待清扫 | 清扫 |
+| 删除时节点离线 | Session 文件这一步无需节点即可提交；无主行等待清扫。整个删除见[删除与分叉 §11](session-deletion-and-fork.md#11-资源节点p3) | 清扫 |
 | 写入期间 FileStorage 重载 | `node_unavailable` 或 `storage`；放弃并清扫 | SessionStore |
 | 写入期间 SessionStore 重载 | 在 txn 2 之前取消（放弃），或已提交；Attachments 随之重载 | SessionStore 卸载 |
 | 进程重启 | 遗留物在第一次写入时或下一次删除之后被清扫 | 清扫 |

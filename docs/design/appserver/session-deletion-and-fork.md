@@ -1,0 +1,551 @@
+# SessionStore Session deletion, cleanup and fork
+
+Status: Draft (for review). Roadmap item S5c ([#61](https://github.com/arcships/dim/issues/61)), after S5a
+([#59](https://github.com/arcships/dim/issues/59)) and its design, [Session files](session-files.md).
+Overview: [Appendix B.2](../overview.md#b2-app-server-process-plugins), the Rpc, Agents and SessionStore rows. Scope:
+[ADR 002](../../adr/002-plugin-scope.md) process scope, inside the existing Agents and SessionStore plugins, with two
+Rpc built-ins.
+Consumers: clients through `session.delete` and `session.fork`, and the CLI's `dimcode session` commands (F6,
+[#77](https://github.com/arcships/dim/issues/77)).
+
+## 1. Summary
+
+A client deletes a Session with `session.delete` and forks one with `session.fork`. Both are Rpc built-ins of
+protocol v3. They call Agents, which owns loading, closing and creating Sessions; SessionStore performs the row and
+file steps.
+
+- **Delete.** Agents stops loading the Session and closes it if it is loaded, so its capabilities settle their work
+  and release what they hold. SessionStore then removes the Session's command output directory, and in one
+  transaction every row the store keeps for it, including its Session-file owner rows. S5a's sweep removes the files
+  that lost their last owner. Deleting an absent Session succeeds.
+- **Cleanup.** One delete removes everything the Session owns (§3.3). Cleanup by age or count, with a preview, is the
+  CLI composing `session.summaries` and `session.delete`; there is no server method for it.
+- **Crash safety.** The directory removal is durable before the row transaction commits, and Session files go by
+  S5a's rows. A delete interrupted anywhere leaves either the whole Session or none of its rows, and a retry or the
+  next sweep finishes it (§4).
+- **Fork.** A fork copies the source's `main` through a cut, with the branches `main` created by then, into a new
+  Session in one transaction, byte for byte, and shares the source's Session files. The fork's `main` opens with
+  `branch/resume`: the fork is the source's conversation restored at the cut under a new id. `SessionConfig` is
+  copied whole, so `interactive` and the permission preset carry over and nothing is widened.
+- **Format.** No change beyond S5a's v15: no provenance column, no tombstone, no event.
+
+No Timeline event, no event type or fixture change, and no change to the runtime, TimelineTree, Prompt, rutis or the
+Session facade.
+
+## 2. Structure
+
+```
+ Client -- session.delete {sessionId} ----------+
+        -- session.fork {sessionId, at} --------+
+                                                v
+ Process scope (control node)          Rpc built-ins (v3): shape, protocol version
+                                                |
+                                                v
+                         Agents (AgentIndex): per-Session admission gate,
+                         close, creation from another Session's cut
+                           |                                 |
+                           | delete_session(S)               | prepared creation,
+                           |                                 | prepare step = fork_session(S, F, at)
+                           v                                 v
+                         SessionStore ---- one transaction each ----> SqliteStorage
+                           |      \
+                           |       +-- S5a sweep (Session files)
+                           | per call, by the Session's resource node (#38)
+                           v
+ Resource node (P1/P2: the control node)     FileStorage: remove(command-output/<S>)
+```
+
+Rpc checks the params and the Session's protocol version and calls Agents. Agents owns the Session lifecycle: the
+admission gate `acquire` already holds while it restores a Session, `Session::close`, and prepared creation
+(`create_prepared_session`). SessionStore owns the rows and the files under the database directory. Its new steps
+are Rust methods over the native store, not services: only Agents calls them.
+
+## 3. Deletion
+
+### 3.1 Method
+
+`session.delete {sessionId: string} -> {}`
+
+| Item | Rule |
+| --- | --- |
+| Kind | Rpc built-in, next to `session.create` and `session.close`. It is not a `sessionMethods` entry, because a Session cannot unload itself through one of its own parts. It is not a management method either: it acts on one Session, and Rpc's Session checks apply |
+| Protocol | v3. v1 and v2 get `unknown_method` ("Method requires protocol v3"). `hello.features` lists it under the conditions that list `session.create`. The protocol version stays 3: clients discover new built-ins through `hello.features`, as they discover `session.summaries` |
+| Callers | Every connection that may call `session.close`, under the same profile rules: in a protected profile, local transports only. Paired devices (P3) are decided in RemoteGateway's compatibility table together with the other Session built-ins |
+| Session version | A Session's recorded protocol version must equal the connection's (`session_protocol_version`), as for every Session built-in. A Session with no readable owner row has no recorded version, so the check passes |
+| Damaged Sessions | Deleted by id. A delete reads none of the Session's records, so a Session that fails validation or has no available owner can be deleted; Rpc's unavailable-Session check does not apply to `session.delete` |
+| Reply | `{}` once the Session's rows are gone. An unknown or already deleted id also replies `{}` |
+
+### 3.2 Sequence
+
+```
+ Rpc          Agents                        Session S            SessionStore              FileStorage
+  | delete(S) ->|                              |                     |                          |
+  |             | 1 take S's admission gate    |                     |                          |
+  |             | 2 loaded? close() ---------->| settle accepted work, write terminal facts,
+  |             |                              | release processes, leases, member requests;
+  |             |<-------------- closed -------| trace archive ends   |                          |
+  |             | delete_session(S) ------------------------------->|                          |
+  |             |                              |  3 remove command-output/S, parent synced ---->|
+  |             |                              |    absent counts as removed <------------------|
+  |             |                              |  4 txn on the Timeline writer: owner rows,     |
+  |             |                              |    Timeline rows, owner, record -> commit      |
+  |             |                              |  5 schedule the S5a sweep                      |
+  |             | 6 forget S; keep its slot closed                   |                          |
+  |<---- {} ----|                              |                     |                          |
+```
+
+1. **Admission.** Agents takes S's admission gate, the `SessionSlot` gate that `acquire` holds while it restores, so
+   no request, subscription or fork can load S while the delete runs. A request that already holds a use of S keeps
+   it, and the close in step 2 ends its work.
+2. **Close.** If S is loaded, Agents closes it as `session.close` does: a business close, not an unload. Its
+   capabilities settle their accepted work, write their terminal facts and release processes, FileStorage leases and
+   member requests, and the delete waits for the trace archive as `session.close` does. A close that reports cleanup
+   errors is logged and the delete continues: the facts it could not write are removed with the rest.
+3. **Command output.** SessionStore removes `<database directory>/command-output/<S>/`, where WorkspaceTools keeps
+   exec output and oversized `read` results ([read.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs)
+   `offload`), through the FileStorage of S's resource node, looked up per call as in S5a. An absent directory counts
+   as removed. The removal must be durable before step 4 (§4), so FileStorage's `remove` syncs the parent of the
+   removed entry (§14). A failure ends the delete before any row changes (§3.5).
+4. **Rows.** One `IMMEDIATE` transaction removes every row of S: `session_file_owners`, `timeline_snapshots`,
+   `timeline_events`, `timeline_branches`, `timeline_content`, `session_owners` and `agent_sessions`, in this order
+   because of the foreign keys, plus S5b's title metadata (§14). This is the operation a creation rollback runs
+   today ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs) `rollback_creation`), extended by S5a
+   with the owner rows; delete and rollback share it. It runs on the Timeline writer, as a rollback does, so it
+   follows every append already queued for S and clears S's recorded write failure.
+5. **Sweep.** SessionStore schedules S5a's sweep ([Session files §5.4](session-files.md#54-sweep)). Files whose last
+   owner was S are removed there; files a fork still owns stay.
+6. **Forget.** Agents removes S's protocol version and unavailable-Session entry and keeps S's slot closed, so
+   `acquire` answers `session_closed`. A delete that failed before step 4 releases the gate instead, and S loads again
+   on its next use.
+
+### 3.3 What a delete removes
+
+| State | Where | Removed by |
+| --- | --- | --- |
+| Session record, owner, branches, events, content, snapshots | Native store | Step 4, one transaction |
+| Session-file ownership | `session_file_owners` (S5a) | Step 4. Files left without an owner go in S5a's sweep |
+| Title metadata | Native store, S5b's design | Step 4, same transaction |
+| Exec output and offloaded `read` results | `<database directory>/command-output/<S>/` | Step 3 |
+| Loaded instance, leases, subscriptions, in-flight uses | Process memory | Step 2 |
+| Protocol version, admission slot, unavailable-Session entry | Agents, in memory | Step 6 |
+| Collaboration relations that name S | Collaboration, in memory | Its existing close watcher, which already treats a closed Session as deleted ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `session_closed`) |
+
+A delete does not remove:
+
+- **Trace archives.** They are written where `session.create {trace}` asked, and their path goes to that client; the
+  client owns them. Step 2 waits for the archive to finish.
+- **Other owners' records that name S**, such as Scheduler and Workflow run records in `pluginFiles`. When their
+  owners use the id, they get `session_closed`, as for a closed Session.
+- **Other Sessions.** Members of a deleted leader and forks of S are Sessions with their own rows. A delete does not
+  cascade.
+- **Host configuration** (provider selections by workspace, MCP project enablement). It is not per Session.
+
+### 3.4 Clients and subscriptions
+
+- Connections attached to S get the existing `session.state` and `session.closed` notices when step 2 closes it, as
+  for `session.close`. A notice carrying the reason "deleted" is not added: `session.closed` is sent before the row
+  transaction commits, so it could announce a delete that then fails. The protocol has no list notification for a
+  new Session either, so none is added for a removed one.
+- After the reply, `session.attach`, Session methods and `session.fork` on S fail `session_closed`, and
+  `session.list` and `session.summaries` omit it.
+- The connection that sends the delete may itself be attached to S. It gets the notices, then the reply.
+
+### 3.5 Idempotence and errors
+
+Every step tolerates an absent target, so a delete can be retried after any failure or an uncertain reply.
+
+| Result | When | State after |
+| --- | --- | --- |
+| `{}` | The rows were removed, or there were none | Session gone; its unowned files go in the sweep |
+| `unknown_method` (-32601) | Protocol v1 or v2 | Unchanged |
+| `invalid_params` (-32602) | `sessionId` missing or not a string | Unchanged |
+| `session_protocol_version` | S belongs to another protocol version | Unchanged |
+| `product_integration_pending` | The profile does not serve Session execution | Unchanged |
+| `-32603` "Session operation failed" | Step 3 failed (`Locked`, `DirectoryNotEmpty`, `Unsynced`, I/O, node unavailable) or step 4 failed (SQLite) | S is closed but not deleted: its rows remain and it loads on its next use, possibly with part of its command output gone. Retry |
+| No reply | The connection or Rpc ended before the reply | Either state. Retry |
+
+`Locked` and `DirectoryNotEmpty` in step 3 come only from writers outside the closed Session, such as a PowerShell
+child that outlived its shell or another process holding a file open. The delete fails and is retried once they are
+gone.
+
+## 4. Crash convergence
+
+```
+            2 close            3 remove (synced)            4 commit              5 sweep
+ [loaded] ----------> [closed] -------------------> [no dir] -----------> [no rows] -------> [gone]
+    ^                    |                              |                     |
+    |                    | crash: all rows,             | crash: all rows,    | crash: unowned file
+    +--- next use -------+ part of the directory        | no directory        | rows (S5a)
+         loads S           retry the delete               retry the delete      next sweep
+```
+
+| Interrupted | Store | Disk | Converges by |
+| --- | --- | --- | --- |
+| Before or during the close | All rows | The directory | Nothing lost; S loads on its next use; retry |
+| During the removal | All rows | Part of the directory | Retry: removal continues and absent entries count as removed |
+| After the removal, before the commit | All rows | No directory, durably | Retry. Meanwhile S loads, without its command output files |
+| After the commit, before the reply | No rows | No directory; S's files unowned | The client's retry replies `{}` and schedules the sweep again; otherwise S5a's next trigger (another delete, or the first put of a later generation) removes the files |
+| During the sweep | S5a's states | — | [Session files §6](session-files.md#6-deletion-crash-recovery-and-serialization) |
+
+**Why the directory goes before the commit.** No row records the command output directory. Once the rows are gone,
+an orphaned directory could only be found by listing `command-output/`, and that directory is shared by every
+database in the database directory (two `--database` files in one directory), so a listing cannot tell a deleted
+Session's directory from another store's. Removing it first means no committed delete ever leaves one behind. S5a's
+files follow the opposite order because their rows record them and the sweep can find them. FileStorage removal is
+not synced ([S6](https://github.com/arcships/dim/pull/87)): after a power loss a removed directory can reappear while
+the later commit, made with `synchronous=FULL`, stays. Syncing the parent before the commit closes that gap.
+
+Rejected alternatives:
+
+| Alternative | Why not |
+| --- | --- |
+| Commit first, remove the directory after | A crash in between leaves a directory nothing names, and listing is unsafe in a shared database directory |
+| A tombstone row for deleted ids awaiting cleanup | A format change (v16) for one directory, when the order above converges without it |
+| Unload instead of close | An unload does not settle accepted work or stop member requests (AGENTS.md rule 8) |
+
+## 5. Cleanup
+
+### 5.1 Cleanup by age or count
+
+The [feature list](../../feature-list.md) asks for cleanup "by age or retained count, with a preview". The CLI
+composes it: `session.summaries` returns `createdAt`, `updatedAt` and a preview for every Session of the connection's
+protocol version; the CLI selects, shows the selection, and calls `session.delete` for each id. A failed id is
+reported and can be retried; the others are deleted.
+
+Rejected: a server method such as `session.cleanup {olderThan, keep, dryRun}`. It repeats the selection and preview
+the client already has, a retention policy would need a business owner and configuration that nothing defines, and a
+partial failure would still need per-id results.
+
+### 5.2 Orphans
+
+| Kind | Handling |
+| --- | --- |
+| Session files | S5a's sweep: after each delete, retried ones included, and on the first put of each generation |
+| Command output | None needed: removed before the commit (§4) |
+| Rows of a deleted Session | None needed: one transaction |
+| Rows left by earlier faults, such as Timeline rows with no record | A delete by that id removes them: every table is cleared by `session_id`, whether or not `agent_sessions` has the row |
+
+## 6. Fork
+
+### 6.1 Method
+
+`session.fork {sessionId: string, at: u64} -> {sessionId: string, sequence: u64}`
+
+| Item | Rule |
+| --- | --- |
+| Kind | Rpc built-in. It creates a Session, as `session.create` does, from another Session's cut (Agents) |
+| Protocol and callers | As for `session.delete` (§3.1). The source must belong to the connection's protocol version, and the fork gets that version |
+| `at` | The last `main` sequence the fork inherits. 0 inherits no event |
+| Reply | The fork's id and its `main` head once it is published. The client then attaches |
+| No other params | No `branchId`, configuration fields or `trace`. The fork's configuration is the source's (§6.3). A client changes it afterwards with `session.permission.update` or `session.model.update`, as [#26](https://github.com/arcships/dim/issues/26) decided for the preset |
+
+A fork is not idempotent: a retry after an uncertain reply can create a second fork, which the client finds in
+`session.summaries`.
+
+### 6.2 The cut
+
+The cut is on `main` and follows `session.branch_create`'s rule
+([tree.rs](../../../crates/dim-app-server/src/connection/tree.rs) `create_branch`): `at` is at most the published
+`main` head and ends an atomic batch, and `history::validate_context_boundary` accepts the context at `at` (no tool
+proposal without its result, no unfinished model output). Agents acquires the source to check it, restoring it if
+needed, as `session.branch_create` does. Rows at or before `at` never change, so appends during the fork do not
+affect the copy.
+
+**Why `main` only.** A child branch's history is its ancestors' prefixes followed by its own events, and each branch
+numbers its events from 1. Laying that out as one `main` would renumber events, and compaction `through`,
+`branch/create.at`, `branch/start.createEvent`, batch ends and snapshot anchors refer to those numbers: the store
+would rewrite facts other owners wrote. To continue a child branch's work, a client creates a branch from it inside
+the Session.
+
+Rejected: copying a child's ancestor chain under the same branch ids and continuing on the copy of the child. The
+fork's conversation would then not be its `main`, which clients, `session.list` and SessionTitle read.
+
+### 6.3 What a fork copies
+
+```
+ Source S                                                 Fork F (one transaction)
+ main: 1 .. 7  8 branch/create(c1)  9 .. 12 | 13 ..       main: 1 .. 12, same ids        (at = 12)
+                      |                   cut                   then 13 branch/resume, written by F
+ c1:   1 branch/start .. 30 (may still grow)             c1:   1 .. 30, whole as committed
+ c2:   branch/create at main 15                          -     not copied (created after the cut)
+ timeline_content: rows the events reference             only the rows the copied events reference
+ timeline_snapshots: main <= 12, c1                      copied
+ session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2), no byte copied
+ agent_sessions.config: stored text                      the same text
+ session_owners: (S, Agent A, v3)                        (F, Agent A, v3)
+ S5b title metadata                                      not copied
+```
+
+| Table | Rows F gets |
+| --- | --- |
+| `agent_sessions` | A new id (UUID v4), `created_at_ms` at the fork, and the source's `config` text unchanged. That is the whole `SessionConfig`, including `interactive` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), `permissionPolicy`, `collaborationRole`, `cwd`, `model`, `systemPrompt` and `tools`. Copying the text instead of re-serializing it keeps `interactive`'s omission rule as written |
+| `session_owners` | The source's Agent and protocol version |
+| `timeline_branches` | `main` with head `at`; every branch whose `branch/create` is on `main` at or before `at`, and every branch below those, with their stored `info` and heads |
+| `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it) and every row of the copied child branches, with kinds, bodies, sequences, batch ends, event ids and before traces as stored |
+| `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces |
+| `timeline_snapshots` | The rows anchored on copied events. They are derived from the same facts, so F's first load uses them instead of replaying from the start |
+| `session_file_owners` | One row for F per file S owns ([Session files §4](session-files.md#4-sharing-on-fork)) |
+| Title metadata (S5b) | None: a fork starts untitled ([SessionTitle](../plugins/SessionTitle.md) A7) |
+
+**Why child branches are copied whole.** The store requires a directory for every `branch/create` and checks it when
+it loads a Session ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs) `validate_session`), and
+TimelineTree restores every stored branch. Without the directory, F could not load. With an empty one, TimelineTree
+would write `branch/create_failed`, "interrupted by process restart", on F's `main` for a creation that succeeded.
+A branch's events are not ordered against `main`'s cut, so no prefix of a child corresponds to `at`; the child is
+copied as committed when the fork transaction runs, and F restores it like any branch after a restart (§6.5).
+
+**Why only referenced content.** Content rows are per Session. Copying all of them would copy, for a fork from an
+early point of a long Session, the requests of everything after the cut, while the copy holds the store's write lock.
+
+Rejected alternatives:
+
+| Alternative | Why not |
+| --- | --- |
+| Keep the child's directory, drop its events | TimelineTree records a failed creation, with a false reason, for a branch that ran |
+| Copy a child only up to its creation | Its first Queue input becomes pending again, and F runs the delegated task a second time |
+| Copy every content row of the source | Disk and lock time for requests after the cut, which no copied event references |
+
+The copy is one write transaction; every Session's commits wait for it, as they wait for any write round, and its
+length grows with the copied history.
+
+### 6.4 What a fork does not copy
+
+| Not copied | Why |
+| --- | --- |
+| `main` events after `at`, branches created after `at` | After the cut |
+| The loaded instance, leases, subscriptions, attached clients, in-flight requests | Runtime state, not stored; F builds its own |
+| An input still being submitted | Not committed, so not a fact |
+| The command output directory | WorkspaceTools' per-Session directory. F's copied tool results quote paths under `command-output/<S>/`, readable while S exists (§6.6) |
+| Title metadata | SessionTitle A7 |
+| Collaboration relations and temporary Agents | Process memory of the source's team. F leads no member, and S's temporary Agents stay invisible to F |
+| Host configuration | Never part of a Session |
+
+### 6.5 Opening the fork
+
+Agents creates F with its existing prepared creation: the prepare step is SessionStore's fork transaction instead of
+`create_owned_session`. The runtime then validates F's rows and builds F. A failure rolls F back, its owner rows
+included ([Session files §5.3](session-files.md#53-delete-s5c)); the source is untouched.
+
+TimelineTree opens a root branch that already has events with `branch/resume`
+([timeline_tree.rs](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) `restore`). F's `main` therefore
+continues with `branch/resume` after the copied facts. F is the source's conversation restored at the cut under a new
+id, and every owner applies its existing reload rule:
+
+| At the cut | In F |
+| --- | --- |
+| Model configuration (`context/configured`), prompt, adopted tools | Kept. A resumed branch keeps its configuration, and Prompt delivers source changes as on any resume, so the prompt prefix equals S's at the cut |
+| Permission preset (`permission/changed`) | Kept. Permission folds the copied facts (#26); the policy in `SessionConfig` is copied too |
+| An open turn | Loop fails it as interrupted by the reload; nothing is executed again |
+| A held input | Held in F as well, and applied as after a restart |
+| A background task without `exec/ended` | WorkspaceTools writes its `failed` terminal |
+| A Collaboration request delivered without a result | Collaboration writes its failed result. It must not stop the source's member (§14) |
+| A live goal (Goal, P5) | Goal's A11 (§14) |
+
+Rejected: `branch/start` after the copied facts. Prompt reads a root `branch/start` as a new Session and adopts the
+model and system prompt in `SessionConfig`, which would undo model changes the copied facts carry and change the
+prompt prefix ([prompt.rs](../../../crates/dim-agent-capabilities/src/prompt.rs) `open`). Avoiding that would change
+TimelineTree, to start a prepared root that has events, and Prompt, to tell a fork's start from a new Session's. A
+crash between F's commit and that start would still leave F with `branch/resume`.
+
+### 6.6 Identity, provenance and paths
+
+- **Event ids.** Copied events keep their ids. An event is identified by its Session and its id: the store checks
+  ids per Session and indexes them by `(session_id, event_id)`. New ids would mean rewriting every reference to them:
+  `input_id`, `call_event_id`, compaction cursors, before traces, snapshot anchors and Collaboration operation ids.
+- **Other ids.** Branch, turn, request, call, task and approval ids are kept; they are also scoped by Session. A
+  copied task id names no running task in F, so `session.exec.stop` answers that the task is unknown.
+- **`submission_id`.** It is copied inside `input/message`, so `session.input_lookup` on F finds copied inputs, since
+  it reads F's history. [#32](https://github.com/arcships/dim/issues/32) keeps that when it moves the field (§14).
+- **Provenance.** F records no source: no column, no fact. Nothing decides with it today, and session access A.3
+  adds the Session's origin (`createdBy`) when something does, with its own format decision.
+- **Paths.** Session files are shared through owner rows and stay valid while any owner exists (S5a). Command output
+  is not shared: F's copied tool results quote `command-output/<S>/…`, which F reads while S exists. After S is
+  deleted, reading such a path fails as file not found, and the results keep their previews.
+
+Rejected: keeping S's command output until S's forks are deleted. The delete would need to know S's forks, through a
+fork relation in the store (a format change), and WorkspaceTools' per-Session output would gain owners it does not
+have.
+
+### 6.7 Errors
+
+| Result | When | State after |
+| --- | --- | --- |
+| `{sessionId, sequence}` | F is published | F exists |
+| `unknown_method` | Protocol v1 or v2 | Nothing created |
+| `invalid_params`, `session_invalid_input` | Param shape, or a cut `session.branch_create` rejects at the same position | Nothing created |
+| `session_closed` | The source is unknown or deleted, also when its delete commits before the fork transaction | Nothing created |
+| `session_protocol_version` | The source belongs to another protocol version | Nothing created |
+| `session_build_failed` | F's build fails | F rolled back |
+| `-32603` "Session operation failed" | Storage failure, including F's copied rows failing validation | Nothing committed, or F rolled back |
+
+## 7. Serialization and races
+
+Deletes and forks decide at write transactions of the one native store connection, as puts do in
+[Session files §6](session-files.md#6-deletion-crash-recovery-and-serialization). Agents' admission gate orders a
+delete against loading.
+
+| Race | Outcome |
+| --- | --- |
+| Fork commits, then the source's delete | F keeps its copy and the shared files |
+| The source's delete commits, then the fork transaction | It finds no source: `session_closed`, nothing created |
+| The delete's close during the fork's cut check | The check fails `session_closed` |
+| Put against delete or fork | Session files §6 |
+| Two deletes | The second waits for the gate, then finds no rows: `{}` |
+| Delete against attach, submit or a Session method | They wait for the gate, then fail `session_closed`; requests that already hold a use end with the close |
+| Delete against the Session's own appends | The close settles them; the row transaction follows every queued append on the Timeline writer |
+| Fork against appends to the source | Rows through `at` never change; child branches are copied as committed when the transaction runs |
+| Delete of a Collaboration leader | Its close stops its member requests, as today; the members stay Sessions |
+| Delete of a member | The leader's requests to it settle as member closed, as today |
+| Two forks of one source | Independent Sessions, each owning the shared files |
+
+**S6 review notes.** "SessionStore must close the Session and release its leases first": step 2 comes before any
+removal. "`attachment.put` racing a delete should expect `Locked` or `DirectoryNotEmpty`": a put's directory belongs
+to no Session (S5a), the delete never removes it, and S5a's sweep removes only unowned, non-pending files, so neither
+meets a put's lease. The command output removal meets `Locked` or `DirectoryNotEmpty` only from a writer outside the
+closed Session; the delete then fails and is retried (§3.5). "Put and delete must be serialized": the store's write
+transactions order them (S5a §6); no in-memory lock is added.
+
+## 8. Storage format
+
+**Decision: no change. S5c uses S5a's v15 as it is.** Recorded in
+[native-storage-format.md](native-storage-format.md#s5c-格式决定).
+
+- A delete removes rows from existing tables.
+- A fork inserts rows into existing tables and copies stored text byte for byte. The persisted JSON types and the
+  event format fixtures are unchanged.
+- An event id is unique within its Session, and a fork repeats the source's ids in another Session. The store already
+  checks and indexes ids per Session; S5c states this as an invariant, not as a change.
+- No provenance column, no tombstone and no event, for the reasons in §4 and §6.6.
+- A daemon without S5c reads a fork as an ordinary Session, and a deleted Session as one that never existed.
+
+## 9. Ownership and S2
+
+| Operation | Owner | Called by |
+| --- | --- | --- |
+| `session.delete`, `session.fork` (shape, protocol version) | Rpc built-ins | Clients |
+| Delete orchestration: gate, close, forget | Agents (`AgentIndex::delete`) | Rpc |
+| Creation from another Session's cut | Agents (`AgentIndex::fork`), the Agents supplement in overview B.2 | Rpc |
+| Command output removal, row removal, fork transaction | SessionStore, Rust methods | Agents |
+| Session-file rows and sweep | SessionStore (S5a) | `sessionFiles.put`, `delete_session` |
+
+**S2 ([#62](https://github.com/arcships/dim/issues/62)).** S2's `sessions.launch` creates a Session from a profile
+and a policy capped by its starter; it does not create from a cut. Agents keeps one creation path for both: prepared
+creation, whose prepare step is `create_owned_session` for `session.create` and `launch`, and the fork transaction for
+a fork. S2 adds no fork method to `sessions`. A later `sessions.fork` would call `AgentIndex::fork` and cap the copied
+policy by its starter as `launch` does, because a process caller must not get a wider preset than its starter holds.
+
+## 10. Authority (ADR 003)
+
+- A fork copies the permission preset and never widens it. The preset at the cut is one the source held, and the
+  caller could already change the source's preset with `session.permission.update`.
+- Copied approval facts are decisions about calls that are already settled. Approval rechecks the current policy on
+  every answer and records no standing grant, so no authority comes from them.
+- Host security settings never enter the Timeline, so a fork neither restores nor widens them (ADR 003 D5).
+- Owning the source's Session files adds no authority ([Session files §11](session-files.md#11-security)).
+- Copied references to another Session's resources (member Session ids, task ids, paths) confer nothing: an owner
+  settling a fork acts only on resources its own Session holds (§14, Collaboration).
+- A delete changes no host state, and diagnostics carry ids and error kinds, never event content.
+
+## 11. Resource nodes (P3)
+
+S5c implements the control node only, as S5a does. There, step 3 fails while FileStorage is reloading or closed, and
+the delete is retried. On a P3 resource node, step 3 runs on that node's FileStorage,
+and an unavailable node fails the delete with node unavailable. Whether a delete may then commit and leave the
+directory for the node to reconcile is decided in P3 with the resource-node lookup
+([#38](https://github.com/arcships/dim/issues/38)): a resource node serves one control node, so a listing there,
+unlike in a shared database directory, can attribute its entries.
+
+## 12. Changes to other documents
+
+| Document | Change in this PR |
+| --- | --- |
+| [Overview B.2](../overview.md#b2-app-server-process-plugins) | Rpc row: `session.delete` and `session.fork` built-ins. Agents and SessionStore rows link here |
+| [Native storage format](native-storage-format.md#s5c-格式决定) | S5c format decision: no change |
+| [AcpGateway](../plugins/AcpGateway.md), [RemoteGateway](../plugins/RemoteGateway.md) | Their text said the preset is reset on fork, which #26 replaced: the preset is copied with the facts |
+| [Documentation index](../../INDEX.md) | Link to this page |
+| [Session files](session-files.md) | §5.3 and §12 said a delete commits while the node is offline. That holds for its Session-file step; the delete as a whole removes the command output on the node first (§11). §5.2, §5.4 and §6 are unchanged and are the steps this page runs |
+
+## 13. Rule check
+
+| Rule | Answer |
+| --- | --- |
+| Principles §4 rule 1 (commands for others' state) | Delete and fork change only Agents' and SessionStore's own state: Session records and rows. A fork copies stored bytes and writes no fact for another owner; the facts F writes when it opens come from their owners (TimelineTree's `branch/resume`, Loop's terminals). The preset is copied, not reset (#26) |
+| Principles §4 rule 2 (handover) | Not applicable: nothing is handed over |
+| Principles §4 rule 3 (before callbacks only) | No before callback. Rpc checks shape and the Session's version; the cut check is the existing one of `session.branch_create` |
+| Principles §4 rule 4 (no business meaning in core) | Timeline, Dispatcher, before and batches are untouched. TimelineTree's existing rule, that a root with events resumes, applies unchanged |
+| Principles §4 rule 5 (batch) | No event. The cut ends an atomic batch, so the copy holds whole batches |
+| Principles §4 rule 6 (context from handed-over events) | F's context comes from the copied adopted inputs and tool results; nothing else enters it |
+| Principles §4 rule 7 (public events and services only) | Agents uses the Session facade (`close`, `context`) and SessionStore's methods; SessionStore uses FileStorage's public `remove`. The Collaboration requirement keeps a fork from acting on the source's members |
+| Principles §4 rule 8 (requirements to mechanism owners) | No change to the Timeline, Dispatcher, event format, assembly, rutis or the Session facade, and nothing raised to rutis. The synced removal is a FileStorage supplement about the durability of its own operation; the Collaboration check is Collaboration's own rule (§14) |
+| Principles §4 rule 9 (only facts later decisions use) | No Timeline event. Deletion and fork are process-level operations on records, and no provenance is stored because nothing decides with it |
+| Principles §1 (Capability and App Server boundary) | No new plugin; the Agents and SessionStore supplements are in overview B.2 |
+| ADR 002 D1 (scope follows state) | Process scope: records and the database directory outlive any Session |
+| ADR 002 D2 (no wiring modules) | Rpc built-ins call Agents; SessionStore's steps are internal methods, with no adapter or registry |
+| ADR 002 D3 (dependencies follow scope) | Rpc, Agents and SessionStore depend on no optional plugin; FileStorage is looked up per call |
+| ADR 002 D4 (structural vs business configuration) | No configuration |
+| ADR 002 D5 (language-neutral contracts) | The two wire methods take and return data. SessionStore adds no service |
+| ADR 003 (approval scope) | §10: a fork copies the preset and never widens it; copied facts and shared files confer no authority |
+
+## 14. Requirements raised to mechanism owners
+
+None to the runtime or rutis. Supplements and requirements to other owners:
+
+| To | Requirement | Status |
+| --- | --- | --- |
+| FileStorage | `remove` syncs the parent of the removed entry before it reports success, and returns `Unsynced` when that sync fails. Windows has no directory sync and relies on NTFS metadata journaling, as for `replace`. Needed so a delete's removal is durable before its commit (§4) | Supplement in S5c's implementation, as `create_directory` is in S5a; to be agreed with FileStorage's owner |
+| Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. Today the rebuild stops any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would stop the source's member | Required before `session.fork` ships; acceptance 6 |
+| Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | [Goal](../plugins/Goal.md) A11 assumed a `branch/start` after the copied facts. A fork's `main` opens with `branch/resume`, and the copied prefix holds the source's `branch/start` and goal blocks. Goal applies its A11 fallback, clearing an inherited live goal on the fork's first load (a creating build whose `main` already has events: `SessionIdentity.restored` is false), or revises A11. A crash between the fork's commit and that clear leaves the goal live; a durable boundary would need the provenance record that session access A.3 defers | Goal's design review in P5 |
+| S5b ([#60](https://github.com/arcships/dim/issues/60)) | Title metadata rows are removed in the delete transaction and not copied by a fork | S5b's design |
+| [#32](https://github.com/arcships/dim/issues/32) | When `submission_id` leaves `input/message`, the fork copies the idempotency records of inputs at or before the cut in its transaction, so `session.input_lookup` on a fork keeps answering for copied inputs | #32's design |
+| F6 ([#77](https://github.com/arcships/dim/issues/77)) | `dimcode session delete` and cleanup by age or count with a preview, composed from `session.summaries` and `session.delete` (§5.1) | F6's design |
+
+## 15. Acceptance (flow tests)
+
+1. Delete a loaded Session with a running turn while a client is attached: the client gets `session.closed`, the reply
+   is `{}`, `session.list` omits the Session and `session.attach` fails `session_closed`. No row with its id remains
+   in any table, `command-output/<id>/` is gone, and its Session files are removed by the sweep. A second delete
+   replies `{}`.
+2. Delete an unloaded Session, and one whose rows fail validation: both reply `{}` and leave no row.
+3. Fork at a context boundary of `main`, with one child branch created before the cut and one after: F's `main` holds
+   the source's events through `at` with the same ids, then `branch/resume`; F has the first child whole and not the
+   second; F has only the content rows its events reference, and it reloads after a restart.
+4. A fork's `SessionConfig` text equals the source's, including `"interactive": false`. A permission preset and a
+   model set on the source before the cut are F's preset and model.
+5. A fork is refused for `at` beyond the head, inside a batch or outside a context boundary, for an unknown source,
+   and on a v2 connection, and creates nothing.
+6. Fork a leader while its request to a member is open at the cut: F settles the request as failed, and the source's
+   member keeps running.
+7. Fork, then delete the source: F loads and reads its Session files; deleting F removes them. A delete and a fork of
+   the same source raced: either F exists with the files or the fork fails `session_closed`; never a fork without its
+   files.
+8. On disposable stores: a Session whose command output directory is gone but whose rows remain loads, and a delete
+   then completes; unowned file rows left by a delete commit are swept on the next generation's first put.
+
+Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and
+`cargo test --workspace --locked`. No Capability, assembly or crate dependency changes, so `xtask` is not needed
+beyond its usual CI run.
+
+## Appendix A. Rust binding
+
+In dim-app-server:
+
+```rust
+impl AgentIndex {
+    /// `session.delete`: gate, close if loaded, `SessionStore::delete_session`, forget (§3.2).
+    pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()>;
+    /// `session.fork`: acquire the source, check the cut, prepared creation (§6.5).
+    pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session>;
+}
+impl SessionStore {
+    /// Removes `command-output/<id>` (synced), then every row in one transaction;
+    /// schedules the Session-file sweep.
+    pub async fn delete_session(&self, id: &str) -> Result<()>;
+    /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
+    pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;
+}
+```
+
+`SessionStorePlugin` already takes the database directory's root index (S5a). It removes `command-output/<id>` under
+that root, the directory the daemon gives WorkspaceTools as its output root
+([main.rs](../../../crates/dim-app-server/src/main.rs)); the name is defined once and used by both. The creation rollback
+path (`TimelineStore::rollback_session`) calls the same row removal as `delete_session`.
