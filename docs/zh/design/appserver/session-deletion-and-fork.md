@@ -14,7 +14,7 @@
 - **删除。** Agents 不再加载该 Session；若它已加载，就关闭它，让各能力结算在途工作并释放所持资源。随后 SessionStore 移除该 Session 的命令输出目录，并在一个事务内删除存储为它保存的所有行，包括 Session 文件的所有者行。失去最后一个所有者的文件由 S5a 的清扫移除。删除不存在的 Session 也成功。
 - **清理。** 一次删除移除该 Session 拥有的一切（§3.3）。按时间或保留数量清理并预览，由 CLI 组合 `session.summaries` 与 `session.delete` 完成，没有对应的服务端方法。
 - **崩溃安全。** 目录的移除在行事务提交之前落盘，Session 文件按 S5a 的行处理。删除在任何一步中断，都只会留下完整的 Session 或者它的行全部消失，重试或下一次清扫会完成剩余工作（§4）。
-- **分叉。** 分叉在一个事务内把源 Session 的 `main` 截至某个切点的部分，连同 `main` 到那时创建的分支，按存储的字节复制到一个新 Session，并共享源的 Session 文件。分叉的 `main` 以 `branch/resume` 打开：分叉就是源的对话在切点处、以新 id 恢复。`SessionConfig` 整体复制，`interactive` 和权限预设随之带过去，不放宽任何权限。
+- **分叉。** 分叉在一个事务内把源 Session 的 `main` 截至某个切点的部分按存储的字节复制到一个新 Session，并共享源的 Session 文件。切点必须是 `main` 的静止点，`main` 到那时创建的分支只复制目录、不带事件，因此客户端给分叉发送输入之前，分叉不会自己开始任何工作（§6.5）。分叉的 `main` 以 `branch/resume` 打开：分叉就是源的对话在切点处、以新 id 恢复。`SessionConfig` 整体复制，`interactive` 和权限预设随之带过去，不放宽任何权限。
 - **格式。** 在 S5a 的 v15 之外不改格式：不加来源列，不写墓碑，不加事件。
 
 不新增 Timeline 事件，不改事件类型或格式样本，也不改运行时、TimelineTree、Prompt、rutis 或 Session 门面。
@@ -192,6 +192,8 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 切点在 `main` 上，规则与 `session.branch_create` 相同（[tree.rs](../../../../crates/dim-app-server/src/connection/tree.rs) 的 `create_branch`）：`at` 不超过已发布的 `main` 头部，位于原子批次的末尾，并且 `history::validate_context_boundary` 接受 `at` 处的上下文（没有缺少结果的工具调用，没有未结束的模型输出）。Agents 获取源 Session 来做这项检查，需要时先恢复它，与 `session.branch_create` 相同。`at` 及之前的行不会改变，分叉期间的追加不影响复制。
 
+`at` 还必须是 `main` 的**静止点**：没有未结束的轮次，每个 Queue 或 Steer 输入都已消费，每个后台任务都已结束，并且它发出的唤醒输入（如果有）也在 `at` 及之前且已消费。如今重载正是从后两类事实开始工作的：Loop 为已采纳但未消费的 Queue 或 Steer 输入启动轮次（[agent_loop.rs](../../../../crates/dim-agent-capabilities/src/agent_loop.rs) 的 `rebuild`），InputQueue 在轮次结束时采纳排在它后面的 Queue 输入（[input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs)），BackgroundExec 把重载时仍未结束的任务记为失败，并用 Steer 输入唤醒分支（[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) 的 `rebuild`）。在 F 中，这些轮次会在源的 `cwd` 里重做源已经做过或正在做的工作。切点处未结束的轮次只会被重载记为失败，不会重新执行；要求切点处没有这样的轮次，F 打开时就不会多出一个源里没有的失败轮次。静止点上 F 的重载不会开始任何工作。Append 输入可以留下：它不启动轮次，会并入 F 中由客户端输入启动的下一次请求。这项检查读取 `main` 截至 `at` 的前缀，与 `validate_context_boundary` 放在一起（§14）。常见的分叉点，即某轮结束之后或某条用户消息之前，都是静止点，除非当时有后台任务在运行。
+
 **为什么只在 `main` 上。** 子分支的历史是各祖先的前缀加上它自己的事件，而每个分支的事件都从 1 编号。把它排成一条 `main` 要给事件重新编号，而压缩的 `through`、`branch/create.at`、`branch/start.createEvent`、批次终点和快照锚点都引用这些编号：存储将不得不改写其他所有者写下的事实。要继续某个子分支的工作，客户端在 Session 内从它创建分支。
 
 被否决：以相同的分支 id 复制子分支的祖先链，并在子分支的副本上继续。那样分叉的对话就不在它的 `main` 上，而客户端、`session.list` 和 SessionTitle 读的都是 `main`。
@@ -200,12 +202,13 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 ```
  源 S                                                     分叉 F（一个事务）
- main: 1 .. 7  8 branch/create(c1)  9 .. 12 | 13 ..       main: 1 .. 12，id 相同         (at = 12)
-                      |                  切点                   之后是 13 branch/resume，由 F 写入
- c1:   1 branch/start .. 30（可能仍在增长）              c1:   1 .. 30，按已提交的整体复制
- c2:   在 main 15 处 branch/create                       -     不复制（在切点之后创建）
+ main: 1 .. 7  8 branch/create(c1)  9 .. 12 | 13 ..       main: 1 .. 12，id 相同      (at = 12，静止点)
+                      |                  切点                   F 首次加载时写 13 branch/resume
+ c1:   1 branch/start .. 30（可能仍在增长）                     和 14 branch/create-failed(c1)
+ c2:   在 main 15 处 branch/create                       c1:   目录（存储的 info，头部 0），没有事件
+                                                         -     c2 不复制（在切点之后创建）
  timeline_content: 事件引用的行                          只复制被复制事件引用的行
- timeline_snapshots: main <= 12、c1                      复制
+ timeline_snapshots: main、c1                            main 的，锚点在 12 及之前
  session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2)，不复制字节
  agent_sessions.config: 存储的文本                       相同的文本
  session_owners: (S, Agent A, v3)                        (F, Agent A, v3)
@@ -216,14 +219,14 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | --- | --- |
 | `agent_sessions` | 新 id（UUID v4）、分叉时刻的 `created_at_ms`，以及原样的源 `config` 文本，也就是整个 `SessionConfig`，包括 `interactive`（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)）、`permissionPolicy`、`collaborationRole`、`cwd`、`model`、`systemPrompt` 和 `tools`。复制文本而不重新序列化，`interactive` 的省略规则保持原样 |
 | `session_owners` | 源的 Agent 与协议版本 |
-| `timeline_branches` | 头部为 `at` 的 `main`；`branch/create` 位于 `main` 上 `at` 及之前的每个分支，以及其下的所有分支，保留存储的 `info` 与头部 |
-| `timeline_events` | `main` 截至 `at` 的行（切点规则保证没有行跨过它），以及被复制子分支的全部行；种类、正文、序号、批次终点、事件 id 和 before 轨迹都按存储的样子 |
+| `timeline_branches` | 头部为 `at` 的 `main`，以及 `branch/create` 位于 `main` 上 `at` 及之前的每个分支，保留存储的 `info`，头部为 0。其下的分支不复制：它们的创建事件在 F 拿不到的事件里 |
+| `timeline_events` | `main` 截至 `at` 的行（切点规则保证没有行跨过它），种类、正文、序号、批次终点、事件 id 和 before 轨迹都按存储的样子。不含任何子分支的行 |
 | `timeline_content` | 被复制事件按编解码器写入的引用（请求及其 before 轨迹）所引用的行 |
-| `timeline_snapshots` | 锚定在被复制事件上的行。它们由相同的事实派生，F 首次加载时可以直接使用，不必从头重放 |
+| `timeline_snapshots` | 锚定在被复制的 `main` 事件上的行。它们由相同的事实派生，F 首次加载时可以直接使用，不必从头重放 |
 | `session_file_owners` | S 拥有的每个文件给 F 一行（[Session 文件 §4](session-files.md#4-分叉时共享)） |
 | 标题元数据（S5b） | 不复制：分叉没有标题（[SessionTitle](../plugins/SessionTitle.md) A7） |
 
-**为什么子分支整体复制。** 存储要求每个 `branch/create` 都有对应分支的目录，并在加载 Session 时检查（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的 `validate_session`），TimelineTree 也会恢复每个存储的分支。没有目录，F 无法加载；目录为空，TimelineTree 会在 F 的 `main` 上为一次成功的创建写下 `branch/create_failed`，理由是 "interrupted by process restart"。分支的事件与 `main` 的切点之间没有先后顺序，子分支没有哪个前缀对应 `at`；因此按分叉事务执行时已提交的样子整体复制，F 像重启后一样恢复它（§6.5）。
+**为什么子分支不带事件。** 子分支的事件与 `main` 的切点之间没有先后顺序，子分支没有哪个前缀对应 `at`。整体复制的子分支带着切点之后发生的事，它待处理的工作（尚未开始的第一个输入、Queue 或 Steer 输入、后台任务的唤醒）会在 F 中启动轮次，在同一个 `cwd` 里重做源已经做过或正在做的工作（§6.5）。存储仍要求每个 `branch/create` 都有对应分支的目录，并在加载 Session 时检查（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的 `validate_session`）；头部为 0 的目录能通过检查。TimelineTree 把缺少 `branch/start` 和第一个 Queue 输入的子分支当作从未开始的创建（[timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 的 `restore`）：F 首次加载时，它在 F 的 `main` 上写 `branch/create-failed`（`error: "branch creation failed"`），不构建这个分支；之后的加载看到这条事实就跳过它。创建已提交、子分支尚未开始时崩溃，走的就是这条路径。在 F 中，这条事实表示该分支不属于 F；分支和它的工作留在 S 中，客户端可以在那里继续。这条事实不进入模型上下文，切点处的提示词前缀不变。
 
 **为什么只复制被引用的内容。** 内容行按 Session 存放。全部复制的话，从长 Session 的早期分叉会把切点之后所有请求的内容也复制过去，而复制期间一直持有存储的写锁。
 
@@ -231,17 +234,19 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 | 方案 | 原因 |
 | --- | --- |
-| 保留子分支目录、丢弃其事件 | TimelineTree 会为一个运行过的分支记下理由不实的创建失败 |
+| 按分叉事务执行时已提交的样子整体复制每个子分支（本页初稿） | 把子分支在切点之后的工作带进 F，重载规则还会在共用的 `cwd` 里重新执行它待处理的输入和唤醒（§6.5） |
 | 子分支只复制到创建为止 | 它的第一个 Queue 输入重新变成待处理，F 会把委托的任务再执行一遍 |
+| 子分支复制到它最后一个静止点 | 仍然带着切点之后的工作。还在做第一个任务的子分支在创建之后没有静止点，而且检查要在分叉事务持有写锁时读取每个被复制子分支的事实 |
 | 复制源的全部内容行 | 为切点之后、没有被复制事件引用的请求付出磁盘和锁的时间 |
 
-复制是一个写事务；所有 Session 的提交都要等它，就像等任何一轮写入一样，时长随被复制的历史增长。
+复制是一个写事务；所有 Session 的提交都要等它，就像等任何一轮写入一样，时长随被复制的 `main` 前缀增长。
 
 ### 6.4 分叉不复制什么
 
 | 不复制 | 原因 |
 | --- | --- |
 | `at` 之后的 `main` 事件，`at` 之后创建的分支 | 在切点之后 |
+| 子分支的事件，以及其下的分支 | 与切点之间没有先后顺序，重载还会重新执行其中待处理的工作（§6.3）。它们的工作留在 S 中 |
 | 已加载实例、租约、订阅、已附着的客户端、在途请求 | 运行时状态，不存储；F 自己建立 |
 | 正在提交中的输入 | 尚未提交，不是事实 |
 | 命令输出目录 | WorkspaceTools 的每 Session 目录。F 复制来的工具结果引用 `command-output/<S>/` 下的路径，S 存在期间可读（§6.6） |
@@ -253,24 +258,53 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 Agents 用现有的预备创建来创建 F：预备步骤是 SessionStore 的分叉事务，而不是 `create_owned_session`。随后运行时校验 F 的行并构建 F。失败时回滚 F，包括它的所有者行（[Session 文件 §5.3](session-files.md)）；源不受影响。
 
-TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 的 `restore`），因此 F 的 `main` 在复制来的事实之后接着写 `branch/resume`。F 就是源的对话在切点处、以新 id 恢复，每个所有者按现有的重载规则处理：
+TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 的 `restore`），因此 F 的 `main` 在复制来的事实之后接着写 `branch/resume`。F 就是源的对话在切点处、以新 id 恢复，每个所有者按现有的重载规则处理。切点是静止点（§6.2），子分支不带事件（§6.3），所以没有哪条重载规则会开始工作：**客户端给 F 发送输入之前，F 不运行任何轮次、模型调用或工具。** F 与 S 共用 `cwd`，这一点保证分叉不会重复源的副作用。
 
 | 切点处 | 在 F 中 |
 | --- | --- |
 | 模型配置（`context/configured`）、提示词、已采用的工具 | 保留。恢复的分支保留其配置，Prompt 像任何恢复时一样投递来源变化，因此提示词前缀与 S 在切点处相同 |
 | 权限预设（`permission/changed`） | 保留。Permission 折叠复制来的事实（#26）；`SessionConfig` 中的策略也一并复制 |
-| 未结束的轮次 | Loop 以重载中断结束它；不会重新执行任何东西 |
-| 被持有的输入 | 在 F 中同样被持有，像重启后一样被采纳 |
-| 没有 `exec/ended` 的后台任务 | WorkspaceTools 写出其 `failed` 终态 |
-| 已送达但没有结果的 Collaboration 请求 | Collaboration 写出失败结果，但不得停止源的成员（§14） |
+| 未结束的轮次、未消费的 Queue 或 Steer 输入、运行中的后台任务 | 不存在：切点是静止点（§6.2） |
+| 未消费的 Append 输入 | 保持待处理，并入 F 中由客户端输入启动的下一次请求 |
+| `main` 创建的分支 | 只有目录，没有事件。F 首次加载时 TimelineTree 在 F 的 `main` 上写 `branch/create-failed`（§6.3） |
+| 已送达但没有结果的 Collaboration 请求 | Collaboration 写出失败结果（`capability reloading`）。重载写出的结果不投递报告输入，因此不启动轮次。它不得停止源的成员（[#127](https://github.com/arcships/dim/issues/127)，§14） |
 | 生效中的目标（Goal，P5） | Goal 的 A11（§14） |
+
+**切点之后的子分支。** 子分支在自己的 Timeline 上运行，`main` 同时继续，所以源里可能有切点之后的子分支事件。F 一条都没有：
+
+```
+ 1. 子分支在切点之后完成
+ S main: .. 8 branch/create(c1) .. 10 step/tool-result "Branch created: c1" .. 12 turn/end | 13 ..
+                                                                                         切点
+ S c1:   1 branch/start  2 input/message（任务）  3 turn/start .. 25 turn/end   （在切点之后）
+ F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F c1:   只有目录
+
+ 2. 分叉提交时子分支正在运行
+ S main: .. 8 branch/create(c1) .. 12 turn/end | ..
+ S c1:   1 .. 5 turn/start  6 step/tool-call (exec)   <- 分叉事务在这里提交
+ F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F c1:   只有目录：没有要记为失败的轮次，没有要采纳的输入，没有要唤醒的任务
+
+ 3. 子分支在切点之后收到输入
+ S main: .. 8 branch/create(c1) .. 12 turn/end | ..
+ S c1:   1 .. 9 turn/end  10 input/message（steer，来自客户端）  11 turn/start ..
+ F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F c1:   只有目录
+```
+
+| 情况 | 在源中 | 在 F 中 |
+| --- | --- | --- |
+| 1. 子分支在切点之后完成 | 没有任何东西回到 `main`。TimelineTree 没有交回机制：`branch` 工具在子分支开始后就返回 `Branch created: <id>`，子分支的轮次在它自己的 Timeline 上结束。`wait` 只被后台任务通知和 steer 唤醒，不等子分支 | F 的 `main` 有这次创建，若由 `branch` 工具创建还有那条工具结果，都在切点之前，之后是 `branch/create-failed`。它不会收到结果，不等待任何东西，也不记其他失败。子分支的结果仍可在 S 中读取。Dim 唯一的交回机制是 Collaboration 从成员 Session 交回结果，见上表 Collaboration 一行 |
+| 2. 分叉提交时子分支正在运行 | 它的轮次、模型调用或工具批次尚未结束 | 不复制子分支的任何事件，所以没有东西被记为失败、采纳、唤醒或在共用的 `cwd` 里重新执行。F 的 `main` 收到的是 `branch/create-failed`，不是"委托失败"输入：不存在这样的输入 |
+| 3. 子分支在切点之后收到输入 | `main` 无法给子分支发送输入。子分支的输入来自客户端（`session.submit {branchId}`）、它自己的能力（exec 唤醒、Collaboration 报告）和 TimelineTree 的第一个输入 | F 没有子分支的任何输入，因此不含 F 从未收到的输入 |
 
 被否决：在复制来的事实之后写 `branch/start`。Prompt 把根分支的 `branch/start` 当作新 Session，会采用 `SessionConfig` 中的模型和系统提示词，从而撤销复制来的事实中的模型变更，并改变提示词前缀（[prompt.rs](../../../../crates/dim-agent-capabilities/src/prompt.rs) 的 `open`）。要避免这一点，得改 TimelineTree（让已有事件的预备根分支以 start 打开）和 Prompt（区分分叉的 start 与新 Session 的 start）。而且 F 提交之后、写出 start 之前崩溃，F 仍会以 `branch/resume` 打开。
 
 ### 6.6 身份、来源与路径
 
 - **事件 id。** 复制的事件保留原 id。事件由所属 Session 和 id 共同标识：存储按 Session 检查 id，并按 `(session_id, event_id)` 建索引。换新 id 就要改写所有引用它们的地方：`input_id`、`call_event_id`、压缩游标、before 轨迹、快照锚点和 Collaboration 的操作 id。
-- **其他 id。** 分支、轮次、请求、调用、任务和审批 id 都保留，它们同样按 Session 划分。复制来的任务 id 在 F 中没有对应的运行任务，`session.exec.stop` 回答任务未知。
+- **其他 id。** 分支、轮次、请求、调用、任务和审批 id 都保留，它们同样按 Session 划分。复制来的任务 id 指向一个在切点处已经结束的任务（§6.2）：BackgroundExec 从复制来的事实重建它，`session.exec.stop` 返回它记录的结果，不停止任何东西。
 - **`submission_id`。** 它随 `input/message` 复制，`session.input_lookup` 读取 F 的历史，因此能在 F 上找到复制来的输入。[#32](https://github.com/arcships/dim/issues/32) 移走这个字段时要保持这一点（§14）。
 - **来源。** F 不记录源：没有列，也没有事实。目前没有任何决定使用它；Session 访问 A.3 规定 Session 的来源（`createdBy`）在有使用方时连同其格式决定一起加入。
 - **路径。** Session 文件通过所有者行共享，只要还有所有者就有效（S5a）。命令输出不共享：F 复制来的工具结果引用 `command-output/<S>/…`，S 存在期间 F 可以读取。S 删除之后，读取这些路径会得到文件不存在，工具结果中的预览仍在。
@@ -283,7 +317,7 @@ TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree
 | --- | --- | --- |
 | `{sessionId, sequence}` | F 已发布 | F 存在 |
 | `unknown_method` | 协议 v1 或 v2 | 什么都没创建 |
-| `invalid_params`、`session_invalid_input` | 参数格式，或 `session.branch_create` 在同一位置会拒绝的切点 | 什么都没创建 |
+| `invalid_params`、`session_invalid_input` | 参数格式、`session.branch_create` 在同一位置会拒绝的切点，或不是静止点的切点（§6.2） | 什么都没创建 |
 | `session_closed` | 源未知或已删除，包括源的删除在分叉事务之前提交 | 什么都没创建 |
 | `session_protocol_version` | 源属于另一个协议版本 | 什么都没创建 |
 | `session_build_failed` | F 构建失败 | F 已回滚 |
@@ -302,7 +336,7 @@ TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree
 | 两次删除 | 第二次等准入门，然后发现没有行：`{}` |
 | 删除与 attach、submit 或 Session 方法 | 它们等准入门，然后失败于 `session_closed`；已持有使用权的请求随关闭结束 |
 | 删除与该 Session 自己的追加 | 关闭结算它们；行事务在 Timeline 写线程上排在所有已排队的追加之后 |
-| 分叉与对源的追加 | `at` 及之前的行不变；子分支按分叉事务执行时已提交的样子复制 |
+| 分叉与对源的追加 | `at` 及之前的行不变，分叉也不复制其后的任何行：子分支目录不带事件 |
 | 删除 Collaboration leader | 关闭它会像如今一样停止其成员请求；成员仍是 Session |
 | 删除成员 | leader 对它的请求像如今一样以成员已关闭结算 |
 | 对同一源的两次分叉 | 两个独立的 Session，各自拥有共享的文件 |
@@ -315,7 +349,7 @@ TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree
 [native-storage-format.md](../../../design/appserver/native-storage-format.md#s5c-格式决定)。
 
 - 删除只从现有表中删行。
-- 分叉只向现有表插入行，按字节复制存储的文本。持久化 JSON 类型和事件格式样本不变。
+- 分叉只向现有表插入行，按字节复制存储的文本。头部为 0、没有事件的子分支目录是存储已经接受的状态：子分支尚未开始的创建。持久化 JSON 类型和事件格式样本不变。
 - 事件 id 在所属 Session 内唯一，分叉在另一个 Session 中重复源的 id。存储本就按 Session 检查和索引 id；S5c 把这一点写明为不变量，不是格式变化。
 - 不加来源列、不写墓碑、不加事件，原因见 §4 和 §6.6。
 - 没有 S5c 的守护进程把分叉当作普通 Session 读取，把已删除的 Session 当作从未存在。
@@ -359,14 +393,14 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 | 规则 | 回答 |
 | --- | --- |
-| 原则 §4 第 1 条（改别人的状态写指令） | 删除和分叉只改 Agents 与 SessionStore 自己的状态：Session 记录和行。分叉复制存储的字节，不替其他所有者写事实；F 打开时写出的事实来自各自的所有者（TimelineTree 的 `branch/resume`、Loop 的终态）。预设是复制，不是重置（#26） |
+| 原则 §4 第 1 条（改别人的状态写指令） | 删除和分叉只改 Agents 与 SessionStore 自己的状态：Session 记录和行。分叉复制存储的字节，不替其他所有者写事实；F 打开时写出的事实来自各自的所有者（TimelineTree 的 `branch/resume` 与 `branch/create-failed`、Collaboration 的失败结果）。预设是复制，不是重置（#26） |
 | 原则 §4 第 2 条（交接） | 不适用：没有交接任何东西 |
-| 原则 §4 第 3 条（before 只做变换） | 没有 before 回调。Rpc 检查参数格式和 Session 的版本；切点检查沿用 `session.branch_create` 现有的检查 |
-| 原则 §4 第 4 条（核心不带业务含义） | Timeline、Dispatcher、before 和批次不变。TimelineTree 现有的规则（有事件的根分支以 resume 打开）原样适用 |
+| 原则 §4 第 3 条（before 只做变换） | 没有 before 回调。Rpc 检查参数格式和 Session 的版本；切点检查是 `session.branch_create` 现有的检查加上静止点，两者都只读固定前缀 |
+| 原则 §4 第 4 条（核心不带业务含义） | Timeline、Dispatcher、before 和批次不变。TimelineTree 现有的规则（有事件的根分支以 resume 打开，缺少 start 的子分支是失败的创建）原样适用 |
 | 原则 §4 第 5 条（批次） | 没有事件。切点位于原子批次末尾，复制的都是完整批次 |
 | 原则 §4 第 6 条（上下文只来自交接后的事件） | F 的上下文来自复制来的已采纳输入和工具结果，没有其他东西进入 |
 | 原则 §4 第 7 条（只通过公开事件和服务） | Agents 使用 Session 门面（`close`、`context`）和 SessionStore 的方法；SessionStore 使用 FileStorage 公开的 `remove`。对 Collaboration 的需求让分叉不会作用于源的成员 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 不改 Timeline、Dispatcher、事件格式、装配、rutis 或 Session 门面，也不向 rutis 提需求。同步移除是 FileStorage 关于自身操作持久性的补充；Collaboration 的检查是它自己的规则（§14） |
+| 原则 §4 第 8 条（向机制所有者提需求） | 不改 Timeline、Dispatcher、事件格式、装配、rutis 或 Session 门面，也不向 rutis 提需求。同步移除是 FileStorage 关于自身操作持久性的补充；静止点检查只读取那些会在重载时开始工作的能力的事实；Collaboration 的检查是它自己的规则（§14） |
 | 原则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 没有 Timeline 事件。删除和分叉是对记录的进程级操作；没有任何决定使用来源，所以不存储 |
 | 原则 §1（Capability 与 App Server 的边界） | 不新增插件；Agents 和 SessionStore 的补充已列在总体设计 B.2 |
 | ADR 002 D1（作用域随状态） | 进程作用域：记录和数据库目录比任何 Session 都长寿 |
@@ -383,8 +417,9 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | 对象 | 需求 | 状态 |
 | --- | --- | --- |
 | FileStorage | `remove` 在报告成功之前同步被移除条目的父目录，同步失败时返回 `Unsynced`。Windows 没有目录同步，与 `replace` 一样依赖 NTFS 元数据日志。用于让删除的移除在提交之前落盘（§4） | 在 S5c 的实现中补充，与 S5a 中的 `create_directory` 一样；需与 FileStorage 的所有者确认 |
-| Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。如今重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | `session.fork` 上线前必须完成；验收第 6 条 |
-| Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | [Goal](../plugins/Goal.md) 的 A11 假设复制来的事实之后有 `branch/start`。分叉的 `main` 以 `branch/resume` 打开，复制来的前缀含有源的 `branch/start` 和目标块。Goal 采用 A11 的回退做法，在分叉首次加载时清除继承来的生效目标（这是一次创建性构建且 `main` 已有事件：`SessionIdentity.restored` 为 false），或修订 A11。分叉提交之后、清除之前崩溃，目标仍会生效；要有持久的边界，需要 Session 访问 A.3 推迟的来源记录 | P5 的 Goal 设计评审 |
+| Loop、InputQueue、BackgroundExec | 与 `history::validate_context_boundary` 放在一起的只读静止点检查，作用于固定前缀：没有未结束的轮次，每个 Queue 或 Steer 输入都已消费，每个后台任务都已结束且其唤醒已消费（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 在 S5c 的实现中补充；需与其所有者确认 |
+| Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。如今重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | [#127](https://github.com/arcships/dim/issues/127)，负责人 @yyhhyyyyyy。`session.fork` 上线前必须完成；验收第 7 条 |
+| Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | [Goal](../plugins/Goal.md) 的 A11 假设复制来的事实之后有 `branch/start`。分叉的 `main` 以 `branch/resume` 打开，复制来的前缀含有源的 `branch/start` 和目标块。Goal 采用 A11 的回退做法，在分叉首次加载时清除继承来的生效目标（这是一次创建性构建且 `main` 已有事件：`SessionIdentity.restored` 为 false），或修订 A11。分叉提交之后、清除之前崩溃，目标仍会生效；要有持久的边界，需要 Session 访问 A.3 推迟的来源记录。无论哪种做法，复制来的目标都不得在 F 中驱动轮次（§6.5） | P5 的 Goal 设计评审 |
 | S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | S5b 的设计 |
 | [#32](https://github.com/arcships/dim/issues/32) | `submission_id` 移出 `input/message` 后，分叉在其事务中复制切点及之前输入的幂等记录，让 `session.input_lookup` 在分叉上继续能回答复制来的输入 | #32 的设计 |
 | F6（[#77](https://github.com/arcships/dim/issues/77)） | `dimcode session delete`，以及按时间或数量清理并预览，由 `session.summaries` 和 `session.delete` 组合（§5.1） | F6 的设计 |
@@ -393,12 +428,13 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 1. 删除一个正在运行轮次、并有客户端附着的已加载 Session：客户端收到 `session.closed`，回复为 `{}`，`session.list` 不再列出它，`session.attach` 失败于 `session_closed`。任何表中都不再有它 id 的行，`command-output/<id>/` 已移除，它的 Session 文件由清扫移除。第二次删除回复 `{}`。
 2. 删除未加载的 Session，以及行校验失败的 Session：都回复 `{}`，不留任何行。
-3. 在 `main` 的上下文边界处分叉，一个子分支在切点之前创建、一个在之后：F 的 `main` 含有源截至 `at` 的事件且 id 相同，之后是 `branch/resume`；F 整体含有第一个子分支，不含第二个；F 只有其事件引用的内容行，重启后能重新加载。
-4. 分叉的 `SessionConfig` 文本与源相同，包括 `"interactive": false`。切点之前在源上设置的权限预设和模型就是 F 的预设和模型。
-5. `at` 超过头部、位于批次内部或不在上下文边界，源未知，以及 v2 连接：分叉都被拒绝，什么都没创建。
-6. 在 leader 对成员的请求未结束时分叉：F 以失败结算该请求，源的成员继续运行。
-7. 分叉后删除源：F 能加载并读取它的 Session 文件；删除 F 后文件被移除。对同一源的删除与分叉竞争：要么 F 带着文件存在，要么分叉失败于 `session_closed`；绝不会出现没有文件的分叉。
-8. 在一次性存储上：命令输出目录已不在但行还在的 Session 能加载，随后删除能完成；删除提交后留下的无所有者文件行在下一代的第一次写入时被清扫。
+3. 在 `main` 的静止点处分叉，一个子分支在切点之前创建、一个在之后：F 的 `main` 含有源截至 `at` 的事件且 id 相同，之后是 `branch/resume` 和为第一个子分支写的一条 `branch/create-failed`；F 有第一个子分支的目录、没有其事件，不含第二个子分支的任何东西；F 只有其 `main` 事件引用的内容行和快照；重启后重新加载，不再写第二条 `branch/create-failed`。
+4. §6.5 的几种情况：子分支在切点之后完成时分叉，子分支有未结束的轮次、工具批次和后台任务时分叉，客户端在切点之后给子分支发 steer 时分叉。每种情况下 F 的子分支都没有事件；客户端给 F 提交输入之前，F 不记录任何 `turn/start`、模型调用、工具执行或 `exec/started`；源的子分支不受影响地继续。
+5. 分叉的 `SessionConfig` 文本与源相同，包括 `"interactive": false`。切点之前在源上设置的权限预设和模型就是 F 的预设和模型。
+6. `at` 超过头部、位于批次内部、不在上下文边界或不是静止点（在轮次之内、有未消费的 Queue 或 Steer 输入、有运行中的后台任务或其唤醒未消费），源未知，以及 v2 连接：分叉都被拒绝，什么都没创建。
+7. 在 leader 对成员的请求未结束时分叉：F 记录失败结果，不投递报告输入，不启动轮次，源的成员继续运行（[#127](https://github.com/arcships/dim/issues/127)）。
+8. 分叉后删除源：F 能加载并读取它的 Session 文件；删除 F 后文件被移除。对同一源的删除与分叉竞争：要么 F 带着文件存在，要么分叉失败于 `session_closed`；绝不会出现没有文件的分叉。
+9. 在一次性存储上：命令输出目录已不在但行还在的 Session 能加载，随后删除能完成；删除提交后留下的无所有者文件行在下一代的第一次写入时被清扫。
 
 验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo test --workspace --locked`。不改 Capability、装配或 crate 依赖，`xtask` 只需按常规在 CI 中运行。
 

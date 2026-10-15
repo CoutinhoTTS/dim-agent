@@ -23,10 +23,11 @@ file steps.
 - **Crash safety.** The directory removal is durable before the row transaction commits, and Session files go by
   S5a's rows. A delete interrupted anywhere leaves either the whole Session or none of its rows, and a retry or the
   next sweep finishes it (§4).
-- **Fork.** A fork copies the source's `main` through a cut, with the branches `main` created by then, into a new
-  Session in one transaction, byte for byte, and shares the source's Session files. The fork's `main` opens with
-  `branch/resume`: the fork is the source's conversation restored at the cut under a new id. `SessionConfig` is
-  copied whole, so `interactive` and the permission preset carry over and nothing is widened.
+- **Fork.** A fork copies the source's `main` through a cut into a new Session in one transaction, byte for byte, and
+  shares the source's Session files. The cut is a rest point of `main`, and branches `main` created by then are
+  copied without their events, so the fork starts no work until a client sends it input (§6.5). The fork's `main`
+  opens with `branch/resume`: the fork is the source's conversation restored at the cut under a new id.
+  `SessionConfig` is copied whole, so `interactive` and the permission preset carry over and nothing is widened.
 - **Format.** No change beyond S5a's v15: no provenance column, no tombstone, no event.
 
 No Timeline event, no event type or fixture change, and no change to the runtime, TimelineTree, Prompt, rutis or the
@@ -251,6 +252,19 @@ proposal without its result, no unfinished model output). Agents acquires the so
 needed, as `session.branch_create` does. Rows at or before `at` never change, so appends during the fork do not
 affect the copy.
 
+`at` must also be a **rest point** of `main`: no turn is open, every Queue or Steer input is consumed, and every
+background task has ended, with its wake input, if it posts one, at or before `at` and consumed. A reload starts work
+from the last two today: Loop starts a turn for an applied Queue or Steer input it has not consumed
+([agent_loop.rs](../../../crates/dim-agent-capabilities/src/agent_loop.rs) `rebuild`), InputQueue applies a Queue
+input held behind a turn when that turn ends ([input_queue.rs](../../../crates/dim-agent-capabilities/src/input_queue.rs)),
+and BackgroundExec ends a task it finds open as failed and wakes the branch with a Steer input
+([background.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) `rebuild`). In F those turns
+would run in the source's `cwd` for work the source already did or is still doing. A turn open at the cut is only failed by the reload,
+not run again; requiring none keeps F from opening with a failed turn the source never had. At a rest point F's reload
+starts nothing. Append inputs may remain: they start no turn and join the next request a client's input starts in F. The check reads `main`'s prefix through `at`,
+next to `validate_context_boundary` (§14). The usual fork points, after a turn ends or before a user message, are rest
+points unless a background task was running.
+
 **Why `main` only.** A child branch's history is its ancestors' prefixes followed by its own events, and each branch
 numbers its events from 1. Laying that out as one `main` would renumber events, and compaction `through`,
 `branch/create.at`, `branch/start.createEvent`, batch ends and snapshot anchors refer to those numbers: the store
@@ -264,12 +278,13 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 
 ```
  Source S                                                 Fork F (one transaction)
- main: 1 .. 7  8 branch/create(c1)  9 .. 12 | 13 ..       main: 1 .. 12, same ids        (at = 12)
-                      |                   cut                   then 13 branch/resume, written by F
- c1:   1 branch/start .. 30 (may still grow)             c1:   1 .. 30, whole as committed
- c2:   branch/create at main 15                          -     not copied (created after the cut)
+ main: 1 .. 7  8 branch/create(c1)  9 .. 12 | 13 ..       main: 1 .. 12, same ids     (at = 12, a rest point)
+                      |                   cut                   F's first load writes 13 branch/resume
+ c1:   1 branch/start .. 30 (may still grow)                    and 14 branch/create-failed(c1)
+ c2:   branch/create at main 15                          c1:   directory (stored info, head 0), no events
+                                                         -     c2 not copied (created after the cut)
  timeline_content: rows the events reference             only the rows the copied events reference
- timeline_snapshots: main <= 12, c1                      copied
+ timeline_snapshots: main, c1                            main's, anchored at or before 12
  session_file_owners: (S,f1) (S,f2)                      (F,f1) (F,f2), no byte copied
  agent_sessions.config: stored text                      the same text
  session_owners: (S, Agent A, v3)                        (F, Agent A, v3)
@@ -280,19 +295,24 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 | --- | --- |
 | `agent_sessions` | A new id (UUID v4), `created_at_ms` at the fork, and the source's `config` text unchanged. That is the whole `SessionConfig`, including `interactive` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), `permissionPolicy`, `collaborationRole`, `cwd`, `model`, `systemPrompt` and `tools`. Copying the text instead of re-serializing it keeps `interactive`'s omission rule as written |
 | `session_owners` | The source's Agent and protocol version |
-| `timeline_branches` | `main` with head `at`; every branch whose `branch/create` is on `main` at or before `at`, and every branch below those, with their stored `info` and heads |
-| `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it) and every row of the copied child branches, with kinds, bodies, sequences, batch ends, event ids and before traces as stored |
+| `timeline_branches` | `main` with head `at`, and every branch whose `branch/create` is on `main` at or before `at`, with its stored `info` and head 0. Branches below those are not copied: their creations are in events F does not get |
+| `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it), with kinds, bodies, sequences, batch ends, event ids and before traces as stored. No row of a child branch |
 | `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces |
-| `timeline_snapshots` | The rows anchored on copied events. They are derived from the same facts, so F's first load uses them instead of replaying from the start |
+| `timeline_snapshots` | The rows anchored on copied `main` events. They are derived from the same facts, so F's first load uses them instead of replaying from the start |
 | `session_file_owners` | One row for F per file S owns ([Session files §4](session-files.md#4-sharing-on-fork)) |
 | Title metadata (S5b) | None: a fork starts untitled ([SessionTitle](../plugins/SessionTitle.md) A7) |
 
-**Why child branches are copied whole.** The store requires a directory for every `branch/create` and checks it when
-it loads a Session ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs) `validate_session`), and
-TimelineTree restores every stored branch. Without the directory, F could not load. With an empty one, TimelineTree
-would write `branch/create_failed`, "interrupted by process restart", on F's `main` for a creation that succeeded.
-A branch's events are not ordered against `main`'s cut, so no prefix of a child corresponds to `at`; the child is
-copied as committed when the fork transaction runs, and F restores it like any branch after a restart (§6.5).
+**Why child branches come without their events.** A child's events are not ordered against `main`'s cut, so no prefix
+of a child corresponds to `at`. Copied whole, a child holds what happened after the cut, and its pending work (an
+unstarted first input, a Queue or Steer input, a background task's wake) would start turns in F for work the source
+already ran or is running, in the same `cwd` (§6.5). The store still requires a directory for every `branch/create`
+and checks it when it loads a Session ([timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)
+`validate_session`); a directory with head 0 passes. TimelineTree treats a child without its `branch/start` and first
+Queue input as a creation that never started ([timeline_tree.rs](../../../crates/dim-agent-capabilities/src/timeline_tree.rs)
+`restore`): at F's first load it writes `branch/create-failed` (`error: "branch creation failed"`) on F's `main` and
+builds nothing, and later loads skip the child because of that fact. A crash between a creation's commit and the
+child's start already takes this path. In F the fact means the branch is not part of F; the branch and its work stay
+in S, where a client can continue them. The fact is not model context, so the prompt prefix at the cut is unchanged.
 
 **Why only referenced content.** Content rows are per Session. Copying all of them would copy, for a fork from an
 early point of a long Session, the requests of everything after the cut, while the copy holds the store's write lock.
@@ -301,18 +321,20 @@ Rejected alternatives:
 
 | Alternative | Why not |
 | --- | --- |
-| Keep the child's directory, drop its events | TimelineTree records a failed creation, with a false reason, for a branch that ran |
+| Copy each child whole, as committed when the fork transaction runs (this page's first draft) | It carries the child's work after the cut into F, and the reload rules run its pending inputs and wakes again in the shared `cwd` (§6.5) |
 | Copy a child only up to its creation | Its first Queue input becomes pending again, and F runs the delegated task a second time |
+| Copy a child through its last rest point | It still carries work after the cut. A child on its first task has no rest point after its creation, and the check would read every copied child's facts while the fork transaction holds the write lock |
 | Copy every content row of the source | Disk and lock time for requests after the cut, which no copied event references |
 
 The copy is one write transaction; every Session's commits wait for it, as they wait for any write round, and its
-length grows with the copied history.
+length grows with `main`'s copied prefix.
 
 ### 6.4 What a fork does not copy
 
 | Not copied | Why |
 | --- | --- |
 | `main` events after `at`, branches created after `at` | After the cut |
+| Events of child branches, and the branches below them | Not ordered against the cut, and a reload would run their pending work again (§6.3). Their work stays in S |
 | The loaded instance, leases, subscriptions, attached clients, in-flight requests | Runtime state, not stored; F builds its own |
 | An input still being submitted | Not committed, so not a fact |
 | The command output directory | WorkspaceTools' per-Session directory. F's copied tool results quote paths under `command-output/<S>/`, readable while S exists (§6.6) |
@@ -329,17 +351,49 @@ included ([Session files §5.3](session-files.md#53-delete-s5c)); the source is 
 TimelineTree opens a root branch that already has events with `branch/resume`
 ([timeline_tree.rs](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) `restore`). F's `main` therefore
 continues with `branch/resume` after the copied facts. F is the source's conversation restored at the cut under a new
-id, and every owner applies its existing reload rule:
+id, and every owner applies its existing reload rule. The cut is a rest point (§6.2) and child branches come without
+events (§6.3), so no reload rule starts work: **F runs no turn, model call or tool until a client sends it input.**
+F and S share `cwd`, so this keeps a fork from repeating the source's side effects.
 
 | At the cut | In F |
 | --- | --- |
 | Model configuration (`context/configured`), prompt, adopted tools | Kept. A resumed branch keeps its configuration, and Prompt delivers source changes as on any resume, so the prompt prefix equals S's at the cut |
 | Permission preset (`permission/changed`) | Kept. Permission folds the copied facts (#26); the policy in `SessionConfig` is copied too |
-| An open turn | Loop fails it as interrupted by the reload; nothing is executed again |
-| A held input | Held in F as well, and applied as after a restart |
-| A background task without `exec/ended` | WorkspaceTools writes its `failed` terminal |
-| A Collaboration request delivered without a result | Collaboration writes its failed result. It must not stop the source's member (§14) |
+| An open turn, a Queue or Steer input not consumed, a running background task | None: the cut is a rest point (§6.2) |
+| An Append input not consumed | Stays pending, and joins the next request a client's input starts in F |
+| A branch `main` created | Its directory without events. TimelineTree writes `branch/create-failed` on F's `main` at the first load (§6.3) |
+| A Collaboration request delivered without a result | Collaboration writes its failed result (`capability reloading`). A result written by a reload posts no report input, so no turn starts. It must not stop the source's member ([#127](https://github.com/arcships/dim/issues/127), §14) |
 | A live goal (Goal, P5) | Goal's A11 (§14) |
+
+**Child branches after the cut.** A child runs on its own Timeline while `main` goes on, so the source can hold child
+events from after the cut. F holds none of them:
+
+```
+ 1. The child finishes after the cut
+ S main: .. 8 branch/create(c1) .. 10 step/tool-result "Branch created: c1" .. 12 turn/end | 13 ..
+                                                                                         cut
+ S c1:   1 branch/start  2 input/message (the task)  3 turn/start .. 25 turn/end   (after the cut)
+ F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F c1:   directory only
+
+ 2. The child is running when the fork commits
+ S main: .. 8 branch/create(c1) .. 12 turn/end | ..
+ S c1:   1 .. 5 turn/start  6 step/tool-call (exec)   <- the fork transaction commits here
+ F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F c1:   directory only: no turn to fail, no input to apply, no task to wake
+
+ 3. The child gets input after the cut
+ S main: .. 8 branch/create(c1) .. 12 turn/end | ..
+ S c1:   1 .. 9 turn/end  10 input/message (steer, from a client)  11 turn/start ..
+ F main: .. 12 turn/end  13 branch/resume  14 branch/create-failed(c1)
+ F c1:   directory only
+```
+
+| Case | In the source | In F |
+| --- | --- | --- |
+| 1. The child finishes after the cut | Nothing reaches `main`. TimelineTree has no hand-back: the `branch` tool returns `Branch created: <id>` once the child has started, and a child's turns end in its own Timeline. `wait` wakes on background-task notices and steers, not on a child | F's `main` holds the creation and, for a `branch` tool call, that result, both before the cut, then `branch/create-failed`. It is handed no result, waits for nothing and records no other failure. The child's result stays readable in S. The one hand-back Dim has is Collaboration's, from a member Session: the Collaboration row above |
+| 2. The child is running when the fork commits | Its turn, model call or tool batch is open | No child event is copied, so nothing is failed, applied, woken or run again in the shared `cwd`. F's `main` gets `branch/create-failed`, not a "delegation failed" input: no such input exists |
+| 3. The child gets input after the cut | `main` cannot send input to a child. A child gets input from clients (`session.submit {branchId}`), from its own capabilities (exec wakes, Collaboration reports) and from TimelineTree's first input | F has none of the child's inputs, so it holds no input F never received |
 
 Rejected: `branch/start` after the copied facts. Prompt reads a root `branch/start` as a new Session and adopts the
 model and system prompt in `SessionConfig`, which would undo model changes the copied facts carry and change the
@@ -353,7 +407,8 @@ crash between F's commit and that start would still leave F with `branch/resume`
   ids per Session and indexes them by `(session_id, event_id)`. New ids would mean rewriting every reference to them:
   `input_id`, `call_event_id`, compaction cursors, before traces, snapshot anchors and Collaboration operation ids.
 - **Other ids.** Branch, turn, request, call, task and approval ids are kept; they are also scoped by Session. A
-  copied task id names no running task in F, so `session.exec.stop` answers that the task is unknown.
+  copied task id names a task that ended by the cut (§6.2): BackgroundExec rebuilds it from the copied facts, and
+  `session.exec.stop` returns its recorded result and stops nothing.
 - **`submission_id`.** It is copied inside `input/message`, so `session.input_lookup` on F finds copied inputs, since
   it reads F's history. [#32](https://github.com/arcships/dim/issues/32) keeps that when it moves the field (§14).
 - **Provenance.** F records no source: no column, no fact. Nothing decides with it today, and session access A.3
@@ -372,7 +427,7 @@ have.
 | --- | --- | --- |
 | `{sessionId, sequence}` | F is published | F exists |
 | `unknown_method` | Protocol v1 or v2 | Nothing created |
-| `invalid_params`, `session_invalid_input` | Param shape, or a cut `session.branch_create` rejects at the same position | Nothing created |
+| `invalid_params`, `session_invalid_input` | Param shape, a cut `session.branch_create` rejects at the same position, or a cut that is not a rest point (§6.2) | Nothing created |
 | `session_closed` | The source is unknown or deleted, also when its delete commits before the fork transaction | Nothing created |
 | `session_protocol_version` | The source belongs to another protocol version | Nothing created |
 | `session_build_failed` | F's build fails | F rolled back |
@@ -393,7 +448,7 @@ delete against loading.
 | Two deletes | The second waits for the gate, then finds no rows: `{}` |
 | Delete against attach, submit or a Session method | They wait for the gate, then fail `session_closed`; requests that already hold a use end with the close |
 | Delete against the Session's own appends | The close settles them; the row transaction follows every queued append on the Timeline writer |
-| Fork against appends to the source | Rows through `at` never change; child branches are copied as committed when the transaction runs |
+| Fork against appends to the source | Rows through `at` never change, and the fork copies no row after them: child directories come without events |
 | Delete of a Collaboration leader | Its close stops its member requests, as today; the members stay Sessions |
 | Delete of a member | The leader's requests to it settle as member closed, as today |
 | Two forks of one source | Independent Sessions, each owning the shared files |
@@ -411,8 +466,9 @@ transactions order them (S5a §6); no in-memory lock is added.
 [native-storage-format.md](native-storage-format.md#s5c-格式决定).
 
 - A delete removes rows from existing tables.
-- A fork inserts rows into existing tables and copies stored text byte for byte. The persisted JSON types and the
-  event format fixtures are unchanged.
+- A fork inserts rows into existing tables and copies stored text byte for byte. A child directory with head 0 and no
+  events is a state the store already accepts: a creation whose child never started. The persisted JSON types and
+  the event format fixtures are unchanged.
 - An event id is unique within its Session, and a fork repeats the source's ids in another Session. The store already
   checks and indexes ids per Session; S5c states this as an invariant, not as a change.
 - No provenance column, no tombstone and no event, for the reasons in §4 and §6.6.
@@ -469,14 +525,14 @@ unlike in a shared database directory, can attribute its entries.
 
 | Rule | Answer |
 | --- | --- |
-| Principles §4 rule 1 (commands for others' state) | Delete and fork change only Agents' and SessionStore's own state: Session records and rows. A fork copies stored bytes and writes no fact for another owner; the facts F writes when it opens come from their owners (TimelineTree's `branch/resume`, Loop's terminals). The preset is copied, not reset (#26) |
+| Principles §4 rule 1 (commands for others' state) | Delete and fork change only Agents' and SessionStore's own state: Session records and rows. A fork copies stored bytes and writes no fact for another owner; the facts F writes when it opens come from their owners (TimelineTree's `branch/resume` and `branch/create-failed`, Collaboration's failed results). The preset is copied, not reset (#26) |
 | Principles §4 rule 2 (handover) | Not applicable: nothing is handed over |
-| Principles §4 rule 3 (before callbacks only) | No before callback. Rpc checks shape and the Session's version; the cut check is the existing one of `session.branch_create` |
-| Principles §4 rule 4 (no business meaning in core) | Timeline, Dispatcher, before and batches are untouched. TimelineTree's existing rule, that a root with events resumes, applies unchanged |
+| Principles §4 rule 3 (before callbacks only) | No before callback. Rpc checks shape and the Session's version; the cut check is `session.branch_create`'s existing one plus the rest point, both reads of the fixed prefix |
+| Principles §4 rule 4 (no business meaning in core) | Timeline, Dispatcher, before and batches are untouched. TimelineTree's existing rules, that a root with events resumes and a child without its start is a failed creation, apply unchanged |
 | Principles §4 rule 5 (batch) | No event. The cut ends an atomic batch, so the copy holds whole batches |
 | Principles §4 rule 6 (context from handed-over events) | F's context comes from the copied adopted inputs and tool results; nothing else enters it |
 | Principles §4 rule 7 (public events and services only) | Agents uses the Session facade (`close`, `context`) and SessionStore's methods; SessionStore uses FileStorage's public `remove`. The Collaboration requirement keeps a fork from acting on the source's members |
-| Principles §4 rule 8 (requirements to mechanism owners) | No change to the Timeline, Dispatcher, event format, assembly, rutis or the Session facade, and nothing raised to rutis. The synced removal is a FileStorage supplement about the durability of its own operation; the Collaboration check is Collaboration's own rule (§14) |
+| Principles §4 rule 8 (requirements to mechanism owners) | No change to the Timeline, Dispatcher, event format, assembly, rutis or the Session facade, and nothing raised to rutis. The synced removal is a FileStorage supplement about the durability of its own operation; the rest-point check only reads the facts of the capabilities whose reload rules start work; the Collaboration check is Collaboration's own rule (§14) |
 | Principles §4 rule 9 (only facts later decisions use) | No Timeline event. Deletion and fork are process-level operations on records, and no provenance is stored because nothing decides with it |
 | Principles §1 (Capability and App Server boundary) | No new plugin; the Agents and SessionStore supplements are in overview B.2 |
 | ADR 002 D1 (scope follows state) | Process scope: records and the database directory outlive any Session |
@@ -493,8 +549,9 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 | To | Requirement | Status |
 | --- | --- | --- |
 | FileStorage | `remove` syncs the parent of the removed entry before it reports success, and returns `Unsynced` when that sync fails. Windows has no directory sync and relies on NTFS metadata journaling, as for `replace`. Needed so a delete's removal is durable before its commit (§4) | Supplement in S5c's implementation, as `create_directory` is in S5a; to be agreed with FileStorage's owner |
-| Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. Today the rebuild stops any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would stop the source's member | Required before `session.fork` ships; acceptance 6 |
-| Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | [Goal](../plugins/Goal.md) A11 assumed a `branch/start` after the copied facts. A fork's `main` opens with `branch/resume`, and the copied prefix holds the source's `branch/start` and goal blocks. Goal applies its A11 fallback, clearing an inherited live goal on the fork's first load (a creating build whose `main` already has events: `SessionIdentity.restored` is false), or revises A11. A crash between the fork's commit and that clear leaves the goal live; a durable boundary would need the provenance record that session access A.3 defers | Goal's design review in P5 |
+| Loop, InputQueue, BackgroundExec | A read-only rest-point check over a fixed prefix, next to `history::validate_context_boundary`: no open turn, every Queue or Steer input consumed, every background task ended with its wake consumed (§6.2). A capability whose reload rule comes to start work from other facts adds them to the check, so a fork keeps starting nothing | Supplement in S5c's implementation; to be agreed with their owner |
+| Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. Today the rebuild stops any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would stop the source's member | [#127](https://github.com/arcships/dim/issues/127), owner @yyhhyyyyyy. Required before `session.fork` ships; acceptance 7 |
+| Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | [Goal](../plugins/Goal.md) A11 assumed a `branch/start` after the copied facts. A fork's `main` opens with `branch/resume`, and the copied prefix holds the source's `branch/start` and goal blocks. Goal applies its A11 fallback, clearing an inherited live goal on the fork's first load (a creating build whose `main` already has events: `SessionIdentity.restored` is false), or revises A11. A crash between the fork's commit and that clear leaves the goal live; a durable boundary would need the provenance record that session access A.3 defers. Either way, a copied goal must not drive a turn in F (§6.5) | Goal's design review in P5 |
 | S5b ([#60](https://github.com/arcships/dim/issues/60)) | Title metadata rows are removed in the delete transaction and not copied by a fork | S5b's design |
 | [#32](https://github.com/arcships/dim/issues/32) | When `submission_id` leaves `input/message`, the fork copies the idempotency records of inputs at or before the cut in its transaction, so `session.input_lookup` on a fork keeps answering for copied inputs | #32's design |
 | F6 ([#77](https://github.com/arcships/dim/issues/77)) | `dimcode session delete` and cleanup by age or count with a preview, composed from `session.summaries` and `session.delete` (§5.1) | F6's design |
@@ -506,19 +563,25 @@ None to the runtime or rutis. Supplements and requirements to other owners:
    in any table, `command-output/<id>/` is gone, and its Session files are removed by the sweep. A second delete
    replies `{}`.
 2. Delete an unloaded Session, and one whose rows fail validation: both reply `{}` and leave no row.
-3. Fork at a context boundary of `main`, with one child branch created before the cut and one after: F's `main` holds
-   the source's events through `at` with the same ids, then `branch/resume`; F has the first child whole and not the
-   second; F has only the content rows its events reference, and it reloads after a restart.
-4. A fork's `SessionConfig` text equals the source's, including `"interactive": false`. A permission preset and a
+3. Fork at a rest point of `main`, with one child branch created before the cut and one after: F's `main` holds the
+   source's events through `at` with the same ids, then `branch/resume` and one `branch/create-failed` for the first
+   child; F has the first child's directory without events and nothing of the second; F has only the content rows
+   and snapshots of its `main` events; after a restart it reloads without a second `branch/create-failed`.
+4. The cases of §6.5: fork while a child finishes after the cut, while a child has an open turn with a tool batch and
+   a background task, and while a client steers a child after the cut. In each, F's child has no events, F records
+   no `turn/start`, model call, tool execution or `exec/started` until a client submits input to F, and the source's
+   child goes on unaffected.
+5. A fork's `SessionConfig` text equals the source's, including `"interactive": false`. A permission preset and a
    model set on the source before the cut are F's preset and model.
-5. A fork is refused for `at` beyond the head, inside a batch or outside a context boundary, for an unknown source,
-   and on a v2 connection, and creates nothing.
-6. Fork a leader while its request to a member is open at the cut: F settles the request as failed, and the source's
-   member keeps running.
-7. Fork, then delete the source: F loads and reads its Session files; deleting F removes them. A delete and a fork of
+6. A fork is refused for `at` beyond the head, inside a batch, outside a context boundary or not at a rest point
+   (inside a turn, with a Queue or Steer input not consumed, with a background task running or its wake not
+   consumed), for an unknown source, and on a v2 connection, and creates nothing.
+7. Fork a leader while its request to a member is open at the cut: F records a failed result, posts no report input
+   and starts no turn, and the source's member keeps running ([#127](https://github.com/arcships/dim/issues/127)).
+8. Fork, then delete the source: F loads and reads its Session files; deleting F removes them. A delete and a fork of
    the same source raced: either F exists with the files or the fork fails `session_closed`; never a fork without its
    files.
-8. On disposable stores: a Session whose command output directory is gone but whose rows remain loads, and a delete
+9. On disposable stores: a Session whose command output directory is gone but whose rows remain loads, and a delete
    then completes; unowned file rows left by a delete commit are swept on the next generation's first put.
 
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and
