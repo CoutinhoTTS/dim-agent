@@ -415,11 +415,18 @@ crash between F's commit and that start would still leave F with `branch/resume`
   adds the Session's origin (`createdBy`) when something does, with its own format decision.
 - **Paths.** Session files are shared through owner rows and stay valid while any owner exists (S5a). Command output
   is not shared: F's copied tool results quote `command-output/<S>/…`, which F reads while S exists. After S is
-  deleted, reading such a path fails as file not found, and the results keep their previews.
+  deleted, reading such a path fails as file not found, and the results keep their previews. What the user sees: an
+  exec output or a large `read` result that a copied tool result truncated to a preview can no longer be read in
+  full in F, by the model or by a client. Session files behave differently: their owner rows let them outlive the
+  Session that wrote them.
 
-Rejected: keeping S's command output until S's forks are deleted. The delete would need to know S's forks, through a
-fork relation in the store (a format change), and WorkspaceTools' per-Session output would gain owners it does not
-have.
+Rejected for S5c: keeping S's command output until S's forks are deleted. The delete would need to know S's forks,
+through a fork relation in the store (a format change), and WorkspaceTools' per-Session output would gain owners it
+does not have.
+
+**Future improvement.** Give command output owner rows as S5a gives Session files: a fork would share the source's
+output, and the delete of its last owner would remove it. That moves WorkspaceTools' output from a per-Session
+directory to owned entries and needs its own format decision, so it stays outside S5c.
 
 ### 6.7 Errors
 
