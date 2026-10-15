@@ -6,7 +6,7 @@ optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses source-owned business documents; MCP connections and Skill content instances belong
 to Sessions. Project MCP execution requires host-local approval. See
 [ADR 004](../../adr/004-loader-plugin-management.md) for implemented configuration
-scope. Rpc collects [management methods](../../design/plugins/management.md)
+scope. Rpc collects [management methods](../../design/appserver/management-methods.md)
 as named services from account, provider, MCP and Skills owners.
 Structural reloads propagate through normal rutis dependencies; business
 configuration changes do not reload those plugins. No Methods or Management

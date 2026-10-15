@@ -85,7 +85,7 @@ port or adapter row. MCP and Skills publish their existing management methods;
 Settings publishes none. Local v3 hello advertises the collected methods;
 non-serving entries return `unknown_method`. Structural reloads follow ordinary
 dependencies; business edits do not reload plugins. See
-[Management methods](../design/plugins/management.md).
+[Management methods](../design/appserver/management-methods.md).
 
 PluginManager's proposed responsibility remains package acquisition, manifest
 admission and installation/removal. Installation records, structural enablement,

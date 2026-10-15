@@ -5,7 +5,7 @@ Status: Draft
 The scope assignment and wiring in this draft are being revised in
 [PR #15](https://github.com/arcships/dim/pull/15). Its plugin-scope ADR withdraws
 the Management plugin and stable registration ports. The current implementation
-uses [owner-provided management methods](plugins/management.md) collected by Rpc;
+uses [owner-provided management methods](appserver/management-methods.md) collected by Rpc;
 the older Management-plugin descriptions below are not implementation guidance.
 
 This document takes the [CLI feature list](../feature-list.md) as its target, identifies the features that existing plugin responsibilities do not yet cover, designs them as plugins, and describes how these plugins integrate with the existing system. The detailed requirements of each new plugin are written separately in `docs/design/plugins/<name>.md`, following the template in section 10.
