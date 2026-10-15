@@ -2,7 +2,8 @@ use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
 use dim_agent_runtime::{capability_plugin, wait_active};
 use dim_app_server::{
     settings::{
-        BusinessDocument, Result, SettingsError, SettingsPlugin, SettingsScope, SettingsService,
+        BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
+        SettingsPlugin, SettingsScope, SettingsService, project_authorizations, settings_changes,
     },
     storage::SqliteStoragePlugin,
 };
@@ -42,6 +43,50 @@ impl dim_agent_runtime::Capability for ProcessSettings {
     fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
         ((), ())
     }
+}
+
+/// Records every event of one rutis channel, in delivery order.
+struct Log<E>(std::sync::Arc<tokio::sync::watch::Sender<Vec<E>>>);
+impl<E> Clone for Log<E> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<E: rutis::Event<Value = ()> + Clone> rutis::Listener<E> for Log<E> {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        event: &'a E,
+    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
+        self.0.send_modify(|log| log.push(event.clone()));
+        Box::pin(async { Ok(None) })
+    }
+}
+fn listen<E: rutis::Event<Value = ()> + Clone>(
+    root: &Ctx,
+    key: &rutis::EventKey<E>,
+) -> tokio::sync::watch::Receiver<Vec<E>> {
+    let log = Log(std::sync::Arc::new(tokio::sync::watch::Sender::new(
+        Vec::new(),
+    )));
+    root.events().on(root, key, log.clone()).unwrap();
+    log.0.subscribe()
+}
+/// Waits until the channel has delivered an event matching `seen`.
+async fn saw<E: Clone>(
+    changes: &mut tokio::sync::watch::Receiver<Vec<E>>,
+    seen: impl Fn(&E) -> bool,
+) {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|log| log.iter().any(&seen)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+fn change(scope: SettingsScope, revision: &str) -> impl Fn(&SettingsChanged) -> bool + '_ {
+    move |c| c.source == "example" && c.scope == scope && c.revision == revision
 }
 
 #[tokio::test]
@@ -164,12 +209,17 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let project = home.join("later");
     fs::create_dir(&project).unwrap();
     assert_eq!(settings.project_root(&project), None);
+    let mut authorized = listen(&root, &project_authorizations());
     let (first, same) = tokio::join!(
         settings.authorize_project(project.clone(), &cancel),
         settings.authorize_project(project.clone(), &cancel)
     );
     let project_root = first.unwrap();
     assert_eq!(project_root, same.unwrap());
+    // Authorizing the same directory twice announces it once.
+    saw(&mut authorized, |a: &ProjectAuthorized| a.cwd == project).await;
+    assert_eq!(authorized.borrow().len(), 1);
+    assert_eq!(authorized.borrow()[0].root, project_root);
     let scope = SettingsScope::Project(project_root);
     let snapshot = settings.read::<McpSettings>(scope, &cancel).await.unwrap();
     let document = serde_json::from_value::<McpSettings>(serde_json::json!({"mcpServers":{"late":{"command":"node","enabled":false}},"future":{"keep":7}})).unwrap();
@@ -266,8 +316,8 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
             .await
             .unwrap();
         let settings = root.get::<SettingsService>().unwrap();
-        let mut changes = settings.subscribe_document::<Document>(SettingsScope::User);
-        assert_eq!(*changes.borrow_and_update(), None);
+        let mut changes = listen(&root, &settings_changes("example"));
+        assert!(changes.borrow_and_update().is_empty());
         let current = settings
             .read::<Document>(SettingsScope::User, &cancel)
             .await
@@ -353,7 +403,7 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
                 | (Err(SettingsError::Conflict), Ok(value)) => value,
                 result => panic!("unexpected CAS: {result:?}"),
             };
-            assert_eq!(*changes.borrow_and_update(), Some(winner.revision.clone()));
+            saw(&mut changes, change(SettingsScope::User, &winner.revision)).await;
             assert_eq!(winner.revision, "native:user/example:2");
             saved = Some(winner);
             fs::write(home.join("example.json"), b"ignored malformed legacy data").unwrap();
@@ -409,10 +459,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .unwrap();
     let settings = root.get::<SettingsService>().unwrap();
     let files = root.get::<FileStorage>().unwrap();
-    let mut changes = settings.subscribe_document::<Document>(SettingsScope::User);
-    let mut project_changes = settings.subscribe_document::<Document>(SettingsScope::Project(1));
-    let other_project = settings.subscribe_document::<Document>(SettingsScope::Project(2));
-    let mut all = settings.subscribe();
+    let mut changes = listen(&root, &settings_changes("example"));
     let empty = settings
         .read::<Document>(SettingsScope::User, &cancel)
         .await
@@ -441,12 +488,9 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         }
         result => panic!("unexpected file CAS: {result:?}"),
     };
-    assert_eq!(
-        changes.borrow_and_update().as_deref(),
-        Some(saved.revision.as_str())
-    );
-    assert_eq!(*project_changes.borrow_and_update(), None);
-    assert_eq!(*all.borrow_and_update(), 1);
+    saw(&mut changes, change(SettingsScope::User, &saved.revision)).await;
+    // One write, one event: the conflicting writer announced nothing.
+    assert_eq!(changes.borrow().len(), 1);
     assert_eq!(settings.project_path(1).unwrap(), project);
     assert_eq!(settings.project_sources().len(), 2);
     assert!(matches!(
@@ -472,12 +516,18 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         )
         .await
         .unwrap();
-    // Each source notifies in its own scope, with the revision it wrote.
-    assert_eq!(
-        project_changes.borrow_and_update().as_deref(),
-        Some(project_saved.revision.as_str())
+    // Each write is announced with its own scope and revision.
+    saw(
+        &mut changes,
+        change(SettingsScope::Project(1), &project_saved.revision),
+    )
+    .await;
+    assert!(
+        changes
+            .borrow()
+            .iter()
+            .all(|c| c.scope != SettingsScope::Project(2))
     );
-    assert!(!other_project.has_changed().unwrap());
     assert_eq!(
         settings
             .read::<Document>(SettingsScope::Project(2), &cancel)
@@ -545,15 +595,17 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         tokio::select! { result = &mut update => panic!("unexpected {result:?}"), _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
     }
     drop(lock);
-    tokio::time::timeout(Duration::from_secs(3), changes.changed())
-        .await
-        .unwrap()
-        .unwrap();
-    let saved = settings
-        .read::<Document>(SettingsScope::User, &cancel)
-        .await
-        .unwrap();
-    assert_eq!(*changes.borrow_and_update(), Some(saved.revision.clone()));
+    let saved = loop {
+        let saved = settings
+            .read::<Document>(SettingsScope::User, &cancel)
+            .await
+            .unwrap();
+        if saved.document == document {
+            break saved;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    saw(&mut changes, change(SettingsScope::User, &saved.revision)).await;
     assert_eq!(saved.document, document);
     #[cfg(unix)]
     {
@@ -598,12 +650,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .await
         .unwrap();
     let fresh = root.get::<SettingsService>().unwrap();
-    assert_eq!(
-        *fresh
-            .subscribe_document::<Document>(SettingsScope::User)
-            .borrow(),
-        None
-    );
     assert_eq!(
         fresh
             .read::<Document>(SettingsScope::User, &cancel)

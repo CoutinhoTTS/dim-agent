@@ -2,7 +2,10 @@
 use crate::{
     methods::{ManagementMethods, SelectionScope},
     protocol::{canonical_cwd, optional_non_null},
-    settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
+    settings::{
+        BusinessDocument, SettingsChanged, SettingsError, SettingsScope, SettingsService,
+        settings_changes,
+    },
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use dim_agent_capabilities::skills::{RefreshTarget, SkillStatus, SkillsCatalog, SkillsError};
@@ -44,8 +47,27 @@ impl BusinessDocument for SkillDocument {
     }
 }
 
+struct SkillRelay(Arc<SkillStorage>);
+impl rutis::Listener<SettingsChanged> for SkillRelay {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        change: &'a SettingsChanged,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        if change.scope == SettingsScope::User {
+            self.0.changed.send_replace(Some(change.revision.clone()));
+        }
+        Box::pin(async { Ok(None) })
+    }
+}
+
 /// Adapts the owner's business document to the reusable Skill catalog port.
-struct SkillStorage(Arc<SettingsService>);
+/// `changed` relays Settings' `skills` events to the port's `changes` until the
+/// catalog listens to the rutis event itself.
+struct SkillStorage {
+    settings: Arc<SettingsService>,
+    changed: tokio::sync::watch::Sender<Option<SettingsVersion>>,
+}
 impl SkillSettings for SkillStorage {
     fn skills(
         &self,
@@ -53,7 +75,7 @@ impl SkillSettings for SkillStorage {
     ) -> BoxFuture<'_, Result<SkillSettingsSnapshot, SkillSettingsError>> {
         Box::pin(async move {
             let snapshot = self
-                .0
+                .settings
                 .read::<SkillDocument>(SettingsScope::User, &cancel)
                 .await?;
             Ok(SkillSettingsSnapshot {
@@ -74,7 +96,7 @@ impl SkillSettings for SkillStorage {
                 return Err(SkillSettingsError::Invalid("empty Skill id".into()));
             }
             let current = self
-                .0
+                .settings
                 .read::<SkillDocument>(SettingsScope::User, &cancel)
                 .await?;
             if current.revision != expected {
@@ -90,15 +112,14 @@ impl SkillSettings for SkillStorage {
                 document.disabled_skill_ids.push(id);
             }
             Ok(self
-                .0
+                .settings
                 .update(SettingsScope::User, &expected, document, &cancel)
                 .await?
                 .revision)
         })
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<Option<SettingsVersion>> {
-        self.0
-            .subscribe_document::<SkillDocument>(SettingsScope::User)
+        self.changed.subscribe()
     }
 }
 impl From<SettingsError> for SkillSettingsError {
@@ -197,7 +218,16 @@ impl TypedPlugin for SkillsCatalogPlugin {
         (platform, settings): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage(settings))));
+            let storage = Arc::new(SkillStorage {
+                settings,
+                changed: tokio::sync::watch::Sender::new(None),
+            });
+            ctx.events().on(
+                ctx,
+                &settings_changes(SkillDocument::NAMESPACE),
+                SkillRelay(storage.clone()),
+            )?;
+            let settings = Arc::new(SkillSettingsHost(storage));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
                 ctx,
                 (platform, settings),
