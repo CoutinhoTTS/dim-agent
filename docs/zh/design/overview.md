@@ -158,7 +158,7 @@ flowchart LR
 
 | 插件 | 作用域 | 职责 | 阶段 | 语言 | 文档 |
 | --- | --- | --- | --- | --- | --- |
-| Questions | Session + 分支 | `ask_user`；待答问题与回答；`session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
+| Questions | Session + 分支 | `ask_user`；待答问题与回答；`session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md)（需要重新设计） |
 | ShellInput | Session | `!command` / `!!command`，作为 Session 方法 `shell.run/stop/list` | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Session | 大段文本的 `attachment.put`；Session 文件 | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Session | 由首条被采纳的用户输入生成标题；`session.rename` | P1 | TypeScript 优先 | [SessionTitle](plugins/SessionTitle.md) |
@@ -374,6 +374,8 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | `input/withdraw {input_id, reason?}` | 客户端（`session.input.withdraw`，由 InputQueue 提供）、进程调用方（`sessions.withdraw`）、该输入所在批次中的 before 回调 | 一个通过序号与采纳排序的指令；可选的 `reason`（通用文本，不带业务含义）是客户端为被删除输入显示的内容 |
 | `input/deleted {input_id}` | InputQueue | 结果事实：被持有的输入永不被应用；队列状态必须可重建 |
 
+三行 `question/*` 正在复审：Questions 需要重新设计（[Questions](plugins/Questions.md)），这些事件可能被删除。
+
 | 不新增的事件 | 改用什么 | 原因 |
 | --- | --- | --- |
 | `goal/*` | 带 key 的 raw 块，包括终态块 | 目标状态是输入 |
@@ -561,7 +563,7 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | Agent 装配从 `provides` 收集具名服务，并按插件启用状态与 `interactive` 安装可选部分 | 运行时 | 待开 | 所有 Session 插件 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
 | 按名称查找带 key 的 Session 服务（按命名空间查 `sessionMethods`）及收集具名 `toolContribution` | 运行时 | 待开 | Rpc、ToolRegistry | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
 | Session 级方法提供方卸载时等待其 `drain` 调用 | rutis 生命周期 | 待开 | Rpc | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
-| 插件在运行时注册自己的事件类型，并可声明为客户端可见（Connection 转发见附录 B.2） | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | Questions | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
+| 插件在运行时注册自己的事件类型，并可声明为客户端可见（Connection 转发见附录 B.2） | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | Questions（需要重新设计，可能不再需要） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
 | 经 rutis 链接导入的服务在链接断开期间保持登记，每次调用以 `node_unavailable` 失败（该节点上的进程由该节点自己的 HostPlatform 结束） | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent、Modality、ShellInput、Hooks、Attachments、Workflow、Scheduler、PluginManager、RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-向机制所有者提出的需求) |
 | 跨语言发出和监听具名进程事件 | rutis | 待开 | Scheduler、Notifications | [Scheduler §9](plugins/Scheduler.md#9-向机制所有者提出的需求) |
 | 提供方在一次调用内向调用方发请求 | rutis | 待开 | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-提供方在调用内向调用方发请求) |

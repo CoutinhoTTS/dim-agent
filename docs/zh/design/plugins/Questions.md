@@ -1,6 +1,8 @@
 # Questions
 
-状态：草案。总体设计：[overview §4](../overview.md)。阶段：P1。语言：Rust。作用域：Session + 分支（[ADR 002](../../adr/002-plugin-scope.md)）。
+状态：需要重新设计。总体设计：[overview §4](../overview.md)。阶段：P1。语言：Rust。作用域：Session + 分支（[ADR 002](../../adr/002-plugin-scope.md)）。
+
+> **需要重新设计。** 本文不具权威性，不得按现文实现。模型已经通过 `ask_user` 的工具结果拿到回答，调用在所属 turn 内同步等待。三个 `question/*` 事件以及由此带来的对 #2（客户端可见事件）的依赖缺少依据：待答问题可以从已提交、尚无结果的 `step/tool-call` 推导出来，中断、重载和恢复已由 ToolExecutor 用该调用的 `step/tool-result` 结算。重新设计要决定在工具调用和结果之外是否还需要事实（例如在批次完成前让其他客户端关闭提示，或在批次完成前崩溃时保留回答），并按设计规则 §4 rule 9 逐一说明理由。
 
 模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答。**Session 部分**以 `toolContribution` 服务（Session 作用域，key `ask_user`）提供 `ask_user` 工具，并通过 `sessionMethods` 服务（Session 作用域，key `session.question`）提供 Session 方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)）。它只安装在交互 Session 中。**分支部分**把待回答的问题和回答记录为 Timeline 事实，并依据自己消费到的 `stop/interrupt` 按序号判定回答与中断，沿用 [Approval](../../../architecture/rust-agent/plugins/Approval.md) 的模式。
 

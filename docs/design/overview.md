@@ -158,7 +158,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 
 | Plugin | Scopes | Role | Phase | Language | Document |
 | --- | --- | --- | --- | --- | --- |
-| Questions | Session + branch | `ask_user`; pending questions and answers; `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
+| Questions | Session + branch | `ask_user`; pending questions and answers; `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) (needs redesign) |
 | ShellInput | Session | `!command` / `!!command` as `shell.run/stop/list` Session methods | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Session | `attachment.put` for large text; Session files | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Session | Title from the first adopted user input; `session.rename` | P1 | TypeScript first | [SessionTitle](plugins/SessionTitle.md) |
@@ -374,6 +374,8 @@ rutis nodes connect through links, export and import services, run plugins on th
 | `input/withdraw {input_id, reason?}` | Clients (`session.input.withdraw`, provided by InputQueue), process callers (`sessions.withdraw`), before callbacks in the input's batch | A command ordered against adoption by sequence; the optional `reason` (generic text, no business meaning) is what clients show for a deleted input |
 | `input/deleted {input_id}` | InputQueue | Result fact: the held input is never applied; queue state must be rebuildable |
 
+The three `question/*` rows are under review: Questions needs redesign ([Questions](plugins/Questions.md)), and they may be removed.
+
 | Event not added | Used instead | Reason |
 | --- | --- | --- |
 | `goal/*` | Keyed raw blocks, including terminal blocks | Goal state is input |
@@ -561,7 +563,7 @@ One row per requirement to the runtime or rutis; changes to other plugins are in
 | Agent assembly collects named services from `provides` and installs optional parts per enabled plugin and `interactive` | Runtime | To be opened | All Session plugins | [session access §9](contracts/session-access.md#9-requirements-raised-to-mechanism-owners) |
 | Lookup of a keyed Session service by name (`sessionMethods` by namespace) and named `toolContribution` collection | Runtime | To be opened | Rpc, ToolRegistry | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
 | Unload of a Session-scoped method provider waits for its `drain` calls | rutis lifecycle | To be opened | Rpc | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
-| Plugins register their own event types at runtime, with a declared client-visible flag (Connection forwarding: Appendix B.2) | Runtime | [#2](https://github.com/arcships/dim/issues/2) | Questions | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
+| Plugins register their own event types at runtime, with a declared client-visible flag (Connection forwarding: Appendix B.2) | Runtime | [#2](https://github.com/arcships/dim/issues/2) | Questions (needs redesign; may no longer need it) | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
 | Services imported over a rutis link stay registered while the link is down and each call fails with `node_unavailable` (processes on the node are ended by that node's own HostPlatform) | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent, Modality, ShellInput, Hooks, Attachments, Workflow, Scheduler, PluginManager, RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners) |
 | Named process events emitted and listened to across languages | rutis | To be opened | Scheduler, Notifications | [Scheduler §9](plugins/Scheduler.md#9-requirements-raised-to-mechanism-owners) |
 | A provider sends requests back to the caller within one call (call-scoped requests) | rutis | To be opened | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-call-scoped-requests-from-provider-to-caller) |

@@ -2,13 +2,13 @@
 
 Designs of the new plugins planned in the [overall design](../overview.md). Implemented plugins and their capabilities are documented in [architecture/rust-agent/plugins](../../architecture/rust-agent/plugins/README.md). Rules: [design rules](../../architecture/rust-agent/principles.md) §1 and §4, [ADR 002](../../adr/002-plugin-scope.md). Shared contracts: [session-access](../contracts/session-access.md), [session-boundary](../contracts/session-boundary.md).
 
-A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft.
+A plugin is split by the owner of its state. Process parts are process plugins; Session and branch parts are Capabilities. Status of every document: Draft, except Questions, which needs redesign.
 
 ## Index
 
 | Plugin | Process plugin | Session Capability | Branch Capability | Phase |
 | --- | --- | --- | --- | --- |
-| [Questions](Questions.md) | — | `ask_user` tool, `session.question.*` | pending questions, `question/*` | P1 |
+| [Questions](Questions.md) | — | `ask_user` tool, `session.question.*` | pending questions, `question/*` | P1 (needs redesign) |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 |
 | [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |
