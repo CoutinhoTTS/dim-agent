@@ -6,6 +6,7 @@ use crate::{
     protocol::*,
 };
 use dim_agent_capabilities::{
+    methods::RpcError,
     permission::{Permission, PermissionState, PermissionUpdateError},
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
@@ -452,7 +453,7 @@ impl Connection {
             // Capability owners retain admitted work when the RPC generation ends.
             return Some(tokio::select! {
                 biased;
-                _ = rpc.unloading.cancelled() => Err(RpcError::app(-32000, "operation_interrupted", "Service reloaded; the operation may already have committed. Read the current state before retrying")),
+                _ = rpc.unloading.cancelled() => Err(RpcError::interrupted()),
                 result = self.execution_session(rpc, &usage.as_ref().expect("execution operation pins its Session").session, call) => result,
             });
         }
@@ -895,7 +896,7 @@ impl Connection {
                 .unwrap_or(rpc.index.default_agent_id());
             match rpc.index.unavailable_agent(agent_id) {
                 Some(reason) => RpcError::from(AgentError::Storage(reason)),
-                None => RpcError::agent_unknown(),
+                None => agent_unknown(),
             }
         })?;
         let mut config = crate::agents::session_config(&host.profile, &rpc.config.session_defaults);

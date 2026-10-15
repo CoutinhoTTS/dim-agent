@@ -2,10 +2,11 @@
 use super::config::{McpServerSettings, RemoteTransport};
 use super::{McpChange, McpError, McpService};
 use crate::{
-    methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
-    protocol::{RpcError, canonical_cwd, optional_non_null},
+    methods::{ManagementMethods, SelectionScope},
+    protocol::{canonical_cwd, optional_non_null},
     settings::{SettingsError, SettingsScope, SettingsService},
 };
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use rutis::{CordisError, Ctx};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -143,7 +144,7 @@ pub(super) fn provide(
             "mcp.disconnect",
         ]
         .into_iter()
-        .map(|name| MethodDecl::management(name, name != "mcp.catalog", Interruption::Report))
+        .map(|name| MethodDecl::new(name, name != "mcp.catalog", Interruption::Report))
         .collect(),
         Arc::new(move |method, value, stopping| {
             let directory = directory.clone();

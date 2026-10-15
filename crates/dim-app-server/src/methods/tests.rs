@@ -1,7 +1,8 @@
 //! Per-call lookup, provider-owned calls and namespace ownership contracts.
 use super::*;
+use dim_agent_capabilities::methods::Interruption;
 use dim_agent_runtime::{Capability, KeysOf, capability_plugin, register_capability, wait_active};
-use rutis::{Gate, TypedPlugin};
+use rutis::{BoxFuture, Effect, Gate, TypedPlugin};
 use rutis_loader::{Builtins, Layer, LoaderPlugin, Patch};
 use serde_json::json;
 use std::{
@@ -95,7 +96,7 @@ impl Capability for Broken {
 }
 
 fn decl(name: &str, interruption: Interruption) -> MethodDecl {
-    MethodDecl::management(name, false, interruption)
+    MethodDecl::new(name, false, interruption)
 }
 fn rejected(result: Result<Accepted, RpcError>) -> &'static str {
     result.err().unwrap().data.unwrap().app_error

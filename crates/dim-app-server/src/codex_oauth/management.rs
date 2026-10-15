@@ -4,9 +4,10 @@ use crate::{
     managed_provider::management::{
         BrowserLogin, LoginAttempt, attempt_id, managed_attempt, managed_oauth_error as error,
     },
-    methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
-    protocol::{Empty, RpcError},
+    methods::ManagementMethods,
+    protocol::Empty,
 };
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use rutis::{CordisError, Ctx};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<OpenAICodexOAuthService>) -> Result<
         ]
         .into_iter()
         .map(|name| {
-            MethodDecl::management(
+            MethodDecl::new(
                 name,
                 !matches!(name, "account.codex.status" | "account.codex.login.status"),
                 Interruption::Drain,

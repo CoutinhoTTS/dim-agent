@@ -15,6 +15,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use dim_agent_capabilities::methods::RpcError;
 use dim_agent_runtime::{Capability, KeysOf, When};
 use futures_util::{
     SinkExt, StreamExt,

@@ -1,9 +1,10 @@
 //! Provider configuration wire boundary; accepted operations drain on unload.
 use super::ProviderService;
 use crate::{
-    methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
-    protocol::{Empty, RpcError, canonical_cwd, optional_non_null},
+    methods::{ManagementMethods, SelectionScope},
+    protocol::{Empty, canonical_cwd, optional_non_null},
 };
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use rutis::{CordisError, Ctx};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -92,7 +93,7 @@ pub(super) fn provide(ctx: &Ctx, provider: Arc<ProviderService>) -> Result<(), C
         ]
         .into_iter()
         .map(|name| {
-            MethodDecl::management(
+            MethodDecl::new(
                 name,
                 !matches!(
                     name,

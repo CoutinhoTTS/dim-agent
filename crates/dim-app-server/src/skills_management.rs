@@ -1,9 +1,10 @@
 //! Skills management wire boundary; discovery and enablement belong to SkillsCatalog.
 use crate::{
-    methods::{Interruption, ManagementMethods, MethodDecl, SelectionScope, params, reply},
-    protocol::{RpcError, canonical_cwd, optional_non_null},
+    methods::{ManagementMethods, SelectionScope},
+    protocol::{canonical_cwd, optional_non_null},
     settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use dim_agent_capabilities::skills::{RefreshTarget, SkillStatus, SkillsCatalog, SkillsError};
 use dim_agent_capabilities::{
     host_platform::HostPlatform,
@@ -208,7 +209,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
                 ["skills.catalog", "skills.set_enabled", "skills.refresh"]
                     .into_iter()
                     .map(|name| {
-                        MethodDecl::management(name, name != "skills.catalog", Interruption::Report)
+                        MethodDecl::new(name, name != "skills.catalog", Interruption::Report)
                     })
                     .collect(),
                 Arc::new(move |method, value, _stopping| {

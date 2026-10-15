@@ -1,6 +1,7 @@
-use dim_agent_runtime::{AgentError, ModelId, PermissionPolicy};
+use dim_agent_capabilities::methods::{RpcError, params};
+use dim_agent_runtime::{ModelId, PermissionPolicy};
 use dim_agent_types::{AgentEvent, InputMode, JS_MAX_SAFE_INTEGER, JsonObject, UserInput, v1};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -31,84 +32,14 @@ pub enum RequestId {
     String(String),
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RpcError {
-    pub code: i32,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<ErrorData>,
-}
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorData {
-    pub app_error: &'static str,
-}
-impl RpcError {
-    pub fn invalid(message: impl Into<String>) -> Self {
-        Self::app(-32602, "invalid_params", message)
-    }
-    pub fn app(code: i32, app_error: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data: Some(ErrorData { app_error }),
-        }
-    }
-    pub fn wire(code: i32, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data: None,
-        }
-    }
-    /// The server service is reloading; the request did not run and may be retried.
-    pub fn reloading() -> Self {
-        Self::app(
-            -32000,
-            "service_reloading",
-            "Server service is reloading; retry",
-        )
-    }
-    pub fn is_closed(&self) -> bool {
-        self.data
-            .as_ref()
-            .is_some_and(|data| data.app_error == "session_closed")
-    }
-    pub fn closed() -> Self {
-        Self::app(
-            -32000,
-            "session_closed",
-            "Session is closed or does not exist",
-        )
-    }
-    pub fn agent_unknown() -> Self {
-        Self::app(-32000, "agent_unknown", "Agent is closed or does not exist")
-    }
-}
-impl From<AgentError> for RpcError {
-    fn from(error: AgentError) -> Self {
-        let app = match &error {
-            AgentError::InvalidInput(_) | AgentError::UnknownBranch(_) => "session_invalid_input",
-            AgentError::Closed(_) => "session_closed",
-            AgentError::Build(_) => {
-                return Self::app(
-                    -32000,
-                    "session_build_failed",
-                    "Session initialization failed",
-                );
-            }
-            AgentError::Reloading(_) => return Self::reloading(),
-            _ => return Self::wire(-32603, "Session operation failed"),
-        };
-        Self::app(-32000, app, error.to_string())
-    }
+/// The error of an unknown or closed Agent.
+pub(crate) fn agent_unknown() -> RpcError {
+    RpcError::app(-32000, "agent_unknown", "Agent is closed or does not exist")
 }
 impl From<crate::agents::AgentOpError> for RpcError {
     fn from(error: crate::agents::AgentOpError) -> Self {
         match error {
-            crate::agents::AgentOpError::Unknown(_) => {
-                Self::app(-32000, "agent_unknown", "Agent is closed or does not exist")
-            }
+            crate::agents::AgentOpError::Unknown(_) => agent_unknown(),
             crate::agents::AgentOpError::Build(_) => {
                 Self::app(-32000, "agent_build_failed", "Agent initialization failed")
             }
@@ -490,9 +421,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
     let raw_params = obj
         .remove("params")
         .unwrap_or_else(|| Value::Object(Default::default()));
-    fn params<T: DeserializeOwned>(value: Value) -> Result<T, RpcError> {
-        serde_json::from_value(value).map_err(|_| RpcError::invalid("Invalid request parameters"))
-    }
     let result = (|| -> Result<Call, RpcError> {
         Ok(match method.as_str() {
             "hello" => Call::Hello(params(raw_params)?),

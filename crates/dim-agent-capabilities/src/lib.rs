@@ -12,6 +12,7 @@ pub mod history;
 pub mod host;
 pub mod host_platform;
 pub mod input_queue;
+pub mod methods;
 pub mod model_provider;
 mod output;
 pub mod permission;

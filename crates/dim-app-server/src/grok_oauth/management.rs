@@ -4,9 +4,10 @@ use crate::{
     managed_provider::management::{
         DeviceLogin, LoginAttempt, attempt_id, managed_attempt, managed_oauth_error as error,
     },
-    methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
+    methods::ManagementMethods,
     protocol::Empty,
 };
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, params, reply};
 use rutis::{CordisError, Ctx};
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<GrokOAuthService>) -> Result<(), Cor
         ]
         .into_iter()
         .map(|name| {
-            MethodDecl::management(
+            MethodDecl::new(
                 name,
                 !matches!(name, "account.grok.status" | "account.grok.login.status"),
                 Interruption::Drain,
