@@ -1298,6 +1298,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         restarted.plugin(dim_agent_runtime::capability_plugin(
             ProviderPlugin::default(),
         )),
+        restarted.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
         active(plugin).await;

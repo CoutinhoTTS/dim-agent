@@ -139,7 +139,7 @@ on a later input). No event is written anywhere.
   `complete`, never returned or serialized. Consumers see text, stop reason and usage only.
 - Error messages carry no secrets: `failed` uses the existing `HostError` message, which
   carries no credential values; Provider never formats a connection into a message.
-- Diagnostics: `complete` emits a process `tracing` span `auxiliary.complete` with provider
+- Diagnostics: `complete` records one process `tracing` event, target `auxiliary.complete`, with provider
   id, model id, outcome, duration and token usage, never request or reply content. Consumers
   record outcomes in their own Session diagnostics. Auxiliary calls are not Session facts
   and enter no Timeline.
@@ -184,5 +184,5 @@ not designed now.
 3. Deleting the model's Provider: the next call is `model_unavailable`.
 4. Dropping the call mid-stream cancels the request; unloading Provider ends an in-flight
    call with `cancelled`.
-5. No API key appears in the reply, errors or the trace span; the Session's Timeline has no
+5. No API key appears in the reply, errors or the trace event; the Session's Timeline has no
    new event after a call.
