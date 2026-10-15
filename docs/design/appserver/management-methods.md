@@ -63,10 +63,12 @@ non-local transport with `local_transport_required`, as before contributions
 ([methods contract A.3](../contracts/session-boundary.md#a3-entries-and-export)). Local v3 then dispatches management contributions; v1/v2 do not.
 A namespace with no enabled provider (no configured namespace owns the name, or
 its owner row is disabled), or a name its provider does not declare, returns
-`unknown_method`. A namespace whose owner row is Pending or between generations
-while it reloads returns the retryable `service_reloading`; one whose owner row
-is Failed or Unresolved returns the non-retryable `service_unavailable`. Rpc
-tells these apart from the loader's row status (contract §3.2). A name outside
+`unknown_method`. A namespace whose owner row is not running and has not failed
+(Pending, not started yet, or between generations) returns the retryable
+`service_reloading`; one whose owner row cannot run again until it is fixed or
+restarted (Failed, Unresolved or Disposed) returns the non-retryable
+`service_unavailable`. Rpc tells these apart from the loader's row status
+(contract §3.2). A name outside
 the declaration grammar (dot-separated
 lowercase segments, at most 128 bytes) is unknown without any lookup, so a
 caller's name bounds the lookups made under the handler lock. Error codes at the
@@ -88,12 +90,26 @@ provider of the namespace active? --yes--> provider answers
         |                                  (a name it does not declare: unknown_method)
         no
         v
-owner row status (loader)         reply                         client
--------------------------------   ---------------------------   ----------------------------------
-absent or Disabled                -32601 unknown_method         stop: nothing serves the name
-Pending or between generations    -32000 service_reloading      retry: the owner is coming back
-Failed or Unresolved              -32000 service_unavailable    stop: retry after a fix or restart
+owner row status (loader.get)          reply                         client
+------------------------------------   ---------------------------   ----------------------------------
+absent or Disabled                     -32601 unknown_method         stop: nothing serves the name
+Inactive: not started yet,             -32000 service_reloading      retry: the owner is coming back
+  or between generations
+Running: Pending, Loading, Unloading   -32000 service_reloading      retry: the owner is coming back
+Running: Active (after the lookup)     the provider answers
+Running: Failed or Disposed            -32000 service_unavailable    stop: retry after a fix or restart
+Unresolved                             -32000 service_unavailable    stop: retry after a fix or restart
+Stopped (instance copies only)         -32000 service_unavailable    stop: retry after a fix or restart
+a status the loader adds later         -32000 service_unavailable    stop: retry after a fix or restart
 ```
+
+`loader.get(row)` reads the row itself, and the loader reports Stopped only for
+a copy inside an instance, so Stopped does not reach Rpc today. Two owners
+answer `service_reloading` although they will not come back without a fix
+([#124](https://github.com/arcships/dim/issues/124)): one that is Pending on a
+dependency that failed, and one that disposed itself. The process loader has no
+editable layer in which to disable the second one's row, so once the loader
+drops its fiber, the row reads Inactive.
 
 Rpc admits contributed calls under the same handler lock as built-in commands
 and tracks reply delivery in its command tracker. A request id is the client's
@@ -115,10 +131,11 @@ account methods use `Drain`; MCP and Skills use `Report`. Settings retains its
 accepted-write contract.
 
 An owner that is disabled, Pending, Failed or reloading affects only its own
-namespace; Rpc and open connections are unaffected. While its row is Pending or
-between generations its methods return `service_reloading`, as before
-contributions when Rpc reloaded with it (contract A.4); while it is Failed or
-Unresolved they return `service_unavailable`; a disabled owner's methods return
+namespace; Rpc and open connections are unaffected. While its row is Pending,
+not started yet, or between generations its methods return `service_reloading`,
+as before contributions when Rpc reloaded with it (contract A.4); while it is
+Failed, Unresolved or Disposed they return `service_unavailable`; a disabled
+owner's methods return
 `unknown_method`. Rpc and Agents depend on no owner, directly or
 through each other: `session.create`, `session.model.update` and Collaboration
 member creation read Provider and the `ModelSelectionHost` per call and return a

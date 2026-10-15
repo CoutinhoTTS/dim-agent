@@ -106,7 +106,7 @@ sequenceDiagram
 
 连接的入口记录是唯一的检查。获得管理方法即授予宿主管理员权限。
 
-装配在 [lib.rs](../../../../crates/dim-app-server/src/lib.rs) 中构建一组固定的已配置 `(namespace, row)` 对并交给 Rpc；Rpc 的 `apply`（[connection.rs](../../../../crates/dim-app-server/src/connection.rs)）拒绝 loader 不认识其行的对，并用它们构建 `Owners`（[methods.rs](../../../../crates/dim-app-server/src/methods.rs)）。一个名称属于作为其前缀或与其相等的最长已配置命名空间，即使该命名空间的所有者已禁用；父命名空间从不应答它。Rpc 在每次调用时按 key 读取该命名空间的提供方（`TypeKey::keyed_dynamic::<ManagementMethods>(ns)`，附录 F），不依赖它。没有已激活的提供方时，Rpc 用 `loader.get(row)` 读取所有者行的状态：已启用且处于 Pending 或重载时新旧两代之间的行，返回可重试的 `service_reloading`；处于 Failed 或 Unresolved 的行，返回不可重试的 `service_unavailable`；已禁用或不存在的行，或没有任何已配置命名空间拥有的名称，返回 `unknown_method`。Rpc、已打开的连接和其他命名空间都不受影响。提供方卸载前已受理的调用属于该提供方，由它按方法的 `interruption` 回复（A.1）：`report` 调用以 `operation_interrupted` 结束，`drain` 调用回复自己的结果，提供方的卸载等待它受理的每个调用。
+装配在 [lib.rs](../../../../crates/dim-app-server/src/lib.rs) 中构建一组固定的已配置 `(namespace, row)` 对并交给 Rpc；Rpc 的 `apply`（[connection.rs](../../../../crates/dim-app-server/src/connection.rs)）拒绝 loader 不认识其行的对，并用它们构建 `Owners`（[methods.rs](../../../../crates/dim-app-server/src/methods.rs)）。一个名称属于作为其前缀或与其相等的最长已配置命名空间，即使该命名空间的所有者已禁用；父命名空间从不应答它。Rpc 在每次调用时按 key 读取该命名空间的提供方（`TypeKey::keyed_dynamic::<ManagementMethods>(ns)`，附录 F），不依赖它。没有已激活的提供方时，Rpc 用 `loader.get(row)` 读取所有者行的状态：未运行且未失败的行（Pending、尚未启动，或新旧两代之间）返回可重试的 `service_reloading`；修复或重启之前无法再运行的行（Failed、Unresolved，或 Disposed：已移除且不能重启）返回不可重试的 `service_unavailable`；已禁用或不存在的行，或没有任何已配置命名空间拥有的名称，返回 `unknown_method`。Rpc、已打开的连接和其他命名空间都不受影响。提供方卸载前已受理的调用属于该提供方，由它按方法的 `interruption` 回复（A.1）：`report` 调用以 `operation_interrupted` 结束，`drain` 调用回复自己的结果，提供方的卸载等待它受理的每个调用。
 
 ## 4. 时序与冲突
 
@@ -115,7 +115,7 @@ sequenceDiagram
 | Session 级提供方在调用中途重载 | call < reload | `report`：`operation_interrupted`；`drain`：调用自己的结果；提供方的卸载等待每个已受理的调用（AGENTS.md 规则 8） | 提供方 |
 | Session 的 Capability 重载期间调用 Session 方法 | — | `service_reloading` | Rpc |
 | 对未列出该命名空间的 Session 调用 Session 方法 | — | `unknown_method` | Rpc |
-| 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `service_reloading`；处于 Failed 或 Unresolved 的所有者返回 `service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
+| 管理方法所有者重载 | — | 新一代激活前，调用其命名空间返回 `service_reloading`；处于 Failed、Unresolved 或 Disposed 的所有者返回 `service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载，连接保持打开 | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法或 `daemon.shutdown` | — | `unknown_method` | Rpc |
 | 两个提供方声明同一命名空间或工具名 | 装配 | 装配失败；key 在每个作用域内唯一 | 装配 |
 | Session 命名空间与已配置的管理命名空间重叠 | 装配 | 装配失败（A.1） | 装配 |
@@ -232,7 +232,7 @@ sequenceDiagram
 | 调用归属 | Session 级提供方这一代拥有它受理的调用，与 `ManagementMethods` 相同：由它回复，它的卸载按 `interruption` 中断这些调用并等待它们（见上文取消与中断） |
 | 已知命名空间（C1，未实现） | 运行时的 `Session::session_service` 对任何缺失的 key 都返回 `Reloading`，因此单靠读取分不清不存在的命名空间与正在重载的命名空间。C1 让装配用 `AgentBuilder::session_methods(ns)` 记录每个 Session 的已知命名空间，作为 `Owners` 的对应物：不在列表中的命名空间 → `unknown_method`；在列表中但提供方未激活 → `service_reloading` |
 | 共享类型（C1） | `MethodDecl`、`Interruption`、`Handler` 与 `RpcError` 目前位于 dim-app-server，而 dim-agent-capabilities 中的 Session Capability 不能依赖它。C1 把共享的声明、处理函数与错误类型移到 dim-agent-types |
-| 不分发 | 没有已配置命名空间拥有该名称且它不是 Session 方法候选、所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称、在带 `deviceId` 的连接或未导出的链接上调用管理方法，或 v1/v2 → `-32601 unknown_method`。Session 正在重载、已列出的 Session 命名空间的提供方未激活，或管理方法所有者行处于 Pending 或新旧两代之间 → `-32000 service_reloading`（可重试）。管理方法所有者行处于 Failed 或 Unresolved → `-32000 service_unavailable`（不可重试）。已开始的 `report` 调用被中断 → `operation_interrupted` |
+| 不分发 | 没有已配置命名空间拥有该名称且它不是 Session 方法候选、所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称、在带 `deviceId` 的连接或未导出的链接上调用管理方法，或 v1/v2 → `-32601 unknown_method`。Session 正在重载、已列出的 Session 命名空间的提供方未激活，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间）→ `-32000 service_reloading`（可重试）。管理方法所有者行处于 Failed、Unresolved 或 Disposed → `-32000 service_unavailable`（不可重试）。已开始的 `report` 调用被中断 → `operation_interrupted` |
 | `hello.features`（v3） | 内建方法；连接获得管理方法时（本地 v3），再加上已配置命名空间中已激活提供方的方法，每个方法只列在拥有它的命名空间下。从 loader 行的 `provides` 发现命名空间是后续工作（[ADR 004](../../../adr/004-loader-plugin-management.md)）。Session 级方法不在这里列出，由 `session.methods` 按 Session 列出 |
 | `session.methods`（C1，未实现） | 新的公开接口，Rpc 内建方法：`session.methods {sessionId}` → `{ "methods": [ { "name": "string", "mutating": true } ] }`，即该 Session 列出且提供方已激活的命名空间所声明的方法。它与其他 Session 级内建方法一样授权和解析，并增加一个精确内建名 |
 | 就绪闩 | 在 loader 的初始装载结算后打开，因此进程提供方在第一个 `hello` 时已存在 |
@@ -326,7 +326,7 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 | 对已关闭分支调用 Session 方法 | — | 所有者的 `BranchMissing` 错误 | 所属插件 |
 | 对未装载 Session 调用 Session 方法 | — | Rpc 通过 `index.acquire` 恢复后再分发（不同于 `approval.respond`，它返回 `session_closed`） | Rpc |
 | Session 级提供方在调用中途重载 | admitted < reload | `report`：`operation_interrupted`；`drain`：调用自己的结果；卸载等待两者 | 提供方 |
-| 进程所有者重载 | — | Pending 或新旧两代之间：重新激活前返回 `service_reloading`；Failed 或 Unresolved：`service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载 | Rpc |
+| 进程所有者重载 | — | Pending、尚未启动，或新旧两代之间：重新激活前返回 `service_reloading`；Failed、Unresolved 或 Disposed：`service_unavailable`（§3.2）；已受理的调用属于提供方，按 `interruption` 处理；Rpc 不重载 | Rpc |
 | 有在途调用时 Rpc 重载 | — | 处理函数的取消令牌触发：`report` 回复 `operation_interrupted`，`drain` 回复自己的结果；Rpc 卸载时等待它应发出的回复以及每个被中断操作结算；`closed` 完成（`callChannel`，未实现） | Rpc |
 | 在带 `deviceId` 的连接上调用管理方法 | — | `unknown_method` | Rpc |
 | 客户端在调用中途 detach | — | 调用继续；回复被丢弃 | Rpc |
@@ -343,8 +343,8 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 | --- | --- |
 | 没有所有者（管理方法所有者行已禁用或不存在、该 Session 未列出此命名空间、提供方未声明该名称）、不向该连接提供，或 v1/v2 | `-32601`，`unknown_method` |
 | Session 方法候选缺少 `sessionId` | `-32602` |
-| Session 正在重载、已列出的 Session 命名空间未激活，或管理方法所有者行处于 Pending 或新旧两代之间 | `-32000`，`service_reloading`（可重试） |
-| 管理方法所有者行处于 Failed 或 Unresolved | `-32000`，`service_unavailable`（不可重试） |
+| Session 正在重载、已列出的 Session 命名空间未激活，或管理方法所有者行未运行且未失败（Pending、尚未启动，或新旧两代之间） | `-32000`，`service_reloading`（可重试） |
+| 管理方法所有者行处于 Failed、Unresolved 或 Disposed | `-32000`，`service_unavailable`（不可重试） |
 | `report` 调用被中断 | `-32000`，`operation_interrupted` |
 | 提供方错误 | `-32000`，提供方的 `appError` |
 
