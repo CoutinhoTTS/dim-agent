@@ -94,7 +94,7 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 
 ## 3. CLI
 
-`dimcode web [--port N] [--no-open]` connects to (or spawns) the daemon, calls `web.open`, prints the address and opens the sign-in URL with `browser::open`. With `--no-open`, `DIMCODE_OAUTH_MANUAL=1` or no browser, it prints the full sign-in URL instead; it is the local user's own terminal. It then exits; the entry lives in the daemon. `dimcode web --close` calls `web.close`. `/web` in the TUI does the same and opens `/chat/<sessionId>` for the current Session (the home page before the first message).
+`dimcode web [--port N] [--no-open]` connects to (or spawns) the daemon, calls `web.open`, prints the address and opens the sign-in URL with `browser::open`. With `--no-open`, `DIMCODE_OAUTH_MANUAL=1` or no browser, it prints the full sign-in URL instead; it is the local user's own terminal. It then exits; the entry lives in the daemon. `dimcode web --close` calls `web.close`. `/web` in the TUI hands the Session to the browser, as the TypeScript `dim` did: the interface closes (a detach, so a running turn keeps going in the App Server), then the same process opens the entry at `/chat/<sessionId>` and prints where the Session continues and how to resume it in the terminal, in place of the goodbye panel.
 
 ```
 $ dimcode web

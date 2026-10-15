@@ -42,8 +42,20 @@ fn main() {
                     .fullscreen
                     .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
             };
-            let host = session_host::SessionHost::start(options);
-            return Ok(ui::tui::run(Box::new(host), env));
+            let host = session_host::SessionHost::start(options.clone());
+            let session_id = match ui::tui::run(Box::new(host), env) {
+                ui::tui::Leave::Exit(code) => return Ok(code),
+                ui::tui::Leave::Web { session_id } => session_id,
+            };
+            // `/web` hands the session over: the interface has closed and the
+            // browser opens on it, as `dimcode web` would.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            return runtime.block_on(async {
+                let mut client = client::connect(&options).await?;
+                open_web(&mut client, None, true, session_id.as_deref()).await
+            });
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -300,7 +312,14 @@ async fn run(options: Options) -> Result<i32> {
             port,
             open_browser,
             close,
-        } => web(&mut client, *port, *open_browser, *close).await,
+        } if *close => {
+            client.rpc("web.close", serde_json::json!({})).await?;
+            println!("Web workspace closed.");
+            Ok(0)
+        }
+        Action::Web {
+            port, open_browser, ..
+        } => open_web(&mut client, *port, *open_browser, None).await,
         Action::Chat | Action::Tui | Action::Exec => session::chat(&mut client, &options).await,
         Action::Help
         | Action::Version
@@ -309,17 +328,14 @@ async fn run(options: Options) -> Result<i32> {
     }
 }
 
-async fn web(
+/// Opens the daemon's web entry, at `session_id`'s chat when given, and
+/// says where it is.
+async fn open_web(
     client: &mut client::Client,
     port: Option<u16>,
     open_browser: bool,
-    close: bool,
+    session_id: Option<&str>,
 ) -> Result<i32> {
-    if close {
-        client.rpc("web.close", serde_json::json!({})).await?;
-        println!("Web workspace closed.");
-        return Ok(0);
-    }
     #[derive(serde::Deserialize)]
     struct Opened {
         url: String,
@@ -330,15 +346,21 @@ async fn web(
         None => serde_json::json!({}),
     };
     let opened: Opened = client.typed("web.open", params).await?;
-    println!("Web workspace  http://{}/", opened.address);
-    if open_browser && browser::open(&opened.url) {
+    let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
+    let path = session_id.map_or(String::new(), |id| format!("chat/{id}"));
+    let url = format!("http://{}/{path}#{fragment}", opened.address);
+    println!("Web workspace  http://{}/{path}", opened.address);
+    if open_browser && browser::open(&url) {
         println!("Opened in your browser.");
     } else {
         // The fragment carries the sign-in token; show it only to this user.
-        println!("Open this link to sign in: {}", opened.url);
+        println!("Open this link to sign in: {url}");
     }
     println!(
         "The workspace stays available until the daemon stops or you run `dimcode web --close`."
     );
+    if let Some(id) = session_id {
+        println!("To continue in the terminal: dimcode --resume {id}");
+    }
     Ok(0)
 }

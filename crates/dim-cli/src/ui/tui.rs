@@ -99,7 +99,31 @@ pub fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
+/// How the interface ended.
+pub enum Leave {
+    Exit(i32),
+    /// `/web`: the interface closed so the browser carries on with the
+    /// session (`None` before the first one exists). Detaching leaves any
+    /// running turn going in the App Server.
+    Web {
+        session_id: Option<String>,
+    },
+}
+
+pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
+    let mut web = None;
+    let code = run_terminal(host, surroundings, &mut web);
+    match web {
+        Some(session_id) => Leave::Web { session_id },
+        None => Leave::Exit(code),
+    }
+}
+
+fn run_terminal(
+    host: Box<dyn SessionPort>,
+    surroundings: Env,
+    web: &mut Option<Option<String>>,
+) -> i32 {
     let mut terminal = match Terminal::enter() {
         Ok(terminal) => terminal,
         Err(TerminalError::NotATerminal) => {
@@ -377,8 +401,13 @@ pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
                         // Anything else is typing: the pick ends and the key
                         // goes to the composer.
                         full.clear_focus();
-                        if let Outcome::Exit(code) = app.handle(InputEvent::Key(key)) {
-                            break code;
+                        match app.handle(InputEvent::Key(key)) {
+                            Outcome::Exit(code) => break code,
+                            Outcome::Web => {
+                                *web = Some(app.web_session());
+                                break 0;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -450,6 +479,10 @@ pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
                     dirty = true;
                 }
                 Outcome::Exit(code) => break code,
+                Outcome::Web => {
+                    *web = Some(app.web_session());
+                    break 0;
+                }
             },
         }
     };
@@ -465,9 +498,12 @@ pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
         }
         None => screen.leave(),
     };
-    let resume =
-        (app.session_active() && !app.session_id.is_empty()).then_some(app.session_id.as_str());
-    bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
+    // `/web` prints where the session continues instead of the goodbye.
+    if web.is_none() {
+        let resume =
+            (app.session_active() && !app.session_id.is_empty()).then_some(app.session_id.as_str());
+        bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
+    }
     let _ = terminal.write(&bytes);
     terminal.leave();
     app.host.shutdown();
@@ -495,6 +531,8 @@ enum Outcome {
     SwitchMode,
     /// `/suspend`: give the terminal to the shell until the job continues.
     Suspend,
+    /// `/web`: leave the terminal and continue in the browser.
+    Web,
     Exit(i32),
 }
 
@@ -729,6 +767,11 @@ impl App {
     }
 
     /// True once the session has a message (what "needs a session" means).
+    /// The session `/web` opens in the browser, once one exists.
+    fn web_session(&self) -> Option<String> {
+        (!self.session_id.is_empty()).then(|| self.session_id.clone())
+    }
+
     fn session_active(&self) -> bool {
         self.snapshot
             .as_ref()
@@ -1482,10 +1525,7 @@ impl App {
                 self.host.send(Command::NewSession);
                 Outcome::Continue
             }
-            "web" => {
-                self.host.send(Command::OpenWeb);
-                Outcome::Continue
-            }
+            "web" => Outcome::Web,
             "resume" => {
                 self.prompt = Some(Prompt::Sessions(SessionsPanel::new()));
                 self.host.send(Command::ListSessions);

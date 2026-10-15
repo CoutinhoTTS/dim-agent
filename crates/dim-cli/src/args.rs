@@ -57,7 +57,7 @@ Approval accepts only y/yes; empty input denies. For a simple exec command, a/al
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval required, 130 interrupted.\n";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Action {
     Chat,
     Tui,
@@ -94,6 +94,7 @@ pub enum Action {
     Version,
 }
 
+#[derive(Clone)]
 pub struct Options {
     pub action: Action,
     pub prompt: Option<String>,
