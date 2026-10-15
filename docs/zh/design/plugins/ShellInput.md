@@ -1,6 +1,6 @@
 # ShellInput
 
-状态：Ready（待维护者确认）。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。C1（[#47](https://github.com/arcships/dim/issues/47)）、逐次调用的进度（C8，由 [#125](https://github.com/arcships/dim/pull/125) 提议）和 S7（[#52](https://github.com/arcships/dim/issues/52)）合入后开始实现（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
+状态：Ready（待维护者确认）。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。C1（[#47](https://github.com/arcships/dim/issues/47)，含逐次调用的进度，[#125](https://github.com/arcships/dim/pull/125)）和 S7（[#52](https://github.com/arcships/dim/issues/52)）合入后开始实现（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
 
 在 Session 的工作目录中执行用户输入的 `!command` 和 `!!command`。`!command` 的结果（命令及有界输出）作为 Append 输入写入，因此随下一次模型请求进入上下文；`!!command` 的输出只发给调用方客户端。ShellInput 是一个没有事件的 Session 插件。它通过 `sessionMethods` 服务（Session 作用域，key `shell`；[session-boundary](../contracts/session-boundary.md)）以普通 Session 方法提供 `shell.run`、`shell.stop` 和 `shell.list`；契约以语言中立形式给出，Rust 形式见[附录 G](#附录-g-rust-绑定)。每个 Session 最多同时运行一个命令。命令自行结束、收到 `shell.stop`，或在 Session 部分结束时（Session 关闭、ShellInput 或 Session 重载、卸载、App Server 关闭）结束。
 
@@ -37,7 +37,7 @@ flowchart LR
 依赖的契约：
 
 - `sessionMethods` 的分发、错误与调用归属（C1，[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。ShellInput 既不指名共享方法类型所在的 crate，也不依赖 Rpc 报告分发错误的顺序，因此尚未合入的契约修改 [#120](https://github.com/arcships/dim/pull/120) 不影响它。
-- 逐次调用的进度（[session-boundary A.2](../contracts/session-boundary.md#a2-调用通道)）：已定义，未实现；由提议中的 C8 排期（[A.5](#a5-对其他插件的改动)）。
+- 逐次调用的进度（[session-boundary A.2](../contracts/session-boundary.md#a2-调用通道)）：已定义，未实现；C1 包含它（[A.5](#a5-对其他插件的改动)）。
 - 带边界校验的 `Branch::input`，以及 InputQueue 的 Append 模式：Append 输入立即应用，随下一次模型请求被消费，从不开启轮次。
 - HostPlatform：`spawn(ProcessSpec)` 返回带 stdout、stderr、wait 和 terminate 的进程树（已实现）；命令构造器与 `exec` 的输出规则（S7，[A.5](#a5-对其他插件的改动)）。
 - `SessionLifecycle::closing()`、插件代的取消及其 `ctx.effect` 卸载清理函数（[生命周期](../../../architecture/rust-agent/lifecycle.md)）。
@@ -83,7 +83,7 @@ CLI             Rpc                    ShellInput (Session)          HostPlatfor
  |               |                            |-- build command (S7) ------>|               |
  |               |                            |-- spawn in Session cwd ---->|               |
  |               |                            |<-- stdout + stderr ---------|               |
- |<- progress ---|<-- progress {text} (C8) ---|                             |               |
+ |<- progress ---|<-- progress {text} (C1) ---|                             |               |
  |               |                            |<-- exit --------------------|               |
  |               |                            |-- record mode only: input (Append) -------->|
  |               |                            |<-- committed sequence ----------------------|
@@ -179,7 +179,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-`!` 和 `!!` 以服务用户身份执行任意命令，无需 Approval：Approval 与 Permission 只管 agent 决策的动作，而这些命令是用户的（[ADR 003](../../adr/003-approval-scope.md) D1）。`shell.*` 是普通 Session 方法：任何被提供 Session 方法的连接，都可以对它能寻址的任何 Session 调用它们。目前这只是本地受保护连接；有了 RemoteGateway（P3）后还包括已配对设备（决定 E3，[overview §6.2](../overview.md#62-约束) 第 10 条），因此配对设备就是授予在宿主上执行命令的能力。Session 方法没有级别；只有管理方法不提供给已配对设备（[session-boundary](../contracts/session-boundary.md)）。HostPlatform 的进程隔离在实现后适用（Q4）；Permission 预设从不放宽它。对于 `!`，命令文本和输出会写入 Timeline 并重放给模型；用户应避免打印机密。环境与 `exec` 一样是服务的环境，从不使用客户端的环境。诊断不包含命令文本或输出（A11）。
+`!` 和 `!!` 以服务用户身份执行任意命令，无需 Approval：Approval 与 Permission 只管 agent 决策的动作，而这些命令是用户的（[ADR 003](../../adr/003-approval-scope.md) D1）。`!` 也不拒绝后台 `&`，而 `exec` 在 POSIX shell 中拒绝它：那是 agent 工具的策略，用来把 agent 的后台工作引向 BackgroundExec，而 `!` 命令由用户输入（D1）。它留在后台的进程以服务用户身份运行，在运行、Session 和 App Server 结束后继续存在，Dim 中没有任何部件跟踪它们（A.2）。`shell.*` 是普通 Session 方法：任何被提供 Session 方法的连接，都可以对它能寻址的任何 Session 调用它们。目前这只是本地受保护连接；有了 RemoteGateway（P3）后还包括已配对设备（决定 E3，[overview §6.2](../overview.md#62-约束) 第 10 条），因此配对设备就是授予在宿主上执行命令的能力。Session 方法没有级别；只有管理方法不提供给已配对设备（[session-boundary](../contracts/session-boundary.md)）。HostPlatform 的进程隔离在实现后适用（Q4）；Permission 预设从不放宽它。对于 `!`，命令文本和输出会写入 Timeline 并重放给模型；用户应避免打印机密。环境与 `exec` 一样是服务的环境，从不使用客户端的环境。诊断不包含命令文本或输出（A11）。
 
 ## 8. 规则检查
 
@@ -194,7 +194,7 @@ sequenceDiagram
 | §4.5 决定前读完整个批次 | 不适用：ShellInput 不读任何 Timeline 事件，它唯一的事件（`input/message`）不需要同批次的其他事实。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 输出只在 InputQueue 应用、Loop 消费该输入后进入模型；`!!` 的输出和进度从不进入。 |
 | §4.7 插件之间只通过公开事件和服务交互 | ShellInput 经 `S:TreeCommands` 使用 `Branch::input`，并使用 `SessionConfig`、`SessionLifecycle`、`Diagnostics`、HostPlatform 与 `sessionMethods` 契约。 |
-| §4.8 基础设施默认不变 | 基础设施不变，不向运行时或 rutis 提需求（§9）。需要 Rpc（逐次调用的进度，C8）和 HostPlatform（命令构造器，S7）做的改动列在 A.5；Agents 活动句柄已放弃。 |
+| §4.8 基础设施默认不变 | 基础设施不变，不向运行时或 rutis 提需求（§9）。需要 Rpc（逐次调用的进度，在 C1 中）和 HostPlatform（命令构造器，S7）做的改动列在 A.5；Agents 活动句柄已放弃。 |
 | §4.9 只有后续决定要用的事实进入 Timeline | 只有 `!` 的记录结果进入，作为模型会读取的输入。进度是一次调用的回复数据，不是 Session 状态，因此既不进 Timeline，也不走 Session 广播通知；运行记录进入诊断。 |
 | §1 Capability 与 App Server 边界 | ShellInput 是各自包中的 Session Capability；Rpc 只分派 `sessionMethods`。 |
 | ADR 002 D1 作用域跟随状态所有者 | 运行是 Session 工作目录中的 Session 工作，因此插件是 Session 作用域。 |
@@ -237,9 +237,34 @@ sequenceDiagram
 | 进程 | 每次运行一个新进程（A3）；stdin 为 null，交互式程序看到 EOF |
 | 环境 | 服务的环境，加上 `exec` 的强制变量；从不使用客户端的环境 |
 | 超时 | 无；运行自行结束、收到 `shell.stop`，或随 Session 部分结束 |
-| 输出 | stdout 和 stderr 按到达顺序合并。根进程退出后，在 `exec` 的宽限期内读取已就绪的输出后停止读取，因此保持管道打开的后代进程不会拖住运行 |
-| 后代进程 | 与 `exec` 相同：根进程自行退出时，它留在后台的进程继续运行；终止（stop、Session 部分结束）会结束整棵进程树 |
+| 输出 | stdout 和 stderr 按到达顺序合并。根进程退出后，在 `exec` 的宽限期内读取已就绪的输出，然后停止读取并关闭管道，因此保持管道打开的后代进程不会拖住运行 |
+| 后代进程 | 与 `exec` 相同，只是不拒绝 `&`（§7）：根进程自行退出时运行结束，它留在后台的进程继续运行，不再归 ShellInput 管；根进程仍在运行时，终止（stop、Session 部分结束）会结束整棵进程树。见下文 |
 | 上限 | 回复和模型可见输出遵循 `exec` 的规则：无效字节解码为 `<0xNN>`，去除控制字符，50 KiB 以内的最后 2000 行；上限截掉内容时 `truncated` 为真（A6） |
+
+**后台进程（`!cmd &`）。** 命令留下的进程会怎样：
+
+```text
+!cmd &        the shell starts cmd in the background and exits at once
+
+shell   o--x  run completes: output read up to the exit and during the grace is
+              replied and recorded; the tree is released
+cmd     o---------------------------------------------------------> keeps running
+           ^  pipes closed: a later write to stdout or stderr fails
+              (POSIX: the default SIGPIPE ends cmd)
+              not in shell.list; shell.stop, Session close or reload,
+              unload and App Server shutdown do not reach cmd
+
+!cmd & other  the shell is still running
+
+shell   o-------------x  shell.stop or the end of the Session part terminates the tree
+cmd     o-------------x  same process group (POSIX) or job (Windows): ended
+setsid  o--------------------------------------> own session (POSIX): not reached
+```
+
+- shell 退出时运行结束。回复和记录的输入只包含退出前及宽限期内读到的输出；之后的输出不会被捕获。
+- 根进程自行退出并被回收时，HostPlatform 保留它的后代进程，与 `exec` 相同（`ProcessTree`）。之后 ShellInput 不再持有任何东西：这些进程不会让 Session 处于忙碌状态，`shell.list` 不显示它们，`shell.stop` 够不到它们，Session 关闭、ShellInput 或 Session 重载、卸载以及 App Server 关闭都不会结束它们。用户用另一条命令停止它们，例如 `!kill <pid>`。
+- 它们的 stdout 和 stderr 是这次运行的管道，停止读取后即被关闭。之后的写入会失败；在 POSIX 上，默认的 `SIGPIPE` 会结束该进程。长期运行的命令需要重定向输出：`!npm run dev > dev.log 2>&1 &`。
+- shell 仍在运行时，`shell.stop` 和 Session 部分结束会终止整棵进程树，后台子进程也在内：POSIX 上向进程组先发 `SIGTERM` 再发 `SIGKILL`；Windows 上终止 job。`nohup` 只忽略 `SIGHUP`，仍在进程组内。在 POSIX 上，自己开启新会话或进程组的进程（`setsid`、自行脱离的守护进程）会离开进程组，不会被终止；Windows 上 job 不允许脱离。
 
 ### A.3 记录的输入
 
@@ -265,7 +290,7 @@ sequenceDiagram
 
 ### A.5 对其他插件的改动
 
-**Rpc：Session 方法的逐次调用进度**（[overview B.2](../overview.md#b2-app-server-进程插件) Rpc 行，`callChannel`）。`shell.run` 在命令运行期间流式发送输出（A7）。session-boundary A.2 已定义做法：方法声明 `progress`，提供方在所服务的调用上发送进度数据，Rpc 以 `management.progress {id, method, data}` 发给调用方连接，排在回复之前，断开后丢弃。它尚未实现，C1 不包含它，路线图也没有排期，因此 [#125](https://github.com/arcships/dim/pull/125) 提议在 Rpc 线上 C1 之后增加 C8，ShellInput 是第一个使用者。只需要 `progress`，不需要 `notify`、`closed` 或 `takeFinalReply`。已否决：Session 广播通知（C6 把进程级状态的已提交变更发给 Session 的每个客户端，而命令输出是一次调用的回复数据）；`shell.output` 之类的轮询方法（在契约之外多一条路径，并增加延迟）；只在退出时输出。
+**Rpc：Session 方法的逐次调用进度**（[overview B.2](../overview.md#b2-app-server-进程插件) Rpc 行，`callChannel`）。`shell.run` 在命令运行期间流式发送输出（A7）。session-boundary A.2 已定义做法：方法声明 `progress`，提供方在所服务的调用上发送进度数据，Rpc 以 `management.progress {id, method, data}` 发给调用方连接，排在回复之前，断开后丢弃。它尚未实现。按 [#125](https://github.com/arcships/dim/pull/125) 的决定，C1（[#47](https://github.com/arcships/dim/issues/47)）包含它，Session 方法的处理函数从一开始就带进度接收端，ShellInput 是第一个使用者。只需要 `progress`，不需要 `notify`、`closed` 或 `takeFinalReply`。已否决：Session 广播通知（C6 把进程级状态的已提交变更发给 Session 的每个客户端，而命令输出是一次调用的回复数据）；`shell.output` 之类的轮询方法（在契约之外多一条路径，并增加延迟）；只在退出时输出。
 
 **HostPlatform：命令构造器与输出规则**（S7，[#52](https://github.com/arcships/dim/issues/52)；[overview B.1](../overview.md#b1-session-与分支-capability) HostPlatform 行）。ShellInput 不自己构造 argv，也不复制 `exec` 的任何规则。它需要 S7 提供：
 
@@ -296,6 +321,8 @@ H1 到 H3 阻塞 ShellInput。S7 的另一半，即每次 spawn 时读取 exec s
 | 被持有时对 X 的 `input/withdraw`（S1） | X < withdraw < `input/deleted` | 从未被应用或消费；不重新写入 | InputQueue |
 | 应用之后对 X 的 `input/withdraw`（S1） | `input/applied` < withdraw | 无效果（`notHeld`）；X 正常被消费 | InputQueue |
 | 运行期间分支级中断或分支关闭 | 关闭 < X | 运行继续；写入失败；`recorded.error` | 运行时门面；ShellInput |
+| `!cmd &`：shell 退出，留下后台进程 | — | 运行以已读到的输出完成；该进程继续运行，不在 `shell.list` 和 `shell.stop` 的范围内；之后向已关闭管道的写入失败（A.2） | ShellInput、HostPlatform |
+| `!cmd &` 运行之后 Session 关闭、重载或 App Server 关闭 | — | 后台进程不受影响，继续运行（A.2） | HostPlatform |
 | 运行期间 Session 关闭 | — | 在 `closing()` 时终止进程树；不写任何内容；`operation_interrupted`（A8） | ShellInput |
 | 运行期间 ShellInput 或 Session 重载，或宿主的空闲卸载 | — | 进程树终止；不写任何内容；`operation_interrupted`（D3） | ShellInput |
 | 运行期间 Rpc 重载 | — | 调用回复 `operation_interrupted`；运行继续，像断开后一样被记录或丢弃（A10） | ShellInput |
@@ -335,6 +362,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 | 非零退出或被信号结束 | `status: "completed"`，带 `exitCode` 或 `signal`；记录 |
 | 启动后读取或等待出错，或终止失败 | `status: "failed"`，带 `reason`；记录已读到的输出（A5） |
 | 写入被拒绝 | 返回输出；`recorded: {error}` |
+| 命令中的后台 `&` | 不拒绝，不同于 `exec`：`exec` 在 POSIX shell 中以 `exec_invalid_request` 拒绝它（§7）；shell 退出时运行即完成（A.2） |
 | Session 部分结束、重启 | 运行被终止；不写任何内容；从不重新运行 |
 
 ## 附录 D. 验收
@@ -360,7 +388,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 | A4 | 每个 Session 一个运行中的命令 | 维护者决定 | 并发运行，输入按完成顺序 |
 | A5 | 被停止或失败的 `!` 运行记录部分输出 | 判断 | 只记录完成的运行 |
 | A6 | `exec` 的输出规则与上限（2000 行，50 KiB） | 现有 `exec` 常量 | 单独的规则 |
-| A7 | 输出经逐次调用的进度流式发送，每 100 ms 至多一项 | [session-boundary A.2](../contracts/session-boundary.md#a2-调用通道)；C8（#125）；频率是判断 | 只在退出时随回复输出 |
+| A7 | 输出经逐次调用的进度流式发送，每 100 ms 至多一项 | [session-boundary A.2](../contracts/session-boundary.md#a2-调用通道)；C1（#47、#125）；频率是判断 | 只在退出时随回复输出 |
 | A8 | 运行是 Session 工作：Session 开始关闭或 ShellInput 代卸载时结束 | ADR 002 D1、D3；`SessionLifecycle::closing()`（[生命周期 §3](../../../architecture/rust-agent/lifecycle.md#3-初始化与失败回滚)） | 运行需要一个进程级拥有者 |
 | A9 | 没有提交标识：客户端从不重试 `shell.run`，`duplicate_run` 覆盖一代，重启后由分支历史判断 X 是否已写入 | `session.input_lookup` 只接受 UUID；[#32](https://github.com/arcships/dim/issues/32) 计划把 `submission_id` 移出 `input/message` | 需要查找能接受的 `submissionId` |
 | A10 | 客户端断开或 Rpc 重载不会停止运行 | [生命周期 §5](../../../architecture/rust-agent/lifecycle.md#5-stop-与-close)（连接断开保留 Session 工作） | 断开会停止运行 |
@@ -384,7 +412,7 @@ ShellInput 用 Rust 实现，位于自己的 crate。
 | --- | --- |
 | 插件 | `TypedPlugin` 与 `Capability`；`Deps = (Arc<HostPlatform>, InSession<SessionConfig>, InSession<TreeCommands>, InSession<SessionLifecycle>, InSession<Diagnostics>)`，key 按工厂的 `SessionScope` 限定 |
 | `sessionMethods` key `shell` | C1 中与 `ManagementMethods::provide` 对应的 Session 版本，在 `apply` 中调用，每个方法一个 `MethodDecl {name, mutating, interruption: Report}`；命名空间用 `AgentBuilder::session_methods("shell")` 登记。处理函数接收方法名、参数和调用的取消 token。共享类型来自 C1 放置它们的位置（#120） |
-| 进度 | C8 的逐次调用进度接收端；Rust 名称在 C8 中确定 |
+| 进度 | C1 的逐次调用进度接收端；Rust 名称在 C1 中确定 |
 | 进程 | S7 构造器返回 `ProcessSpec`；`HostPlatform::spawn` 返回带 `stdout`、`stderr`、`wait` 和 `terminate` 的 `ProcessTree` |
 | 运行任务 | 一个 `TaskTracker`；每个任务观察 `ctx.cancelled()` 和 `SessionLifecycle::closing()`；`ctx.effect` 登记等待该跟踪器的卸载清理函数 |
 | 记录的输入（A.3） | `TreeCommands::get(branch_id)?.input(..)` |

@@ -1,6 +1,6 @@
 # ShellInput
 
-Status: Ready (pending maintainer confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Implementation starts when C1 ([#47](https://github.com/arcships/dim/issues/47)), per-call progress (C8, proposed in [#125](https://github.com/arcships/dim/pull/125)) and S7 ([#52](https://github.com/arcships/dim/issues/52)) have landed ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
+Status: Ready (pending maintainer confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Implementation starts when C1 ([#47](https://github.com/arcships/dim/issues/47), including per-call progress, [#125](https://github.com/arcships/dim/pull/125)) and S7 ([#52](https://github.com/arcships/dim/issues/52)) have landed ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
 Executes `!command` and `!!command` typed by the user in the Session's working directory. The result of `!command` (the command and its bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` as ordinary Session methods through a `sessionMethods` service (Session scope, key `shell`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session. A command ends on its own, on `shell.stop`, or when the Session part ends (Session close, ShellInput or Session reload, unload, App Server shutdown).
 
@@ -37,7 +37,7 @@ flowchart LR
 Contracts depended on:
 
 - `sessionMethods` dispatch, errors and call ownership (C1, [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). ShellInput names neither the crate of the shared method types nor the order in which Rpc reports dispatch errors, so the open contract change [#120](https://github.com/arcships/dim/pull/120) does not affect it.
-- Per-call progress ([session-boundary A.2](../contracts/session-boundary.md#a2-call-channel)): defined, not implemented; scheduled by the proposed C8 ([A.5](#a5-changes-to-other-plugins)).
+- Per-call progress ([session-boundary A.2](../contracts/session-boundary.md#a2-call-channel)): defined, not implemented; C1 includes it ([A.5](#a5-changes-to-other-plugins)).
 - `Branch::input` with boundary validation, and InputQueue's Append mode: an Append input is applied at once, consumed with the next model request and never starts a turn.
 - HostPlatform: `spawn(ProcessSpec)` returning a process tree with stdout, stderr, wait and terminate (implemented); the command builder and `exec`'s output rules (S7, [A.5](#a5-changes-to-other-plugins)).
 - `SessionLifecycle::closing()`, the plugin generation's cancellation and its `ctx.effect` disposer ([lifecycle](../../architecture/rust-agent/lifecycle.md)).
@@ -83,7 +83,7 @@ CLI             Rpc                    ShellInput (Session)          HostPlatfor
  |               |                            |-- build command (S7) ------>|               |
  |               |                            |-- spawn in Session cwd ---->|               |
  |               |                            |<-- stdout + stderr ---------|               |
- |<- progress ---|<-- progress {text} (C8) ---|                             |               |
+ |<- progress ---|<-- progress {text} (C1) ---|                             |               |
  |               |                            |<-- exit --------------------|               |
  |               |                            |-- record mode only: input (Append) -------->|
  |               |                            |<-- committed sequence ----------------------|
@@ -179,7 +179,7 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 
 ## 7. Security
 
-`!` and `!!` execute arbitrary commands as the service user without Approval: Approval and Permission govern only actions an agent decides, and these commands are the user's ([ADR 003](../../adr/003-approval-scope.md) D1). `shell.*` are ordinary Session methods: any connection served Session methods may call them on any Session it can address. Today that is a local protected connection; with RemoteGateway (P3) it includes paired devices (decision E3, [overview §6.2](../overview.md#62-constraints) constraint 10), so pairing a device grants command execution on the host. Session methods have no level; only management methods are withheld from paired devices ([session-boundary](../contracts/session-boundary.md)). HostPlatform's process isolation applies once it exists (Q4); a Permission preset never relaxes it. For `!`, the command text and output are written to the Timeline and replayed to the model; users must avoid printing secrets. The environment is the service's, as for `exec`, never the client's. Diagnostics carry no command text or output (A11).
+`!` and `!!` execute arbitrary commands as the service user without Approval: Approval and Permission govern only actions an agent decides, and these commands are the user's ([ADR 003](../../adr/003-approval-scope.md) D1). Nor does `!` refuse a background `&`, which `exec` refuses in POSIX shells: that refusal is a policy of the agent's tool, steering an agent's background work to BackgroundExec, and a `!` command is typed by the user (D1). Processes it leaves in the background keep running as the service user after the run, the Session and the App Server end, and nothing in Dim tracks them (A.2). `shell.*` are ordinary Session methods: any connection served Session methods may call them on any Session it can address. Today that is a local protected connection; with RemoteGateway (P3) it includes paired devices (decision E3, [overview §6.2](../overview.md#62-constraints) constraint 10), so pairing a device grants command execution on the host. Session methods have no level; only management methods are withheld from paired devices ([session-boundary](../contracts/session-boundary.md)). HostPlatform's process isolation applies once it exists (Q4); a Permission preset never relaxes it. For `!`, the command text and output are written to the Timeline and replayed to the model; users must avoid printing secrets. The environment is the service's, as for `exec`, never the client's. Diagnostics carry no command text or output (A11).
 
 ## 8. Rule check
 
@@ -194,7 +194,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.5 Read the whole batch | Not applicable: ShellInput reads no Timeline event, and its one event (`input/message`) needs no other fact in its batch. |
 | §4.6 Context only from handed-off events | The output reaches the model only after InputQueue applies and Loop consumes the input; `!!` output and progress never do. |
 | §4.7 Public events and services only | ShellInput uses `Branch::input` through `S:TreeCommands`, `SessionConfig`, `SessionLifecycle`, `Diagnostics`, HostPlatform and the `sessionMethods` contract. |
-| §4.8 Requirements to mechanism owners | Infrastructure is unchanged and nothing is raised to the runtime or rutis (§9). The changes needed from Rpc (per-call progress, C8) and HostPlatform (command builder, S7) are listed in A.5; the Agents activity handle is dropped. |
+| §4.8 Requirements to mechanism owners | Infrastructure is unchanged and nothing is raised to the runtime or rutis (§9). The changes needed from Rpc (per-call progress, in C1) and HostPlatform (command builder, S7) are listed in A.5; the Agents activity handle is dropped. |
 | §4.9 Only facts later decisions use enter the Timeline | Only the recorded `!` result enters, as an input the model reads. Progress is reply data of one call, not Session state, so it uses neither the Timeline nor a Session broadcast notice; run records go to diagnostics. |
 | §1 Capability and App Server boundary | ShellInput is a Session Capability in its own crate; Rpc only dispatches `sessionMethods`. |
 | ADR 002 D1 Scope | A run is Session work in the Session's working directory, so the plugin is Session scoped. |
@@ -237,9 +237,34 @@ Service `sessionMethods`, Session scope, key `shell`. `describe()` returns one `
 | Process | A fresh process per run (A3); stdin is null, so interactive programs see EOF |
 | Environment | The service's, with `exec`'s forced variables; never the client's |
 | Timeout | None; the run ends on its own, on `shell.stop`, or with the Session part |
-| Output | stdout and stderr merged in arrival order. After the root process exits, ready output is read for `exec`'s grace period and reading stops, so descendants that keep the pipes open do not hold the run |
-| Descendants | As for `exec`: when the root exits on its own, processes it left in the background keep running; terminating (stop, end of the Session part) ends the whole tree |
+| Output | stdout and stderr merged in arrival order. After the root process exits, ready output is read for `exec`'s grace period, then reading stops and the pipes are closed, so descendants that keep the pipes open do not hold the run |
+| Descendants | As for `exec`, except that `&` is not refused (§7): when the root exits on its own, the run ends and the processes it left in the background keep running outside ShellInput; while the root runs, terminating (stop, end of the Session part) ends the whole tree. See below |
 | Bounds | Reply and model-visible output follow `exec`'s rules: invalid bytes decoded as `<0xNN>`, control characters removed, the last 2000 lines within 50 KiB; `truncated` when the bound cut anything (A6) |
+
+**Background processes (`!cmd &`).** What happens to a process the command leaves behind:
+
+```text
+!cmd &        the shell starts cmd in the background and exits at once
+
+shell   o--x  run completes: output read up to the exit and during the grace is
+              replied and recorded; the tree is released
+cmd     o---------------------------------------------------------> keeps running
+           ^  pipes closed: a later write to stdout or stderr fails
+              (POSIX: the default SIGPIPE ends cmd)
+              not in shell.list; shell.stop, Session close or reload,
+              unload and App Server shutdown do not reach cmd
+
+!cmd & other  the shell is still running
+
+shell   o-------------x  shell.stop or the end of the Session part terminates the tree
+cmd     o-------------x  same process group (POSIX) or job (Windows): ended
+setsid  o--------------------------------------> own session (POSIX): not reached
+```
+
+- The run ends when the shell exits. The reply and the recorded input hold what was read up to the exit and during the grace; later output is not captured.
+- HostPlatform keeps the descendants of a root that exited on its own and was reaped, as for `exec` (`ProcessTree`). ShellInput holds nothing afterwards: the processes do not make the Session busy, `shell.list` does not show them, `shell.stop` cannot reach them, and Session close, ShellInput or Session reload, unload and App Server shutdown do not end them. The user stops them with another command, such as `!kill <pid>`.
+- Their stdout and stderr are the run's pipes, which are closed once reading stops. A later write fails, and on POSIX the default `SIGPIPE` ends the process. A long-lived command needs its output redirected: `!npm run dev > dev.log 2>&1 &`.
+- While the shell still runs, `shell.stop` and the end of the Session part terminate the whole tree, background children included: on POSIX the process group gets `SIGTERM`, then `SIGKILL`; on Windows the job is terminated. `nohup` only ignores `SIGHUP` and stays in the group. On POSIX, a process that starts its own session or process group (`setsid`, a daemon that detaches) leaves the group and is not reached; on Windows the job allows no breakaway.
 
 ### A.3 Recorded input
 
@@ -265,7 +290,7 @@ One input written with `Branch::input` on `branchId`:
 
 ### A.5 Changes to other plugins
 
-**Rpc: per-call progress for Session methods** ([overview B.2](../overview.md#b2-app-server-process-plugins) Rpc row, `callChannel`). `shell.run` streams output while the command runs (A7). Session-boundary A.2 defines how: a method declares `progress`, its provider sends progress data on the call it serves, and Rpc sends it to the calling connection as `management.progress {id, method, data}`, before the reply and dropped after a disconnect. It is not implemented, C1 does not include it and no roadmap item schedules it, so [#125](https://github.com/arcships/dim/pull/125) proposes item C8 on the Rpc line after C1, with ShellInput as its first consumer. Only `progress` is needed, not `notify`, `closed` or `takeFinalReply`. Rejected: a Session broadcast notice (C6 carries committed changes of process-level state to every client of the Session, and command output is reply data of one call); a polling method such as `shell.output` (a second path beside the contract, plus latency); output only at exit.
+**Rpc: per-call progress for Session methods** ([overview B.2](../overview.md#b2-app-server-process-plugins) Rpc row, `callChannel`). `shell.run` streams output while the command runs (A7). Session-boundary A.2 defines how: a method declares `progress`, its provider sends progress data on the call it serves, and Rpc sends it to the calling connection as `management.progress {id, method, data}`, before the reply and dropped after a disconnect. It is not implemented. As decided in [#125](https://github.com/arcships/dim/pull/125), C1 ([#47](https://github.com/arcships/dim/issues/47)) includes it, so the Session method handler carries a progress sink from the start, with ShellInput as its first consumer. Only `progress` is needed, not `notify`, `closed` or `takeFinalReply`. Rejected: a Session broadcast notice (C6 carries committed changes of process-level state to every client of the Session, and command output is reply data of one call); a polling method such as `shell.output` (a second path beside the contract, plus latency); output only at exit.
 
 **HostPlatform: command builder and output rules** (S7, [#52](https://github.com/arcships/dim/issues/52); [overview B.1](../overview.md#b1-session-and-branch-capabilities) HostPlatform row). ShellInput builds no argv and copies none of `exec`'s rules. It needs from S7:
 
@@ -296,6 +321,8 @@ H1 to H3 block ShellInput. The other half of S7, reading the exec shell configur
 | `input/withdraw` of X while held (S1) | X < withdraw < `input/deleted` | Never applied or consumed; not re-written | InputQueue |
 | `input/withdraw` of X after apply (S1) | `input/applied` < withdraw | No effect (`notHeld`); X consumed normally | InputQueue |
 | Branch-scoped interrupt or branch close during the run | close < X | Run continues; the write fails; `recorded.error` | Runtime facade; ShellInput |
+| `!cmd &`: the shell exits, a background process remains | — | The run completes with the output read so far; the process keeps running outside `shell.list` and `shell.stop`; a later write to its closed pipes fails (A.2) | ShellInput, HostPlatform |
+| Session close, reload or App Server shutdown after a `!cmd &` run | — | The background process is not reached and keeps running (A.2) | HostPlatform |
 | Session close during the run | — | Tree terminated at `closing()`; nothing written; `operation_interrupted` (A8) | ShellInput |
 | ShellInput or Session reload, or a host's idle unload, during the run | — | Tree terminated; nothing written; `operation_interrupted` (D3) | ShellInput |
 | Rpc reload during the run | — | The call replies `operation_interrupted`; the run continues and is recorded or discarded as after a disconnect (A10) | ShellInput |
@@ -335,6 +362,7 @@ Dispatch errors (`unknown_method` when the Session does not list `shell`, `-3260
 | Non-zero exit or signal | `status: "completed"` with `exitCode` or `signal`; recorded |
 | Read or wait error after start, or a failed terminate | `status: "failed"` with `reason`; recorded with the output read so far (A5) |
 | Write rejected | Output returned; `recorded: {error}` |
+| Background `&` in the command | Not refused, unlike `exec`, which refuses it in POSIX shells with `exec_invalid_request` (§7); the run completes when the shell exits (A.2) |
 | End of the Session part, restart | Run terminated; nothing written; never run again |
 
 ## Appendix D. Acceptance
@@ -360,7 +388,7 @@ Dispatch errors (`unknown_method` when the Session does not list `shell`, `-3260
 | A4 | One running command per Session | Maintainer decision | Concurrent runs, inputs in completion order |
 | A5 | Stopped or failed `!` runs record their partial output | Judgment | Only completed runs recorded |
 | A6 | `exec`'s output rules and bounds (2000 lines, 50 KiB) | Existing `exec` constants | Separate rules |
-| A7 | Output streams through per-call progress, at most one item per 100 ms | [Session-boundary A.2](../contracts/session-boundary.md#a2-call-channel); C8 (#125); the rate is judgment | Output only in the reply at exit |
+| A7 | Output streams through per-call progress, at most one item per 100 ms | [Session-boundary A.2](../contracts/session-boundary.md#a2-call-channel); C1 (#47, #125); the rate is judgment | Output only in the reply at exit |
 | A8 | A run is Session work: it ends when the Session starts closing or the ShellInput generation unloads | ADR 002 D1, D3; `SessionLifecycle::closing()` ([lifecycle §3](../../architecture/rust-agent/lifecycle.md#3-初始化与失败回滚)) | Runs need a process owner |
 | A9 | No submission identity: clients never retry `shell.run`, `duplicate_run` covers one generation, and after a restart the branch history shows whether X was written | `session.input_lookup` accepts only UUIDs; [#32](https://github.com/arcships/dim/issues/32) plans to move `submission_id` out of `input/message` | A `submissionId` that the lookup accepts |
 | A10 | A client disconnect or an Rpc reload does not stop a run | [Lifecycle §5](../../architecture/rust-agent/lifecycle.md#5-stop-与-close) (a closed connection keeps Session work) | Disconnects stop runs |
@@ -384,7 +412,7 @@ ShellInput is implemented in Rust, in its own crate.
 | --- | --- |
 | Plugin | `TypedPlugin` and `Capability`; `Deps = (Arc<HostPlatform>, InSession<SessionConfig>, InSession<TreeCommands>, InSession<SessionLifecycle>, InSession<Diagnostics>)`, keys scoped to the factory's `SessionScope` |
 | `sessionMethods` key `shell` | C1's Session counterpart of `ManagementMethods::provide`, called in `apply`, with one `MethodDecl {name, mutating, interruption: Report}` per method; the namespace is recorded with `AgentBuilder::session_methods("shell")`. The handler receives the method name, the params and the call's cancellation token. The shared types come from wherever C1 places them (#120) |
-| Progress | C8's per-call progress sink; its Rust name is chosen in C8 |
+| Progress | C1's per-call progress sink; its Rust name is chosen in C1 |
 | Process | The S7 builder returns a `ProcessSpec`; `HostPlatform::spawn` returns a `ProcessTree` with `stdout`, `stderr`, `wait` and `terminate` |
 | Run tasks | A `TaskTracker`; each task watches `ctx.cancelled()` and `SessionLifecycle::closing()`; `ctx.effect` registers the disposer that waits for the tracker |
 | Recorded input (A.3) | `TreeCommands::get(branch_id)?.input(..)` |
