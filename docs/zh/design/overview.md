@@ -326,7 +326,7 @@ sequenceDiagram
 
 1. **最少事件**：只为影响后续行为、且无法从工具调用与结果、`input/*`、`turn/*` 或 `stop/interrupt` 推导出的结果新增事件（时间总线规则 3）。进程输出进入诊断。
 2. **所有权**：声明事件类型即定义其数据合同。生产方使用所有者的公共服务。谁启动工作，谁写其开始与终态事实。决策只使用已消费的事实，从不使用其他插件的内存。没有 Timeline 的进程级状态（SessionStore 标题、Provider 连接条目、Agents profile、Settings 业务来源、插件存储）从不进入 Timeline：写入通过所有者的类型化公共写操作，需要在 UI 上显示时由所有者发出 Session 广播通知，供客户端使用。
-3. **外部入口**：RPC 从不写事件。它调用所属服务，由该服务写入（先例 `approval.respond`）。Rpc 只做外部边界校验（参数格式、`sessionId` 授权、自有来源检查）；图像嗅探、大小限制、模型能力等功能检查归各自所有者（上传方法的所有者、客户端，或构建请求时的 ModelProvider），不放在 Rpc、before 回调或 `session.submit` 中。竞争由 Timeline 序号裁决。
+3. **外部入口**：RPC 从不写事件。它调用所属服务，由该服务写入（先例 `approval.respond`）。Rpc 只做外部边界校验（参数格式、`sessionId` 授权）；图像嗅探、大小限制、模型能力等功能检查归各自所有者（上传方法的所有者、客户端，或构建请求时的 ModelProvider），不放在 Rpc、before 回调或 `session.submit` 中。竞争由 Timeline 序号裁决。
 4. **重载与副作用**：已开始但未终止的工作结算为“未能在恢复后存活”，且从不重新执行。允许通过轮询已保存的 handle 恢复对外部任务的观察。
 5. **作用域**：每个部分只依赖自身或外层作用域（D3）。Session 与分支部分读取所属 Session 的 `SessionConfig`。进程部分只通过 Agents 的 `sessions` 服务读取 Session。
 6. **中断**：插件先取消在途工作并释放资源，再写终态事实（[中断](../../architecture/rust-agent/interrupt.md)）。
@@ -489,7 +489,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | --- | --- | --- | --- |
 | **已撤回（Hooks 待设计，#21）。** Timeline（运行时） | 补充 | `Timeline::before` 增加异步回调。当某分支写入匹配已注册的异步回调时，该写入保持其在序号顺序中的位置，只在回调完成后才提交；该分支上后续的写入排在它之后；等待期间不持有提交锁。回调收到草稿（其事件 id 在写入占位时即已固定），返回变换后的草稿和/或追加到同一原子批次的事件（只能是发给事件所有者的指令或注册方自己声明的事件，不能是别的模块的结果事件）；随后同步 `before` 处理器像现在一样在提交锁内应用，追加的事件不再被匹配。before 回调从不使写入失败或阻止写入：回调开始时返回一份兜底草稿，运行期间持续更新；回调无法完成时（超时、回调故障、注册方卸载、分支关闭，或排队了 `cancel_on` 中某种事件的写入），运行时提交最新的兜底草稿。注册选项全部由注册方决定：`timeout`；`cancel_on`（一组事件种类，其排队写入会取消待定回调）。写入方的追加在被接受时返回，提交结果经 Dispatcher 报告，因此 Loop 等同步写入方不会阻塞。回调从不等待其自身分支上的写入。通用：不含业务语义。五项说明见 [Hooks §9](plugins/Hooks.md#9-向机制所有者提出的需求) | Hooks |
 | Approval | 补充 | 在模型步骤打开期间，接受宿主来源的准入（由 ModelProvider 针对 `approval_ask` 流条目发起），写入普通的 `approval/request`、`approval/respond`、`approval/cancelled` 事实；通用，不了解 model kind | ExternalAgent（首个使用方） |
-| InputQueue | 变更 | 按序消费 `input/withdraw {input_id, reason?}`（`reason`：提议的通用可选文本，最多 2 KiB，任何生产方都可写入，由客户端显示，例如 Hooks 拒绝提示词；InputQueue 做决定时忽略它；不带它的事件不变；设计规则 §4 第 9 条允许必需事件带描述性字段；设计见 [Hooks](plugins/Hooks.md)），只为它仍持有且未应用的输入写入 `input/deleted {input_id}`（否则不写入，`notHeld`）；自有来源撤回服务；经 `sessionMethods` 提供 `session.input.withdraw`（命名空间 `session.input`，提议中）；“撤回并作为 Steer 重新提交”作为一个批次；队列状态从事件重建（[Session 访问 A.4](contracts/session-access.md#a4-撤回)） | `Ctrl+S`、`/queue`；Hooks、AcpGateway、Scheduler |
+| InputQueue | 变更 | 按序消费 `input/withdraw {input_id, reason?}`（`reason`：提议的通用可选文本，最多 2 KiB，任何生产方都可写入，由客户端显示，例如 Hooks 拒绝提示词；InputQueue 做决定时忽略它；不带它的事件不变；设计规则 §4 第 9 条允许必需事件带描述性字段；设计见 [Hooks](plugins/Hooks.md)），只为它仍持有且未应用的输入写入 `input/deleted {input_id}`（否则不写入，`notHeld`）；经 `sessionMethods` 提供 `session.input.withdraw`（命名空间 `session.input`，提议中）；“撤回并作为 Steer 重新提交”作为一个批次；队列状态从事件重建（[Session 访问 A.4](contracts/session-access.md#a4-撤回)） | `Ctrl+S`、`/queue`；Hooks、AcpGateway、Scheduler |
 | 运行时 Session 门面 | 补充 | 按命名空间查找 `sessionMethods`；固定前缀历史读取 | Rpc；进程调用方 |
 | ToolRegistry | 补充 | 除现有注册外，接受具名的 `toolContribution` 服务（[方法 A.5](contracts/session-boundary.md#a5-工具贡献)） | 非 Rust 的 Session 工具 |
 | Agent 装配 | 补充 | 收集每个已安装插件在 `provides` 中声明的具名服务；可选的 Session 与分支部分按已启用插件及 `interactive` 安装 | 所有 Session 插件 |
@@ -506,7 +506,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 
 | 插件 | 类型 | 内容 | 理由 |
 | --- | --- | --- | --- |
-| Rpc | 变更 | 方法表：内建方法，然后是收集到的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive, client}`。把 Session 广播通知记录原样转发给已订阅的客户端（SessionTitle）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权、自有来源检查）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
+| Rpc | 变更 | 方法表：内建方法，然后是收集到的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive, client}`。把 Session 广播通知记录原样转发给已订阅的客户端（SessionTitle）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
 | Agents | 补充 | `sessions` 服务；`SessionConfig` 字段；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建；Session 部分持有的活动句柄，持有期间 Agents 不因空闲卸载该 Session（提议）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)） | Scheduler、Workflow、fork、ExternalAgent；ShellInput |
 | Collaboration | 变更 | 按用途 `collaboration.member` 选择成员模型；成员审批转发给 leader | ExternalAgent |
@@ -561,7 +561,6 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | **已撤回（Hooks 待设计，#21）。** 异步 Timeline before 回调（保持在顺序中的位置、由回调持续更新并在回调无法完成时提交的兜底草稿、`timeout`、`cancel_on`），写入方的追加在被接受时返回，因此 Loop 等同步写入方不会阻塞 | 运行时 | 待开 | Hooks | [Hooks §9](plugins/Hooks.md#9-向机制所有者提出的需求) |
 | 运行时的类型化服务（Timeline、Dispatcher、InputQueue、Session 广播等）按名称暴露给非 Rust 部分 | 运行时、rutis | [#4](https://github.com/arcships/dim/issues/4) | SessionTitle、Goal、Web、Notifications、Scheduler、Workflow、ExternalAgent、PluginManager | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
 | Session 门面上的固定前缀历史读取 | 运行时 | 待开 | 进程调用方、依据 Timeline 事实决定的分支部分 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
-| 调用方来源由调用插件的身份确定 | 运行时门面、rutis | 待开 | `sessions` 调用方 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
 | Agent 装配从 `provides` 收集具名服务，并按插件启用状态与 `interactive` 安装可选部分 | 运行时 | 待开 | 所有 Session 插件 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
 | 按名称查找带 key 的 Session 服务（按命名空间查 `sessionMethods`）及收集具名 `toolContribution` | 运行时 | 待开 | Rpc、ToolRegistry | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
 | Session 级方法提供方卸载时等待其 `drain` 调用 | rutis 生命周期 | 待开 | Rpc | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
