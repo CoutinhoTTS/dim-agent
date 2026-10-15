@@ -946,10 +946,10 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
     tokio::fs::remove_dir_all(directory).await.unwrap();
 }
 
-/// `session.create {interactive}` is creation data of the stored Session
-/// record on v13: only `false` is written, an interactive record keeps the
-/// fields written before `interactive` existed, and restore reads a record
-/// without the field as interactive.
+/// `session.create {interactive}` takes only a boolean and is creation data
+/// of the stored Session record on v13: only `false` is written, an
+/// interactive record keeps the fields written before `interactive` existed,
+/// and a record written before the field existed restores as interactive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_is_stored_with_the_session_and_absence_means_interactive() {
     let directory = std::env::temp_dir().join(format!("dim-interactive-{}", uuid::Uuid::new_v4()));
@@ -960,10 +960,12 @@ async fn interactive_is_stored_with_the_session_and_absence_means_interactive() 
     };
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let mut parameters = create(json!([]));
-    parameters["interactive"] = Value::Null;
-    let rejected = client.rpc("session.create", parameters).await;
-    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    for invalid in [Value::Null, json!("false"), json!(0)] {
+        let mut parameters = create(json!([]));
+        parameters["interactive"] = invalid;
+        let rejected = client.rpc("session.create", parameters).await;
+        assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    }
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let interactive = created["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -1013,6 +1015,23 @@ async fn interactive_is_stored_with_the_session_and_absence_means_interactive() 
         ]
     );
     assert_eq!(stored(&automated)["interactive"], false);
+    // The record a daemon before C2 wrote for this Session: its six fields,
+    // stored directly so that restore reads bytes this code never produced.
+    let pre_c2 = json!({
+        "permissionPolicy": {"preset": "read-only", "allowedTools": ["echo", "wait"], "disallowedTools": []},
+        "cwd": std::env::temp_dir(),
+        "model": {"providerId": "mock", "modelId": "deterministic"},
+        "systemPrompt": "",
+        "tools": [],
+        "collaborationRole": "leader"
+    });
+    let updated = connection
+        .execute(
+            "UPDATE agent_sessions SET config = ?1 WHERE session_id = ?2",
+            rusqlite::params![pre_c2.to_string(), interactive],
+        )
+        .unwrap();
+    assert_eq!(updated, 1);
     drop(connection);
 
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
