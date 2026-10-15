@@ -131,7 +131,7 @@ Compaction keeps neither images nor file contents verbatim, only the summary (a 
 
 ## 7. Security
 
-The CLI decodes images only to check headers and limits; ModelProvider decodes them only to check what the request's adapter accepts; Rpc does not inspect them. Text attachments are written by SessionStore under its Session-files directory, never at client-chosen paths (`name` is a file name). Files are readable through `read` under the Session's permission policy; attachments confer no extra authority. Paired remote devices may call `attachment.put` and `session.submit` like any Session method; their images skip the CLI checks, and ModelProvider's handling is the server-side guard. Contents are user data replayed to the model; the CLI must not attach secrets implicitly. A fork reads only files its inherited history references.
+The CLI decodes images only to check headers and limits; ModelProvider decodes them only to check what the request's adapter accepts; Rpc does not inspect them. Text attachments are written by SessionStore under its Session-files directory, never at client-chosen paths (`name` is a file name). Files are readable through `read` under the Session's permission policy; attachments confer no extra authority. Paired remote devices may call `attachment.put` and `session.submit` like any Session method; their images skip the CLI checks, and ModelProvider's handling is the server-side guard. Contents are user data replayed to the model; the CLI must not attach secrets implicitly. Reading a file never prompts and records no grant; [session files §11](../appserver/session-files.md#11-security) gives how reads are admitted and what path-scoped file access must keep.
 
 ## 8. Rule check
 

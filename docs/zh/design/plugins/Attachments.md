@@ -131,7 +131,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请求的适配器能否接收而解码；Rpc 不检查图片。文本附件由 SessionStore 写在它的 Session 文件目录下，从不写到客户端选择的路径（`name` 只是文件名）。文件可在 Session 的权限策略下通过 `read` 读取；附件不授予额外权限。已配对的远程设备可以像调用任何 Session 方法一样调用 `attachment.put` 和 `session.submit`；它们的图片不经过 CLI 检查，服务端由 ModelProvider 的处理兜底。内容是重放给模型的用户数据；CLI 不得隐式附加机密。分叉只读取其继承的历史所引用的文件。
+CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请求的适配器能否接收而解码；Rpc 不检查图片。文本附件由 SessionStore 写在它的 Session 文件目录下，从不写到客户端选择的路径（`name` 只是文件名）。文件可在 Session 的权限策略下通过 `read` 读取；附件不授予额外权限。已配对的远程设备可以像调用任何 Session 方法一样调用 `attachment.put` 和 `session.submit`；它们的图片不经过 CLI 检查，服务端由 ModelProvider 的处理兜底。内容是重放给模型的用户数据；CLI 不得隐式附加机密。读取文件从不弹出审批，也不记录任何授权；读取如何准入、以及按路径限定的文件访问必须保持什么，见 [Session 文件 §11](../appserver/session-files.md#11-安全)。
 
 ## 8. 规则检查
 

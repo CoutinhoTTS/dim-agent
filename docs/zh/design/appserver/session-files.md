@@ -15,6 +15,7 @@ SessionStore 为 Session 保存不可变文件。调用方为某个 Session 交�
 - **FileStorage。** S5a 只新增一个操作 `create_directory`。共享不需要建链接的操作。
 - **格式。** 原生存储升级到 15 版，新增两张表；v13 存储在启动时原地升级。
 - **接口。** Attachments 通过进程服务 `sessionFiles` 使用它。
+- **读取。** 模型像读其他文件一样用 `read` 读取这些文件：不弹审批，不留授权，也不新增任何权限（§11）。
 
 不新增 Timeline 事件，不新增插件，不改运行时、rutis 或 Session 门面。
 
@@ -274,6 +275,10 @@ CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)
 
 升级是单向的。v13 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。这是可以接受的：改动是增量的，而另一种做法，即拒绝所有 v13 库，会丢失用户的 Session。之后的格式各自追加从前一版本出发的一步。测试用 v13 结构的冻结副本构建一次性 v13 库，从不打开用户的库（AGENTS.md）。
 
+**升级日志。** 打开存储时告诉调用方它做了升级，守护进程随后向 stderr 写一行：`Upgraded native store <path> from format v13 to v15; earlier dimcode versions cannot open it.`。这一行在升级提交之后写，所以不会声称一次已经回滚的升级；也只有执行升级的那次启动写它。它直接写 stderr，不作为 `tracing` 事件，因为守护进程默认的日志过滤只保留错误（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。CLI 启动的守护进程的 stderr 就是数据库目录下私有的 `daemon.log`，回退旧版本的用户能在旧守护进程的拒绝信息旁找到原因。
+
+**S5c 不需要为 Session 文件再改格式。** 它的分叉步骤只插入 `session_file_owners` 行（§4），删除步骤只删除这些行（§5.3），清扫读取 `session_files`；这些步骤读写的内容 v15 都已具备。v16 只可能来自 S5c 对它自己的 Session 记录的改动，不会来自 Session 文件。
+
 ## 9. 接口
 
 ### 9.1 语言中立形式（ADR 002 D5）
@@ -327,9 +332,68 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 ## 11. 安全
 
 - 文件只写在 `<db>.session-files/<fileId>/` 下，从不写到调用方选择的位置；`name` 是经过校验的单个组成部分。Unix 上目录为 `0700`、文件为 `0400`；Windows 继承父目录的 DACL。
-- 路径不授予任何权限。`read` 本来就在 Session 的权限策略下读取绝对路径，这些行也不授予任何东西。
 - 目录只属于一个数据库，所以一个存储的清扫不会移除另一个存储的文件，即使两个数据库位于同一目录。
 - 内容是用户数据，不出现在任何诊断、行或事件中；诊断只带文件 id、节点和错误。
+
+### 11.1 读取 Session 文件
+
+**决定：模型读取 Session 文件与读取任何文件相同。读取从不询问，不记录任何授权，S5a 也不新增任何权限、规则或例外。** Permission、Approval 和 WorkspaceTools 保持不变。
+
+```
+ model: read {path: "<database directory>/<db>.session-files/<fileId>/paste.txt"}
+   |
+   v
+ ToolExecutor -> Approval.admit -> Permission.decide(tool "read", risk "read_filesystem")
+                                   (no path input)
+   "read" in disallowedTools --------------------------> Deny, for every path
+   "read" in allowedTools -----------------------------> Allow
+   preset read-only, workspace-write or full-access ---> Allow, no approval/request
+   |
+   v
+ WorkspaceTools read: resolve the path (~, join with cwd, realpath), refuse binary files
+```
+
+今天的实际行为，依据 [permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs) 的 `decide` 和 [approval.rs](../../../../crates/dim-agent-capabilities/src/approval.rs) 的 `admit`：
+
+- **不询问。** Permission 按工具名和风险类别决定，看不到路径，所以工作目录以外的路径与目录内的路径决定方式相同。`read` 声明的风险是 `read_filesystem`，所有预设都允许；产品配置的默认预设是 `workspace-write`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。因此模型读取粘贴文件时不会弹出审批，符合 Attachments 的需要。把 `read` 列入 `disallowedTools` 的策略会拒绝它，与拒绝其他任何 `read` 一样。
+- **没有可以扩大的授权。** 审批的回答是对单次调用的 `allow` 或 `deny`，Dim 不记录"以后都允许"（[AcpGateway](../plugins/AcpGateway.md) 从不提供 `allow_always`）。策略变更（`session.permission.update`，写成 `permission/changed`）只包含预设和工具名，从不包含路径。记住的决定（`/approvals`）在计划中，尚未设计；从不询问的 `read` 不会产生它们，§11.2 保证这一点不变。读取 Session 文件不经审批请求就被允许，所以不会留下任何可能覆盖 `dimcode.sqlite`、数据库目录或 `~/.dimcode` 的东西。
+- **FileStorage 根不授予任何东西。** 把数据库目录登记为 FileStorage 根（§3.1），只是让 SessionStore 能通过 FileStorage 在那里写入。`read` 从不查询 FileStorage 根，文件根授权也不授予除此之外的任何东西（[ADR 003](../../adr/003-approval-scope.md) D5）。
+- **不是新情况。** WorkspaceTools 已经把超长的 `read` 结果和 `exec` 输出写到 `<数据库目录>/command-output/<sessionId>/`，并把路径交给模型（[read.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs) 的 `offload`）。在产品配置下，这两个目录都紧挨着 `dimcode.sqlite`。
+
+```
+ ~/.dimcode/                            product home: auth.json and others
+   rust/                                database directory, a FileStorage root
+     dimcode.sqlite                     native store; read refuses .sqlite as binary
+     command-output/<sessionId>/        WorkspaceTools output, already read by path
+     dimcode.sqlite.session-files/
+       <fileId S owns>/paste.txt        path returned by a put for S
+       <fileId T owns>/notes.md         Session T's file
+```
+
+**Permission 不做什么。** Permission 按工具和风险准入，不是隔离（[Permission](../../../architecture/rust-agent/plugins/Permission.md)，ADR 001 的 "Trust and cross-language calls" 一节）。在任何预设下，`read`、`glob` 和 `grep` 都能读到守护进程用户可读的任何文本文件：上图中 T 的文件、其他 Session 的命令输出、`~/.dimcode/auth.json`。`read` 拒绝 `dimcode.sqlite`，只是因为它的二进制防护拒绝 `.sqlite` 扩展名。S5a 不扩大这个边界，也不为自己的目录开例外去收窄它：那样只护住一个 App Server 目录，产品目录的其余部分照旧。S5a 在构造上保证的是：
+
+- `put` 返回的每个路径都是 `<db>.session-files/<fileId>/<name>`，其中 `fileId` 是随机 UUID v4，`name` 是一个经过校验的组成部分。返回的路径不会指向数据库、它的伴随文件或数据库目录中的其他条目。
+- SessionStore 只把路径返回给一次 `put`，该文件随即归这次 `put` 所针对的 Session 所有；分叉拥有源拥有的每个文件，所以它继承的历史中来自 `put` 的路径仍归它所有（§4）。
+
+要把一个 Session 的读取限制在它拥有的文件上，需要按路径限定的文件访问，§11.2 把它留给其所有者。
+
+### 11.2 对按路径限定的文件访问的需求
+
+目前没有哪一项按路径限定进程内的文件读取：F2（[#73](https://github.com/arcships/dim/issues/73)）负责命令规则，F5（[#76](https://github.com/arcships/dim/issues/76)）在启动时隔离进程。无论哪一项首先按路径限定文件访问，无论针对工具还是进程，都必须保持下面两条性质。这是文件访问的通用需求，不是 Session 文件的例外：WorkspaceTools 的命令输出也是同样的形态，即 Session 自己的能力在工作区以外按路径交给模型的数据。
+
+1. **拥有的文件读取时不询问。** Session 读取它拥有的 Session 文件时不审批、不记录决定，所以 Attachments 从不弹出审批。这样的读取不派生任何授权。
+2. **由所有权而不是位置决定。** 在决定访问时，或在隔离进程启动时，Session S 可以读取 SessionStore 的行中 S 拥有的每个文件的 `<db>.session-files/<fileId>/`。这个集合从不覆盖整个 `<db>.session-files/`、数据库目录或产品目录；只有 S 拥有另一个 Session 的文件时才包含它（分叉拥有源的文件）。
+
+SessionStore 从 `session_file_owners` 回答"S 拥有哪些文件"，其主键 `(session_id, file_id)` 服务这个查询，所以 v15 不需要为此修改。这个查询随该项的设计加入；在那之前没有调用方。
+
+被否决的方案：
+
+| 方案 | 为什么不用 |
+| --- | --- |
+| 把 Session 文件目录登记为 `read` 接受的只读根 | `read` 不查询任何根，今天什么都不会改变；文件根授权也不得授予工具权限（ADR 003 D5，AGENTS.md 第 11 条）。而且一个根覆盖整个目录，即所有 Session 的文件 |
+| Attachments 把文本放进上下文，或用专门的工具按 `fileId` 读取 | 内联会在提交时把最多 10 MiB 放进上下文，而 Attachments 正是为避免这一点而存在。第二个读取工具重复 `read`（偏移、编码、卸载），路径仍然可以被 `read` 读取 |
+| 现在就给 Permission 加一条"Session 可以读取自己的文件"规则 | Permission 没有路径输入，这条规则什么也豁免不了；它会成为路径无关的 Permission 里的 Session 文件特例。它的通用形式就是 §11.2 |
+| `read` 拒绝数据库目录，Session 文件除外 | 在 WorkspaceTools 里为一个 App Server 目录开例外。它覆盖 `dimcode.sqlite`（已经作为二进制被拒绝），却覆盖不到 `auth.json` 和产品目录的其余部分 |
 
 ## 12. 时序与冲突
 
@@ -351,7 +415,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 | 文档 | 本 PR 中的修改 |
 | --- | --- |
-| [Attachments](../plugins/Attachments.md) | 布局改为 `<db>.session-files/<fileId>/<name>`，`attachmentId = fileId`；A1 细化为不属于任何单个 Session 的目录；分叉与删除顺序的行指向本文；离线相关的行不再依赖已撤回的 #5，因为 SessionStore 每次调用时查找 FileStorage（#38）。`attachment.put` 的客户端契约在本 PR 中不变；它的 `storage_failed` 码在 P2 的设计复核中加入（§15） |
+| [Attachments](../plugins/Attachments.md) | 布局改为 `<db>.session-files/<fileId>/<name>`，`attachmentId = fileId`；A1 细化为不属于任何单个 Session 的目录；分叉与删除顺序的行指向本文；离线相关的行不再依赖已撤回的 #5，因为 SessionStore 每次调用时查找 FileStorage（#38）。`attachment.put` 的客户端契约在本 PR 中不变；它的 `storage_failed` 码在 P2 的设计复核中加入（§15）。§7 不再说分叉只读取其历史引用的文件，改为指向 §11 说明读取如何准入 |
 | [总体设计 B.2](../overview.md#b2-app-server-进程插件) | FileStorage 行增加目录创建 |
 | [原生存储格式](../../../design/appserver/native-storage-format.md) | 计划中的 v15 决定 |
 
@@ -368,7 +432,7 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 | 原则 §4 第 5 条（批次） | 不适用：没有事件。 |
 | 原则 §4 第 6 条（上下文来自交接后的事件） | 模型只在已采用的用户输入里看到路径，只在 `read` 结果里看到文件内容。 |
 | 原则 §4 第 7 条（只用公开的事件和服务） | Attachments 使用 `sessionFiles`；SessionStore 使用 FileStorage 的公开操作，不读任何插件的内部状态。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 不改 Timeline、Dispatcher、事件格式、rutis、装配或 Session 门面，也不向 rutis 提需求。格式变化属于 SessionStore 自己的存储，记录为格式决定。`create_directory` 是 FileStorage 在自己模块内的补充，已在 S6 评审中同意。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 不改 Timeline、Dispatcher、事件格式、rutis、装配或 Session 门面，也不向 rutis 提需求。格式变化属于 SessionStore 自己的存储，记录为格式决定。`create_directory` 是 FileStorage 在自己模块内的补充，已在 S6 评审中同意。Permission、Approval 和 WorkspaceTools 不变（§11.1）；§11.2 是对按路径限定文件访问的那一项提出的通用需求，不是 Session 文件的例外。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 没有 Timeline 事件。所有权是 SessionStore 行中的进程级状态。 |
 | 原则 §1（Capability 与 App Server 边界） | Session 文件是 SessionStore 的数据（总体设计 B.2）；不新增插件。粘贴功能留在 Attachments 自己的 crate 中。 |
 | ADR 002 D1（作用域跟随状态） | 进程作用域：文件比写入它的 Session 活得更久，并在 Session 之间共享。 |
@@ -376,6 +440,7 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 | ADR 002 D3（依赖跟随作用域） | Attachments（可选，Session）依赖 SessionStore（核心，进程）；SessionStore 不依赖任何可选插件，并按资源节点逐次查找 FileStorage，所以 FileStorage 重载不会引起任何重载。 |
 | ADR 002 D4（结构性配置与业务配置） | 没有配置：位置和限制都是固定的。 |
 | ADR 002 D5（语言中立合同） | §9.1 是合同；附录 A 是一种绑定。 |
+| ADR 003（审批范围） | 读取 Session 文件是一次工具调用，像任何 `read` 一样由 Approval 和 Permission 准入（§11.1）。SessionStore 登记的 FileStorage 根不授予任何权限（D5）。 |
 
 ## 15. 向机制所有者提出的需求
 
@@ -387,6 +452,7 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 | App Server 装配（lib.rs 中的 `serve`） | 数据库目录还不是 FileStorage 根时注册它，并把索引交给 `SessionStorePlugin`（§3.1） | S5a 实现中的几行改动，像其他登记一样在装配线的工作之后追加 |
 | Attachments（P2 设计细化） | 把 `sessionFiles` 的 `storage` 映射为 `attachment.put` 的某个码。Attachments 目前没有；SessionTitle 把 SessionStore 的 `storage` 映射为 `storage_failed` | 已决定：`storage_failed`，记录在 [#66](https://github.com/arcships/dim/issues/66)；在 P2 的设计复核中落实 |
 | S5c | 在删除事务内、关闭 Session 之后、删除 `agent_sessions` 之前删除所有者行；在分叉事务内复制所有者行；删除后安排清扫 | S5c 的合同（§5.2、§5.3） |
+| 首先按路径限定文件访问的那一项（进程方面为 F5 [#76](https://github.com/arcships/dim/issues/76)；进程内工具方面尚无条目） | §11.2：Session 读取它拥有的文件时不询问；由所有权决定，从不是整个 Session 文件目录、数据库目录或产品目录 | S5a 不需要，因为 Permission 没有路径输入。在该项设计时适用；届时 SessionStore 加入所有权查询 |
 
 ## 16. 验收（流程测试）
 
@@ -396,8 +462,9 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 4. 另一个代次的 pending 行及其目录，在新代次第一次写入时被清扫，没有行的目录也一样。同一目录下第二个数据库的 Session 文件目录保持不动。
 5. FileStorage 未激活：`node_unavailable`；什么都不写；SessionStore 和 Attachments 保持加载。
 6. 在 txn 2 之前取消：不拥有任何文件；目录被清扫。文件名无效（包括 `AUTH.JSON`）或内容超过 16 MiB：`invalid` 或 `too_large`；什么都不写。
-7. 空库建为 v15。一次性 v13 库原地升级为精确的 v15 结构，所有业务行不变，再次打开时为 v15。分支专用 v14 和未知结构被拒绝并保留。
+7. 空库建为 v15。一次性 v13 库原地升级为精确的 v15 结构，所有业务行不变，再次打开时为 v15。执行升级的那次打开报告升级，§8 的日志行由此而来；再次打开不报告。分支专用 v14 和未知结构被拒绝并保留。
 8. FileStorage 流程：`create_directory` 以 `0700` 创建并同步父目录；已存在的目录成功；父目录缺失以 `NotFound` 失败。保留名、保留目录的大小写别名，以及（在大小写不敏感的文件系统上）`auth.json.lock` 的大小写别名，都以 `InvalidPath` 失败且不创建任何东西。已存在的文件或链接被拒绝且不改动。创建前取消则什么都不创建。
+9. 读取准入，经由 Session 的工具路径：`put` 之后，在产品默认的 `workspace-write` 和 `read-only` 下，该 Session 对返回路径的 `read` 返回内容；分支不写 `approval/request`，它的权限状态（版本和策略）不变。拒绝读取另一个 Session 的文件或数据库目录属于 §11.2 那一项的验收，因为 `read` 不按路径限定（§11.1）。
 
 验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及先 `cargo run --locked -p xtask -- graph` 再 `check`，因为 SessionStore 提供了新服务。
 
