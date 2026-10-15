@@ -211,9 +211,23 @@ impl Agent {
                 .map(Session::start)
             }
             .await;
-            if let Ok(session) = &result
-                && owner.0.closing.is_cancelled()
-            {
+            // Publication and close admission are decided under the entries
+            // lock (lifecycle §3): once Agent::close has taken its snapshot, a
+            // finished build is closed here instead of being published.
+            let unpublished = {
+                let mut entries = owner.0.entries.lock().unwrap();
+                match &result {
+                    Ok(session) if !owner.0.closing.is_cancelled() => {
+                        *session.0.agent.lock().unwrap() = Arc::downgrade(&owner.0);
+                        entries.insert(id.clone(), Entry::Ready(session.clone()));
+                        session.activate();
+                        None
+                    }
+                    Ok(session) => Some(session.clone()),
+                    Err(_) => None,
+                }
+            };
+            if let Some(session) = unpublished {
                 let cancelled = AgentError::Cancelled("agent closed during initialization".into());
                 result = match session.close().await {
                     Ok(()) => Err(cancelled),
@@ -226,20 +240,8 @@ impl Agent {
                     Err(cleanup) => failure.with_cleanup(cleanup),
                 });
             }
-            if let Ok(session) = &result {
-                *session.0.agent.lock().unwrap() = Arc::downgrade(&owner.0);
-            }
-            {
-                let mut entries = owner.0.entries.lock().unwrap();
-                match &result {
-                    Ok(session) => {
-                        entries.insert(id.clone(), Entry::Ready(session.clone()));
-                        session.activate();
-                    }
-                    Err(_) => {
-                        entries.remove(&id);
-                    }
-                }
+            if result.is_err() {
+                owner.0.entries.lock().unwrap().remove(&id);
             }
             send.send_replace(Some(result));
         });

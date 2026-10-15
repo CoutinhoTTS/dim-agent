@@ -815,6 +815,7 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/config.rs",
       "unexpandedMacros": [
+        "tokio::select",
         "vec"
       ]
     },

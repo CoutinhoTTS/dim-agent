@@ -1273,8 +1273,8 @@ pub(crate) async fn build_session(
         restored: matches!(initialization, SessionInitialization::Restore(_)),
         faults: FaultReporter::default(),
         unloading: CancellationToken::new(),
+        lifecycle: SessionLifecycle::new(closing.clone()),
         closing,
-        lifecycle: SessionLifecycle::new(),
         diagnostics,
         loaded: Mutex::new(None),
     });

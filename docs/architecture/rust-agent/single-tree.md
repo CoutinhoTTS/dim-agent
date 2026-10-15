@@ -163,7 +163,7 @@ Session 与分支能力不向进程服务登记自己：RPC 经 `Session::servic
 
 | 对象 | 建立与释放 |
 | --- | --- |
-| `SessionScopePlugin` | `Agent` 创建 Session 时载入；`apply` 以本实例键提供身份、配置、故障报告、`TimelineFactory`、Session 生命周期 `SessionLifecycle`（Loading → Active → Closing → Closed，只由 `Agent` 推进：发布时 Active，装配失败直接 Closed）与宿主值；Active 后 `Agent` 在其下载入 Session 能力；关闭 Session 即永久卸载该子树 |
+| `SessionScopePlugin` | `Agent` 创建 Session 时载入；`apply` 以本实例键提供身份、配置、故障报告、`TimelineFactory`、Session 生命周期 `SessionLifecycle`（Loading → Active → Closing → Closed：`Agent` 在 entries 锁内发布时 Active；关闭 token 取消即 Closing；关闭完成或装配失败时由运行时记录 Closed）与宿主值；Active 后 `Agent` 在其下载入 Session 能力；关闭 Session 即永久卸载该子树 |
 | `BranchScopePlugin` | `TimelineTree` 创建分支时在 SessionScope 下载入；`apply` 提供 Timeline、Dispatcher、分支身份与分支生命周期 `BranchLifecycle`（Loading → Active → Closing → Closed，只由 TimelineContext 推进）；Active 后在其下载入分支能力；分支结束即永久卸载该子树 |
 | `TimelineContext` | 分支能力全部 Active 后由 `TimelineFactory::build` 建立并启动分发，`TimelineTree` 持有；关闭时先结算、再卸载 BranchScope 子树、最后关闭 Timeline。不作为分支服务提供，能力不经它取依赖 |
 | 能力 Plugin | 每个作用域实例一组；随作用域子树卸载 |

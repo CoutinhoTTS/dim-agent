@@ -159,30 +159,56 @@ impl BranchLifecycle {
     }
 }
 
-/// Lifecycle of one Session: provided by its scope and advanced by its Agent.
-/// Session capabilities that spawn background work in `apply`, such as
-/// creating Session-owned instances or contacting external services, wait for
-/// [`Self::activated`]. A Session whose assembly fails never activates, and
-/// readiness of its assembly never depends on that work.
+/// Lifecycle of one Session, provided by its scope. Session capabilities that
+/// spawn background work in `apply`, such as replacing Session-owned instances
+/// or contacting external services, wait for [`Self::activated`] and end that
+/// work when [`Self::closing`] returns. A Session whose assembly fails never
+/// activates, and readiness of its assembly never depends on that work.
+///
+/// Its Agent publishes it (`Active`) and the runtime records `Closed` after
+/// close or failed assembly. Closing follows the Session's close admission:
+/// the phase is `Closing` from the moment its closing token is cancelled, by
+/// `Session::close`, by `Agent::close` or during assembly, so no observer sees
+/// a closing Session as active.
 #[derive(Clone)]
-pub struct SessionLifecycle(Phases<SessionPhase>);
+pub struct SessionLifecycle {
+    phases: Phases<SessionPhase>,
+    closing: tokio_util::sync::CancellationToken,
+}
 impl SessionLifecycle {
-    pub(crate) fn new() -> Self {
-        Self(Phases::new())
+    pub(crate) fn new(closing: tokio_util::sync::CancellationToken) -> Self {
+        Self {
+            phases: Phases::new(),
+            closing,
+        }
     }
     pub fn phase(&self) -> SessionPhase {
-        self.0.get()
+        let phase = self.phases.get();
+        if phase < SessionPhase::Closing && self.closing.is_cancelled() {
+            SessionPhase::Closing
+        } else {
+            phase
+        }
     }
-    /// Waits until the Session leaves `Loading`: true when it was published,
-    /// false when its assembly ended without publication.
+    /// Waits until the Session is published or starts closing: true only when
+    /// it was published and is not closing.
     pub async fn activated(&self) -> bool {
-        self.0.reach(|phase| *phase != SessionPhase::Loading).await == Some(SessionPhase::Active)
+        tokio::select! {
+            phase = self.phases.reach(|phase| *phase != SessionPhase::Loading) => {
+                phase == Some(SessionPhase::Active) && !self.closing.is_cancelled()
+            }
+            _ = self.closing.cancelled() => false,
+        }
     }
-    /// Waits until the Session starts closing.
+    /// Waits until the Session starts closing; background work ends then,
+    /// without waiting for its capability to unload.
     pub async fn closing(&self) {
-        self.0.reach(|phase| *phase >= SessionPhase::Closing).await;
+        tokio::select! {
+            _ = self.phases.reach(|phase| *phase >= SessionPhase::Closing) => {}
+            _ = self.closing.cancelled() => {}
+        }
     }
     pub(crate) fn advance(&self, next: SessionPhase) {
-        self.0.advance(next);
+        self.phases.advance(next);
     }
 }
