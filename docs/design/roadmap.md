@@ -16,14 +16,14 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | `ToolContribution` / `SessionToolSource`，经 `AgentBuilder` 静态登记 | `dim-agent-capabilities/src/tool_registry.rs` | C3 |
 | `history(branch, through)`：上限是已分配的头部，会读到尚未发布的事件 | `dim-agent-runtime/src/agent.rs` | C7（固定前缀读仍要做） |
 | `PluginFilesPlugin`（UTF-8、锁） | `dim-app-server/src/plugin_files.rs` | S10 |
-| Settings `subscribe()`，仅 MCP/Skills 源 | `dim-app-server/src/settings.rs` | S8 |
+| Settings `subscribe()`，仅 MCP/Skills 源 | `dim-app-server/src/settings.rs` | S8a |
 | 自动压缩事实；生产压缩宿主仍是 `ContextModelHost(None)` | `context_preparation.rs`、`main.rs` | 独立功能 |
 
 相关 PR：
 
 | PR | 状态 | 内容 | 对计划的影响 |
 | --- | --- | --- | --- |
-| [#14](https://github.com/arcships/dim/pull/14) | 已合入 | Session 持有 MCP；`ManagementMethods` 由业务 owner 提供；`SessionLifecycle`；移除 `mcp.approve`/`mcp.revoke`，项目源条目默认禁用（ADR 003 D3、ADR 004） | C1、S8、F4 的前置已满足 |
+| [#14](https://github.com/arcships/dim/pull/14) | 已合入 | Session 持有 MCP；`ManagementMethods` 由业务 owner 提供；`SessionLifecycle`；移除 `mcp.approve`/`mcp.revoke`，项目源条目默认禁用（ADR 003 D3、ADR 004） | C1、S8a、F4 的前置已满足 |
 | [#16](https://github.com/arcships/dim/pull/16) | 已关闭 | 移除 `mcp.approve`/`mcp.revoke` | 已由 #14 完成 |
 | [#17](https://github.com/arcships/dim/pull/17) | 已合入 | 实验性 Pursuit 设计 | 决策 D3 |
 | [#20](https://github.com/arcships/dim/pull/20) | 已合入 | `managementMethods` 按调用查找，不依赖其所有者 | 已反映在总体设计 B.2 |
@@ -45,7 +45,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 ### 3.1 立即做（文档与对齐）
 
 1. ~~合入 #14、#16 并补 ADR 003 D3~~：已由 #14 完成（#16 关闭）。
-2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8 Settings 业务源（§5.2）。核心部件（Session 装配、ToolRegistry）不硬依赖任何可选插件，可选插件没起来时只有它自己的功能不可用（#34），在契约里一并写明。
+2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8a Settings 业务源（§5.2）。核心部件（Session 装配、ToolRegistry）不硬依赖任何可选插件，可选插件没起来时只有它自己的功能不可用（#34），在契约里一并写明。
 3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
 4. 决定 Goal 还是 Pursuit（D3）。
 5. 确认两项可能不需要的工作：Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
@@ -79,7 +79,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | S7 | HostPlatform argv 辅助、每次启动时读 shell 配置 | S | 独立 | — | ShellInput |
 | S8a | Settings 业务源（Rust）：每个所有者一个或多个源、两个作用域的变更通知、入口统一校验；目录形式的项目文件由所有者自己读 | M | Settings | A2 | Rust 所有者、S8b |
 | S8b | Settings 语言中立服务、`settings.read/update`、统一的凭据引用解析 | M | Settings | S8a、C4 | Web、SessionTitle、Goal、Scheduler、Workflow |
-| R1 | Rpc：管理插件处于 Failed 或 Unresolved 时返回不可重试的 `service_unavailable` | S | Rpc | — | 客户端 |
+| R1 | Rpc：管理插件处于 Failed 或 Unresolved 时返回不可重试的 `service_unavailable`（#116） | S | Rpc | — | 客户端 |
 | S10 | `pluginFiles` 格式版本（二进制留给 P3） | S | 独立 | — | Scheduler、Workflow |
 | S11 | ModelProvider：模型不支持图片时换成文本占位 | S | 独立 | — | Attachments |
 
@@ -93,7 +93,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | 2 | Attachments | Rust | C1、S5a、S6、S11 |
 | 3 | Web | TypeScript | C3、C4、S8b |
 | 4 | SessionTitle | TypeScript | C1、C2、C4、C6、C7、S4、S5b、S8b |
-| 5 | Goal 或 Pursuit（D3） | TypeScript | C1、C3、C4、C5、S1、S8b |
+| 5 | Goal | TypeScript | C1、C3、C4、C5、S1、S8b |
 | 6 | Scheduler | TypeScript | C4、C7、S2、S8b、S10 |
 | 7 | Workflow | TypeScript | C4、C7、S2、S8b、S10 |
 
@@ -112,7 +112,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | 事件类型（`events.rs` 与冻结样本） | S1 | 单独做格式决定 |
 | 插件自己的 crate 或包 | 无冲突 | |
 
-契约层面的冲突比文件冲突更要紧：C1、C2、S8 一旦改动，所有使用者都要跟着改，所以放在 §3.1 先定稿。
+契约层面的冲突比文件冲突更要紧：C1、C2、S8a 一旦改动，所有使用者都要跟着改，所以放在 §3.1 先定稿。
 
 ### 3.5 按人按批次
 
@@ -120,10 +120,10 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 
 | 批次 | eric8810（核心机制与契约） | yyhhyyyyyy（Rpc、Agents、存储、MCP） | zerob13（装配、TS 桥接、TS 插件、CLI、平台） |
 | --- | --- | --- | --- |
-| 1（现在） | A2 契约定稿、A3 Goal/Pursuit、~~A4 权限类别~~（已完成） | S6 FileStorage、R1 Failed 错误码 | C3 工具接入、C4 spike、S7 argv 辅助、S10 pluginFiles |
+| 1（现在） | A2 契约定稿、A3 Goal（已决定）、~~A4 权限类别~~（已完成） | S6 FileStorage、R1 Failed 错误码 | C3 工具接入、C4 spike、S7 argv 辅助、S10 pluginFiles |
 | 2 | S8a Settings 源（等 A2）、S4 AuxiliaryModel、C7 固定前缀读 | C1 sessionMethods（等 A2）、C2 interactive、S5a Session 文件 | C4 TS 桥接（等 C3）、F5 隔离 spike |
 | 3 | S1 InputQueue 撤回（等 C1）、S8b Settings 服务（等 C4）、S11 图片占位、F2 权限命令规则 | C6 广播通知、P1 ShellInput（等 C1、S7）、S5b 标题、S3 活动句柄（确认） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
-| 4 | F1 压缩宿主（等 S4）、P5 Goal/Pursuit（等 C5、S1、S8b） | S2 sessions（等 C2、S1）、P2 Attachments（等 S5a、S11）、S5c 删除和 fork、F4 MCP OAuth | P3 Web（等 C4、S8b）、P4 SessionTitle（等 C6、S4、S5b、S8b） |
+| 4 | F1 压缩宿主（等 S4）、P5 Goal（等 C5、S1、S8b） | S2 sessions（等 C2、S1）、P2 Attachments（等 S5a、S11）、S5c 删除和 fork、F4 MCP OAuth | P3 Web（等 C4、S8b）、P4 SessionTitle（等 C6、S4、S5b、S8b） |
 | 5 | — | — | P6 Scheduler、P7 Workflow（等 S2） |
 
 跨人的交接（都不在同一批文件上）：
@@ -169,27 +169,27 @@ flowchart LR
   S5a --> AT
   S11["S11 图片占位"] --> AT
   C4 --> WEB["Web"]
-  S8a["S8a Settings 源"] --> S8["S8b Settings 服务"]
-  C4 --> S8
-  S8 --> WEB
+  S8a["S8a Settings 源"] --> S8b["S8b Settings 服务"]
+  C4 --> S8b
+  S8b --> WEB
   C4 --> ST["SessionTitle"]
   C1 --> ST
   C2 --> ST
   C7["C7 固定前缀读"] --> ST
   S4["S4 AuxiliaryModel"] --> ST
   S5b --> ST
-  S8 --> ST
-  C5 --> GO["Goal / Pursuit"]
+  S8b --> ST
+  C5 --> GO["Goal"]
   S1 --> GO
-  S8 --> GO
+  S8b --> GO
   S2 --> SC["Scheduler"]
   S2 --> WF["Workflow"]
   C4 --> SC
   C4 --> WF
   C7 --> SC
   C7 --> WF
-  S8 --> SC
-  S8 --> WF
+  S8b --> SC
+  S8b --> WF
   S10["S10 pluginFiles"] --> SC
   S10 --> WF
 ```

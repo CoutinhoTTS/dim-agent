@@ -6,7 +6,7 @@ Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog); 
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
-Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own new non-interactive Session launched through Agents. The process part owns runs and reaches launched Sessions through the process service `sessions` ([session-access](../contracts/session-access.md)), as Collaboration does. User-saved definitions live in Workflow's Settings source `workflow`, project definitions stay project files that Workflow reads through FileStorage, and run records live in `pluginFiles` (extended). The Session part offers the `workflow` tool to interactive Sessions as a `toolContribution`; operators use the `workflow.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
+Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own new non-interactive Session launched through Agents. The process part owns runs and reaches launched Sessions through the process service `sessions` ([session-access](../contracts/session-access.md)), as Collaboration does. User-saved definitions live in Workflow's Settings source `workflow`, project definitions stay project files that Workflow reads through FileStorage, and run records live in `pluginFiles` (extended). The Session part declares the `workflow` tool as a `toolContribution` in every Session, and only interactive Sessions can use it; operators use the `workflow.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
 
 ## 1. Structure
 
@@ -46,7 +46,7 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `Workflow` | Process (control node) | `sessions` (Agents; `launch` with `policy`), Provider model selection, Settings source `workflow`, FileStorage (project files, looked up per call), `PluginContents` (optional, type `workflows`), `pluginFiles` (extended) | Run engine; `workflowRuns` (the tool's access to runs, A.2); `managementMethods` key `workflow` |
-| `WorkflowSession` | Session, installed when Workflow is enabled | `workflowRuns` (`Workflow`), Session configuration | `toolContribution` key `workflow`, declared only when `interactive` |
+| `WorkflowSession` | Session, installed when Workflow is enabled | `workflowRuns` (`Workflow`), Session configuration | `toolContribution` key `workflow`, declared in every Session; the handler refuses unless the Session is `interactive` |
 
 **Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields, `input` with source raw blocks, `history`, `idle`, `stop`, `withdraw`; `agent` optional), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)); [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (run records; a TypeScript part uses it natively); and existing typed services: Provider purpose policy and Settings sources (the `workflow` business source is a Settings supplement, [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)), which a TypeScript part reaches by name once [#4](https://github.com/arcships/dim/issues/4) exposes them ([session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflowRuns` service, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
 
@@ -188,12 +188,12 @@ Full table: Appendix B.
 
 | What the model sees | Form | Placement |
 | --- | --- | --- |
-| `workflow` declaration | Tool declaration in adopted configuration (interactive Sessions only) | Requests whose prefix holds that configuration |
+| `workflow` declaration | Tool declaration in adopted configuration (every Session; usable only in interactive Sessions) | Requests whose prefix holds that configuration |
 | Start, status, stop | `ToolResult.content` (text incl. `run_id`) | Tool result position of its batch |
 | Report | One raw block `<dim-workflow kind="report" run="..." status="...">`; body: per-stage status, bounded preview of the last step's results (A16), how to get full results (`status`) | Consumed position of the Steer input; unkeyed |
 | Stage task (stage Session) | Marker `<dim-workflow kind="stage" run="..." stage="...">` then the rendered prompt as user content | First input of the launched stage Session |
 
-Report and stage inputs are unkeyed: after compaction they survive only through the summary; child branches inherit them only if consumed before the cut. Stage Sessions are non-interactive (no `ask_user`, no `workflow` tool), so runs never nest. The model never sees unlisted definitions, run records, logs or diagnostics.
+Report and stage inputs are unkeyed: after compaction they survive only through the summary; child branches inherit them only if consumed before the cut. Stage Sessions are non-interactive: `ask_user` and `workflow` stay declared, and their handlers refuse with an error result, so runs never nest. The model never sees unlisted definitions, run records, logs or diagnostics.
 
 ## 6. Interfaces (summary)
 
@@ -272,7 +272,7 @@ Validation happens at the external boundary: Settings validates the `workflow` d
 
 ### A.2 Tool `workflow`
 
-`toolContribution` key `workflow`, registered by `WorkflowSession` only in Sessions whose configuration has `interactive: true` (A8). `declaration(): sync -> ToolDeclaration` returns the actions below; `execute(ToolCall): async -> ToolResult` calls the process part's `workflowRuns` service; cancellation is the consumer dropping the call.
+`toolContribution` key `workflow`, registered by `WorkflowSession` in every Session: assembly never reads `interactive`, so the tool set stays the same across Sessions (#30). The handler refuses with an error result when `SessionConfig.interactive` is false (A8); this is the nesting guard. `declaration(): sync -> ToolDeclaration` returns the actions below; `execute(ToolCall): async -> ToolResult` calls the process part's `workflowRuns` service; cancellation is the consumer dropping the call.
 
 `workflowRuns`, process scope, no key, defined here: `call(RunRequest): async -> RunReply`, where `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` uses the actions below and `RunReply = {content: string, structured: JSON}` or an error `{code}` from the list below. Risk: the category Collaboration's `agent` tool declares (today none, so unclassified: ReadOnly denies, WorkspaceWrite asks, FullAccess allows; E2).
 
@@ -283,7 +283,7 @@ Validation happens at the external boundary: Settings validates the `workflow` d
 | `status` | `run_id` | State, per-stage state, Session id, bounded result preview, last log entries |
 | `stop` | `run_id` | Final state after propagation |
 
-`start` sets `report_to = {session_id, branch_id}` and `cwd`/`resource_node` from the calling Session's configuration, and `policy_cap` from the starter (resolved by Agents). Errors: `definition_not_found` (also for a project definition the user has not enabled), `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
+`start` sets `report_to = {session_id, branch_id}` and `cwd` from the calling Session's configuration (`resource_node` is absent until P3, which means the control node), and `policy_cap` from the starter (resolved by Agents). Errors: `definition_not_found` (also for a project definition the user has not enabled), `invalid_definition`, `invalid_parameters`, `run_not_found`, `limit_exceeded` (A11).
 
 ### A.3 Management methods
 
@@ -293,7 +293,7 @@ Validation happens at the external boundary: Settings validates the `workflow` d
 | --- | --- | --- | --- |
 | `workflow.list` | `cwd` | Definitions with source, enabled state and issues | no |
 | `workflow.save` | `source: user\|project`, `cwd?`, `document` | `{name}`; `user`: Workflow's typed write of the entry into the `workflow` document (CAS on its revision); `project`: the project file, written through FileStorage (file authority); saving does not enable a project definition | yes |
-| `workflow.start` | `name`, `source?`, `cwd`, `resource_node?`, `params`, `report_to?` | `{run_id}`; `policy_cap` = host configuration maximum, default read-only | yes |
+| `workflow.start` | `name`, `source?`, `cwd`, `resource_node?` (P3; absent means the control node), `params`, `report_to?` | `{run_id}`; `policy_cap` = host configuration maximum, default read-only | yes |
 | `workflow.status` | `run_id?` | One run or recent runs | no |
 | `workflow.stop` | `run_id` | Final run state | yes |
 
@@ -303,7 +303,7 @@ An admitted call completes if the caller disconnects. While Workflow reloads, Rp
 
 ```text
 Run { run_id, name, source: user|project|plugin, definition (snapshot),
-      params, cwd, resource_node, policy_cap, report_to?: {session_id, branch_id},
+      params, cwd, resource_node? (absent until P3: control node), policy_cap, report_to?: {session_id, branch_id},
       started_by: tool{session_id, branch_id, call_id} | management,
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
@@ -389,7 +389,7 @@ Through the tool, management methods and Session history reads:
 7. Restart, Workflow reload and Agents reload: `interrupted`/`lost`, no relaunch, exactly one report.
 8. Policy: tool start under WorkspaceWrite → stages at most WorkspaceWrite; management start → ReadOnly by default; `workflow` denied under ReadOnly.
 9. Every stage, parallel ones included, runs in its own launched non-interactive Session; a stage without `agent` runs with Agents' default profile.
-10. Non-interactive stage Sessions have no `workflow` tool.
+10. Non-interactive stage Sessions declare the `workflow` tool, and calling it returns an error result.
 
 ## Appendix E. Assumptions
 
@@ -402,7 +402,7 @@ Through the tool, management methods and Session history reads:
 | A5 | Model precedence: stage > profile > purpose `workflow.stage` | [Overview §4](../overview.md#4-plugin-catalog); precedence judgment | Other precedence |
 | A6 | Rendered prompt ≤ 32 KiB; stored result ≤ 64 KiB | Judgment | Other bounds |
 | A7 | Plain substitution templates | Judgment | Expressions need a sandbox |
-| A8 | Tool only for interactive Sessions | Prevents nesting | Depth limit needed |
+| A8 | Tool usable only in interactive Sessions; the handler refuses elsewhere | Prevents nesting | Depth limit needed |
 | A9 | Log ≤ 500 entries; last 100 runs kept | Judgment | Other retention |
 | A11 | 4 running runs, 4 concurrent stages per run; fields of the `workflow` document, read at each start | Judgment | Other limits |
 | A13 | Unload waits up to 10 s for stage stops | Judgment | Other bound |

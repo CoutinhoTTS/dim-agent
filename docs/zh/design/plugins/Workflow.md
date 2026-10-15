@@ -6,7 +6,7 @@
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
-Workflow 拥有工作流定义和运行。一次运行推进一个固定的步骤列表；每个阶段在通过 Agents 启动的一个新非交互 Session 中运行。进程部分拥有运行，并通过进程服务 `sessions`（[session-access](../contracts/session-access.md)）访问启动的 Session，方式与 Collaboration 相同。用户保存的定义存于 Workflow 的 Settings 来源 `workflow`，项目定义仍是项目文件，由 Workflow 经 FileStorage 读取，运行记录存于 `pluginFiles`（扩展）。Session 部分以 `toolContribution` 向交互 Session 提供 `workflow` 工具；运维方使用 `workflow.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。运行结束时，其结果以 Steer 输入向起始分支报告一次。Workflow 不写自己的 Timeline 事件。
+Workflow 拥有工作流定义和运行。一次运行推进一个固定的步骤列表；每个阶段在通过 Agents 启动的一个新非交互 Session 中运行。进程部分拥有运行，并通过进程服务 `sessions`（[session-access](../contracts/session-access.md)）访问启动的 Session，方式与 Collaboration 相同。用户保存的定义存于 Workflow 的 Settings 来源 `workflow`，项目定义仍是项目文件，由 Workflow 经 FileStorage 读取，运行记录存于 `pluginFiles`（扩展）。Session 部分以 `toolContribution` 在每个 Session 中声明 `workflow` 工具，只有交互 Session 可以使用它；运维方使用 `workflow.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。运行结束时，其结果以 Steer 输入向起始分支报告一次。Workflow 不写自己的 Timeline 事件。
 
 ## 1. 结构
 
@@ -46,7 +46,7 @@ flowchart LR
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
 | `Workflow` | 进程（控制节点） | `sessions`（Agents；`launch` 带 `policy`）、Provider 模型选择、Settings 来源 `workflow`、FileStorage（项目文件，按调用查找）、`PluginContents`（可选，类型 `workflows`）、`pluginFiles`（扩展） | 运行引擎；`workflowRuns`（工具访问运行的服务，A.2）；`managementMethods` key `workflow` |
-| `WorkflowSession` | Session，Workflow 启用时安装 | `workflowRuns`（`Workflow`）、Session 配置 | `toolContribution` key `workflow`，仅在 `interactive` 时声明 |
+| `WorkflowSession` | Session，Workflow 启用时安装 | `workflowRuns`（`Workflow`）、Session 配置 | `toolContribution` key `workflow`，在每个 Session 中声明；除非 Session 为 `interactive`，处理函数拒绝调用 |
 
 **依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段、带来源 raw 块的 `input`、`history`、`idle`、`stop`、`withdraw`；`agent` 可省略）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（存运行记录；TypeScript 部分直接使用）；以及现有的类型化服务：Provider purpose 策略和 Settings 来源（业务来源 `workflow` 属于 Settings 补充，[overview 附录 B](../overview.md#附录-b-现有插件的补充)），待 [#4](https://github.com/arcships/dim/issues/4) 暴露后 TypeScript 部分可按名称访问（[session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）。**此处定义的契约**：定义格式 `dim.workflow/v1`、`workflow` 工具、`workflowRuns` 服务、`workflow.*` 方法、来源名 `workflow`（标记类型 `stage` 和 `report`）、purpose key `workflow.stage`、内容类型 key `workflows`、运行记录。
 
@@ -188,12 +188,12 @@ Workflow 自身重载、依赖（Agents）重载或重启都会把运行结算�
 
 | 模型看到的内容 | 形式 | 位置 |
 | --- | --- | --- |
-| `workflow` 声明 | 已采用配置中的工具声明（仅交互 Session） | 前缀包含该配置的请求 |
+| `workflow` 声明 | 已采用配置中的工具声明（每个 Session；只在交互 Session 中可用） | 前缀包含该配置的请求 |
 | 启动、状态、停止 | `ToolResult.content`（文本，含 `run_id`） | 其批次的工具结果位置 |
 | 报告 | 一个 raw 块 `<dim-workflow kind="report" run="..." status="...">`；正文：各阶段状态、最后一步结果的有界预览（A16）、获取完整结果的方式（`status`） | Steer 输入的消费位置；无 key |
 | 阶段任务（阶段 Session） | 标记 `<dim-workflow kind="stage" run="..." stage="...">`，随后是作为用户内容的渲染后提示词 | 启动的阶段 Session 的第一个输入 |
 
-报告和阶段输入均无 key：压缩后只经由摘要保留；子分支只有在切点前已消费时才继承它们。阶段 Session 是非交互的（没有 `ask_user`，没有 `workflow` 工具），因此运行绝不嵌套。模型永远看不到未列出的定义、运行记录、日志或诊断信息。
+报告和阶段输入均无 key：压缩后只经由摘要保留；子分支只有在切点前已消费时才继承它们。阶段 Session 是非交互的：`ask_user` 和 `workflow` 仍然声明，其处理函数以错误结果拒绝，因此运行绝不嵌套。模型永远看不到未列出的定义、运行记录、日志或诊断信息。
 
 ## 6. 接口（摘要）
 
@@ -272,7 +272,7 @@ steps:
 
 ### A.2 工具 `workflow`
 
-`toolContribution` key `workflow`，仅由 `WorkflowSession` 在配置为 `interactive: true` 的 Session 中注册（A8）。`declaration(): sync -> ToolDeclaration` 返回下列动作；`execute(ToolCall): async -> ToolResult` 调用进程部分的 `workflowRuns` 服务；取消即消费方丢弃该调用。风险：Collaboration 的 `agent` 工具所声明的类别（目前没有，因此未分类：ReadOnly 拒绝，WorkspaceWrite 询问，FullAccess 允许；E2）。
+`toolContribution` key `workflow`，由 `WorkflowSession` 在每个 Session 中注册：装配从不读取 `interactive`，因此各 Session 的工具集合保持相同（#30）。`SessionConfig.interactive` 为 false 时，处理函数以错误结果拒绝（A8）；这就是防止嵌套的保护。`declaration(): sync -> ToolDeclaration` 返回下列动作；`execute(ToolCall): async -> ToolResult` 调用进程部分的 `workflowRuns` 服务；取消即消费方丢弃该调用。风险：Collaboration 的 `agent` 工具所声明的类别（目前没有，因此未分类：ReadOnly 拒绝，WorkspaceWrite 询问，FullAccess 允许；E2）。
 
 `workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code}`。
 
@@ -283,7 +283,7 @@ steps:
 | `status` | `run_id` | 状态、各阶段状态、Session id、有界的结果预览、最近的日志条目 |
 | `stop` | `run_id` | 传播后的最终状态 |
 
-`start` 设置 `report_to = {session_id, branch_id}`，从调用方 Session 的配置取 `cwd`/`resource_node`，从起始方取 `policy_cap`（由 Agents 解析）。错误：`definition_not_found`（用户未启用的项目定义也返回它）、`invalid_definition`、`invalid_parameters`、`run_not_found`、`limit_exceeded`（A11）。
+`start` 设置 `report_to = {session_id, branch_id}`，从调用方 Session 的配置取 `cwd`（`resource_node` 在 P3 之前不存在，此时表示控制节点），从起始方取 `policy_cap`（由 Agents 解析）。错误：`definition_not_found`（用户未启用的项目定义也返回它）、`invalid_definition`、`invalid_parameters`、`run_not_found`、`limit_exceeded`（A11）。
 
 ### A.3 管理方法
 
@@ -293,7 +293,7 @@ steps:
 | --- | --- | --- | --- |
 | `workflow.list` | `cwd` | 定义及来源、启用状态、问题 | 否 |
 | `workflow.save` | `source: user\|project`、`cwd?`、`document` | `{name}`；`user`：Workflow 以类型化写入把条目写进 `workflow` 文档（按其 revision 做 CAS）；`project`：经 FileStorage 写入项目文件（文件权威）；保存不会启用项目定义 | 是 |
-| `workflow.start` | `name`、`source?`、`cwd`、`resource_node?`、`params`、`report_to?` | `{run_id}`；`policy_cap` = 宿主配置最大值，默认只读 | 是 |
+| `workflow.start` | `name`、`source?`、`cwd`、`resource_node?`（P3；缺省表示控制节点）、`params`、`report_to?` | `{run_id}`；`policy_cap` = 宿主配置最大值，默认只读 | 是 |
 | `workflow.status` | `run_id?` | 一次运行或最近的运行 | 否 |
 | `workflow.stop` | `run_id` | 运行的最终状态 | 是 |
 
@@ -303,7 +303,7 @@ steps:
 
 ```text
 Run { run_id, name, source: user|project|plugin, definition (snapshot),
-      params, cwd, resource_node, policy_cap, report_to?: {session_id, branch_id},
+      params, cwd, resource_node?（P3 之前不存在：控制节点）, policy_cap, report_to?: {session_id, branch_id},
       started_by: tool{session_id, branch_id, call_id} | management,
       state: running | stopping | completed | failed | stopped | interrupted,
       stages: [Stage], log: [LogEntry] (bounded, A9),
@@ -389,7 +389,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 7. 重启、Workflow 重载和 Agents 重载：`interrupted`/`lost`，不重新启动，恰好一份报告。
 8. Policy：WorkspaceWrite 下工具启动 → 阶段最多 WorkspaceWrite；管理启动 → 默认 ReadOnly；ReadOnly 下 `workflow` 被拒。
 9. 每个阶段（包括并行阶段）都在自己启动的非交互 Session 中运行；未声明 `agent` 的阶段使用 Agents 的默认 profile。
-10. 非交互阶段 Session 没有 `workflow` 工具。
+10. 非交互阶段 Session 声明了 `workflow` 工具，调用它返回错误结果。
 
 ## 附录 E. 假设
 
@@ -402,7 +402,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | A5 | 模型优先级：阶段 > profile > purpose `workflow.stage` | [Overview §4](../overview.md#4-插件目录)；优先级为判断 | 其他优先级 |
 | A6 | 渲染后提示词 ≤ 32 KiB；存储结果 ≤ 64 KiB | 判断 | 其他上限 |
 | A7 | 纯替换模板 | 判断 | 表达式需要沙箱 |
-| A8 | 工具仅用于交互 Session | 防止嵌套 | 需要深度限制 |
+| A8 | 工具只在交互 Session 中可用；在其他 Session 中处理函数拒绝 | 防止嵌套 | 需要深度限制 |
 | A9 | 日志 ≤ 500 条；保留最近 100 次运行 | 判断 | 其他保留策略 |
 | A11 | 4 个运行中的运行，每个运行 4 个并发阶段；是 `workflow` 文档中的字段，每次启动时读取 | 判断 | 其他限制 |
 | A13 | 卸载最多等待 10 s 以停止阶段 | 判断 | 其他上限 |

@@ -141,7 +141,7 @@ sequenceDiagram
 
 - 压缩：声明作为配置保留；结果只经摘要保留。
 - 子分支继承其祖先前缀中的结果。
-- 非交互 Session 看到相同的工具（`requires.interactive = false`）。
+- 非交互 Session 看到相同的工具，也可以使用它们；各 Session 的工具集合保持相同（#30）。
 - 从不可见：`structuredContent`、服务名、配置、凭据引用、私有主机例外、诊断。
 - 抓取的页面文本是不可信的第三方内容，放入工具结果时不加指令框定（A14）。
 

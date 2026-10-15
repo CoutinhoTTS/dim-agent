@@ -398,10 +398,10 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 
 | 阶段 | 内容 |
 | --- | --- |
-| P0 基础 | 由 `session.create` 设置的 `SessionConfig.interactive`；带 `launch` 的 `sessions` 服务；`sessionMethods` 分发；Rpc 表中的 `managementMethods` 及现有管理方法的迁移；`ConnectionEntry {name, deviceId}`；ToolRegistry 中的 `toolContribution`；Permission 类别；带变更通知的 Settings 业务来源（S8a）；语言中立的 `settings` 服务与凭据解析器（S8b，随 C4）；`pluginFiles`（扩展：二进制、格式版本）；Provider 用途策略与 `AuxiliaryModel`；SessionStore 元数据与 Session 文件；FileStorage 列举与删除；HostPlatform argv 辅助 |
+| P0 基础 | 由 `session.create` 设置的 `SessionConfig.interactive`；带 `launch` 的 `sessions` 服务；`sessionMethods` 分发；Rpc 表中的 `managementMethods` 及现有管理方法的迁移；ToolRegistry 中的 `toolContribution`；带变更通知的 Settings 业务来源（S8a）；语言中立的 `settings` 服务与凭据解析器（S8b，随 C4）；`pluginFiles`（扩展：二进制、格式版本）；Provider 用途策略与 `AuxiliaryModel`；SessionStore 元数据与 Session 文件；FileStorage 列举与删除；HostPlatform argv 辅助 |
 | P1 核心交互 | Questions（需要重新设计）、ShellInput、Attachments、SessionTitle；InputQueue 撤回；Permission 规则；模型参数；SessionStore 删除、清理与 fork；HostPlatform 隔离；#4 为非 Rust 部分按名称暴露运行时的类型化服务；CLI 子命令、图像转换、`/export`、`exec --json` |
-| P2 功能扩展 | Goal、Web、Scheduler、Workflow；ModelProvider `ModelCallScope`；Collaboration 成员审批作为输入送到 leader；Transport `EntryHost`；Mcp OAuth；生产环境压缩宿主 |
-| P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway、Modality；PluginManager；资源节点（按 `resourceNode` 在每次调用时查找服务） |
+| P2 功能扩展 | Goal、Web、Scheduler、Workflow；ModelProvider `ModelCallScope`；Collaboration 成员审批作为输入送到 leader；Mcp OAuth；生产环境压缩宿主 |
+| P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway 及 Transport `EntryHost` 与 `ConnectionEntry {name, deviceId}`、Modality；PluginManager；资源节点（按 `resourceNode` 在每次调用时查找服务） |
 
 ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每次 spawn 时读取）是独立工作，不阻塞任何阶段。
 

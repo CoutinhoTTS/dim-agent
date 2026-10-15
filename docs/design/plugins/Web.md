@@ -141,7 +141,7 @@ Full table in Appendix B.
 
 - Compaction: declarations survive as configuration; results only through the summary.
 - Child branches inherit results in their ancestor prefix.
-- Non-interactive Sessions see the same tools (`requires.interactive = false`).
+- Non-interactive Sessions see the same tools and can use them; the tool set stays the same across Sessions (#30).
 - Never visible: `structuredContent`, the service name, configuration, credential references, private-host exceptions, diagnostics.
 - Fetched page text is untrusted third-party content placed in a tool result without instruction framing (A14).
 

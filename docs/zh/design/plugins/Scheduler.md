@@ -8,7 +8,7 @@
 
 > **待设计复核时细化。** 运行结果的通知是 Scheduler 自己的功能。为 Notifications 发布的运行结果事件通知，以及它所需的跨语言具名进程事件（§9.1），随 Notifications 一并撤回。
 
-Scheduler 把定时任务（用户写的配置）保存在自己的 Settings 业务来源 `schedule` 中，把运行历史保存在自己的进程存储 [`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage) 中。守护进程存活且某个窗口到期时，进程部分通过 `sessions.launch` 创建一个非交互 Session（或复用一个），并通过 `sessions.input`（[session-access](../contracts/session-access.md)）把任务提示词写成带自身来源标记的 Queue 输入，方式与 Collaboration 访问其成员相同。Session 部分以 `toolContribution` 向交互式 leader Session 提供 `schedule` 工具（风险 `persistent_configuration`）。运维方使用 `schedule.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。Scheduler 不写自己的 Timeline 事件：一次运行的结果从运行 Session 的历史中读取，并作为运行结果事件通知发布。
+Scheduler 把定时任务（用户写的配置）保存在自己的 Settings 业务来源 `schedule` 中，把运行历史保存在自己的进程存储 [`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage) 中。守护进程存活且某个窗口到期时，进程部分通过 `sessions.launch` 创建一个非交互 Session（或复用一个），并通过 `sessions.input`（[session-access](../contracts/session-access.md)）把任务提示词写成带自身来源标记的 Queue 输入，方式与 Collaboration 访问其成员相同。Session 部分以 `toolContribution` 在每个 Session 中声明 `schedule` 工具（风险 `persistent_configuration`）；只有交互式 leader Session 可以使用它。运维方使用 `schedule.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。Scheduler 不写自己的 Timeline 事件：一次运行的结果从运行 Session 的历史中读取，并作为运行结果事件通知发布。
 
 ## 1. 结构
 
@@ -48,9 +48,9 @@ flowchart LR
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
 | `Scheduler` | 进程（控制节点） | `sessions`（Agents；`launch` 带 `policy`）、Settings 业务来源 `schedule`、`pluginFiles`（扩展） | 任务访问、定时器、运行跟踪器；`scheduleJobs`（工具访问任务存储的服务，A.2）；`managementMethods` key `schedule`；进程事件 `scheduled_run_outcomes` |
-| `SchedulerSession` | Session，Scheduler 启用时安装 | `scheduleJobs`（`Scheduler`）、Session 配置 | `toolContribution` key `schedule`，仅在 `interactive` 且非 Collaboration 成员时声明 |
+| `SchedulerSession` | Session，Scheduler 启用时安装 | `scheduleJobs`（`Scheduler`）、Session 配置 | `toolContribution` key `schedule`，在每个 Session 中声明；除非 Session 为 `interactive` 且非 Collaboration 成员，处理函数拒绝调用 |
 
-**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段 `interactive`、带来源 raw 块的 `input`、固定前缀 `history`、`idle`、`stop`、`withdraw`；`agent` 可省略）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、Permission 类别 `persistent_configuration`（FullAccess 允许，E1）、[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（存运行历史；在现有的受信插件存储上增加二进制读写和格式版本；TypeScript 部分直接使用，Rust 部分通过同名服务使用）、Settings 业务来源 `schedule`，按 Scheduler 声明的 schema 类型化写入（Settings 补充，[overview 附录 B](../overview.md#附录-b-现有插件的补充)）、[单树事件契约](../../../architecture/rust-agent/single-tree.md)。**此处定义的契约**：任务和运行格式、`schedule` 工具、`scheduleJobs` 服务、`schedule.*` 方法、运行结果事件（A.6）、来源名 `scheduler`（标记 `dim-scheduler`，提交 id `scheduler:<run_id>`）。
+**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段 `interactive`、带来源 raw 块的 `input`、固定前缀 `history`、`idle`、`stop`、`withdraw`；`agent` 可省略）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、描述性风险 `persistent_configuration`，Permission 把它视为未分类（#45）、[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（存运行历史；在现有的受信插件存储上增加二进制读写和格式版本；TypeScript 部分直接使用，Rust 部分通过同名服务使用）、Settings 业务来源 `schedule`，按 Scheduler 声明的 schema 类型化写入（Settings 补充，[overview 附录 B](../overview.md#附录-b-现有插件的补充)）、[单树事件契约](../../../architecture/rust-agent/single-tree.md)。**此处定义的契约**：任务和运行格式、`schedule` 工具、`scheduleJobs` 服务、`schedule.*` 方法、运行结果事件（A.6）、来源名 `scheduler`（标记 `dim-scheduler`，提交 id `scheduler:<run_id>`）。
 
 ## 2. 数据与状态
 
@@ -184,11 +184,11 @@ sequenceDiagram
 
 | 位置 | 模型看到的内容 | 形式 | 位置与存续 |
 | --- | --- | --- | --- |
-| 调用方 Session | `schedule` 声明 | 已采用配置中的工具声明（仅交互式 leader） | 配置；压缩后保留 |
+| 调用方 Session | `schedule` 声明 | 已采用配置中的工具声明（每个 Session；只在交互式 leader 中可用） | 配置；压缩后保留 |
 | 调用方 Session | `schedule` 结果 | `ToolResult.content` | 批次结果位置；压缩后仅存于摘要 |
 | 运行 Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`，随后是作为用户内容的提示词 | 一个 Queue 输入的 raw 标记块 + 用户文本 | 位于其 `input/consumed` 位置；无 key，因此压缩后只经由摘要；若在切点前已消费，子分支会继承 |
 
-运行 Session 是非交互的：没有 `ask_user`，没有 `schedule` 工具。`reuse` Session 中的先前运行与任何输入一样保留为历史。模型永远看不到任务记录、运行历史、定时器或诊断信息。
+运行 Session 是非交互的：`ask_user` 和 `schedule` 仍然声明，其处理函数以错误结果拒绝。`reuse` Session 中的先前运行与任何输入一样保留为历史。模型永远看不到任务记录、运行历史、定时器或诊断信息。
 
 ## 6. 接口（摘要）
 
@@ -251,7 +251,7 @@ sequenceDiagram
 
 ### A.2 工具 `schedule`
 
-`toolContribution` key `schedule`，仅由 `SchedulerSession` 在配置为 `interactive: true` 且无成员角色的 Session 中注册（A9），因此运行 Session 和成员永远看不到它，运行也无法调度更多运行。`declaration(): sync -> ToolDeclaration` 返回下列参数，所有动作的风险均为 `persistent_configuration`（A10）；`execute(ToolCall): async -> ToolResult` 调用进程部分的 `scheduleJobs` 服务。取消即消费方丢弃该调用。
+`toolContribution` key `schedule`，由 `SchedulerSession` 在每个 Session 中注册：装配从不读取 `interactive`，因此各 Session 的工具集合保持相同（#30）。`SessionConfig.interactive` 为 false 或 Session 有成员角色时，处理函数以错误结果拒绝（A9），因此运行 Session 和成员无法使用它，运行也无法调度更多运行。`declaration(): sync -> ToolDeclaration` 返回下列参数，所有动作的风险均为 `persistent_configuration`（A10）；`execute(ToolCall): async -> ToolResult` 调用进程部分的 `scheduleJobs` 服务。取消即消费方丢弃该调用。
 
 `scheduleJobs`，进程作用域，无 key，在此定义：`call(JobRequest): async -> JobReply`，其中 `JobRequest = {action, job_id?, job?, enabled?, limit?, caller: {sessionId, cwd}}` 使用下列参数，`JobReply = {content: string, records: JSON}`，或附录 C 中的错误 `{code}`。取消即消费方丢弃该调用；已持久化的保存保留。
 
@@ -263,7 +263,7 @@ sequenceDiagram
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`cwd` 和 `resource_node` 默认取调用方 Session 的配置；工具不能指向其他资源节点（A11）。在 `create`/`update` 时，`policy_cap` 为调用方 Session 当前的 policy，由 Agents 解析（A15）。结果 `content`：包含 `job_id`、下一个窗口或列表的简短文本；`structured_content` 保存记录。校验错误为错误结果。
+`cwd` 默认取调用方 Session 的配置。`resource_node` 在 P3 之前不存在，此时表示控制节点；工具不能指向其他资源节点（A11）。在 `create`/`update` 时，`policy_cap` 为调用方 Session 当前的 policy，由 Agents 解析（A15）。结果 `content`：包含 `job_id`、下一个窗口或列表的简短文本；`structured_content` 保存记录。校验错误为错误结果。
 
 ### A.3 管理方法
 
@@ -375,7 +375,7 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 8. 带 `launching` 运行重启：已接受的恢复，未知的 → `lost`；无重复输入。
 9. 运行中 Agents 重载：Scheduler 重载，运行完成并被跟踪到结束。
 10. Policy：WorkspaceWrite 下工具创建的任务最多以 WorkspaceWrite 运行；管理创建的任务默认 ReadOnly。
-11. 非交互和成员 Session 中没有 `schedule`；WorkspaceWrite 下询问，FullAccess 下允许。
+11. 非交互和成员 Session 中声明了 `schedule`，调用时返回错误结果；WorkspaceWrite 下询问，FullAccess 下允许。
 12. 触发时节点不可用：`skipped: node_unavailable`。
 
 ## 附录 E. 假设
@@ -389,7 +389,7 @@ Scheduler 重载期间，Rpc 回复 `service_reloading`；未启用时回复 `un
 | A6 | 失败绝不重试，也不回退到 `create` | 判断 | 回退策略 |
 | A7 | `max_run_minutes` 默认 60 | 判断 | 运行无上限 |
 | A8 | 每个任务保留最近 100 次运行 | 判断 | 保留设置 |
-| A9 | 工具仅用于交互式 leader Session | [Overview §6.2](../overview.md#62-约束) 约束 15；判断 | 运行可创建任务 |
+| A9 | 工具只在交互式 leader Session 中可用；在其他 Session 中处理函数拒绝 | [Overview §6.2](../overview.md#62-约束) 约束 15；判断 | 运行可创建任务 |
 | A10 | 所有动作使用一个风险类别 | [Overview §6.2](../overview.md#62-约束) 约束 7 | 拆分出只读工具 |
 | A11 | 工具创建的任务使用调用方的资源节点 | 判断（overview §6.3） | 允许其他节点 |
 | A13 | 最大并发运行数 = 4，即 `schedule` 文档中仅限用户的字段 `max_concurrent_runs`，在每个窗口读取 | 判断；ADR 002 D4 | 其他上限 |

@@ -124,7 +124,7 @@ The revision check is the recheck: a manual title always wins.
 
 | Scenario | Order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Member, workflow-stage or other non-interactive Session | `SessionConfig` | Never generated; rename allowed | SessionTitle |
+| Member Session (`collaborationRole`), or a non-interactive Session | `SessionConfig` | Never generated; rename allowed | SessionTitle |
 | Second input before generation finishes | — | Skipped (in flight) | SessionTitle |
 | First input deleted | input < `input/deleted` | Never adopted: no title from it; the next adopted operator input triggers (A9) | SessionTitle |
 | Generation failed | — | Next adopted `main` input while untitled retries from the first adopted input (A5) | SessionTitle |
