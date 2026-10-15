@@ -73,6 +73,8 @@ impl SessionService for ToolContribution {}
 | `ToolHost` 重载 | `ToolRegistry` 重载并重新收集全部贡献；贡献方不受影响 |
 | 旧代处理器 | 被继续持有时调用返回明确的停止错误 |
 
+`agent` 处理器持有贡献方当前代的取消令牌；贡献方卸载后，包括 `list` 在内的调用都返回 `capability reloading`，不再读取旧代状态。`Agents` 重载不会使固定工具自动换代；需要重载注册表或重新装载 Session 后才能使用新处理器。
+
 ## 5. 错误
 
 | 情况 | 结果 |
