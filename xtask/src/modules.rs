@@ -41,6 +41,8 @@ struct Module {
     imports: Vec<Import>,
     paths: BTreeSet<Vec<String>>,
     macros: BTreeSet<String>,
+    /// Implements BusinessDocument: the module owns a business source.
+    business_document: bool,
 }
 #[derive(Default)]
 struct SourceGraph {
@@ -244,6 +246,7 @@ impl SourceGraph {
             imports: vec![],
             paths: BTreeSet::new(),
             macros: BTreeSet::new(),
+            business_document: false,
         };
         let mut children = vec![];
         for item in items {
@@ -302,6 +305,7 @@ impl SourceGraph {
             visitor.visit_item(&item);
             module.paths.extend(visitor.paths);
             module.macros.extend(visitor.macros);
+            module.business_document |= visitor.business_document;
         }
         self.modules.insert(id.to_owned(), module);
         for (child, source, child_directory, items) in children {
@@ -528,6 +532,38 @@ impl SourceGraph {
             {
                 return Err(format!("types reverse dependency: {from} -> {to}").into());
             }
+            // D4: Settings is persistence infrastructure, not a business or RPC owner.
+            let within = |module: &str, root: &str| {
+                module == root || module.starts_with(&format!("{root}::"))
+            };
+            if within(from, "dim_app_server::settings")
+                && ((within(to, "dim_app_server")
+                    && !within(to, "dim_app_server::settings")
+                    && !within(to, "dim_app_server::storage"))
+                    || (within(to, "dim_agent_capabilities")
+                        && !within(to, "dim_agent_capabilities::file_storage")))
+            {
+                return Err(format!("settings business dependency: {from} -> {to}").into());
+            }
+            // Built-in Session contracts remain in protocol; contributed management
+            // wire types do not. In particular, do not ban Connection -> MCP.
+            if within(from, "dim_app_server::protocol")
+                && within(to, "dim_app_server")
+                && (within(to, "dim_app_server::skills_management")
+                    || to.split("::").any(|part| part == "management"))
+            {
+                return Err(format!("protocol management dependency: {from} -> {to}").into());
+            }
+        }
+        // Nor does it define a business document of its own: each belongs to
+        // the owner of its namespace.
+        if let Some(id) = self.modules.iter().find_map(|(id, module)| {
+            (module.business_document
+                && (id == "dim_app_server::settings"
+                    || id.starts_with("dim_app_server::settings::")))
+            .then_some(id)
+        }) {
+            return Err(format!("settings business document: {id}").into());
         }
         Ok(())
     }
@@ -592,8 +628,17 @@ fn item_name(item: &Item) -> Option<String> {
 struct Paths {
     paths: BTreeSet<Vec<String>>,
     macros: BTreeSet<String>,
+    business_document: bool,
 }
 impl<'ast> Visit<'ast> for Paths {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.business_document |= node.trait_.as_ref().is_some_and(|(_, path, _)| {
+            path.segments
+                .last()
+                .is_some_and(|segment| segment.ident == "BusinessDocument")
+        });
+        syn::visit::visit_item_impl(self, node);
+    }
     fn visit_visibility(&mut self, _: &'ast syn::Visibility) {}
     fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {}
     fn visit_item_use(&mut self, _: &'ast syn::ItemUse) {}
@@ -624,4 +669,79 @@ fn escape(label: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn business_boundaries_follow_source_aliases_and_preserve_builtin_contracts() {
+        let workspace = std::env::temp_dir().join(format!(
+            "dim-module-boundaries-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"dim-app-server\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n").unwrap();
+        let definitions = r#"
+            mod mcp { pub struct Config; pub mod management { pub struct Request; } }
+            mod storage { pub struct Database; }
+            mod provider { pub struct ModelPreferences; }
+            mod aliases { pub use crate::mcp::{Config as Document, management::Request}; }
+        "#;
+        for (source, expected) in [
+            (
+                "mod settings { pub type Db = crate::storage::Database; }
+                 mod protocol { pub type Model = crate::provider::ModelPreferences; }
+                 mod connection { pub type Mcp = crate::mcp::Config; }",
+                None,
+            ),
+            (
+                "mod settings { mod native { pub type Document = crate::aliases::Document; } }",
+                Some("settings business dependency"),
+            ),
+            (
+                "mod hooks { pub struct Rule; }
+                 mod settings { pub type Document = crate::hooks::Rule; }",
+                Some("settings business dependency"),
+            ),
+            (
+                "mod settings {
+                     pub trait BusinessDocument {}
+                     mod native { struct Approvals; impl super::BusinessDocument for Approvals {} }
+                 }",
+                Some("settings business document"),
+            ),
+            (
+                "mod settings { pub trait BusinessDocument {} }
+                 mod hooks { struct Rules; impl crate::settings::BusinessDocument for Rules {} }",
+                None,
+            ),
+            (
+                "mod protocol { use crate::aliases::*; pub fn decode(_: Request) {} }",
+                Some("protocol management dependency"),
+            ),
+            (
+                "mod skills_management { pub struct Request; }
+                 mod protocol { pub type Request = crate::skills_management::Request; }",
+                Some("protocol management dependency"),
+            ),
+        ] {
+            fs::write(
+                workspace.join("src/lib.rs"),
+                format!("{definitions}\n{source}"),
+            )
+            .unwrap();
+            let result = generate(&workspace, &workspace.join("graph"));
+            match expected {
+                None => result.unwrap(),
+                Some(expected) => assert!(result.unwrap_err().to_string().contains(expected)),
+            }
+        }
+        fs::remove_dir_all(workspace).unwrap();
+    }
 }

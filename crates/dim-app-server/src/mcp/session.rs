@@ -11,8 +11,8 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionScope,
-    SessionService, StateCell, scoped,
+    AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionLifecycle,
+    SessionLoader, SessionScope, SessionService, StateCell, scoped,
 };
 use dim_agent_types::{ToolCall, ToolDefinition, ToolMetadata, ToolResult, ToolSource};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -28,6 +28,11 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// This registers only the Session part; the host registers McpPlugin at root.
 pub fn install(builder: &mut AgentBuilder) {
     builder
+        .session_extension::<super::publication::ConnectionConfig, _>(
+            super::publication::GROUP,
+            "McpServer",
+            |_, value| super::publication::ConnectionPlugin::new(value),
+        )
         .session_tool_source("mcp")
         .session_plugin(McpSessionPlugin::new);
 }
@@ -35,10 +40,21 @@ pub fn install(builder: &mut AgentBuilder) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpSourceState {
     Disabled,
-    ApprovalRequired,
     Connecting,
     Ready { version: String },
     Failed { message: String },
+}
+impl McpSourceState {
+    /// `session.mcp` state name with its version and failure message. MCP owns
+    /// this vocabulary; the protocol projection only copies it.
+    pub fn into_wire(self) -> (&'static str, Option<String>, Option<String>) {
+        match self {
+            Self::Disabled => ("disabled", None, None),
+            Self::Connecting => ("connecting", None, None),
+            Self::Ready { version } => ("ready", Some(version), None),
+            Self::Failed { message } => ("failed", None, Some(message)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,6 +66,7 @@ pub struct McpSessionState {
 
 /// Management view, without credentials, transport handles or registry access.
 pub struct McpSession {
+    connections: super::McpOwner,
     sets: Mutex<BTreeMap<String, Arc<ToolSourceSet>>>,
     state: StateCell<McpSessionState>,
     changed: watch::Sender<()>,
@@ -127,21 +144,33 @@ impl McpSessionPlugin {
     }
 }
 impl TypedPlugin for McpSessionPlugin {
-    type Deps = (Arc<McpService>, InSession<SessionConfig>);
+    type Deps = (
+        Arc<McpService>,
+        InSession<SessionConfig>,
+        InSession<SessionLoader>,
+        InSession<SessionLifecycle>,
+    );
     fn name(&self) -> &str {
         "McpSession"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (directory, InSession(config)): Self::Deps,
+        (directory, InSession(config), InSession(loader), InSession(session)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let project = directory.settings.project_root(Path::new(&config.cwd));
             // Subscribe before any file reads, including the first discovery.
             let settings = directory.settings.subscribe();
+            let applied = directory.publication.applied();
             let stopped = ctx.cancellation_token();
             let owner = Arc::new(McpSession {
+                connections: super::McpOwner::in_session(
+                    ctx.clone(),
+                    loader,
+                    self.scope,
+                    (*session).clone(),
+                ),
                 sets: Mutex::default(),
                 state: StateCell::new(McpSessionState::default()),
                 changed: watch::Sender::new(()),
@@ -152,6 +181,7 @@ impl TypedPlugin for McpSessionPlugin {
             let tasks = TaskTracker::new();
             let cleanup = owner.clone();
             let drain = tasks.clone();
+            let publication = directory.publication.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
@@ -163,6 +193,10 @@ impl TypedPlugin for McpSessionPlugin {
                             ..Default::default()
                         });
                         cleanup.changed.send_replace(());
+                        // Wake eligibility bookkeeping even when stale bindings
+                        // keep every lease alive. Never await the coordinator:
+                        // Session tree disposal already owns these instances.
+                        publication.refresh();
                         Ok(())
                     })
                 }))
@@ -173,10 +207,22 @@ impl TypedPlugin for McpSessionPlugin {
                 Arc::new(SessionToolSource(Arc::new(Sources(owner.clone())))),
             )?;
             // No network await in apply, and all owned resources have a disposer.
+            // Discovery creates Session-owned instances and may start servers,
+            // so it waits for publication; an unpublished Session never starts it,
+            // and it ends when the Session starts closing.
             let workers = tasks.clone();
-            tasks.spawn(reconcile(
-                directory, owner, project, settings, refresh, workers,
-            ));
+            tasks.spawn(async move {
+                tokio::select! {
+                    _ = owner.stopped.cancelled() => return,
+                    published = session.activated() => if !published { return },
+                }
+                let changes = Changes {
+                    settings,
+                    applied,
+                    refresh,
+                };
+                reconcile(directory, owner, project, &session, changes, workers).await
+            });
             Ok(Effect::Done)
         })
     }
@@ -187,36 +233,52 @@ impl Capability for McpSessionPlugin {
     }
 }
 
+/// What makes a Session re-read its selection: a settings write, a change
+/// the publisher applied (including external file edits), or a refresh.
+struct Changes {
+    settings: watch::Receiver<u64>,
+    applied: watch::Receiver<BTreeMap<crate::settings::SettingsScope, super::McpApplication>>,
+    refresh: watch::Receiver<()>,
+}
+
 async fn reconcile(
     directory: Arc<McpService>,
     owner: Arc<McpSession>,
     project: Option<usize>,
-    mut settings: watch::Receiver<u64>,
-    mut refresh: watch::Receiver<()>,
+    session: &SessionLifecycle,
+    mut changes: Changes,
     tasks: TaskTracker,
 ) {
     let mut active: BTreeMap<String, (McpServerEntry, CancellationToken)> = BTreeMap::new();
     let mut force = false;
+    let closing = session.closing();
+    tokio::pin!(closing);
     loop {
         if owner.stopped.is_cancelled() {
             break;
         }
-        match directory.catalog(project, &owner.stopped).await {
+        let catalog = tokio::select! {
+            biased;
+            _ = &mut closing => break,
+            catalog = directory.catalog(project, &owner.stopped) => catalog,
+        };
+        match catalog {
             Ok(catalog) => {
                 owner.state.update(|state| state.catalog_error = None);
                 let entries = catalog.servers;
                 active.retain(|id, (entry, cancel)| {
+                    // A cancelled discovery ended with its entry withdrawn;
+                    // this read selects the entry again.
                     let keep = !force
+                        && !cancel.is_cancelled()
                         && entries.get(id).is_some_and(|next| {
-                            next.source == entry.source
-                                && next.configuration == entry.configuration
-                                && next.approval == entry.approval
+                            next.source == entry.source && next.configuration == entry.configuration
                         });
                     if !keep {
                         cancel.cancel();
                         // Keep a complete old set until a replacement is ready or
                         // fails. A deletion/disable, unlike refresh, withdraws now.
-                        if !entries.get(id).is_some_and(McpServerEntry::executable) {
+                        if !entries.get(id).is_some_and(McpServerEntry::enabled) {
                             owner.remove(id);
                         }
                     }
@@ -227,7 +289,7 @@ async fn reconcile(
                         continue;
                     }
                     let cancel = owner.stopped.child_token();
-                    if entry.executable() {
+                    if entry.enabled() {
                         owner.state.update(|state| {
                             state.servers.insert(id.clone(), McpSourceState::Connecting);
                         });
@@ -239,12 +301,7 @@ async fn reconcile(
                             cancel.clone(),
                         ));
                     } else {
-                        let state = if entry.enabled() {
-                            McpSourceState::ApprovalRequired
-                        } else {
-                            McpSourceState::Disabled
-                        };
-                        owner.publish(&id, None, state, &cancel);
+                        owner.publish(&id, None, McpSourceState::Disabled, &cancel);
                     }
                     active.insert(id, (entry, cancel));
                 }
@@ -259,9 +316,11 @@ async fn reconcile(
         }
         force = tokio::select! {
             biased;
+            _ = &mut closing => break,
             _ = owner.stopped.cancelled() => break,
-            result = refresh.changed() => { if result.is_err() { break; } true },
-            result = settings.changed() => { if result.is_err() { break; } false },
+            result = changes.refresh.changed() => { if result.is_err() { break; } true },
+            result = changes.settings.changed() => { if result.is_err() { break; } false },
+            result = changes.applied.changed() => { if result.is_err() { break; } false },
         };
     }
     for (_, (_, cancel)) in active {
@@ -276,8 +335,10 @@ async fn discover(
     id: String,
     cancel: CancellationToken,
 ) {
+    let mut lease = None;
     let result = async {
-        let connection = directory.server(project, id.clone(), &cancel).await?;
+        let connection = directory.server(owner.connections.clone(), project, id.clone(), &cancel).await?;
+        lease = Some(connection.clone());
         let mut changed = connection.tool_changes();
         let mut state = connection.subscribe();
         let mut previous: Option<Vec<McpTool>> = None;
@@ -308,15 +369,25 @@ async fn discover(
             }
         }
     }.await;
-    if let Err(error) = result {
-        owner.publish(
+    // A generation retired because its entry was disabled or removed, even
+    // while the source is unreadable, reports the entry as disabled. The
+    // discovery then marks itself ended, so the next read selects the entry
+    // again, for example once it is re-enabled.
+    let withdrawn = lease.take().is_some_and(|lease| lease.withdrawn());
+    match result {
+        Ok(()) => {}
+        Err(error) if withdrawn || matches!(error, McpError::Disabled) => {
+            owner.publish(&id, None, McpSourceState::Disabled, &cancel);
+            cancel.cancel();
+        }
+        Err(error) => owner.publish(
             &id,
             None,
             McpSourceState::Failed {
                 message: error.to_string(),
             },
             &cancel,
-        );
+        ),
     }
 }
 
