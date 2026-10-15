@@ -2,7 +2,7 @@
 //! each call and does not depend on it, so an inactive or reloading provider
 //! affects only its own namespace. Accepted calls belong to their provider.
 use crate::protocol::RpcError;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Snapshot, TypeKey};
 use rutis_loader::{EntryStatus, Loader};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -204,12 +204,22 @@ fn unknown() -> RpcError {
     RpcError::app(-32601, "unknown_method", "Unknown method")
 }
 
+/// Unlike `service_reloading`, a retry fails the same way until the owner is
+/// fixed or restarted.
+fn unavailable() -> RpcError {
+    RpcError::app(
+        -32000,
+        "service_unavailable",
+        "Service is unavailable until it is fixed or restarted",
+    )
+}
+
 /// The management namespaces assembly configures, each with the loader row
 /// of the owner that provides it. Rpc reaches a namespace's provider by key on
-/// each call and reads that row's status only to tell an owner between
-/// generations from one that serves nothing, so it depends on no owner
-/// (methods contract §3.2). Adding an owner adds its pair where its row is
-/// registered.
+/// each call and reads that row's status only when none is active, to tell a
+/// reloading owner from a failed one and from one that serves nothing, so it
+/// depends on no owner (methods contract §3.2). Adding an owner adds its pair
+/// where its row is registered.
 pub(crate) struct Owners {
     loader: Loader,
     /// Longest first: a name belongs to the longest namespace containing it.
@@ -248,12 +258,36 @@ impl Owners {
         let (namespace, row) = self.owner(&method).ok_or_else(unknown)?;
         let provider = match provider(ctx, namespace) {
             Some(provider) => provider,
-            None => match self.status(row) {
-                Status::Changing => return Err(RpcError::reloading()),
-                // Active between the lookup and the status read.
-                Status::Active => provider(ctx, namespace).ok_or_else(unknown)?,
-                Status::Unavailable => return Err(unknown()),
-            },
+            // No active provider: the owner row's state answers (methods
+            // contract §3.2). Each known state is named, and a new
+            // `FiberState` does not compile until it is placed.
+            None => match self.loader.get(row).map(|entry| entry.status) {
+                // No enabled provider.
+                None | Some(EntryStatus::Disabled) => Err(unknown()),
+                // Not started yet, or between generations while the loader
+                // replaces its fiber. An owner that disposed itself also ends
+                // here: the process loader cannot disable its row (#124).
+                Some(EntryStatus::Inactive) => Err(RpcError::reloading()),
+                Some(EntryStatus::Running(Snapshot { state, .. })) => match state {
+                    // Waiting for its dependencies, applying, or unloading
+                    // between generations. A failed dependency keeps it
+                    // Pending until the dependency is fixed (#124).
+                    FiberState::Pending | FiberState::Loading | FiberState::Unloading => {
+                        Err(RpcError::reloading())
+                    }
+                    // Active between the lookup and the status read.
+                    FiberState::Active => provider(ctx, namespace).ok_or_else(unknown),
+                    // Its apply failed, or it was removed and cannot restart.
+                    FiberState::Failed | FiberState::Disposed => Err(unavailable()),
+                },
+                // The row cannot run as configured; or a copy inside an
+                // instance disposed itself and waits for an explicit restart
+                // (`get` reads the row itself, so it never reports this).
+                Some(EntryStatus::Unresolved(_) | EntryStatus::Stopped) => Err(unavailable()),
+                // `EntryStatus` is non-exhaustive. A state added later stops
+                // the client instead of letting it retry without end.
+                Some(_) => Err(unavailable()),
+            }?,
         };
         provider.accept(method, params, entry_stopping)
     }
@@ -280,26 +314,6 @@ impl Owners {
         names.sort();
         names
     }
-
-    /// The owner row's state (methods contract §3.2): an enabled row that is
-    /// not active (Pending, Failed, or between generations while it reloads)
-    /// answers the retryable `service_reloading`; a disabled or absent row
-    /// means no enabled provider.
-    fn status(&self, row: &str) -> Status {
-        match self.loader.get(row).map(|entry| entry.status) {
-            None | Some(EntryStatus::Disabled) => Status::Unavailable,
-            Some(EntryStatus::Running(snapshot)) if snapshot.state == FiberState::Active => {
-                Status::Active
-            }
-            Some(_) => Status::Changing,
-        }
-    }
-}
-
-enum Status {
-    Active,
-    Changing,
-    Unavailable,
 }
 
 fn provider(ctx: &Ctx, namespace: &str) -> Option<Arc<ManagementMethods>> {
