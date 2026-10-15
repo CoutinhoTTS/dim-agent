@@ -38,7 +38,6 @@ impl TypedPlugin for Owner {
                     MethodDecl::management("fixture.wait", false, Interruption::Report),
                     MethodDecl::management("fixture.read", false, Interruption::Drain),
                 ],
-                vec![],
                 Arc::new(move |method, _, cancel| {
                     let state = state.clone();
                     Box::pin(async move {
@@ -193,7 +192,6 @@ async fn namespace_validation_and_nested_ownership_are_order_independent() {
                     false,
                     Interruption::Drain
                 )],
-                vec![],
                 handler.clone()
             )
             .is_err()
@@ -207,7 +205,6 @@ async fn namespace_validation_and_nested_ownership_are_order_independent() {
             false,
             Interruption::Drain,
         )],
-        vec![],
         handler.clone(),
     )
     .unwrap();
@@ -219,33 +216,7 @@ async fn namespace_validation_and_nested_ownership_are_order_independent() {
             false,
             Interruption::Drain,
         )],
-        vec![],
         handler.clone(),
-    )
-    .unwrap();
-    // A parent's notification inside a nested namespace is captured the same way.
-    let notifying = ManagementMethods::provide(
-        &root,
-        "notifying",
-        vec![MethodDecl::management(
-            "notifying.read",
-            false,
-            Interruption::Drain,
-        )],
-        vec!["notifying.nested.changed".into()],
-        handler.clone(),
-    )
-    .unwrap();
-    let nested = ManagementMethods::provide(
-        &root,
-        "notifying.nested",
-        vec![MethodDecl::management(
-            "notifying.nested.read",
-            false,
-            Interruption::Drain,
-        )],
-        vec![],
-        handler,
     )
     .unwrap();
     for owners in [
@@ -254,14 +225,6 @@ async fn namespace_validation_and_nested_ownership_are_order_independent() {
             ("fixture.nested".into(), child.clone()),
         ],
         vec![("fixture.nested".into(), child), ("fixture".into(), parent)],
-        vec![
-            ("notifying".into(), notifying.clone()),
-            ("notifying.nested".into(), nested.clone()),
-        ],
-        vec![
-            ("notifying.nested".into(), nested),
-            ("notifying".into(), notifying),
-        ],
     ] {
         assert!(MethodTable::new(Contributions(owners)).is_err());
     }

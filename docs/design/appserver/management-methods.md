@@ -41,9 +41,8 @@ Session/branch instance (`Some(instance)`). A listed but missing provider gates
 the collector. Namespace and method validation rejects duplicates, invalid names,
 built-in method names and the `hello`, `daemon`, `agent`, `approval` and
 `session` roots: management methods are about the host, so contributed methods
-and notifications cannot impersonate Session traffic. It also rejects nested
-ownership that would capture another contributor's declared method or
-notification. Valid nested namespaces such as `account.codex` remain independent
+cannot impersonate Session traffic. It also rejects nested ownership that would
+capture another contributor's declared method. Valid nested namespaces such as `account.codex` remain independent
 from the parent `account` namespace.
 
 ## Dispatch and lifecycle
@@ -55,8 +54,8 @@ non-local transport with `local_transport_required`, as before contributions
 and unknown names or methods return `unknown_method`.
 The proposed `ConnectionEntry {name, deviceId}` and paired-device routing remain
 RemoteGateway work; its connections must never be served management methods.
-`hello.features` snapshots the collected methods and declared notifications
-from the same Rpc load as the protocol instance. The withdrawn
+`hello.features` snapshots the collected methods from the same Rpc load as the
+protocol instance. The withdrawn
 `management.methods` endpoint is not provided. Existing Session and daemon
 methods keep their built-in contracts.
 
@@ -85,13 +84,12 @@ user-local business document; see ADR 004.
 
 ## Notifications
 
-Owners declare notification names and publish serialized parameters through
-their contribution. Rpc follows those channels for its current load, forwarding
-only to local v3 connections of the current protocol instance after hello.
-Pointer identity fences delivery from an old Rpc load. Settings source watches
-invalidate business consumers after successful persistence; they are not loader
-events or a `configuration.changed` management notification. Persistence does not
-certify runtime adoption or generation settlement.
+Management methods have no notification channel. Connection-bound notifications
+belong to the contract's `callChannel.notify` ([A.2](../contracts/session-boundary.md#a2-call-channel)),
+which is not implemented. Settings source watches invalidate business consumers
+after successful persistence; they are not loader events or management
+notifications. Persistence does not certify runtime adoption or generation
+settlement.
 
 ## Limits and verification
 
@@ -115,6 +113,6 @@ Transport flows cover actual owner methods, hello features, owner/Rpc reloads,
 local/remote and protocol-version boundaries, business source CAS, persistence
 failures and invalidation. A rutis contribution flow verifies reload propagation,
 Report interruption, Drain completion after the unload signal and replacement
-admission. Namespace validation covers reserved roots and nested method and
-notification collisions in either collection order. Existing tool/prompt contribution flows protect instance
+admission. Namespace validation covers reserved roots and nested method
+collisions in either collection order. Existing tool/prompt contribution flows protect instance
 scoping while the shared collector also supports process services.

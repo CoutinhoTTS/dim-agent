@@ -31,7 +31,6 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<GrokOAuthService>) -> Result<(), Cor
             )
         })
         .collect(),
-        vec![],
         Arc::new(move |method, value, stopping| {
             let oauth = oauth.clone();
             Box::pin(async move {

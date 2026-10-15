@@ -211,7 +211,6 @@ impl TypedPlugin for SkillsCatalogPlugin {
                         MethodDecl::management(name, name != "skills.catalog", Interruption::Report)
                     })
                     .collect(),
-                vec![],
                 Arc::new(move |method, value, _stopping| {
                     let catalog = catalog.clone();
                     Box::pin(async move {

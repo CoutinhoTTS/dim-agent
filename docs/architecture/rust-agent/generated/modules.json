@@ -1123,8 +1123,7 @@
       "file": "crates/dim-app-server/src/codex_oauth/management.rs",
       "unexpandedMacros": [
         "matches",
-        "unreachable",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -1208,8 +1207,7 @@
       "file": "crates/dim-app-server/src/grok_oauth/management.rs",
       "unexpandedMacros": [
         "matches",
-        "unreachable",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -1241,8 +1239,7 @@
       "file": "crates/dim-app-server/src/managed_provider/management.rs",
       "unexpandedMacros": [
         "matches",
-        "unreachable",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -1272,8 +1269,7 @@
       "file": "crates/dim-app-server/src/mcp/management.rs",
       "unexpandedMacros": [
         "serde_json::json",
-        "unreachable",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -1456,8 +1452,7 @@
       "file": "crates/dim-app-server/src/provider/management.rs",
       "unexpandedMacros": [
         "matches",
-        "unreachable",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -1524,8 +1519,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/skills_management.rs",
       "unexpandedMacros": [
-        "unreachable",
-        "vec"
+        "unreachable"
       ]
     },
     {
@@ -10063,7 +10057,6 @@
         "path Create",
         "path CreateResult",
         "path ModelUpdateResult",
-        "path Outbound::ManagementNotice",
         "path Outbound::result",
         "path PermissionResult",
         "path PingResult",

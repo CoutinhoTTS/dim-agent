@@ -40,7 +40,6 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<OpenAICodexOAuthService>) -> Result<
             )
         })
         .collect(),
-        vec![],
         Arc::new(move |method, value, stopping| {
             let oauth = oauth.clone();
             Box::pin(async move {

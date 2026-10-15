@@ -102,7 +102,6 @@ pub(super) fn provide(ctx: &Ctx, provider: Arc<ProviderService>) -> Result<(), C
             )
         })
         .collect(),
-        vec![],
         Arc::new(move |method, value, stopping| {
             let provider = provider.clone();
             Box::pin(async move {

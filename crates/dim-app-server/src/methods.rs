@@ -58,15 +58,7 @@ impl MethodDecl {
 pub struct ManagementMethods {
     namespace: String,
     declarations: Vec<MethodDecl>,
-    notifications: Vec<String>,
     handler: Handler,
-    notices: tokio::sync::broadcast::Sender<ManagementNotice>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ManagementNotice {
-    pub method: String,
-    pub params: Value,
 }
 
 impl ManagementMethods {
@@ -74,13 +66,12 @@ impl ManagementMethods {
         ctx: &Ctx,
         namespace: &str,
         declarations: Vec<MethodDecl>,
-        notifications: Vec<String>,
         handler: Handler,
     ) -> Result<Arc<Self>, CordisError> {
         let mut unique = std::collections::HashSet::new();
         // Management methods are about the host, never a Session. The `session`
         // root belongs to built-ins and Session-scoped methods, so contributed
-        // methods and notifications cannot impersonate Session traffic.
+        // methods cannot impersonate Session traffic.
         if !valid_name(namespace)
             || ["hello", "daemon", "agent", "approval", "session"]
                 .iter()
@@ -102,9 +93,6 @@ impl ManagementMethods {
                     || crate::protocol::is_builtin_method(&decl.name)
                     || !unique.insert(&decl.name)
             })
-            || notifications
-                .iter()
-                .any(|name| !valid_name(name) || !within(name, namespace))
         {
             return Err(CordisError::PluginFailed(
                 "Invalid management contribution".into(),
@@ -113,22 +101,10 @@ impl ManagementMethods {
         let service = Arc::new(Self {
             namespace: namespace.into(),
             declarations,
-            notifications,
             handler,
-            notices: tokio::sync::broadcast::channel(64).0,
         });
         ctx.provide_as(TypeKey::keyed_dynamic::<Self>(namespace), service.clone())?;
         Ok(service)
-    }
-
-    /// Publish an owner-declared notification; undeclared names are ignored.
-    pub fn notify(&self, method: &str, params: Value) {
-        if self.notifications.iter().any(|declared| declared == method) {
-            let _ = self.notices.send(ManagementNotice {
-                method: method.into(),
-                params,
-            });
-        }
     }
 }
 
@@ -148,16 +124,12 @@ impl MethodTable {
             }
         }
         // A nested namespace may coexist with its parent, but must never capture
-        // a method or notification that the parent declares, in either order.
+        // a method that the parent declares, in either assembly order.
         for owner in table.values() {
-            let names = owner
-                .declarations
-                .iter()
-                .map(|decl| &decl.name)
-                .chain(&owner.notifications);
-            for name in names {
+            for declaration in &owner.declarations {
                 if table.values().any(|other| {
-                    other.namespace.len() > owner.namespace.len() && within(name, &other.namespace)
+                    other.namespace.len() > owner.namespace.len()
+                        && within(&declaration.name, &other.namespace)
                 }) {
                     return Err(CordisError::PluginFailed(
                         "Overlapping management contributions".into(),
@@ -177,23 +149,6 @@ impl MethodTable {
             .collect();
         names.sort();
         names
-    }
-
-    pub fn notification_names(&self) -> Vec<String> {
-        self.owners
-            .values()
-            .flat_map(|owner| owner.notifications.iter().cloned())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
-    pub fn subscriptions(&self) -> Vec<tokio::sync::broadcast::Receiver<ManagementNotice>> {
-        self.owners
-            .values()
-            .filter(|owner| !owner.notifications.is_empty())
-            .map(|owner| owner.notices.subscribe())
-            .collect()
     }
 
     /// Called under ConnectionHub's Rpc admission lock. Its disposer removes

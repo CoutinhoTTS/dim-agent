@@ -130,7 +130,7 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |
 | `ConnectionPlugin` | Connection index, admission limits and transport tasks | `ConnectionHub` | `ServerControl` |
-| `RpcPlugin` | Built-in and contributed commands, accepted task drainage and local management notification delivery | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`, `Contributions<ManagementMethods>`; product profile also uses Provider for model selection |
+| `RpcPlugin` | Built-in and contributed commands and accepted task drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`, `Contributions<ManagementMethods>`; product profile also uses Provider for model selection |
 | Management contributions | Owner-specific declarations, wire validation and business calls, provided by the business plugin itself | Named `ManagementMethods` services; structural reload propagates to Rpc | Each owner's existing business dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 

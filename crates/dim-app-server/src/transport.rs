@@ -668,9 +668,7 @@ async fn run_connection(
                             .instance
                             .set(instance.clone())
                             .expect("first handshake");
-                        let mut methods = rpc.methods.methods();
-                        methods.extend(rpc.methods.notification_names());
-                        (instance, methods)
+                        (instance, rpc.methods.methods())
                     });
                     let (instance_id, methods) = match instance {
                         Ok(instance) => instance,

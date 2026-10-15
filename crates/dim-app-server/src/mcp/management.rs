@@ -145,7 +145,6 @@ pub(super) fn provide(
         .into_iter()
         .map(|name| MethodDecl::management(name, name != "mcp.catalog", Interruption::Report))
         .collect(),
-        vec![],
         Arc::new(move |method, value, stopping| {
             let directory = directory.clone();
             let settings = settings.clone();

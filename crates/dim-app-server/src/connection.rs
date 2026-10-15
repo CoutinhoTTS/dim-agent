@@ -1250,36 +1250,6 @@ impl TypedPlugin for RpcPlugin {
                     })
                 }))
             })?;
-            for mut notices in registered.methods.subscriptions() {
-                let rpc = registered.clone();
-                let delivery = handler.clone();
-                registered.commands.spawn(async move {
-                    loop {
-                        let notice = tokio::select! {
-                            biased;
-                            _ = rpc.unloading.cancelled() => break,
-                            notice = notices.recv() => match notice {
-                                Ok(notice) => notice,
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(_) => break,
-                            },
-                        };
-                        let _ = delivery.with_rpc(|current| {
-                            if !Arc::ptr_eq(current, &rpc) { return; }
-                            for connection in delivery.connections.lock().expect("connection index")
-                                .values().filter_map(Weak::upgrade) {
-                                if connection.local && connection.version.get() == Some(&3)
-                                    && connection.instance.get().map(String::as_str) == Some(rpc.index.server_instance_id())
-                                    && !connection.closed.is_cancelled() {
-                                    let _ = connection.sender.send(Outbound::ManagementNotice {
-                                        jsonrpc: "2.0", method: notice.method.clone(), params: notice.params.clone(),
-                                    }, false);
-                                }
-                            }
-                        });
-                    }
-                });
-            }
             // Registered only after its cleanup is owned by this generation.
             handler.register(registered);
             Ok(Effect::Done)

@@ -722,11 +722,6 @@ pub enum Notification {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum Outbound {
-    ManagementNotice {
-        jsonrpc: &'static str,
-        method: String,
-        params: Value,
-    },
     Success {
         jsonrpc: &'static str,
         id: RequestId,
