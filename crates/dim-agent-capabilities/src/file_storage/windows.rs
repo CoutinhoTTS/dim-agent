@@ -1,7 +1,6 @@
 //! Handle-relative Windows filesystem operations. No pathname fallback.
 use super::*;
 use std::{
-    fs::TryLockError,
     mem::{offset_of, size_of},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
@@ -351,19 +350,15 @@ pub(super) fn lock(
             null_mut(),
         )
     };
-    let alias_lock = key(name)?;
-    alias_lock.try_lock().map_err(|error| match error {
-        TryLockError::WouldBlock => FileStorageError::Locked,
-        TryLockError::Error(error) => FileStorageError::Io(error),
-    })?;
-    if same_identity(&alias_lock, &key(OsStr::new("auth.json.lock"))?)? {
+    let alias_lock = HeldKey::lock(key(name)?)?;
+    if same_identity(alias_lock.file(), &key(OsStr::new("auth.json.lock"))?)? {
         return Err(FileStorageError::InvalidPath("reserved storage lock"));
     }
-    if same_identity(&alias_lock, &key(OsStr::new("auth.json"))?)? {
+    if same_identity(alias_lock.file(), &key(OsStr::new("auth.json"))?)? {
         return account_lock(parent, alias_lock, storage);
     }
     Ok(PhysicalLock {
-        file: alias_lock,
+        file: alias_lock.into_file(),
         _alias_lock: None,
         account_parent: None,
         owner: None,

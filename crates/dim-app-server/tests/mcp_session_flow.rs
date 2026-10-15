@@ -18,7 +18,7 @@ use dim_agent_runtime::*;
 use dim_agent_types::*;
 use dim_app_server::{
     mcp::{self, McpChange, McpPlugin, McpService, McpSession, McpSourceState},
-    settings::{SettingsPlugin, SettingsService, SettingsSource},
+    settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::Ctx;
 use serde_json::{Value, json};
@@ -125,8 +125,13 @@ async fn events(State(remote): State<Arc<Remote>>) -> impl IntoResponse {
 }
 
 enum Action {
-    Call { pause: bool, name: Option<String> },
+    Call {
+        pause: bool,
+        name: Option<String>,
+    },
     Text,
+    /// Ignores cancellation until released, so a Session close waits for it.
+    Hold,
 }
 #[derive(Default)]
 struct Model {
@@ -192,6 +197,14 @@ impl ModelDriver for Model {
                     vec![ModelChunk::Text("done".into()), ModelChunk::TextEnd],
                     ModelStopReason::EndTurn,
                 ),
+                Action::Hold => {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    (
+                        vec![ModelChunk::Text("done".into()), ModelChunk::TextEnd],
+                        ModelStopReason::EndTurn,
+                    )
+                }
             };
             let mut stream = vec![Ok(ModelChunk::MessageStart {
                 message_id: "message".into(),
@@ -222,6 +235,10 @@ struct Env {
 mod mcp_host;
 impl Env {
     async fn new() -> Self {
+        Self::with(|_, _| {}).await
+    }
+    /// `configure` adds Session capabilities after the MCP Session part.
+    async fn with(configure: impl FnOnce(&mut AgentBuilder, &Arc<Remote>)) -> Self {
         let remote = Remote::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -285,6 +302,7 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
+        configure(&mut builder, &remote);
         let agent = builder.build_in(&root);
         Self {
             root,
@@ -317,10 +335,10 @@ impl Env {
             .await
             .unwrap()
     }
-    async fn update(&self, source: SettingsSource, id: &str, change: McpChange) {
+    async fn update(&self, source: SettingsScope, id: &str, change: McpChange) {
         let cancel = CancellationToken::new();
         let catalog = self.directory.catalog(Some(1), &cancel).await.unwrap();
-        let version = if source == SettingsSource::UserMcp {
+        let version = if source == SettingsScope::User {
             catalog.user_revision
         } else {
             catalog.project_revision.unwrap()
@@ -351,6 +369,41 @@ impl Env {
         std::fs::remove_dir_all(self.home).unwrap();
     }
 }
+/// Fails Session assembly after McpSession applied, once discovery started
+/// during assembly would have reached the server.
+struct FailAfterMcp {
+    scope: SessionScope,
+    remote: Arc<Remote>,
+}
+impl rutis::TypedPlugin for FailAfterMcp {
+    type Deps = InSession<McpSession>;
+    fn name(&self) -> &str {
+        "FailAfterMcp"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let _ = tokio::time::timeout(Duration::from_millis(500), async {
+                while self.remote.initializes.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            Err(rutis::CordisError::PluginFailed(
+                "assembly failed after McpSession".into(),
+            ))
+        })
+    }
+}
+impl Capability for FailAfterMcp {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
 fn configuration(url: &str, generation: &str) -> Value {
     json!({"type":"http","url":url,"headers":{"X-Generation":generation}})
 }
@@ -422,66 +475,68 @@ async fn results(session: &Session) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
-async fn project_discovery_does_not_connect_without_execution_approval() {
-    let env = Env::new().await;
-    env.update(
-        SettingsSource::ProjectMcp(1),
-        "docs",
-        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
-    )
-    .await;
-    let session = env.session(true, PermissionPreset::FullAccess).await;
+async fn state(session: &Session, expected: McpSourceState) {
     let mut state = session.session_service::<McpSession>().unwrap().subscribe();
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if state
-                .borrow_and_update()
-                .servers
-                .get("docs")
-                .is_some_and(|s| !matches!(s, McpSourceState::Connecting))
-            {
-                break;
-            }
+        while state.borrow_and_update().servers.get("docs") != Some(&expected) {
             state.changed().await.unwrap();
         }
     })
     .await
     .unwrap();
-    // This assertion also runs on the pre-fix source, where discovery connects
-    // before any model tool call and FullAccess offers no execution boundary.
-    let initializes = env.remote.initializes.load(Ordering::SeqCst);
-    env.close().await;
-    assert_eq!(
-        initializes, 0,
-        "unapproved project discovery made an external request"
-    );
 }
 
 #[tokio::test]
-async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_request() {
+async fn project_discovery_does_not_connect_until_the_user_enables_it() {
     let env = Env::new().await;
-    let cancel = CancellationToken::new();
+    // The project file asks to be enabled; ADR 003 D3 ignores that.
+    let mut project = configuration(&env.url, "project");
+    project["enabled"] = json!(true);
     env.update(
-        SettingsSource::ProjectMcp(1),
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(project).unwrap()),
+    )
+    .await;
+    let file = env.home.join("project/.mcp.json");
+    let written = std::fs::read(&file).unwrap();
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    state(&session, McpSourceState::Disabled).await;
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        0,
+        "opening a workspace ran its MCP server"
+    );
+
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    ready(&session).await;
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
+    // The choice is the user's, recorded outside the shared project file.
+    assert_eq!(std::fs::read(&file).unwrap(), written);
+    env.close().await;
+}
+
+#[tokio::test]
+async fn enabled_project_entry_serves_tools_and_disabling_stops_it_in_every_session() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
         "docs",
         McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
     )
     .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
     let session = env.session(true, PermissionPreset::FullAccess).await;
-    let token = env
-        .directory
-        .catalog(Some(1), &cancel)
-        .await
-        .unwrap()
-        .servers["docs"]
-        .approval_token
-        .clone()
-        .unwrap();
-    env.directory
-        .approve(1, "docs".into(), token, &cancel)
-        .await
-        .unwrap();
     ready(&session).await;
     env.turn(
         &session,
@@ -498,7 +553,9 @@ async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_r
             .unwrap()
             .contains("project:8")
     );
-    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
+    let other = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&other).await;
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
 
     *env.model.actions.lock().unwrap() = VecDeque::from([
         Action::Call {
@@ -514,10 +571,21 @@ async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_r
     tokio::time::timeout(Duration::from_secs(5), env.model.entered.notified())
         .await
         .unwrap();
-    env.directory
-        .revoke(1, "docs".into(), &cancel)
-        .await
-        .unwrap();
+    // Disabling stops the server in both Sessions before it returns,
+    // including the connection that the paused request has already bound.
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(false),
+    )
+    .await;
+    assert_eq!(
+        env.remote.deletes.load(Ordering::SeqCst),
+        2,
+        "disabling returned before every Session's generation closed"
+    );
+    state(&other, McpSourceState::Disabled).await;
+    adopted(&other, None).await;
     env.model.release.notify_one();
     tokio::time::timeout(Duration::from_secs(5), session.idle("main"))
         .await
@@ -526,20 +594,50 @@ async fn project_approval_enables_tools_and_revocation_blocks_an_already_bound_r
     assert_eq!(
         env.remote.calls.lock().unwrap().len(),
         1,
-        "retained tool binding bypassed revocation"
+        "a disabled server received a call"
+    );
+    assert!(results(&session).await.last().unwrap().contains("isError"));
+    state(&session, McpSourceState::Disabled).await;
+    env.close().await;
+}
+
+#[tokio::test]
+async fn closing_one_session_drains_only_its_connections_with_retained_requests() {
+    let env = Env::new().await;
+    let first = env.session(false, PermissionPreset::FullAccess).await;
+    let second = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&first).await;
+    ready(&second).await;
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
+    env.turn(
+        &first,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    // Model keeps the request (and its tool binding) alive after Session close.
+    let retained = env.model.requests.lock().unwrap()[0].clone();
+    first.close().await.unwrap();
+    assert_eq!(env.remote.deletes.load(Ordering::SeqCst), 1);
+    assert!(first.session_service::<McpSession>().is_err());
+    env.turn(
+        &second,
+        Action::Call {
+            pause: false,
+            name: None,
+        },
+    )
+    .await;
+    assert!(results(&second).await.last().unwrap().contains("one:8"));
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        2,
+        "closing a sibling must not reconnect this Session"
     );
     assert_eq!(env.remote.deletes.load(Ordering::SeqCst), 1);
-    assert!(results(&session).await.last().unwrap().contains("isError"));
-    let mut state = session.session_service::<McpSession>().unwrap().subscribe();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while state.borrow_and_update().servers.get("docs")
-            != Some(&McpSourceState::ApprovalRequired)
-        {
-            state.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
+    drop(retained);
     env.close().await;
 }
 
@@ -572,7 +670,7 @@ async fn bound_model_request_keeps_old_connection_while_next_request_uses_replac
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }));
     env.update(
-        SettingsSource::UserMcp,
+        SettingsScope::User,
         "docs",
         McpChange::Put(serde_json::from_value(configuration(&env.url, "two")).unwrap()),
     )
@@ -624,7 +722,7 @@ async fn bound_model_request_keeps_old_connection_while_next_request_uses_replac
 async fn project_visibility_disable_refresh_failure_and_permission_use_real_sources() {
     let env = Env::new().await;
     env.update(
-        SettingsSource::ProjectMcp(1),
+        SettingsScope::Project(1),
         "docs",
         McpChange::Put(
             serde_json::from_value(json!({"type":"http","url":env.url,"enabled":false})).unwrap(),
@@ -646,13 +744,13 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
     })
     .await
     .unwrap();
-    env.update(SettingsSource::ProjectMcp(1), "docs", McpChange::Remove)
+    env.update(SettingsScope::Project(1), "docs", McpChange::Remove)
         .await;
     ready(&project).await;
     assert_eq!(
         env.remote.initializes.load(Ordering::SeqCst),
-        1,
-        "Sessions share the user connection"
+        2,
+        "Sessions own distinct user connections"
     );
     let denied = env.session(false, PermissionPreset::ReadOnly).await;
     ready(&denied).await;
@@ -675,12 +773,8 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
         .unwrap()[0]
         .name
         .clone();
-    env.update(
-        SettingsSource::UserMcp,
-        "docs",
-        McpChange::SetEnabled(false),
-    )
-    .await;
+    env.update(SettingsScope::User, "docs", McpChange::SetEnabled(false))
+        .await;
     adopted(&user, None).await;
     env.turn(
         &user,
@@ -707,7 +801,7 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
         &event.kind, EventKind::ModelOutputEnd(end)
         if matches!(&end.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("Tool was not offered"))
     )));
-    env.update(SettingsSource::UserMcp, "docs", McpChange::SetEnabled(true))
+    env.update(SettingsScope::User, "docs", McpChange::SetEnabled(true))
         .await;
     ready(&user).await;
     env.remote.invalid.store(true, Ordering::SeqCst);
@@ -807,7 +901,7 @@ async fn unreadable_catalog_preserves_adopted_tools_until_a_valid_update() {
             // a broken catalog does not keep a dead connection callable.
             env.directory
                 .disconnect(
-                    SettingsSource::UserMcp,
+                    SettingsScope::User,
                     "docs".into(),
                     &CancellationToken::new(),
                 )
@@ -850,11 +944,122 @@ async fn unreadable_catalog_preserves_adopted_tools_until_a_valid_update() {
 }
 
 #[tokio::test]
+async fn disabling_an_entry_whose_project_file_is_unreadable_withdraws_it() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    let record = env.home.join("mcp-projects.json");
+    let granted = std::fs::read(&record).unwrap();
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    let view = session.session_service::<McpSession>().unwrap();
+    ready(&session).await;
+
+    let file = env.home.join("project/.mcp.json");
+    let written = std::fs::read(&file).unwrap();
+    std::fs::write(&file, "{ invalid json").unwrap();
+    let mut changes = view.subscribe();
+    view.refresh().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while changes.borrow_and_update().catalog_error.is_none() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    ready(&session).await;
+    // The user's choice does not depend on the file: the running server
+    // stops before the call returns, and the Session reports it disabled.
+    env.directory
+        .update(
+            SettingsScope::Project(1),
+            "unreadable".into(),
+            "docs".into(),
+            McpChange::SetEnabled(false),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        env.remote.deletes.load(Ordering::SeqCst),
+        1,
+        "a disabled server kept running while its project file was unreadable"
+    );
+    state(&session, McpSourceState::Disabled).await;
+    adopted(&session, None).await;
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ invalid json");
+
+    // Another process enables it again; once the file is readable, the Session
+    // follows the publisher without its own refresh and connects again.
+    std::fs::write(&record, granted).unwrap();
+    std::fs::write(&file, written).unwrap();
+    env.directory
+        .catalog(Some(1), &CancellationToken::new())
+        .await
+        .unwrap();
+    ready(&session).await;
+    assert!(view.state().catalog_error.is_none());
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_closing_session_starts_no_connection() {
+    let env = Env::new().await;
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "project")).unwrap()),
+    )
+    .await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    state(&session, McpSourceState::Disabled).await;
+    // A held turn keeps the close waiting for its branch, with every Session
+    // capability still loaded.
+    *env.model.actions.lock().unwrap() = VecDeque::from([Action::Hold]);
+    session
+        .submit("hold".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), env.model.entered.notified())
+        .await
+        .unwrap();
+    let closing = session.close();
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::SetEnabled(true),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        0,
+        "a closing Session connected an MCP server"
+    );
+    env.model.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), closing)
+        .await
+        .unwrap()
+        .unwrap();
+    env.close().await;
+}
+
+#[tokio::test]
 async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_without_replay() {
     let env = Env::new().await;
     env.remote.hold.store(true, Ordering::SeqCst);
     env.update(
-        SettingsSource::UserMcp,
+        SettingsScope::User,
         "slow",
         McpChange::Put(serde_json::from_value(configuration(&env.url, "slow")).unwrap()),
     )
@@ -882,12 +1087,8 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     assert!(results(&session).await[0].contains("one:8"));
 
     // A completed list from a cancelled worker must not republish a disabled source.
-    env.update(
-        SettingsSource::UserMcp,
-        "slow",
-        McpChange::SetEnabled(false),
-    )
-    .await;
+    env.update(SettingsScope::User, "slow", McpChange::SetEnabled(false))
+        .await;
     let mut status = view.subscribe();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -946,7 +1147,7 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     let calls = env.remote.calls.lock().unwrap().len();
     env.directory
         .disconnect(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             "docs".into(),
             &CancellationToken::new(),
         )
@@ -969,5 +1170,75 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     )
     .await;
     assert_eq!(env.remote.calls.lock().unwrap().len(), calls + 1);
+    env.close().await;
+}
+
+#[tokio::test]
+async fn an_unpublished_session_never_starts_discovery() {
+    let env = Env::with(|builder, remote| {
+        let remote = remote.clone();
+        builder.session_plugin(move |scope| FailAfterMcp {
+            scope: *scope,
+            remote: remote.clone(),
+        });
+    })
+    .await;
+    let created = env
+        .agent
+        .create_session(SessionConfig {
+            cwd: env.home.join("other").to_string_lossy().into(),
+            tools: vec![],
+            ..Default::default()
+        })
+        .await;
+    let error = created.err().expect("assembly fails").to_string();
+    assert!(
+        error.contains("assembly failed after McpSession"),
+        "{error}"
+    );
+    // An enabled user server is eligible; only publication may start discovery.
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 0);
+    env.close().await;
+}
+
+#[tokio::test]
+async fn a_shadowed_user_server_closes_its_unused_connection() {
+    let env = Env::new().await;
+    let session = env.session(true, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    // The branch adopts the user tools, so a binding holds the connection.
+    env.turn(&session, Action::Text).await;
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
+    // A project entry shadows the user server even while disabled.
+    let mut shadow = configuration(&env.url, "project");
+    shadow["enabled"] = json!(false);
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(shadow).unwrap()),
+    )
+    .await;
+    let mut state = session.session_service::<McpSession>().unwrap().subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            state.borrow_and_update().servers.get("docs"),
+            Some(McpSourceState::Disabled)
+        ) {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // The next request adopts the tool set without it, releasing the binding;
+    // the user generation is still current but now unused, so it closes.
+    env.turn(&session, Action::Text).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while env.remote.deletes.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the unused user connection closes");
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
     env.close().await;
 }

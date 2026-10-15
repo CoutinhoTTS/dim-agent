@@ -364,7 +364,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | --- | --- |
 | 上下文 | 模型上下文只经由工具结果和输入；常驻规则经由提示词来源或带 key 的 raw 块 |
 | 配置 | 每项一个来源、一条写入路径。结构性条目（例如 `enabled`）位于 loader 行，只由 PluginManager 的结构性操作（安装、启用、禁用、更新）在 loader 可编辑层（#3）上修改；插件不写自己的结构性字段。每个插件的业务条目，包括用户编写的配置（例如 Scheduler 任务、保存的 Workflow 定义），通过 Settings 类型化操作写入该插件的 Settings 业务来源，按插件自己声明的 schema。运行记录位于 `pluginFiles`（扩展后）；项目目录中的工作流文件仍是项目文件（一种配置来源）。RemoteGateway 监听设置、Modality 的 OCR 组件路径和 ExternalAgent 桥接都是业务配置。凭据是引用，由 Settings 凭据解析器解析 |
-| 批准范围 | Approval 与 Permission 只管 agent 决策引起的动作（模型的工具调用）。按用户或项目配置运行、而不是由 agent 决定的命令（连接时启动的 MCP stdio 服务、Hook 命令、工作流文件、插件）不属于 agent 体系，由该配置自己负责：启用即运行，不需要批准。功能开关（启用、禁用）是普通配置，与批准无关；来自项目来源的条目默认关闭，只能由用户本机配置启用。没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；现有的 `mcp.approve`/`mcp.revoke` 在后续代码变更中删除（[附录 B.2](#b2-app-server-进程插件)） |
+| 批准范围 | Approval 与 Permission 只管 agent 决策引起的动作（模型的工具调用）。按用户或项目配置运行、而不是由 agent 决定的命令（连接时启动的 MCP stdio 服务、Hook 命令、工作流文件、插件）不属于 agent 体系，由该配置自己负责：启用即运行，不需要批准。功能开关（启用、禁用）是普通配置，与批准无关；来自项目来源的条目默认关闭，只能由用户本机配置启用。没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；原有的 `mcp.approve`/`mcp.revoke` 及其批准记录已删除（[附录 B.2](#b2-app-server-进程插件)） |
 | 安全设置 | 宿主安全设置从不进入 Timeline，回放和 fork 从不恢复或放宽它们。权限预设是 Timeline 事实（`permission/changed`），由子分支继承，fork 时随事实一起复制 |
 | 持久化 | 进程存储使用 `pluginFiles`（扩展后）：每插件根目录、UTF-8 与二进制原子替换、锁、格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）。Session 文件位于 SessionStore 之下 |
 | 协议 | Rpc 内建方法优先于贡献的方法 |
@@ -403,7 +403,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | P2 功能扩展 | Goal、Web、Scheduler、Workflow；ModelProvider `ModelCallScope`；Collaboration 成员审批作为输入送到 leader；Transport `EntryHost`；Mcp OAuth；生产环境压缩宿主 |
 | P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway、Modality；PluginManager；资源节点（按 `resourceNode` 在每次调用时查找服务） |
 
-ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每次 spawn 时读取）是独立工作，不阻塞任何阶段。删除现有 `mcp.approve`/`mcp.revoke` 方法及其批准记录的后续代码变更也是如此（§6.4 批准范围）。
+ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每次 spawn 时读取）是独立工作，不阻塞任何阶段。
 
 ## 9. 待对齐问题
 
@@ -519,7 +519,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Provider | 补充 | 按用途的策略，单一写入路径；`AuxiliaryModel` 服务（`complete`，用途为消费方拥有的 key）；按 Modality 类别的非对话连接；外部 Agent 连接类型；连接条目经 Provider 的类型化公共写操作写入 | SessionTitle、压缩、Collaboration、Modality、ExternalAgent |
 | Aimux / ModelHost | 补充 | 来自其他插件的 provider kind；某 kind 没有 provider 时，其请求在受理前失败 | ExternalAgent |
 | `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、ExternalAgent、Modality、RemoteGateway、PluginManager |
-| Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 在后续代码变更中删除，stdio 服务启用即启动（§6.4 批准范围） | Rpc 迁移 |
+| Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 已删除，服务启用即运行，项目条目默认关闭、只能由用户本机配置启用（§6.4 批准范围） | Rpc 迁移 |
 | ManagedProviders | 补充 | 套餐用量查询 | `/usage` |
 | Mcp | 补充 | HTTP/SSE OAuth；通过自己的类型化操作从 PluginManager 接收插件包中的 MCP 配置（#36） | MCP；PluginManager |
 | SkillsCatalog | 补充 | 通过自己的类型化操作从 PluginManager 接收插件包中的 Skill 根目录（#36） | PluginManager |

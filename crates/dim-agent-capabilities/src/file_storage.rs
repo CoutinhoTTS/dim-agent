@@ -17,7 +17,7 @@ use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
-    fs::{File, Permissions},
+    fs::{File, Permissions, TryLockError},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, Weak},
@@ -55,6 +55,10 @@ pub enum FileStorageError {
     },
     #[error("file lock cleanup: {0:?}")]
     Release(Vec<io::Error>),
+    /// The replacement is in place and visible, but syncing it failed, so it
+    /// may not survive a crash. It is not an unchanged file.
+    #[error("file replaced, but its durability could not be confirmed: {0}")]
+    Unsynced(#[source] io::Error),
 }
 
 /// A relative path bound to one authorized root and one service generation.
@@ -474,12 +478,14 @@ impl FileLease {
                 // may abandon rename or its durability result.
                 owner.check(&cancel)?;
                 native::replace(&temp, &temporary_directory, &temporary, &parent, &name)?;
-                native::sync_replacement(&temp, &temporary_directory, &parent)?;
-                Ok(())
+                native::sync_replacement(&temp, &temporary_directory, &parent)
+                    .map_err(FileStorageError::Unsynced)
             })();
             // On success rename consumed the temporary name. On failure before
             // rename it is still ours; after rename it no longer exists.
-            if result.is_err()
+            if result
+                .as_ref()
+                .is_err_and(|error| !matches!(error, FileStorageError::Unsynced(_)))
                 && let Err(cleanup) = native::remove(&temporary_directory, &temporary)
                 && cleanup.kind() != io::ErrorKind::NotFound
             {
@@ -586,9 +592,37 @@ impl Drop for PhysicalLock {
     }
 }
 
+/// A business lock key held while its PhysicalLock is built. Every early
+/// return unlocks it explicitly, as PhysicalLock's drop does: Windows may
+/// defer the implicit unlock after CloseHandle.
+struct HeldKey(Option<File>);
+impl HeldKey {
+    fn lock(file: File) -> Result<Self> {
+        file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => FileStorageError::Locked,
+            TryLockError::Error(error) => FileStorageError::Io(error),
+        })?;
+        Ok(Self(Some(file)))
+    }
+    fn file(&self) -> &File {
+        self.0.as_ref().expect("held lock key")
+    }
+    /// Hands the locked file to its PhysicalLock, which unlocks it.
+    fn into_file(mut self) -> File {
+        self.0.take().expect("held lock key")
+    }
+}
+impl Drop for HeldKey {
+    fn drop(&mut self) {
+        if let Some(file) = &self.0 {
+            let _ = file.unlock();
+        }
+    }
+}
+
 fn account_lock(
     parent: &File,
-    alias_lock: File,
+    alias_lock: HeldKey,
     storage: &Arc<FileStorage>,
 ) -> Result<PhysicalLock> {
     let account_parent = parent.try_clone()?;
@@ -598,7 +632,7 @@ fn account_lock(
             Ok(file) => {
                 let mut lock = PhysicalLock {
                     file,
-                    _alias_lock: Some(alias_lock),
+                    _alias_lock: Some(alias_lock.into_file()),
                     account_parent: Some(account_parent),
                     owner: None,
                     storage: Arc::downgrade(storage),
@@ -717,7 +751,6 @@ mod native {
     use super::*;
     use std::{
         ffi::{CString, OsStr},
-        fs::TryLockError,
         os::{
             fd::{AsRawFd, FromRawFd},
             unix::{
@@ -755,6 +788,23 @@ mod native {
     pub fn temporary_directory(parent: &File) -> io::Result<File> {
         Ok(directories(parent)?.1)
     }
+    fn lock_key(parent: &File, name: &OsStr) -> io::Result<File> {
+        // Concurrent nonexclusive creation can fail with ENOENT on macOS even
+        // when the winner created the key. Create once, then open that inode.
+        let file = match open(
+            parent,
+            name,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                open(parent, name, libc::O_RDWR, 0)?
+            }
+            Err(error) => return Err(error),
+        };
+        regular(file)
+    }
     pub fn lock(parent: &File, name: &OsStr, storage: &Arc<FileStorage>) -> Result<PhysicalLock> {
         // Reserve the fixed temp directory before opening any business lock key,
         // so filesystem-equivalent spellings cannot create a competing inode.
@@ -769,31 +819,17 @@ mod native {
         }
         // Raw names on the same volume share its case/Unicode equivalence. Hashes
         // or string folding cannot reproduce the filesystem's name identity.
-        let alias_lock = regular(open(&directory, name, libc::O_RDWR | libc::O_CREAT, 0o600)?)?;
-        alias_lock.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => FileStorageError::Locked,
-            TryLockError::Error(error) => FileStorageError::Io(error),
-        })?;
-        let marker_key = regular(open(
-            &directory,
-            OsStr::new("auth.json.lock"),
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?)?;
-        if same_inode(&alias_lock.metadata()?, &marker_key.metadata()?) {
+        let alias_lock = HeldKey::lock(lock_key(&directory, name)?)?;
+        let marker_key = lock_key(&directory, OsStr::new("auth.json.lock"))?;
+        if same_inode(&alias_lock.file().metadata()?, &marker_key.metadata()?) {
             return Err(FileStorageError::InvalidPath("reserved storage lock"));
         }
-        let auth_key = regular(open(
-            &directory,
-            OsStr::new("auth.json"),
-            libc::O_RDWR | libc::O_CREAT,
-            0o600,
-        )?)?;
-        if same_inode(&alias_lock.metadata()?, &auth_key.metadata()?) {
+        let auth_key = lock_key(&directory, OsStr::new("auth.json"))?;
+        if same_inode(&alias_lock.file().metadata()?, &auth_key.metadata()?) {
             return account_lock(parent, alias_lock, storage);
         }
         Ok(PhysicalLock {
-            file: alias_lock,
+            file: alias_lock.into_file(),
             _alias_lock: None,
             account_parent: None,
             owner: None,
