@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel` 在用途 key `session-title` 下生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（通用通知记录是对运行时的需求，见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（通用通知记录是对运行时的需求，见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 1. 结构
 
@@ -23,7 +23,7 @@ flowchart LR
   ST -->|"监听：main 上的 input/applied"| SB
   ST -->|"读取前缀至 N"| TT
   ST --> CFG
-  ST -->|"以用途 session-title 调用 complete"| AUX
+  ST -->|"complete(model, 文本)"| AUX
   ST -->|"带 revision 的 setTitle"| META
   META -->|"标题通知"| SB
   ST -->|"使用时读取"| Settings
@@ -34,7 +34,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | 其所在 Session 的 Session 广播、TimelineTree（`main` 的固定前缀）、`SessionConfig`；进程服务 SessionStore 标题元数据、Provider `AuxiliaryModel`、Settings 来源 `session-title` | `sessionMethods` key `session.rename`（在其 `provides` 中声明）；用途 key `session-title`；Settings 来源 `session-title`，字段 `enabled`、`maxLength` |
+| `SessionTitle` | Session | 其所在 Session 的 Session 广播、TimelineTree（`main` 的固定前缀）、`SessionConfig`；进程服务 SessionStore 标题元数据、Provider `AuxiliaryModel`、Settings 来源 `session-title` | `sessionMethods` key `session.rename`（在其 `provides` 中声明）；Settings 来源 `session-title`，字段 `enabled`、`maxLength`、`model` |
 
 每个依赖都位于 Session 作用域或外层进程作用域。多数是既有的类型化服务；SessionStore 标题元数据和标题通知是拟议的补充；Settings 来源已为 Rust 所有者提供，具名的 `settings` 服务尚未实现（S8b）（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)；形状见 A.2）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。SessionStore、Provider 或 Settings 重载会重载 SessionTitle，从而取消在途的生成；这是可接受的（[ADR 002 D3](../../adr/002-plugin-scope.md)）。业务配置变更从不触发重载（[D4](../../adr/002-plugin-scope.md)）。
 
@@ -50,10 +50,10 @@ flowchart TB
     MD["revision、标题文本、来源 auto 或 manual"]
   end
   CONF["SessionConfig：interactive、collaborationRole"]
-  CFG["session-title：enabled、maxLength"]
+  CFG["session-title：enabled、maxLength、model"]
   MEM["在途生成、失败次数（内存）"]:::new
   FUI -->|"仅文本"| MEM
-  CC -->|"继承提示"| MEM
+  CC -->|"Session 的模型"| MEM
   CONF --> MEM
   CFG --> MEM
   MEM -->|"setTitle，期望 revision"| MD
@@ -78,7 +78,7 @@ sequenceDiagram
   Note over ST: 交互式 leader，已启用，无在途生成
   ST->>Meta: metadata：无标题，revision r
   ST->>TL: prefix(main, 已发布到 N)：第一条被采用的操作者输入的文本
-  ST->>Aux: complete(session-title, text)
+  ST->>Aux: complete(model, text)
   Aux-->>ST: 标题文本
   ST->>Meta: setTitle(expected r, auto)
   Meta-->>SB: 标题通知
@@ -148,14 +148,13 @@ revision 检查就是复检：手动标题总是胜出。
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | 设置或清除手动标题 |
-| `session-title` | Provider 用途 key | 标题生成的模型策略；未配置时继承 |
-| `session-title` 来源：`enabled`、`maxLength` | 业务配置（Settings 来源） | 关闭生成；标题长度 |
+| `session-title` 来源：`enabled`、`maxLength`、`model` | 业务配置（Settings 来源） | 关闭生成；标题长度；生成标题用的模型（未设置：Session 的模型） |
 | `session.list`/`session.summaries` 中的 `title`、`titleSource` | 从 SessionStore 读取的 Rpc 协议字段 | 展示 |
 | 标题通知 `{sessionId, title, titleSource, revision}` | SessionStore 发出的 Session 广播通知（通用记录，§9；SessionStore 补充） | 已订阅的客户端实时更新标题 |
 
 ## 7. 安全
 
-第一条输入的文本会发送给为 `session-title` 选择的模型；在默认的继承策略下即该 Session 的 provider。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
+第一条输入的文本会发送给 `session-title` 来源中设置的模型；未设置时即该 Session 的模型。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
 
 ## 8. 规则检查
 
@@ -210,11 +209,11 @@ revision 检查就是复检：手动标题总是胜出。
 | SessionStore 元数据（补充） | `metadata` | 异步 | `{sessionId}` | `{revision, title?: {text, source: "auto" \| "manual"}}`；错误 `not_found`、`storage` |
 | SessionStore 元数据（补充） | `setTitle` | 异步 | `{sessionId, expectedRevision, title: {text, source} \| null}` | 新的 `revision`；错误 `conflict`、`not_found`、`storage`。提交后 SessionStore 发出标题通知 |
 | SessionStore（补充） | 标题通知 | Session 广播通知（通用记录，§9） | — | 在该 Session 的广播频道上发出 `{source: "SessionStore", kind: "title", data: {sessionId, title, titleSource, revision}}`；没有序号，不重放 |
-| Provider `AuxiliaryModel` | `complete` | 异步 | `{purpose: "session-title", inherit?: model selection, request: {system, user}}` | 文本；错误作为数据。继承提示是 SessionTitle 的假设（A1）。由取消请求或丢弃调用取消 |
+| Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [用户文本], maxOutputTokens}}`（[设计](../appserver/auxiliary-model.md)） | `{text, stopReason, usage}`；错误作为数据。由取消请求或丢弃调用取消 |
 
 ### A.3 配置
 
-Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`；`maxLength: u32` 默认 80，范围 10..=200（A3）。SessionTitle 声明的 schema 带有默认值和范围（`minimum`/`maximum`），因此 Settings 在写入和读取持久化文件时拒绝超出范围的值，SessionTitle 直接使用交付的文档，不再检查。每次决定时读取。SessionTitle 没有写配置的工具，因此文档只经客户端方法 `settings.read`/`settings.update` 写入（S8b，尚未实现）。变更是带通知的数据更新，从不触发重载。启用插件属于结构性配置。`session-title` 的 Provider 策略位于 Provider 的按用途策略中；未配置时继承 Session 的模型（A1）。
+Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`；`maxLength: u32` 默认 80，范围 10..=200（A3）；`model: {providerId, modelId} | null` 默认 `null`，表示前缀中最新 `context/configured` 的模型（A1）。SessionTitle 声明的 schema 带有默认值和范围（`minimum`/`maximum`），因此 Settings 在写入和读取持久化文件时拒绝超出范围的值，SessionTitle 直接使用交付的文档，不再检查。每次决定时读取。SessionTitle 没有写配置的工具，因此文档只经客户端方法 `settings.read`/`settings.update` 写入（S8b，尚未实现）。变更是带通知的数据更新，从不触发重载。启用插件属于结构性配置。`model` 不可选时调用以 `model_unavailable` 失败，计为一次失败尝试。
 
 ### A.4 机制
 
@@ -225,7 +224,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `metadata(session)`：已有任何标题则跳过；记下 revision `r` |
 | 读取 | `main` 已发布到 `N` 的固定前缀（session-access A.5，`atLeast = N`）；第一条有 `input/applied` 的操作者输入（`user` 内容；A10）及其文本。没有这样的输入或无文本：不生成标题（A8） |
-| 生成 | `complete({purpose: "session-title", inherit: 前缀中最新 context/configured 的模型, request})`，30 s 预算（A4）。规范化：取第一行，去除引号与末尾标点，折叠空白，在 `maxLength` 处截断 |
+| 生成 | `complete({model: 来源中的 model，否则为前缀中最新 context/configured 的模型, request})`，30 s 预算（A4）。规范化：取第一行，去除引号与末尾标点，折叠空白，在 `maxLength` 处截断 |
 | 写入 | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`；`conflict` 或 `not_found` 时丢弃 |
 | Timeline | 不写入，不登记 Dispatcher，无 `StateCell` |
 | 重载 / 卸载 | 生成随插件一起取消；不写入；间隙中的事件不重放 |
@@ -283,7 +282,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
-| A1 | `AuxiliaryModel::complete` 接受继承提示（最新 `context/configured` 的模型） | 判断 | Provider 自行解析继承 |
+| A1 | 未设置 `model` 时使用 Session 的模型（最新 `context/configured`） | 判断 | 固定的默认模型 |
 | A2 | 指令文本、8 个词的目标、2000 个字符的摘录 | 判断 | 不同的提示词或摘录 |
 | A3 | 标题长度默认 80（10..=200），单行 | 判断 | 其他限制 |
 | A4 | 30 s 生成预算 | 判断 | 其他超时 |
@@ -318,6 +317,6 @@ async fn set_title(&self, session_id: &str, expected_revision: u64, title: Optio
 pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
 pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
 // Provider AuxiliaryModel
-async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
-    request: AuxiliaryRequest, cancel: CancellationToken) -> Result<String, AuxiliaryError>;
+async fn complete(&self, model: ModelId, request: AuxiliaryRequest,
+    cancel: CancellationToken) -> Result<AuxiliaryReply, AuxiliaryError>;
 ```

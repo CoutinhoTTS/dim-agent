@@ -241,7 +241,7 @@ sequenceDiagram
   IQ-->>BC: main 上首条用户输入的 input/applied
   BC-->>ST: 事件
   ST->>ST: 仅限无标题的交互式 leader Session
-  ST->>PR: complete(session-title, 已采纳文本)
+  ST->>PR: complete(model, 已采纳文本)
   PR-->>ST: 标题
   ST->>SS: 类型化写操作：标题，source auto，修订检查
   SS-->>BC: 给客户端的标题通知
@@ -341,7 +341,7 @@ sequenceDiagram
 11. **在途工作**：没有共享注册表。每个所有者提供自己的查询与停止，由 CLI 汇总。
 12. **撤回**：由 InputQueue 拥有的单一合同。`input/withdraw {input_id, reason?}` 是一个指令事件，可由任何合法生产方写入：客户端经 `session.input.withdraw`（InputQueue 通过 `sessionMethods` 提供的 Session 方法），进程调用方经 `sessions.withdraw`。InputQueue 按序消费它；只有当它仍持有该输入且尚未应用（无 `input/applied`）时，才写入结果事实 `input/deleted {input_id}`，且永不应用该输入。否则（未知、已应用或已删除）不写入任何内容，调用方收到的回复为 `notHeld`。已应用的输入无法撤回，Loop 不变。“撤回并作为 Steer 重新提交”是一个原子批次。每个待处理输入推导都排除已删除的输入，它们从不进入模型上下文（其带 key 的块从不生效）。
 13. **提交前处理**：插件只能通过 Timeline before 回调，在另一个所有者的写入提交前对其作出处理，回调同步变换草稿，不阻止写入，不等待外部工作；该写入的消费方不做任何特定于插件的改动。
-14. **低业务耦合**：raw 块标记与 key、配置 key 和方法命名空间都带所有者前缀。传给共享服务的用途是消费方拥有的 key（`session-title`、`compaction`、`collaboration.member`、`modality.<category>`）。收集方从不点名贡献方。
+14. **低业务耦合**：raw 块标记与 key、配置 key 和方法命名空间都带所有者前缀。消费方为自己的任务选择的模型是它自己的配置，显式传给共享服务；共享服务不保存按消费方区分的策略。收集方从不点名贡献方。
 15. **交互式 Session**：`interactive` 表示 Session 有可交互的对象，能回答它的提问和审批，可以是用户，也可以是另一个 Session 或分支的 agent（[Session 访问 A.3](contracts/session-access.md)）。`session.create` 设置 `interactive`（客户端只在其为 false 时发送）。Exec 和自动化创建非交互 Session；ACP Session 是交互的，因为编辑器回答它的审批。装配不依赖 `interactive`，因此 fork 前后工具集合与提示词前缀保持一致（#30）；这类 Session 中 `ask_user` 回答当前没有可以回答的对象。SessionTitle 只作用于交互式 leader Session。
 
 ### 6.3 多节点
@@ -398,7 +398,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 
 | 阶段 | 内容 |
 | --- | --- |
-| P0 基础 | 由 `session.create` 设置的 `SessionConfig.interactive`；带 `launch` 的 `sessions` 服务；`sessionMethods` 分发；Rpc 表中的 `managementMethods` 及现有管理方法的迁移；ToolRegistry 中的 `toolContribution`；带变更通知的 Settings 业务来源（S8a）；语言中立的 `settings` 服务与凭据解析器（S8b，随 C4）；`pluginFiles`（扩展：二进制、格式版本）；Provider 用途策略与 `AuxiliaryModel`；SessionStore 元数据与 Session 文件；FileStorage 列举与删除；HostPlatform argv 辅助 |
+| P0 基础 | 由 `session.create` 设置的 `SessionConfig.interactive`；带 `launch` 的 `sessions` 服务；`sessionMethods` 分发；Rpc 表中的 `managementMethods` 及现有管理方法的迁移；ToolRegistry 中的 `toolContribution`；带变更通知的 Settings 业务来源（S8a）；语言中立的 `settings` 服务与凭据解析器（S8b，随 C4）；`pluginFiles`（扩展：二进制、格式版本）；Provider `AuxiliaryModel`（会话外单次模型调用）；SessionStore 元数据与 Session 文件；FileStorage 列举与删除；HostPlatform argv 辅助 |
 | P1 核心交互 | Questions（需要重新设计）、ShellInput、Attachments、SessionTitle；InputQueue 撤回；Permission 规则；模型参数；SessionStore 删除、清理与 fork；HostPlatform 隔离；#4 为非 Rust 部分按名称暴露运行时的类型化服务；CLI 子命令、图像转换、`/export`、`exec --json` |
 | P2 功能扩展 | Goal、Web、Scheduler、Workflow；ModelProvider `ModelCallScope`；Collaboration 成员审批作为输入送到 leader；Mcp OAuth；生产环境压缩宿主 |
 | P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway 及 Transport `EntryHost` 与 `ConnectionEntry {name, deviceId}`、Modality；PluginManager；资源节点（按 `resourceNode` 在每次调用时查找服务） |
@@ -431,7 +431,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | --- | --- | --- |
 | Provider | OAuth / API-key Provider、`/connect`、`/models` | 现有：Provider、ManagedProviders、OAuth 插件、Aimux |
 | Provider | `/effort`、`/fast` | 扩展：Prompt、ModelProvider |
-| Provider | 子 Agent 与辅助模型 | 扩展：Provider（用途策略、`AuxiliaryModel`） |
+| Provider | 子 Agent 与辅助模型 | 扩展：Provider（`AuxiliaryModel`） |
 | Session | `/new`、`/resume`、Session 列表、`/history` | 现有：Agents、SessionStore |
 | Session | `/timeline`、`/export` | CLI |
 | Session | Session 标题 | 新增：SessionTitle |
@@ -502,7 +502,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | ModelProvider | 补充 | 向 model kind 传递 `ModelCallScope`（session、branch、request 与 step id，`SessionConfig`）；构建请求时发送图像，模型不支持图像时改为文本占位；历史不变（从 Rpc 移出） | ExternalAgent；Attachments |
 | Prompt, ModelProvider | 补充 | 模型参数（effort、fast 模式）；切换 Agent 配置作为一次采纳 | `/effort`、`/fast`、`/agent` |
 | PromptSources | 补充 | 提示词语言来源 | `/language` |
-| ContextPreparation | 补充 | 用量查询；手动压缩；用途为 `compaction` 的生产环境压缩宿主 | `/usage`、`/compact` |
+| ContextPreparation | 补充 | 用量查询；手动压缩；实现 `ResolveContextModel` 的生产环境压缩宿主 | `/usage`、`/compact` |
 | FileStorage | 补充 | 根目录下的目录列举与删除（S6）；目录创建（S5a，[Session 文件](appserver/session-files.md#7-filestorage-新增操作)） | Session 文件、清理 |
 | HostPlatform | 补充 | 进程启动时的 OS 隔离（macOS seatbelt、Linux landlock 或 bubblewrap、Windows 明确不可用）、按节点的宿主本地配置；exec argv 辅助；每次 spawn 时读取 exec shell（ADR 002）；到控制节点的链接断开时，该节点的 HostPlatform 结束它启动的进程 | 沙箱；ShellInput、Hooks、ExternalAgent |
 
@@ -513,10 +513,10 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Rpc | 变更 | 方法表：内建方法，然后是按调用查找、不依赖其所有者的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive}`（只在其为 false 时发送）。把 Session 广播通知记录原样转发给已订阅的客户端（SessionTitle）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
 | Agents | 补充 | `sessions` 服务；`SessionConfig.interactive`；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)） | Scheduler、Workflow、fork、ExternalAgent |
-| Collaboration | 变更 | 按用途 `collaboration.member` 选择成员模型；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29） | ExternalAgent |
+| Collaboration | 变更 | 成员模型：profile 的模型，否则为默认选择；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29） | ExternalAgent |
 | SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）；删除与清理；fork（复制切点之前的事实）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除（S5a，已实现：`sessionFiles` 服务，[Session 文件](appserver/session-files.md)） | SessionTitle、Attachments、fork |
 | Settings | 补充 | S8a（Rust，进行中）：每个所有者一个或多个具名业务来源，每个来源一种文档类型；用户和项目作用域的变更通知，携带 `{source, scope, revision}`，不带文档内容；校验和默认值只在 Settings 边界应用；v13 中增量的 `user/<source>` 行（D4）。S8b（随 C4，尚未实现）：语言中立的 `settings` 服务，插件清单声明 JSON Schema、默认值、允许的作用域和仅限用户的字段；管理方法 `settings.read`/`settings.update`；凭据解析器 `credentials.resolve(owner, reference)`（§6.4） | 每个有业务配置的插件，包括用户编写的 Scheduler 任务（来源 `schedule`）和 Workflow 定义（来源 `workflow`） |
-| Provider | 补充 | 按用途的策略，单一写入路径；`AuxiliaryModel` 服务（`complete`，用途为消费方拥有的 key）；按 Modality 类别的非对话连接；外部 Agent 连接类型；连接条目经 Provider 的类型化公共写操作写入 | SessionTitle、压缩、Collaboration、Modality、ExternalAgent |
+| Provider | 补充 | `AuxiliaryModel` 服务：`complete(model, request)`，在任何 Session 之外的一次非流式调用，模型由调用方从自己的配置中传入（[设计](appserver/auxiliary-model.md)）；按 Modality 类别的非对话连接；外部 Agent 连接类型；连接条目经 Provider 的类型化公共写操作写入 | SessionTitle、Modality、ExternalAgent |
 | Aimux / ModelHost | 补充 | 来自其他插件的 provider kind；某 kind 没有 provider 时，其请求在受理前失败 | ExternalAgent |
 | `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、ExternalAgent、Modality、RemoteGateway、PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 已删除，服务启用即运行，项目条目默认关闭、只能由用户本机配置启用（§6.4 批准范围） | Rpc 迁移 |

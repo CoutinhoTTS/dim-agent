@@ -69,7 +69,7 @@ crash is an infrastructure failure, like an App Server crash, and nothing is des
 | Kind | Examples | Location | On change |
 | --- | --- | --- | --- |
 | Structural plugin configuration | enable or disable, runtime and package paths, node binding | loader rows (issue #3 editable layer) | may reload the row |
-| Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, model purpose policies, MCP server and Skill documents, external agent entries and bridges, gateway listener settings, OCR component path, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
+| Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, each consumer's auxiliary model choice, MCP server and Skill documents, external agent entries and bridges, gateway listener settings, OCR component path, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
 
 ### D5. Contracts are language-neutral
 
