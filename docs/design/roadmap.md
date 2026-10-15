@@ -14,7 +14,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | --- | --- | --- |
 | 同步 `Timeline::before`（一个草稿进、一个草稿出，失败提交原草稿） | `dim-agent-runtime/src/core/timeline.rs` | 不变（[原则 §4 第 3 条](../architecture/rust-agent/principles.md)） |
 | `ToolContribution` / `SessionToolSource`，经 `AgentBuilder` 静态登记 | `dim-agent-capabilities/src/tool_registry.rs` | C3 |
-| `history(branch, through)`：上限是已分配的头部，会读到尚未发布的事件 | `dim-agent-runtime/src/agent.rs` | C7（固定前缀读仍要做） |
+| Session 门面的 `history(branch, through)`：上限是已发布的头部，只读已发布的事件（内部 `Timeline::history` 才以已分配的头部为上限） | `dim-agent-runtime/src/agent.rs` | 不需要新接口：先取已发布的 head（`sequence`），再 `history(Some(head))`（#50） |
 | `PluginFilesPlugin`（UTF-8、锁） | `dim-app-server/src/plugin_files.rs` | S10 |
 | Settings `subscribe()`，仅 MCP/Skills 源 | `dim-app-server/src/settings.rs` | S8a |
 | 自动压缩事实；生产压缩宿主仍是 `ContextModelHost(None)` | `context_preparation.rs`、`main.rs` | 独立功能 |
@@ -64,7 +64,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发 | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Goal、S1 |
 | C2 | `SessionConfig.interactive` 与 `session.create` 参数（只做这一个字段；存储保持 v13，旧记录缺省为交互） | S | Rpc | — | SessionTitle、S2（Questions 待重新设计） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
-| C7 | 固定前缀读：Session 门面只读已发布到指定序号的事件（session-access A.5） | S | 独立 | — | SessionTitle、Scheduler、Workflow |
+| ~~C7~~ | ~~固定前缀读~~：不需要新接口，现有门面组合即可（#50，session-access §9.2） | — | — | — | — |
 | C3 | `toolContribution` 按名收集；不硬依赖可选插件：在 `SessionLifecycle::activated()` 时接入当时已起来的提供方，之后起来的在下次重载时接入；`SessionConfig.tools` 里提供方没起来的工具直接省略（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
 | C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载；Session 装配不等可选插件的部件（#34） | L，先 spike | 装配 | C3 | 所有 TypeScript 插件 |
 | C5 | #4 分支级：TypeScript 部件按名使用 `Dispatcher`、`Branch::input`、`TreeCommands` | M | 装配 | C4 | Goal |
@@ -92,10 +92,10 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | 1 | ShellInput | Rust | C1、S7 |
 | 2 | Attachments | Rust | C1、S5a、S6、S11 |
 | 3 | Web | TypeScript | C3、C4、S8b |
-| 4 | SessionTitle | TypeScript | C1、C2、C4、C6、C7、S4、S5b、S8b |
+| 4 | SessionTitle | TypeScript | C1、C2、C4、C6、S4、S5b、S8b |
 | 5 | Goal | TypeScript | C1、C3、C4、C5、S1、S8b |
-| 6 | Scheduler | TypeScript | C4、C7、S2、S8b、S10 |
-| 7 | Workflow | TypeScript | C4、C7、S2、S8b、S10 |
+| 6 | Scheduler | TypeScript | C4、S2、S8b、S10 |
+| 7 | Workflow | TypeScript | C4、S2、S8b、S10 |
 
 不被其他插件依赖、随时可以单独做的功能：生产压缩宿主与 `/compact`、用量查询（依赖 S4）；Session 删除和 fork（S5c）；Permission 命令规则；模型参数 effort/fast 与 `/agent`；MCP OAuth；HostPlatform OS 隔离（L，先 spike）；CLI 子命令、`/export`、`exec --json`。
 
@@ -121,7 +121,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | 批次 | eric8810（核心机制与契约） | yyhhyyyyyy（Rpc、Agents、存储、MCP） | zerob13（装配、TS 桥接、TS 插件、CLI、平台） |
 | --- | --- | --- | --- |
 | 1（现在） | A2 契约定稿、A3 Goal（已决定）、~~A4 权限类别~~（已完成） | S6 FileStorage、R1 Failed 错误码 | C3 工具接入、C4 spike、S7 argv 辅助、S10 pluginFiles |
-| 2 | S8a Settings 源（等 A2）、S4 AuxiliaryModel、C7 固定前缀读 | C1 sessionMethods（等 A2）、C2 interactive、S5a Session 文件 | C4 TS 桥接（等 C3）、F5 隔离 spike |
+| 2 | S8a Settings 源（等 A2）、S4 AuxiliaryModel | C1 sessionMethods（等 A2）、C2 interactive、S5a Session 文件 | C4 TS 桥接（等 C3）、F5 隔离 spike |
 | 3 | S1 InputQueue 撤回（等 C1）、S8b Settings 服务（等 C4）、S11 图片占位、F2 权限命令规则 | C6 广播通知、P1 ShellInput（等 C1、S7）、S5b 标题、~~S3 活动句柄~~（不需要） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
 | 4 | F1 压缩宿主（等 S4）、P5 Goal（等 C5、S1、S8b） | S2 sessions（等 C2、S1）、P2 Attachments（等 S5a、S11）、S5c 删除和 fork、F4 MCP OAuth | P3 Web（等 C4、S8b）、P4 SessionTitle（等 C6、S4、S5b、S8b） |
 | 5 | — | — | P6 Scheduler、P7 Workflow（等 S2） |
@@ -174,7 +174,6 @@ flowchart LR
   C4 --> ST["SessionTitle"]
   C1 --> ST
   C2 --> ST
-  C7["C7 固定前缀读"] --> ST
   S4["S4 AuxiliaryModel"] --> ST
   S5b --> ST
   S8b --> ST
@@ -185,8 +184,6 @@ flowchart LR
   S2 --> WF["Workflow"]
   C4 --> SC
   C4 --> WF
-  C7 --> SC
-  C7 --> WF
   S8b --> SC
   S8b --> WF
   S10["S10 pluginFiles"] --> SC

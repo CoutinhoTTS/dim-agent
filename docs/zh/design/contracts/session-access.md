@@ -12,7 +12,7 @@
 | 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow |
 | `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 分支部分写入相同形式，Hooks 分支部分（待设计）也会如此 |
-| 固定前缀读取 | 运行时门面（需求，§9） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
+| 固定前缀读取 | 运行时门面（现有的 `sequence` 与 `history`，A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
 | 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、Hooks（待设计）、AcpGateway、Scheduler、Workflow |
 
 Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用所属 Session 与分支的服务、分支 Dispatcher 和 Session 广播。
@@ -173,7 +173,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | §4 第 5 条（批次） | InputQueue 按序处理 `input/message` 与 `input/withdraw`；“撤回并作为 Steer 重新提交”在同一批次中先写撤回。 |
 | §4 第 6 条（模型上下文） | 被删除的输入从不进入上下文；已消费的输入放在其消费位置（§5）。 |
 | §4 第 7 条（公开事件与服务） | 进程调用方只通过 `sessions` 访问 Session，只通过 InputQueue 公开的撤回服务撤回输入。 |
-| §4 第 8 条（需求） | #4、固定前缀读取、可选部分的装配，在 §9 提出。 |
+| §4 第 8 条（需求） | #4 与可选部分的装配在 §9 提出；固定前缀读取由现有门面组合实现（§9.2）。 |
 | §4 第 9 条（只有决定用的事实进 Timeline） | `SessionConfig`、租约和调用方进度不进 Timeline；只有输入、撤回的指令和结果，以及 `stop` 写入的 `stop/interrupt` 是事件；必需事件 `input/withdraw` 上的描述性字段 `reason` 符合第 9 条。 |
 | §1（Capability 与 App Server 边界） | Agents 只提供访问；调用方的业务逻辑留在各自插件中。 |
 | ADR 002 D1 | `sessions` 是 Agents 的进程服务；InputQueue 的撤回留在其分支部分，由其 Session 部分提供给客户端。 |
@@ -196,13 +196,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ### 9.2 固定前缀读取
 
-| 项 | 内容 |
-| --- | --- |
-| 被什么挡住 | §4 第 5 条和时间总线 §4：依据历史做决定的进程调用方，必须读到一个已知的已发布序号为止，不能用未提交或未消费的尾部。 |
-| 考虑过的现有机制 | `Session::history`：不保证读到的头部不低于某个序号，可能漏掉触发读取的事件。订阅 Dispatcher：进程调用方没有分支部分。 |
-| 需要的通用能力 | 读取分支已发布的历史，至少到给定序号；头部低于该序号时以 `future_sequence` 失败（A.5）。 |
-| 对序号、批次、中断、重载的影响 | 只读；返回的头部是整个批次的边界。重载时读取以 `reloading` 失败。 |
-| 由谁实现、对应 issue | 运行时（Session 门面，`Session::prefix`）；issue 待开。 |
+已撤回（[#50](https://github.com/arcships/dim/issues/50)）：现有的 Session 门面组合即可实现，不需要改运行时。`Session::sequence(branch)` 返回已发布的 head；若它低于 `atLeast`，读取以 `future_sequence` 失败，否则用 `Session::history(branch, Some(head))` 读到该 head。两者都只读已发布的事件，head 只会前移，因此前缀是固定的（A.5）。
 
 ### 9.3 由插件身份确定调用方来源
 
@@ -316,7 +310,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 
 ### A.5 固定前缀读取
 
-带 `atLeast` 的 `sessions.history` 把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回截至该 head 的历史（包含祖先）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
+带 `atLeast` 的 `sessions.history` 把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回截至该 head 的历史（包含祖先）。它由现有门面组合实现：先用 `Session::sequence(branch)` 读 head，再用 `Session::history(branch, Some(head))`（§9.2）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
 
 ### A.6 错误
 
@@ -382,7 +376,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | 逐次调用的 acquire | `AgentIndex::acquire(id)`（已有），返回 `SessionUse` 租约 |
 | `input` | `Session::input(InputMessageData, branch)`（已有），key 为 `KeyUse::Live(name)` / `Retire(name)` |
 | `lookup` | 门面上的 `session.input_lookup` 语义 |
-| 带 `atLeast` 的 `history` | `Session::prefix(branch, at_least) -> Result<Prefix, AgentError>`（补充）；否则为 `Session::history`，设置了 `after` 时为 `Session::local_page(branch, after, limit, through)` |
+| 带 `atLeast` 的 `history` | `Session::sequence(branch)`，低于 `at_least` 时以 `future_sequence` 失败，然后 `Session::history(branch, Some(head))`；否则为 `Session::history`，设置了 `after` 时为 `Session::local_page(branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`：追加 `input/withdraw`，等待 InputQueue 对它的决定；`WithdrawOutcome::Deleted { sequence }` 或 `WithdrawOutcome::NotHeld` |
 | `stop`、`idle` | `Session::stop`、`Session::idle`（已有） |
 | `SessionConfig` | 下方的 Rust 结构体 |
