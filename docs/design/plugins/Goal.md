@@ -12,7 +12,7 @@ Goal keeps a standing objective on a branch and continues the branch automatical
 flowchart LR
   subgraph PROC["Process"]
     Rpc["Rpc"]
-    Settings["Settings business source"]
+    Settings["Settings source goal"]
   end
   subgraph SESS["Session scope"]
     GS["GoalPlugin: toolContribution goal_update, sessionMethods session.goal"]:::new
@@ -31,7 +31,7 @@ flowchart LR
   TC -- "get only" --> GB
   TL -- "branch/start, input/*, turn/*, stop/interrupt in order" --> GB
   GB -- "owned write task: continuation, automatic pause or start clear" --> TL
-  GB -- "goal.maxContinuations per decision" --> Settings
+  GB -- "maxContinuations per decision" --> Settings
   TL --> IQ
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
@@ -41,9 +41,9 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal`; writes change inputs through `Branch::input` |
-| `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, Settings business source (enclosing scope) | `goal` (branch scope; `get` only), used only by the Session part; the fold, the continuation decision and Goal's own writes |
+| `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, Settings source `goal` (enclosing scope) | `goal` (branch scope; `get` only), used only by the Session part; the fold, the continuation decision and Goal's own writes |
 
-Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `goal.maxContinuations` is business configuration in the Settings business source ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision, changed by a data update, never a reload. Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
+Both parts declare their services in the plugin's `provides` and are installed only in Sessions where Goal is enabled; ToolRegistry and Rpc collect them by name and scope. `maxContinuations` is a field of the document in Goal's Settings source `goal`, business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4): read at each decision and used as delivered (Settings applies the default and the range declared in Goal's schema on write and when reading a persisted file), changed by a data update, never a reload. No Goal tool writes it; it is written through the client methods `settings.read`/`settings.update` (S8b, not implemented). Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
 
 ## 2. Data and state
 
@@ -56,7 +56,7 @@ flowchart TB
     IC["input/consumed, input/deleted"]
     TE["branch/start, turn/start, turn/end, stop/interrupt"]
   end
-  CFG["Settings: goal.maxContinuations"]
+  CFG["Settings source goal: maxContinuations"]
   VIEW["Fold: built at load, advanced by each Dispatcher delivery"]:::new
   GBK --> VIEW
   CI --> VIEW
@@ -241,7 +241,7 @@ Exact texts: [Appendix A.5](#a5-model-visible-texts).
 | `session.goal.set/edit/pause/resume/clear` | `sessionMethods` (Session, key `session.goal`) | User changes the goal; each writes one change input and replies with its sequence |
 | `session.goal.get` | Same service | The fold of a branch and the sequence it covers; replaces any "mode" query (A8) |
 | `goal` | Branch service, internal to Goal | `get` of the fold |
-| `goal.maxContinuations` | Business configuration (Settings) | Continuation limit, read at each decision |
+| `goal` source: `maxContinuations` | Business configuration (Settings) | Continuation limit, read at each decision |
 
 Details: [Appendix A](#appendix-a-interface-details).
 
@@ -268,7 +268,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | ADR 002 D1 Scope | The tool and methods are Session services; the goal, its fold and its decisions are branch state. |
 | ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect Goal's services by name and scope; nothing names Goal. |
 | ADR 002 D3 Scope dependencies | The branch part depends on branch services and the enclosing Settings source; reloads refold and are accepted. |
-| ADR 002 D4 Configuration | `goal.maxContinuations` is business configuration read at each decision. |
+| ADR 002 D4 Configuration | `maxContinuations` in the `goal` source is business configuration read at each decision. |
 | ADR 002 D5 Language-neutral contracts | Tool, methods, branch service and block formats are neutral; Appendix G is one binding. |
 
 ## 9. Requirements raised to mechanism owners
@@ -442,7 +442,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 5. Branch part reload and restart after an undecided `turn/end`: exactly one decision; a reload with a write task in flight yields exactly one write.
 6. Compaction after `completed`: the baseline contains `completed`, not `active`, and `get` reports `completed`. After compaction the baseline contains the latest `goal:objective` block and the latest `goal:status` block; a continuation is not replayed.
 7. Child branch created after a goal is set on the parent: the child's `get` reports no goal from its first event, Goal writes exactly one start `clear` and the child's context after it shows no parent goal as its own, and there is no continuation; a reload or restart of the child writes no second `clear`; a `goal_update` or `set` on the child changes the child's `get` only, never the parent's. A forked Session's `main`: the same, with no goal and one start `clear`.
-8. Unloaded Session: `session.goal.pause` restores it and writes. Goal not enabled: `unknown_method`. Changing `goal.maxContinuations` takes effect at the next decision without reloading Goal.
+8. Unloaded Session: `session.goal.pause` restores it and writes. Goal not enabled: `unknown_method`. Changing `maxContinuations` in the `goal` source takes effect at the next decision without reloading Goal.
 9. Two `goal_update` calls in one batch both return the confirmation and the fold shows the second status; `pause` and `resume` without a goal write a block that compaction replays while `get` reports no goal; `edit` without a goal makes a goal exist with the latest live status; the tool and the methods never read the fold (tested by writing while the branch part is reloading).
 10. `edit` (only `goal:objective` changes), `clear` (both retired keys not replayed), forged `</dim-goal>` in an objective or summary is escaped; `session.goal.get` reflects every status and `through` reaches each write's `sequence`.
 11. Set → `completed` → `resume`: the goal reopens (`active`, count restarted), the resume input drives a turn and its normal end writes a continuation; a compaction after the resume replays the resume block and `get` reports `active`.
@@ -455,7 +455,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | A1 | `set`, `resume` and the continuation use Queue; `edit`, `pause`, `clear`, `goal_update` and Goal's pauses use Append | Judgment (overview fixes Queue only for continuation); a method cannot know the status, so `edit` never starts a turn | Set would not start work on an idle branch, or pause would start a turn |
 | A2 | Exact block formats and texts in Appendix A.5; the objective and the status are separate keys (`goal:objective`, `goal:status`), `set` and `clear` write both in one input, and continuations carry no key | Judgment; [session access A.1](../contracts/session-access.md#a1-the-sessions-service) lets one input carry several keyed raw blocks | Text and parsing change together; with one key, compaction would replay only the latest change and lose the objective after a status change |
 | A3 | A goal belongs to exactly one branch: the fold uses only the branch's local events, and a new branch retires live inherited goal keys with one start `clear` | User decision | Child branches would continue or complete the parent's goal, or the model there would take the parent's goal as its own |
-| A4 | `goal.maxContinuations` default 20, range 1..=1000 | Judgment | Different default |
+| A4 | `maxContinuations` (source `goal`) default 20, range 1..=1000 | Judgment | Different default |
 | A5 | Count restarts on `set`, `resume` and operator input only: `user` content and no source marker as first raw block | Judgment | Another plugin's automatic input would reset the limit |
 | A6 | A failed turn pauses the goal (`turn_failed`) | Judgment (avoid retry loops on provider errors) | Failed turns would continue and consume the limit |
 | A7 | Pause does not interrupt the running turn | Judgment | Pause would also call `stop` |

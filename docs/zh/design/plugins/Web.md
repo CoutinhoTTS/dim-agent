@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview](../overview.md)（Web）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-Web 是一个 Session 插件，以两个按工具名作 key 的 Session 级 `toolContribution` 服务向模型提供 `web_search` 与 `web_fetch`（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)；ToolRegistry 接受具名工具服务作为补充，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从 Settings 业务来源读取其 `web.*` 业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。
+Web 是一个 Session 插件，以两个按工具名作 key 的 Session 级 `toolContribution` 服务向模型提供 `web_search` 与 `web_fetch`（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)；ToolRegistry 接受具名工具服务作为补充，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从自己的 Settings 来源 `web` 读取业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。
 
 ## 1. 结构
 
@@ -18,8 +18,8 @@ flowchart LR
   subgraph BR["分支"]
     Exec["ToolBinding、ToolExecutor、Approval、Permission"]
   end
-  Web -->|"使用时读取 web 段，解析 secretRef"| Settings
-  ToolRegistry -->|"按名称收集 toolContribution"| Web
+  Web -->|"使用时读取来源 web，解析 secretRef"| Settings
+  ToolRegistry -.->|"Session 发布时接入 toolContribution"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall)、取消请求"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
@@ -27,11 +27,11 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Web` | Session（仅启用时安装） | Settings 业务来源（`web` 段）与凭据引用解析器；诊断通道 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
+| `Web` | Session（仅启用时安装） | Settings 来源 `web` 与凭据引用解析器；诊断通道 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
 
-**依赖的契约：** `toolContribution`（附录 A.1）；Settings 业务来源与凭据引用解析器；由 Permission 读取的 `ToolDefinition.risk = "network"`（既有，[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。**本文定义的契约：** 工具名称、参数与结果格式；`web.*` 业务配置。诊断通道是既有的类型化服务；Settings 业务来源与凭据引用解析器是 Settings 的补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
+**依赖的契约：** `toolContribution`（附录 A.1）；Settings 业务来源与凭据引用解析器；由 Permission 读取的 `ToolDefinition.risk = "network"`（既有，[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。**本文定义的契约：** 工具名称、参数与结果格式；`web` 业务文档。诊断通道是既有的类型化服务。Settings 来源目前只通过 Rust 的 `BusinessDocument` 绑定存在；语言中立的 `settings` 服务和凭据引用解析器是尚未实现的 Settings 补充（S8b，[总体设计 §6.4](../overview.md#64-约定) 与[附录 B.2](../overview.md#b2-app-server-进程插件)）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
 
-**重载。** Web 只依赖外层作用域（Settings）。启用、禁用或升级 Web，或 Settings 重载，会重载 Web，并经被收集的 `toolContribution` 服务重载 ToolRegistry 及其依赖方；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
+**重载。** Web 只依赖外层作用域（Settings）。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 在 Session 发布时接入 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行，Web 的工具在下次重载前不可用；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
 **节点。** 请求从承载该 Session 的 App Server 进程发出，而非从 Session 的资源节点发出（A2）。
 
@@ -39,8 +39,8 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  subgraph CFG["业务配置（Settings 来源，web 段）"]
-    WebCfg["web.search.service、web.fetch.allow_private_hosts、web.proxy"]
+  subgraph CFG["业务配置（Settings 来源 web）"]
+    WebCfg["search_service、allow_private_hosts、proxy"]
     Secret["secretRef（仅引用）"]
   end
   subgraph MEM["每个 Session 的 Web 内存（不持久化）"]
@@ -76,7 +76,7 @@ sequenceDiagram
   A-->>X: 允许（或询问、拒绝）
   X->>W: execute(ToolCall)
   W->>W: 校验 URL，解析主机，检查每个地址
-  W->>N: GET，固定到已校验 IP（直连，或经 web.proxy CONNECT IP:port）
+  W->>N: GET，固定到已校验 IP（直连，或经 proxy CONNECT IP:port）
   N-->>W: 正文，至多 5 MiB
   W-->>X: ToolResult 头部加文本切片
   X->>TL: step/tool-completed，然后整个批次一个 step/tool-result
@@ -93,7 +93,7 @@ sequenceDiagram
   participant S as Settings
   participant Q as 搜索服务
   X->>W: execute(ToolCall：query、filters)
-  W->>S: 读取 web.search.service
+  W->>S: 读取 search_service
   alt 无可用服务
     W-->>X: 错误 search_unavailable
   else 已配置适配器
@@ -126,7 +126,7 @@ sequenceDiagram
 | --- | --- | --- |
 | 调用期间编辑配置 | 调用继续使用开始时读取的值；下一次调用使用新值 | Web |
 | 两次调用之间移除服务 | 下一次 `web_search` 返回 `search_unavailable` | Web |
-| 调用中途 Web 或 Settings 重载 | ToolRegistry 及依赖方重载；调用以 reloaded 结算（D3） | ToolExecutor |
+| 调用中途 Web 或 Settings 重载 | 调用以 reloaded 结算；ToolRegistry 与 Loop 照常运行，Web 的工具在 Session 下次重载前不可用（D3，C3） | ToolExecutor |
 | 调用中途进程重启 | ToolExecutor 将已提交的调用结算为未能在恢复中存活；Web 从不重复请求 | ToolExecutor |
 | 结果之后发生压缩 | 抓取的文本只经摘要保留 | ContextPreparation |
 
@@ -141,7 +141,7 @@ sequenceDiagram
 
 - 压缩：声明作为配置保留；结果只经摘要保留。
 - 子分支继承其祖先前缀中的结果。
-- 非交互 Session 看到相同的工具（`requires.interactive = false`）。
+- 非交互 Session 看到相同的工具，也可以使用它们；各 Session 的工具集合保持相同（#30）。
 - 从不可见：`structuredContent`、服务名、配置、凭据引用、私有主机例外、诊断。
 - 抓取的页面文本是不可信的第三方内容，放入工具结果时不加指令框定（A14）。
 
@@ -151,18 +151,18 @@ sequenceDiagram
 | --- | --- | --- |
 | `web_search` | `toolContribution`（Session，key `web_search`），风险 `network` | 查询已配置的服务；编号结果列表 |
 | `web_fetch` | `toolContribution`（Session，key `web_fetch`），风险 `network` | 抓取一个公开的 `http(s)` URL；带分页的有界文本切片 |
-| `web.*` 配置 | Settings 来源中的业务配置，使用时读取 | 搜索服务、私有主机例外、代理 |
+| `web` 来源 | Web 的 Settings 来源中的业务配置，使用时读取 | 搜索服务、私有主机例外、代理 |
 
-没有 Session 方法、没有 `managementMethods`，也没有 CLI 子命令：配置经 Settings 的类型化操作与 `/settings` 完成。细节见附录 A。
+没有 Session 方法、没有 `managementMethods`，也没有 CLI 子命令：配置经 Settings 的客户端方法 `settings.read`/`settings.update`（S8b，尚未实现）与 `/settings` 完成。细节见附录 A。
 
 ## 7. 安全
 
 - 准入：两个工具都声明 `network`；每次调用都经过 Approval 与 Permission（read-only 拒绝，workspace-write 询问，FullAccess 允许）。
-- SSRF：Web 自行解析名称，按封禁范围检查每个地址，只连接已检查的地址，有无 `web.proxy` 都一样；跨主机重定向需要一次新调用与新的准入（A.4、A10）。
+- SSRF：Web 自行解析名称，按封禁范围检查每个地址，只连接已检查的地址，有无 `proxy` 都一样；跨主机重定向需要一次新调用与新的准入（A.4、A10）。
 - 无环境权限：仅 `GET`；不带 cookie、已存站点凭据或客户端证书；除模型写出的 URL 外不携带 Session 中的任何内容（A8）。
 - 凭据：引用在每次调用时解析；从不出现在声明、结果、`structuredContent`、诊断或错误中。
 - 经 URL 外泄是 `network` 类别的固有风险，由准入控制。
-- 使用 `web.proxy` 时，Web 请代理对已校验的 IP 和端口做 HTTP `CONNECT`，从不把主机名交给代理，代理不解析目标名称；TLS SNI 和 `Host` 头用原主机名。固定连接和私有地址保护与直连相同（A.4）。
+- 使用 `proxy` 时，Web 请代理对已校验的 IP 和端口做 HTTP `CONNECT`，从不把主机名交给代理，代理不解析目标名称；TLS SNI 和 `Host` 头用原主机名。固定连接和私有地址保护与直连相同（A.4）。
 
 ## 8. 规则检查
 
@@ -181,7 +181,7 @@ sequenceDiagram
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；搜索适配器是内置的（A1）。 |
 | ADR 002 D3（依赖跟随作用域） | 唯一依赖 Settings 位于外层作用域；Settings 重载会重载 Web，这是可接受的。 |
-| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`web.*` 是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
+| ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`web` 文档是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
 
 ## 9. 向机制所有者提出的需求
@@ -264,22 +264,22 @@ Characters: <start>-<end> of <total>
 
 | 规则 | 内容 |
 | --- | --- |
-| 解析 | Web 解析主机名，校验每个解析出的地址，只连接已校验的地址（固定），直连或经 `web.proxy` 都一样，因此检查与连接之间不可能发生 DNS 重绑定 |
+| 解析 | Web 解析主机名，校验每个解析出的地址，只连接已校验的地址（固定），直连或经 `proxy` 都一样，因此检查与连接之间不可能发生 DNS 重绑定 |
 | 默认封禁 | 回环（`127.0.0.0/8`、`::1`）、未指定地址、RFC 1918、链路本地（`169.254.0.0/16`、`fe80::/10`，含云元数据）、CGNAT `100.64.0.0/10`、唯一本地 `fc00::/7`、组播、广播、保留范围，以及这些地址的 IPv4 映射与 IPv4 兼容 IPv6 形式；主机名 `localhost` 与 `*.localhost` |
 | 字面 IP | 仅当按相同规则为公网地址时允许 |
 | 端口 | 公网地址上的任意端口（A12） |
-| 例外 | `web.fetch.allow_private_hosts`：精确主机名或 CIDR；默认为空；只由用户经 Settings 写入 |
-| 代理 | 使用 `web.proxy` 时，Web 照上面解析并校验，再向代理发 HTTP `CONNECT <已校验 IP>:<端口>`，`http` 和 `https` 都如此；TLS SNI 和 `Host` 头用原主机名；代理从不收到作为连接目标的主机名。代理拒绝 `CONNECT` 时调用以 `connect_failed` 失败（A15） |
+| 例外 | `allow_private_hosts`：精确主机名或 CIDR；默认为空。这是仅限用户的字段：经客户端方法 `settings.update` 写入，从不由 Web 写入（S8b）。Settings 只检查它是字符串数组；Web 在使用时解析每一项，忽略既不是主机名也不是 CIDR 的项并作为诊断报告 |
+| 代理 | 使用 `proxy` 时，Web 照上面解析并校验，再向代理发 HTTP `CONNECT <已校验 IP>:<端口>`，`http` 和 `https` 都如此；TLS SNI 和 `Host` 头用原主机名；代理从不收到作为连接目标的主机名。代理拒绝 `CONNECT` 时调用以 `connect_failed` 失败（A15） |
 
-### A.5 业务配置（`web` 段，Settings 来源）
+### A.5 业务配置（Settings 来源 `web`）
 
-| Key | 类型 | 默认值 |
+| 字段 | 类型 | 默认值 |
 | --- | --- | --- |
-| `web.search.service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` 或缺省 | 缺省（`web_search` 返回 `search_unavailable`） |
-| `web.fetch.allow_private_hosts` | string[] | `[]` |
-| `web.proxy` | string（URL） | 缺省 |
+| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` 或缺省 | 缺省（`web_search` 返回 `search_unavailable`） |
+| `allow_private_hosts` | string[] | `[]` |
+| `proxy` | string（URL） | 缺省 |
 
-每次调用时读取；只通过 Settings 的类型化操作写入 Web 的业务来源，其 schema 由 Web 声明；变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。凭据只以 `secretRef` 出现。
+每次调用时读取，按交付的样子使用：Settings 在写入和读取持久化文件时按 Web 声明的 schema 校验文档并应用默认值，Web 不再校验。Web 没有写配置的工具，因此文档只经客户端方法写入（S8b）。变更是带通知的数据更新，从不触发重载。只有 Web 的启用是结构性配置。内置适配器 id 是实现选择，列于插件 README（A13）。凭据只以 `secretRef` 出现，它是不透明的非空引用，每次调用经凭据解析器解析。
 
 ### A.6 Timeline 与 Capability 机制
 
@@ -344,7 +344,7 @@ Characters: <start>-<end> of <total>
 3. `web_fetch` 的 HTML 头部与 Markdown；`start_char` 分页至结尾；`max_chars`；下载上限提示。
 4. 纯文本、JSON、不支持的类型、404、空页面。
 5. 同主机重定向至多 5 次；第六次失败；跨主机重定向返回提示。
-6. 回环、私有、链路本地、IPv4 映射 IPv6、`localhost` 以及解析到私有地址的主机名均被封禁；DNS 重绑定测试未建立连接，直连和使用 `web.proxy` 都要测（测试代理只收到 `CONNECT <已校验 IP>:<端口>`，SNI 和 `Host` 为主机名）。
+6. 回环、私有、链路本地、IPv4 映射 IPv6、`localhost` 以及解析到私有地址的主机名均被封禁；DNS 重绑定测试未建立连接，直连和使用 `proxy` 都要测（测试代理只收到 `CONNECT <已校验 IP>:<端口>`，SNI 和 `Host` 为主机名）。
 7. Permission：read-only 拒绝，workspace-write 询问，FullAccess 允许。
 8. 派发前、审批期间与慢响应期间中断（socket 关闭，一个结果）。
 9. 重启结算不重复任何请求。
@@ -375,7 +375,7 @@ Characters: <start>-<end> of <total>
 
 | 问题 | 描述 |
 | --- | --- |
-| 按名称获取 Settings | TypeScript 实现需要 Settings 业务来源、凭据引用解析器与诊断通道按名称暴露（[#4](https://github.com/arcships/dim/issues/4)，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）；`toolContribution` 本身是语言中立的 |
+| 按名称获取 Settings | TypeScript 实现需要 Settings 来源、凭据引用解析器与诊断通道按名称暴露（Settings 部分属于 S8b；[#4](https://github.com/arcships/dim/issues/4)，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）；`toolContribution` 本身是语言中立的 |
 
 ## 附录 G. Rust 绑定
 

@@ -11,7 +11,7 @@ Hooks 在 Session 工作的固定节点运行用户配置的命令。其 Session
 ```mermaid
 flowchart LR
   subgraph PROC["进程"]
-    Settings["Hooks 业务来源（Settings）"]
+    Settings["Settings 来源 hooks"]
   end
   subgraph SESS["Session"]
     HS["HooksSession：目录、运行器、Session 启动"]:::new
@@ -39,7 +39,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `HooksSession` | Session（仅启用时安装） | Settings 业务来源（`hooks` 文档）；Session 的 `HostPlatform` 与 `FileStorage`；`SessionConfig` | `sessionMethods` key `hooks`，含 `hooks.catalog`；`main` 的 Session 启动 Hook 结果；供 `HooksBranch` 使用的内部目录与命令运行器（不是契约） |
+| `HooksSession` | Session（仅启用时安装） | Settings 来源 `hooks`；Session 的 `HostPlatform` 与 `FileStorage`（读取 `.dimcode/hooks.json`）；`SessionConfig` | `sessionMethods` key `hooks`，含 `hooks.catalog`；`main` 的 Session 启动 Hook 结果；供 `HooksBranch` 使用的内部目录与命令运行器（不是契约） |
 | `HooksBranch` | 分支 | `HooksSession` 的运行器；分支 Timeline（before 回调）、`Branch::input`、Dispatcher 与 ToolBinding | `input/message` 与 `step/tool-call` 上的 before 回调，在部件加载时注册、卸载时移除 |
 
 没有任何部件收集 Hooks：回调是分支 Timeline 上的注册，随 `HooksBranch` 的生命周期存在，因此没有消费方依赖 Hooks 或指名它。
@@ -217,7 +217,7 @@ sequenceDiagram
 | `step/tool-call` 上的 before 回调 | 由 `HooksBranch` 在分支 Timeline 上注册 | 运行 `pre_tool_use` Hook；给被拒绝的调用标记 `skip` |
 | `input/message` 上的 before 回调 | 由 `HooksBranch` 在分支 Timeline 上注册 | 运行 `user_prompt_submit` Hook；添加 context 块，或追加 `input/withdraw {input_id, reason?}` |
 | `hooks.catalog {sessionId}` | `sessionMethods` key `hooks` | Session 的有效 Hook 及其启用状态 |
-| `hooks` 文档 | Settings 业务来源 | 用户 Hook、`disable_all`、启用覆盖（项目 Hook 按工作区和 Hook ID 记录） |
+| `hooks` 文档 | Settings 来源 `hooks` | 用户 Hook、`disable_all`、启用覆盖（项目 Hook 按工作区和 Hook ID 记录） |
 | 配置格式、命令协议 | 本文定义 | 附录 A |
 
 ## 7. 安全
@@ -266,7 +266,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 
 ### A.1 配置格式
 
-每个来源一个 JSON 文档，用户配置（Settings 中的 `hooks` 文档）与项目文件 `.dimcode/hooks.json` 形状相同：
+每个来源一个 JSON 文档，用户配置（Settings 来源 `hooks` 中的文档）与项目文件 `.dimcode/hooks.json` 形状相同。项目文件不是 Settings 来源：Hooks 在项目文件权威下自己经 FileStorage 读取。
 
 ```json
 {
@@ -339,7 +339,7 @@ Hook 命令因用户或项目配置而运行，不是因为 agent 的决定，�
 | --- | --- |
 | `{sessionId}` | 按来源列出的 Hook：`id`、`source`、`event`、匹配器、`command`、`enabled`、`invalid?`；全局 `disabled` |
 
-启用、禁用与 `disable_all` 是对 `hooks` 文档的类型化 Settings 操作，只由用户执行（A9）；没有批准。
+启用、禁用与 `disable_all` 是 `hooks` 文档中仅限用户的字段：用户经客户端方法 `settings.update` 写入（S8b，尚未实现），Hooks 没有写配置的工具（A9）；没有批准。
 
 ### A.6 机制
 
