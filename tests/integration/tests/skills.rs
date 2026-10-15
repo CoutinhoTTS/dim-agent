@@ -962,3 +962,52 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
     assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-2"));
     env.agent.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closing_session_creates_no_content_instances() {
+    let dirs = Dirs::new();
+    let layout = layout(&dirs);
+    let env = env(&dirs, Options::default()).await;
+    let session = env.session(&layout.cwd, "").await.unwrap();
+    let content = || {
+        env.agent
+            .diagnostics()
+            .unwrap()
+            .plugins
+            .into_iter()
+            .filter(|plugin| plugin.name == "SkillContent")
+            .map(|plugin| plugin.id)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let before = content();
+    assert_eq!(before.len(), 3);
+    // A turn held in the gate keeps the close waiting for its branch to
+    // settle, with every Session capability still loaded.
+    env.model.push(Step::Tool("gate", serde_json::json!({})));
+    session
+        .submit("go".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    entered(&env).await;
+    let closing = session.close();
+    assert!(session.is_closing());
+    dirs.write(
+        &layout.project.join("b/SKILL.md"),
+        &skill_file("b", "project b", "BODY-B-2"),
+    );
+    env.catalog()
+        .refresh(RefreshTarget {
+            user: true,
+            project: Some(layout.cwd.clone()),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        content().is_subset(&before),
+        "a closing Session created content instances"
+    );
+    env.gate.release.notify_one();
+    closing.await.unwrap();
+    env.agent.close().await.unwrap();
+}

@@ -206,17 +206,35 @@ impl TypedPlugin for SkillsPlugin {
                     published = session.activated() => if !published { return },
                 }
                 loop {
+                    // Closing wins over a change that arrived at the same time.
                     tokio::select! {
+                        biased;
                         _ = stopped.cancelled() => return,
+                        _ = session.closing() => return,
                         changed = changes.changed() => if changed.is_err() { return },
                     }
-                    owner.replace(
+                    // A closing Session creates no more instances: cancel the
+                    // update, but await it so no partial instance is abandoned.
+                    let cancel = stopped.child_token();
+                    let update = async {
+                        let view = catalog.query(Some(&cwd)).await;
                         contents
                             .lock()
                             .await
-                            .update(catalog.query(Some(&cwd)).await, &context, &loader, &stopped)
-                            .await,
-                    );
+                            .update(view, &context, &loader, &cancel)
+                            .await
+                    };
+                    tokio::pin!(update);
+                    let view = tokio::select! {
+                        biased;
+                        _ = session.closing() => {
+                            cancel.cancel();
+                            let _ = update.await;
+                            return;
+                        }
+                        view = &mut update => view,
+                    };
+                    owner.replace(view);
                 }
             });
             ctx.provide_as(

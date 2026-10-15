@@ -218,9 +218,12 @@ impl Contents {
                 if let Some(error) = instance.view.state().error {
                     return Err(ContentError::Lifecycle(error.to_string()));
                 }
-                return Err(ContentError::Lifecycle(
-                    "content instance did not become ready".into(),
-                ));
+                // Cancellation is an ordinary close or rollback, not a fault.
+                return Err(if cancel.is_cancelled() {
+                    SkillsError::Closed.into()
+                } else {
+                    ContentError::Lifecycle("content instance did not become ready".into())
+                });
             }
             self.instances.insert(id, (instance.view, key));
         }

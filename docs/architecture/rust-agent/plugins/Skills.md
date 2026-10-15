@@ -38,7 +38,11 @@ Apply creates the initial instances as part of Session assembly. Replacement
 after a catalog change waits for `SessionLifecycle::activated()`, so assembly
 readiness never observes an instance that the watcher retires, and a Session
 that fails assembly never replaces content. Changes seen meanwhile are adopted
-by the first update after publication.
+by the first update after publication. Replacement ends when
+`SessionLifecycle::closing()` returns: closing wins over a simultaneous change,
+and an update in progress is cancelled but awaited, so a closing Session creates
+no content and abandons no partial instance. Cancellation is not logged as a
+content failure.
 
 ## Events and lifetime
 
@@ -66,6 +70,7 @@ loading uses the current view rather than an old model-visible list.
 `skill_loads_the_latest_view_after_queue_and_steer_interleave`,
 `content_instances_are_session_owned_and_only_changed_content_is_replaced`,
 `catalog_changes_during_assembly_wait_for_session_publication`,
+`a_closing_session_creates_no_content_instances`,
 `unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessions`.
 
 <!-- generated:plugin Skills — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->

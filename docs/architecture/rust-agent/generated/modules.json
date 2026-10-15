@@ -531,6 +531,7 @@
       "unexpandedMacros": [
         "format",
         "serde_json::json",
+        "tokio::pin",
         "tokio::select",
         "vec"
       ]
