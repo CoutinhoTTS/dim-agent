@@ -130,9 +130,9 @@ Skills implements its existing SkillSettingsHost. Full process assembly uses one
 reconcile, without an editable-user bootstrap or configuration management namespace.
 
 MCP generations are private immutable instances within each Session's loader
-subtree. Retained user bindings pin superseded generations until release, and a
-generation no lease uses closes; project generations retire on configuration
-change, disablement or loss of approval even with retained bindings. Disconnect drains every selected source/server generation
+subtree. Bindings pin a superseded generation while its entry stays enabled;
+disabling or removing the entry retires its generations even with bindings, and a
+generation no lease uses closes. Disconnect drains every selected source/server generation
 across affected Sessions and reports cleanup errors independently of persistence.
 Ordinary Session closure stops only its own connections. No business document or
 secret enters loader row options; there is no second lifecycle manager.
@@ -154,7 +154,8 @@ external outcomes. Use existing rutis lifecycle hooks and the harness fault path
 
 > Superseded in part by [ADR 003](003-approval-scope.md): project MCP execution approval
 > (grants, fingerprints, `mcp.approve`/`mcp.revoke`) is removed; project entries start disabled
-> and the user enables them. The rest of this section stands.
+> and the user enables them. The rest of this section stands. The approval paragraphs below
+> record the superseded design; the code no longer implements them (see ADR 004).
 
 Project MCP execution approval is implemented at the host boundary. It is not a complete
 workspace sandbox or a cross-language Capability implementation. Authorizing a FileStorage root,
@@ -230,8 +231,8 @@ API. Validate runtime loss, reload, cancellation and commit-before-reply disconn
 | Cross-language public capability | Not implemented | Node declaration, append, subscription, cancellation, reload and process-loss flows |
 | Business settings persistence | Original v13 plain settings_documents payloads, source-local CAS, lazy atomic import/provenance. See ADR 004. Structural editable plugin configuration, Session overrides and credential references are not implemented | Source isolation, save failure, protected-local business management, secret-free rows and diagnostics |
 | Common execution assembly | Implemented: API-key and product profiles share public capabilities and protected-local management | Binary API-key flow, persistent settings across restart, model adoption, account isolation and transport restrictions |
-| Loader-owned MCP instances | Implemented: Session-owned nested instanced groups with private immutable configuration, automatic replacement, explicit disconnect and cleanup receipts. Session closure stops only its connections; revocation drains all affected Sessions | Bound user-source tools survive replacement; project tools obey current approval; all generations drain; logical identities survive restart and root reordering |
-| Project MCP execution approval | Implemented: host-local scoped configuration grants, protected-local approval/revocation, per-operation checks and generation disposal. General workspace sandboxing and constrained plugins are not implemented | Unapproved project MCP cannot execute or connect; stale configuration, restart, retained tool bindings and revocation respect the grant |
+| Loader-owned MCP instances | Implemented: Session-owned nested instanced groups with private immutable configuration, automatic replacement, explicit disconnect and cleanup receipts. Session closure stops only its connections; disconnect drains all affected Sessions | Bound tools survive replacement; disablement stops them; project entries run only after the user enables them; all generations drain; logical identities survive restart and root reordering |
+| Project MCP enablement | Implemented per [ADR 003](003-approval-scope.md): no grants or approval methods; project entries start disabled and the user's local record enables them by workspace and id. General workspace sandboxing and constrained plugins are not implemented | Opening a workspace runs none of its servers; project files cannot enable entries; the record survives restart and fails closed when unreadable |
 
 Keep this implementation batch on one integration branch with reviewable commits. The persistence
 format, runtime assembly and lifecycle have one coordinated owner. Whole-plugin documentation

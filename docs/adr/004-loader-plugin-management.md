@@ -21,15 +21,15 @@ fails assembly never connects, and assembly readiness never observes a
 generation retired meanwhile.
 
 Configuration changes are adopted automatically. New bindings use replacement
-generations; retained user bindings keep their old generation until release,
-Session closure or explicit disconnect. Preparing replacements does not await an
-old model request. A generation that no lease uses closes even while current,
-such as a user server that a project entry now shadows. Project generations
-retire on configuration change, disablement, unreadable authority or revocation
-even with retained bindings. Each project
-operation checks current authorization. Revocation persists the grant removal,
-rejects new work and drains affected instances across this host's Sessions before
-successful acknowledgement. Cleanup failure does not roll back revocation.
+generations; a binding keeps a superseded generation while the entry stays
+enabled, until release, Session closure or explicit disconnect, so a replacement
+never breaks a request in flight. Preparing replacements does not await an old
+model request. Disabling or removing an entry in a readable source retires its
+generations in every Session, even with bindings; an unreadable source retires
+nothing. A generation that no lease uses closes even while current, such as a
+user server that a project entry now shadows. Disconnect drains the selected
+server's generations across this host's Sessions and reports cleanup failure
+separately.
 Discovery failures remain visible in Session MCP state; persistence alone does
 not certify discovery, model adoption or cleanup.
 
@@ -69,16 +69,23 @@ API or two-stage bootstrap. Full process assembly is reconciled once. Unsupporte
 databases are rejected and preserved, never reinterpreted as v13. See the
 [native storage contract](../design/appserver/native-storage-format.md).
 
-Settings provides no approval service. [ADR 003](003-approval-scope.md) limits
-Approval and Permission to agent decisions and removes host-local approval:
-configured servers run when enabled, project entries start disabled, and only the
-user's local configuration enables them. AGENTS.md rule 11 states that decision.
-The code removal is pending in PR #16. Until this branch merges it, the code, like
-main, still carries the existing project execution approval; MCP owns its grants
-in the unchanged version-1 `mcp-approvals.json`.
-Grants are not business documents, loader intent or replayable authority. Missing
-grants deny execution and damaged stores fail closed. Package acquisition, file-root
-access, tool permission presets and Session replay never confer execution approval.
+There is no host-local approval ([ADR 003](003-approval-scope.md)): a configured
+server runs when it is enabled. Project entries start disabled, and a project
+file, including its own `enabled` field, cannot enable them. The user's choice is
+an MCP business document in the user source `mcp-projects`, keyed by canonical
+workspace and server id, written by `mcp.set_enabled` for a project entry. That
+call checks its `expectedVersion` against the project source; the record keeps no
+configuration, so later edits to an enabled entry take effect (ADR 003 D4).
+Disabling, or removing the entry through `mcp.remove`, withdraws the record first
+and does not depend on the project file, so an entry that disappears and returns,
+for example through a checkout, starts disabled again. An unreadable record
+disables every project entry and is reported in the project application; user
+entries stay available. A record outlives a deleted workspace; a different
+project later cloned at the same path with the same id is treated as enabled.
+`mcp-approvals.json` is no longer read, migrated or removed. The record is
+configuration, not replayable authority: file-root access, tool permission
+presets and Session replay enable nothing. This is an additive source in the v13
+format, not a schema change; older binaries ignore its row.
 
 ## Management and installation boundaries
 
@@ -94,7 +101,7 @@ dependencies; business edits do not reload plugins. See
 
 PluginManager's proposed responsibility remains package acquisition, manifest
 admission and installation/removal. Installation records, structural enablement,
-business source revisions, execution grants and Session instances are distinct.
+business source revisions, project enablement and Session instances are distinct.
 PR #13 integration must follow D4 without moving business documents into the
 editable layer. This branch's approval does not accept another contributor's PR.
 
@@ -102,8 +109,8 @@ editable layer. This branch's approval does not accept another contributor's PR.
 
 | Unit | Implementation scope |
 | --- | --- |
-| Session-owned MCP instances | Independent connections, retained user bindings, Session close, cross-Session project revocation and cleanup reporting |
-| Business settings persistence | Generic source-local CAS, lazy atomic import and unchanged v13 payloads; MCP owns its existing execution grants |
+| Session-owned MCP instances | Independent connections, retained bindings, Session close, cross-Session disconnect and cleanup reporting |
+| Business settings persistence | Generic source-local CAS, lazy atomic import and unchanged v13 payloads; MCP's user-local project enablement |
 | Skill content | Session-owned content instances with selective replacement; Skills owner supplies SkillSettingsHost |
 | Management | Rust owner contributions for existing business methods, not generic plugin installation or structural configuration management |
 

@@ -40,7 +40,6 @@ pub fn install(builder: &mut AgentBuilder) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpSourceState {
     Disabled,
-    ApprovalRequired,
     Connecting,
     Ready { version: String },
     Failed { message: String },
@@ -51,7 +50,6 @@ impl McpSourceState {
     pub fn into_wire(self) -> (&'static str, Option<String>, Option<String>) {
         match self {
             Self::Disabled => ("disabled", None, None),
-            Self::ApprovalRequired => ("approval_required", None, None),
             Self::Connecting => ("connecting", None, None),
             Self::Ready { version } => ("ready", Some(version), None),
             Self::Failed { message } => ("failed", None, Some(message)),
@@ -164,7 +162,6 @@ impl TypedPlugin for McpSessionPlugin {
             let project = directory.settings.project_root(Path::new(&config.cwd));
             // Subscribe before any file reads, including the first discovery.
             let settings = directory.settings.subscribe();
-            let approvals = directory.publication.approvals.subscribe();
             let stopped = ctx.cancellation_token();
             let owner = Arc::new(McpSession {
                 connections: super::McpOwner::in_session(ctx.clone(), loader, self.scope),
@@ -212,10 +209,7 @@ impl TypedPlugin for McpSessionPlugin {
                     _ = owner.stopped.cancelled() => return,
                     published = session.activated() => if !published { return },
                 }
-                reconcile(
-                    directory, owner, project, settings, approvals, refresh, workers,
-                )
-                .await
+                reconcile(directory, owner, project, settings, refresh, workers).await
             });
             Ok(Effect::Done)
         })
@@ -232,7 +226,6 @@ async fn reconcile(
     owner: Arc<McpSession>,
     project: Option<usize>,
     mut settings: watch::Receiver<u64>,
-    mut approvals: watch::Receiver<u64>,
     mut refresh: watch::Receiver<()>,
     tasks: TaskTracker,
 ) {
@@ -249,15 +242,13 @@ async fn reconcile(
                 active.retain(|id, (entry, cancel)| {
                     let keep = !force
                         && entries.get(id).is_some_and(|next| {
-                            next.source == entry.source
-                                && next.configuration == entry.configuration
-                                && next.approval == entry.approval
+                            next.source == entry.source && next.configuration == entry.configuration
                         });
                     if !keep {
                         cancel.cancel();
                         // Keep a complete old set until a replacement is ready or
                         // fails. A deletion/disable, unlike refresh, withdraws now.
-                        if !entries.get(id).is_some_and(McpServerEntry::executable) {
+                        if !entries.get(id).is_some_and(McpServerEntry::enabled) {
                             owner.remove(id);
                         }
                     }
@@ -268,7 +259,7 @@ async fn reconcile(
                         continue;
                     }
                     let cancel = owner.stopped.child_token();
-                    if entry.executable() {
+                    if entry.enabled() {
                         owner.state.update(|state| {
                             state.servers.insert(id.clone(), McpSourceState::Connecting);
                         });
@@ -280,12 +271,7 @@ async fn reconcile(
                             cancel.clone(),
                         ));
                     } else {
-                        let state = if entry.enabled() {
-                            McpSourceState::ApprovalRequired
-                        } else {
-                            McpSourceState::Disabled
-                        };
-                        owner.publish(&id, None, state, &cancel);
+                        owner.publish(&id, None, McpSourceState::Disabled, &cancel);
                     }
                     active.insert(id, (entry, cancel));
                 }
@@ -303,7 +289,6 @@ async fn reconcile(
             _ = owner.stopped.cancelled() => break,
             result = refresh.changed() => { if result.is_err() { break; } true },
             result = settings.changed() => { if result.is_err() { break; } false },
-            result = approvals.changed() => { if result.is_err() { break; } false },
         };
     }
     for (_, (_, cancel)) in active {

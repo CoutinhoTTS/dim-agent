@@ -78,9 +78,10 @@ execution dependencies may also reload affected consumers and fail in-flight
 turns; this is the accepted cost of rare structural changes, not hidden by
 registration ports. Business configuration edits update the owner's source and
 publish invalidation without reloading the owner or Rpc. MCP connections remain
-Session-owned. Like main, the code still carries the project execution approval
-that [ADR 003](../../adr/003-approval-scope.md) removes, until this branch merges
-PR #16's removal; see ADR 004.
+Session-owned. There is no host-local approval
+([ADR 003](../../adr/003-approval-scope.md)); a project entry runs only after the
+user enables it through `mcp.set_enabled`, which records the choice in MCP's
+user-local business document; see ADR 004.
 
 ## Notifications
 

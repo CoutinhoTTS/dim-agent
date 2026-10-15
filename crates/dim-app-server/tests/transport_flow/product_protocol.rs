@@ -752,66 +752,32 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         "mcp.catalog",
         "mcp.set_enabled",
         "mcp.disconnect",
-        "mcp.approve",
-        "mcp.revoke",
         "session.mcp",
         "session.mcp.refresh",
     ] {
         assert!(client.features.as_array().unwrap().contains(&json!(method)));
     }
+    // ADR 003: no host-local approval methods or catalog approval state.
+    for (method, params) in [
+        (
+            "mcp.approve",
+            json!({"cwd":work,"id":"docs","approvalToken":"any"}),
+        ),
+        ("mcp.revoke", json!({"cwd":work,"id":"docs"})),
+    ] {
+        assert!(!client.features.as_array().unwrap().contains(&json!(method)));
+        assert_eq!(
+            client.rpc(method, params).await["error"]["data"]["appError"],
+            "unknown_method"
+        );
+    }
     let catalog = client.rpc("mcp.catalog", json!({"cwd":work})).await;
     assert_ok(&catalog);
-    let token = catalog["result"]["servers"][0]["approvalToken"].clone();
-    assert_eq!(token.as_str().unwrap().len(), 64);
     assert_eq!(
         catalog["result"]["servers"],
-        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio","approval":"required","approvalToken":token}])
+        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio"}])
     );
     assert!(!catalog.to_string().contains("private-secret"));
-    assert_eq!(
-        client
-            .rpc(
-                "mcp.approve",
-                json!({"cwd":work,"id":"docs","approvalToken":"stale"})
-            )
-            .await["error"]["data"]["appError"],
-        "mcp_settings_conflict"
-    );
-    assert_eq!(
-        client
-            .rpc("mcp.approve", json!({"id":"docs","approvalToken":token}))
-            .await["error"]["data"]["appError"],
-        "invalid_params"
-    );
-    assert_ok(
-        &client
-            .rpc(
-                "mcp.approve",
-                json!({"cwd":work,"id":"docs","approvalToken":token}),
-            )
-            .await,
-    );
-    assert_eq!(
-        client.rpc("mcp.catalog", json!({"cwd":work})).await["result"]["servers"][0]["approval"],
-        "approved"
-    );
-    assert_ok(
-        &client
-            .rpc("mcp.revoke", json!({"cwd":work,"id":"docs"}))
-            .await,
-    );
-    assert_eq!(
-        client.rpc("mcp.catalog", json!({"cwd":work})).await["result"]["servers"][0]["approval"],
-        "required"
-    );
-    assert_ok(
-        &client
-            .rpc(
-                "mcp.approve",
-                json!({"cwd":work,"id":"docs","approvalToken":token}),
-            )
-            .await,
-    );
     let revision = catalog["result"]["projectRevision"].clone();
     assert_eq!(client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":"stale","enabled":true})).await["error"]["data"]["appError"], "mcp_settings_conflict");
     assert_eq!(
@@ -837,11 +803,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         ("session.list", json!({})),
         ("skills.catalog", json!({})),
         ("mcp.catalog", json!({})),
-        (
-            "mcp.approve",
-            json!({"cwd":work,"id":"docs","approvalToken":token}),
-        ),
-        ("mcp.revoke", json!({"cwd":work,"id":"docs"})),
         ("session.mcp", json!({"sessionId":"remote"})),
         (
             "session.permission.get",
@@ -936,11 +897,14 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             break;
         }
     }
-    assert_eq!(client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":revision,"enabled":false})).await["error"]["data"]["appError"], "mcp_settings_conflict");
-    assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":enabled["result"]["projectRevision"],"enabled":false})).await);
+    // The choice is recorded for the user; the project file and its revision
+    // do not change, so the same revision disables it again.
+    assert_eq!(enabled["result"]["projectRevision"], revision);
+    assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":revision,"enabled":false})).await);
     let saved: Value =
         serde_json::from_slice(&std::fs::read(work.join(".mcp.json")).unwrap()).unwrap();
     assert_eq!(saved["extension"], "preserved");
+    assert_eq!(saved["mcpServers"]["docs"]["enabled"], false);
     mcp_disabled(&mut client).await;
     // A damaged external file reports its error rather than an empty catalog;
     // optional MCP failures leave ordinary workspace tools available.

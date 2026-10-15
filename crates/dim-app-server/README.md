@@ -41,7 +41,7 @@ CAS. Business owners define and validate their payloads: MCP types live in
 Settings owns source persistence, not approvals or business management methods.
 There is no `configuration.*` RPC namespace.
 
-Native v13 retains `settings_documents` with `user/mcp` and `user/skills` keys,
+Native v13 retains `settings_documents` with `user/mcp`, `user/skills` and `user/mcp-projects` keys,
 plain payload JSON (not `{kind, document}`), source-local versions and opaque
 `native:<source>:<version>` revision tokens. Import provenance is preserved on
 edits. Successful writes notify consumers after persistence; failed persistence
@@ -54,35 +54,33 @@ loader configuration and package installation remain separate work. See
 On protected local protocol-v3 connections, `mcp.catalog({cwd?})` returns the merged catalog,
 `userRevision` and optional `projectRevision`, without commands, URLs, credentials or environment
 values. Edits target `source: "user" | "project"`, an `id`, and that source's `expectedVersion`.
-Project edits require an authorized workspace `cwd`; they write `.mcp.json`, not the user source.
+Project edits require an authorized workspace `cwd`; `mcp.save` and `mcp.remove` write `.mcp.json`,
+not the user source.
 
 - `mcp.save` additionally takes `configuration`: a complete stdio, HTTP or SSE server definition
   in the existing `mcpServers` format. It creates or replaces that source's entry, not a merged one.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.
-- `mcp.set_enabled` additionally takes `enabled` and preserves the rest of the selected entry.
+- `mcp.set_enabled` additionally takes `enabled`. A user entry's `enabled` field changes and the
+  rest of the entry is preserved. For a project entry, enabling checks `expectedVersion` against
+  `projectRevision` and the entry's presence; the choice is stored only in the user's local record
+  (below). Disabling a project entry always succeeds against that record, even if `.mcp.json` is
+  unreadable or no longer defines the entry, and `mcp.remove` withdraws it before editing the file.
 - `mcp.disconnect` takes `source`, `id` and optional `cwd`, without a revision; it does not edit
   persisted intent.
-- `mcp.approve` takes required `cwd`, `id` and `approvalToken` from the catalog. It grants only
-  the reviewed project's exact effective configuration, not future changes or another workspace.
-- `mcp.revoke` takes required `cwd` and `id`. It removes that project's grant and waits for
-  generation cancellation and transport cleanup; it does not undo earlier external effects.
 
-Project MCP requires explicit execution approval before discovery, for stdio, HTTP and SSE.
-Catalog entries expose `approval` (`notRequired`, `required`, `approved`) and `approvalToken`;
-the token is a digest, not a credential. `enabled` expresses configuration intent independently
-of approval. Sessions report `approval_required` for enabled but unapproved servers. FullAccess,
-file-root authorization, session restoration and same-name user entries never approve a project.
-Approval may immediately start discovery in active sessions. Only protected-local v3 management
-can grant or revoke; these operations are not model tools.
-
-MCP owns its grants in the host's `mcp-approvals.json` (version 1, private file permissions on
-Unix), outside project configuration and Session history. Native and standalone hosts share this
-format; the SQLite format is unchanged. Corrupt or inaccessible grant storage fails closed. Approval
-compares current configuration with the caller's digest before persistence; stale tokens return
-`mcp_settings_conflict`. Commands, arguments, environment overrides, resolved cwd, URLs, headers
-and authentication are bound by the digest, but changes to referenced scripts/binaries or inherited
-environment are not. This is configuration approval, not an OS sandbox; see the
-[trust contract](../../docs/adr/001-harness-foundation.md#trust-and-cross-language-calls).
+Approval and Permission govern only model tool calls ([ADR 003](../../docs/adr/003-approval-scope.md)).
+A configured server runs when it is enabled; there are no grants, fingerprints or approval methods,
+and `mcp.approve`/`mcp.revoke` return `unknown_method`. Project entries start disabled: a project
+file cannot enable its own entries, including with its own `enabled` field, which is ignored.
+The user enables a project entry with `mcp.set_enabled`. That choice is stored in the user's local
+record `mcp-projects` (`user/mcp-projects` in native storage, `mcp-projects.json` in a standalone
+home), keyed by canonical workspace and server id. It holds no configuration and never enters
+project files or Session history. An unreadable record disables every project entry and is
+reported in `projectApplication.error`; user entries stay available. A record outlives a deleted
+workspace, so a different project later cloned at the same path with the same id is enabled.
+After enabling, later edits to that entry's command or arguments take effect without another
+decision (ADR 003 D4). FullAccess, file-root authorization and Session restoration enable nothing.
+An old `mcp-approvals.json` is ignored, not migrated or removed.
 
 Successful configuration mutations return `{}` after persistence, not after connection/tool
 adoption. The catalog also returns `userApplication` and optional `projectApplication`, each with
@@ -106,13 +104,13 @@ Each Session owns its MCP connections as nested instances in the existing loader
 The host coordinates source selection and retirement without rewriting root layers.
 Catalog reads and connection operations also request refresh of external workspace-file edits;
 there is no background filesystem watcher. A catalog reply is not a refresh-completion barrier.
-Already bound user-source tools retain their connection generation during replacement. After the last old
-binding is released, the coordinator closes that instance through the loader's fiber. A generation
-that no lease uses closes even while current, such as a user server that a project entry now shadows.
-Session closure drains all its instances, including those retained by old bindings,
-without affecting another Session using the same server configuration.
-Project generations instead close on configuration change, disablement or revoked approval,
-even when a model request retains their tools. Each project operation rechecks current authority.
+Already bound tools retain their connection generation while a replacement takes over, so a
+request in flight finishes on the configuration it started with. After the last old binding is
+released, the coordinator closes that instance through the loader's fiber. Disabling or removing
+an entry in a readable source closes its generations in every Session, including bound ones; an
+unreadable source closes nothing. A generation that no lease uses closes even while current, such
+as a user server that a project entry now shadows. Session closure drains all its instances, including those
+retained by old bindings, without affecting another Session using the same server configuration.
 Explicit disconnect drains all generations of the selected source/server, without changing its
 configuration; a later acquisition can reconnect. It reports cleanup failure rather than treating
 loader reconciliation as proof of successful cleanup.

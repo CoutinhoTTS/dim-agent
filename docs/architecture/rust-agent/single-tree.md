@@ -4,7 +4,7 @@ Status: single-tree assembly, capability reload settlement, native Timeline stor
 and recovery are implemented. FileStorage, process Aimux, product Provider and
 optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses source-owned business documents; MCP connections and Skill content instances belong
-to Sessions. Project MCP execution requires host-local approval. See
+to Sessions. Project MCP entries start disabled until the user enables them. See
 [ADR 004](../../adr/004-loader-plugin-management.md) for implemented configuration
 scope. Rpc collects [management methods](../../design/appserver/management-methods.md)
 as named services from account, provider, MCP and Skills owners.
@@ -24,8 +24,8 @@ External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-ap
 可选的 managed provider 账号插件由外部单独提供：给出 `--plugin-dir`、`--js-runtime` 与 `--node` 时，rutis Node runtime 与该插件作为同一进程树中的独立 loader 行装载，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；插件不可用时其 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#optional-managed-provider)）。
 
 MCP connection generations are nested `McpConnections` group instances owned by
-each Session in the same loader. `McpPublication` serializes source selection,
-authorization and cross-Session retirement; it does not reconcile root layers.
+each Session in the same loader. `McpPublication` serializes source selection
+and cross-Session retirement; it does not reconcile root layers.
 Its plugin declares Settings as a dependency and owns the publication worker in
 an asynchronous effect. Reload and disposal stop admission, settle the current
 operation and retire retained connections before withdrawing the service. The
@@ -119,8 +119,8 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
 | `AimuxPlugin`（进程级） | 共享 HTTP 资源、请求/流转换及取消桥接 | `ModelHost`：接收最终请求、已解析连接与取消信号的 request 对象 | 无业务服务依赖；不注入 Provider、ToolRegistry 或 Session |
 | `ConfiguredModelsPlugin` | `--model-config` 的开发模型目录与 resolver | 开发目录与 resolver | — |
-| `McpPublication` | Source selection, the project execution grant record (`mcp-approvals.json`) and retirement across Session-owned instances; no root reconciliation | `Publication` | `SettingsService`, `FileStorage` |
-| `McpPlugin` | MCP 目录、连接租约与准入复查；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
+| `McpPublication` | Source selection, including project enablement from the user's record, and retirement across Session-owned instances; no root reconciliation | `Publication` | `SettingsService` |
+| `McpPlugin` | MCP 目录、连接租约与项目条目的用户启用记录；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
 | `HostPlatformPlugin` | 平台与 exec shell 设置 | `HostPlatform` | `When<FileStorage>` |
 | `SkillsCatalogPlugin` | Skill discovery/catalog and business settings; privately supplies the reusable catalog's SkillSettingsHost | `SkillsCatalog`, Skills management contribution | `HostPlatform`, `SettingsService` |
 | `AgentDirectoryPlugin` | `AgentDirectory`：Agent 表与实例、Session 协议版本与占用、不可用记录、默认 agentId、serverInstanceId；不可重启 | `AgentDirectory` | — |
@@ -146,7 +146,7 @@ source-local CAS and lazy atomic import, as described by
 persists BusinessDocument values; MCP owns its types in `mcp/config.rs`, and
 Skills owns its SkillSettingsHost implementation. Successful persistence precedes
 invalidation; no unsaved loader intent, configuration namespace or flush exists.
-Project files and MCP's host-local approval record retain separate authority.
+Project files and MCP's user-local project enablement record retain separate authority.
 Business updates do not reload owners or Rpc. Structural editable configuration
 remains separate issue #3 work.
 
@@ -154,8 +154,8 @@ remains separate issue #3 work.
 | --- | --- |
 | Sources and writes | Native user MCP/Skill documents import independently on first successful source read; plain v13 payloads and import provenance commit atomically. SQLite then owns that source, with native:source:N CAS tokens. Originals remain intact. Project `.mcp.json` remains file-authoritative with content CAS |
 | Publication | Settings notifications update Session discovery automatically. New bindings use new instances; a persistence acknowledgement does not guarantee discovery, adoption or cleanup |
-| MCP generations | Connections are not shared across Sessions. The declared `SessionLoader` service creates nested instances using private immutable values, never secret-bearing loader options or mutable templates. Retained user bindings keep old generations until release or Session close; a generation no lease uses closes even while current. Project generations retire on configuration change, disablement, unreadable authority and revocation even with retained bindings. Disconnect/revoke drains every affected Session instance; cleanup failures are reported separately |
-| 项目 MCP 批准 | 宿主本地批准绑定规范工作区、服务器 ID 与有效配置指纹；未批准的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现。每次连接操作复查当前来源与批准；撤销拒绝经保留绑定的新调用、取消并等待已受理的代次工作、关闭传输后才确认。文件根授权、FullAccess 工具权限与 Session 恢复都不授予批准（ADR 001 信任合同）。[ADR 003](../../adr/003-approval-scope.md) 已决定取消宿主本地批准，代码删除待 #16 |
+| MCP generations | Connections are not shared across Sessions. The declared `SessionLoader` service creates nested instances using private immutable values, never secret-bearing loader options or mutable templates. Bindings keep a superseded generation while its entry stays enabled, until release or Session close; disabling or removing the entry retires its generations in every Session even with bindings; a generation no lease uses closes even while current. Disconnect drains every affected Session instance; cleanup failures are reported separately |
+| 项目 MCP 启用 | 没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）：已配置的服务器启用即运行。项目条目默认禁用，项目文件（包括其 `enabled` 字段）不能启用自己；用户经 `mcp.set_enabled` 在本地记录 `mcp-projects` 中按规范工作区与服务器 ID 启用。未启用的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现；停用或经 `mcp.remove` 删除时先撤回记录，不依赖项目文件；记录不可读时所有项目条目按禁用处理，用户条目不受影响。文件根授权、FullAccess 工具权限与 Session 恢复都不启用任何条目 |
 
 Session 与分支能力不向进程服务登记自己：RPC 经 `Session::service::<T>(branch)` 调用分支能力（如 [Approval](plugins/Approval.md)）。开发配置的 ModelProvider 已注入进程 resolver 与 `ModelHost`，每次请求解析当前连接，再调用 Aimux；Session 的 ConfiguredModelPlugin 只提供请求准备。产品 profile 的模型选择经 Provider 的 `ModelSelectionHost` 解析；managed provider 的凭据只以请求内租约交给模型请求。
 

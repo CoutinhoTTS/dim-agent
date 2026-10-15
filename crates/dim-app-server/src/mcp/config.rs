@@ -1,8 +1,10 @@
-//! Typed MCP documents and host-scoped execution identity.
+//! Typed MCP documents and the effective configuration of each entry.
 use crate::settings::{BusinessDocument, Result, SettingsError, SettingsScope, SettingsService};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -121,24 +123,91 @@ impl BusinessDocument for McpSettings {
     }
 }
 
-pub(crate) fn workspace(settings: &SettingsService, scope: SettingsScope) -> Result<PathBuf> {
-    let SettingsScope::Project(root) = scope else {
-        return Err(SettingsError::Invalid(
-            "MCP approval requires a project source",
-        ));
-    };
-    settings.project_path(root)
+/// The user's enablement of project entries (ADR 003 D3), keyed by canonical
+/// workspace and server id. A project source starts disabled: its own files
+/// cannot enable an entry, and only this user-local record does.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpProjectEnablement {
+    #[serde(default)]
+    pub enabled: BTreeMap<String, BTreeSet<String>>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+impl McpProjectEnablement {
+    pub fn contains(&self, workspace: &str, id: &str) -> bool {
+        self.enabled
+            .get(workspace)
+            .is_some_and(|ids| ids.contains(id))
+    }
+    /// Returns whether the record changed.
+    pub fn set(&mut self, workspace: &str, id: &str, enabled: bool) -> bool {
+        if enabled {
+            return self
+                .enabled
+                .entry(workspace.to_owned())
+                .or_default()
+                .insert(id.to_owned());
+        }
+        let Some(ids) = self.enabled.get_mut(workspace) else {
+            return false;
+        };
+        let changed = ids.remove(id);
+        if ids.is_empty() {
+            self.enabled.remove(workspace);
+        }
+        changed
+    }
+}
+impl BusinessDocument for McpProjectEnablement {
+    const NAMESPACE: &'static str = "mcp-projects";
+    const USER_FILE: &'static str = "mcp-projects.json";
+
+    fn validate(&self) -> Result<()> {
+        if self.extra.contains_key("enabled")
+            || self.enabled.iter().any(|(workspace, ids)| {
+                !Path::new(workspace).is_absolute()
+                    || ids.is_empty()
+                    || ids.iter().any(|id| id.trim().is_empty())
+            })
+        {
+            return Err(SettingsError::Invalid("invalid MCP project enablement"));
+        }
+        Ok(())
+    }
 }
 
+/// The canonical workspace of an authorized project source, as the
+/// enablement key.
+pub(crate) fn workspace(settings: &SettingsService, scope: SettingsScope) -> Result<String> {
+    let SettingsScope::Project(root) = scope else {
+        return Err(SettingsError::Invalid("not a project MCP source"));
+    };
+    settings
+        .project_path(root)?
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(SettingsError::Invalid("project cwd must be UTF-8"))
+}
+
+/// The configuration an entry runs with. A project entry resolves its stdio
+/// cwd against the workspace and takes its enablement only from the user's
+/// record; its own `enabled` field is ignored.
 pub(crate) fn effective(
     settings: &SettingsService,
     scope: SettingsScope,
+    id: &str,
     mut config: McpServerSettings,
+    enablement: &McpProjectEnablement,
 ) -> Result<McpServerSettings> {
     if matches!(scope, SettingsScope::Project(_)) {
         let workspace = workspace(settings, scope)?;
+        let (McpServerSettings::Stdio { enabled, .. } | McpServerSettings::Remote { enabled, .. }) =
+            &mut config;
+        *enabled = Some(enablement.contains(&workspace, id));
         if let McpServerSettings::Stdio { cwd, .. } = &mut config {
             // Resolve relative directories against the workspace, not the daemon.
+            let workspace = PathBuf::from(&workspace);
             let path = cwd
                 .as_ref()
                 .map_or(workspace.clone(), |cwd| workspace.join(cwd));
@@ -150,32 +219,4 @@ pub(crate) fn effective(
         }
     }
     Ok(config)
-}
-
-pub(crate) fn grant_key(
-    settings: &SettingsService,
-    scope: SettingsScope,
-    id: &str,
-) -> Result<String> {
-    let workspace = workspace(settings, scope)?;
-    let bytes = serde_json::to_vec(&(workspace, id))
-        .map_err(|_| SettingsError::Invalid("invalid MCP identity"))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
-pub(crate) fn fingerprint(
-    settings: &SettingsService,
-    scope: SettingsScope,
-    id: &str,
-    config: &McpServerSettings,
-) -> Result<String> {
-    let key = grant_key(settings, scope, id)?;
-    let mut config = config.clone();
-    // Enablement is intent, not a new executable configuration.
-    let (McpServerSettings::Stdio { enabled, .. } | McpServerSettings::Remote { enabled, .. }) =
-        &mut config;
-    *enabled = None;
-    let bytes = serde_json::to_vec(&("dim/mcp-execution/v1", key, config))
-        .map_err(|_| SettingsError::Invalid("invalid MCP configuration"))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
 }

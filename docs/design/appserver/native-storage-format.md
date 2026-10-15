@@ -16,7 +16,7 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
 | `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 13)`; exactly one row |
-| `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp` or `user/skills`; workspace files are not mirrored |
+| `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills` or `user/mcp-projects`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
 | `settings_documents.imported_revision` | `TEXT` | No | — | Original file SHA-256 or `missing`; import provenance, not a CAS token |
@@ -71,6 +71,11 @@ v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、
 
 Settings owns each source independently. Original v13 rows under `user/mcp` or
 `user/skills` contain the plain MCP or Skill document JSON, not a tagged envelope.
+`user/mcp-projects` holds MCP's user-local project enablement
+(`{"enabled":{"<canonical workspace>":["<server id>"]}}`, ADR 003 D3). Its legacy
+import file is `mcp-projects.json`, which no earlier version wrote, so the first
+read imports `missing` and an empty record. The row is an additive source within
+v13: the schema and format version are unchanged, and older binaries ignore it.
 Generic Settings persistence retains these exact payload shapes, not loader
 patches or UUID snapshots. Business interpretation and validation belong to the namespace owner.
 Unknown extension fields and disabled Skill IDs are preserved.
@@ -95,8 +100,8 @@ not fall back to empty settings. Originals remain available for repair/retry.
 After import, SQLite is authoritative: edits CAS the named source revision,
 increment only that source's version, and never rewrite or reread the old file
 as runtime authority. Import provenance does not change on ordinary edits.
-Project `.mcp.json` keeps file authority and content CAS; host-local approvals
-remain separate. Standalone hosts may explicitly use the file backend.
+Project `.mcp.json` keeps file authority and content CAS; project enablement is
+never written there. Standalone hosts may explicitly use the file backend.
 
 Revision notifications follow successful persistence and contain no business
 document bodies. They certify neither loader adoption nor generation settlement.

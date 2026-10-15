@@ -76,7 +76,7 @@ impl Fixture {
     }
     async fn open(home: PathBuf, reversed: bool) -> Self {
         let root = Ctx::root().unwrap();
-        let (publication, loader) = mcp_host::Host::start(&root, usize::from(reversed)).await;
+        let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         let plugin = root.plugin(dim_agent_runtime::capability_plugin(McpPlugin));
         let mut roots = vec![home.clone(), home.join("project")];
@@ -179,8 +179,9 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
         );
     }
 
-    // Saving a project source is not execution approval, even if its transport
-    // is invalid. The disabled loader row cannot execute that configuration.
+    // Saving a project source never enables it, even with a valid-looking
+    // transport; enabling records only the user's choice, and an invalid
+    // transport still cannot run.
     let revision = fixture
         .mcp
         .update(
@@ -201,29 +202,25 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
         )
         .await
         .unwrap();
-    assert!(
-        fixture
-            .mcp
-            .server(Some(1), "shared".into(), &cancel)
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        fixture.mcp.server(Some(1), "shared".into(), &cancel).await,
+        Err(McpError::Disabled)
+    ));
     let application = fixture.mcp.application(SettingsScope::Project(1));
     assert_eq!(application.applied_revision, Some(revision.clone()));
-    let entry = fixture
+    fixture
         .mcp
-        .catalog(Some(1), &cancel)
+        .update(
+            SettingsScope::Project(1),
+            revision.clone(),
+            "shared".into(),
+            McpChange::SetEnabled(true),
+            &cancel,
+        )
         .await
-        .unwrap()
-        .servers
-        .remove("shared")
         .unwrap();
-    assert_eq!(entry.approval, dim_app_server::mcp::McpApproval::Required);
     assert!(matches!(
-        fixture
-            .mcp
-            .approve(1, "shared".into(), entry.approval_token.unwrap(), &cancel)
-            .await,
+        fixture.mcp.server(Some(1), "shared".into(), &cancel).await,
         Err(McpError::Server(
             dim_app_server::mcp::server::McpServerError::Configuration(_)
         ))
@@ -240,7 +237,7 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
     assert_eq!(user.state(), McpServerState::Disconnected);
 
     // Restart with different FileStorage indices. Templates stay immutable;
-    // execution authorization still belongs to the canonical workspace.
+    // enablement still belongs to the canonical workspace.
     fixture.publication.close().await;
     fixture.root.shutdown().await.unwrap();
     assert_eq!(user.state(), McpServerState::Closed);
@@ -258,6 +255,15 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
     assert!(
         restarted
             .mcp
+            .catalog(Some(0), &cancel)
+            .await
+            .unwrap()
+            .servers["shared"]
+            .enabled()
+    );
+    assert!(
+        restarted
+            .mcp
             .server(Some(0), "shared".into(), &cancel)
             .await
             .is_err()
@@ -266,88 +272,80 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
 }
 
 #[tokio::test]
-async fn project_approval_is_persisted_scoped_and_checked_on_retained_connections() {
-    use dim_app_server::mcp::{
-        McpApproval,
-        server::{McpServerError, McpServerState},
-    };
-    use sha2::{Digest, Sha256};
+async fn project_entries_start_disabled_and_only_the_users_record_enables_them() {
+    use dim_app_server::mcp::server::McpServerState;
     let fixture = Fixture::new().await;
     let cancel = CancellationToken::new();
-    let config =
-        json!({"command":"approved-server", "args":["--first"], "env":{"SECRET":"do-not-export"}});
+    let config = json!({"command":"project-server", "args":["--first"], "env":{"SECRET":"do-not-export"}, "enabled":true});
+    let project_file = fixture.home.join("project/.mcp.json");
     let write = |value: &Value| {
         fs::write(
-            fixture.home.join("project/.mcp.json"),
+            &project_file,
             json!({"mcpServers":{"shared":value}}).to_string(),
         )
         .unwrap()
     };
     write(&config);
-    let entry = fixture
-        .mcp
-        .catalog(Some(1), &cancel)
-        .await
-        .unwrap()
-        .servers
-        .remove("shared")
-        .unwrap();
-    let token = entry.approval_token.unwrap();
-    assert_eq!(entry.approval, McpApproval::Required);
+    // The file's own `enabled` cannot enable it, and a grant from the removed
+    // approval store is ignored rather than migrated.
+    let grants = r#"{"version":1,"approved":{}}"#;
+    fs::write(fixture.home.join("mcp-approvals.json"), grants).unwrap();
+    let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert!(!catalog.servers["shared"].enabled());
     assert!(matches!(
         fixture.mcp.server(Some(1), "shared".into(), &cancel).await,
-        Err(McpError::ApprovalRequired)
+        Err(McpError::Disabled)
     ));
-    // Freeze the original execution identity and typed serialization, without
-    // using the new owner's hashing helpers to construct the legacy grant.
-    let workspace = fixture.home.join("project");
-    let key = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&(&workspace, "shared")).unwrap())
-    );
-    let effective = format!(
-        r#"{{"command":"approved-server","args":["--first"],"env":{{"SECRET":"do-not-export"}},"cwd":{}}}"#,
-        serde_json::to_string(&workspace).unwrap(),
-    );
-    let fingerprint = format!(
-        "{:x}",
-        Sha256::digest(format!(r#"["dim/mcp-execution/v1","{key}",{effective}]"#))
-    );
-    assert_eq!(token, fingerprint);
-    let legacy_grants = format!(r#"{{"version":1,"approved":{{"{key}":"{fingerprint}"}}}}"#);
-    fs::write(fixture.home.join("mcp-approvals.json"), &legacy_grants).unwrap();
-    assert_eq!(
-        fixture.mcp.catalog(Some(1), &cancel).await.unwrap().servers["shared"].approval,
-        McpApproval::Approved
-    );
-    let mut disabled = config.clone();
-    disabled["enabled"] = json!(false);
-    write(&disabled);
-    let disabled = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
-    assert_eq!(
-        disabled.servers["shared"].approval_token.as_ref(),
-        Some(&token)
-    );
-    assert!(!disabled.servers["shared"].executable());
-    write(&config);
-    fixture
-        .mcp
-        .approve(1, "shared".into(), token.clone(), &cancel)
-        .await
-        .unwrap();
+
+    let written = fs::read(&project_file).unwrap();
+    assert!(matches!(
+        fixture
+            .mcp
+            .update(
+                SettingsScope::Project(1),
+                catalog.user_revision.clone(),
+                "shared".into(),
+                McpChange::SetEnabled(true),
+                &cancel,
+            )
+            .await,
+        Err(McpError::Settings(SettingsError::Conflict))
+    ));
+    assert!(matches!(
+        fixture
+            .mcp
+            .update(
+                SettingsScope::Project(1),
+                catalog.project_revision.clone().unwrap(),
+                "missing".into(),
+                McpChange::SetEnabled(true),
+                &cancel,
+            )
+            .await,
+        Err(McpError::UnknownServer)
+    ));
+    set_project(&fixture.mcp, 1, true, &cancel).await.unwrap();
+    assert!(fixture.mcp.catalog(Some(1), &cancel).await.unwrap().servers["shared"].enabled());
     let first = fixture
         .mcp
         .server(Some(1), "shared".into(), &cancel)
         .await
         .unwrap();
-    let approved = fs::read_to_string(fixture.home.join("mcp-approvals.json")).unwrap();
-    assert_eq!(approved, legacy_grants);
-    assert!(
-        !approved.contains("SECRET")
-            && !approved.contains("do-not-export")
-            && !approved.contains("approved-server")
+    // Shared project files never carry the choice; the user's record has only
+    // the workspace and id, no configuration.
+    assert_eq!(fs::read(&project_file).unwrap(), written);
+    let record = fs::read_to_string(fixture.home.join("mcp-projects.json")).unwrap();
+    let workspace = fixture.home.join("project");
+    assert_eq!(
+        serde_json::from_str::<Value>(&record).unwrap(),
+        json!({"enabled":{(workspace.to_str().unwrap()):["shared"]}})
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.home.join("mcp-approvals.json")).unwrap(),
+        grants
     );
 
+    // Enablement is keyed by workspace: the same id elsewhere stays disabled.
     let other = fixture.home.join("other");
     fs::create_dir(&other).unwrap();
     fs::write(
@@ -365,131 +363,144 @@ async fn project_approval_is_persisted_scoped_and_checked_on_retained_connection
             .mcp
             .server(Some(other), "shared".into(), &cancel)
             .await,
-        Err(McpError::ApprovalRequired)
-    ));
-    assert!(matches!(
-        fixture
-            .mcp
-            .approve(other, "shared".into(), token.clone(), &cancel)
-            .await,
-        Err(McpError::Settings(SettingsError::Conflict))
+        Err(McpError::Disabled)
     ));
 
+    // ADR 003 D4: a changed project command runs without a new decision, and
+    // a retained connection keeps its generation.
     let mut changed = config.clone();
     changed["args"] = json!(["--second"]);
     write(&changed);
-    // No catalog refresh is necessary: a retained executable handle rechecks
-    // the actual project source before any connection or tool request.
-    assert!(matches!(
-        first.tools(&cancel).await,
-        Err(McpServerError::ApprovalRequired)
-    ));
-    assert_eq!(first.state(), McpServerState::Closed);
-    assert!(matches!(
-        fixture
-            .mcp
-            .approve(1, "shared".into(), token.clone(), &cancel)
-            .await,
-        Err(McpError::Settings(SettingsError::Conflict))
-    ));
-    let token = fixture.mcp.catalog(Some(1), &cancel).await.unwrap().servers["shared"]
-        .approval_token
-        .clone()
-        .unwrap();
-
-    // A persistence error must not grant execution or overwrite the old store.
-    fs::rename(
-        fixture.home.join("mcp-approvals.json"),
-        fixture.home.join("approval-backup"),
-    )
-    .unwrap();
-    fs::create_dir(fixture.home.join("mcp-approvals.json")).unwrap();
-    assert!(
-        fixture
-            .mcp
-            .approve(1, "shared".into(), token.clone(), &cancel)
-            .await
-            .is_err()
-    );
-    assert!(
-        fixture
-            .mcp
-            .server(Some(1), "shared".into(), &cancel)
-            .await
-            .is_err()
-    );
-    fs::remove_dir(fixture.home.join("mcp-approvals.json")).unwrap();
-    fs::rename(
-        fixture.home.join("approval-backup"),
-        fixture.home.join("mcp-approvals.json"),
-    )
-    .unwrap();
-    fixture
+    assert!(fixture.mcp.catalog(Some(1), &cancel).await.unwrap().servers["shared"].enabled());
+    let second = fixture
         .mcp
-        .approve(1, "shared".into(), token.clone(), &cancel)
+        .server(Some(1), "shared".into(), &cancel)
         .await
         .unwrap();
+    assert_eq!(first.state(), McpServerState::Disconnected);
+    drop((first, second));
+
+    // An unreadable record disables every project entry; user entries, even
+    // looked up from the workspace, are unaffected.
+    let record_path = fixture.home.join("mcp-projects.json");
+    fs::write(&record_path, b"{invalid").unwrap();
+    let degraded = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert!(!degraded.servers["shared"].enabled());
+    assert!(matches!(
+        fixture.mcp.server(Some(1), "shared".into(), &cancel).await,
+        Err(McpError::Disabled)
+    ));
+    fixture
+        .mcp
+        .server(Some(1), "user-only".into(), &cancel)
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .mcp
+            .application(SettingsScope::Project(1))
+            .error
+            .is_some()
+    );
+    assert!(set_project(&fixture.mcp, 1, false, &cancel).await.is_err());
+    fs::write(&record_path, &record).unwrap();
 
     fixture.publication.close().await;
     fixture.root.shutdown().await.unwrap();
     let restarted = Fixture::open(fixture.home.clone(), true).await;
-    let entry = restarted
-        .mcp
+    let mcp = restarted.mcp.clone();
+    let set = |enabled: bool| {
+        let mcp = mcp.clone();
+        let cancel = cancel.clone();
+        async move { set_project(&mcp, 0, enabled, &cancel).await }
+    };
+    // Disabling stops the running server in every Session, even while bound.
+    let connection = mcp.server(Some(0), "shared".into(), &cancel).await.unwrap();
+    set(false).await.unwrap();
+    assert!(matches!(
+        mcp.server(Some(0), "shared".into(), &cancel).await,
+        Err(McpError::Disabled)
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while connection.state() != McpServerState::Closed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the disabled server closes");
+    assert_eq!(
+        fs::read_to_string(restarted.home.join("mcp-projects.json")).unwrap(),
+        "{\n  \"enabled\": {}\n}\n"
+    );
+
+    // Removing an entry withdraws its enablement: re-adding the id, by an edit
+    // or a checkout, starts it disabled again.
+    set(true).await.unwrap();
+    let revision = mcp
         .catalog(Some(0), &cancel)
         .await
         .unwrap()
-        .servers
-        .remove("shared")
+        .project_revision
         .unwrap();
-    assert_eq!(entry.approval, McpApproval::Approved);
-    assert_eq!(entry.approval_token, Some(token));
-    let connection = restarted
-        .mcp
-        .server(Some(0), "shared".into(), &cancel)
+    let revision = mcp
+        .update(
+            SettingsScope::Project(0),
+            revision,
+            "shared".into(),
+            McpChange::Remove,
+            &cancel,
+        )
         .await
         .unwrap();
-    let grants_path = restarted.home.join("mcp-approvals.json");
-    let grants = fs::read(&grants_path).unwrap();
-    fs::write(&grants_path, b"{invalid").unwrap();
-    assert!(matches!(
-        connection.tools(&cancel).await,
-        Err(McpServerError::ApprovalRequired)
-    ));
-    assert_eq!(connection.state(), McpServerState::Closed);
-    fs::write(&grants_path, grants).unwrap();
-    let connection = restarted
-        .mcp
-        .server(Some(0), "shared".into(), &cancel)
-        .await
-        .unwrap();
-    restarted
-        .mcp
-        .revoke(0, "shared".into(), &cancel)
-        .await
-        .unwrap();
-    assert_eq!(connection.state(), McpServerState::Closed);
-    assert!(matches!(
-        connection.tools(&cancel).await,
-        Err(McpServerError::ApprovalRequired)
-    ));
-    assert!(matches!(
-        connection
-            .call("anything".into(), Default::default(), &cancel)
-            .await,
-        Err(McpServerError::ApprovalRequired)
-    ));
-    assert!(matches!(
-        restarted
-            .mcp
-            .server(Some(0), "shared".into(), &cancel)
-            .await,
-        Err(McpError::ApprovalRequired)
-    ));
-    assert_eq!(
-        restarted.mcp.catalog(None, &cancel).await.unwrap().servers["shared"].approval,
-        McpApproval::NotRequired
-    );
+    mcp.update(
+        SettingsScope::Project(0),
+        revision,
+        "shared".into(),
+        McpChange::Put(serde_json::from_value(config.clone()).unwrap()),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert!(!mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
+
+    // Disabling never depends on the project file being readable.
+    set(true).await.unwrap();
+    let written = fs::read(&project_file).unwrap();
+    fs::write(&project_file, b"{broken").unwrap();
+    mcp.update(
+        SettingsScope::Project(0),
+        "stale".into(),
+        "shared".into(),
+        McpChange::SetEnabled(false),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    fs::write(&project_file, &written).unwrap();
+    assert!(!mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
+    drop(connection);
     restarted.close().await;
+}
+
+async fn set_project(
+    mcp: &McpService,
+    root: usize,
+    enabled: bool,
+    cancel: &CancellationToken,
+) -> dim_app_server::mcp::Result<String> {
+    let revision = mcp
+        .catalog(Some(root), cancel)
+        .await?
+        .project_revision
+        .unwrap();
+    mcp.update(
+        SettingsScope::Project(root),
+        revision,
+        "shared".into(),
+        McpChange::SetEnabled(enabled),
+        cancel,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -511,26 +522,25 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     ));
 
     let original_user = fs::read(fixture.home.join("mcp.json")).unwrap();
-    let enabled_revision = mcp
-        .update(
-            SettingsScope::Project(1),
-            project.project_revision.unwrap(),
-            "shared".into(),
-            McpChange::SetEnabled(true),
-            &cancel,
-        )
-        .await
-        .unwrap();
-    let persisted: Value =
-        serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap()).unwrap();
+    let original_project = fs::read(fixture.home.join("project/.mcp.json")).unwrap();
+    let project_revision = project.project_revision.unwrap();
+    mcp.update(
+        SettingsScope::Project(1),
+        project_revision.clone(),
+        "shared".into(),
+        McpChange::SetEnabled(true),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    // Enabling a project entry edits neither the project nor the user MCP file.
+    let enabled = mcp.catalog(Some(1), &cancel).await.unwrap();
+    assert!(enabled.servers["shared"].enabled());
+    assert_eq!(enabled.project_revision, Some(project_revision.clone()));
     assert_eq!(
-        persisted["mcpServers"]["shared"],
-        json!({
-            "type":"sse", "url":"https://project.test/sse", "enabled":true,
-            "headers":{"X-Key":"project-secret"}, "future":[1,2]
-        })
+        fs::read(fixture.home.join("project/.mcp.json")).unwrap(),
+        original_project
     );
-    assert_eq!(persisted["projectExtension"], "keep");
     assert_eq!(
         fs::read(fixture.home.join("mcp.json")).unwrap(),
         original_user
@@ -539,13 +549,16 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     // Removing only the project override reveals, rather than deletes, user config.
     mcp.update(
         SettingsScope::Project(1),
-        enabled_revision,
+        project_revision,
         "shared".into(),
         McpChange::Remove,
         &cancel,
     )
     .await
     .unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("project/.mcp.json")).unwrap()).unwrap();
+    assert_eq!(persisted["projectExtension"], "keep");
     let revealed = mcp.catalog(Some(1), &cancel).await.unwrap();
     assert_eq!(revealed.servers["shared"].source, SettingsScope::User);
     assert!(revealed.servers["shared"].enabled());

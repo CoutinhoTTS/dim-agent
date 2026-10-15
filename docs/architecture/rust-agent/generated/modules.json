@@ -1257,21 +1257,11 @@
       ]
     },
     {
-      "id": "dim_app_server::mcp::approval",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::mcp",
-      "file": "crates/dim-app-server/src/mcp/approval.rs",
-      "unexpandedMacros": [
-        "tokio::select"
-      ]
-    },
-    {
       "id": "dim_app_server::mcp::config",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
       "file": "crates/dim-app-server/src/mcp/config.rs",
       "unexpandedMacros": [
-        "format",
         "matches"
       ]
     },
@@ -10653,24 +10643,18 @@
     },
     {
       "from": "dim_app_server::mcp",
-      "to": "dim_app_server::mcp::approval",
-      "references": [
-        "mod approval",
-        "path approval"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::config",
       "references": [
         "mod config",
+        "path McpProjectEnablement",
+        "path McpProjectEnablement::default",
         "path McpServerSettings",
         "path McpServerSettings::Remote",
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path config::effective",
-        "path config::fingerprint",
-        "path config::grant_key",
+        "path config::workspace",
+        "use config::McpProjectEnablement",
         "use config::McpServerSettings",
         "use config::McpSettings"
       ]
@@ -10704,9 +10688,6 @@
         "mod server",
         "path McpServer",
         "path McpServerError",
-        "path McpServerError::ApprovalRequired",
-        "path McpServerError::Cancelled",
-        "path McpServerError::Closed",
         "path server::McpServerState",
         "path server::McpTool",
         "path server::Result",
@@ -10742,39 +10723,6 @@
       ]
     },
     {
-      "from": "dim_app_server::mcp::approval",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileLease",
-        "path FileStorage",
-        "path FileStorageError",
-        "path FileStorageError::Io",
-        "path FileStorageError::Locked",
-        "use dim_agent_capabilities::file_storage::FileLease",
-        "use dim_agent_capabilities::file_storage::FileStorage",
-        "use dim_agent_capabilities::file_storage::FileStorageError"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::approval",
-      "to": "dim_agent_runtime::state",
-      "references": [
-        "path StateCell",
-        "path StateCell::new",
-        "use dim_agent_runtime::StateCell"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::approval",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path Result",
-        "path SettingsError::Invalid",
-        "use crate::settings::Result",
-        "use crate::settings::SettingsError"
-      ]
-    },
-    {
       "from": "dim_app_server::mcp::config",
       "to": "dim_app_server::settings",
       "references": [
@@ -10799,7 +10747,6 @@
         "path McpChange::Remove",
         "path McpChange::SetEnabled",
         "path McpError",
-        "path McpError::ApprovalRequired",
         "path McpError::Cancelled",
         "path McpError::Closed",
         "path McpError::InvalidId",
@@ -10807,7 +10754,6 @@
         "path McpError::UnknownServer",
         "path McpError::Worker",
         "path McpService",
-        "path crate::mcp::McpApproval",
         "use super::McpChange",
         "use super::McpError",
         "use super::McpService"
@@ -10885,14 +10831,6 @@
     },
     {
       "from": "dim_app_server::mcp::publication",
-      "to": "dim_agent_capabilities::file_storage",
-      "references": [
-        "path FileStorage",
-        "use dim_agent_capabilities::file_storage::FileStorage"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::publication",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
@@ -10927,10 +10865,8 @@
       "to": "dim_app_server::mcp",
       "references": [
         "path McpConnection",
-        "path McpError::ApprovalRequired",
         "path McpError::Closed",
         "path McpError::Disabled",
-        "path McpError::InvalidId",
         "path McpError::Unavailable",
         "path McpError::UnknownServer",
         "path Result",
@@ -10941,27 +10877,18 @@
     },
     {
       "from": "dim_app_server::mcp::publication",
-      "to": "dim_app_server::mcp::approval",
-      "references": [
-        "path Approvals",
-        "path Approvals::new",
-        "use super::approval::Approvals"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::publication",
       "to": "dim_app_server::mcp::config",
       "references": [
+        "path McpProjectEnablement",
+        "path McpProjectEnablement::default",
         "path McpServerSettings",
         "path McpServerSettings::Remote",
         "path McpServerSettings::Stdio",
         "path McpSettings",
         "path config",
         "path config::effective",
-        "path config::fingerprint",
-        "path config::grant_key",
-        "path config::workspace",
         "use super::config",
+        "use super::config::McpProjectEnablement",
         "use super::config::McpServerSettings",
         "use super::config::McpSettings"
       ]
@@ -10995,7 +10922,6 @@
         "path SettingsScope::Project",
         "path SettingsScope::User",
         "path SettingsService",
-        "path crate::settings::SettingsError::Conflict",
         "path crate::settings::SettingsError::Invalid",
         "use crate::settings::SettingsScope",
         "use crate::settings::SettingsService"
@@ -11032,6 +10958,7 @@
       "to": "dim_app_server::mcp",
       "references": [
         "path McpChange::Put",
+        "path McpChange::SetEnabled",
         "path McpConnection",
         "path McpPlugin",
         "path McpService",
@@ -11304,7 +11231,7 @@
         "path McpError::Closed",
         "path McpError::Unavailable",
         "path McpServerEntry",
-        "path McpServerEntry::executable",
+        "path McpServerEntry::enabled",
         "path McpService",
         "use super::McpConnection",
         "use super::McpError",
@@ -12801,9 +12728,7 @@
         "path Action::Help",
         "path Action::Login",
         "path Action::Logout",
-        "path Action::McpApprove",
         "path Action::McpList",
-        "path Action::McpRevoke",
         "path Action::Models",
         "path Action::Version",
         "path Options",

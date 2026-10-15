@@ -1998,9 +1998,12 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         for method in dim_app_server::protocol::LOCAL_EXECUTION_METHODS.into_iter().chain([
             "skills.catalog", "skills.set_enabled", "skills.refresh",
             "mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove",
-            "mcp.disconnect", "mcp.approve", "mcp.revoke",
+            "mcp.disconnect",
         ]) {
             assert!(features.contains(&json!(method)), "{method}: {features:?}");
+        }
+        for method in ["mcp.approve", "mcp.revoke"] {
+            assert!(!features.contains(&json!(method)), "{method}: {features:?}");
         }
         assert!(!features.contains(&json!("account.providers")));
         assert_eq!(client.rpc("account.providers", json!({})).await["error"]["code"], -32601);
@@ -2008,7 +2011,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         for method in [
             "skills.catalog", "skills.set_enabled", "skills.refresh",
             "mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove",
-            "mcp.disconnect", "mcp.approve", "mcp.revoke",
+            "mcp.disconnect",
         ] {
             let invalid = client.rpc(method, json!({"unexpected":true})).await;
             assert_eq!(invalid["error"]["code"], -32602, "{method}: {invalid}");
@@ -2040,8 +2043,28 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
         assert!(!catalog.to_string().contains("never-run-this-test-command"));
         let expected = catalog["result"]["userRevision"].clone();
+        // ADR 003 D3: a project entry starts disabled; enabling it is the
+        // user's native record, never a project file edit, and survives restart.
+        let project = work.join("enable-fixture");
+        let enablement = || database.query_row("SELECT document FROM settings_documents WHERE source='user/mcp-projects'", [], |row| row.get::<_, String>(0)).ok();
+        let local = |catalog: &Value| catalog["result"]["servers"].as_array().unwrap().iter().find(|entry| entry["id"] == "local").cloned();
         if restart {
-            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http","approval":"notRequired","approvalToken":null}]));
+            let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":true,"transport":"stdio"})));
+        } else {
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join(".mcp.json"), json!({"mcpServers":{"local":{"command":"never-run-this-test-command","enabled":true}}}).to_string()).unwrap();
+            let original = std::fs::read(project.join(".mcp.json")).unwrap();
+            let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":false,"transport":"stdio"})));
+            assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":project,"id":"local","source":"project","expectedVersion":listed["result"]["projectRevision"],"enabled":true})).await);
+            assert_eq!(std::fs::read(project.join(".mcp.json")).unwrap(), original);
+            let workspace = std::fs::canonicalize(&project).unwrap();
+            let record: Value = serde_json::from_str(&enablement().unwrap()).unwrap();
+            assert_eq!(record, json!({"enabled":{(workspace.to_str().unwrap()):["local"]}}));
+        }
+        if restart {
+            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http"}]));
             assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"managed-fixture","expectedVersion":expected})).await);
             let empty = client.rpc("mcp.catalog", json!({})).await;
             assert_ok(&empty);

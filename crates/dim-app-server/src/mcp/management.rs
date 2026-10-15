@@ -20,20 +20,6 @@ pub enum McpScope {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ApproveMcp {
-    pub cwd: String,
-    pub id: String,
-    pub approval_token: String,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RevokeMcp {
-    pub cwd: String,
-    pub id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpTarget {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub cwd: Option<String>,
@@ -90,8 +76,6 @@ pub struct McpCatalogEntry {
     pub source: McpScope,
     pub enabled: bool,
     pub transport: &'static str,
-    pub approval: crate::mcp::McpApproval,
-    pub approval_token: Option<String>,
 }
 
 pub(crate) fn error(error: McpError) -> RpcError {
@@ -99,7 +83,6 @@ pub(crate) fn error(error: McpError) -> RpcError {
         McpError::Settings(SettingsError::Conflict) => "mcp_settings_conflict",
         McpError::Settings(SettingsError::Invalid(_)) | McpError::InvalidId => "mcp_invalid_config",
         McpError::UnknownServer => "mcp_unknown_server",
-        McpError::ApprovalRequired => "mcp_approval_required",
         McpError::Closed | McpError::Settings(SettingsError::Closed) => {
             return RpcError::reloading();
         }
@@ -154,8 +137,6 @@ pub(super) fn provide(
         "mcp",
         [
             "mcp.catalog",
-            "mcp.approve",
-            "mcp.revoke",
             "mcp.save",
             "mcp.remove",
             "mcp.set_enabled",
@@ -190,8 +171,6 @@ pub(super) fn provide(
                                         SettingsScope::Project(_) => McpScope::Project,
                                     },
                                     enabled: entry.enabled(),
-                                    approval: entry.approval,
-                                    approval_token: entry.approval_token,
                                     transport: match entry.configuration {
                                         McpServerSettings::Stdio { .. } => "stdio",
                                         McpServerSettings::Remote {
@@ -206,26 +185,6 @@ pub(super) fn provide(
                                 })
                                 .collect(),
                         });
-                    }
-                    "mcp.approve" => {
-                        let p: ApproveMcp = params(value)?;
-                        let project = project(&settings, Some(p.cwd), &stopping)
-                            .await?
-                            .expect("required cwd");
-                        directory
-                            .approve(project, p.id, p.approval_token, &stopping)
-                            .await
-                            .map_err(error)?;
-                    }
-                    "mcp.revoke" => {
-                        let p: RevokeMcp = params(value)?;
-                        let project = project(&settings, Some(p.cwd), &stopping)
-                            .await?
-                            .expect("required cwd");
-                        directory
-                            .revoke(project, p.id, &stopping)
-                            .await
-                            .map_err(error)?;
                     }
                     "mcp.save" => {
                         let p: SaveMcp = params(value)?;
