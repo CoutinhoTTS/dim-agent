@@ -36,7 +36,7 @@ flowchart LR
 
 Contracts depended on:
 
-- `sessionMethods` dispatch, errors and call ownership (C1, [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). ShellInput names neither the crate of the shared method types nor the order in which Rpc reports dispatch errors, so the open contract change [#120](https://github.com/arcships/dim/pull/120) does not affect it.
+- `sessionMethods` dispatch, errors and call ownership (C1, [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). The merged contract change [#120](https://github.com/arcships/dim/pull/120) settled where the shared method types live (a `methods` module of dim-agent-capabilities) and that Rpc answers a name outside every Session namespace recorded at assembly with `unknown_method` before it reads params or `sessionId`. ShellInput depends on neither: its binding takes the shared types from where A.1 places them, and it does not depend on the order in which Rpc reports dispatch errors.
 - Per-call progress ([session-boundary A.2](../contracts/session-boundary.md#a2-call-channel)): defined, not implemented; C1 includes it ([A.5](#a5-changes-to-other-plugins)).
 - `Branch::input` with boundary validation, and InputQueue's Append mode: an Append input is applied at once, consumed with the next model request and never starts a turn.
 - HostPlatform: `spawn(ProcessSpec)` returning a process tree with stdout, stderr, wait and terminate (implemented); the command builder and `exec`'s output rules (S7, [A.5](#a5-changes-to-other-plugins)).
@@ -411,7 +411,7 @@ ShellInput is implemented in Rust, in its own crate.
 | Neutral contract | Rust binding |
 | --- | --- |
 | Plugin | `TypedPlugin` and `Capability`; `Deps = (Arc<HostPlatform>, InSession<SessionConfig>, InSession<TreeCommands>, InSession<SessionLifecycle>, InSession<Diagnostics>)`, keys scoped to the factory's `SessionScope` |
-| `sessionMethods` key `shell` | C1's Session counterpart of `ManagementMethods::provide`, called in `apply`, with one `MethodDecl {name, mutating, interruption: Report}` per method; the namespace is recorded with `AgentBuilder::session_methods("shell")`. The handler receives the method name, the params and the call's cancellation token. The shared types come from wherever C1 places them (#120) |
+| `sessionMethods` key `shell` | C1's Session counterpart of `ManagementMethods::provide`, called in `apply`, with one `MethodDecl {name, mutating, interruption: Report}` per method; the namespace is recorded with `AgentBuilder::session_methods("shell")`. The handler receives the method name, the params and the call's cancellation token. The shared types come from where [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions) places them, as settled by #120 |
 | Progress | C1's per-call progress sink; its Rust name is chosen in C1 |
 | Process | The S7 builder returns a `ProcessSpec`; `HostPlatform::spawn` returns a `ProcessTree` with `stdout`, `stderr`, `wait` and `terminate` |
 | Run tasks | A `TaskTracker`; each task watches `ctx.cancelled()` and `SessionLifecycle::closing()`; `ctx.effect` registers the disposer that waits for the tracker |

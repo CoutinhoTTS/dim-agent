@@ -36,7 +36,7 @@ flowchart LR
 
 依赖的契约：
 
-- `sessionMethods` 的分发、错误与调用归属（C1，[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。ShellInput 既不指名共享方法类型所在的 crate，也不依赖 Rpc 报告分发错误的顺序，因此尚未合入的契约修改 [#120](https://github.com/arcships/dim/pull/120) 不影响它。
+- `sessionMethods` 的分发、错误与调用归属（C1，[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。已合入的契约修改 [#120](https://github.com/arcships/dim/pull/120) 确定了共享方法类型的位置（dim-agent-capabilities 的 `methods` 模块），并规定 Rpc 对不在任何装配时记录的 Session 命名空间内的名称，在读取 params 或 `sessionId` 之前就回复 `unknown_method`。ShellInput 不依赖其中任何一项：它的绑定从 A.1 放置共享类型的位置取用它们，也不依赖 Rpc 报告分发错误的顺序。
 - 逐次调用的进度（[session-boundary A.2](../contracts/session-boundary.md#a2-调用通道)）：已定义，未实现；C1 包含它（[A.5](#a5-对其他插件的改动)）。
 - 带边界校验的 `Branch::input`，以及 InputQueue 的 Append 模式：Append 输入立即应用，随下一次模型请求被消费，从不开启轮次。
 - HostPlatform：`spawn(ProcessSpec)` 返回带 stdout、stderr、wait 和 terminate 的进程树（已实现）；命令构造器与 `exec` 的输出规则（S7，[A.5](#a5-对其他插件的改动)）。
@@ -411,7 +411,7 @@ ShellInput 用 Rust 实现，位于自己的 crate。
 | 中立契约 | Rust 绑定 |
 | --- | --- |
 | 插件 | `TypedPlugin` 与 `Capability`；`Deps = (Arc<HostPlatform>, InSession<SessionConfig>, InSession<TreeCommands>, InSession<SessionLifecycle>, InSession<Diagnostics>)`，key 按工厂的 `SessionScope` 限定 |
-| `sessionMethods` key `shell` | C1 中与 `ManagementMethods::provide` 对应的 Session 版本，在 `apply` 中调用，每个方法一个 `MethodDecl {name, mutating, interruption: Report}`；命名空间用 `AgentBuilder::session_methods("shell")` 登记。处理函数接收方法名、参数和调用的取消 token。共享类型来自 C1 放置它们的位置（#120） |
+| `sessionMethods` key `shell` | C1 中与 `ManagementMethods::provide` 对应的 Session 版本，在 `apply` 中调用，每个方法一个 `MethodDecl {name, mutating, interruption: Report}`；命名空间用 `AgentBuilder::session_methods("shell")` 登记。处理函数接收方法名、参数和调用的取消 token。共享类型来自 [session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献) 放置它们的位置，由 #120 确定 |
 | 进度 | C1 的逐次调用进度接收端；Rust 名称在 C1 中确定 |
 | 进程 | S7 构造器返回 `ProcessSpec`；`HostPlatform::spawn` 返回带 `stdout`、`stderr`、`wait` 和 `terminate` 的 `ProcessTree` |
 | 运行任务 | 一个 `TaskTracker`；每个任务观察 `ctx.cancelled()` 和 `SessionLifecycle::closing()`；`ctx.effect` 登记等待该跟踪器的卸载清理函数 |
