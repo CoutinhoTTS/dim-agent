@@ -1,0 +1,20 @@
+[package]
+name = "dimcode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The single dimcode executable: the CLI, with the App Server as its `app-server` subcommand"
+
+[[bin]]
+name = "dimcode"
+path = "src/main.rs"
+
+[dependencies]
+dim-cli = { path = "../dim-cli" }
+dim-app-server.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+uuid.workspace = true
+libc = "0.2"

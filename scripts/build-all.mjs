@@ -1,7 +1,8 @@
 // Local multi-platform build for hands-on testing, the counterpart of the
-// TypeScript CLI's `build:all`: cross-compiles `dimcode` and `dim-app-server`
-// (with the Web workspace embedded) from this machine into
-// dist/<platform>/. Releases are built per target by .github/workflows/release.yml.
+// TypeScript CLI's `build:all`: cross-compiles the single `dimcode`
+// executable (App Server and Web workspace included) from this machine into
+// dist/dimcode-<platform>. Releases are built per target by
+// .github/workflows/release.yml.
 //
 //   node scripts/build-all.mjs [--target PLATFORM]... [--debug]
 //
@@ -41,23 +42,19 @@ for (const platform of platforms) {
   const result = spawnSync('cargo', [
     command, '--locked', ...(profile === 'release' ? ['--release'] : []),
     '--target', glibc ? `${triple}.${glibc}` : triple,
-    '-p', 'dim-cli', '-p', 'dim-app-server',
+    '-p', 'dimcode',
   ], { cwd: repo, stdio: 'inherit' });
   if (result.status !== 0) {
     failed.push(platform);
     continue;
   }
   const suffix = platform.startsWith('windows-') ? '.exe' : '';
-  const output = path.join(repo, 'dist', platform);
-  rmSync(output, { recursive: true, force: true });
-  mkdirSync(output, { recursive: true });
-  // The CLI starts the App Server found next to itself.
-  for (const binary of ['dimcode', 'dim-app-server']) {
-    const file = path.join(output, `${binary}${suffix}`);
-    copyFileSync(path.join(repo, 'target', triple, profile, `${binary}${suffix}`), file);
-    chmodSync(file, 0o755);
-  }
-  console.log(`✓ dist/${platform}/dimcode${suffix}, dist/${platform}/dim-app-server${suffix}`);
+  const file = path.join(repo, 'dist', `dimcode-${platform}${suffix}`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  rmSync(file, { force: true });
+  copyFileSync(path.join(repo, 'target', triple, profile, `dimcode${suffix}`), file);
+  chmodSync(file, 0o755);
+  console.log(`✓ dist/dimcode-${platform}${suffix}`);
 }
 if (failed.length > 0) {
   console.error(`\nFailed: ${failed.join(', ')}`);

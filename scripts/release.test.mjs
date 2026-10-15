@@ -26,7 +26,6 @@ test('stages public native payload, packs it and rejects modified content', {ski
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),'#!/bin/sh\nprintf "dimcode 0.1.0\\n"\n',{mode:0o755});
-  writeFileSync(path.join(bin,'dim-app-server'),'#!/bin/sh\nexit 0\n',{mode:0o755});
   const stage=path.join(temporary,'stage');
   const staged=run('stage-release.mjs',[bin,stage,version,commit]);
   assert.equal(staged.status,0,staged.stderr);
@@ -48,7 +47,6 @@ test('private archive gate rejects hash, schema and link violations before creat
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin,'dimcode'),'#!/bin/sh\nprintf "dimcode 0.1.0\\n"\n',{mode:0o755});
-  writeFileSync(path.join(bin,'dim-app-server'),'#!/bin/sh\nexit 0\n',{mode:0o755});
   const source=path.join(temporary,'plugin');
   mkdirSync(path.join(source,'dist'),{recursive:true});
   writeFileSync(path.join(source,'package.json'),JSON.stringify({type:'module',version:'0.1.0'}));
@@ -94,9 +92,7 @@ test('stages cross-built executables without running them and rejects the wrong 
   }
   const suffix=osName==='windows'?'.exe':'';
   const cli=path.join(bin,`dimcode${suffix}`);
-  const server=path.join(bin,`dim-app-server${suffix}`);
   writeFileSync(cli,header,{mode:0o755});
-  writeFileSync(server,header,{mode:0o755});
   const stage=path.join(temporary,'stage');
   const result=run('stage-release.mjs',[bin,stage,version,commit],{DIM_BUILD_PLATFORM:platform});
   assert.equal(result.status,0,result.stderr);
@@ -108,7 +104,7 @@ test('stages cross-built executables without running them and rejects the wrong 
   if(osName==='windows') header.writeUInt16LE(cpu==='arm64'?0x8664:0xaa64,68);
   else if(osName==='darwin') header.writeUInt32LE(cpu==='arm64'?0x01000007:0x0100000c,4);
   else header.writeUInt16LE(cpu==='arm64'?62:183,18);
-  writeFileSync(server,header);
+  writeFileSync(cli,header);
   const mismatch=run('stage-release.mjs',[bin,rejected,version,commit],{DIM_BUILD_PLATFORM:platform});
   assert.notEqual(mismatch.status,0);
   assert.match(mismatch.stderr,/architecture mismatch/);

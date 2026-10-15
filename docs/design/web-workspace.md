@@ -69,7 +69,7 @@ Every response carries `Content-Security-Policy: default-src 'self'; style-src '
 
 ### 2.4 Assets
 
-The frontend is compiled into `dim-app-server`, like the TypeScript host's `bun build --compile`. The crate's `build.rs` runs `npm ci` in `web/` when `package-lock.json` changed and `npm run build` when the frontend sources changed, gzip-compresses the output (fonts and images stay as built) and embeds it; the entry answers with `Content-Encoding: gzip` or expands the file for a browser that does not accept it. A build host without npm produces a binary without the frontend and a warning. For frontend development, `--web-assets DIR` (passed by the CLI from `DIMCODE_WEB_ASSETS`) replaces the embedded build with a directory; the entry serves files only from that directory and canonicalizes request paths before opening them.
+The frontend is compiled into `dim-app-server`, and with it into the single `dimcode` executable, like the TypeScript host's `bun build --compile`. The crate's `build.rs` runs `npm ci` in `web/` when `package-lock.json` changed and `npm run build` when the frontend sources changed, gzip-compresses the output (fonts and images stay as built) and embeds it; the entry answers with `Content-Encoding: gzip` or expands the file for a browser that does not accept it. A build host without npm produces a binary without the frontend and a warning. For frontend development, `--web-assets DIR` (passed by the CLI from `DIMCODE_WEB_ASSETS`) replaces the embedded build with a directory; the entry serves files only from that directory and canonicalizes request paths before opening them.
 
 ### 2.5 Protocol on the entry
 

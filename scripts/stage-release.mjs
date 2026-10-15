@@ -33,8 +33,8 @@ const run = (command, args, options = {}) => {
 };
 const suffix = process.platform === 'win32' ? '.exe' : '';
 const cli = path.resolve(binaryDirectory, `dimcode${suffix}`);
-const server = path.resolve(binaryDirectory, `dim-app-server${suffix}`);
-assert(lstatSync(cli).isFile() && lstatSync(server).isFile(), 'Native executables must be regular files');
+// One executable: the CLI runs its App Server daemon as `dimcode app-server`.
+assert(lstatSync(cli).isFile(), 'The native executable must be a regular file');
 const checkArchitecture = (file) => {
   const data = readFileSync(file);
   if (osName === 'windows') {
@@ -55,7 +55,6 @@ if (platform === hostPlatform) {
 } else {
   // shortcut: Cross-built binaries are inspected; add target-machine smoke tests when runners exist.
   checkArchitecture(cli);
-  checkArchitecture(server);
 }
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'dimcode-stage-'));
 let plugin = null;
@@ -100,9 +99,7 @@ try {
   }
   mkdirSync(path.join(output, 'bin'), { recursive: true });
   copyFileSync(cli, path.join(output, 'bin', `dimcode${suffix}`));
-  copyFileSync(server, path.join(output, 'bin', `dim-app-server${suffix}`));
   chmodSync(path.join(output, 'bin', `dimcode${suffix}`), 0o755);
-  chmodSync(path.join(output, 'bin', `dim-app-server${suffix}`), 0o755);
   copyFileSync(path.join(repo, 'LICENSE'), path.join(output, 'LICENSE'));
   const versions = { rust: readFileSync(path.join(repo, 'rust-toolchain.toml'), 'utf8').match(/channel = "([^"]+)"/)[1] };
   if (plugin) {

@@ -171,11 +171,11 @@ automatically retry uncertain commands.
 Build both native programs from the repository root:
 
 ```bash
-cargo build --locked -p dim-cli -p dim-app-server
+cargo build --locked -p dimcode
 target/debug/dimcode --help
 ```
 
-Help and version commands do not start a daemon or read credentials. The CLI finds `dim-app-server` beside its own executable; `--server PATH` selects an explicit binary.
+Help and version commands do not start a daemon or read credentials. This crate is a library; the `dimcode` crate builds the single executable, which runs the CLI and, as `dimcode app-server`, the App Server. The CLI starts its daemon by running its own executable with `app-server`; `--server PATH` selects an explicit App Server binary instead.
 
 ## API-key configuration
 
@@ -495,7 +495,7 @@ dimcode --home /path/to/plugin-home daemon stop
 
 The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overrides it. Native state and the daemon endpoint/log live in `<home>/rust`. No existing home, auth file or database is automatically migrated. Use an isolated home for development and acceptance.
 
-On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dim-app-server --connect-pipe` bridge, which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
+On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dimcode app-server --connect-pipe` bridge (or `--server PATH --connect-pipe`), which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
 The daemon startup wait allows a newly spawned, current-user Unix socket to become private
 before connecting. Existing insecure endpoints are rejected immediately. Wrong ownership,
@@ -521,7 +521,7 @@ JSON escaping can make a prompt exceed this limit even when its original text fi
 The public CLI flow tests exercise the real native binary and NDJSON boundary. Unix PTY checks cover default-deny approval, discarded typeahead, stopping while a frame is fragmented, prompt recovery and hidden callback input:
 
 ```bash
-cargo test --locked -p dim-cli --test cli_flow
+cargo test --locked -p dimcode --test cli_flow
 cargo clippy --locked -p dim-cli --all-targets -- -D warnings
 ```
 
@@ -530,7 +530,7 @@ The production-model flow uses the actual App Server, an API-key environment ref
 ```bash
 cargo build --locked -p dim-app-server
 DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server" \
-  cargo test --locked -p dim-cli --test cli_flow \
+  cargo test --locked -p dimcode --test cli_flow \
   configured_api_key_model_uses_production_tools_and_restores_the_same_session \
   -- --ignored
 ```
@@ -546,7 +546,7 @@ The daemon-profile check rejects an already running mock or different configured
 
 ```bash
 DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server" \
-  cargo test --locked -p dim-cli --test cli_flow \
+  cargo test --locked -p dimcode --test cli_flow \
   real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint \
   -- --ignored
 ```
@@ -555,7 +555,7 @@ The npm wrapper can be checked independently with the same PTY input and stop/se
 
 ```bash
 DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs" \
-  cargo test --locked -p dim-cli --test cli_flow \
+  cargo test --locked -p dimcode --test cli_flow \
   unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow \
   -- --ignored
 ```

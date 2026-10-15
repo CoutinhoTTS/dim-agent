@@ -1,6 +1,7 @@
 mod agent_records;
 mod agents;
 mod approval;
+pub mod cli;
 pub mod codex_oauth;
 pub mod collaboration;
 mod connection;
@@ -13,6 +14,8 @@ pub mod methods;
 pub mod model_catalog;
 mod outbound;
 pub mod permission_rules;
+#[cfg(windows)]
+mod pipe_client;
 pub mod plugin_files;
 pub mod protocol;
 pub mod provider;

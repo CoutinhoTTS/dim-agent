@@ -100,7 +100,7 @@ pub struct Client {
     _bridge: tokio::process::Child,
 }
 impl Client {
-    async fn open(endpoint: &Path, _binary: &Path) -> io::Result<Self> {
+    async fn open(endpoint: &Path, _server: &Server) -> io::Result<Self> {
         #[cfg(unix)]
         let stream = {
             use std::os::unix::fs::FileTypeExt;
@@ -126,7 +126,8 @@ impl Client {
         };
         #[cfg(windows)]
         let (read, write, bridge) = {
-            let mut bridge = tokio::process::Command::new(_binary)
+            let mut bridge = tokio::process::Command::new(&_server.program)
+                .args(_server.subcommand())
                 .arg("--connect-pipe")
                 .arg(endpoint)
                 .stdin(Stdio::piped())
@@ -316,6 +317,19 @@ impl Client {
     }
 }
 
+/// How the CLI starts the App Server: this executable's `app-server`
+/// subcommand (the single `dimcode` binary), or an explicit `--server` binary.
+struct Server {
+    program: std::path::PathBuf,
+    embedded: bool,
+}
+
+impl Server {
+    fn subcommand(&self) -> &'static [&'static str] {
+        if self.embedded { &["app-server"] } else { &[] }
+    }
+}
+
 pub async fn connect(options: &Options) -> Result<Client> {
     connect_inner(options, true)
         .await?
@@ -397,18 +411,18 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
         );
         std::path::PathBuf::from(format!(r"\\.\pipe\dim-rust-{}", &key[..32]))
     };
-    let binary = match &options.server {
-        Some(path) => path.clone(),
-        None => std::env::current_exe()?
-            .parent()
-            .ok_or("CLI executable has no parent directory")?
-            .join(if cfg!(windows) {
-                "dim-app-server.exe"
-            } else {
-                "dim-app-server"
-            }),
+    let server = match &options.server {
+        Some(path) => Server {
+            program: path.clone(),
+            embedded: false,
+        },
+        None => Server {
+            program: std::env::current_exe()?,
+            embedded: true,
+        },
     };
-    match Client::open(&endpoint, &binary).await {
+    let binary = &server.program;
+    match Client::open(&endpoint, &server).await {
         Ok(mut client) => {
             client.hello(profile.as_ref()).await?;
             return Ok(Some(client));
@@ -421,7 +435,7 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
     }
     if !binary.is_file() {
         return Err(format!(
-            "App Server binary is missing at {}; build dim-app-server or supply --server PATH",
+            "App Server binary is missing at {}; supply --server PATH",
             binary.display()
         )
         .into());
@@ -446,7 +460,8 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
             return Err("Daemon log must be a private file owned by the current user".into());
         }
     }
-    let mut command = Command::new(&binary);
+    let mut command = Command::new(binary);
+    command.args(server.subcommand());
     command
         .current_dir(&options.cwd)
         .stdin(Stdio::null())
@@ -516,26 +531,10 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        #[cfg(unix)]
-        let permissions_pending = {
-            use std::os::unix::fs::{FileTypeExt, MetadataExt};
-            std::fs::symlink_metadata(&endpoint).is_ok_and(|metadata| {
-                metadata.file_type().is_socket()
-                    && metadata.uid() == unsafe { libc::geteuid() }
-                    && metadata.mode() & 0o077 != 0
-            })
-        };
-        #[cfg(not(unix))]
-        let permissions_pending = false;
-        // Only the newly spawned owner's socket may be awaiting chmod.
-        if !permissions_pending {
-            match Client::open(&endpoint, &binary).await {
-                Ok(mut client) => {
-                    client.hello(profile.as_ref()).await?;
-                    return Ok(Some(client));
-                }
-                Err(error) if missing(&error) => {}
-                Err(error) => return Err(error.into()),
+        match Client::open(&endpoint, &server).await {
+            Ok(mut client) => {
+                client.hello(profile.as_ref()).await?;
+                return Ok(Some(client));
             }
         }
 

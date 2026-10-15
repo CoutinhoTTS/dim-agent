@@ -146,7 +146,7 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
           rustup target add "$DIM_BUILD_TARGET"
-          cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dim-cli -p dim-app-server
+          cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dimcode
       - name: Stage and pack release payload
         env:
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}

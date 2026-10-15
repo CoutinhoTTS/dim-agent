@@ -33,7 +33,7 @@ const inventory = (directory) => {
 inventory(input);
 assert.deepEqual(files, manifest.files, 'Staged release content changed');
 const suffix = osName === 'windows' ? '.exe' : '';
-assert(files[`bin/dimcode${suffix}`] && files[`bin/dim-app-server${suffix}`], 'Missing executables');
+assert(files[`bin/dimcode${suffix}`], 'Missing executable');
 const name = `dimcode-${manifest.platform}`;
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'dimcode-pack-'));
 const runTar = (args) => {

@@ -96,6 +96,14 @@
     "to": "dim-agent-types"
   },
   {
+    "from": "dimcode",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dimcode",
+    "to": "dim-cli"
+  },
+  {
     "from": "xtask",
     "to": "dim-agent-aimux"
   },

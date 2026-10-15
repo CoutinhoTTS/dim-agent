@@ -27,7 +27,10 @@ use std::io::{IsTerminal, Read};
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 
-fn main() {
+/// Runs the CLI with the process arguments and returns its exit code. The
+/// host binary must answer `app-server` with the App Server command line,
+/// which the CLI starts as its daemon unless `--server` names another.
+pub fn run_cli() -> i32 {
     let result = prepare().and_then(|options| {
         let Some(options) = options else { return Ok(0) };
         if matches!(options.action, Action::Chat)
@@ -63,10 +66,10 @@ fn main() {
         runtime.block_on(run(options))
     });
     match result {
-        Ok(code) => std::process::exit(code),
+        Ok(code) => code,
         Err(error) => {
             eprintln!("Error: {}", display::safe(&error.to_string()));
-            std::process::exit(1);
+            1
         }
     }
 }

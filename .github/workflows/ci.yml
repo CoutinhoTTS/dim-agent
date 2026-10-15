@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
-          cargo test --locked -p dim-cli --test cli_flow -- --ignored
+          cargo test --locked -p dimcode --test cli_flow -- --ignored
       - name: Verify public Node provider bridge
         shell: bash
         run: |

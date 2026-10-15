@@ -31,7 +31,7 @@ Options:\n\
   --cwd PATH                       Workspace (default: current directory)\n\
   --no-tui                         Line client instead of the terminal UI\n\
   --fullscreen | --scrollback      Terminal UI mode; append 'default' to save it\n\
-  --server PATH                    App Server binary (default: sibling binary)\n\
+  --server PATH                    App Server binary (default: this executable)\n\
   --model-config PATH              Explicit API-key model configuration\n\
   --plugin-dir PATH                Managed account plugin package\n\
   --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\

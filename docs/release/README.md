@@ -52,7 +52,7 @@ All Actions artifacts, including the disabled npm publication receipt, use `rete
 One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock`, `npm/package.json`, its exact optional dependencies, runtime package/lock metadata, native version output and the release tag. Keep them synchronized before building. `0.1.0` is a development baseline; check existing npm versions before enabling registry publication.
 
 ```sh
-cargo build --release --locked -p dim-cli -p dim-app-server
+cargo build --release --locked -p dimcode
 node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT
 node scripts/pack-release.mjs staging/local release/local
 ```
@@ -70,8 +70,7 @@ The bundled host runtime is rutis 0.12.1, which also accepts plugin API 1 export
 Account-enabled native staging copies the pinned host Node and its license. Cross-target staging downloads the pinned official Node distribution for the **target** OS/CPU and verifies its archive against the official `SHASUMS256.txt`. Both install the locked rutis runtime with [npm target OS/CPU overrides](https://docs.npmjs.com/cli/v11/using-npm/config/#cpu) and install scripts disabled, then copy the verified plugin. Staging never bundles the host Node into a cross-target payload.
 
 ```text
-bin/dimcode[.exe]
-bin/dim-app-server[.exe]
+bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`
 runtime/node/bin/node          # runtime/node/node.exe on Windows
 runtime/rutis/node_modules/@arcships/rutis-runtime/
 plugins/dim-oauth/{package.json,dim-plugin.json,dist/index.js}
