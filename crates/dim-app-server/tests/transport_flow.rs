@@ -64,6 +64,9 @@ mod summaries;
 #[path = "transport_flow/management.rs"]
 mod management;
 
+#[path = "transport_flow/session_methods.rs"]
+mod session_methods;
+
 enum Transport {
     Unix(BufReader<UnixStream>),
     Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
@@ -205,9 +208,19 @@ async fn launch_with_agent(
 /// `launch_with_agent` with extra capabilities installed after the defaults.
 async fn launch_with(
     tools: Arc<dyn ToolDriver>,
-    mut config: ServerConfig,
+    config: ServerConfig,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> (RunningServer, dim_agent_runtime::Agent) {
+    let server = try_launch_with(tools, config, extra).await.unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+/// `launch_with`, returning the assembly error instead of panicking.
+async fn try_launch_with(
+    tools: Arc<dyn ToolDriver>,
+    mut config: ServerConfig,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> dim_app_server::Result<RunningServer> {
     config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
         "dim-server-test-{}/server.sock",
         uuid::Uuid::new_v4()
@@ -219,9 +232,7 @@ async fn launch_with(
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     dim_app_server::collaboration::install(&mut builder);
     extra(&mut builder);
-    let server = serve(builder, config).await.unwrap();
-    let agent = server.agent().unwrap();
-    (server, agent)
+    serve(builder, config).await
 }
 /// Provides the Session `ToolHost` from a child plugin; restarting it reloads
 /// ToolRegistry and every capability downstream of it.

@@ -418,31 +418,36 @@ pub struct BranchCreate {
 
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
-/// management names (for example `session.shell`).
+/// contributed names (for example `session.shell`).
+const BUILTIN_METHODS: [&str; 19] = [
+    "hello",
+    "daemon.ping",
+    "daemon.shutdown",
+    "session.create",
+    "session.list",
+    "session.summaries",
+    "session.attach",
+    "session.detach",
+    "session.submit",
+    "session.input_lookup",
+    "session.history",
+    "session.stop",
+    "session.idle",
+    "session.close",
+    "approval.respond",
+    "session.branch_create",
+    "agent.create",
+    "agent.list",
+    "agent.close",
+];
+
+/// Every exact built-in method name.
+pub(crate) fn builtin_methods() -> impl Iterator<Item = &'static str> {
+    BUILTIN_METHODS.into_iter().chain(LOCAL_EXECUTION_METHODS)
+}
+
 pub(crate) fn is_builtin_method(method: &str) -> bool {
-    LOCAL_EXECUTION_METHODS.contains(&method)
-        || matches!(
-            method,
-            "hello"
-                | "daemon.ping"
-                | "daemon.shutdown"
-                | "session.create"
-                | "session.list"
-                | "session.summaries"
-                | "session.attach"
-                | "session.detach"
-                | "session.submit"
-                | "session.input_lookup"
-                | "session.history"
-                | "session.stop"
-                | "session.idle"
-                | "session.close"
-                | "approval.respond"
-                | "session.branch_create"
-                | "agent.create"
-                | "agent.list"
-                | "agent.close"
-        )
+    builtin_methods().any(|builtin| builtin == method)
 }
 
 /// Validates the envelope and built-in calls. Runtime contributions retain raw

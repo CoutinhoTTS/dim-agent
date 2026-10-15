@@ -304,6 +304,38 @@ impl Owners {
     }
 }
 
+/// Fails assembly for a Session namespace recorded with
+/// `AgentBuilder::session_methods` that could shadow a built-in or share a
+/// name with a configured management namespace, so no name has two owners
+/// (methods contract A.1). A Session namespace may lie under `session`, but
+/// never equals, contains or lies inside an exact built-in, and never lies
+/// under another reserved root.
+pub(crate) fn check_session_namespaces(
+    management: &[(String, String)],
+    sessions: &[String],
+) -> Result<(), CordisError> {
+    for namespace in sessions {
+        let overlaps = |other: &str| within(namespace, other) || within(other, namespace);
+        if !valid_name(namespace)
+            || ["hello", "daemon", "agent", "approval"]
+                .iter()
+                .any(|root| within(namespace, root))
+            || crate::protocol::builtin_methods().any(overlaps)
+        {
+            return Err(CordisError::PluginFailed(
+                format!("invalid Session namespace {namespace}").into(),
+            ));
+        }
+        if let Some((owner, _)) = management.iter().find(|(owner, _)| overlaps(owner)) {
+            return Err(CordisError::PluginFailed(
+                format!("Session namespace {namespace} overlaps management namespace {owner}")
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn provider(ctx: &Ctx, namespace: &str) -> Option<Arc<ManagementMethods>> {
     ctx.get_as::<ManagementMethods>(TypeKey::keyed_dynamic::<ManagementMethods>(namespace))
 }

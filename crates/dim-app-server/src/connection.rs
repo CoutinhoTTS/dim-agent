@@ -1217,13 +1217,21 @@ pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
     /// Management namespace and the loader row of its owner.
     methods: Arc<[(String, String)]>,
+    /// The `sessionMethods` namespaces assembly recorded for every Session.
+    sessions: Arc<[String]>,
     root: Ctx,
 }
 impl RpcPlugin {
-    pub fn new(config: Arc<ServerConfig>, methods: Arc<[(String, String)]>, root: Ctx) -> Self {
+    pub fn new(
+        config: Arc<ServerConfig>,
+        methods: Arc<[(String, String)]>,
+        sessions: Arc<[String]>,
+        root: Ctx,
+    ) -> Self {
         Self {
             config,
             methods,
+            sessions,
             root,
         }
     }
@@ -1258,6 +1266,7 @@ impl TypedPlugin for RpcPlugin {
                     format!("management namespace {namespace} names unknown row {row}").into(),
                 ));
             }
+            crate::methods::check_session_namespaces(&self.methods, &self.sessions)?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),

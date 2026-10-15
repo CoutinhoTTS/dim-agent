@@ -592,9 +592,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     {
         let config = config.clone();
         let methods: Arc<[(String, String)]> = owners.into();
+        let sessions: Arc<[String]> = builder.session_method_namespaces().into();
         let root = root.clone();
         rows.push(register_capability(&mut builtins, move || {
-            RpcPlugin::new(config.clone(), methods.clone(), root.clone())
+            RpcPlugin::new(
+                config.clone(),
+                methods.clone(),
+                sessions.clone(),
+                root.clone(),
+            )
         }));
     }
     {

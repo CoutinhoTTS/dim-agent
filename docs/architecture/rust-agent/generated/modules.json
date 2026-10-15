@@ -1351,6 +1351,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/methods.rs",
       "unexpandedMacros": [
+        "format",
         "tokio::pin",
         "tokio::select"
       ]
@@ -10004,7 +10005,8 @@
       "to": "dim_app_server::methods",
       "references": [
         "path crate::methods::Owners",
-        "path crate::methods::Owners::new"
+        "path crate::methods::Owners::new",
+        "path crate::methods::check_session_namespaces"
       ]
     },
     {
@@ -11289,6 +11291,7 @@
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path RpcError::wire",
+        "path crate::protocol::builtin_methods",
         "path crate::protocol::is_builtin_method",
         "use crate::protocol::RpcError"
       ]
