@@ -124,11 +124,7 @@ impl SettingsService {
                 let _guard = owner.gate.lock().unwrap();
                 owner.check_open(&cancel)?;
                 if owner.projects.lock().unwrap().insert(cwd.clone(), root) != Some(root) {
-                    let _ = owner.events.events().emit(
-                        &owner.events,
-                        &project_authorizations(),
-                        Arc::new(ProjectAuthorized { root, cwd }),
-                    );
+                    owner.emit(&project_authorizations(), ProjectAuthorized { root, cwd });
                 }
                 Ok(root)
             })
@@ -158,15 +154,25 @@ impl SettingsService {
     /// Announces a committed write on the source's channel. Callers hold the
     /// commit order (the gate or the native connection), so events follow it.
     fn publish<D: BusinessDocument>(&self, scope: SettingsScope, revision: &str) {
-        let _ = self.events.events().emit(
-            &self.events,
+        self.emit(
             &settings_changes(D::NAMESPACE),
-            Arc::new(SettingsChanged {
+            SettingsChanged {
                 source: D::NAMESPACE,
                 scope,
                 revision: revision.to_owned(),
-            }),
+            },
         );
+    }
+    /// The change is already committed; a refused announcement cannot undo it,
+    /// so it is recorded rather than returned to the writer.
+    fn emit<E: Event>(&self, key: &EventKey<E>, event: E) {
+        if let Err(error) = self
+            .events
+            .events()
+            .emit(&self.events, key, Arc::new(event))
+        {
+            tracing::warn!(event = E::NAME, %error, "Settings change was not announced");
+        }
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
         validate_namespace(D::NAMESPACE)?;

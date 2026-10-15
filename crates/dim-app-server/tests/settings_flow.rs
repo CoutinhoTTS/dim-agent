@@ -528,6 +528,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .read::<Document>(SettingsScope::Project(2), &cancel)
         .await
         .unwrap();
+    let before = changes.borrow().len();
     let project_saved = settings
         .update(
             SettingsScope::Project(1),
@@ -537,24 +538,44 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         )
         .await
         .unwrap();
-    // Each write is announced with its own scope and revision.
+    // Each write is announced once, with its own scope and revision.
     saw(
         &mut changes,
         change(SettingsScope::Project(1), &project_saved.revision),
     )
     .await;
-    assert!(
-        changes
-            .borrow()
-            .iter()
-            .all(|c| c.scope != SettingsScope::Project(2))
-    );
+    assert_eq!(changes.borrow().len(), before + 1);
     assert_eq!(
         settings
             .read::<Document>(SettingsScope::Project(2), &cancel)
             .await
             .unwrap(),
         b
+    );
+    let other_saved = settings
+        .update(
+            SettingsScope::Project(2),
+            &b.revision,
+            Document {
+                value: "other project".into(),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    saw(
+        &mut changes,
+        change(SettingsScope::Project(2), &other_saved.revision),
+    )
+    .await;
+    assert_eq!(changes.borrow().len(), before + 2);
+    assert_eq!(
+        settings
+            .read::<Document>(SettingsScope::Project(1), &cancel)
+            .await
+            .unwrap()
+            .revision,
+        project_saved.revision
     );
     assert!(!changes.has_changed().unwrap());
     fs::write(project.join(".example.json"), b"corrupt").unwrap();
