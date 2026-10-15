@@ -129,8 +129,7 @@ impl Connection {
                         "Management method is unavailable",
                     ));
                 }
-                // Lookups from an unloading load see no provider; the next
-                // load serves the call.
+                // An unloading load admits no new call; the next load serves it.
                 if rpc.stopping.is_cancelled() {
                     return Err(RpcError::reloading());
                 }
@@ -1156,13 +1155,16 @@ impl Capability for ConnectionPlugin {
 /// Typed services behind protocol handlers; accepted commands belong to it.
 pub(crate) struct RpcService {
     pub index: Arc<AgentIndex>,
-    /// This load's context for per-call lookups of services Rpc does not depend
+    /// The process root, for per-call lookups of services Rpc does not depend
     /// on: management method providers and, in the product profile, Provider.
+    /// This load's own context sees no provider once it starts unloading,
+    /// before `stopping` is cancelled.
     pub ctx: Ctx,
-    /// Management namespaces of the enabled owner rows, listed in `hello`.
+    /// This profile's management owner namespaces, listed in `hello` while
+    /// their provider is active.
     pub namespaces: Arc<[String]>,
     /// Cancelled when this load starts unloading, before its handler is
-    /// removed; `ctx` then sees no provider.
+    /// removed; it then admits no management call or `hello`.
     pub stopping: CancellationToken,
     pub control: Arc<ServerControl>,
     pub config: Arc<ServerConfig>,
@@ -1214,10 +1216,15 @@ impl RpcService {
 pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
     methods: Arc<[String]>,
+    root: Ctx,
 }
 impl RpcPlugin {
-    pub fn new(config: Arc<ServerConfig>, methods: Arc<[String]>) -> Self {
-        Self { config, methods }
+    pub fn new(config: Arc<ServerConfig>, methods: Arc<[String]>, root: Ctx) -> Self {
+        Self {
+            config,
+            methods,
+            root,
+        }
     }
 }
 impl TypedPlugin for RpcPlugin {
@@ -1239,7 +1246,7 @@ impl TypedPlugin for RpcPlugin {
         Box::pin(async move {
             let service = Arc::new(RpcService {
                 index,
-                ctx: ctx.clone(),
+                ctx: self.root.clone(),
                 namespaces: self.methods.clone(),
                 stopping: ctx.cancellation_token(),
                 control,

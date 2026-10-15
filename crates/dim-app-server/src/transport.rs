@@ -664,8 +664,8 @@ async fn run_connection(
                     // hello against a generation change, which closes stale ones.
                     let instance = hub
                         .with_rpc(|rpc| {
-                            // An unloading load lists no provider: the client
-                            // retries hello against the next load instead.
+                            // An unloading load admits no hello: the client
+                            // retries it against the next load.
                             if rpc.stopping.is_cancelled() {
                                 return Err(RpcError::reloading());
                             }

@@ -581,8 +581,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             methods.extend(["mcp", "skills"]);
         }
         let methods: Arc<[String]> = methods.into_iter().map(str::to_owned).collect();
+        let root = root.clone();
         rows.push(register_capability(&mut builtins, move || {
-            RpcPlugin::new(config.clone(), methods.clone())
+            RpcPlugin::new(config.clone(), methods.clone(), root.clone())
         }));
     }
     {

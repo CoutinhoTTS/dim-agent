@@ -20,12 +20,14 @@ Each process owner provides `ManagementMethods` under its namespace during
 `apply`. Its ordinary rutis lifetime owns that service and the calls it accepts.
 Rpc does not depend on any owner ([methods contract §3.2](../contracts/session-boundary.md#32-management-method)):
 on each call it makes keyed reads of the method name's prefixes, longest first,
-and dispatches to the first active provider. No contributor injects Rpc or
+and dispatches to the first active provider. It reads them from the process root,
+so its own unload hides none. No contributor injects Rpc or
 Connection; neither contains contributor-specific dispatch. Adding a method
 changes its owner's declaration, parsing and implementation. Until rutis can list
-the active providers of a service (contract §9.3), assembly passes Rpc the
-namespaces of its enabled owner rows for `hello.features`; adding an owner adds
-its namespace there.
+the active providers of a service (contract §9.3), assembly passes Rpc its
+profile's owner namespaces for `hello.features` (`account`, `account.codex`,
+`account.grok` and `provider` with a product home; `mcp` and `skills` with local
+execution); adding an owner adds its namespace there.
 
 Account, Codex, Grok, Provider and Mcp provide their methods directly, without
 adapter rows. Settings supplies generic BusinessDocument persistence, not
@@ -80,9 +82,9 @@ operation may already have committed and the current state must be read before
 retrying; a `Drain` call replies with its own result. A provider's unload waits
 for every call it accepted, so `Drain` calls hold it (contract §9.2). Rpc's unload
 waits for the replies it owes and for each interrupted operation to settle, so the
-next load reads its outcome. While Rpc's own load is unloading it sees no
-provider, and management calls and `hello` return `service_reloading`. A caller's
-disconnect cancels nothing.
+next load reads its outcome. Once Rpc's own load is unloading it admits no
+management call or `hello`; they return `service_reloading` and the next load
+serves them. A caller's disconnect cancels nothing.
 This reproduces the behaviour before contributions
 ([methods contract A.4](../contracts/session-boundary.md#a4-migration-and-compatibility)). Provider and
 account methods use `Drain`; MCP and Skills use `Report`. Settings retains its
