@@ -1,14 +1,16 @@
 # Local-execution business plugins
 
-This directory covers the **26 business plugins in the existing local-execution
+This directory covers the **29 business plugins and content groups in the local-execution
 profile**, not every App Server plugin. The authoritative assembly is
 [`defaults::install_local_execution`](../../../../crates/dim-agent-capabilities/src/defaults.rs),
 with process services and scripted model hosts supplied by
 [`xtask`](../../../../xtask/src/plugins.rs). Its recorded bindings are in
 [`generated/local/services.json`](../generated/local/services.json).
+The graph uses isolated host facts and one fixture Skill, not the developer's
+home. The host fixture reuses HostPlatformPlugin's declared dependencies and keys.
 
 Infrastructure rows `BranchScope`, `SessionScope`, `SessionBroadcast`,
-`SessionBroadcastEnd`, `rutis-loader`, `session` and `branch`, and the scripted
+`SessionBroadcastEnd`, `SessionExtension`, `rutis-loader`, `session` and `branch`, and the scripted
 `PrepareModelHost` plugin are excluded. They can still appear as providers or
 consumers in the generated blocks. A service dependency is not necessarily a
 plugin with the same name.
@@ -18,7 +20,7 @@ plugin with the same name.
 | Scope | Plugins |
 | --- | --- |
 | Process | [FileWriteCoordinator](FileWriteCoordinator.md), [SkillsCatalog](SkillsCatalog.md), [HostPlatform](HostPlatform.md), [FileStorage](FileStorage.md) |
-| Session | [Skills](Skills.md), [PromptSources](PromptSources.md), [PromptRegistry](PromptRegistry.md), [Wait](Wait.md), [WorkspaceTools](WorkspaceTools.md), [ToolRegistry](ToolRegistry.md), [TimelineTree](TimelineTree.md) |
+| Session | [Skills](Skills.md), [SkillContributions](SkillContributions.md), [SkillContentInstances](SkillContentInstances.md), [SkillContent](SkillContent.md), [PromptSources](PromptSources.md), [PromptRegistry](PromptRegistry.md), [Wait](Wait.md), [WorkspaceTools](WorkspaceTools.md), [ToolRegistry](ToolRegistry.md), [TimelineTree](TimelineTree.md) |
 | Branch | [SkillsBranch](SkillsBranch.md), [PromptSourcesBranch](PromptSourcesBranch.md), [WaitBranch](WaitBranch.md), [BackgroundExec](BackgroundExec.md), [FileReads](FileReads.md), [ToolExecutor](ToolExecutor.md), [ToolBinding](ToolBinding.md), [Approval](Approval.md), [Permission](Permission.md), [ModelProvider](ModelProvider.md), [Loop](Loop.md), [InputQueue](InputQueue.md), [Prompt](Prompt.md), [ContextPreparation](ContextPreparation.md), [TreeTimeline](TreeTimeline.md) |
 
 ## Reading and maintaining these pages

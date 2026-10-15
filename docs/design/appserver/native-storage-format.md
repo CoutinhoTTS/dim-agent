@@ -1,18 +1,25 @@
 # Rust 会话存储格式
 
-当前格式为 v13。v13 新增用户配置来源表 `settings_documents`；v12 的独立可丢弃恢复快照 `timeline_snapshots` 保持不变。严格拒绝 v12 及更旧数据库，保留原文件，不自动迁移。managed token 只存在所属 OAuth 文件记录，不进入 SQLite。静态 Provider 凭据及 MCP 私有配置只能由所属服务读取，不进入目录投影、Session 或 Timeline。开发验证使用新的数据库路径。存储版本与 RPC 协议版本独立。
+The current native format is **v13**, with source-owned `settings_documents`.
+Startup requires the exact v13 SQL schema and a single format marker of 13
+before writable PRAGMAs. Older databases and the removed branch-only v14
+`user_configuration` format are unsupported and preserved, never migrated,
+downgraded or interpreted as v13. No migration API or startup option is provided.
+Existing v13 schemas and document bytes remain compatible. Storage versions are
+independent of RPC versions. Private MCP/Skill business documents do not belong
+in loader rows, events, diagnostics, Sessions or Timelines.
 
-## 当前 v13 表结构
+## Current v13 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | 否 | — | 主键，`CHECK(version = 13)`；数据库恰有一行是启动门禁 |
-| `settings_documents.source` | `TEXT` | 否 | — | 主键；当前为 `user/mcp` 或 `user/skills`；工作区文件不镜像进此表 |
-| `settings_documents.version` | `INTEGER` | 否 | — | 正整数，来源独立的 CAS 修订号；RPC token 为 `native:<source>:<version>` |
-| `settings_documents.document` | `TEXT` | 否 | — | 对应 `McpSettings` 或 `SkillSettings` JSON，保留未知扩展字段；私有数据，不直接序列化到管理面 |
-| `settings_documents.imported_revision` | `TEXT` | 否 | — | 首次导入原文件的 SHA-256，原文件缺失为 `missing`；仅供来源追溯 |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 13)`; exactly one row |
+| `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills` or `user/mcp-projects`; workspace files are not mirrored |
+| `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
+| `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
+| `settings_documents.imported_revision` | `TEXT` | No | — | Original file SHA-256 or `missing`; import provenance, not a CAS token |
 | `provider_imports.kind` | `TEXT` | 否 | — | 联合主键；`provider` 或 `selection` |
 | `provider_imports.id` | `TEXT` | 否 | — | 联合主键；来源业务 ID，删除 Provider 不删除标记 |
 | `provider_imports.source_schema` | `TEXT` | 否 | — | 已检查的来源两表结构 SHA-256 |
@@ -62,9 +69,45 @@ v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、
 
 ### 配置来源与单写者
 
-App Server 的用户 MCP 与 Skill 设置首次成功读取时导入 SQLite。导入内容和权威切换标记是同一行、同一事务；并发导入只采纳一个成功版本。源文件损坏或数据库写入失败时不创建行、不回退到空配置，保留原文件供修复后重试。导入成功后，更新只写 SQLite，旧文件不删除、不写回，也不再作为运行配置读取。工作区 `.mcp.json` 保持文件权威及文件内容 CAS；不从合成目录反写用户或工作区配置。独立宿主可显式选择原文件后端。
+Settings owns each source independently. Original v13 rows under `user/mcp` or
+`user/skills` contain the plain MCP or Skill document JSON, not a tagged envelope.
+`user/mcp-projects` holds MCP's user-local project enablement
+(`{"enabled":{"<canonical workspace>":["<server id>"]}}`, ADR 003 D3). Its import
+file is `mcp-projects.json`, which only the standalone file backend writes; a
+native home normally has none, so the first read imports `missing` and an empty
+record. The row is an additive source within
+v13: the schema and format version are unchanged, and older binaries ignore it.
+Generic Settings persistence retains these exact payload shapes, not loader
+patches or UUID snapshots. Business interpretation and validation belong to the namespace owner.
+Unknown extension fields and disabled Skill IDs are preserved.
 
-来源写入成功才发送不含配置正文的修订通知；通知不代表 loader 已采用配置或旧代工作已结算。宿主发布协调器在插件 apply/dispose 之外向根 loader 发布合成配置；MCP 代际由 loader 创建和清理。已采用的模型请求保留原来的工具版本及连接代际。
+For example, these original v13 rows store `document` as TEXT containing the
+plain payload, not a serialized SettingsDocument wrapper:
+
+```json
+[
+  {"source":"user/mcp","version":1,"document":"{\"mcpServers\":{}}","imported_revision":"missing"},
+  {"source":"user/skills","version":2,"document":"{\"disabledSkillIds\":[\"example\"]}","imported_revision":"missing"}
+]
+```
+
+Their CAS tokens are `native:user/mcp:1` and `native:user/skills:2`. Updating
+Skills increments only its version and preserves `imported_revision`.
+
+The first successful source read imports its legacy file into SQLite. Document
+and import provenance commit atomically in one row; concurrent imports adopt
+one winner. Invalid files or failed writes create no authoritative row and do
+not fall back to empty settings. Originals remain available for repair/retry.
+After import, SQLite is authoritative: edits CAS the named source revision,
+increment only that source's version, and never rewrite or reread the old file
+as runtime authority. Import provenance does not change on ordinary edits.
+Project `.mcp.json` keeps file authority and content CAS; project enablement is
+never written there. Standalone hosts may explicitly use the file backend.
+
+Revision notifications follow successful persistence and contain no business
+document bodies. They certify neither loader adoption nor generation settlement.
+Loader rows represent runtime instances, not the MCP/Skill document authority.
+Importing legacy settings files does not authorize migrating users' databases.
 
 ### 目录与内容
 
@@ -108,7 +151,12 @@ EventDraft = { tags?: string[], type: string, name: string, data: object }
 
 ### 可丢弃恢复快照
 
-`context/compaction` 的 completed 事实仅保存 source through、cursor、summary、baseline 和 diagnostics，不含 snapshot。快照在事实提交后由独立异步操作写入 `timeline_snapshots`，保存失败不影响事实提交。`RecoverySnapshot={sequence,event_id,interpreter,state}`；默认解释器合同为 `dim/context-projection/v2`，其 state 是 `{payload,sha256}` 的 JSON 字符串，payload 是下列完整 `ProjectionCheckpoint` 的原始 JSON 字符串。SQLite 仍将 state 作为不透明 TEXT 保存，数据库格式保持 v13。
+Completed compaction facts contain source through, cursor, summary, baseline and
+diagnostics, not snapshots. Disposable snapshots commit separately without
+affecting fact durability. `RecoverySnapshot={sequence,event_id,interpreter,state}`;
+the default `dim/context-projection/v2` interpreter encodes `{payload,sha256}`,
+with the complete ProjectionCheckpoint JSON string below as payload. SQLite
+continues to treat state as opaque TEXT; the database format remains v13.
 
 摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照直接绕过，不通过补算摘要升级；v2 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
 
@@ -179,7 +227,9 @@ ProjectionCheckpoint = {
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面两个 hash 可以按上文算法复核。
 
-示例刻意保留旧 `dim/context-projection/v1` 快照，验证 v13 数据库无需迁移：默认 v2 解释器绕过这条无校验缓存，仍从事实恢复相同 summary、保留消息和子分支。新快照使用上节的完整性封装。
+The example retains an old `dim/context-projection/v1` snapshot: the default v2
+interpreter bypasses that unchecked cache and restores from facts. Existing v13
+databases need no migration for this snapshot interpreter change.
 
 ```json
 {
