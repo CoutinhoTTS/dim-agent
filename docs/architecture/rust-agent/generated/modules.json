@@ -9562,6 +9562,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path ToolExecutionContext",
