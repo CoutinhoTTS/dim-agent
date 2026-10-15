@@ -3,6 +3,7 @@ import { computed, watch } from "vue"
 import { RouterLink } from "vue-router"
 import { useI18n } from "vue-i18n"
 import { Menu } from "lucide-vue-next"
+import BrandMark from "../../components/BrandMark.vue"
 import ApprovalPrompt from "./ApprovalPrompt.vue"
 import ComposerPanel from "./ComposerPanel.vue"
 import TimelineView from "./TimelineView.vue"
@@ -52,7 +53,9 @@ function selectModel(model: ModelId): Promise<void> {
   </section>
 
   <section v-else-if="!view || view.status === 'loading'" class="chat-loading" aria-busy="true">
-    <h1 class="sr-only">{{ t("route.session") }}</h1><p>{{ t("common.loading") }}</p>
+    <h1 class="sr-only">{{ t("route.session") }}</h1>
+    <BrandMark animated class="boot-mark" />
+    <p>{{ t("common.loading") }}</p>
   </section>
 
   <section v-else class="chat-page">

@@ -469,9 +469,6 @@ code { font-family: var(--font-mono); }
 }
 
 /* Task 005 chat workspace */
-.main-region > .chat-page,
-.main-region > .new-session-page,
-.main-region > .chat-loading,
 .app-shell[data-chat-route="true"] .main-region { grid-template-rows: auto minmax(0, 1fr); }
 .app-shell[data-chat-route="true"] .main-header { display: none; }
 .app-shell[data-chat-route="true"] .main-region > :is(.chat-page, .new-session-page, .chat-loading, .removed-state) { grid-row: 2; }
@@ -681,7 +678,7 @@ button.event-row { width: 100%; border: 0; background: transparent; font: inheri
 .prompt-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-3); }
 /* container-type makes this a stacking context at z 0; lift it to the sticky layer (later in
    DOM, so it wins the tie) or the timeline's .jump-latest paints over composer popovers. */
-.composer-panel { position: relative; z-index: var(--z-sticky); container: composer / inline-size; padding: var(--space-2) clamp(var(--space-3), 3vw, var(--space-7)) 0; background: var(--background); }
+.composer-panel { position: relative; z-index: var(--z-sticky); container: composer / inline-size; padding: var(--space-2) clamp(var(--space-3), 3vw, var(--space-7)) calc(var(--space-4) + env(safe-area-inset-bottom)); background: var(--background); }
 .composer-panel > * { width: min(100%, var(--content-chat)); margin-inline: auto; }
 /* Input surface (spec v1): r20, p12, shadow-sm; translucent so the timeline reads through. */
 .composer-surface { position: relative; display: flex; min-width: 0; flex-direction: column; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-2xl); background: color-mix(in oklab, var(--background) 70%, transparent); box-shadow: var(--shadow-sm); backdrop-filter: blur(24px); cursor: text; transition: border-color var(--duration-press) ease, box-shadow var(--duration-press) ease, background-color var(--duration-press) ease; }
@@ -746,7 +743,8 @@ button.event-row { width: 100%; border: 0; background: transparent; font: inheri
    status bar is positioned (popover anchor) and would otherwise paint over it. */
 .composer-panel.is-new-thread .composer-surface { z-index: 1; background: var(--background); }
 .composer-panel.is-new-thread .composer-statusbar { height: auto; justify-content: flex-start; margin-top: calc(-1 * var(--space-3)); padding: var(--space-5) var(--space-2) var(--space-2); border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius-2xl) var(--radius-2xl); background: color-mix(in oklab, var(--muted) 80%, transparent); }
-.chat-loading { display: grid; place-items: center; color: var(--muted-foreground); }
+.chat-loading { display: flex; min-height: 0; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-4); color: var(--muted-foreground); font-size: var(--text-sm); }
+.chat-loading p { margin: 0; }
 .removed-state a { display: inline-flex; min-height: var(--control-lg); margin-top: var(--space-4); align-items: center; color: var(--primary); }
 
 
