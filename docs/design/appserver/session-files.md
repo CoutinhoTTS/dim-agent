@@ -410,7 +410,7 @@ Attachments names no SessionStore type; the Rust binding is Appendix A.
 | `too_large` | `attachment_too_large` (Attachments' 10 MiB limit is below SessionStore's, so this does not occur) |
 | `node_unavailable` | `node_unavailable` |
 | `cancelled` | `operation_interrupted`, the `report` interruption of the call |
-| `storage` | No code in Attachments today; raised to Attachments' design refinement (§15) |
+| `storage` | `storage_failed`; Attachments adds the code in P2's design review (§15) |
 
 ## 10. Errors, limits and immutability
 
@@ -474,7 +474,7 @@ history, as moving a workspace breaks paths into it.
 
 | Document | Change in this PR |
 | --- | --- |
-| [Attachments](../plugins/Attachments.md) | Layout `<db>.session-files/<fileId>/<name>` with `attachmentId = fileId`; A1 refined to a directory no single Session owns; fork and delete ordering rows point here; the offline rows no longer depend on the withdrawn #5, because SessionStore looks FileStorage up per call (#38). The client contract of `attachment.put` is unchanged |
+| [Attachments](../plugins/Attachments.md) | Layout `<db>.session-files/<fileId>/<name>` with `attachmentId = fileId`; A1 refined to a directory no single Session owns; fork and delete ordering rows point here; the offline rows no longer depend on the withdrawn #5, because SessionStore looks FileStorage up per call (#38). The client contract of `attachment.put` is unchanged here; its `storage_failed` code lands in P2's design review (§15) |
 | [Overview B.2](../overview.md#b2-app-server-process-plugins) | FileStorage row gains directory creation |
 | [Native storage format](native-storage-format.md) | Planned v15 decision |
 
@@ -509,7 +509,7 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 | --- | --- | --- |
 | FileStorage | `create_directory` (§7) | Added in S5a's implementation, agreed in the S6 review |
 | App Server assembly (`serve` in lib.rs) | Register the database directory as a FileStorage root when it is not one, and pass its index to `SessionStorePlugin` (§3.1) | A few lines in S5a's implementation, appended after the assembly lane's work like other registrations |
-| Attachments (P2 design refinement) | Map `sessionFiles` `storage` to an `attachment.put` code. Attachments lists none today; SessionTitle maps SessionStore `storage` to `storage_failed` | Open with the Attachments refinement |
+| Attachments (P2 design refinement) | Map `sessionFiles` `storage` to an `attachment.put` code. Attachments lists none today; SessionTitle maps SessionStore `storage` to `storage_failed` | Decided: `storage_failed`, recorded in [#66](https://github.com/arcships/dim/issues/66); applied in P2's design review |
 | S5c | Delete owner rows inside the delete transaction, after closing the Session and before `agent_sessions`; copy owner rows inside the fork transaction; schedule a sweep after a delete | Contract for S5c (§5.2, §5.3) |
 
 ## 16. Acceptance (flow tests)

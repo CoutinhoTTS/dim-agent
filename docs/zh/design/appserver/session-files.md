@@ -300,7 +300,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 | `too_large` | `attachment_too_large`（Attachments 的 10 MiB 限制低于 SessionStore 的，因此不会发生） |
 | `node_unavailable` | `node_unavailable` |
 | `cancelled` | `operation_interrupted`，即该调用的 `report` 中断 |
-| `storage` | Attachments 目前没有对应的码；已提给 Attachments 的设计细化（§15） |
+| `storage` | `storage_failed`；Attachments 在 P2 的设计复核中加入这个码（§15） |
 
 ## 10. 错误、限制与不可变性
 
@@ -351,7 +351,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 | 文档 | 本 PR 中的修改 |
 | --- | --- |
-| [Attachments](../plugins/Attachments.md) | 布局改为 `<db>.session-files/<fileId>/<name>`，`attachmentId = fileId`；A1 细化为不属于任何单个 Session 的目录；分叉与删除顺序的行指向本文；离线相关的行不再依赖已撤回的 #5，因为 SessionStore 每次调用时查找 FileStorage（#38）。`attachment.put` 的客户端契约不变 |
+| [Attachments](../plugins/Attachments.md) | 布局改为 `<db>.session-files/<fileId>/<name>`，`attachmentId = fileId`；A1 细化为不属于任何单个 Session 的目录；分叉与删除顺序的行指向本文；离线相关的行不再依赖已撤回的 #5，因为 SessionStore 每次调用时查找 FileStorage（#38）。`attachment.put` 的客户端契约在本 PR 中不变；它的 `storage_failed` 码在 P2 的设计复核中加入（§15） |
 | [总体设计 B.2](../overview.md#b2-app-server-进程插件) | FileStorage 行增加目录创建 |
 | [原生存储格式](../../../design/appserver/native-storage-format.md) | 计划中的 v15 决定 |
 
@@ -385,7 +385,7 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 | --- | --- | --- |
 | FileStorage | `create_directory`（§7） | 在 S5a 的实现中加入，已在 S6 评审中同意 |
 | App Server 装配（lib.rs 中的 `serve`） | 数据库目录还不是 FileStorage 根时注册它，并把索引交给 `SessionStorePlugin`（§3.1） | S5a 实现中的几行改动，像其他登记一样在装配线的工作之后追加 |
-| Attachments（P2 设计细化） | 把 `sessionFiles` 的 `storage` 映射为 `attachment.put` 的某个码。Attachments 目前没有；SessionTitle 把 SessionStore 的 `storage` 映射为 `storage_failed` | 随 Attachments 细化处理 |
+| Attachments（P2 设计细化） | 把 `sessionFiles` 的 `storage` 映射为 `attachment.put` 的某个码。Attachments 目前没有；SessionTitle 把 SessionStore 的 `storage` 映射为 `storage_failed` | 已决定：`storage_failed`，记录在 [#66](https://github.com/arcships/dim/issues/66)；在 P2 的设计复核中落实 |
 | S5c | 在删除事务内、关闭 Session 之后、删除 `agent_sessions` 之前删除所有者行；在分叉事务内复制所有者行；删除后安排清扫 | S5c 的合同（§5.2、§5.3） |
 
 ## 16. 验收（流程测试）
