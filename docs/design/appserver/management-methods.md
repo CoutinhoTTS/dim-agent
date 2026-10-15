@@ -74,9 +74,10 @@ A provider that becomes active later appears in the next `hello`. The withdrawn
 methods keep their built-in contracts.
 
 Rpc admits contributed calls under the same handler lock as built-in commands
-and tracks reply delivery in its command tracker. The operation belongs to its
-provider: the provider admits it under its own gate and tracks it until it
-settles. Either unload, the provider's or the calling Rpc load's, signals the
+and tracks reply delivery in its command tracker. A request id is the client's
+again once its reply is sent, even while an interrupted operation settles. The
+operation belongs to its provider: the provider admits it under its own gate and
+tracks it until it settles. Either unload, the provider's or the calling Rpc load's, signals the
 handler. A `Report` call then replies `operation_interrupted`, stating that the
 operation may already have committed and the current state must be read before
 retrying; a `Drain` call replies with its own result. A provider's unload waits

@@ -140,7 +140,6 @@ impl Connection {
                     rpc.unloading.clone(),
                 )?;
                 rpc.commands.spawn(async move {
-                    let _guard = guard;
                     let result = accepted
                         .reply
                         .await
@@ -151,8 +150,10 @@ impl Connection {
                     let _ = this
                         .sender
                         .send(Outbound::result(request.id, result), false);
-                    // An interrupted operation may still commit: this load's
+                    // The id is the client's again once answered. An
+                    // interrupted operation may still commit: this load's
                     // unload waits for it, so the next load reads its outcome.
+                    drop(guard);
                     let _ = accepted.settled.await;
                 });
                 return Ok(());
