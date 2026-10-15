@@ -59,12 +59,13 @@ legitimate producers use the appropriate public ports and work ownership, rather
 to the type's declaring instance. Bind active registration and its cleanup to rutis, not a second
 plugin lifecycle manager. Revoke registration after the generation's required terminal writes drain.
 
-Validate the final payload at the write boundary. Persist a declaration and its first use
-atomically. Hashes identify content, not schema or semantic compatibility. Preserve unknown
+The producer guarantees the payload; Timeline checks only that the type key is registered.
+Persist a declaration and its first use atomically. Hashes identify content, not semantic
+compatibility. Preserve unknown
 historical events without executing them. Declaration size and reference resolution are bounded;
 declarations contain no resolved credentials. All stores and portable exports preserve the
-reference closure, including branch history and trace records. Archived schemas provide contract
-provenance, not executable business interpretation. Unknown payloads remain readable as data.
+reference closure, including branch history and trace records. Unknown payloads remain readable
+as data.
 
 Preserve the existing v1-v3 protocol contracts. A new dynamic protocol should preserve unknown
 event types without requiring a server-side adapter for every extension. Visibility, authorization

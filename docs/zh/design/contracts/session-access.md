@@ -158,7 +158,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ## 7. 安全
 
-只有控制节点进程中的插件持有 `sessions`，它从不经 RPC 入口或 rutis 链接导出。进程调用方凭写入时拿到的 `input_id` 撤回输入，客户端通过 Rpc 的 Session 授权撤回。标记只是写给模型看的文本，任何组件都不解析它来做决定。写入输入不授予任何权限，因为由此产生的工具调用由 Approval 与 Permission 按该 Session 的策略准入。输入会重放进模型上下文，因此调用方不得把凭据或宿主安全设置放入其中。
+只有控制节点进程中的插件持有 `sessions`，它从不经 RPC 入口或 rutis 链接导出。进程调用方凭写入时拿到的 `input_id` 撤回输入，客户端通过 Rpc 的 Session 授权撤回。标记是写给模型看的文本：共享组件（InputQueue、Agents、运行时）从不解析它；写入标记的插件可以解释自己写的内容。写入输入不授予任何权限，因为由此产生的工具调用由 Approval 与 Permission 按该 Session 的策略准入。输入会重放进模型上下文，因此调用方不得把凭据或宿主安全设置放入其中。
 
 ## 8. 规则检查
 
@@ -277,7 +277,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 | 项目 | 规则 |
 | --- | --- |
-| 标记 | 第一个 raw 块是现有上下文块格式中的元素 `<dim-<source> kind="..." ...>body</dim-<source>>`。它是生产方插件写给模型看的文本，任何组件都不解析它来做决定 |
+| 标记 | 第一个 raw 块是现有上下文块格式中的元素 `<dim-<source> kind="..." ...>body</dim-<source>>`。它是生产方插件写给模型看的文本；共享组件从不解析它，只有生产方插件可以解释自己写的内容（例如 Goal 折叠自己的块） |
 | Key | `RawBlock.key`，`use` 为 `live` 或 `retire`，存储为 `<source>:<name>`，按分支 Timeline 区分。无法产生 Prompt 的 `rule:`/`state:` 前缀 |
 | 提交标识 | `<source>:<uuid>`，每次逻辑提交生成一个。写入不去重；`sessions.lookup`（与 `session.input_lookup` 语义相同）查找已提交的输入（`accepted`、`unknown`，错误 `ambiguous`） |
 | 绝不可能 | 写入 `input/message`、经 `withdraw` 的 `input/withdraw` 和经 `stop` 的 `stop/interrupt` 之外的事件；写入 `input/deleted`；编辑历史 |

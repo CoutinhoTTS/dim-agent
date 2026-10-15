@@ -77,7 +77,7 @@ sequenceDiagram
   SB-->>ST: Event
   Note over ST: 交互式 leader，已启用，无在途生成
   ST->>Meta: metadata：无标题，revision r
-  ST->>TL: prefix(main, 批次末尾)：第一条被采用的操作者输入的文本
+  ST->>TL: prefix(main, 已发布到 N)：第一条被采用的操作者输入的文本
   ST->>Aux: complete(session-title, text)
   Aux-->>ST: 标题文本
   ST->>Meta: setTitle(expected r, auto)
@@ -224,7 +224,7 @@ revision 检查就是复检：手动标题总是胜出。
 | 资格 | `SessionConfig.interactive && collaborationRole = leader` |
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `metadata(session)`：已有任何标题则跳过；记下 revision `r` |
-| 读取 | `main` 至该批次末尾的固定前缀；第一条有 `input/applied` 的操作者输入（`user` 内容，无来源标记；A10）及其文本。没有这样的输入或无文本：不生成标题（A8） |
+| 读取 | `main` 已发布到 `N` 的固定前缀（session-access A.5，`atLeast = N`）；第一条有 `input/applied` 的操作者输入（`user` 内容；A10）及其文本。没有这样的输入或无文本：不生成标题（A8） |
 | 生成 | `complete({purpose: "session-title", inherit: 前缀中最新 context/configured 的模型, request})`，30 s 预算（A4）。规范化：取第一行，去除引号与末尾标点，折叠空白，在 `maxLength` 处截断 |
 | 写入 | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`；`conflict` 或 `not_found` 时丢弃 |
 | Timeline | 不写入，不登记 Dispatcher，无 `StateCell` |

@@ -14,7 +14,7 @@
 
 Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。Rpc 在每次调用时查找 `managementMethods` 提供方，不依赖它们，因此未启用、Pending、Failed 或正在重载的提供方只影响自己的命名空间（§3.2）。`toolContribution` 提供方重载会传播到 ToolRegistry，这是 D3 所接受的代价。
 
-在工具调用或输入提交前对其作出处理不是本合同的服务：分支级插件在 `step/tool-call` 或 `input/message` 上注册 Timeline before 回调（运行时 Timeline 补充，[总览附录 B](../overview.md#附录-b-现有插件的补充)），其写入的内容由该插件定义（[Hooks](../plugins/Hooks.md)）。Approval 和 Session 输入路径不变；ToolExecutor 对 `skip` 的处理和 InputQueue 的撤回是各自所有者的变更（[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
+在工具调用或输入提交前对其作出处理不是本合同的服务。Approval 和 Session 输入路径不变；InputQueue 的撤回是其所有者的变更（[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
 
 ## 1. 结构
 

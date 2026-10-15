@@ -77,7 +77,7 @@ sequenceDiagram
   SB-->>ST: Event
   Note over ST: interactive leader, enabled, none in flight
   ST->>Meta: metadata: no title, revision r
-  ST->>TL: prefix(main, end of the batch): first adopted operator input text
+  ST->>TL: prefix(main, published through N): first adopted operator input text
   ST->>Aux: complete(session-title, text)
   Aux-->>ST: title text
   ST->>Meta: setTitle(expected r, auto)
@@ -224,7 +224,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | Eligibility | `SessionConfig.interactive && collaborationRole = leader` |
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `metadata(session)`: skip if any title exists; keep revision `r` |
-| Read | Fixed prefix of `main` through the end of that batch; the first operator input (user content, no source marker; A10) that has an `input/applied`, and its text. No such input or no text: no title (A8) |
+| Read | Fixed prefix of `main` published through `N` (session-access A.5, `atLeast = N`); the first operator input (`user` content; A10) that has an `input/applied`, and its text. No such input or no text: no title (A8) |
 | Generate | `complete({purpose: "session-title", inherit: model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
 | Write | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
