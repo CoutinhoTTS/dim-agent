@@ -1,9 +1,10 @@
 # 001: Extensible harness foundation
 
 Decision status: Recovery design adopted for this branch. Configuration is implemented on
-this branch but remains Proposed for maintainer alignment with issue #3. Dynamic-event
-registration, its model-context boundary and dependency-loss refinements remain Proposed
-for issues #2 and #6. This ADR does not supersede those issues' decisions.
+this branch but remains Proposed for maintainer alignment with issue #3. The model-context
+boundary of dynamic events is decided: events enter model context only through adopted inputs
+and tool results (issue #2, revised 2026-10-15). Dynamic-event registration and dependency-loss
+refinements remain Proposed for issues #2 and #6. This ADR does not supersede those issues' decisions.
 
 Implementation status: The recovery, configuration and common-assembly batch is implemented;
 the broader foundation remains incomplete. The delivery table records implementation scope,
@@ -25,6 +26,12 @@ SQLite, Node, a TUI or a private account plugin.
 ## Decisions
 
 ### Events and ownership (Proposed; issue #2)
+
+Model-context boundary (Decided, 2026-10-15): events never enter model context directly. The
+model sees only adopted inputs and tool results; a capability that needs content in context
+writes an adopted input with the final content or returns it in a tool result. There are no
+registered projection rules. Issue #2 was revised to the same boundary. The rest of this
+section remains Proposed.
 
 Runtime mechanism facts, public capability protocol events and domain events share one
 registration and persistence mechanism. A Rust core-event enum is a convenience view, not
@@ -264,7 +271,7 @@ never overwrite a user's existing store to make a test pass.
 
 | Issue | Existing decision or open question | Branch position and merge requirement |
 | --- | --- | --- |
-| #2 | Registered plugin projection rules determine whether events enter model context; registration follows the plugin lifecycle | Proposed: retain adopted inputs and public protocol facts as the model-context boundary; archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
+| #2 | Events enter model context only through adopted inputs and tool results, with no projection rules (revised 2026-10-15); registration follows the plugin lifecycle | Decided: the model-context boundary. Proposed: archive declarations and preserve terminal-write eligibility while accepted work drains. Resolve these contracts before implementing the dynamic public event format |
 | #3 | The persisted editable layer is the single configuration authority; management maps directly to loader operations; MCP uses an instanced group | Implemented alternative: each named source persists first, then a publisher reconciles root-loader layers without an editable target. Distinct rows retain overlapping MCP generations. Obtain maintainer agreement on these differences before merging the configuration implementation; otherwise revise the affected implementation and format decisions |
 | #6 | Dependency loss returning a plugin to Pending needs settlement semantics; optional dependencies remain open; the process startup deadline lacks an injection test | Proposed: separate loader state, cleanup completion and committed business settlement. This batch does not settle the optional-dependency question or add the missing startup test |
 
@@ -286,7 +293,7 @@ behavior with maintainer approval of the proposed issue changes.
 Continuing to add domain variants to the closed enum would defer extension ownership and force
 another migration for every feature. A universal executable projection language would create a
 second context-adoption mechanism and make history depend on plugin interpreters. This proposal
-rejects both; agreement on issue #2 is still required.
+rejects both; issue #2 adopts the same model-context boundary (revised 2026-10-15).
 
 Stable public contracts require cross-crate work and explicit storage compatibility. Snapshots add
 storage maintenance but remain disposable; immutable facts and reference closure remain authoritative.
