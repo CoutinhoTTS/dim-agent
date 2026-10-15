@@ -42,7 +42,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 ### 3.1 立即做（文档与对齐）
 
 1. 合入 #14，再合入 #16 并补 ADR 003 D3。两个 PR 都改 MCP，先合改动大的 #14。
-2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8 Settings 业务源（§5.2）。
+2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8 Settings 业务源（§5.2）。核心部件（Session 装配、ToolRegistry）不硬依赖任何可选插件，可选插件没起来时只有它自己的功能不可用（#34），在契约里一并写明。
 3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
 4. 决定 Goal 还是 Pursuit（D3）。
 5. 确认两项可能不需要的工作：Permission 新类别（现有 `Unclassified` 行为已符合）、S3 活动句柄（App Server 本来不自动卸载空闲 Session）。
@@ -62,8 +62,8 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | C2 | `SessionConfig.interactive` 与 `session.create` 参数 | S | Rpc | — | SessionTitle、S2（Questions 待重新设计） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
 | C7 | 固定前缀读：Session 门面只读已发布到指定序号的事件（session-access A.5） | S | 独立 | — | SessionTitle、Scheduler、Workflow |
-| C3 | `toolContribution` 按名收集 | S | 装配 | — | Web、Goal、Scheduler、Workflow |
-| C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载 | L，先 spike | 装配 | C3 | 所有 TypeScript 插件 |
+| C3 | `toolContribution` 按名收集；不硬依赖可选插件：插件起来了就接入它的工具，没起来就没有（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
+| C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载；Session 装配不等可选插件的部件（#34） | L，先 spike | 装配 | C3 | 所有 TypeScript 插件 |
 | C5 | #4 分支级：TypeScript 部件按名使用 `Dispatcher`、`Branch::input`、`TreeCommands` | M | 装配 | C4 | Goal |
 | S1 | InputQueue 撤回：`input/withdraw`、`input/deleted`、`session.input.withdraw`（新事件需做格式决定） | M | 事件类型 | C1 | `Ctrl+S`/`/queue`、Goal、S2 |
 | S2 | Agents `sessions` 服务：`launch`、`input`、`idle`、`withdraw` | L | `agents.rs` | C2、S1 | Scheduler、Workflow |
