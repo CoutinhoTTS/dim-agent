@@ -1,6 +1,8 @@
 # Hooks
 
-状态：草案。总体设计：[overview](../overview.md)（Hooks）。阶段：P2（用户与项目来源）；插件来源在 #3 之后。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session + 分支）。
+状态：待设计。总体设计：[overview](../overview.md)（Hooks）。阶段：P2（用户与项目来源）；插件来源在 #3 之后。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session + 分支）。
+
+> **待设计。** 本文不具权威性，不得按现文实现。Hooks 是兼容第三方插件机制（Claude、Codex、pi 等）所需的横向机制，单独设计，不复用现有基础设施：本文要求的异步 Timeline before 回调已撤回（[#21](https://github.com/arcships/dim/issues/21)），`skip` 字段及其对其他插件提出的改动一并撤回。
 
 Hooks 在 Session 工作的固定节点运行用户配置的命令。其 Session 部件持有规则（从业务来源与项目文件读取），并运行 Session 启动 Hook。其分支部件注册两个异步 Timeline before 回调（即 [overview 附录 B.1](../overview.md) 中的运行时补充）：在 `input/message` 上用于 `user_prompt_submit`，在 `step/tool-call` 上用于 `pre_tool_use`；它还从分支 Dispatcher 运行工具后、turn 结束与通知 Hook。回调从不让它持有的写入失败，也不阻止它。回调先改草稿（`step/tool-call` 上按调用的通用 `skip` 字段，或加入操作者输入的 context 块），在同一批次只追加给所有者的指令（带通用可选字段 `reason` 的 `input/withdraw {input_id, reason?}`）。这两个字段是对其他插件契约的改动，列在 [overview 附录 B.1](../overview.md)（Loop/ToolExecutor 与 InputQueue 两行），设计见 [A.7](#a7-对其他插件的改动)；异步 before 回调是对运行时的需求，见 [§9](#9-向机制所有者提出的需求)。Hooks 不声明任何事件，也从不写别的模块的结果事件，例如 `step/tool-result` 或 `input/deleted`。Approval 不变；ToolExecutor 与 InputQueue 只增加通用的 `skip` 处理和 `reason` 字段，它们不带 Hooks 含义；Loop 对调用与结果的配对不变，它与所有写入方一样经 Dispatcher 得知被持有写入的提交（R1）。命令经 Session 的 `HostPlatform`（其资源节点）运行；输出只以三种形式进入上下文：来源为 `hooks` 的分支输入、加入操作者输入的块，或 ToolExecutor 为被跳过调用写入的错误结果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
