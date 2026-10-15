@@ -119,6 +119,7 @@ impl Owners {
         method: String,
         params: Value,
         entry_stopping: CancellationToken,
+        progress: impl Fn(Value) + Send + Sync + 'static,
     ) -> Result<Accepted, RpcError> {
         if !valid_name(&method) {
             return Err(RpcError::unknown_method());
@@ -159,7 +160,7 @@ impl Owners {
                 Some(_) => Err(unavailable()),
             }?,
         };
-        provider.accept(method, params, entry_stopping)
+        provider.accept(method, params, entry_stopping, progress)
     }
 
     /// The methods `hello.features` lists: those of the configured namespaces'

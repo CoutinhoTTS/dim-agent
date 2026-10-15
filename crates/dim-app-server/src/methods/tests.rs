@@ -27,7 +27,7 @@ impl Owner {
                 .iter()
                 .map(|method| decl(method, Interruption::Drain))
                 .collect(),
-            handler: Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
+            handler: Arc::new(|_, _, _, _| Box::pin(async { Ok(json!({})) })),
         }
     }
 }
@@ -70,7 +70,7 @@ impl TypedPlugin for Waiting {
                 ctx,
                 "pending",
                 vec![decl("pending.read", Interruption::Drain)],
-                Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
+                Arc::new(|_, _, _, _| Box::pin(async { Ok(json!({})) })),
             )?;
             Ok(Effect::Done)
         })
@@ -150,7 +150,7 @@ impl Assembly {
     }
     fn dispatch(&self, method: &str, entry: &CancellationToken) -> Result<Accepted, RpcError> {
         self.owners
-            .dispatch(&self.root, method.into(), json!({}), entry.clone())
+            .dispatch(&self.root, method.into(), json!({}), entry.clone(), |_| {})
     }
     async fn state(&self, row: &str, state: FiberState) {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -202,7 +202,7 @@ impl TypedPlugin for Fixture {
                     decl("fixture.wait", Interruption::Report),
                     decl("fixture.read", Interruption::Drain),
                 ],
-                Arc::new(move |method, _, cancel| {
+                Arc::new(move |method, _, cancel, _| {
                     let state = state.clone();
                     Box::pin(async move {
                         if method == "fixture.write" {

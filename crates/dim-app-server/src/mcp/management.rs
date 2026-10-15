@@ -146,7 +146,7 @@ pub(super) fn provide(
         .into_iter()
         .map(|name| MethodDecl::new(name, name != "mcp.catalog", Interruption::Report))
         .collect(),
-        Arc::new(move |method, value, stopping| {
+        Arc::new(move |method, value, stopping, _| {
             let directory = directory.clone();
             let settings = settings.clone();
             Box::pin(async move {

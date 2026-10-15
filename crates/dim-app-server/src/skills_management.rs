@@ -212,7 +212,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
                         MethodDecl::new(name, name != "skills.catalog", Interruption::Report)
                     })
                     .collect(),
-                Arc::new(move |method, value, _stopping| {
+                Arc::new(move |method, value, _, _| {
                     let catalog = catalog.clone();
                     Box::pin(async move {
                         // SkillsCatalog has no caller cancellation argument. Keep its

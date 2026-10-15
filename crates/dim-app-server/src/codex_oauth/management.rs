@@ -41,7 +41,7 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<OpenAICodexOAuthService>) -> Result<
             )
         })
         .collect(),
-        Arc::new(move |method, value, stopping| {
+        Arc::new(move |method, value, stopping, _| {
             let oauth = oauth.clone();
             Box::pin(async move {
                 let cancel = &stopping;

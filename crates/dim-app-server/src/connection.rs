@@ -136,8 +136,12 @@ impl Connection {
                         return Err(RpcError::reloading());
                     }
                     let (rpc, namespace) = (rpc.clone(), namespace.to_owned());
+                    let progress = this.progress(&id, &method);
                     rpc.commands.clone().spawn(async move {
-                        match this.session_method(&rpc, &namespace, method, params).await {
+                        match this
+                            .session_method(&rpc, &namespace, method, params, progress)
+                            .await
+                        {
                             Ok((accepted, usage)) => {
                                 this.answer(id, guard, accepted).await;
                                 drop(usage);
@@ -159,9 +163,14 @@ impl Connection {
                 if rpc.stopping.is_cancelled() {
                     return Err(RpcError::reloading());
                 }
-                let accepted =
-                    rpc.owners
-                        .dispatch(&rpc.ctx, method, params, rpc.unloading.clone())?;
+                let progress = this.progress(&id, &method);
+                let accepted = rpc.owners.dispatch(
+                    &rpc.ctx,
+                    method,
+                    params,
+                    rpc.unloading.clone(),
+                    progress,
+                )?;
                 rpc.commands.spawn(this.answer(id, guard, accepted));
                 return Ok(());
             }
@@ -198,6 +207,26 @@ impl Connection {
         drop(guard);
         let _ = accepted.settled.await;
     }
+    /// The progress sink of contributed call `id` (methods contract A.2):
+    /// `management.progress {id, method, data}` on this connection only.
+    /// After a disconnect the sender is closed and progress is dropped.
+    fn progress(
+        self: &Arc<Self>,
+        id: &RequestId,
+        method: &str,
+    ) -> impl Fn(Value) + Send + Sync + 'static {
+        let (connection, id, method) = (self.clone(), id.clone(), method.to_owned());
+        move |data| {
+            let _ = connection.sender.send(
+                Outbound::notice(Notification::Progress(ProgressNotice {
+                    id: id.clone(),
+                    method: method.clone(),
+                    data,
+                })),
+                false,
+            );
+        }
+    }
     /// Admits a Session method call (methods contract A.1): reads `sessionId`
     /// from the raw params, authorizes it like a built-in, acquires the
     /// Session (restoring an unloaded one) and hands the call to the provider
@@ -209,6 +238,7 @@ impl Connection {
         namespace: &str,
         method: String,
         params: Value,
+        progress: impl Fn(Value) + Send + Sync + 'static,
     ) -> Result<(Accepted, SessionUse), RpcError> {
         let session_id = params
             .get("sessionId")
@@ -228,7 +258,7 @@ impl Connection {
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
         }
-        let accepted = provider.accept(method, params, rpc.unloading.clone())?;
+        let accepted = provider.accept(method, params, rpc.unloading.clone(), progress)?;
         Ok((accepted, usage))
     }
     /// The connection's entry decides what it may call before any method is

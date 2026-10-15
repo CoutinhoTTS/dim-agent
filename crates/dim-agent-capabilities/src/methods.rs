@@ -129,13 +129,40 @@ pub fn within(name: &str, namespace: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
-/// Serves one call: `(method, params, cancellation token)`. The token fires
-/// when the provider's generation or the calling load unloads.
+/// Serves one call: `(method, params, cancellation token, progress)`. The
+/// token fires when the provider's generation or the calling load unloads.
 pub type Handler = Arc<
-    dyn Fn(String, Value, CancellationToken) -> BoxFuture<'static, Result<Value, RpcError>>
+    dyn Fn(
+            String,
+            Value,
+            CancellationToken,
+            Progress,
+        ) -> BoxFuture<'static, Result<Value, RpcError>>
         + Send
         + Sync,
 >;
+
+type Sink = Box<dyn Fn(Value) + Send + Sync>;
+
+/// The progress channel of one call (methods contract A.2, `progress`): the
+/// provider sends progress data on the call it serves, and the caller's entry
+/// delivers it to the calling connection only, before the call's reply. Data
+/// sent on a method that does not declare `progress`, or once the reply has
+/// been handed over, is dropped.
+#[derive(Clone)]
+pub struct Progress(Arc<Mutex<Option<Sink>>>);
+impl Progress {
+    pub fn send(&self, data: Value) {
+        if let Some(sink) = &*self.0.lock().unwrap() {
+            sink(data);
+        }
+    }
+    /// Ends the channel. A send in flight completes first, so everything the
+    /// caller received precedes the reply handed over next.
+    fn close(&self) {
+        self.0.lock().unwrap().take();
+    }
+}
 
 /// How the provider replies to an admitted call that an unload interrupts:
 /// `Report` replies `operation_interrupted` at once and settles afterwards;
@@ -154,13 +181,18 @@ pub struct MethodDecl {
     pub mutating: bool,
     #[serde(skip)]
     pub interruption: Interruption,
+    /// Whether the caller receives the progress the provider sends.
+    #[serde(skip)]
+    pub progress: bool,
 }
 impl MethodDecl {
+    /// A method without progress.
     pub fn new(name: &str, mutating: bool, interruption: Interruption) -> Self {
         Self {
             name: name.into(),
             mutating,
             interruption,
+            progress: false,
         }
     }
 }
@@ -235,19 +267,25 @@ impl MethodProvider {
     /// unload (`entry_stopping`) interrupt a `Report` call, which replies at
     /// once and then settles; a `Drain` call replies with its own result. The
     /// handler's token fires on either unload. A caller's disconnect cancels
-    /// nothing.
+    /// nothing. `progress` delivers the call's progress to its caller when
+    /// the method declares it; the channel closes before the reply is handed
+    /// over.
     pub fn accept(
         &self,
         method: String,
         params: Value,
         entry_stopping: CancellationToken,
+        progress: impl Fn(Value) + Send + Sync + 'static,
     ) -> Result<Accepted, RpcError> {
-        let interruption = self
+        let decl = self
             .declarations
             .iter()
             .find(|decl| decl.name == method)
-            .ok_or_else(RpcError::unknown_method)?
-            .interruption;
+            .ok_or_else(RpcError::unknown_method)?;
+        let interruption = decl.interruption;
+        let progress = Progress(Arc::new(Mutex::new(
+            decl.progress.then(|| Box::new(progress) as Sink),
+        )));
         let _guard = self.gate.lock().unwrap();
         if self.stopping.is_cancelled() {
             // This generation is unloading; the next one serves the namespace.
@@ -263,7 +301,7 @@ impl MethodProvider {
         self.calls.spawn(async move {
             // Dropped when the operation has settled, after any early reply.
             let _settle = settle;
-            let operation = handler(method, params, cancel.clone());
+            let operation = handler(method, params, cancel.clone(), progress.clone());
             tokio::pin!(operation);
             let unloading = async {
                 tokio::select! {
@@ -282,6 +320,7 @@ impl MethodProvider {
                 None => {
                     cancel.cancel();
                     if interruption == Interruption::Report {
+                        progress.close();
                         let _ = send.send(Err(RpcError::interrupted()));
                         let _ = operation.await;
                         return;
@@ -289,6 +328,7 @@ impl MethodProvider {
                     operation.await
                 }
             };
+            progress.close();
             let _ = send.send(result);
         });
         Ok(Accepted { reply, settled })

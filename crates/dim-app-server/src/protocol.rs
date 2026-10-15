@@ -640,6 +640,14 @@ pub struct ClosedNotice {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+/// Progress of the contributed call `id` (methods contract A.2), sent only
+/// to the connection that made the call and before its reply.
+#[derive(Debug, Serialize)]
+pub struct ProgressNotice {
+    pub id: RequestId,
+    pub method: String,
+    pub data: Value,
+}
 #[derive(Debug, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Notification {
@@ -665,6 +673,8 @@ pub enum Notification {
     TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled),
     #[serde(rename = "session.model.progress")]
     ModelProgress(crate::tree_protocol::ModelProgressNotice),
+    #[serde(rename = "management.progress")]
+    Progress(ProgressNotice),
 }
 
 #[derive(Debug, Serialize)]

@@ -77,6 +77,10 @@ struct NotesState {
     /// `notes.wait` started, and later settled after its token fired.
     entered: tokio::sync::Notify,
     settled: tokio::sync::Notify,
+    /// Releases a held `notes.stream`; then it reports whether its token
+    /// fired.
+    release: tokio::sync::Notify,
+    streamed: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
 }
 impl Notes {
     fn install(&self, builder: &mut AgentBuilder) {
@@ -152,15 +156,40 @@ impl TypedPlugin for NotesProvider {
                 "notes",
                 vec![
                     MethodDecl::new("notes.echo", false, Interruption::Drain),
-                    MethodDecl::new("notes.wait", true, Interruption::Report),
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("notes.wait", true, Interruption::Report)
+                    },
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("notes.stream", false, Interruption::Drain)
+                    },
                 ],
-                Arc::new(move |method, params, cancel| {
+                Arc::new(move |method, params, cancel, progress| {
                     let state = state.clone();
                     Box::pin(async move {
-                        if method == "notes.wait" {
-                            state.entered.notify_one();
-                            cancel.cancelled().await;
-                            state.settled.notify_one();
+                        match method.as_str() {
+                            // Undeclared progress never reaches the caller.
+                            "notes.echo" => progress.send(json!("undeclared")),
+                            "notes.wait" => {
+                                state.entered.notify_one();
+                                cancel.cancelled().await;
+                                // After the interrupted reply: dropped.
+                                progress.send(json!("after the reply"));
+                                state.settled.notify_one();
+                            }
+                            _ => {
+                                for step in 0..3 {
+                                    progress.send(json!({"step": step}));
+                                }
+                                if params["hold"] == true {
+                                    state.release.notified().await;
+                                    progress.send(json!({"step": 3}));
+                                    if let Some(streamed) = state.streamed.lock().await.take() {
+                                        let _ = streamed.send(cancel.is_cancelled());
+                                    }
+                                }
+                            }
                         }
                         Ok(json!({"method": method, "params": params}))
                     })
@@ -213,6 +242,7 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
             .await["result"],
         json!({"methods": [
             {"name": "notes.echo", "mutating": false},
+            {"name": "notes.stream", "mutating": false},
             {"name": "notes.wait", "mutating": true},
         ]})
     );
@@ -320,6 +350,15 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
         let closed = client.rpc(method, json!({"sessionId": sid})).await;
         assert_eq!(app_error(&closed), "session_closed", "{method}");
     }
+    // Progress sent after an interrupted reply never followed it.
+    assert!(
+        !client
+            .notices
+            .iter()
+            .any(|notice| notice["method"] == "management.progress"),
+        "{:?}",
+        client.notices
+    );
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -357,4 +396,94 @@ async fn a_session_method_restores_an_unloaded_session() {
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Reads frames until the reply to `id`, returning the progress of `id`
+/// received before it.
+async fn progress_until_reply(client: &mut Client, id: u64) -> (Vec<Value>, Value) {
+    let mut progress = vec![];
+    loop {
+        let frame = client.read().await;
+        if frame["id"] == id {
+            return (progress, frame);
+        }
+        if frame["method"] == "management.progress" {
+            assert_eq!(frame["params"]["id"], id, "{frame}");
+            progress.push(frame["params"].clone());
+        }
+    }
+}
+
+/// Methods contract A.2 `progress`: a method that declares it sends progress
+/// on its call, which reaches the calling connection only and before the
+/// reply. Undeclared progress and progress after a disconnect are dropped,
+/// and a disconnect cancels nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn call_progress_reaches_only_the_caller_before_its_reply() {
+    let notes = Notes::default();
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        notes.install(builder)
+    })
+    .await;
+    let mut caller = Client::new_version(&server, false, 3).await;
+    let created = caller.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    // Another client of the same Session, subscribed to its notices.
+    let mut watcher = Client::new_version(&server, true, 3).await;
+    assert_ok(
+        &watcher
+            .rpc("session.attach", json!({"sessionId": sid}))
+            .await,
+    );
+
+    let id = caller.send("notes.stream", json!({"sessionId": sid})).await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert_eq!(
+        progress,
+        (0..3)
+            .map(|step| json!({"id": id, "method": "notes.stream", "data": {"step": step}}))
+            .collect::<Vec<_>>()
+    );
+    let id = caller.send("notes.echo", json!({"sessionId": sid})).await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert!(progress.is_empty(), "{progress:?}");
+
+    // The caller disconnects mid-call: the call continues, and its later
+    // progress and reply are dropped.
+    let (streamed, cancelled) = tokio::sync::oneshot::channel();
+    *notes.0.streamed.lock().await = Some(streamed);
+    let mut leaving = Client::new_version(&server, false, 3).await;
+    let id = leaving
+        .send("notes.stream", json!({"sessionId": sid, "hold": true}))
+        .await;
+    assert_eq!(
+        leaving.notice("management.progress").await["params"]["id"],
+        id
+    );
+    drop(leaving);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while caller.rpc("daemon.ping", json!({})).await["result"]["connections"] != 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the caller's connection closed");
+    notes.0.release.notify_one();
+    assert!(!cancelled.await.unwrap(), "a disconnect cancels nothing");
+    // No other connection received any of it.
+    assert_ok(&watcher.rpc("daemon.ping", json!({})).await);
+    for client in [&caller, &watcher] {
+        assert!(
+            !client
+                .notices
+                .iter()
+                .any(|notice| notice["method"] == "management.progress"),
+            "{:?}",
+            client.notices
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
 }
