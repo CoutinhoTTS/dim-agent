@@ -490,7 +490,7 @@ impl SkillSettings for SlowFirstResponse {
             Ok(version)
         })
     }
-    fn changes(&self) -> tokio::sync::watch::Receiver<String> {
+    fn changes(&self) -> tokio::sync::watch::Receiver<Option<String>> {
         self.inner.changes()
     }
 }
@@ -616,7 +616,7 @@ impl SkillSettings for FailingReads {
                 .await
         })
     }
-    fn changes(&self) -> tokio::sync::watch::Receiver<String> {
+    fn changes(&self) -> tokio::sync::watch::Receiver<Option<String>> {
         self.inner.changes()
     }
 }

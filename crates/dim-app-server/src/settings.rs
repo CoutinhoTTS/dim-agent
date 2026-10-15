@@ -60,6 +60,9 @@ pub struct SettingsSnapshot<D> {
     pub document: D,
 }
 
+/// A source in one scope: the document namespace and where it is read.
+type SourceKey = (&'static str, SettingsScope);
+
 pub struct SettingsService {
     files: Arc<FileStorage>,
     database: Option<Arc<SqliteStorage>>,
@@ -69,7 +72,9 @@ pub struct SettingsService {
     gate: Mutex<()>,
     updates: TaskTracker,
     changed: StateCell<u64>,
-    documents: Mutex<BTreeMap<&'static str, StateCell<String>>>,
+    /// The latest written revision of each source in each scope; `None`
+    /// until a write in this service generation.
+    sources: Mutex<BTreeMap<SourceKey, StateCell<Option<String>>>>,
     /// The document type that first used each namespace and file; another
     /// type naming one of them would share its persisted source.
     claims: Mutex<BTreeMap<String, std::any::TypeId>>,
@@ -123,25 +128,25 @@ impl SettingsService {
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changed.subscribe()
     }
-    /// The revision of `D`'s user source after each successful write. Project
-    /// sources notify only through `subscribe`.
-    pub fn subscribe_document<D: BusinessDocument>(&self) -> tokio::sync::watch::Receiver<String> {
-        self.documents
+    /// The revision of `D`'s source in `scope` after each successful write;
+    /// `None` until the first write in this service generation, so a consumer
+    /// reads the current document once and then follows the notifications.
+    pub fn subscribe_document<D: BusinessDocument>(
+        &self,
+        scope: SettingsScope,
+    ) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.source::<D>(scope).subscribe()
+    }
+    fn source<D: BusinessDocument>(&self, scope: SettingsScope) -> StateCell<Option<String>> {
+        self.sources
             .lock()
             .unwrap()
-            .entry(D::NAMESPACE)
-            .or_insert_with(|| StateCell::new("unread".into()))
-            .subscribe()
+            .entry((D::NAMESPACE, scope))
+            .or_insert_with(|| StateCell::new(None))
+            .clone()
     }
     fn publish<D: BusinessDocument>(&self, scope: SettingsScope, revision: &str) {
-        if scope == SettingsScope::User {
-            self.documents
-                .lock()
-                .unwrap()
-                .entry(D::NAMESPACE)
-                .or_insert_with(|| StateCell::new("unread".into()))
-                .set(revision.to_owned());
-        }
+        self.source::<D>(scope).set(Some(revision.to_owned()));
         self.changed.update(|version| *version += 1);
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
@@ -380,7 +385,7 @@ impl TypedPlugin for SettingsPlugin {
                 gate: Mutex::new(()),
                 updates: TaskTracker::new(),
                 changed: StateCell::new(0),
-                documents: Mutex::new(BTreeMap::new()),
+                sources: Mutex::new(BTreeMap::new()),
                 claims: Mutex::new(BTreeMap::new()),
             });
             let owner = service.clone();

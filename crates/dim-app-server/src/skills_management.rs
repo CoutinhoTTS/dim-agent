@@ -96,8 +96,9 @@ impl SkillSettings for SkillStorage {
                 .revision)
         })
     }
-    fn changes(&self) -> tokio::sync::watch::Receiver<SettingsVersion> {
-        self.0.subscribe_document::<SkillDocument>()
+    fn changes(&self) -> tokio::sync::watch::Receiver<Option<SettingsVersion>> {
+        self.0
+            .subscribe_document::<SkillDocument>(SettingsScope::User)
     }
 }
 impl From<SettingsError> for SkillSettingsError {

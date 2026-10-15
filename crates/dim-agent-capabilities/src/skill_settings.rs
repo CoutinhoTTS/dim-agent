@@ -45,10 +45,10 @@ pub trait SkillSettings: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>>;
 
     /// Subscribe before reading `skills()`, then read again after notifications.
-    /// Starts at `unread`, then carries committed Skill revisions; use skills()
+    /// Starts at `None`, then carries committed Skill revisions; use skills()
     /// for the authoritative version. Notifications may coalesce. Does not
     /// watch writes by other processes.
-    fn changes(&self) -> watch::Receiver<SettingsVersion>;
+    fn changes(&self) -> watch::Receiver<Option<SettingsVersion>>;
 }
 
 /// Storage port supplied to the catalog by its embedding host. A standalone

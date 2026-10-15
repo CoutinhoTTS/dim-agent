@@ -266,8 +266,8 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
             .await
             .unwrap();
         let settings = root.get::<SettingsService>().unwrap();
-        let mut changes = settings.subscribe_document::<Document>();
-        assert_eq!(*changes.borrow_and_update(), "unread");
+        let mut changes = settings.subscribe_document::<Document>(SettingsScope::User);
+        assert_eq!(*changes.borrow_and_update(), None);
         let current = settings
             .read::<Document>(SettingsScope::User, &cancel)
             .await
@@ -353,7 +353,7 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
                 | (Err(SettingsError::Conflict), Ok(value)) => value,
                 result => panic!("unexpected CAS: {result:?}"),
             };
-            assert_eq!(*changes.borrow_and_update(), winner.revision);
+            assert_eq!(*changes.borrow_and_update(), Some(winner.revision.clone()));
             assert_eq!(winner.revision, "native:user/example:2");
             saved = Some(winner);
             fs::write(home.join("example.json"), b"ignored malformed legacy data").unwrap();
@@ -409,7 +409,9 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .unwrap();
     let settings = root.get::<SettingsService>().unwrap();
     let files = root.get::<FileStorage>().unwrap();
-    let mut changes = settings.subscribe_document::<Document>();
+    let mut changes = settings.subscribe_document::<Document>(SettingsScope::User);
+    let mut project_changes = settings.subscribe_document::<Document>(SettingsScope::Project(1));
+    let other_project = settings.subscribe_document::<Document>(SettingsScope::Project(2));
     let mut all = settings.subscribe();
     let empty = settings
         .read::<Document>(SettingsScope::User, &cancel)
@@ -439,7 +441,11 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         }
         result => panic!("unexpected file CAS: {result:?}"),
     };
-    assert_eq!(*changes.borrow_and_update(), saved.revision);
+    assert_eq!(
+        changes.borrow_and_update().as_deref(),
+        Some(saved.revision.as_str())
+    );
+    assert_eq!(*project_changes.borrow_and_update(), None);
     assert_eq!(*all.borrow_and_update(), 1);
     assert_eq!(settings.project_path(1).unwrap(), project);
     assert_eq!(settings.project_sources().len(), 2);
@@ -457,7 +463,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .read::<Document>(SettingsScope::Project(2), &cancel)
         .await
         .unwrap();
-    settings
+    let project_saved = settings
         .update(
             SettingsScope::Project(1),
             &a.revision,
@@ -466,6 +472,12 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         )
         .await
         .unwrap();
+    // Each source notifies in its own scope, with the revision it wrote.
+    assert_eq!(
+        project_changes.borrow_and_update().as_deref(),
+        Some(project_saved.revision.as_str())
+    );
+    assert!(!other_project.has_changed().unwrap());
     assert_eq!(
         settings
             .read::<Document>(SettingsScope::Project(2), &cancel)
@@ -541,7 +553,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .read::<Document>(SettingsScope::User, &cancel)
         .await
         .unwrap();
-    assert_eq!(*changes.borrow_and_update(), saved.revision);
+    assert_eq!(*changes.borrow_and_update(), Some(saved.revision.clone()));
     assert_eq!(saved.document, document);
     #[cfg(unix)]
     {
@@ -586,7 +598,12 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .await
         .unwrap();
     let fresh = root.get::<SettingsService>().unwrap();
-    assert_eq!(*fresh.subscribe_document::<Document>().borrow(), "unread");
+    assert_eq!(
+        *fresh
+            .subscribe_document::<Document>(SettingsScope::User)
+            .borrow(),
+        None
+    );
     assert_eq!(
         fresh
             .read::<Document>(SettingsScope::User, &cancel)
