@@ -61,7 +61,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 | ID | 内容 | 规模 | 负责线 | 前置 | 使用者 |
 | --- | --- | --- | --- | --- | --- |
-| C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发 | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Goal、S1 |
+| C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发，含 Session 方法的每次调用进度（session-boundary A.2 只做 `progress`：方法声明 `progress` 后，Rpc 把调用期间的进度以 `management.progress` 只发给调用方连接，先于回复，断开后丢弃；`notify`、`closed`、`takeFinalReply` 不在内） | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Goal、S1 |
 | C2 | `SessionConfig.interactive` 与 `session.create` 参数（只做这一个字段；存储保持 v13，旧记录缺省为交互） | S | Rpc | — | SessionTitle、S2（Questions 待重新设计） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
 | C7 | 固定前缀读：Session 门面只读已发布到指定序号的事件（session-access A.5） | S | 独立 | — | SessionTitle、Scheduler、Workflow |
