@@ -302,7 +302,7 @@ No protocol version is added and persistence formats are unchanged.
 
 ### A.5 Tool contribution
 
-ToolRegistry supplement: besides tools registered today, ToolRegistry accepts named tool services. A plugin declares `toolContribution[<tool name>]` at Session scope in its `provides`, and ToolRegistry collects the Session's tool services by name. Existing rules for name uniqueness, collisions with host tools and enablement through `SessionConfig.tools` are unchanged ([tool contributions](../../architecture/rust-agent/tool-contributions.md)).
+ToolRegistry supplement: besides tools registered today, ToolRegistry accepts named tool services. A plugin declares `toolContribution[<tool name>]` at Session scope in its `provides`, and ToolRegistry attaches each tool service while its provider is active, without a hard dependency on it; a provider that is missing, Pending or reloading means its tools are absent and nothing else stops (ADR 002 D3, #34). Existing rules for name uniqueness, collisions with host tools and enablement through `SessionConfig.tools` are unchanged ([tool contributions](../../architecture/rust-agent/tool-contributions.md)).
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
@@ -380,7 +380,7 @@ The neutral services above map to Rust as follows. Rust plugins may use these ty
 | --- | --- | --- | --- |
 | `sessionMethods[ns]` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, `SessionScope::named_key::<SessionMethodContribution>(ns)` | `AgentBuilder::session_methods(ns)` | `Session::method(ns)` |
 | `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)`, process scope, instance key `ns` | loader row | Per call: `Ctx::get_as::<ManagementMethods>` with the namespace key; not in Rpc's `Deps` |
-| `toolContribution[tool]` | `ToolContribution {definition, handler}`, `SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)` (existing) | `Contributions<ToolContribution>` in ToolRegistry |
+| `toolContribution[tool]` | `ToolContribution {definition, handler}`, `SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)` (existing) | ToolRegistry attaches it while active, no hard dependency (D3); today's `Contributions<ToolContribution>` is a hard dependency and changes |
 | `callChannel` | `CallChannel`, `ConnectionNotifier` passed to `MethodProvider::call` | — | — |
 
 ```rust

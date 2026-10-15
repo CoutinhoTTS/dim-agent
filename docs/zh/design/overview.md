@@ -125,7 +125,7 @@ flowchart LR
   end
   Rpc -.->|"按调用查找"| MM
   Rpc -->|"sessionMethods"| SP
-  TR -->|"收集 toolContribution"| SP
+  TR -.->|"可用时接入 toolContribution"| SP
   SP -->|"监听"| BC
   BP -->|"before 回调"| TL
   BP -->|"按序订阅"| DP
@@ -134,7 +134,7 @@ flowchart LR
   SP -->|"分支服务"| BP
 ```
 
-箭头是依赖边，指向相同或外层作用域（D3）。收集方依赖其贡献（ToolRegistry 依赖工具），因此贡献方重载会使其收集方重载。Rpc 不依赖管理方法所有者：虚线箭头是按调用查找，未激活或正在重载的所有者只影响自己的命名空间（[方法 §3.2](contracts/session-boundary.md#32-管理方法)）。重载只跟随罕见的结构性操作（安装、升级、启用、禁用、崩溃）。其传播（包括使在途 turn 失败）是被接受并记录的代价，不增加任何阻止手段。业务配置变更永不重载（D4）。
+箭头是依赖边，指向相同或外层作用域（D3）。依赖方向从扩展指向核心（D3）：核心收集方从不依赖可选的贡献方。ToolRegistry 在可选插件可用时接入它的工具，Rpc 在每次调用时查找管理方法所有者（虚线箭头，[方法 §3.2](contracts/session-boundary.md#32-管理方法)），Session 装配不等可选部件，因此未激活或正在重载的提供方只影响它自己的功能。重载只跟随罕见的结构性操作（安装、升级、启用、禁用、崩溃）。其传播（包括使在途 turn 失败）是被接受并记录的代价，不增加任何阻止手段。业务配置变更永不重载（D4）。
 
 ### 3.1 合同形式
 
@@ -335,7 +335,7 @@ sequenceDiagram
 5. **作用域**：每个部分只依赖自身或外层作用域（D3）。Session 与分支部分读取所属 Session 的 `SessionConfig`。进程部分只通过 Agents 的 `sessions` 服务读取 Session。
 6. **中断**：插件先取消在途工作并释放资源，再写终态事实（[中断](../../architecture/rust-agent/interrupt.md)）。
 7. **准入**：新工具声明风险类别。新类别 `persistent_configuration` 在 FullAccess 下自动允许。由自动化启动的 Session 以启动方的策略为上限，Scheduler 任务和 Workflow 定义可以进一步收窄。由管理方法启动的运行除非另有声明，默认只读，并受宿主配置约束。`workflow` 使用 `agent` 工具的风险类别。
-8. **重载代价**：贡献方重载会使其收集方重载，并可能使在途 turn 失败。这一点被接受，并记录在每个插件的冲突表中，从不加以阻止（D3）。
+8. **依赖方向与重载代价**：核心部件从不依赖可选插件；可选插件重载或失败只影响它自己的功能（D3）。重载传到真正的依赖方时，可能使其在途 turn 失败；这一点被接受，并记录在每个插件的冲突表中，从不加以阻止。
 9. **管理面**：管理方法（`account.*`、`provider.*`、`mcp.*`、`skills.*`、设置以及新进程插件的方法）只由进程插件通过 `managementMethods` 提供。Session 方法没有级别；`shell.*` 是普通 Session 方法。本地 RPC 服务两类方法，RemoteGateway 只服务 Session 方法，rutis 链接只在显式导出时服务管理方法（宿主管理员权限）。不存在身份分级。`hello`、`daemon.*`、`agent.*` 和现有的 `session.*` 方法保持为 Rpc 内建方法；`daemon.shutdown` 是内建方法，从不提供给已配对设备（带 `deviceId` 的连接）。
 10. **远程 Session 方法**：已配对设备可调用所有 Session 方法，包括 `session.permission.update` 和 `shell.*`（兼容性变更，[方法 A.4](contracts/session-boundary.md#a4-迁移与兼容性)）。
 11. **在途工作**：没有共享注册表。每个所有者提供自己的查询与停止，由 CLI 汇总。

@@ -302,7 +302,7 @@ Rpc 向方法提供方提供进程服务 `callChannel`。
 
 ### A.5 工具贡献
 
-ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名工具服务。插件在其 `provides` 中于 Session 作用域声明 `toolContribution[<tool name>]`，ToolRegistry 按名称收集该 Session 的工具服务。名称唯一性、与宿主工具冲突以及通过 `SessionConfig.tools` 启用的现有规则不变（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。
+ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名工具服务。插件在其 `provides` 中于 Session 作用域声明 `toolContribution[<tool name>]`，ToolRegistry 在每个工具服务的提供方可用时接入它，不对它形成硬依赖；提供方缺失、Pending 或正在重载时，只是它的工具不存在，其他不受影响（ADR 002 D3，#34）。名称唯一性、与宿主工具冲突以及通过 `SessionConfig.tools` 启用的现有规则不变（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。
 
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
@@ -380,7 +380,7 @@ ToolRegistry 补充：除如今已注册的工具外，ToolRegistry 接受具名
 | --- | --- | --- | --- |
 | `sessionMethods[ns]` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，`SessionScope::named_key::<SessionMethodContribution>(ns)` | `AgentBuilder::session_methods(ns)` | `Session::method(ns)` |
 | `managementMethods[ns]` | `ManagementMethods(Arc<dyn MethodProvider>)`，进程作用域，实例 key 为 `ns` | loader 行 | 按调用：用命名空间 key 执行 `Ctx::get_as::<ManagementMethods>`；不在 Rpc 的 `Deps` 中 |
-| `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | ToolRegistry 中的 `Contributions<ToolContribution>` |
+| `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | ToolRegistry 在其可用时接入，不形成硬依赖（D3）；现有的 `Contributions<ToolContribution>` 是硬依赖，需要改 |
 | `callChannel` | `CallChannel`、传给 `MethodProvider::call` 的 `ConnectionNotifier` | — | — |
 
 ```rust

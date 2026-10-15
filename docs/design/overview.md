@@ -125,7 +125,7 @@ flowchart LR
   end
   Rpc -.->|"look up per call"| MM
   Rpc -->|"sessionMethods"| SP
-  TR -->|"collect toolContribution"| SP
+  TR -.->|"attach toolContribution while active"| SP
   SP -->|"listen"| BC
   BP -->|"before callback"| TL
   BP -->|"subscribe in order"| DP
@@ -134,7 +134,7 @@ flowchart LR
   SP -->|"branch services"| BP
 ```
 
-The arrows are dependency edges, and they point to the same or an enclosing scope (D3). A collector depends on its contributions (ToolRegistry on tools), so a contributor reload reloads its collector. Rpc does not depend on management method owners: the dotted arrow is a per-call lookup, so an inactive or reloading owner affects only its own namespace ([methods §3.2](contracts/session-boundary.md#32-management-method)). Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
+The arrows are dependency edges, and they point to the same or an enclosing scope (D3). Dependencies point from extensions to the core (D3): a core collector never depends on optional contributors. ToolRegistry attaches an optional plugin's tools while it is active, Rpc looks up management method owners on each call (the dotted arrow, [methods §3.2](contracts/session-boundary.md#32-management-method)), and Session assembly does not wait for optional parts, so an inactive or reloading provider affects only its own features. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
 
 ### 3.1 Contract form
 
@@ -335,7 +335,7 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 5. **Scope**: each part depends only on its own or an enclosing scope (D3). Session and branch parts read the Session's `SessionConfig`. Process parts read a Session only through Agents' `sessions` service.
 6. **Interrupt**: a plugin cancels in-flight work and releases resources before writing terminal facts ([interrupt](../architecture/rust-agent/interrupt.md)).
 7. **Admission**: new tools declare a risk category. The new category `persistent_configuration` is allowed automatically under FullAccess. Sessions started by automation use the starter's policy as an upper bound, which Scheduler jobs and Workflow definitions may narrow. Runs started by a management method default to read-only unless declared, capped by host configuration. `workflow` uses the `agent` tool's risk category.
-8. **Reload cost**: a contributor reload reloads its collector and may fail in-flight turns. This is accepted and documented in each plugin's conflict table, never prevented (D3).
+8. **Dependency direction and reload cost**: core parts never depend on optional plugins; an optional plugin's reload or failure affects only its own features (D3). A reload that reaches its real dependents may fail their in-flight turns; this is accepted and documented in each plugin's conflict table, never prevented.
 9. **Management plane**: management methods (`account.*`, `provider.*`, `mcp.*`, `skills.*`, settings and the methods of new process plugins) are provided only by process plugins through `managementMethods`. Session methods have no level; `shell.*` is an ordinary Session method. Local RPC serves both kinds, RemoteGateway serves Session methods only, and a rutis link serves management methods only when explicitly exported (host administrator rights). There are no identity tiers. `hello`, `daemon.*`, `agent.*` and the existing `session.*` methods stay Rpc built-ins; `daemon.shutdown` is a built-in never served to a paired device (a connection with a `deviceId`).
 10. **Remote Session methods**: paired devices may call every Session method, including `session.permission.update` and `shell.*` (compatibility change, [methods A.4](contracts/session-boundary.md#a4-migration-and-compatibility)).
 11. **In-flight work**: there is no shared registry. Each owner provides its own query and stop, and the CLI aggregates them.

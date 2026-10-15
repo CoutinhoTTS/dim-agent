@@ -52,12 +52,16 @@ own scope:
 | Reach other Sessions | Agents' `sessions` service (AgentIndex and the Session public interface), as Collaboration does |
 | React to another process plugin's outcomes | an event notice, not a dependency |
 
-### D3. Dependencies follow scope; rare restarts are accepted
+### D3. Dependencies follow scope and point from extensions to the core
 
-A plugin depends on plugins at its own scope or an enclosing scope. Because reloads are rare and
-structural, a reload propagating to dependents (and failing in-flight turns) is an accepted cost
-of those operations; no mechanism is added to prevent it. Crash isolation of volatile runtimes,
-if needed later, belongs to rutis (issue #6), not to application wiring.
+A plugin depends on plugins at its own scope or an enclosing scope, and dependencies point from
+extensions to the core. A core part (for example Session assembly, ToolRegistry, Rpc, and content
+owners such as Mcp and SkillsCatalog) never takes a hard dependency on an optional plugin: it looks
+the optional provider up on each call, or attaches it while it is active. An optional plugin that is
+missing, Pending, Failed or reloading therefore affects only its own features (#34). Within this
+rule, because reloads are rare and structural, a reload propagating to its real dependents (and
+failing their in-flight turns) is an accepted cost; no mechanism is added to prevent it. A runtime
+crash is an infrastructure failure, like an App Server crash, and nothing is designed around it.
 
 ### D4. Structural configuration and business configuration are separate
 
