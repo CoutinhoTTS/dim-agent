@@ -34,7 +34,7 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel`, Settings source `session-title` | `sessionMethods` key `session.rename` (declared in its `provides`); Settings source `session-title` with fields `enabled`, `maxLength` |
+| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel` (hard dependency: without Provider SessionTitle is reported failed for the missing service), Settings source `session-title` | `sessionMethods` key `session.rename` (declared in its `provides`); Settings source `session-title` with fields `enabled`, `maxLength`, `model` |
 
 Every dependency is at the Session scope or the enclosing process scope. Most are existing typed services; SessionStore title metadata and the title notice are proposed supplements, and Settings sources exist for Rust owners while the named `settings` service is not implemented (S8b) ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins); shapes in A.2). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). A reload of SessionStore, Provider or Settings reloads SessionTitle, which cancels an in-flight generation; this is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Business configuration changes never reload ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
@@ -154,7 +154,7 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 
 ## 7. Security
 
-The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
+The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. A Session whose model is an `external-agent:*` entry is not titled automatically, so a title request never goes to an external agent bridge. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
 
 ## 8. Rule check
 
@@ -209,7 +209,7 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | SessionStore metadata (supplement) | `metadata` | async | `{sessionId}` | `{revision, title?: {text, source: "auto" \| "manual"}}`; errors `not_found`, `storage` |
 | SessionStore metadata (supplement) | `setTitle` | async | `{sessionId, expectedRevision, title: {text, source} \| null}` | New `revision`; errors `conflict`, `not_found`, `storage`. After a commit SessionStore emits the title notice |
 | SessionStore (supplement) | title notice | Session broadcast notice (generic record, §9) | — | `{source: "SessionStore", kind: "title", data: {sessionId, title, titleSource, revision}}` on the Session's broadcast channel; no sequence number, not replayed |
-| Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [user text], maxOutputTokens}}` ([design](../appserver/auxiliary-model.md)) | `{text, stopReason, usage}`; errors as data. Cancelled by a cancel request or by dropping the call |
+| Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: text}], maxOutputTokens}}` ([design](../appserver/auxiliary-model.md)) | `{text, stopReason, usage}`; errors as data. Cancelled by a cancel request or by dropping the call |
 
 ### A.3 Configuration
 

@@ -74,8 +74,11 @@ existing task tracking.
 
 - `model` is required. The caller resolves it from its own configuration; Provider does not
   fall back to another model.
-- `messages` use the existing serializable `Message` type (dim-agent-types). No tools are
-  offered; thinking output is dropped; only text blocks form `text`.
+- `messages` use the existing serializable `Message` type (dim-agent-types), for example
+  `[{role: "user", content: "…"}]`. No tools are offered; thinking output is dropped; only
+  text blocks form `text`.
+- `stopReason` has three values. The Rust `ModelStopReason` also has `ToolUse`; since no tool
+  is offered, a tool stop is a provider defect and the call fails with `failed`.
 - `maxOutputTokens` caps the reply; the default is the model's limit, clamped to the model's
   `max_output_tokens`.
 - Non-streaming: the consumer needs the whole text.
@@ -119,10 +122,18 @@ Provider's `apply` provides `AuxiliaryModelHost`; its `Deps` gain `Arc<ModelHost
     |<-- {text, stopReason, usage}                                          |
 ```
 
-If the stream fails because a credential was rejected and the connection's
-`RecoverModelConnection` reports recoverable (managed OAuth), Provider recovers once and
-retries once. No transient retry or backoff: retry is the consumer's (SessionTitle retries
-on a later input). No event is written anywhere.
+Failures go through the same policy as Session requests, in one shared function
+(`dim-agent-capabilities::model_provider::invoke_with_recovery`, also used by
+ModelProvider), so the policy has one implementation:
+
+- **Credentials:** a credential that is rejected is recovered once. If the recovered
+  credential is rejected again (`Terminal`), the credential owner's `finish_rejected`
+  settles it before the call fails; for example, a managed account is signed out.
+- **Transient failures:** these back off within the shared budget (at most three attempts,
+  60 s of waiting), unless the provider's `ModelFailurePolicy::forbids_retry` forbids it.
+
+Beyond that, retry is the consumer's (SessionTitle retries on a later input). No event is
+written anywhere.
 
 ## 6. Errors
 
@@ -130,7 +141,7 @@ on a later input). No event is written anywhere.
 | --- | --- | --- |
 | `invalid_request` | `messages` empty, `maxOutputTokens = 0` | No (caller defect) |
 | `model_unavailable` | The model is not selectable, or its Provider or catalog is missing | After the user fixes the consumer's setting or the catalog |
-| `failed` | Connection resolution, transport, HTTP or stream error (after one credential recovery) | Consumer's choice |
+| `failed` | Connection resolution, transport, HTTP or stream error after the shared policy; a tool stop | Consumer's choice |
 | `cancelled` | Call dropped, cancel token fired, or Provider unloading (its stop token) | Consumer's choice |
 
 ## 7. Security
@@ -149,7 +160,7 @@ on a later input). No event is written anywhere.
 | Part | Relationship |
 | --- | --- |
 | Default selection (`provider.select`) | Unchanged. `complete` does not consult it |
-| SessionTitle (P4) | Calls `complete(model, …)`; `model` is the optional `model` of its Settings source `session-title`, else the model of the latest `context/configured` in the prefix. May declare `auxiliaryModel` in `Deps` |
+| SessionTitle (P4) | Calls `complete(model, …)`; `model` is the optional `model` of its Settings source `session-title`, else the model of the latest `context/configured` in the prefix; it skips titling when that model is an `external-agent:*` entry. Hard dependency on `auxiliaryModel` in `Deps`: without Provider (the `--models` profile) SessionTitle is reported failed with the missing service rather than silently absent; that profile does not load TypeScript plugins today |
 | Compaction host (F1) | Does not use this service. Implements `ResolveContextModel`; how it picks the model and reads the context window is F1's design |
 | Collaboration | No change from S4. A member's model is its profile's model, else the default selection; a separate member default, if ever wanted, is Collaboration's own setting |
 | Modality | Keeps its default model per category in its own `modality` Settings source and passes the model explicitly. Non-conversational connection resolution is a separate Provider supplement, not S4 |
@@ -172,9 +183,9 @@ on a later input). No event is written anywhere.
 
 ## 10. Open questions
 
-None for S4. Per-purpose reasoning effort (feature list) is a field of the consumer's own
-setting if it is ever added, and `complete` would then take it as a request parameter;
-not designed now.
+Deferred: per-purpose reasoning effort (feature list: "Auxiliary model and reasoning
+effort"). If it is added, it is a field of the consumer's own setting and `complete`
+takes it as a request parameter. It is decided with the `/settings` design, not in S4.
 
 ## 11. Acceptance (flow tests)
 
@@ -184,5 +195,7 @@ not designed now.
 3. Deleting the model's Provider: the next call is `model_unavailable`.
 4. Dropping the call mid-stream cancels the request; unloading Provider ends an in-flight
    call with `cancelled`.
-5. No API key appears in the reply, errors or the trace event; the Session's Timeline has no
+5. A managed account whose recovered credential is rejected again is settled (signed out)
+   and the call fails with `failed`; the endpoint received exactly two requests.
+6. No API key appears in the reply, errors or the trace event; the Session's Timeline has no
    new event after a call.

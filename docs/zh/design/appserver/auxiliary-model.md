@@ -65,8 +65,10 @@ S4 完成标准里只有一个使用者：SessionTitle（P4），它需要在自
 | `complete` | async | `{model: {providerId, modelId}, request: {system?: string, messages: Message[], maxOutputTokens?: u32}}` | `{text, stopReason: "end_turn" \| "max_tokens" \| "stop_sequence", usage?: {promptTokens, completionTokens, totalTokens}}` |
 
 - `model` 必填。调用方从自己的配置中解析出它；Provider 不回退到其他模型。
-- `messages` 使用现有可序列化的 `Message` 类型（dim-agent-types）。不提供工具；丢弃 thinking
-  输出；只有文本块组成 `text`。
+- `messages` 使用现有可序列化的 `Message` 类型（dim-agent-types），例如
+  `[{role: "user", content: "…"}]`。不提供工具；丢弃 thinking 输出；只有文本块组成 `text`。
+- `stopReason` 有三个取值。Rust 的 `ModelStopReason` 还有 `ToolUse`；因为不提供工具，出现工具
+  停止属于提供方缺陷，调用以 `failed` 失败。
 - `maxOutputTokens` 限制回复长度；缺省为模型上限，并截到模型的 `max_output_tokens`。
 - 非流式：使用者需要完整文本。
 - 取消：使用者丢弃调用（或发送桥接协议的取消请求）。服务本身没有超时，预算归使用者。
@@ -108,9 +110,16 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
     |<-- {text, stopReason, usage}                                          |
 ```
 
-如果流因凭据被拒而失败，且连接的 `RecoverModelConnection` 判定可恢复（托管 OAuth），Provider
-恢复一次并重试一次。没有瞬时错误重试或退避：重试归使用者（SessionTitle 在之后的输入时重试）。
-任何地方都不写事件。
+失败处理与 Session 请求用同一套策略，放在一个共用函数里
+（`dim-agent-capabilities::model_provider::invoke_with_recovery`，ModelProvider 也用它），
+所以这套策略只有一份实现：
+
+- **凭据：** 被拒的凭据恢复一次；恢复后再次被拒（`Terminal`）时，先由凭据所有者的
+  `finish_rejected` 结算（例如托管账号被登出），再让调用失败。
+- **瞬时失败：** 在共用预算内退避重试（至多三次尝试、等待合计 60 秒），提供方的
+  `ModelFailurePolicy::forbids_retry` 禁止时不重试。
+
+此外的重试归使用者（SessionTitle 在之后的输入时重试）。任何地方都不写事件。
 
 ## 6. 错误
 
@@ -118,7 +127,7 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 | --- | --- | --- |
 | `invalid_request` | `messages` 为空、`maxOutputTokens = 0` | 否（调用方缺陷） |
 | `model_unavailable` | 模型不可选，或其 Provider、目录缺失 | 用户修正使用者的设置或目录之后 |
-| `failed` | 连接解析、传输、HTTP 或流错误（在一次凭据恢复之后） | 由使用者决定 |
+| `failed` | 共用策略处理之后仍失败的连接解析、传输、HTTP 或流错误；工具停止 | 由使用者决定 |
 | `cancelled` | 调用被丢弃、取消令牌触发，或 Provider 卸载（其停止令牌） | 由使用者决定 |
 
 ## 7. 安全
@@ -136,7 +145,7 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 | 部件 | 关系 |
 | --- | --- |
 | 默认选择（`provider.select`） | 不变。`complete` 不使用它 |
-| SessionTitle（P4） | 调用 `complete(model, …)`；`model` 取其 Settings 来源 `session-title` 中可选的 `model`，否则取前缀中最新 `context/configured` 的模型。可在 `Deps` 中声明 `auxiliaryModel` |
+| SessionTitle（P4） | 调用 `complete(model, …)`；`model` 取其 Settings 来源 `session-title` 中可选的 `model`，否则取前缀中最新 `context/configured` 的模型；该模型是 `external-agent:*` 条目时跳过标题生成。在 `Deps` 中硬依赖 `auxiliaryModel`：没有 Provider（`--models` 配置）时 SessionTitle 报告为失败并指出缺少的服务，而不是悄悄缺席；该配置目前也不装载 TypeScript 插件 |
 | 压缩宿主（F1） | 不使用本服务。实现 `ResolveContextModel`；如何选模型、如何读上下文窗口由 F1 设计 |
 | Collaboration | S4 不带来变化。成员模型 = profile 的模型，否则为默认选择；如果以后需要单独的成员默认值，那是 Collaboration 自己的设置 |
 | Modality | 把每个类别的默认模型保存在自己的 Settings 来源 `modality` 中，并显式传入模型。非对话型连接解析是另一项 Provider 补充，不在 S4 内 |
@@ -159,8 +168,8 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 
 ## 10. 开放问题
 
-S4 没有开放问题。按用途的推理强度（功能清单）如果以后要加，是使用者自己设置里的一个字段，
-`complete` 再把它作为请求参数接收；现在不设计。
+推迟：按用途的推理强度（功能清单："Auxiliary model and reasoning effort"）。如果要加，它是
+使用者自己设置里的一个字段，`complete` 把它作为请求参数接收；随 `/settings` 设计决定，不在 S4 内。
 
 ## 11. 验收（流程测试）
 
@@ -169,4 +178,5 @@ S4 没有开放问题。按用途的推理强度（功能清单）如果以后�
 2. 模型被禁用或不存在：`model_unavailable`，不发请求，不回退。
 3. 删除模型所属的 Provider：下一次调用返回 `model_unavailable`。
 4. 流进行中丢弃调用会取消请求；卸载 Provider 会以 `cancelled` 结束进行中的调用。
-5. 回复、错误和 trace 事件都不含 API key；调用后 Session 的 Timeline 没有新事件。
+5. 托管账号恢复后的凭据再次被拒：账号被结算（登出），调用以 `failed` 失败；端点恰好收到两次请求。
+6. 回复、错误和 trace 事件都不含 API key；调用后 Session 的 Timeline 没有新事件。
