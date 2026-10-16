@@ -17,6 +17,7 @@
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
+- [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
