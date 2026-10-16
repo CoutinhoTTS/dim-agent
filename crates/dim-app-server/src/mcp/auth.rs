@@ -114,6 +114,12 @@ pub(crate) fn credential_key(
     Some((CredentialKey::new(id, &url), url))
 }
 
+/// The key a remote entry's credentials are stored under, even once the
+/// entry no longer uses OAuth, so they can still be signed out.
+pub(crate) fn stored_key(id: &str, settings: &McpServerSettings) -> Option<CredentialKey> {
+    remote_url(settings).map(|url| CredentialKey::new(id, &url))
+}
+
 /// Why a connection cannot authorize a request.
 pub(crate) enum Refusal {
     /// No credential: the user has not signed in.
@@ -480,6 +486,59 @@ impl McpAuth {
         .await;
         settle(&self, pending);
         result
+    }
+
+    pub(crate) async fn logout(
+        self: &Arc<Self>,
+        key: &CredentialKey,
+        cancel: &CancellationToken,
+    ) -> Result<bool, McpAuthError> {
+        let started = Instant::now();
+        let target = key.clone();
+        let result = self
+            .owned(cancel, move |auth| async move {
+                let mut locked = auth.store.lock(&auth.stopping).await.map_err(closed)?;
+                let record = locked.document.remove(&target);
+                // Revoke the refresh token, then the access token (RFC 7009);
+                // the record is deleted whatever the outcome.
+                let mut revoked = false;
+                if let Some(Record {
+                    revocation_endpoint: Some(endpoint),
+                    client: Some(client),
+                    tokens: Some(tokens),
+                    ..
+                }) = &record
+                {
+                    revoked = true;
+                    if let Some(refresh) = &tokens.refresh_token {
+                        revoked &=
+                            oauth::revoke(&auth.http, endpoint, client, refresh, "refresh_token")
+                                .await;
+                    }
+                    revoked &= oauth::revoke(
+                        &auth.http,
+                        endpoint,
+                        client,
+                        &tokens.access_token,
+                        "access_token",
+                    )
+                    .await;
+                }
+                if record.is_some() {
+                    locked.write().await?;
+                }
+                auth.key(&target, |state| {
+                    state.challenge = None;
+                    state.missing_scopes.clear();
+                    state.attempt = None;
+                });
+                auth.changed(&target, false);
+                Ok((revoked, record.map(|record| record.issuer)))
+            })
+            .await;
+        let issuer = result.as_ref().ok().and_then(|(_, issuer)| issuer.clone());
+        trace(key, issuer.as_deref(), "logout", outcome(&result), started);
+        result.map(|(revoked, _)| revoked)
     }
 
     /// Refreshes the key's tokens, holding the store lock from the re-read

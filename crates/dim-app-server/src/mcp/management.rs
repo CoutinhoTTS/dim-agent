@@ -1,5 +1,5 @@
 //! MCP management wire boundary over the MCP and Settings owners.
-use super::auth::{AuthState, McpAuth, McpAuthError, credential_key};
+use super::auth::{AuthState, McpAuth, McpAuthError, credential_key, stored_key};
 use super::config::{McpServerSettings, RemoteTransport};
 use super::{McpChange, McpError, McpService};
 use crate::{
@@ -89,6 +89,11 @@ impl std::fmt::Debug for CompleteMcpAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompleteMcpAuth").finish_non_exhaustive()
     }
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpAuthLoggedOut {
+    pub revoked: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +205,7 @@ pub(super) fn provide(
             "mcp.disconnect",
             "mcp.auth.start",
             "mcp.auth.complete",
+            "mcp.auth.logout",
         ]
         .into_iter()
         .map(|name| MethodDecl::new(name, name != "mcp.catalog", Interruption::Report))
@@ -357,6 +363,20 @@ pub(super) fn provide(
                         auth.complete(id, &p.callback_url, &stopping)
                             .await
                             .map_err(|e| error(e.into()))?;
+                    }
+                    "mcp.auth.logout" => {
+                        let p: McpTarget = params(value)?;
+                        let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
+                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
+                        // Also once the entry no longer uses OAuth: its stored
+                        // credential can still be revoked.
+                        let key = stored_key(&p.id, &entry.configuration)
+                            .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
+                        let revoked = auth
+                            .logout(&key, &stopping)
+                            .await
+                            .map_err(|e| error(e.into()))?;
+                        return reply(McpAuthLoggedOut { revoked });
                     }
                     _ => unreachable!("registered MCP management method"),
                 }

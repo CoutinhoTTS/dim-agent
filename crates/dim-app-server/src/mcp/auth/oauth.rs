@@ -24,6 +24,7 @@ use std::{
 
 const CLIENT_NAME: &str = "Dim";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every OAuth request: no redirects, no retries, the 30 s budget rmcp
 /// also uses.
@@ -688,6 +689,24 @@ pub(super) async fn token(
         // RFC 6749 §5.1: an omitted scope means the request was granted.
         scopes: string("scope")?.map_or_else(|| requested.to_vec(), |scope| split(&scope)),
     })
+}
+
+/// RFC 7009 revocation of one token, best effort. Returns whether the
+/// authorization server confirmed it.
+pub(super) async fn revoke(
+    http: &Http,
+    endpoint: &str,
+    client: &Client,
+    token: &str,
+    hint: &str,
+) -> bool {
+    let mut form = vec![("token", token), ("token_type_hint", hint)];
+    let request = authenticate(http.post(endpoint), &mut form, client);
+    form_body(request, &form)
+        .timeout(REVOCATION_TIMEOUT)
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 fn form_body(
