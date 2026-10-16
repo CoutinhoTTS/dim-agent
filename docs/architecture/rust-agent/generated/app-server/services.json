@@ -482,6 +482,11 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_app_server::mcp::publication::Publication",
             "scope": null,
             "status": "Ready"
@@ -493,6 +498,12 @@
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "scope": null,
+            "provider": 4,
+            "generation": 1
+          },
           {
             "service": "dim_app_server::mcp::publication::Publication",
             "scope": null,
@@ -507,6 +518,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "provider": 4,
+            "declared": true,
+            "external": true
+          },
           {
             "service": "dim_app_server::mcp::publication::Publication",
             "provider": 14,
@@ -958,6 +975,12 @@
       },
       {
         "service": "dim_app_server::mcp::McpService",
+        "provider": 15,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::mcp::auth::McpAuth",
         "provider": 15,
         "generation": 1,
         "removing": false

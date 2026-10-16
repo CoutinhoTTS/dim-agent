@@ -1,7 +1,7 @@
 //! Session visibility and versioned MCP contributions. No registry or prompt ownership.
 use super::{
     McpConnection, McpError, McpServerEntry, McpService,
-    server::{McpServerState, McpTool},
+    server::{McpServerError, McpServerState, McpTool},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::{
@@ -15,7 +15,9 @@ use dim_agent_runtime::{
     AgentBuilder, Capability, InSession, KeysOf, PublicService, SessionConfig, SessionLifecycle,
     SessionLoader, SessionScope, SessionService, StateCell, scoped,
 };
-use dim_agent_types::{ToolCall, ToolDefinition, ToolMetadata, ToolResult, ToolSource};
+use dim_agent_types::{
+    ToolCall, ToolContent, ToolDefinition, ToolMetadata, ToolResult, ToolSource,
+};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, TypedPlugin};
 use sha2::{Digest, Sha256};
 use std::{
@@ -42,8 +44,17 @@ pub fn install(builder: &mut AgentBuilder) {
 pub enum McpSourceState {
     Disabled,
     Connecting,
-    Ready { version: String },
-    Failed { message: String },
+    Ready {
+        version: String,
+    },
+    Failed {
+        message: String,
+    },
+    /// The server needs the user to sign in; clears by itself once the
+    /// server's credential changes.
+    AuthRequired {
+        expired: bool,
+    },
 }
 impl McpSourceState {
     /// `session.mcp` state name with its version and failure message. MCP owns
@@ -54,6 +65,18 @@ impl McpSourceState {
             Self::Connecting => ("connecting", None, None),
             Self::Ready { version } => ("ready", Some(version), None),
             Self::Failed { message } => ("failed", None, Some(message)),
+            Self::AuthRequired { expired } => (
+                "auth_required",
+                None,
+                Some(
+                    if expired {
+                        "authorization expired"
+                    } else {
+                        "authorization required"
+                    }
+                    .into(),
+                ),
+            ),
         }
     }
 }
@@ -353,30 +376,56 @@ async fn discover(
         lease = Some(connection.clone());
         let mut changed = connection.tool_changes();
         let mut state = connection.subscribe();
+        let mut credential = connection.credential_changes();
         let mut previous: Option<Vec<McpTool>> = None;
-        loop {
-            let tools = connection.tools(&cancel).await?;
-            if matches!(connection.state(), McpServerState::Failed | McpServerState::Closed) {
-                return Err(McpError::Unavailable);
+        'discover: loop {
+            if let Some(credential) = credential.as_mut() {
+                credential.borrow_and_update();
             }
-            if previous.as_ref() != Some(&tools) {
-                let version = uuid::Uuid::new_v4().to_string();
-                let set = Arc::new(ToolSourceSet {
-                    key: format!("mcp:{id}"), version: version.clone(),
-                    tools: tools.iter().map(|tool| contribution(&id, tool, connection.clone(), owner.stopped.clone())).collect(),
-                });
-                owner.publish(&id, Some(set), McpSourceState::Ready { version }, &cancel);
-                previous = Some(tools);
-            }
-            loop {
-                if matches!(*state.borrow_and_update(), McpServerState::Failed | McpServerState::Closed) {
-                    return Err(McpError::Unavailable);
+            let refused = match connection.tools(&cancel).await {
+                Err(McpServerError::AuthRequired { expired }) => Some(expired),
+                // Refused for scope while discovering: sign in again (§5.7).
+                Err(McpServerError::InsufficientScope(_)) => Some(false),
+                result => {
+                    let tools = result?;
+                    if matches!(connection.state(), McpServerState::Failed | McpServerState::Closed) {
+                        return Err(McpError::Unavailable);
+                    }
+                    if previous.as_ref() != Some(&tools) {
+                        let version = uuid::Uuid::new_v4().to_string();
+                        let set = Arc::new(ToolSourceSet {
+                            key: format!("mcp:{id}"), version: version.clone(),
+                            tools: tools.iter().map(|tool| contribution(&id, tool, connection.clone(), owner.stopped.clone())).collect(),
+                        });
+                        owner.publish(&id, Some(set), McpSourceState::Ready { version }, &cancel);
+                        previous = Some(tools);
+                    }
+                    loop {
+                        let current = *state.borrow_and_update();
+                        match current {
+                            McpServerState::Failed | McpServerState::Closed => return Err(McpError::Unavailable),
+                            McpServerState::AuthRequired { expired } => break Some(expired),
+                            _ => {}
+                        }
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Ok(()),
+                            result = state.changed() => { if result.is_err() { return Err(McpError::Unavailable); } },
+                            result = changed.changed() => { if result.is_err() { return Err(McpError::Unavailable); } continue 'discover; },
+                            // Another Session expired or signed out the key.
+                            usable = credential_change(credential.as_mut()) => { if !usable? { continue 'discover; } },
+                        }
+                    }
                 }
+            };
+            // Without tools until the credential changes, then rediscover.
+            if let Some(expired) = refused {
+                owner.publish(&id, None, McpSourceState::AuthRequired { expired }, &cancel);
+                previous = None;
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Ok(()),
-                    result = state.changed() => { if result.is_err() { return Err(McpError::Unavailable); } },
-                    result = changed.changed() => { if result.is_err() { return Err(McpError::Unavailable); } break; },
+                    result = credential_change(credential.as_mut()) => { result?; }
                 }
             }
         }
@@ -401,6 +450,21 @@ async fn discover(
             &cancel,
         ),
     }
+}
+
+/// The next change of the server's OAuth credential, and whether it now
+/// holds tokens; never resolves for a server without OAuth.
+async fn credential_change(
+    credential: Option<&mut watch::Receiver<bool>>,
+) -> Result<bool, McpError> {
+    let Some(credential) = credential else {
+        return std::future::pending().await;
+    };
+    credential
+        .changed()
+        .await
+        .map_err(|_| McpError::Unavailable)?;
+    Ok(*credential.borrow_and_update())
 }
 
 fn contribution(
@@ -436,6 +500,7 @@ fn contribution(
             }),
         },
         handler: Arc::new(McpToolHandler {
+            server: id.to_owned(),
             connection,
             original: tool.name.clone(),
             stopped,
@@ -444,6 +509,7 @@ fn contribution(
 }
 
 struct McpToolHandler {
+    server: String,
     connection: Arc<McpConnection>,
     original: String,
     stopped: CancellationToken,
@@ -469,11 +535,34 @@ impl ToolHandler for McpToolHandler {
                 _ = self.stopped.cancelled() => { cancel.cancel(); operation.await },
                 result = &mut operation => result,
             };
-            result.map_err(|error| match error {
-                super::server::McpServerError::Cancelled
-                | super::server::McpServerError::Closed => HostError::Cancelled(error.to_string()),
-                other => HostError::failed(other.to_string()),
-            })
+            // Authorization failures are fixed text: no URL, token or issuer
+            // reaches the model (design §8).
+            let server = &self.server;
+            let refused = |text: String| {
+                Ok(ToolResult {
+                    content: ToolContent::Text(text),
+                    is_error: Some(true),
+                    ..ToolResult::default()
+                })
+            };
+            match result {
+                Err(McpServerError::AuthRequired { .. }) => refused(format!(
+                    "The MCP server \"{server}\" requires the user to sign in. Ask the user to sign in to it with /mcp."
+                )),
+                Err(McpServerError::InsufficientScope(scopes)) => refused(format!(
+                    "The MCP server \"{server}\" needs additional permissions for this tool{}. Ask the user to sign in to it again with /mcp.",
+                    if scopes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({scopes})")
+                    }
+                )),
+                Err(error @ (McpServerError::Cancelled | McpServerError::Closed)) => {
+                    Err(HostError::Cancelled(error.to_string()))
+                }
+                Err(other) => Err(HostError::failed(other.to_string())),
+                Ok(result) => Ok(result),
+            }
         })
     }
 }
