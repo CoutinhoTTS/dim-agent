@@ -24,8 +24,10 @@
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
+- [Settings service](design/appserver/settings-service.md) (S8b design approved; implementation pending)（[中文](zh/design/appserver/settings-service.md)）
 - [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
+- [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

@@ -227,7 +227,7 @@ sequenceDiagram
   IQ->>TL: input/message，然后 turn/start
 ```
 
-每次目标变更（设置、编辑、暂停、恢复、清除，以及模型通过 `goal_update` 报告完成或受阻）都是一条 `input/message`，其 raw 块带 key `goal:objective`（设置、编辑）、`goal:status`（设置、暂停、恢复、完成、受阻、自动暂停），或退役两者（清除）；续跑不带 key，只被计数。压缩重放每个 key 最新的块，因此模型保有当前目标与状态。工具和 `session.goal.*` 方法只写这条事件，不读 Goal 的状态，也不做决定。Goal 的状态是已消费的块按序号折叠的结果，没有例外：每个 key 最新的存活块就是当前目标与状态，因此压缩重放的内容总与折叠结果一致；只有 `goal:objective` 存活时目标才存在。Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定是否续跑，只用已消费的状态；把写入登记为自持任务后返回，写入前再用已消费的状态复核。被删除的输入不改变状态。一个目标只属于一个分支：折叠只用写在该分支上的事件，从不用继承的前缀，因此子分支和分叉 Session 的 `main` 从没有目标开始，在那里的变更只影响该分支；Goal 消费新分支的 `branch/start` 时，若继承的前缀中仍有存活的目标 key，就作为自持任务在那里写一次 `clear`，使新分支上的模型不把父分支的目标当作自己的。`stop/interrupt` 会暂停目标。如果中断落在续跑输入之后，最多多跑一个 turn，模型会看到已暂停的块。
+每次目标变更（设置、编辑、暂停、恢复、清除，以及模型通过 `goal_update` 报告完成或受阻）都是一条 `input/message`，其 raw 块带 key `goal:objective`（设置、编辑）、`goal:status`（设置、暂停、恢复、完成、受阻、自动暂停），或退役两者（清除）；续跑不带 key，只被计数。压缩（[ContextCompaction](https://github.com/arcships/dim/blob/roadmap/f1-production-compaction-host-compact-and-u/docs/zh/design/plugins/ContextCompaction.md)，F1；PR #108 合并前为分支链接）原样保留从 `retain_from` 起的事件（最后几轮），并重放位于它之前的每个 key 最新的存活块，因此模型保有当前目标与状态；压缩是 Loop 的一个步骤，不写 `turn/*`，因此从不触发续跑决策。工具和 `session.goal.*` 方法只写这条事件，不读 Goal 的状态，也不做决定。Goal 的状态是已消费的块按序号折叠的结果，没有例外：每个 key 最新的存活块就是当前目标与状态，因此压缩重放的内容总与折叠结果一致；只有 `goal:objective` 存活时目标才存在。Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定是否续跑，只用已消费的状态；把写入登记为自持任务后返回，写入前再用已消费的状态复核。被删除的输入不改变状态。一个目标只属于一个分支：折叠只用写在该分支上的事件，从不用继承的前缀，因此子分支和分叉 Session 的 `main` 从没有目标开始，在那里的变更只影响该分支；Goal 消费新分支的 `branch/start` 时，若继承的前缀中仍有存活的目标 key，就作为自持任务在那里写一次 `clear`，使新分支上的模型不把父分支的目标当作自己的。`stop/interrupt` 会暂停目标。如果中断落在续跑输入之后，最多多跑一个 turn，模型会看到已暂停的块。
 
 ### 5.3 通过 Session 广播的观察者（SessionTitle）
 
@@ -277,7 +277,7 @@ sequenceDiagram
   participant AI as Agents sessions
   participant S as 任务 Session（非交互）
   participant NT as Notifications 监听方
-  SC->>AI: launch {source scheduler，策略以启动方为上限}
+  SC->>AI: launch {策略以启动方为上限}
   AI-->>SC: sessionId
   SC->>S: 带 dim-scheduler 标记的 Queue 输入
   SC->>S: idle(main)
@@ -512,7 +512,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | --- | --- | --- | --- |
 | Rpc | 变更 | 方法表：内建方法，然后是按调用查找、不依赖其所有者的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive}`（只在其为 false 时发送）。内建方法 `session.delete` 与 `session.fork`（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）。把 Session 广播通知记录原样转发给已订阅的客户端（SessionTitle）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
-| Agents | 补充 | `sessions` 服务；`SessionConfig.interactive`；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建（[删除与分叉](appserver/session-deletion-and-fork.md#6-分叉)）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)） | Scheduler、Workflow、fork、ExternalAgent |
+| Agents | 补充 | `sessions` 服务（[sessions 服务](appserver/sessions-service.md)）；`SessionConfig.interactive`；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建（[删除与分叉](appserver/session-deletion-and-fork.md#6-分叉)）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)） | Scheduler、Workflow、fork、ExternalAgent |
 | Collaboration | 变更 | 成员模型：profile 的模型，否则为默认选择；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29） | ExternalAgent |
 | SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）；删除与清理；fork（复制切点之前的事实）（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除（S5a，已实现：`sessionFiles` 服务，[Session 文件](appserver/session-files.md)） | SessionTitle、Attachments、fork |
 | Settings | 补充 | S8a（Rust，已实现）：每个所有者一个或多个具名业务来源，每个来源一种文档类型；没有自己的订阅接口：写入提交后在 `settings/<source>` 上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，覆盖用户和项目作用域，不带文档内容；新授权的项目发出 `settings.project_authorized`；校验和默认值只在 Settings 边界应用；v13 中增量的 `user/<source>` 行（D4）。S8b（随 C4，尚未实现）：语言中立的 `settings` 服务，插件清单声明 JSON Schema、默认值、允许的作用域和仅限用户的字段；管理方法 `settings.read`/`settings.update`；凭据解析器 `credentials.resolve(owner, reference)`（§6.4） | 每个有业务配置的插件，包括用户编写的 Scheduler 任务（来源 `schedule`）和 Workflow 定义（来源 `workflow`） |
