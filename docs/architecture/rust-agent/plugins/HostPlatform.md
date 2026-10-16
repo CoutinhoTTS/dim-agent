@@ -40,8 +40,8 @@ fails explicitly. Environment filtering/tree termination are execution mechanics
 not an OS sandbox or permission policy.
 
 The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exercises
-Seatbelt argv through these existing process and PTY APIs. It does not install
-product isolation; Linux verification and the host-local policy remain open.
+Seatbelt and Landlock wrappers through these existing process and PTY APIs. It
+does not install product isolation; the host-local policy remains open.
 
 ## Command construction
 
