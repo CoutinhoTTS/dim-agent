@@ -30,7 +30,12 @@ use dim_agent_runtime::{
     Agent, AgentBuilder, AgentError, SessionConfig, register_capability, wait_active,
 };
 use rutis::{Ctx, FiberView};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use transport::{ListenAddresses, TransportPlugin};
@@ -334,14 +339,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 "target_home and database_path are mutually exclusive".into(),
             ));
         }
-        let mut directory = std::fs::DirBuilder::new();
-        directory.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            directory.mode(0o700);
-        }
-        directory.create(home)?;
+        create_private_directory(home)?;
         let home = std::fs::canonicalize(home)?;
         config.database_path = Some(home.join("dimcode.sqlite"));
         config.file_roots.push(home.clone());
@@ -387,7 +385,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     .map(PathBuf::from)
             })
             .ok_or_else(|| ServerError::Configuration("database must name a file".into()))?;
-        std::fs::create_dir_all(&home)?;
+        create_private_directory(&home)?;
         let home = std::fs::canonicalize(home)?;
         Some(
             match config.file_roots.iter().position(|root| root == &home) {
@@ -410,7 +408,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 .parent()
                 .map(PathBuf::from)
                 .ok_or_else(|| ServerError::Configuration("database must name a file".into()))?;
-            std::fs::create_dir_all(&directory)?;
+            create_private_directory(&directory)?;
             let directory = std::fs::canonicalize(directory)?;
             Some(
                 match config.file_roots.iter().position(|root| root == &directory) {
@@ -780,6 +778,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle,
         task: Some(task),
     })
+}
+
+/// Creates a directory that holds the native store, and any missing parents,
+/// owner-only (0700) on Unix. On Windows they inherit the parent's DACL.
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    let mut directory = std::fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory.create(path)
 }
 
 struct NodeRows(Arc<rutis_loader::RuntimeResolver>);
