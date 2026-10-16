@@ -1480,7 +1480,11 @@ fn mcp_hello(wire: &mut Wire) {
 fn mcp_started(wire: &mut Wire, redirect: &str, expired: bool) {
     let request = wire.read("mcp.auth.start");
     let expires = if expired {
-        0
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 1200
     } else {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1566,6 +1570,9 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
         wire.reply(&catalog,mcp_catalog("docs team"));
         let state = wire.read("session.mcp");
         wire.reply(&state,json!({"sessionId":"session","servers":[{"id":"docs team","state":"auth_required"}],"catalogError":null,"closed":false}));
+        for other in ["connecting", "connected"] { wire.notice("session.mcp.state", json!({"sessionId":"session","servers":[{"id":"docs team","state":"auth_required"},{"id":"other","state":other}]})); }
+        let invalid = wire.read("mcp.catalog");
+        wire.reply(&invalid,mcp_catalog("docs team"));
         let catalog = wire.read("mcp.catalog");
         wire.reply(&catalog,mcp_catalog("docs team"));
         let request = wire.read("mcp.auth.start");
@@ -1588,12 +1595,20 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
         wire.reply(&catalog,mcp_catalog("docs team"));
         let logout = wire.read("mcp.auth.logout");
         wire.reply(&logout,json!({"revoked":true}));
+        let submit=wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
+        let idle=wire.read("session.idle"); wire.reply(&idle,json!({"sequence":8}));
         wire.detach();
     });
     let (mut terminal, child) = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"/mcp\n");
     terminal.until("auth_required");
+    terminal.until("\n> ");
+    terminal.write(b"/mcp login docs team --no-browser\n");
+    terminal.until("Usage: /mcp login");
+    terminal.until("\n> ");
+    terminal.write(b"/mcp login --client-secret argument-secret docs\n");
+    terminal.until("No matching MCP server");
     terminal.until("\n> ");
     terminal.write(b"/mcp login --no-browser --client-secret docs team\n");
     terminal.until("Client secret (hidden): ");
@@ -1617,6 +1632,9 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     terminal.write(b"/mcp logout docs team\n");
     terminal.until("Revoked: true");
     terminal.until("\n> ");
+    terminal.write(b"continue after sign-out\n");
+    terminal.until("sign-in required. Run mcp login");
+    terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(wait(child).status.success());
     daemon.join().unwrap();
@@ -1624,13 +1642,25 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     assert_eq!(data["through"], 8);
     assert_eq!(data["events"], json!([]));
     assert!(!terminal.transcript.contains("fixture-confidential-secret"));
+    assert_eq!(
+        terminal.transcript.matches("argument-secret").count(),
+        1,
+        "only the terminal echo of the typed command may contain it"
+    );
+    assert_eq!(
+        terminal
+            .transcript
+            .matches("sign-in required. Run mcp login")
+            .count(),
+        1
+    );
     assert!(!terminal.transcript.contains("wrong-code"));
     assert!(!terminal.transcript.contains("private-code"));
 }
 
 #[test]
 fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidden_input() {
-    for mode in ["ipv4", "ipv6", "busy"] {
+    for mode in ["ipv4", "ipv6", "busy", "paste", "noise", "cancel", "expiry"] {
         let home = Home::new();
         let reserve = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = reserve.local_addr().unwrap().port();
@@ -1645,7 +1675,12 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             mcp_hello(wire);
             let catalog = wire.read("mcp.catalog");
             wire.reply(&catalog, mcp_catalog("docs"));
-            mcp_started(wire, &redirect, false);
+            mcp_started(wire, &redirect, mode == "expiry");
+            if matches!(mode, "cancel" | "expiry") {
+                let mut line = String::new();
+                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0);
+                return;
+            }
             let callback = wire.read("mcp.auth.complete");
             assert_eq!(callback["params"]["callbackUrl"], expected);
             wire.reply(&callback, json!({}));
@@ -1664,14 +1699,61 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             .env_remove("SSH_CONNECTION")
             .env_remove("SSH_TTY");
         let (mut terminal, child) = Terminal::launch(command);
-        if mode == "busy" {
+        if matches!(mode, "cancel" | "expiry") {
+            terminal.until("Callback URL: ");
+            if mode == "cancel" {
+                assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            }
+            terminal.until(if mode == "expiry" {
+                "Sign-in expired"
+            } else {
+                "Stopped waiting"
+            });
+            assert_eq!(
+                wait(child).status.code(),
+                Some(if mode == "expiry" { 1 } else { 130 })
+            );
+            assert!(std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err());
+            assert!(std::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port)).is_err());
+            daemon.join().unwrap();
+            continue;
+        }
+        if matches!(mode, "busy" | "paste") {
+            if mode == "paste" {
+                terminal.until("Waiting for the browser callback");
+            }
             terminal.until("Callback URL: ");
             terminal.write(
                 format!("http://localhost:{port}/callback?code=private-callback&state=fixture\n")
                     .as_bytes(),
             );
         } else {
-            terminal.until("Waiting for the browser callback");
+            terminal.until("Callback URL: ");
+            if mode == "noise" {
+                let mut wrong =
+                    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+                wrong
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                wrong
+                    .write_all(b"GET /unrelated HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .unwrap();
+                let mut response = String::new();
+                wrong.read_to_string(&mut response).unwrap();
+                assert!(response.contains("404 Not Found"));
+                let mut oversized =
+                    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+                oversized
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                oversized.write_all(&vec![b'x'; 16385]).unwrap();
+                let mut response = Vec::new();
+                let _ = oversized.read_to_end(&mut response);
+                let mut idle =
+                    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+                idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                assert_eq!(idle.read(&mut [0]).unwrap(), 0);
+            }
             let mut browser = if mode == "ipv6" {
                 std::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port)).unwrap()
             } else {
@@ -1710,14 +1792,57 @@ fn mcp_sign_in_stops_on_interrupt_or_expiry_without_a_cleanup_request() {
             );
         });
         let mut command = home.command();
-        command.args(["mcp", "login", "docs", "--no-browser"]);
+        command.args(["mcp", "login", "--no-browser", "docs"]);
         let (mut terminal, child) = Terminal::launch(command);
         if !expired {
             terminal.until("Callback URL: ");
             assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
         }
-        terminal.until("Stopped waiting");
-        assert_eq!(wait(child).status.code(), Some(130));
+        terminal.until(if expired {
+            "Sign-in expired"
+        } else {
+            "Stopped waiting"
+        });
+        assert_eq!(
+            wait(child).status.code(),
+            Some(if expired { 1 } else { 130 })
+        );
         daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
+    for expires in [false, true] {
+        let home = Home::new();
+        let (admitted, accepted) = std::sync::mpsc::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let daemon=home.daemon(move |wire| {
+            mcp_hello(wire);
+            let catalog=wire.read("mcp.catalog"); wire.reply(&catalog,mcp_catalog("docs"));
+            let start=wire.read("mcp.auth.start");
+            let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            wire.reply(&start,json!({"attemptId":"held","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":now+if expires {1200} else {60_000}}));
+            let callback=wire.read("mcp.auth.complete"); admitted.send(()).unwrap();
+            wait_release.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.reply(&callback,json!({}));
+        });
+        let mut command = home.command();
+        command.args(["mcp", "login", "--no-browser", "docs"]);
+        let (mut terminal, child) = Terminal::launch(command);
+        terminal.until("Callback URL: ");
+        terminal.write(b"http://localhost:1456/callback?code=held-secret&state=held\n");
+        accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+        if expires {
+            terminal.until("Sign-in expired; waiting for the submitted operation");
+        } else {
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.until("Waiting for the MCP operation to settle");
+        }
+        release.send(()).unwrap();
+        terminal.until("Signed in to");
+        assert!(wait(child).status.success());
+        daemon.join().unwrap();
+        assert!(!terminal.transcript.contains("held-secret"));
     }
 }

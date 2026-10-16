@@ -128,6 +128,7 @@ struct TextPosition {
 }
 
 pub struct Display {
+    pub mcp_auth_required: HashSet<String>,
     pub json: bool,
     pub cursor: u64,
     pub failed: bool,
@@ -142,6 +143,7 @@ pub struct Display {
 impl Display {
     pub fn new(interactive: bool, json: bool) -> Self {
         Self {
+            mcp_auth_required: HashSet::new(),
             json,
             cursor: 0,
             failed: false,

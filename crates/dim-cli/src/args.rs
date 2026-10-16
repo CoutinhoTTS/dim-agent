@@ -204,7 +204,17 @@ impl Options {
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
-                        "login" => Action::McpLogin(value(&mut args)?),
+                        "login" => {
+                            let id = loop {
+                                match value(&mut args)?.as_str() {
+                                    "--no-browser" => options.no_browser = true,
+                                    "--client-secret" => options.client_secret = true,
+                                    value if value.starts_with("--") => return Err("Use mcp login ID [--no-browser] [--client-secret]".into()),
+                                    value => break value.to_owned(),
+                                }
+                            };
+                            Action::McpLogin(id)
+                        },
                         "logout" => Action::McpLogout(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,

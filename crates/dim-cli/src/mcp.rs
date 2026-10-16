@@ -101,7 +101,7 @@ async fn target(client: &mut Client, options: &Options, id: &str) -> Result<Valu
         .servers
         .into_iter()
         .find(|server| server.id == id)
-        .ok_or_else(|| format!("No MCP server {id:?} in mcp list"))?;
+        .ok_or("No matching MCP server; inspect mcp list")?;
     Ok(json!({"id":id,"source":server.source,"cwd":options.cwd}))
 }
 
@@ -147,7 +147,7 @@ async fn settle<T>(
     let mut interrupted = false;
     loop {
         tokio::select! {
-            result = &mut request => return Ok((result, interrupted)),
+            biased;
             signal = tokio::signal::ctrl_c(), if !interrupted => {
                 signal?;
                 interrupted = true;
@@ -157,21 +157,17 @@ async fn settle<T>(
                 interrupted = true;
                 eprintln!("Sign-in expired; waiting for the submitted operation to settle...");
             }
+            result = &mut request => return Ok((result, interrupted)),
         }
     }
 }
 
-async fn hidden(
-    input: &mut Input,
-    prompt: &str,
-    deadline: Option<Instant>,
-) -> Result<Option<String>> {
+async fn hidden(input: &mut Input, prompt: &str) -> Result<Option<String>> {
     let echo = input.hide_echo()?;
-    input.prompt(prompt)?;
     let result = tokio::select! {
+        biased;
         signal = tokio::signal::ctrl_c() => { signal?; None }
-        line = input.line() => line?,
-        _ = async { match deadline { Some(deadline) => tokio::time::sleep_until(deadline).await, None => std::future::pending().await } } => None,
+        line = async { input.prompt(prompt)?; input.line().await } => line?,
     };
     drop(echo);
     println!();
@@ -204,13 +200,15 @@ pub async fn sign_in(
     }
     let mut params = params.map_err(error)?;
     if secret {
-        let Some(value) = hidden(input, "Client secret (hidden): ", None)
-            .await?
-            .filter(|value| !value.is_empty())
-        else {
+        let Some(value) = hidden(input, "Client secret (hidden): ").await? else {
             restart(id);
             return Ok(130);
         };
+        if value.is_empty() {
+            return Err(
+                "Client secret cannot be empty; omit --client-secret for public clients".into(),
+            );
+        }
         params["clientSecret"] = json!(value);
     }
     let (started, interrupted) =
@@ -233,49 +231,58 @@ pub async fn sign_in(
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     let deadline = Instant::now() + Duration::from_millis(started.expires_at.saturating_sub(now));
     if deadline <= Instant::now() {
-        restart(id);
-        return Ok(130);
+        return Ok(stopped(id, deadline));
     }
     let local_browser = !no_browser
         && std::env::var_os("SSH_CONNECTION").is_none()
         && std::env::var_os("SSH_TTY").is_none();
-    let capture = if !local_browser {
+    let mut capture = if !local_browser {
         None
     } else {
         Capture::bind(&started.redirect_uri).await
     };
+    if local_browser && capture.is_none() {
+        eprintln!(
+            "Local callback listening is unavailable; copy the full URL from the browser address bar and paste it here."
+        );
+    }
     println!("Open: {}", safe(&started.authorization_url));
     if local_browser {
         open_browser(&started.authorization_url);
     }
-    let mut incoming = if let Some(capture) = capture {
-        println!("Waiting for the browser callback. Ctrl+C stops waiting.");
-        tokio::select! {
-            signal = tokio::signal::ctrl_c() => { signal?; restart(id); return Ok(130) }
-            _ = tokio::time::sleep_until(deadline) => { restart(id); return Ok(130) }
-            callback = capture.receive() => match callback {
-                Ok(callback) => Some(callback),
-                Err(_) => { eprintln!("The local callback could not be read; paste it instead."); None }
-            }
-        }
-    } else {
-        None
-    };
     loop {
-        let (callback, browser) = match incoming.take() {
-            Some((callback, stream)) => (callback, Some(stream)),
-            None => {
-                println!("Paste the full callback URL. Input is hidden.");
-                let Some(callback) = hidden(input, "Callback URL: ", Some(deadline))
-                    .await?
-                    .filter(|value| !value.trim().is_empty())
-                else {
-                    restart(id);
-                    return Ok(130);
-                };
-                (callback, None)
+        let echo = input.hide_echo()?;
+        if capture.is_some() {
+            println!(
+                "Waiting for the browser callback. You can also paste the full callback URL now; input is hidden. Ctrl+C stops waiting."
+            );
+        } else {
+            println!("Paste the full callback URL. Input is hidden.");
+        }
+        let listener = capture.take();
+        let browser = async move {
+            match listener {
+                Some(capture) => capture.receive().await,
+                None => std::future::pending().await,
             }
         };
+        // Register interruption before displaying the input prompt.
+        let (callback, browser) = tokio::select! {
+            biased;
+            signal = tokio::signal::ctrl_c() => { signal?; return Ok(stopped(id, deadline)); },
+            _ = tokio::time::sleep_until(deadline) => return Ok(stopped(id, deadline)),
+            incoming = browser => match incoming {
+                Ok((callback, stream)) => { println!(); (callback, Some(stream)) },
+                Err(_) => { eprintln!("The local callback could not be read; paste it instead."); continue; }
+            },
+            line = async { input.prompt("Callback URL: ")?; input.line().await } => match line? {
+                Some(callback) if !callback.trim().is_empty() => (callback, None),
+                Some(_) => continue,
+                None => return Ok(stopped(id, deadline)),
+            },
+        };
+        drop(echo);
+        println!();
         let (completed, interrupted) = settle(
             client.rpc(
                 "mcp.auth.complete",
@@ -299,12 +306,11 @@ pub async fn sign_in(
         match completed {
             Ok(_) => {
                 println!("Signed in to {id:?}.");
-                return Ok(if interrupted { 130 } else { 0 });
+                return Ok(0);
             }
             Err(error) => {
                 if interrupted {
-                    restart(id);
-                    return Ok(130);
+                    return Ok(stopped(id, deadline));
                 }
                 // Check the owner-provided code before mapping its action text.
                 if error
@@ -321,6 +327,16 @@ pub async fn sign_in(
     }
 }
 
+fn stopped(id: &str, deadline: Instant) -> i32 {
+    if Instant::now() >= deadline {
+        eprintln!("Sign-in expired. Run mcp login {id:?} to start again.");
+        1
+    } else {
+        restart(id);
+        130
+    }
+}
+
 fn restart(id: &str) {
     eprintln!("Stopped waiting. Run mcp login {id:?} to start again.");
 }
@@ -331,11 +347,10 @@ pub async fn sign_out(client: &mut Client, options: &Options, id: &str) -> Resul
         revoked: bool,
     }
     let params = target(client, options, id).await?;
-    let (result, interrupted) =
-        settle(client.typed::<LoggedOut>("mcp.auth.logout", params), None).await?;
+    let (result, _) = settle(client.typed::<LoggedOut>("mcp.auth.logout", params), None).await?;
     let result = result.map_err(error)?;
     println!("Signed out of {id:?}. Revoked: {}.", result.revoked);
-    Ok(if interrupted { 130 } else { 0 })
+    Ok(0)
 }
 
 pub async fn session_status(client: &mut Client, session: &str) -> Result<()> {
@@ -399,13 +414,13 @@ pub async fn command(
                 }
                 id = tail.trim_start();
             }
-            if id.is_empty() {
+            if id.is_empty() || id.split_whitespace().any(|word| word.starts_with("--")) {
                 return Err("Usage: /mcp login [--no-browser] [--client-secret] ID".into());
             }
             sign_in(client, options, input, id, no_browser, secret).await?;
             Ok(())
         }
-        "logout" if !id.is_empty() => {
+        "logout" if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) => {
             sign_out(client, options, id).await?;
             Ok(())
         }
@@ -439,50 +454,57 @@ impl Capture {
         })
     }
     async fn receive(self) -> Result<(String, TcpStream)> {
-        let (mut stream, _) = tokio::select! { value = self.ipv4.accept() => value?, value = self.ipv6.accept() => value? };
-        drop(self.ipv4);
-        drop(self.ipv6);
-        let mut request = Vec::new();
-        let mut reader = BufReader::new((&mut stream).take(16385));
         loop {
-            let start = request.len();
-            if reader.read_until(b'\n', &mut request).await? == 0 || request.len() > 16384 {
-                return Err("Incomplete or oversized local callback request".into());
-            }
-            if &request[start..] == b"\r\n" {
-                break;
-            }
-        }
-        drop(reader);
-        let line = std::str::from_utf8(
-            request
+            let (mut stream, _) = tokio::select! { value = self.ipv4.accept() => value?, value = self.ipv6.accept() => value? };
+            let request = tokio::time::timeout(Duration::from_secs(2), async {
+                let mut request = Vec::new();
+                let mut reader = BufReader::new((&mut stream).take(16385));
+                loop {
+                    let start = request.len();
+                    if reader.read_until(b'\n', &mut request).await? == 0 || request.len() > 16384 {
+                        return Err("Incomplete or oversized local callback request".into());
+                    }
+                    if &request[start..] == b"\r\n" {
+                        return Ok::<_, crate::Error>(request);
+                    }
+                }
+            })
+            .await;
+            let Ok(Ok(request)) = request else { continue };
+            let line = request
                 .split_inclusive(|byte| *byte == b'\n')
                 .next()
-                .ok_or("Missing callback request")?,
-        )?;
-        let fields: Vec<_> = line.split_ascii_whitespace().collect();
-        if line.len() > 8192
-            || !line.ends_with('\n')
-            || fields.len() != 3
-            || fields[0] != "GET"
-            || !fields[1].starts_with('/')
-            || fields[1].starts_with("//")
-            || !matches!(fields[2], "HTTP/1.0" | "HTTP/1.1")
-        {
-            let _ = stream
-                .write_all(
-                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await;
-            return Err("Invalid local callback request".into());
+                .unwrap();
+            let Ok(line) = std::str::from_utf8(line) else {
+                continue;
+            };
+            let fields: Vec<_> = line.split_ascii_whitespace().collect();
+            if line.len() > 8192
+                || fields.len() != 3
+                || fields[0] != "GET"
+                || !fields[1].starts_with('/')
+                || fields[1].starts_with("//")
+                || !matches!(fields[2], "HTTP/1.0" | "HTTP/1.1")
+            {
+                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                continue;
+            }
+            if fields[1].split('?').next() != Some(self.redirect.path()) {
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                continue;
+            }
+            return Ok((
+                format!(
+                    "{}{}",
+                    self.redirect.origin().ascii_serialization(),
+                    fields[1]
+                ),
+                stream,
+            ));
         }
-        Ok((
-            format!(
-                "{}{}",
-                self.redirect.origin().ascii_serialization(),
-                fields[1]
-            ),
-            stream,
-        ))
     }
 }

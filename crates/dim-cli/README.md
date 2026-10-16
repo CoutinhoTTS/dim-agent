@@ -120,7 +120,9 @@ serving your workspace. See the
 
 For an enabled HTTP/SSE entry, run `mcp login ID` or idle `/mcp login ID`. The CLI shows the
 resource and authorization server host before opening the browser. It captures one callback
-on both loopback families when the configured port is free; busy ports, SSH and `--no-browser`
+on both loopback families when the configured port is free. While listening, you can also paste
+the full URL with hidden input. Unrelated paths and incomplete connections do not consume the
+listener. Busy ports, SSH and `--no-browser`
 use hidden pasted input. `--client-secret` prompts with echo disabled; it never accepts the
 secret as an argument. The daemon owns validation, token exchange and credential storage.
 
@@ -138,11 +140,19 @@ Signed in to "docs".
 Signed out of "docs". Revoked: true.
 ```
 
-Use `mcp login ID --no-browser --client-secret` for the standalone command. Slash-command
+Browser capture uses this prompt, so remote terminals can paste without restarting:
+
+```text
+Waiting for the browser callback. You can also paste the full callback URL now; input is hidden.
+Callback URL: _
+```
+
+Use `mcp login ID --no-browser --client-secret` for the standalone command; flags can also precede ID. Slash-command
 flags precede the ID; its remaining text is the literal ID, including spaces. `/mcp` also
 shows the attached Session's server states and a sign-in hint for `auth_required`.
 Invalid callbacks can be pasted again. Ctrl+C, EOF or expiry stops waiting and prints the
-restart command. Once an RPC has been submitted, its reply is drained before another
+restart command. Expiry exits 1, cancellation exits 130, and a submitted operation that succeeds
+exits 0 even if waiting was interrupted. Once an RPC has been submitted, its reply is drained before another
 interactive command can run. A submitted exchange may complete successfully during that wait.
 Noninteractive input never starts sign-in; slash text in a headless prompt remains model input.
 `mcp logout ID` reports the daemon's `revoked` result. Credentials can be signed out before

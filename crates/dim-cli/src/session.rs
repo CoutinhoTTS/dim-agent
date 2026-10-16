@@ -449,16 +449,21 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
         "session.mcp.state" => {
             let state: mcp::State = decode(params, &method)?;
             if state.session_id == session_id {
-                for server in state
+                let required: std::collections::HashSet<_> = state
                     .servers
-                    .iter()
+                    .into_iter()
                     .filter(|server| server.state == "auth_required")
-                {
+                    .map(|server| server.id)
+                    .collect();
+                for id in &required {
+                    if display.mcp_auth_required.contains(id) {
+                        continue;
+                    }
                     display.record(&format!(
-                        "MCP {:?}: sign-in required. Run mcp login {:?} or /mcp login {:?}.",
-                        server.id, server.id, server.id
+                        "MCP {id:?}: sign-in required. Run mcp login {id:?} or /mcp login {id:?}."
                     ))?;
                 }
+                display.mcp_auth_required = required;
             }
         }
         "session.closed" if params["sessionId"].as_str() == Some(session_id) => {
