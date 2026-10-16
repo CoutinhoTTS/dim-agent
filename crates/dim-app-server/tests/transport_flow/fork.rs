@@ -290,8 +290,10 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
 
 /// Acceptance 6: cuts that are beyond the head, inside a batch, outside a
 /// context boundary or not a rest point, unknown sources and other
-/// protocols are refused and create nothing; `at` 0 forks a Session with
-/// the source's configuration and no event.
+/// protocols are refused and create nothing. The inputs D1 lets rest at a
+/// cut, a withdrawn Queue input and a Steer input stopped before it was
+/// consumed, do not refuse it, and the fork runs neither. `at` 0 forks a
+/// Session with the source's configuration and no event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
     let store = Store::new();
@@ -380,17 +382,88 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
             .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
             .await,
     );
-    let at = source.sequence("main").unwrap();
+    let withdrawn_at = source.sequence("main").unwrap();
     assert!(keys(&history(&source, "main").await).contains(&"input/deleted"));
-    let rested = forked(&fork(&mut client, &sid, at).await);
-    assert!(agent.get_session(&rested).is_some());
+    let rested = forked(&fork(&mut client, &sid, withdrawn_at).await);
+    let rested = agent.get_session(&rested).unwrap();
+
+    // A Steer input applied before a stop and not consumed may stay at the
+    // cut (D1): a reload does not run it, and it joins the next request a
+    // client's input starts in the fork.
+    let calls = |events: &[Arc<AgentEvent>]| {
+        keys(events)
+            .into_iter()
+            .filter(|key| *key == "step/tool-call")
+            .count()
+    };
+    let before = calls(&history(&source, "main").await);
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"branchId":"main","text":"tool:wait {\"millis\":60000}"}),
+            )
+            .await,
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while calls(&history(&source, "main").await) == before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn runs its tool batch");
+    let steer = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":sid,"branchId":"main","text":"steered","mode":"steer"}),
+        )
+        .await;
+    let steer = steer["result"]["event"]["id"].as_str().unwrap().to_owned();
+    let input = |events: &[Arc<AgentEvent>], applied: bool| {
+        events.iter().any(|event| match &event.kind {
+            EventKind::InputApplied(data) if applied => data.input_id == steer,
+            EventKind::InputConsumed(data) if !applied => data.input_id == steer,
+            _ => false,
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !input(&history(&source, "main").await, true) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the steer is applied during the tool batch");
+    let main = json!({"sessionId":sid,"branchId":"main"});
+    assert_ok(&client.rpc("session.stop", main.clone()).await);
+    assert_ok(&client.rpc("session.idle", main).await);
+    assert!(
+        !input(&history(&source, "main").await, false),
+        "the stop left the steer unconsumed"
+    );
+    let at = source.sequence("main").unwrap();
+    let fid = forked(&fork(&mut client, &sid, at).await);
+    let stopped = agent.get_session(&fid).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for (fork, at) in [(&rested, withdrawn_at), (&stopped, at)] {
+        let tail = history(fork, "main").await.split_off(at as usize);
+        assert!(
+            !keys(&tail).iter().any(|key| WORK.contains(key)),
+            "{:?}",
+            keys(&tail)
+        );
+    }
+    turn(&mut client, &fid, "in the fork").await;
+    assert!(
+        input(&history(&stopped, "main").await, false),
+        "the steer joins the fork's next request"
+    );
 
     // 0 inherits no event: the fork starts like a new Session.
     let fid = forked(&fork(&mut client, &sid, 0).await);
     let empty = history(&agent.get_session(&fid).unwrap(), "main").await;
     assert_eq!(empty[0].kind.key(), "branch/start");
     assert!(!keys(&empty).iter().any(|key| WORK.contains(key)));
-    drop((client, v2, source, agent));
+    drop((client, v2, source, rested, stopped, agent));
     server.shutdown();
     server.join().await.unwrap();
 
@@ -676,9 +749,11 @@ async fn launch_configured(
 }
 
 /// Acceptance 4, 5 and 6 with the real BackgroundExec: cuts with a task
-/// running, its wake not posted or its wake not consumed are refused; at a
-/// rest point the fork keeps the source's permission preset and model and
-/// starts no command. Deleting the source removes its real command output.
+/// running, its wake not posted or its wake not consumed are refused; a
+/// child's running task does not keep `main` from resting, and the fork gets
+/// that child as a directory without events; at a rest point the fork keeps
+/// the source's permission preset and model and starts no command. Deleting
+/// the source removes its real command output.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     let store = Store::new();
@@ -689,7 +764,7 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     let created = client
         .rpc(
             "session.create",
-            json!({"cwd":work,"permissionPolicy":{"preset":"workspace-write","allowedTools":["exec"]}}),
+            json!({"cwd":work,"tools":["exec","branch"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["exec"]}}),
         )
         .await;
     let sid = forked(&created);
@@ -756,6 +831,24 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         assert!(message.contains(cause), "{at}: {message}");
     }
 
+    // A child running a background task when the fork commits (acceptance
+    // 4): the fork gets its directory without events.
+    let head = source.sequence("main").unwrap();
+    let child = branch(
+        &mut client,
+        &sid,
+        head,
+        "tool:exec {\"command\":\"sleep 60\",\"runInBackground\":true,\"timeoutMs\":-1}",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !keys(&source.local(&child, ..).await.unwrap()).contains(&"exec/started") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the child starts its background task");
+
     // The preset and model the source holds at the cut.
     let policy = client.rpc("session.permission.get", main.clone()).await;
     assert_ok(&client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":{"preset":"read-only","allowedTools":["exec"],"disallowedTools":[]}})).await);
@@ -794,6 +887,15 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
             .await["result"],
         policy["result"]
     );
+    // F's first load records the child's creation as failed; then nothing
+    // runs.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while failed_creations(&history(&fork, "main").await[at as usize..]).is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fork records the child's creation as failed");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let tail = history(&fork, "main").await.split_off(at as usize);
     assert!(
@@ -802,6 +904,22 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         keys(&tail)
     );
     assert!(!store.output(&fid).exists(), "the fork ran no command");
+    // No task of the child to fail, wake or run in the fork; the source's
+    // task goes on.
+    assert_eq!(failed_creations(&tail), std::slice::from_ref(&child));
+    assert!(fork.state(&child).is_err());
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM timeline_events WHERE session_id=?1 AND branch_id=?2",
+            [&fid, &child]
+        ),
+        0
+    );
+    assert!(
+        !keys(&source.local(&child, ..).await.unwrap()).contains(&"exec/ended"),
+        "the source's task still runs"
+    );
     // Its first request uses the model the source had selected.
     turn(&mut client, &fid, "in the fork").await;
     let calls: Vec<String> = history(&fork, "main")
