@@ -2,6 +2,8 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
+> **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
+
 Executes `!command` and `!!command` typed by the user in the Session's workspace on its resource node. The result of `!command` (command and bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client and diagnostics. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` through a `sessionMethods` service (Session scope, key `shell`) as ordinary Session methods ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session; a command ends on `shell.stop` or when the Session part ends (Session close or unload, reload, daemon exit).
 
 ## 1. Structure
@@ -173,7 +175,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.5 Read the whole batch | Not applicable: ShellInput reads no Timeline event. |
 | §4.6 Context only from handed-off events | The output reaches the model only after InputQueue adopts and Loop consumes the input; `!!` output never does. |
 | §4.7 Public events and services only | ShellInput uses only `Branch::input`, `S:TreeCommands`, `SessionConfig` and HostPlatform. |
-| §4.8 Requirements to mechanism owners | #5 is linked from §9; the Session activity handle for idle unload is an Agents supplement listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins) and designed in A.5. |
+| §4.8 Requirements to mechanism owners | #5 is linked from §9; the Agents activity handle for idle unload is dropped because the App Server does not unload idle Sessions (A.5). |
 | §4.9 Only facts later decisions use enter the Timeline | Only the recorded `!` result enters, as an input InputQueue and Loop decide on and the model reads; `!!` output, progress and run records stay in the reply and diagnostics. |
 | §1 Capability and App Server boundary | ShellInput is a Session Capability in its own crate; Rpc only dispatches `sessionMethods`. |
 | ADR 002 D1 Scope | A run is Session work on the Session's resource node, so the plugin is Session scoped. |
@@ -184,7 +186,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None to the runtime or rutis beyond #5. The Session activity handle ShellInput needs is a change to Agents, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins) and designed in [A.5](#a5-changes-to-other-plugins).
+None to the runtime or rutis beyond #5.
 
 Linked: #5 guarantees only that each call on an imported service fails `node_unavailable` while the link is down ([ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)); processes already started on the node are ended by that node's own HostPlatform when the link drops ([overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), HostPlatform row).
 
@@ -243,17 +245,7 @@ ANSI/OSC sequences are removed from the body (A8); the reply keeps them for the 
 
 ### A.5 Changes to other plugins
 
-Listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins) (Agents row); this section records why ShellInput needs it, in the five items.
-
-#### Session work reported as activity for idle unload (Agents supplement)
-
-| Item | Content |
-| --- | --- |
-| Blocked by | ADR 002 D1 (a run is Session work and ends with the Session part) and lifecycle rule "detaching a client is not closing a Session": after the caller disconnects, nothing keeps the Session from idle unload, which terminates a long `!` run. |
-| Existing mechanisms considered | The per-call `SessionUse` lease Rpc holds (released when the call is dropped, A12); a running turn (a `!` run is not a turn); a process-level owner for runs (moves Session work out of its scope, D1). |
-| Generic capability | A Session part can hold an activity handle on its own Session; Agents does not idle-unload a Session while any handle is held. The handle carries no business meaning and is released by `ctx.effect`. |
-| Effect on sequence, batch, interrupt, reload | None on sequence or batch. Interrupt: unchanged (runs ignore turn interrupts). Reload: the handle is released with the part; close still terminates runs. |
-| Owner and issue | Agents (`AgentIndex`, App Server) with the runtime Session facade; no issue filed yet. |
+No Agents change. The Session activity handle this section requested, so that idle unload would not end a `!` run after its caller disconnects, is dropped ([#57](https://github.com/arcships/dim/issues/57)): the App Server does not unload idle Sessions, which stay loaded until closed or the process exits ([lifecycle §5](../../architecture/rust-agent/lifecycle.md#5-stop-与-close)). Reopen it when a host starts unloading idle Sessions on its own; lifecycle defers whether in-flight detached work, such as a `!` run or a BackgroundExec task, blocks such an unload.
 
 ## Appendix B. Full conflict table
 
@@ -293,7 +285,7 @@ Listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins) 
 
 | Error (`appError`) | Condition |
 | --- | --- |
-| `shell_unavailable` | `HostPlatform.shell` unavailable on the node (reason forwarded) |
+| `shell_unavailable` | HostPlatform command construction refuses the command: `EXEC_SHELL_CONFIG_INVALID`, `EXEC_SHELL_UNAVAILABLE`, `cwd_not_found`, `EXEC_SHELL_CWD_UNSUPPORTED` or `EXEC_SHELL_PATH_MAPPING_FAILED` (reason forwarded) |
 | `shell_busy` | Another run of the Session is running |
 | `duplicate_run` | `runId` already used in this generation |
 | `invalid_params` | Empty command, command over 64 KiB, `runId` not `[A-Za-z0-9-]{1,64}` |
@@ -337,7 +329,7 @@ Listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins) 
 | A7 | `exec` preview bounds (2000 lines, 50 KiB) | Existing `exec` constants | Separate limit |
 | A8 | Terminal escapes stripped from model-visible text | Judgment | Escapes reach the model |
 | A9 | Progress through the call's progress channel, rate-coalesced | [session-boundary](../contracts/session-boundary.md); coalescing is judgment | Output only at completion |
-| A10 | A run is Session work: it ends with the Session part (close, reload, and idle unload until the Agents activity handle of A.5 exists) | ADR 002 D1 (Session scope), D3 | Runs would need a process owner |
+| A10 | A run is Session work: it ends with the Session part (close, unload, reload); the App Server does not unload idle Sessions (A.5) | ADR 002 D1 (Session scope), D3 | Runs would need a process owner |
 | A11 | Clients deduplicate by `runId` via `session.input_lookup` | Session public interface | Possible duplicate input |
 | A12 | Client disconnect does not stop a run | Lifecycle ("connection close keeps Session work") | Disconnect stops runs |
 | A13 | Diagnostics carry only metadata and the bounded tail | Judgment | Full output in diagnostics |
@@ -357,6 +349,7 @@ ShellInput is implemented in Rust.
 | `sessionMethods` key `shell` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("shell")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)`; progress = `CallChannel::progress` |
 | Recorded input (A.3) | `Branch::input` through `S:TreeCommands` |
 | Unload disposer | `ctx.effect` |
+| Command construction | `HostPlatform::build_process_spec(command, cwd).await` returns `(ProcessSpec, ExecShellRuntime)` or `ProcessSpecError { code, reason }`; it reads the current shell itself |
 | Process service | `HostPlatform::spawn(ProcessSpec)` returning `ProcessTree` with `stdout`, `stderr`, `wait`, `terminate` |
 
 ```rust

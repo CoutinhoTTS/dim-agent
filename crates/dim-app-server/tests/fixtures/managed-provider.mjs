@@ -12,8 +12,11 @@ export default definePlugin({
   async apply(ctx, { home }) {
     const files = await ctx.use('pluginFiles').open()
     ctx.effect(() => files.close())
-    const written = await files.withLock('fixture-state', async file => file.replace('mounted'))
-    if (!written.ok || !written.value.ok) throw Error('fixture storage failed')
+    const stored = await files.withLock('fixture-state', async file => {
+      const written = await file.replace('mounted')
+      return written.ok ? file.read() : written
+    })
+    if (!stored.ok || !stored.value.ok || stored.value.value !== 'mounted') throw Error('fixture storage failed')
     const { baseUrl, entry } = JSON.parse(await readFile(join(home, 'fixture.json'), 'utf8'))
     const account = { credentialEpoch: randomUUID(), generation: 1, account: { issuer: 'https://accounts.example', subject: 'fixture', grantedScopes: ['model'] } }
     const leases = new Set()

@@ -125,6 +125,10 @@ async fn transactions_keep_backups_private_and_revoke_escaped_handles() {
                         true
                     );
                     assert_eq!(
+                        call(&lease, "read", vec![]).await.json().unwrap(),
+                        json!({"ok":true,"value":"original\n"})
+                    );
+                    assert_eq!(
                         call(&lease, "backup", vec![json!("before-reset").into()])
                             .await
                             .json()
@@ -162,12 +166,18 @@ async fn transactions_keep_backups_private_and_revoke_escaped_handles() {
     .unwrap();
     assert_eq!(result, json!({"ok":true,"value":"completed"}));
     assert_eq!(
-        std::fs::read(directory.0.join("state.json")).unwrap(),
-        b"replacement\n"
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(directory.0.join("state.json")).unwrap()
+        )
+        .unwrap(),
+        json!({"version":1,"text":"replacement\n"})
     );
     assert_eq!(
-        std::fs::read(directory.0.join("state.json.before-reset")).unwrap(),
-        b"original\n"
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(directory.0.join("state.json.before-reset")).unwrap()
+        )
+        .unwrap(),
+        json!({"version":1,"text":"original\n"})
     );
     #[cfg(unix)]
     {
@@ -207,6 +217,125 @@ async fn transactions_keep_backups_private_and_revoke_escaped_handles() {
         )
         .await;
         assert_eq!(result.json().unwrap()["error"], "invalid_path");
+    }
+    call(&scope, "close", vec![]).await;
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn versioned_records_reopen_and_preserve_rejected_files() {
+    let directory = Directory::new();
+    let (root, scope) = mount(&directory.0).await;
+    let text = "{\"version\":99,\"private\":\"fixture-secret\"}\n中文\t\0";
+    let result = call(
+        &scope,
+        "withLock",
+        vec![
+            json!("state").into(),
+            Value::callback(move |args| {
+                let file = args.list()?.remove(0);
+                Ok(Value::future(async move {
+                    for text in ["", text] {
+                        assert_eq!(
+                            call(&file, "replace", vec![json!(text).into()])
+                                .await
+                                .json()
+                                .unwrap(),
+                            json!({"ok":true,"value":null})
+                        );
+                        assert_eq!(
+                            call(&file, "read", vec![]).await.json().unwrap(),
+                            json!({"ok":true,"value":text})
+                        );
+                    }
+                    Ok(json!(null).into())
+                }))
+            }),
+        ],
+    )
+    .await
+    .json()
+    .unwrap();
+    assert_eq!(result, json!({"ok":true,"value":null}));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(directory.0.join("state")).unwrap()
+        )
+        .unwrap(),
+        json!({"version":1,"text":text})
+    );
+    call(&scope, "close", vec![]).await;
+    root.shutdown().await.unwrap();
+
+    let (root, scope) = mount(&directory.0).await;
+    let read = Value::callback(|args| {
+        let file = args.list()?.remove(0);
+        Ok(Value::future(async move {
+            Ok(call(&file, "read", vec![]).await)
+        }))
+    });
+    let reopened = call(
+        &scope,
+        "withLock",
+        vec![json!("state").into(), read.clone()],
+    )
+    .await
+    .json()
+    .unwrap();
+    assert_eq!(
+        reopened,
+        json!({"ok":true,"value":{"ok":true,"value":text}})
+    );
+
+    for (index, bytes) in [
+        &b"unversioned fixture-secret"[..],
+        br#"{"text":"missing version"}"#,
+        br#"{"version":0,"text":"old"}"#,
+        br#"{"version":2,"text":"future"}"#,
+        br#"{"version":1.0,"text":"not an integer"}"#,
+        br#"{"version":1}"#,
+        br#"{"version":1,"text":null}"#,
+        br#"{"version":1,"text":"extra","unknown":true}"#,
+        br#"{"version":1,"version":1,"text":"duplicate"}"#,
+        b"{",
+        b"\xff",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("rejected-{index}");
+        let path = directory.0.join(&name);
+        std::fs::write(&path, bytes).unwrap();
+        let rejected = call(&scope, "withLock", vec![json!(name).into(), read.clone()])
+            .await
+            .json()
+            .unwrap();
+        assert_eq!(
+            rejected,
+            json!({"ok":true,"value":{"ok":false,"error":"invalid_data"}})
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let backup = call(
+            &scope,
+            "withLock",
+            vec![
+                json!(name).into(),
+                Value::callback(|args| {
+                    let file = args.list()?.remove(0);
+                    Ok(Value::future(async move {
+                        Ok(call(&file, "backup", vec![json!("preserved").into()]).await)
+                    }))
+                }),
+            ],
+        )
+        .await
+        .json()
+        .unwrap();
+        assert_eq!(backup, json!({"ok":true,"value":{"ok":true,"value":null}}));
+        assert_eq!(
+            std::fs::read(directory.0.join(format!("{name}.preserved"))).unwrap(),
+            bytes
+        );
     }
     call(&scope, "close", vec![]).await;
     root.shutdown().await.unwrap();
@@ -273,8 +402,11 @@ async fn quiesce_cancels_waiters_but_settles_issued_transactions_and_isolates_sc
         resume.notify_one();
         assert_eq!(task.await.unwrap().json().unwrap()["value"]["ok"], true);
         assert_eq!(
-            std::fs::read(directory.0.join("auth.json")).unwrap(),
-            b"rotated"
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(directory.0.join("auth.json")).unwrap()
+            )
+            .unwrap(),
+            json!({"version":1,"text":"rotated"})
         );
         call(&scope, "close", vec![]).await;
         root.shutdown().await.unwrap();
@@ -298,7 +430,11 @@ async fn concurrent_stale_lock_reclaimers_serialize_through_native_ownership() {
                 std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(60)),
             )
             .unwrap();
-        std::fs::write(directory.0.join("auth.json"), "0").unwrap();
+        std::fs::write(
+            directory.0.join("auth.json"),
+            br#"{"version":1,"text":"0"}"#,
+        )
+        .unwrap();
         let (root, a) = mount(&directory.0).await;
         let (other_root, b) = mount(&directory.0).await;
         let increment = |scope: Value, amount: u64| async move {
@@ -332,8 +468,11 @@ async fn concurrent_stale_lock_reclaimers_serialize_through_native_ownership() {
         assert_eq!(first.json().unwrap()["value"]["ok"], true);
         assert_eq!(second.json().unwrap()["value"]["ok"], true);
         assert_eq!(
-            std::fs::read_to_string(directory.0.join("auth.json")).unwrap(),
-            "48"
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(directory.0.join("auth.json")).unwrap()
+            )
+            .unwrap(),
+            json!({"version":1,"text":"48"})
         );
         call(&a, "close", vec![]).await;
         call(&b, "close", vec![]).await;

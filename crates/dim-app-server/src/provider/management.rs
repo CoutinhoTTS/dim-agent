@@ -1,0 +1,254 @@
+//! Provider configuration wire boundary; accepted operations drain on unload.
+use super::ProviderService;
+use crate::{
+    methods::{ManagementMethods, SelectionScope},
+    protocol::{Empty, canonical_cwd, optional_non_null},
+};
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
+use rutis::{CordisError, Ctx};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportLegacyProviders {
+    pub source_path: std::path::PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveProvider {
+    pub provider: crate::provider::ProviderInput,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_version: Option<u32>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteProvider {
+    pub provider_id: String,
+    pub expected_version: u32,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetEnabledModels {
+    pub provider_id: String,
+    pub expected_version: u32,
+    pub model_ids: Vec<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderTarget {
+    pub provider_id: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EditModel {
+    pub provider_id: String,
+    pub expected_version: u32,
+    pub model_id: String,
+    pub edit: crate::model_catalog::ModelEdit,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResetModel {
+    pub provider_id: String,
+    pub expected_version: u32,
+    pub model_id: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectModel {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub provider_id: String,
+    pub model_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_version: Option<u32>,
+}
+#[derive(Debug, Serialize)]
+pub struct CatalogResult {
+    pub catalog: Option<crate::provider::ProviderCatalog>,
+}
+#[derive(Debug, Serialize)]
+pub struct SelectionResult {
+    pub selection: Option<crate::provider::ProviderSelection>,
+}
+
+pub(super) fn provide(ctx: &Ctx, provider: Arc<ProviderService>) -> Result<(), CordisError> {
+    ManagementMethods::provide(
+        ctx,
+        "provider",
+        [
+            "provider.catalog",
+            "provider.refresh",
+            "provider.models.set_enabled",
+            "provider.models.edit",
+            "provider.models.reset",
+            "provider.selection",
+            "provider.select",
+            "provider.list",
+            "provider.save",
+            "provider.delete",
+            "provider.import_legacy",
+        ]
+        .into_iter()
+        .map(|name| {
+            MethodDecl::new(
+                name,
+                !matches!(
+                    name,
+                    "provider.catalog" | "provider.selection" | "provider.list"
+                ),
+                Interruption::Drain,
+            )
+        })
+        .collect(),
+        Arc::new(move |method, value, stopping, _| {
+            let provider = provider.clone();
+            Box::pin(async move {
+                let cancel = &stopping;
+                match method.as_str() {
+                    "provider.catalog" => {
+                        let p: ProviderTarget = params(value)?;
+                        reply(CatalogResult {
+                            catalog: provider
+                                .catalog_for(p.provider_id, cancel)
+                                .await
+                                .map_err(error)?,
+                        })
+                    }
+                    "provider.refresh" => {
+                        let p: ProviderTarget = params(value)?;
+                        reply(
+                            provider
+                                .refresh_for(p.provider_id, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "provider.models.set_enabled" => {
+                        let p: SetEnabledModels = params(value)?;
+                        reply(
+                            provider
+                                .set_enabled_models(
+                                    p.provider_id,
+                                    p.expected_version,
+                                    p.model_ids,
+                                    cancel,
+                                )
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "provider.models.edit" => {
+                        let p: EditModel = params(value)?;
+                        reply(
+                            provider
+                                .update_model_config(
+                                    p.provider_id,
+                                    p.expected_version,
+                                    p.model_id,
+                                    Some(p.edit),
+                                    cancel,
+                                )
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "provider.models.reset" => {
+                        let p: ResetModel = params(value)?;
+                        reply(
+                            provider
+                                .update_model_config(
+                                    p.provider_id,
+                                    p.expected_version,
+                                    p.model_id,
+                                    None,
+                                    cancel,
+                                )
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "provider.selection" => {
+                        let p: SelectionScope = params(value)?;
+                        let cwd = match p.cwd {
+                            Some(cwd) => Some(canonical_cwd(&cwd).await?),
+                            None => None,
+                        };
+                        reply(SelectionResult {
+                            selection: provider
+                                .selection(cwd.as_deref(), cancel)
+                                .await
+                                .map_err(error)?,
+                        })
+                    }
+                    "provider.select" => {
+                        let p: SelectModel = params(value)?;
+                        if p.model_id.trim().is_empty() {
+                            return Err(RpcError::invalid("modelId must not be empty"));
+                        }
+                        let cwd = match p.cwd {
+                            Some(cwd) => Some(canonical_cwd(&cwd).await?),
+                            None => None,
+                        };
+                        reply(
+                            provider
+                                .select(
+                                    cwd.as_deref(),
+                                    dim_agent_types::ModelId {
+                                        provider_id: p.provider_id,
+                                        model_id: p.model_id,
+                                    },
+                                    p.expected_version,
+                                    cancel,
+                                )
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "provider.list" => {
+                        let _: Empty = params(value)?;
+                        reply(provider.list(cancel).await.map_err(error)?)
+                    }
+                    "provider.save" => {
+                        let p: SaveProvider = params(value)?;
+                        reply(
+                            provider
+                                .save_static(p.provider, p.expected_version, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "provider.import_legacy" => {
+                        let p: ImportLegacyProviders = params(value)?;
+                        reply(
+                            provider
+                                .import_legacy(p.source_path, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "provider.delete" => {
+                        let p: DeleteProvider = params(value)?;
+                        provider
+                            .delete_static(p.provider_id, p.expected_version, cancel)
+                            .await
+                            .map_err(error)?;
+                        reply(Empty {})
+                    }
+                    _ => unreachable!("registered provider method"),
+                }
+            })
+        }),
+    )?;
+    Ok(())
+}
+
+fn error(error: dim_agent_capabilities::host::HostError) -> RpcError {
+    let kind = match &error {
+        dim_agent_capabilities::host::HostError::Cancelled(_) => "provider_cancelled",
+        _ => "provider_failed",
+    };
+    RpcError::app(-32000, kind, error.to_string())
+}

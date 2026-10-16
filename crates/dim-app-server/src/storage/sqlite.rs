@@ -8,10 +8,12 @@ use std::{
     time::Duration,
 };
 
+/// The native store format this daemon creates and opens.
+const FORMAT: u32 = 15;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 13))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 15))",
     ),
     (
         "settings_documents",
@@ -77,7 +79,45 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "timeline_tool_use_starts",
         "CREATE INDEX timeline_tool_use_starts ON timeline_events(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'",
     ),
+    (
+        "session_files",
+        "CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)",
+    ),
+    (
+        "session_file_owners",
+        "CREATE TABLE session_file_owners (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), file_id TEXT NOT NULL REFERENCES session_files(file_id), PRIMARY KEY (session_id, file_id))",
+    ),
+    (
+        "session_file_owners_by_file",
+        "CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)",
+    ),
 ];
+/// The entries v15 adds to the v13 schema. Their order creates the tables
+/// before the index.
+const V15_ADDITIONS: [&str; 3] = [
+    "session_files",
+    "session_file_owners",
+    "session_file_owners_by_file",
+];
+/// The v13 format marker table, the only v13 entry v15 replaces.
+const V13_FORMAT_TABLE: &str =
+    "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 13))";
+
+/// Whether `actual`, sorted by name, is exactly `expected`.
+fn same_schema<'a>(
+    actual: &[(String, String)],
+    expected: impl Iterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    let mut expected: Vec<_> = expected.collect();
+    expected.sort_unstable();
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|((name, sql), (expected_name, expected_sql))| {
+                name == expected_name && sql == expected_sql
+            })
+}
 
 fn storage(error: impl std::fmt::Display) -> AgentError {
     AgentError::Storage(error.to_string())
@@ -90,11 +130,21 @@ pub struct SqliteStorage {
     admission: Mutex<Admission>,
     idle: tokio::sync::Notify,
     pub(super) path: PathBuf,
+    upgraded_from: Option<u32>,
 }
 struct Admission {
     closed: bool,
     running: usize,
-    lease: Option<File>,
+    lease: Option<DatabaseLease>,
+}
+// Closing a descriptor alone may leave a flock held by a concurrently spawned
+// child until exec. Release ownership explicitly, including failed opens and
+// shutdown. The connection must always be dropped before this lease.
+struct DatabaseLease(File);
+impl Drop for DatabaseLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 struct Operation(Arc<SqliteStorage>);
 impl Drop for Operation {
@@ -137,6 +187,7 @@ impl SqliteStorage {
             )),
             std::fs::TryLockError::Error(error) => storage(error),
         })?;
+        let admission = DatabaseLease(admission);
         let mut connection = Connection::open(&path).map_err(storage)?;
         connection
             .busy_timeout(Duration::from_secs(5))
@@ -154,38 +205,60 @@ impl SqliteStorage {
                 .collect::<rusqlite::Result<_>>()
                 .map_err(storage)?
         };
-        if actual.is_empty() {
-            for (_, sql) in SCHEMA {
-                tx.execute_batch(sql).map_err(storage)?;
-            }
-            tx.execute("INSERT INTO agent_store_format VALUES (13)", [])
-                .map_err(storage)?;
-        } else {
-            if actual.len() != SCHEMA.len()
-                || actual.iter().any(|(name, sql)| {
-                    !SCHEMA.iter().any(|(expected_name, expected_sql)| {
-                        *expected_name == name && *expected_sql == sql
-                    })
-                })
-            {
-                return Err(storage(format!(
-                    "unsupported SQLite schema at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
-                    path.display()
-                )));
-            }
-            let versions = tx
-                .prepare("SELECT version FROM agent_store_format")
+        let versions = || {
+            tx.prepare("SELECT version FROM agent_store_format")
                 .map_err(storage)?
                 .query_map([], |row| row.get::<_, i64>(0))
                 .map_err(storage)?
                 .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(storage)?;
-            if versions != [13] {
-                return Err(storage(format!(
-                    "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
-                    path.display()
-                )));
+                .map_err(storage)
+        };
+        let unsupported_version = || {
+            storage(format!(
+                "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
+                path.display()
+            ))
+        };
+        let v13 = SCHEMA
+            .iter()
+            .filter(|(name, _)| !V15_ADDITIONS.contains(name))
+            .map(|&(name, sql)| match name {
+                "agent_store_format" => (name, V13_FORMAT_TABLE),
+                _ => (name, sql),
+            });
+        let mut upgraded_from = None;
+        if actual.is_empty() {
+            for (_, sql) in SCHEMA {
+                tx.execute_batch(sql).map_err(storage)?;
             }
+            tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+                .map_err(storage)?;
+        } else if same_schema(&actual, SCHEMA.iter().copied()) {
+            if versions()? != [i64::from(FORMAT)] {
+                return Err(unsupported_version());
+            }
+        } else if same_schema(&actual, v13) {
+            if versions()? != [13] {
+                return Err(unsupported_version());
+            }
+            // The one upgrade: replace the marker and add the Session-file
+            // tables. No business row is read or rewritten; a failure rolls
+            // back to the untouched v13 store.
+            tx.execute_batch("DROP TABLE agent_store_format")
+                .map_err(storage)?;
+            for (name, sql) in SCHEMA {
+                if *name == "agent_store_format" || V15_ADDITIONS.contains(name) {
+                    tx.execute_batch(sql).map_err(storage)?;
+                }
+            }
+            tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+                .map_err(storage)?;
+            upgraded_from = Some(13);
+        } else {
+            return Err(storage(format!(
+                "unsupported SQLite schema at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
+                path.display()
+            )));
         }
         tx.commit().map_err(storage)?;
         connection
@@ -210,7 +283,13 @@ impl SqliteStorage {
             }),
             idle: tokio::sync::Notify::new(),
             path,
+            upgraded_from,
         }))
+    }
+    /// The format this open upgraded the store from, once that upgrade has
+    /// committed; `None` when the store was created or already current.
+    pub fn upgraded_from(&self) -> Option<u32> {
+        self.upgraded_from
     }
     pub(crate) async fn run<T: Send + 'static>(
         self: &Arc<Self>,
@@ -250,19 +329,20 @@ impl SqliteStorage {
             }
             tokio::task::spawn_blocking(move || {
                 let mut guard = db.connection.lock().unwrap();
-                let Some(connection) = guard.take() else {
-                    return Ok(());
-                };
-                match connection.close() {
-                    Ok(()) => {
-                        drop(db.admission.lock().unwrap().lease.take());
-                        Ok(())
-                    }
-                    Err((connection, failure)) => {
-                        *guard = Some(connection);
-                        Err(storage(failure))
-                    }
+                if let Some(connection) = guard.take()
+                    && let Err((connection, failure)) = connection.close()
+                {
+                    *guard = Some(connection);
+                    return Err(storage(failure));
                 }
+                // Retain the lease on unlock failure so another close can retry,
+                // even when the SQLite connection has already closed.
+                let mut admission = db.admission.lock().unwrap();
+                if let Some(lease) = &admission.lease {
+                    lease.0.unlock().map_err(storage)?;
+                }
+                admission.lease.take();
+                Ok(())
             })
             .await
             .map_err(storage)?
@@ -295,6 +375,15 @@ impl TypedPlugin for SqliteStoragePlugin {
             let storage = tokio::task::spawn_blocking(move || SqliteStorage::open(path))
                 .await
                 .map_err(|error| CordisError::PluginFailed(error.into()))??;
+            // Direct to stderr: the daemon's default log filter keeps only
+            // errors, and a user who rolls back finds this line next to the
+            // old daemon's refusal.
+            if let Some(from) = storage.upgraded_from() {
+                eprintln!(
+                    "Upgraded native store {} from format v{from} to v{FORMAT}; earlier dimcode versions cannot open it.",
+                    storage.path.display()
+                );
+            }
             let owned = storage.clone();
             if let Err(error) = ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {

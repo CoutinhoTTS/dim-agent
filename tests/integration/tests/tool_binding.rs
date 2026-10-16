@@ -18,7 +18,10 @@ use dim_agent_types::*;
 use local_support::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::watch;
@@ -286,6 +289,351 @@ async fn last_result(session: &Session, branch: &str) -> String {
         .unwrap()
 }
 
+struct ContributorEnabled;
+struct EnableContributor;
+impl TypedPlugin for EnableContributor {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "EnableContributor"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (): (),
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            ctx.provide(ContributorEnabled)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for EnableContributor {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+struct OptionalContributor {
+    scope: SessionScope,
+    generations: Arc<AtomicUsize>,
+    hold: Arc<Gate>,
+}
+struct OptionalHandler {
+    generation: usize,
+    stopping: CancellationToken,
+    hold: Arc<Gate>,
+}
+impl ToolHandler for OptionalHandler {
+    fn execute(
+        &self,
+        call: ToolCall,
+        _: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move {
+            if self.stopping.is_cancelled() {
+                return Err(HostError::Cancelled("provider unloaded".into()));
+            }
+            if call.input.get("hold") == Some(&serde_json::json!(true)) {
+                self.hold.entered.notify_one();
+                tokio::select! {
+                    biased;
+                    _ = self.stopping.cancelled() => return Err(HostError::Cancelled("provider unloaded".into())),
+                    _ = cancel.cancelled() => return Err(HostError::Cancelled("call cancelled".into())),
+                    _ = self.hold.release.notified() => {}
+                }
+            }
+            Ok(ToolResult::text(format!("generation {}", self.generation)))
+        })
+    }
+}
+impl TypedPlugin for OptionalContributor {
+    type Deps = Arc<ContributorEnabled>;
+    fn name(&self) -> &str {
+        "OptionalContributor"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        _: Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
+            ctx.provide_as(
+                self.scope.named_key::<ToolContribution>("optional"),
+                Arc::new(ToolContribution {
+                    definition: definition(
+                        "optional",
+                        "Report provider generation",
+                        serde_json::json!({"type":"object"}),
+                    ),
+                    handler: Arc::new(OptionalHandler {
+                        generation,
+                        stopping: ctx.cancellation_token(),
+                        hold: self.hold.clone(),
+                    }),
+                }),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for OptionalContributor {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        view.watch()
+            .wait_for(|snapshot| snapshot.state == state)
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn optional_contributors_do_not_gate_the_loop_and_new_generations_wait_for_reload() {
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let generations = Arc::new(AtomicUsize::new(0));
+    let hold = Arc::new(Gate::default());
+    let held = hold.clone();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::mock_hosts(&mut builder);
+    defaults::install_with_prompt(
+        &mut builder,
+        Arc::new(EmptyPromptHost),
+        Some(ConfigureUpdate {
+            sources: Vec::new(),
+            model: Some(selection("scripted")),
+        }),
+    );
+    builder
+        .session_tool("optional")
+        .session_tool("absent")
+        .session_plugin(move |scope| OptionalContributor {
+            scope: *scope,
+            generations: generations.clone(),
+            hold: held.clone(),
+        });
+    let agent = builder.build_in(&root);
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["optional".into(), "absent".into(), "echo".into()],
+            permission_policy: PermissionPolicy {
+                allowed_tools: vec!["echo".into(), "optional".into()],
+                ..PermissionPolicy::default()
+            },
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+    session
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(declared(&requests(&session).await[0]), ["optional", "echo"]);
+    assert_eq!(last_result(&session, "main").await, "generation 1");
+    let snapshot = session.diagnostics().unwrap();
+    let registry = snapshot
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "ToolRegistry")
+        .unwrap();
+    let registry_id = registry.id;
+    let registry_generation = registry.generation;
+    let provider = root
+        .view(
+            snapshot
+                .plugins
+                .iter()
+                .find(|plugin| plugin.name == "OptionalContributor")
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    let before = session.sequence("main").unwrap();
+    session
+        .submit(
+            "tool:optional {\"hold\":true}".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), hold.entered.notified())
+        .await
+        .unwrap();
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    session.idle("main").await.unwrap();
+    assert!(
+        last_result(&session, "main")
+            .await
+            .contains("provider unloaded")
+    );
+    let history = session.history("main", None).await.unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(
+                |event| event.sequence > before && matches!(event.kind, EventKind::ToolResult(_))
+            )
+            .count(),
+        1
+    );
+    session
+        .submit(
+            "tool:echo {\"text\":\"still running\"}".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert!(
+        last_result(&session, "main")
+            .await
+            .contains("still running")
+    );
+    let current = session.diagnostics().unwrap();
+    let registry = current
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == registry_id)
+        .unwrap();
+    assert_eq!(registry.state, rutis::FiberState::Active);
+    assert_eq!(registry.generation, registry_generation);
+
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    plugin_state(&provider, rutis::FiberState::Active).await;
+    session
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert!(
+        last_result(&session, "main")
+            .await
+            .contains("provider unloaded")
+    );
+    let branches = session.branch_diagnostics("main").unwrap();
+    let previous_loop = branches
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "Loop")
+        .unwrap();
+    let loop_view = root.view(previous_loop.id).unwrap();
+    root.view(registry_id).unwrap().restart().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop_view
+            .watch()
+            .wait_for(|snapshot| {
+                snapshot.generation > previous_loop.generation
+                    && snapshot.state == rutis::FiberState::Active
+            })
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    session
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(last_result(&session, "main").await, "generation 2");
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixed_contributors_are_sampled_before_the_first_request_without_initial_configuration() {
+    let root = Ctx::root().unwrap();
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let store = Arc::new(MemoryTimelineStore::default());
+    let generations = Arc::new(AtomicUsize::new(0));
+    let hold = Arc::new(Gate::default());
+    let build = || {
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::mock_hosts(&mut builder);
+        defaults::install(&mut builder);
+        builder
+            .timeline_store(store.clone())
+            .session_tool("optional")
+            .session_plugin({
+                let generations = generations.clone();
+                let hold = hold.clone();
+                move |scope| OptionalContributor {
+                    scope: *scope,
+                    generations: generations.clone(),
+                    hold: hold.clone(),
+                }
+            });
+        builder.build_in(&root)
+    };
+    let agent = build();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["optional".into(), "echo".into()],
+            permission_policy: PermissionPolicy {
+                allowed_tools: vec!["echo".into(), "optional".into()],
+                ..PermissionPolicy::default()
+            },
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+    let provider = root
+        .view(
+            session
+                .diagnostics()
+                .unwrap()
+                .plugins
+                .iter()
+                .find(|plugin| plugin.name == "OptionalContributor")
+                .unwrap()
+                .id,
+        )
+        .unwrap();
+    enabled.dispose().await.unwrap();
+    plugin_state(&provider, rutis::FiberState::Pending).await;
+    let enabled = root.plugin(capability_plugin(EnableContributor));
+    plugin_state(&provider, rutis::FiberState::Active).await;
+    session
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert_eq!(declared(&requests(&session).await[0]), ["optional", "echo"]);
+    assert!(
+        last_result(&session, "main")
+            .await
+            .contains("provider unloaded")
+    );
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+
+    let agent = build();
+    let restored = agent.restore_session(id).await.unwrap();
+    restored
+        .submit("tool:optional {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    restored.idle("main").await.unwrap();
+    assert_eq!(
+        declared(requests(&restored).await.last().unwrap()),
+        ["optional", "echo"]
+    );
+    assert_eq!(last_result(&restored, "main").await, "generation 3");
+    agent.close().await.unwrap();
+    enabled.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_released() {
     let (source, log, hold) = (
@@ -343,6 +691,7 @@ async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free()
         set("mcp:a", "a1", &["find"], &log, None),
         set("mcp:b", "b1", &["find", "other"], &log, None),
         set("mcp:c", "c1", &["gate"], &log, None),
+        set("mcp:d", "d1", &["branch"], &log, None),
     ]);
     let env = env(source.clone(), None);
     let session = env.session().await;
@@ -352,6 +701,7 @@ async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free()
     assert_eq!(state.0["mcp:b"].adopted, None);
     assert_eq!(state.0["mcp:b"].rejected.as_ref().unwrap().version, "b1");
     assert!(state.0["mcp:c"].rejected.is_some());
+    assert!(state.0["mcp:d"].rejected.is_some());
     env.turn(&session, "main", &[]).await;
     assert_eq!(declared(&requests(&session).await[0]), ["gate", "find"]);
 

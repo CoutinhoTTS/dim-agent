@@ -1,8 +1,10 @@
 use super::{
     SqliteStorage,
     codec::{self, ContentCache, WireEvent},
+    files::{self, SessionFiles},
     sqlite::error,
 };
+use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::{
     AgentError, BoxFuture, Capability, KeysOf, PublishCallback, Result, SessionConfig,
     StoredBranch, StoredEvent, TimelineInfo, TimelineKey, TimelineStore, TimelineTrace, scoped,
@@ -36,6 +38,8 @@ enum Command {
 /// One process writer batches every Session; only pending events reside here.
 pub struct SqliteTimelineStore {
     db: Arc<SqliteStorage>,
+    /// Schedules a Session-file sweep after a commit released owner rows.
+    sweep_files: Arc<tokio::sync::Notify>,
     admission: Mutex<Admission>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     closing: Mutex<Option<tokio::sync::watch::Receiver<Option<Result<()>>>>>,
@@ -50,6 +54,7 @@ impl SqliteTimelineStore {
         let (sender, receiver) = mpsc::channel();
         let store = Arc::new(Self {
             db,
+            sweep_files: Arc::new(tokio::sync::Notify::new()),
             admission: Mutex::new(Admission {
                 sender,
                 failures: BTreeMap::new(),
@@ -171,6 +176,8 @@ impl SqliteTimelineStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        // Owner rows go before the Session record they reference.
+        let released = files::release(&tx, session_id).map_err(error)?;
         for table in [
             "timeline_snapshots",
             "timeline_events",
@@ -186,6 +193,9 @@ impl SqliteTimelineStore {
             .map_err(error)?;
         }
         tx.commit().map_err(error)?;
+        if released > 0 {
+            self.sweep_files.notify_one();
+        }
         self.admission.lock().unwrap().failures.remove(session_id);
         Ok(())
     }
@@ -448,7 +458,16 @@ impl SessionStore {
     }
 }
 
-pub struct SessionStorePlugin;
+/// The Session directory and the `sessionFiles` service. Session files live
+/// below the FileStorage root `files_root`, which is the database directory.
+pub struct SessionStorePlugin {
+    files_root: usize,
+}
+impl SessionStorePlugin {
+    pub fn new(files_root: usize) -> Self {
+        Self { files_root }
+    }
+}
 impl TypedPlugin for SessionStorePlugin {
     type Deps = (Arc<SqliteStorage>,);
     fn name(&self) -> &str {
@@ -460,14 +479,29 @@ impl TypedPlugin for SessionStorePlugin {
         (db,): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let store = Arc::new(SessionStore::new(db));
-            let owned = store.timeline.clone();
+            let store = Arc::new(SessionStore::new(db.clone()));
+            let files = SessionFiles::new(
+                db,
+                ctx.clone(),
+                self.files_root,
+                store.timeline.sweep_files.clone(),
+            );
+            let (timeline, owned_files) = (store.timeline.clone(), files.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move { owned.close().await.map_err(Into::into) })
+                    Box::pin(async move {
+                        // Puts settle before the native store stops writing.
+                        owned_files.close().await;
+                        timeline.close().await.map_err(Into::into)
+                    })
                 }))
             })?;
+            files.start();
             ctx.provide_as(TypeKey::of::<SessionStore>(), store)?;
+            ctx.provide_as(
+                TypeKey::of::<SessionFilesHost>(),
+                Arc::new(SessionFilesHost(Arc::new(files))),
+            )?;
             Ok(Effect::Done)
         })
     }

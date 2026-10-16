@@ -1,6 +1,8 @@
 # Notifications
 
-Status: Draft. Overall design: [overview](../overview.md) (Notifications). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+Status: Withdrawn. Overall design: [overview](../overview.md) (Notifications). Phase: P2. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
+
+> **Withdrawn.** This plugin has no responsibility of its own; each of its duties belongs to an existing owner. Alerts for a Session the user is working in (task ended, approval or question pending) belong to the client, which already receives those events. Notifying a scheduled run's outcome belongs to Scheduler. Talking to an external channel (Slack, Feishu and others) belongs to a per-platform plugin with its own tools; there is no generic channel and no `notify` tool. This document is kept for reference only.
 
 Notifications is a Session plugin. It delivers messages to configured external channels (Slack, Feishu) when a task on its interactive leader Session completes or fails, an approval is pending or a question awaits an answer; it reports a scheduled run that ended in its Session from Scheduler's run-outcome event notice; it offers the model the `notify` tool as a Session-scoped `toolContribution` service keyed `notify`; and it serves `notifications.test` through the Session-scoped `sessionMethods` service keyed `notifications` ([session-boundary](../contracts/session-boundary.md)). It observes its Session only through the existing Session broadcast, confirms each trigger against the fixed prefix of the branch, and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 

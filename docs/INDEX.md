@@ -3,8 +3,10 @@
 - [CLI feature list](feature-list.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
+- [Development plan and priorities](design/roadmap.md)（中文）
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
+- [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
@@ -13,7 +15,11 @@
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
+- [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
+- [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
+- [Management methods](design/appserver/management-methods.md)
+- [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

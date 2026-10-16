@@ -201,11 +201,12 @@ impl ToolBinding {
         timeline: &Timeline,
         cancel: &CancellationToken,
     ) -> dim_agent_runtime::Result<()> {
+        // Fix optional providers during branch initialization even without a model.
+        let (adoption, sets) = current(&self.registry);
         let prefix = crate::history::read_context(timeline, timeline.sequence()).await?;
         let Some(configuration) = context_configuration(&prefix) else {
             return Ok(());
         };
-        let (adoption, sets) = current(&self.registry);
         // A configuration without a tool part declares the fixed tools (Loop
         // binds it with `bind_current`); it needs an adoption only once a
         // dynamic source offers tools.

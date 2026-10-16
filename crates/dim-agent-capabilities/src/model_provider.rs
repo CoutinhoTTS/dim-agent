@@ -1,3 +1,4 @@
+mod images;
 mod recovery;
 use recovery::{FailureAction, RecoveryState};
 
@@ -178,6 +179,8 @@ impl ModelProvider {
                     .validate(call.request.clone(), cancel.clone())
                     .await?;
                 crate::context_policy::check_cancel(&cancel)?;
+                // The committed request keeps its images; only what is sent changes.
+                let request = images::adapt(&call.request);
                 let ResolvedModelConnection {
                     mut connection,
                     failure_policy: policy,
@@ -186,7 +189,7 @@ impl ModelProvider {
                     Some(resolver) => {
                         resolver
                             .0
-                            .resolve(call.request.clone(), cancel.clone())
+                            .resolve(request.clone(), cancel.clone())
                             .await?
                     }
                     None => ResolvedModelConnection {
@@ -204,7 +207,7 @@ impl ModelProvider {
                     let result = match self
                         .host
                         .0
-                        .invoke(call.request.clone(), connection.clone(), attempt.clone())
+                        .invoke(request.clone(), connection.clone(), attempt.clone())
                         .await
                     {
                         Ok(stream) => {

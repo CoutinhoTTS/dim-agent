@@ -3,7 +3,7 @@ mod sse;
 mod stdio;
 
 use super::McpService;
-use crate::settings::{BearerAuth, McpServerSettings, RemoteTransport};
+use super::config::{BearerAuth, McpServerSettings, RemoteTransport};
 use dim_agent_runtime::{Capability, KeysOf, StateCell};
 use dim_agent_types::{
     ContentBlock, ImageSource, ImageSourceType, JsonObject, JsonSchema, ToolContent, ToolResult,
@@ -44,8 +44,6 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub enum McpServerError {
     #[error("MCP server is closed")]
     Closed,
-    #[error("Project MCP execution requires approval of the current configuration")]
-    ApprovalRequired,
     #[error("MCP operation cancelled; remote effects may already have occurred")]
     Cancelled,
     #[error("MCP operation timed out; remote effects may already have occurred")]

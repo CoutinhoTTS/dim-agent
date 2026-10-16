@@ -9,14 +9,15 @@ use super::{
 };
 use crate::{
     host::{HostError, ToolExecutionContext},
-    host_platform::{HostPlatform, Os, ProcessSpec, ProcessTree, ShellEdition, ShellKind},
+    host_platform::{
+        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, Os, ProcessTree, ShellKind,
+    },
     tool_registry::definition,
 };
 use dim_agent_runtime::Branch;
 use dim_agent_types::*;
 use serde_json::{Value, json};
 use std::{
-    ffi::OsString,
     io,
     path::{Component, Path, PathBuf},
     process::ExitStatus,
@@ -39,17 +40,8 @@ const PREVIEW_BUFFER_HEADROOM_BYTES: usize = OUTPUT_PREVIEW_MAX_BYTES * 2;
 /// Maximum bytes written to one exec output file.
 const OUTPUT_FILE_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
 /// Pipe reading continues this long after the root process exits.
-const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
+pub const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const DESCRIPTION_CHARS: usize = 200;
-
-const RUNTIME_BIN_ENV_KEYS: [&str; 5] = [
-    "DIMCODE_CLI_BIN",
-    "DIMCODE_UV_BIN",
-    "DIMCODE_PYTHON_BIN",
-    "DIMCODE_NODE_BIN",
-    "DIMCODE_BUNDLED_GIT_BIN",
-];
-const PLUGIN_BIN_DIRS_ENV: &str = "DIMCODE_PLUGIN_BIN_DIRS";
 
 pub fn definition_for(platform: &HostPlatform) -> ToolDefinition {
     let env_line = format!(
@@ -499,201 +491,21 @@ fn correct_windows_path(value: &str) -> String {
     value.to_owned()
 }
 
-fn windows_network_share(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().replace('/', "\\");
-    normalized.to_uppercase().starts_with("\\\\?\\UNC\\")
-        || (normalized.starts_with("\\\\") && !normalized.starts_with("\\\\?\\"))
-}
-
-/// TS `buildEnv`: the service start environment with forced overrides.
-fn build_env(platform: &HostPlatform) -> Vec<(OsString, OsString)> {
-    let mut env: Vec<(OsString, OsString)> = platform.env.clone();
-    if platform.os == Os::Windows
-        && let Some(entry) = env.iter_mut().find(|(key, _)| {
-            key.to_str()
-                .is_some_and(|key| key.eq_ignore_ascii_case("PATH"))
-        })
-    {
-        entry.0 = "PATH".into();
-    }
-    let forced = [
-        ("TERM", "dumb"),
-        ("NO_COLOR", "1"),
-        ("PAGER", "cat"),
-        ("GIT_PAGER", "cat"),
-        ("GH_PAGER", "cat"),
-    ];
-    env.retain(|(key, _)| key != "FORCE_COLOR" && !forced.iter().any(|(name, _)| key == name));
-    env.extend(
-        forced
-            .iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-    );
-    env
-}
-
-fn env_str<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a str> {
-    crate::host_platform::env_var(env, key).and_then(|value| value.to_str())
-}
-
-/// Product runtime directories that a login shell may drop from `PATH`.
-fn runtime_path_entries(env: &[(OsString, OsString)], windows_paths: bool) -> Vec<String> {
-    let mut output: Vec<String> = vec![];
-    let mut push = |entry: String| {
-        if !output.contains(&entry) {
-            output.push(entry);
-        }
-    };
-    for key in RUNTIME_BIN_ENV_KEYS {
-        if let Some(value) = env_str(env, key).filter(|value| !value.is_empty())
-            && Path::new(value).is_absolute()
-        {
-            let path = Path::new(value);
-            push(path.parent().unwrap_or(path).to_string_lossy().into_owned());
-        }
-    }
-    if let Some(value) = env_str(env, PLUGIN_BIN_DIRS_ENV).map(str::trim) {
-        let separator = if windows_paths { ';' } else { ':' };
-        value
-            .split(separator)
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty() && Path::new(entry).is_absolute())
-            .for_each(|entry| push(entry.to_owned()));
-    }
-    output
-}
-
-fn quote_posix(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-/// TS `prependRuntimePathForPosixCommand`.
-async fn prepend_runtime_path(
-    command: &str,
-    env: &[(OsString, OsString)],
-    platform: &HostPlatform,
-    shell: &Path,
-    edition: ShellEdition,
-    cwd: &Path,
-) -> Result<String, String> {
-    let git_bash = edition == ShellEdition::GitBash;
-    let entries = runtime_path_entries(env, git_bash);
-    if entries.is_empty() {
-        return Ok(command.to_owned());
-    }
-    let mapped = if git_bash {
-        map_git_bash_entries(&entries, platform, shell, env, cwd).await?
-    } else {
-        entries
-    };
-    let prefix: Vec<String> = mapped.iter().map(|entry| quote_posix(entry)).collect();
-    Ok(format!(
-        "export PATH={}:\"$PATH\"; {command}",
-        prefix.join(":")
-    ))
-}
-
-async fn map_git_bash_entries(
-    entries: &[String],
-    platform: &HostPlatform,
-    shell: &Path,
-    env: &[(OsString, OsString)],
-    cwd: &Path,
-) -> Result<Vec<String>, String> {
-    let cygpath = git_bash_cygpath(shell).ok_or_else(|| {
-        format!(
-            "Git Bash path converter is unavailable: {}",
-            shell.display()
-        )
-    })?;
-    let run = |args: [&str; 2]| {
-        capture(
-            platform,
-            ProcessSpec {
-                executable: cygpath.clone(),
-                args: args.iter().map(OsString::from).collect(),
-                cwd: cwd.to_owned(),
-                env: env.to_vec(),
-            },
-        )
-    };
-    let normalize = |value: &str| {
-        value
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_lowercase()
-    };
-    let mut output = vec![];
-    for entry in entries {
-        let result: Result<String, String> = async {
-            let mapped = run(["-u", entry]).await?.trim().to_owned();
-            if !mapped.starts_with('/') {
-                return Err(format!("cygpath returned a non-absolute path for {entry}"));
-            }
-            let bytes = entry.as_bytes();
-            let drive = bytes.len() >= 3
-                && bytes[0].is_ascii_alphabetic()
-                && bytes[1] == b':'
-                && matches!(bytes[2], b'\\' | b'/');
-            if drive || entry.starts_with("\\\\") {
-                let round_trip = run(["-w", &mapped]).await?.trim().to_owned();
-                if normalize(&round_trip) != normalize(entry) {
-                    return Err(format!("cygpath round-trip mismatch for {entry}"));
-                }
-            }
-            Ok(mapped)
-        }
-        .await;
-        output.push(result.map_err(|error| {
-            format!("Failed to map bundled runtime paths for Git Bash: {error}")
-        })?);
-    }
-    Ok(output)
-}
-
-fn git_bash_cygpath(bash: &Path) -> Option<PathBuf> {
-    let mut current = bash.parent()?;
-    for _ in 0..4 {
-        let git = current.join("cmd").join("git.exe");
-        let cygpath = current.join("usr").join("bin").join("cygpath.exe");
-        if git.is_file() && cygpath.is_file() {
-            return Some(cygpath);
-        }
-        current = current.parent()?;
-    }
-    None
-}
-
-/// Runs a product helper and returns its stdout.
-async fn capture(platform: &HostPlatform, spec: ProcessSpec) -> Result<String, String> {
-    let mut tree = platform.spawn(spec).map_err(|error| error.to_string())?;
-    let mut stdout = tree.stdout();
-    drop(tree.stderr());
-    let mut bytes = vec![];
-    let read = stdout.read_to_end(&mut bytes).await;
-    let status = tree.wait().await.map_err(|error| error.to_string())?;
-    read.map_err(|error| error.to_string())?;
-    if !status.success() {
-        return Err(format!("converter exited with {status}"));
-    }
-    String::from_utf8(bytes).map_err(|error| error.to_string())
-}
-
 // ------------------------------------------------------------------ output
 
 /// Incremental canonical UTF-8 decoding of one stream (ADR 018): invalid and
 /// truncated bytes become `<0xNN>`, never U+FFFD.
 #[derive(Default)]
-struct Decoder {
+pub struct Decoder {
     pending: Vec<u8>,
 }
 impl Decoder {
-    fn write(&mut self, chunk: &[u8]) -> String {
+    pub fn write(&mut self, chunk: &[u8]) -> String {
         let mut input = std::mem::take(&mut self.pending);
         input.extend_from_slice(chunk);
         self.decode(&input, false)
     }
-    fn end(&mut self) -> String {
+    pub fn end(&mut self) -> String {
         let input = std::mem::take(&mut self.pending);
         self.decode(&input, true)
     }
@@ -747,7 +559,7 @@ fn escape_byte(byte: u8) -> String {
 }
 
 /// Removes control characters except `\t\n\r`, and U+FFF9–U+FFFB.
-fn sanitize(text: &str) -> String {
+pub fn sanitize(text: &str) -> String {
     text.chars()
         .filter(|&ch| {
             !(matches!(ch, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}')
@@ -781,7 +593,7 @@ fn head_bytes(text: &str, max: usize) -> &str {
 }
 
 /// TS `truncatePreview`: the last 2000 lines within 50 KiB.
-fn truncate_preview(text: &str) -> String {
+pub fn truncate_preview(text: &str) -> String {
     let sanitized = sanitize(text);
     if sanitized.is_empty() {
         return sanitized;
@@ -1307,28 +1119,29 @@ pub(super) async fn execute(
         Err((message, code)) => return Ok(failed(message, code)),
     };
     let platform = &tools.platform;
-    let shell = match &platform.shell {
-        crate::host_platform::ShellStatus::Available(shell) => shell,
-        crate::host_platform::ShellStatus::Unavailable { code, reason } => {
-            return Ok(failed(
-                format!(
-                    "exec shell is unavailable ({code}): {reason} Fix exec-shell.json and restart the service."
-                ),
-                "exec_shell_unavailable",
-            ));
-        }
-    };
     let cwd = match &input.cwd {
         Some(value) => resolve_cwd(value, &tools.cwd, platform),
         None => tools.cwd.clone(),
     };
+    let (spec, shell) = match platform.build_process_spec(&input.command, &cwd).await {
+        Ok(built) => built,
+        Err(error)
+            if matches!(
+                error.code,
+                EXEC_SHELL_CONFIG_INVALID | EXEC_SHELL_UNAVAILABLE
+            ) =>
+        {
+            return Ok(failed(
+                format!(
+                    "exec shell is unavailable ({}): {} Fix exec-shell.json and retry.",
+                    error.code, error.reason
+                ),
+                "exec_shell_unavailable",
+            ));
+        }
+        Err(error) => return Ok(failed(error.reason, error.code)),
+    };
     let kind = shell.edition.kind();
-    if platform.os == Os::Windows && kind == ShellKind::Cmd && windows_network_share(&cwd) {
-        return Ok(failed(
-            "Command Prompt cannot use a network-share workspace as its current directory.",
-            "EXEC_SHELL_CWD_UNSUPPORTED",
-        ));
-    }
     if kind == ShellKind::Posix && has_unquoted_posix_background_ampersand(&input.command) {
         return Ok(failed(
             "exec manages background tasks; remove shell background markers such as & and set runInBackground to true when the result can be handled later.",
@@ -1341,41 +1154,6 @@ pub(super) async fn execute(
     {
         return Ok(refused);
     }
-    if !tokio::fs::metadata(&cwd)
-        .await
-        .is_ok_and(|metadata| metadata.is_dir())
-    {
-        let shown = input
-            .cwd
-            .clone()
-            .unwrap_or_else(|| tools.cwd.to_string_lossy().into_owned());
-        return Ok(failed(
-            format!("Working directory not found: {shown}"),
-            "cwd_not_found",
-        ));
-    }
-    let env = build_env(platform);
-    let mut command = input.command.clone();
-    if kind == ShellKind::Posix {
-        command = match prepend_runtime_path(
-            &command,
-            &env,
-            platform,
-            &shell.executable_path,
-            shell.edition,
-            &cwd,
-        )
-        .await
-        {
-            Ok(command) => command,
-            Err(message) => return Ok(failed(message, "EXEC_SHELL_PATH_MAPPING_FAILED")),
-        };
-    }
-    let args: Vec<&str> = match kind {
-        ShellKind::Posix => vec!["-lc"],
-        ShellKind::Powershell => vec!["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
-        ShellKind::Cmd => vec!["/d", "/s", "/v:off", "/c"],
-    };
     let task_id = format!("exec-{}", uuid::Uuid::new_v4());
     let background = input.run_in_background && !tools.member;
     let effective_timeout = (!(input.disable_timeout && background)).then_some(input.timeout_ms);
@@ -1385,16 +1163,7 @@ pub(super) async fn execute(
         cwd: cwd_text,
         timeout_ms: effective_timeout.map_or(-1, |timeout| timeout as i64),
     };
-    let spawned = platform.spawn(ProcessSpec {
-        executable: shell.executable_path.clone(),
-        args: args
-            .into_iter()
-            .map(OsString::from)
-            .chain([OsString::from(command)])
-            .collect(),
-        cwd: cwd.clone(),
-        env,
-    });
+    let spawned = platform.spawn(spec);
     let mut tree = match spawned {
         Ok(tree) => tree,
         Err(error) => {

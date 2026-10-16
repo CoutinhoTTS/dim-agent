@@ -1,6 +1,8 @@
 # ExternalAgent
 
-状态：草案。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程）。阶段：P3。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：需要重新设计。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程）。阶段：P3。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+
+> **需要重新设计。** 本文中审批相关的部分已撤回，不得实现（[#28](https://github.com/arcships/dim/issues/28)）：模型流中不加 `approval_ask` / `approval_ask_withdrawn` 条目，ModelProvider 不依赖 Approval，`modelKind` 不加 `answerApproval`，不发伪造的 thinking 行，Approval 不做补充。重新设计的方向：外部 agent 的权限请求作为一条 `input/message` 写入主模型所在的分支，ExternalAgent 提供一个工具让主模型决定；这次工具调用照常经过 dim 的 Approval 与 Permission。重新设计时还要处理（[#37](https://github.com/arcships/dim/issues/37)）：桥接改为由业务配置对齐的 loader 行（远程节点上为 `peer:<node>/...`），不再由 ExternalAgent 自己启停进程；文档只保留一种接入 ModelHost 的方式。
 
 ExternalAgent 让本地安装的编码 agent（Claude Code、Codex、Cursor、OpenCode、ZCode 等）可作为一种模型连接使用。模型为外部 agent 的 Session 照常经由 Loop 和 ModelProvider 运行：ExternalAgent 为类型 `external-agent` 提供 `modelKind` 服务，由 Aimux 的 ModelHost 路由到该服务（Aimux 补充），它把每个 dim 模型请求转换为一次外部轮次，再把外部流转换回模型输出块。外部 agent 使用自己的工具；它们的权限请求在流中以审批询问的形式返回，由 ModelProvider 在执行该调用的 Session 中作为普通 dim 审批准入。ExternalAgent 不写自己的 Timeline 事件。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。
 
@@ -17,7 +19,7 @@ flowchart LR
     Rpc["Rpc 方法表"]
     Store["进程存储：pluginFiles（扩展），记录"]
     Agents["Agents：profile 写操作（提议）、sessions"]
-    Settings["Settings：业务来源 external_agents、凭据解析器"]
+    Settings["Settings：来源 external_agents、凭据解析器"]
     Provider["Provider：连接条目写操作（提议）"]
   end
   subgraph node["每个节点（控制节点本地，对等节点导入）"]
@@ -45,7 +47,7 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `ExternalAgent` | 进程，控制节点 | Aimux（ModelHost 按类型路由）、Agents（profile 写操作，提议；用于读取历史的 `sessions`）、Provider（连接条目写操作，提议）、Settings（业务来源 `external_agents`、凭据解析器）、各节点的 `HostPlatform`（由该节点的桥接使用）、存放对话记录的 `pluginFiles`（扩展） | `modelKind` key `external-agent`；`managementMethods` key `external_agents`；内部桥接，每个有已启用 agent 的节点一个 |
+| `ExternalAgent` | 进程，控制节点 | Aimux（ModelHost 按类型路由）、Agents（profile 写操作，提议；用于读取历史的 `sessions`）、Provider（连接条目写操作，提议）、Settings（来源 `external_agents`、凭据解析器）、各节点的 `HostPlatform`（由该节点的桥接使用）、存放对话记录的 `pluginFiles`（扩展） | `modelKind` key `external-agent`；`managementMethods` key `external_agents`；内部桥接，每个有已启用 agent 的节点一个 |
 
 **依赖的契约**：Aimux 补充（ModelHost 按名称收集 `modelKind`，并带调用作用域按类型路由，A.2）；另外两个补充：**ModelProvider** 通过其分支的 Approval 准入 `approval_ask` 流条目，并用 `answerApproval` 回答，**Approval** 在模型步骤打开期间接受 `Host` 来源的准入，复用 `approval/request`、`approval/respond` 和 `approval/cancelled`（无新事件）；现有模型契约的模型块和失败数据（[host.rs](../../../../crates/dim-agent-capabilities/src/host.rs)）以及 ModelProvider 的失败策略（[recovery.rs](../../../../crates/dim-agent-capabilities/src/model_provider/recovery.rs)）；Approval 的 `admit`（[Approval](../../../architecture/rust-agent/plugins/Approval.md)）；Collaboration 补充“member 审批转发给 leader”（decisions E6）；`sessions`（[session-access](../contracts/session-access.md)）；由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）；[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（TypeScript 部分直接使用）；业务来源 `external_agents` 的 Settings 类型化写操作和变更通知（[ADR 002 D4](../../adr/002-plugin-scope.md)）；Provider 的连接条目写操作和 Agents 的 profile 写操作（均为提议，由这两个插件拥有并定义形态；附录 F）；各节点的 `HostPlatform`（overview 附录 B 补充，包括在它与控制节点的链路断开时结束它启动的进程）。现有的类型化服务待 [#4](https://github.com/arcships/dim/issues/4) 暴露后可由 TypeScript 部分按名称访问（[session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）。**此处定义的契约**：`modelKind` key `external-agent` 及其目标 `{node, agent}`；对话记录；审批调用形态 `external_agent.<kind>`；业务配置 `external_agents.*`；方法 `external_agents.*`；与 [AcpGateway](AcpGateway.md) 共享的 ACP schema 和一致性测试套件（客户端侧）。Provider、Agents、Approval 和 Collaboration 从不指名本插件。
 
@@ -55,7 +57,7 @@ flowchart LR
 flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   classDef contract stroke-dasharray:4 3
-  Cfg["业务配置 external_agents.node.agent.*（Settings 业务来源）"]:::new
+  Cfg["业务配置：Settings 来源 external_agents，按节点和 agent 分条目"]:::new
   Br["每节点运行中的桥接（ExternalAgent 内存）"]:::new
   Conn["Provider 连接条目 external-agent:node:agent"]
   Prof["Agents profile：Agent (node)，无工具"]
@@ -71,7 +73,7 @@ flowchart TB
   Cat -->|"external_agents.list"| Cfg
 ```
 
-`external_agents.*` 条目是业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4），保存在 ExternalAgent 的 Settings 业务来源中，schema 由 ExternalAgent 声明，只通过 Settings 的类型化操作写入，在使用时读取；变更是数据更新加通知，绝不重载。它们是启用状态的事实来源。ExternalAgent 只通过 Provider 和 Agents 的公开类型化写操作请求对应的连接条目和 profile；由这两个所有者校验并保存，需要客户端显示变化时由所有者发出自己的 Session 广播通知。ExternalAgent 不以其他方式写它们的状态，因此条目和 profile 可以从配置重建。桥接在变更时由 ExternalAgent 启动和停止；没有结构性变化。对话记录只保存投递游标和外部身份；每次投递决策都根据 Timeline 页加记录重新计算。桥接不持有任何必须存续的内容。
+ExternalAgent 的业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）是其 Settings 来源 `external_agents` 中的一个文档：`{ nodes: { <node>: { <agent>: { enabled, executable?, args?, env?, reasoning? } } } }`。Settings 在写入和读取持久化文件时按 ExternalAgent 声明的 schema 校验并应用默认值；ExternalAgent 按交付的样子使用，在使用时读取。它只经 ExternalAgent 自己的管理方法发起的类型化写入写入（A.1）；变更是数据更新加通知，绝不重载。它们是启用状态的事实来源。ExternalAgent 只通过 Provider 和 Agents 的公开类型化写操作请求对应的连接条目和 profile；由这两个所有者校验并保存，需要客户端显示变化时由所有者发出自己的 Session 广播通知。ExternalAgent 不以其他方式写它们的状态，因此条目和 profile 可以从配置重建。桥接在变更时由 ExternalAgent 启动和停止；没有结构性变化。对话记录只保存投递游标和外部身份；每次投递决策都根据 Timeline 页加记录重新计算。桥接不持有任何必须存续的内容。
 
 ```text
 ConversationRecord {
@@ -242,6 +244,8 @@ sequenceDiagram
 
 ### 9.1 链路断开期间导入的服务保持登记（#5）
 
+已撤回：rutis 是外部依赖，不向它提需求。节点离线时的行为按 rutis 现有的节点行为设计。
+
 | 项 | 内容 |
 | --- | --- |
 | 被哪条规则挡住 | ADR 002 D3 与 overview §6.3（离线规则）：对等节点的 `HostPlatform`（及其他节点服务）经 rutis 链路导入；如果链路断开时撤销导入，每个依赖方（ExternalAgent、绑定该节点的 Session、Hooks、RemoteGateway、PluginManager 代码行）都会重载或变为 Pending，一个离线节点会影响无关的工作。 |
@@ -262,7 +266,7 @@ sequenceDiagram
 | `external_agents.set_enabled` | `node`、`agent`、`enabled` | 新状态 | 是 |
 | `external_agents.configure` | `node`、`agent`、`executable?`、`args?`、`env?: {name: credential reference}`、`reasoning?` | 新配置 | 是 |
 
-检测在加载时和 `refresh` 时通过节点的 `HostPlatform` 运行各适配器的探测（A1）；检测到的 agent 在启用前保持禁用（A3）。`set_enabled` 和 `configure` 通过 Settings 的类型化操作把业务配置写入 ExternalAgent 的业务来源；ExternalAgent 处理变更通知，不重载。在某节点上启用第一个 agent 会启动该节点的桥接，禁用最后一个则停止它；不增删 loader 行。启用 `(node, agent)` 会通过 Provider 的公开连接条目写操作（提议）请求条目 `external-agent:<node>:<agent>`（含一个模型 `default`（A2）和目标 `{node, agent}`），并通过 Agents 的公开 profile 写操作（提议）请求一个 profile `{ name: "<Agent> (<node>)", system_prompt: "", tools: [], model: { provider_id: "external-agent:<node>:<agent>", model_id: "default" } }`。禁用时通过相同操作请求移除两者；由 Provider 和 Agents 决定并发出各自的通知；现有 Session 保留其已采用的模型，并在下一次调用时以 `external_agent_disabled` 失败。Profile 与任何 Agent 一样由 Agents 列出，因此 Collaboration 的 `agent` 工具可以请求它们。
+检测在加载时和 `refresh` 时通过节点的 `HostPlatform` 运行各适配器的探测（A1）；检测到的 agent 在启用前保持禁用（A3）。`set_enabled` 和 `configure` 以读到的 revision 通过 Settings 的类型化写入（CAS）写 `external_agents` 文档；ExternalAgent 处理变更通知，不重载。在某节点上启用第一个 agent 会启动该节点的桥接，禁用最后一个则停止它；不增删 loader 行。启用 `(node, agent)` 会通过 Provider 的公开连接条目写操作（提议）请求条目 `external-agent:<node>:<agent>`（含一个模型 `default`（A2）和目标 `{node, agent}`），并通过 Agents 的公开 profile 写操作（提议）请求一个 profile `{ name: "<Agent> (<node>)", system_prompt: "", tools: [], model: { provider_id: "external-agent:<node>:<agent>", model_id: "default" } }`。禁用时通过相同操作请求移除两者；由 Provider 和 Agents 决定并发出各自的通知；现有 Session 保留其已采用的模型，并在下一次调用时以 `external_agent_disabled` 失败。Profile 与任何 Agent 一样由 Agents 列出，因此 Collaboration 的 `agent` 工具可以请求它们。
 
 ### A.2 Provider 注册与调用作用域
 
