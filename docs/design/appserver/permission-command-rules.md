@@ -1,6 +1,7 @@
 # Permission command rules
 
-Status: Draft (for review). Roadmap item F2 ([#73](https://github.com/arcships/dim/issues/73)).
+Status: Implemented (corrections found during implementation are listed in
+[§12](#12-implementation-notes)). Roadmap item F2 ([#73](https://github.com/arcships/dim/issues/73)).
 Overview: [§3 `/approvals`, command rules row](../overview.md#3-integration-by-existing-mechanisms) and
 [Appendix B.1 Permission row](../overview.md#b1-session-and-branch-capabilities). Scope:
 [ADR 002](../../adr/002-plugin-scope.md) (a supplement to the existing branch Permission, with its
@@ -149,9 +150,10 @@ In `dim-agent-capabilities::permission`:
 ```rust
 pub trait ReadCommandRules: Send + Sync + 'static {
     fn rules(&self, cancel: CancellationToken)
-        -> BoxFuture<'_, Result<Vec<CommandRule>, HostError>>;   // Failed | Cancelled
+        -> HostFuture<'_, Vec<CommandRule>>;   // Result<_, HostError>: Failed | Cancelled
 }
 pub struct CommandRulesHost(pub Arc<dyn ReadCommandRules>);       // Session value
+pub struct NoCommandRules;                                         // the fixed empty host
 
 impl Permission {
     pub async fn decide(&self, call: &ApprovalCallData, risk: Option<&str>,
@@ -167,8 +169,9 @@ Bindings per profile (exactly one each):
 
 | Profile | Binding |
 | --- | --- |
-| `defaults::install`, `install_with_prompt`, `install_with_process_model` (mock App Server profile and test hosts) | `install_profile` binds a fixed empty host with `session_value`, next to the `EmptyPromptHost` it already binds. Existing tests are unchanged |
-| App Server with Settings (product home or local execution) | `permission_rules::install(&mut builder)` adds the Session part `CommandRules` (Deps `Arc<SettingsService>`), which provides `CommandRulesHost` reading `SettingsService::read::<PermissionSettings>(User)` on each call. The process part `PermissionRulesPlugin` (Deps `Arc<SettingsService>`, owner row `permission`) provides the management methods. Both live in `dim-app-server/src/permission_rules.rs` with the `PermissionSettings` document type (`NAMESPACE = "permission"`, `USER_FILE = "permission.json"`, no `PROJECT_FILE`) |
+| `defaults::install`, `install_with_prompt`, `install_with_process_model` (mock App Server profile and test hosts) | `install_profile` binds the fixed empty host `NoCommandRules` with `session_value`, next to the `EmptyPromptHost` it already binds. Existing tests are unchanged |
+| `install_with_prompt_capability`, `install_local_execution`, `install_minimal_execution` | Bind nothing, like `PromptHost`: the host that installs them binds the port. Capability-only hosts (integration tests, the `xtask` local graph) bind `CommandRulesHost(Arc::new(NoCommandRules))` |
+| App Server product profile (`install_local_execution` in `main.rs`, its tests and the `xtask` App Server graph) | The profile calls `permission_rules::install(&mut builder)`, which adds the Session part `CommandRules` (Deps `Arc<SettingsService>`); it provides `CommandRulesHost` reading `SettingsService::read::<PermissionSettings>(User)` on each call. `serve` registers the process part `PermissionRulesPlugin` (Deps `Arc<SettingsService>`, owner row `permission`) with local execution, next to `mcp` and `skills`; it provides the management methods. Both live in `dim-app-server/src/permission_rules.rs` with the `PermissionSettings` document type (`NAMESPACE = "permission"`, `USER_FILE = "permission.json"`, no `PROJECT_FILE`) |
 
 ## 5. Flows
 
@@ -198,8 +201,8 @@ paths or scripts; those are denied only by presets or OS isolation.
  decide(call, risk)
   1. call.name in disallowedTools                  -> Deny   (existing)
   2. command call? read rules (each time)
-       read failed                                 -> Deny "command rules could not be read"
-       a deny rule matches a segment               -> Deny "denied by command rule `<command>` (<match>)"
+       read failed                                 -> Deny "Command rules could not be read: <error>"
+       a deny rule matches a segment               -> Deny "Command denied by command rule `<command>` (<match>)"
   3. call.name in allowedTools                     -> Allow  (existing)
   4. preset by risk                                -> Allow | Ask | Deny (existing)
   5. result is Ask and an allow rule matches the
@@ -259,7 +262,8 @@ denials do today, for example
 
 | Case | Result |
 | --- | --- |
-| Rules source unreadable or persisted file invalid | The command call is denied with "command rules could not be read: …"; other calls are unaffected. `permission.rules` returns `permission_rules_failed` |
+| Rules source unreadable or persisted file invalid | The command call is denied with "Command rules could not be read: …"; other calls are unaffected. `permission.rules` returns `permission_rules_failed` |
+| Management call interrupted (owner unloading) | `operation_interrupted`, as for MCP; a write may already have committed, so read before retrying |
 | Read cancelled (batch cancelled, Session closing) | Admission ends as cancelled, as today |
 | `set_rules` with an invalid rule (empty, separator character, unknown field) | Invalid params; nothing written |
 | `set_rules` with a stale revision | `permission_rules_conflict`; read and retry |
@@ -358,3 +362,26 @@ App Server flow (`crates/dim-app-server/tests/`):
 7. `permission.set_rules` writes a rule; the next `exec` in an already open Session follows it.
    A stale revision returns `permission_rules_conflict`; a rule with `;` is rejected; a
    `.dimcode/permission.json` in the workspace has no effect.
+
+Implemented by `crates/dim-agent-capabilities/tests/permission_flow.rs` (1-6) and
+`crates/dim-app-server/tests/transport_flow/permission_rules.rs` (7).
+
+## 12. Implementation notes
+
+Corrections to the draft found against the code; the sections above already state them.
+
+1. **Bindings (§4.2).** The draft listed only the `defaults` profiles and "App Server with
+   Settings". `install_with_prompt_capability`, `install_local_execution` and
+   `install_minimal_execution` bind no host, as they bind no `PromptHost`, so their callers bind
+   one: the App Server product profile calls `permission_rules::install`, capability-only hosts
+   bind `NoCommandRules`. `serve` cannot install the Session part itself, because App Server tests
+   that pair a product home with `defaults::install` already bind the empty host. The process part
+   is registered with local execution, where the rules are consumed, not for a product home alone.
+2. **Reason texts (§5.2, §6).** Denials read "Command rules could not be read: <error>" and
+   "Command denied by command rule `<command>` (<match>)", matching §5.5 and the capitalized
+   preset reasons.
+3. **Recheck cancellation (§5.3).** A rules read cancelled during the recheck after an allow
+   response ends the request with `approval/cancelled` ("Tool execution cancelled") and the
+   cancellation is returned, as for a batch stopped at that point.
+4. **Port future type (§4.2).** `HostFuture<'_, T>` is the existing alias of
+   `BoxFuture<'_, Result<T, HostError>>`.

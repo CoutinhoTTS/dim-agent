@@ -1,6 +1,6 @@
 # Permission 命令规则
 
-状态：草案（待评审）。路线图项 F2（[#73](https://github.com/arcships/dim/issues/73)）。
+状态：已实现（实现中发现的修正见 [§12](#12-实现说明)）。路线图项 F2（[#73](https://github.com/arcships/dim/issues/73)）。
 总体设计：[§3 `/approvals`、命令规则行](../overview.md#3-基于现有机制的集成)与
 [附录 B.1 Permission 行](../overview.md#b1-session-与分支-capability)。作用域：
 [ADR 002](../../adr/002-plugin-scope.md)（对现有分支级 Permission 的补充，存储归 App Server 内的所有者）与
@@ -139,9 +139,10 @@ pub struct CommandRule { pub command: String,
 ```rust
 pub trait ReadCommandRules: Send + Sync + 'static {
     fn rules(&self, cancel: CancellationToken)
-        -> BoxFuture<'_, Result<Vec<CommandRule>, HostError>>;   // Failed | Cancelled
+        -> HostFuture<'_, Vec<CommandRule>>;   // Result<_, HostError>：Failed | Cancelled
 }
 pub struct CommandRulesHost(pub Arc<dyn ReadCommandRules>);       // Session 值
+pub struct NoCommandRules;                                         // 固定的空宿主
 
 impl Permission {
     pub async fn decide(&self, call: &ApprovalCallData, risk: Option<&str>,
@@ -156,8 +157,9 @@ impl Permission {
 
 | 配置 | 绑定 |
 | --- | --- |
-| `defaults::install`、`install_with_prompt`、`install_with_process_model`（App Server mock 配置与测试宿主） | `install_profile` 用 `session_value` 绑定固定的空宿主，与它已绑定的 `EmptyPromptHost` 并列。现有测试不变 |
-| 带 Settings 的 App Server（产品 home 或本地执行） | `permission_rules::install(&mut builder)` 加入 Session 部分 `CommandRules`（Deps `Arc<SettingsService>`），它提供的 `CommandRulesHost` 每次调用都读取 `SettingsService::read::<PermissionSettings>(User)`。进程部分 `PermissionRulesPlugin`（Deps `Arc<SettingsService>`，所有者行 `permission`）提供管理方法。两者与文档类型 `PermissionSettings`（`NAMESPACE = "permission"`、`USER_FILE = "permission.json"`、无 `PROJECT_FILE`）同在 `dim-app-server/src/permission_rules.rs` |
+| `defaults::install`、`install_with_prompt`、`install_with_process_model`（App Server mock 配置与测试宿主） | `install_profile` 用 `session_value` 绑定固定的空宿主 `NoCommandRules`，与它已绑定的 `EmptyPromptHost` 并列。现有测试不变 |
+| `install_with_prompt_capability`、`install_local_execution`、`install_minimal_execution` | 与 `PromptHost` 一样不绑定：由安装它们的宿主绑定端口。只用 capabilities 的宿主（集成测试、`xtask` 本地图）绑定 `CommandRulesHost(Arc::new(NoCommandRules))` |
+| App Server 产品配置（`main.rs` 中的 `install_local_execution`、其测试与 `xtask` App Server 图） | 配置调用 `permission_rules::install(&mut builder)`，加入 Session 部分 `CommandRules`（Deps `Arc<SettingsService>`），它提供的 `CommandRulesHost` 每次调用都读取 `SettingsService::read::<PermissionSettings>(User)`。`serve` 在本地执行时注册进程部分 `PermissionRulesPlugin`（Deps `Arc<SettingsService>`，所有者行 `permission`），与 `mcp`、`skills` 并列，由它提供管理方法。两者与文档类型 `PermissionSettings`（`NAMESPACE = "permission"`、`USER_FILE = "permission.json"`、无 `PROJECT_FILE`）同在 `dim-app-server/src/permission_rules.rs` |
 
 ## 5. 流程
 
@@ -184,8 +186,8 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
  decide(call, risk)
   1. call.name 在 disallowedTools 中                -> Deny   （现有）
   2. 是命令调用？读取规则（每次都读）
-       读取失败                                    -> Deny "command rules could not be read"
-       某条 deny 规则命中某一段                    -> Deny "denied by command rule `<command>` (<match>)"
+       读取失败                                    -> Deny "Command rules could not be read: <error>"
+       某条 deny 规则命中某一段                    -> Deny "Command denied by command rule `<command>` (<match>)"
   3. call.name 在 allowedTools 中                   -> Allow  （现有）
   4. 按风险走预设                                   -> Allow | Ask | Deny（现有）
   5. 结果为 Ask 且某条 allow 规则命中该简单命令     -> Allow
@@ -241,7 +243,8 @@ WorkspaceTools 的 `exec` 和 ShellTools 的 `execute`，两者都已接收 `com
 
 | 情况 | 结果 |
 | --- | --- |
-| 规则来源无法读取或持久化文件无效 | 命令调用被拒绝，理由为 "command rules could not be read: …"；其他调用不受影响。`permission.rules` 返回 `permission_rules_failed` |
+| 规则来源无法读取或持久化文件无效 | 命令调用被拒绝，理由为 "Command rules could not be read: …"；其他调用不受影响。`permission.rules` 返回 `permission_rules_failed` |
+| 管理调用被中断（所有者卸载） | 与 MCP 一样返回 `operation_interrupted`；写入可能已经提交，重试前先读取 |
 | 读取被取消（批次取消、Session 关闭） | 准入以取消结束，与现在相同 |
 | `set_rules` 含无效规则（空、含分隔字符、未知字段） | 参数无效；不写入 |
 | `set_rules` 修订号过期 | `permission_rules_conflict`；重新读取后重试 |
@@ -333,3 +336,23 @@ App Server 流程（`crates/dim-app-server/tests/`）：
 
 7. `permission.set_rules` 写入一条规则；已打开的 Session 中下一次 `exec` 遵循它。修订号过期返回
    `permission_rules_conflict`；含 `;` 的规则被拒绝；工作区里的 `.dimcode/permission.json` 不起作用。
+
+由 `crates/dim-agent-capabilities/tests/permission_flow.rs`（1–6）与
+`crates/dim-app-server/tests/transport_flow/permission_rules.rs`（7）实现。
+
+## 12. 实现说明
+
+对照代码时发现的草案修正；上文各节已按此表述。
+
+1. **绑定（§4.2）。** 草案只列了 `defaults` 配置和“带 Settings 的 App Server”。
+   `install_with_prompt_capability`、`install_local_execution` 与 `install_minimal_execution` 不绑定
+   宿主（正如它们不绑定 `PromptHost`），由调用方绑定：App Server 产品配置调用
+   `permission_rules::install`，只用 capabilities 的宿主绑定 `NoCommandRules`。`serve` 不能自行安装
+   Session 部分，因为有的 App Server 测试把产品 home 与 `defaults::install` 搭配，已经绑定了空宿主。
+   进程部分在本地执行时注册（规则在那里被使用），而不是只要有产品 home 就注册。
+2. **理由文本（§5.2、§6）。** 拒绝理由为 "Command rules could not be read: <error>" 与
+   "Command denied by command rule `<command>` (<match>)"，与 §5.5 及首字母大写的预设理由一致。
+3. **复核时的取消（§5.3）。** 允许回复后的复核中若规则读取被取消，请求以 `approval/cancelled`
+   （"Tool execution cancelled"）结束并返回取消，与该时刻批次被停止相同。
+4. **端口的 future 类型（§4.2）。** `HostFuture<'_, T>` 是现有的
+   `BoxFuture<'_, Result<T, HostError>>` 别名。
