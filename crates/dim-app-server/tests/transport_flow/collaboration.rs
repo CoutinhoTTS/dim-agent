@@ -1214,10 +1214,7 @@ async fn members_cancel_close_and_leave_the_team() {
         [CollaborationOutcome::Cancelled { .. }]
     ));
     assert!(agent_results(&timeline)[0].contains("Status: cancelled."));
-    // Reloading directory logic preserves both Team addressing and the
-    // temporary Agent's privacy. The remaining flow also checks its watcher
-    // still closes the Agent when its last Session closes.
-    server.restart("Agents").await.unwrap();
+    // Cancellation preserves Team addressing and the temporary Agent's privacy.
     say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
     idle(&mut client, &lead).await;
     let listed = last_ok(&events(&lead_session).await);
@@ -1499,20 +1496,23 @@ async fn members_cancel_close_and_leave_the_team() {
             reason: dim_agent_runtime::CAPABILITY_RELOADING.into(),
         }]
     );
+    // The registry keeps its old generation until it reloads; even a read-only
+    // action must reject the stopped provider, while host tools keep working.
+    say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
+    idle(&mut client, &lead).await;
+    assert!(
+        last_error(&events(&lead_session).await).contains(dim_agent_runtime::CAPABILITY_RELOADING)
+    );
     say(
         &mut client,
         &lead,
-        tool(json!({"action": "request", "agentId": default_agent,
-            "sessionId": member, "prompt": "work after reload"})),
+        "tool:echo {\"text\":\"still running\"}".into(),
         "queue",
     )
     .await;
-    let outcomes = poll("member reused after reload", async || {
-        let outcomes = result_of(&events(&lead_session).await, &member);
-        (outcomes.len() == 2).then_some(outcomes)
-    })
-    .await;
-    assert!(matches!(outcomes[1], CollaborationOutcome::Completed));
+    idle(&mut client, &lead).await;
+    let (error, text) = results(&events(&lead_session).await).pop().unwrap();
+    assert!(!error && text.contains("still running"), "{text}");
 
     server.shutdown();
     server.join().await.unwrap();
@@ -2310,6 +2310,19 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
             .rpc("session.close", json!({"sessionId":member}))
             .await,
     );
+    // Reattach the leader's tools to the current provider generation.
+    assert_ok(
+        &client
+            .rpc("session.detach", json!({"sessionId":lead}))
+            .await,
+    );
+    unload(&agent, &lead).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
+    let session = agent.get_session(&lead).unwrap();
     poll("restored member relation removed", async || {
         say(&mut client, &lead, tool(json!({"action":"list"})), "queue").await;
         idle(&mut client, &lead).await;

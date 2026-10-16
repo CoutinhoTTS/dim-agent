@@ -208,8 +208,8 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | --- | --- |
 | Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled. |
 | Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls per plugin: not language-neutral (D5). |
-| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled, and does not wait for an optional part to become active: the Session is built without it and only that plugin's features are unavailable. Whether a part is attached is decided when the Session is published (at `SessionLifecycle::activated()`); a part that becomes active later is attached on the next Session reload, so the tool set stays the same within one load (ADR 002 D3, #34). Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
-| Effect on sequence, batch, interrupt, reload | Decided when the Session is published, and a Session reload decides again; enabling a plugin applies to Sessions loaded afterwards. |
+| Generic capability | Agent assembly collects the named services each installed plugin declares in `provides`, and installs a part only when its plugin is enabled, and does not wait for an optional part to become active: the Session is built without it and only that plugin's features are unavailable. For tool contributions, attachment is decided on the first ToolRegistry read during branch initialization (session-boundary A.5); a part that becomes active later is attached on the next Session reload, so the tool set stays the same within one load (ADR 002 D3, #34). Installation never depends on `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). |
+| Effect on sequence, batch, interrupt, reload | Tool contributions are sampled during branch initialization before Session publication; a registry or Session reload samples again; enabling a plugin applies to Sessions loaded afterwards. |
 | Owner and issue | Runtime (Agent assembly); issue to be opened. |
 
 #5, used by the offline rows, in [ExternalAgent §9](../plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The optional `reason` on `input/withdraw` and the `LaunchRequest.agent` default are changes of InputQueue and Agents, listed in [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins).
@@ -309,7 +309,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | Result fact | `input/deleted { input_id }`, written only by InputQueue, only when it consumes an `input/withdraw` while it holds that input unapplied |
 | Held | InputQueue holds an input from its `input/message` until it writes `input/applied` or `input/deleted` for it. |
 | No effect | Unknown id, input already applied, or already deleted: InputQueue writes nothing and no failure event exists; the caller's reply is `notHeld` |
-| Client path | `session.input.withdraw {sessionId, branchId, inputId, reason?}`, provided by InputQueue through `sessionMethods` (namespace `session.input`; proposed Session-scoped InputQueue part that calls the branch's withdrawal service), so Rpc names no owning service → `{status: "deleted", sequence}` or `{status: "notHeld"}` |
+| Client path | `session.input.withdraw {sessionId, branchId, inputId, reason?, steer?}`, provided by InputQueue through `sessionMethods` (namespace `session.input`; Session-scoped part `InputMethods`, implemented in S1, that calls the branch's withdrawal service), so Rpc names no owning service → `{status: "deleted", sequence}` or `{status: "notHeld"}`. With `steer` (a `UserInput`), the reply also carries `steer: {inputId, sequence}` for the new Steer input |
 | Process and branch-part path | `sessions.withdraw` for process callers, InputQueue's branch withdrawal service for branch parts: by the `input_id` returned when the caller wrote the input |
 | Write path | The service appends `input/withdraw`, then replies with InputQueue's decision for that command. InputQueue's recheck uses only its own decision state (held set), never a lock on another owner's facts |
 | Withdraw and re-submit as Steer | One atomic batch: `input/withdraw` for the old input plus the new Steer `input/message`. The withdraw takes effect only if the old input is still held; the new input is written either way |
@@ -372,7 +372,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | A1 | Every source input starts with one marker block | Existing context-block format | Each plugin defines recognition |
 | A2 | Moved to the format decision in [A.3](#a3-sessionconfig-fields) | — | — |
 | A3 | Process callers may call `idle` and `stop` on Sessions they started | Collaboration precedent | Another stop path |
-| A4 | "Withdraw and re-submit as Steer" is written as one batch by InputQueue's `session.input.withdraw` through a further optional parameter (proposed; its shape is not defined here) | Judgment | A separate built-in |
+| A4 | "Withdraw and re-submit as Steer" is written as one batch by InputQueue's `session.input.withdraw` through its optional `steer` parameter, the new input's user content (S1) | Judgment | A separate built-in |
 
 ## Appendix E. Rust binding
 
