@@ -389,7 +389,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 | `invalid_params`（`-32602`） | 参数形状错误；命令为空或超过 64 KiB；`runId` 不符合 `[A-Za-z0-9-]{1,64}`；未知的 `mode` |
 | `shell_busy` | Session 中另一个运行正在进行 |
 | `duplicate_run` | `runId` 已在本代中使用 |
-| `shell_unavailable` | 构造器拒绝（H2）；消息中带其代码和原因 |
+| `shell_unavailable` | HostPlatform 拒绝构造命令（H2）：`EXEC_SHELL_CONFIG_INVALID`、`EXEC_SHELL_UNAVAILABLE`、`cwd_not_found`、`EXEC_SHELL_CWD_UNSUPPORTED` 或 `EXEC_SHELL_PATH_MAPPING_FAILED`；消息中带其代码和原因 |
 | `spawn_failed` | 无法启动进程；消息中带原因 |
 | `session_closed`、`session_invalid_input` | 启动时运行时门面拒绝（Session 或分支已关闭、未知分支），使用 `AgentError` 现有的 wire 映射 |
 
@@ -453,7 +453,8 @@ ShellInput 用 Rust 实现，位于自己的 crate。
 | `sessionMethods` key `shell` | `dim_agent_capabilities::methods` 的 `SessionMethods::provide(ctx, &scope, "shell", declarations, handler)`（C1，[#83](https://github.com/arcships/dim/pull/83)），在 `apply` 中于 ShellInput 自己的 effect 之后调用，因此它的卸载 effect 先运行。`declarations` 为 `MethodDecl { progress: true, ..MethodDecl::new("shell.run", true, Interruption::Report) }`、`MethodDecl::new("shell.stop", true, Interruption::Report)` 和 `MethodDecl::new("shell.list", false, Interruption::Report)`。装配用 `AgentBuilder::session_methods("shell")` 登记命名空间 |
 | 处理函数 | 一个 `Handler`，以方法名、参数、调用的 `CancellationToken`（A.4 两种取消）和它的 `Progress` 调用，返回 `Result<Value, RpcError>` 的 future。自己的错误用 `RpcError::app(-32000, "shell_busy", ..)` 等，`invalid_params` 用 `RpcError::invalid`；运行时门面的错误用 `?` 转换（`From<AgentError> for RpcError`） |
 | 进度 | 处理函数的 `Progress` 参数：`progress.send(json!({"text": text}))`，有略去的字节时加上 `"skipped"`。运行任务持有它的克隆；回复之后的发送被丢弃 |
-| 进程 | S7 构造器返回 `ProcessSpec`；`HostPlatform::spawn` 返回带 `stdout`、`stderr`、`wait` 和 `terminate` 的 `ProcessTree` |
+| 命令构造 | `HostPlatform::build_process_spec(command, cwd).await` 返回 `(ProcessSpec, ExecShellRuntime)` 或 `ProcessSpecError { code, reason }`；内部读取当前 shell |
+| 进程 | `HostPlatform::spawn(ProcessSpec)` 返回带 `stdout`、`stderr`、`wait` 和 `terminate` 的 `ProcessTree` |
 | 运行任务 | ShellInput 自己的 `TaskTracker`，与 `SessionMethods` 跟踪的调用分开；每个任务持有自己的 `ProcessTree`，观察 `ctx.cancelled()` 和 `SessionLifecycle::closing()`；`ctx.effect` 登记等待该跟踪器的卸载清理函数 |
 | 记录的输入（A.3） | `TreeCommands::get(branch_id)?.input(..)` |
 | 诊断 | `Diagnostics::span("shell.run", None, None, Some(run_id.as_str()))`，运行结束时记录 `outcome` |

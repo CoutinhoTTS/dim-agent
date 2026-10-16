@@ -389,7 +389,7 @@ ShellInput's own errors (`-32000` unless noted):
 | `invalid_params` (`-32602`) | Params of the wrong shape; empty command or one over 64 KiB; `runId` not `[A-Za-z0-9-]{1,64}`; unknown `mode` |
 | `shell_busy` | Another run of the Session is running |
 | `duplicate_run` | `runId` already used in this generation |
-| `shell_unavailable` | The builder refused (H2); its code and reason are in the message |
+| `shell_unavailable` | HostPlatform's command construction refused the command (H2): `EXEC_SHELL_CONFIG_INVALID`, `EXEC_SHELL_UNAVAILABLE`, `cwd_not_found`, `EXEC_SHELL_CWD_UNSUPPORTED` or `EXEC_SHELL_PATH_MAPPING_FAILED`; its code and reason are in the message |
 | `spawn_failed` | The process could not be started; the reason is in the message |
 | `session_closed`, `session_invalid_input` | The runtime facade refused at start (closed Session or branch, unknown branch), with the existing wire mapping of `AgentError` |
 
@@ -453,7 +453,8 @@ ShellInput is implemented in Rust, in its own crate.
 | `sessionMethods` key `shell` | `SessionMethods::provide(ctx, &scope, "shell", declarations, handler)` from `dim_agent_capabilities::methods` (C1, [#83](https://github.com/arcships/dim/pull/83)), called in `apply` after ShellInput's own effects, so its unload effect runs first. `declarations` holds `MethodDecl { progress: true, ..MethodDecl::new("shell.run", true, Interruption::Report) }`, `MethodDecl::new("shell.stop", true, Interruption::Report)` and `MethodDecl::new("shell.list", false, Interruption::Report)`. The assembly records the namespace with `AgentBuilder::session_methods("shell")` |
 | Handler | A `Handler`, called with the method name, the params, the call's `CancellationToken` (A.4 Two cancellations) and its `Progress`, returning a future of `Result<Value, RpcError>`. Own errors are `RpcError::app(-32000, "shell_busy", ..)` and the like, and `RpcError::invalid` for `invalid_params`; runtime facade errors convert with `?` (`From<AgentError> for RpcError`) |
 | Progress | The handler's `Progress` argument: `progress.send(json!({"text": text}))`, with `"skipped"` added when bytes were left out. The run task holds a clone; a send after the reply is dropped |
-| Process | The S7 builder returns a `ProcessSpec`; `HostPlatform::spawn` returns a `ProcessTree` with `stdout`, `stderr`, `wait` and `terminate` |
+| Command construction | `HostPlatform::build_process_spec(command, cwd).await` returns `(ProcessSpec, ExecShellRuntime)` or `ProcessSpecError { code, reason }`; it reads the current shell itself |
+| Process | `HostPlatform::spawn(ProcessSpec)` returns a `ProcessTree` with `stdout`, `stderr`, `wait` and `terminate` |
 | Run tasks | ShellInput's own `TaskTracker`, separate from the calls `SessionMethods` tracks; each task owns its `ProcessTree` and watches `ctx.cancelled()` and `SessionLifecycle::closing()`; `ctx.effect` registers the disposer that waits for the tracker |
 | Recorded input (A.3) | `TreeCommands::get(branch_id)?.input(..)` |
 | Diagnostics | `Diagnostics::span("shell.run", None, None, Some(run_id.as_str()))`, with `outcome` recorded when the run ends |

@@ -1,11 +1,12 @@
 use crate::{
     ServerConfig,
-    agents::AgentIndex,
+    agents::{AgentIndex, SessionUse},
     control::ServerControl,
     outbound::{Frame, Sender},
     protocol::*,
 };
 use dim_agent_capabilities::{
+    methods::{Accepted, RpcError, SessionMethods},
     permission::{Permission, PermissionState, PermissionUpdateError},
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
@@ -16,6 +17,7 @@ mod mcp;
 mod subscription;
 mod tree;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -62,7 +64,7 @@ impl Connection {
     pub fn new(
         hub: Arc<ConnectionHub>,
         local: bool,
-    ) -> (Arc<Self>, tokio::sync::mpsc::Receiver<Frame>) {
+    ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
         let closed = hub.closing.child_token();
         let (sender, receiver) = Sender::new(closed.clone());
         let connection = Arc::new(Self {
@@ -121,7 +123,36 @@ impl Connection {
             let guard = self.admit(&request)?;
             self.admit_entry(rpc, &request.call)?;
             let this = self.clone();
-            if let Call::Management { method, params } = &request.call {
+            let Request { id, call } = request;
+            if let Call::Contributed { method, params } = call {
+                // Session namespaces never overlap management namespaces
+                // (assembly fails otherwise), so routing a candidate first
+                // keeps the contract's order: built-in, management, Session.
+                if self.protocol_version() >= 3
+                    && let Some(namespace) = rpc.sessions.owner(&method)
+                {
+                    // An unloading load admits no new call; the next load serves it.
+                    if rpc.stopping.is_cancelled() {
+                        return Err(RpcError::reloading());
+                    }
+                    let (rpc, namespace) = (rpc.clone(), namespace.to_owned());
+                    let progress = this.progress(&id, &method);
+                    rpc.commands.clone().spawn(async move {
+                        match this
+                            .session_method(&rpc, &namespace, method, params, progress)
+                            .await
+                        {
+                            Ok((accepted, usage)) => {
+                                this.answer(id, guard, accepted).await;
+                                drop(usage);
+                            }
+                            Err(error) => {
+                                let _ = this.sender.send(Outbound::result(id, Err(error)), false);
+                            }
+                        }
+                    });
+                    return Ok(());
+                }
                 if self.protocol_version() < 3 || !self.local {
                     return Err(RpcError::app(
                         -32601,
@@ -129,45 +160,29 @@ impl Connection {
                         "Management method is unavailable",
                     ));
                 }
-                // An unloading load admits no new call; the next load serves it.
                 if rpc.stopping.is_cancelled() {
                     return Err(RpcError::reloading());
                 }
+                let progress = this.progress(&id, &method);
                 let accepted = rpc.owners.dispatch(
                     &rpc.ctx,
-                    method.clone(),
-                    params.clone(),
+                    method,
+                    params,
                     rpc.unloading.clone(),
+                    progress,
                 )?;
-                rpc.commands.spawn(async move {
-                    let result = accepted
-                        .reply
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(RpcError::wire(-32603, "Management operation failed"))
-                        })
-                        .map(Reply::Management);
-                    let _ = this
-                        .sender
-                        .send(Outbound::result(request.id, result), false);
-                    // The id is the client's again once answered. An
-                    // interrupted operation may still commit: this load's
-                    // unload waits for it, so the next load reads its outcome.
-                    drop(guard);
-                    let _ = accepted.settled.await;
-                });
+                rpc.commands.spawn(this.answer(id, guard, accepted));
                 return Ok(());
             }
             let rpc = rpc.clone();
             // Shutdown must join its control requests without waiting for
             // business commands that a forced exit deliberately abandons.
-            let shutdown = matches!(request.call, Call::Shutdown(_))
-                .then(|| self.hub.shutdown_requests.token());
+            let shutdown =
+                matches!(call, Call::Shutdown(_)).then(|| self.hub.shutdown_requests.token());
             rpc.commands.clone().spawn(async move {
                 let _guard = guard;
                 let _shutdown = shutdown;
-                let id = request.id;
-                let result = this.handle(&rpc, id.clone(), request.call).await;
+                let result = this.handle(&rpc, id.clone(), call).await;
                 if let Some(result) = result {
                     let _ = this.sender.send(Outbound::result(id, result), false);
                 }
@@ -177,6 +192,74 @@ impl Connection {
         if let Err(error) = admitted.and_then(|admitted| admitted) {
             let _ = self.sender.send(Outbound::result(id, Err(error)), false);
         }
+    }
+    /// Sends an admitted contributed call's reply on this connection. The id
+    /// is the client's again once answered. An interrupted operation may still
+    /// commit: the calling load's unload waits for it, so the next load reads
+    /// its outcome.
+    async fn answer(self: Arc<Self>, id: RequestId, guard: Inflight, accepted: Accepted) {
+        let result = accepted
+            .reply
+            .await
+            .unwrap_or_else(|_| Err(RpcError::wire(-32603, "Method operation failed")))
+            .map(Reply::Contributed);
+        let _ = self.sender.send(Outbound::result(id, result), false);
+        drop(guard);
+        let _ = accepted.settled.await;
+    }
+    /// The progress sink of contributed call `id` (methods contract A.2):
+    /// `management.progress {id, method, data}` on this connection only, best
+    /// effort. Progress the connection cannot take, also after a disconnect,
+    /// is dropped; it never closes the connection or holds back the reply.
+    fn progress(
+        self: &Arc<Self>,
+        id: &RequestId,
+        method: &str,
+    ) -> impl Fn(Value) + Send + Sync + 'static {
+        let (connection, id, method) = (self.clone(), id.clone(), method.to_owned());
+        move |data| {
+            connection
+                .sender
+                .offer(Outbound::notice(Notification::Progress(ProgressNotice {
+                    id: id.clone(),
+                    method: method.clone(),
+                    data,
+                })));
+        }
+    }
+    /// Admits a Session method call (methods contract A.1): reads `sessionId`
+    /// from the raw params, authorizes it like a built-in, acquires the
+    /// Session (restoring an unloaded one) and hands the call to the provider
+    /// the Session serves under `namespace`. The returned use holds the
+    /// Session for the duration of the call; `sessionId` stays in the params.
+    async fn session_method(
+        &self,
+        rpc: &RpcService,
+        namespace: &str,
+        method: String,
+        params: Value,
+        progress: impl Fn(Value) + Send + Sync + 'static,
+    ) -> Result<(Accepted, SessionUse), RpcError> {
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid("sessionId is required"))?
+            .to_owned();
+        if !rpc.config.session_execution {
+            return Err(integration_pending());
+        }
+        self.authorize(rpc, &session_id)?;
+        let usage = rpc.index.acquire(&session_id).await?;
+        // A recorded namespace whose provider is not active, also while the
+        // Session reloads, is `service_reloading` (`AgentError::Reloading`).
+        let provider = usage
+            .session
+            .session_named_service::<SessionMethods>(namespace)?;
+        if rpc.stopping.is_cancelled() {
+            return Err(RpcError::reloading());
+        }
+        let accepted = provider.accept(method, params, rpc.unloading.clone(), progress)?;
+        Ok((accepted, usage))
     }
     /// The connection's entry decides what it may call before any method is
     /// routed, for built-in and contributed methods alike: protected profiles
@@ -260,16 +343,15 @@ impl Connection {
                     | Call::AgentList
             )
         {
-            return Err(RpcError::app(
-                -32000,
-                "product_integration_pending",
-                "Programming integration is pending",
-            ));
+            return Err(integration_pending());
         }
         if self.protocol_version() < 3
             && matches!(
                 call,
-                Call::InputLookup(_) | Call::History(_) | Call::Summaries(_)
+                Call::InputLookup(_)
+                    | Call::History(_)
+                    | Call::Summaries(_)
+                    | Call::SessionMethods(_)
             )
         {
             return Err(RpcError::app(
@@ -309,9 +391,11 @@ impl Connection {
             Call::ExecStop(p) => (Some(&p.session_id), None),
             Call::ModelUpdate(p) => (Some(&p.session_id), None),
             Call::Attach(p) => (Some(&p.session_id), None),
-            Call::Detach(p) | Call::Close(p) | Call::SessionMcp(p) | Call::McpRefresh(p) => {
-                (Some(&p.session_id), None)
-            }
+            Call::Detach(p)
+            | Call::Close(p)
+            | Call::SessionMcp(p)
+            | Call::McpRefresh(p)
+            | Call::SessionMethods(p) => (Some(&p.session_id), None),
             Call::Create(p) => {
                 if p.agent_id.is_some() && self.protocol_version() < 3 {
                     return Err(RpcError::invalid("agentId requires protocol v3"));
@@ -374,19 +458,25 @@ impl Connection {
             return Err(RpcError::invalid("branchId must not be empty"));
         }
         if let Some(id) = session_id {
-            let known = rpc.index.version_of(id);
-            if known.is_some_and(|version| version != self.protocol_version())
-                || (known.is_none() && rpc.index.session(id).is_some())
-            {
-                return Err(RpcError::app(
-                    -32000,
-                    "session_protocol_version",
-                    "Session belongs to another protocol version",
-                ));
-            }
-            if let Some(reason) = rpc.index.unavailable_session(id) {
-                return Err(RpcError::from(AgentError::Storage(reason)));
-            }
+            self.authorize(rpc, id)?;
+        }
+        Ok(())
+    }
+    /// A Session belongs to the protocol version that created it, and one
+    /// whose storage is damaged is unavailable.
+    fn authorize(&self, rpc: &RpcService, id: &str) -> Result<(), RpcError> {
+        let known = rpc.index.version_of(id);
+        if known.is_some_and(|version| version != self.protocol_version())
+            || (known.is_none() && rpc.index.session(id).is_some())
+        {
+            return Err(RpcError::app(
+                -32000,
+                "session_protocol_version",
+                "Session belongs to another protocol version",
+            ));
+        }
+        if let Some(reason) = rpc.index.unavailable_session(id) {
+            return Err(RpcError::from(AgentError::Storage(reason)));
         }
         Ok(())
     }
@@ -437,6 +527,7 @@ impl Connection {
             Call::SessionMcp(p) | Call::McpRefresh(p) => Some(&p.session_id),
             Call::Attach(p) => Some(&p.session_id),
             Call::BranchCreate(p) => Some(&p.session_id),
+            Call::SessionMethods(p) => Some(&p.session_id),
             Call::Close(p) if rpc.index.session_available(&p.session_id) => Some(&p.session_id),
             _ => None,
         };
@@ -452,7 +543,7 @@ impl Connection {
             // Capability owners retain admitted work when the RPC generation ends.
             return Some(tokio::select! {
                 biased;
-                _ = rpc.unloading.cancelled() => Err(RpcError::app(-32000, "operation_interrupted", "Service reloaded; the operation may already have committed. Read the current state before retrying")),
+                _ = rpc.unloading.cancelled() => Err(RpcError::interrupted()),
                 result = self.execution_session(rpc, &usage.as_ref().expect("execution operation pins its Session").session, call) => result,
             });
         }
@@ -707,6 +798,10 @@ impl Connection {
                 })
             }
             Call::BranchCreate(params) => self.create_branch(rpc, params).await,
+            Call::SessionMethods(_) => rpc
+                .sessions
+                .listed(&usage.expect("session.methods pins its Session").session)
+                .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
             Call::AgentCreate(params) => rpc
                 .index
                 .create(uuid::Uuid::new_v4(), params.profile)
@@ -745,7 +840,7 @@ impl Connection {
                     Err(error) => Err(RpcError::from(error)),
                 }
             }
-            _ => unreachable!("management methods are dispatched before session operations"),
+            _ => unreachable!("contributed methods are dispatched before session operations"),
         })
     }
     async fn execution_session(
@@ -895,7 +990,7 @@ impl Connection {
                 .unwrap_or(rpc.index.default_agent_id());
             match rpc.index.unavailable_agent(agent_id) {
                 Some(reason) => RpcError::from(AgentError::Storage(reason)),
-                None => RpcError::agent_unknown(),
+                None => agent_unknown(),
             }
         })?;
         let mut config = crate::agents::session_config(&host.profile, &rpc.config.session_defaults);
@@ -1016,6 +1111,15 @@ fn configuration_outcome(
             "Configuration was superseded by another update",
         )),
     }
+}
+
+/// Session operations wait for the product execution profile.
+fn integration_pending() -> RpcError {
+    RpcError::app(
+        -32000,
+        "product_integration_pending",
+        "Programming integration is pending",
+    )
 }
 
 fn skills_error(error: SkillsError) -> RpcError {
@@ -1166,6 +1270,8 @@ pub(crate) struct RpcService {
     pub ctx: Ctx,
     /// This profile's management namespaces and their owner rows.
     pub owners: crate::methods::Owners,
+    /// The `sessionMethods` namespaces every Session lists.
+    pub sessions: crate::methods::SessionNamespaces,
     /// Cancelled when this load starts unloading, before its handler is
     /// removed; it then admits no management call or `hello`.
     pub stopping: CancellationToken,
@@ -1220,13 +1326,21 @@ pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
     /// Management namespace and the loader row of its owner.
     methods: Arc<[(String, String)]>,
+    /// The `sessionMethods` namespaces assembly recorded for every Session.
+    sessions: Arc<[String]>,
     root: Ctx,
 }
 impl RpcPlugin {
-    pub fn new(config: Arc<ServerConfig>, methods: Arc<[(String, String)]>, root: Ctx) -> Self {
+    pub fn new(
+        config: Arc<ServerConfig>,
+        methods: Arc<[(String, String)]>,
+        sessions: Arc<[String]>,
+        root: Ctx,
+    ) -> Self {
         Self {
             config,
             methods,
+            sessions,
             root,
         }
     }
@@ -1261,10 +1375,12 @@ impl TypedPlugin for RpcPlugin {
                     format!("management namespace {namespace} names unknown row {row}").into(),
                 ));
             }
+            let sessions = crate::methods::SessionNamespaces::new(&self.methods, &self.sessions)?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
                 owners: crate::methods::Owners::new((*loader).clone(), &self.methods),
+                sessions,
                 stopping: ctx.cancellation_token(),
                 control,
                 config: self.config.clone(),

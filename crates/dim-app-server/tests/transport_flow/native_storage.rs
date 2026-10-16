@@ -829,6 +829,15 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
         ..Default::default()
     };
     let (server, original_agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    // The server creates the missing database directory owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
     let mut client = Client::new_version(&server, false, 3).await;
     let original_instance = client.instance.clone();
     let mut parameters = create(json!(["branch"]));
