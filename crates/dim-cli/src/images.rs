@@ -1,22 +1,32 @@
 use crate::Result;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use dim_agent_types::{ContentBlock, ImageSource, ImageSourceType};
-use std::{fs::File, io::Read, path::PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::{fs::OpenOptions, io::Read, path::PathBuf};
 
 pub fn load(paths: &[PathBuf]) -> Result<Vec<ContentBlock>> {
+    let mut encoded_size = 0;
     paths
         .iter()
         .map(|path| {
-            let read = || -> Result<ContentBlock> {
-                if !std::fs::metadata(path)?.is_file() {
+            let mut read = || -> Result<ContentBlock> {
+                let mut options = OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                options.custom_flags(libc::O_NONBLOCK);
+                let file = options.open(path)?;
+                if !file.metadata()?.is_file() {
                     return Err("Expected a local image file".into());
                 }
                 let mut bytes = Vec::new();
-                File::open(path)?
-                    .take(5 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)?;
+                file.take(5 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
                 if bytes.len() > 5 * 1024 * 1024 {
                     return Err("Image exceeds 5 MiB".into());
+                }
+                encoded_size += bytes.len().div_ceil(3) * 4;
+                if encoded_size > 16 * 1024 * 1024 {
+                    return Err("Images exceed 16 MiB after base64 encoding".into());
                 }
                 let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes.as_slice()))
                     .with_guessed_format()?;

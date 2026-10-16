@@ -341,6 +341,7 @@ async fn wait_turn(
         } else {
             let content = prompt
                 .into_iter()
+                .filter(|text| !text.trim().is_empty())
                 .map(|text| ContentBlock::Text { text: text.into() })
                 .chain(images)
                 .collect();
@@ -545,7 +546,12 @@ async fn wait_turn(
                 }
             }
             Message::Response { id, result } if Some(id) == submit => {
-                result.map_err(|error| format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again"))?;
+                if let Err(error) = result {
+                    match error.data.as_ref().and_then(|data| data.get("appError")).and_then(Value::as_str) {
+                        Some("invalid_params" | "session_invalid_input" | "session_closed" | "session_build_failed" | "service_reloading" | "unknown_method") => return Err(error.into()),
+                        _ => return Err(format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again").into()),
+                    }
+                }
                 submit = None;
                 if stop.is_none() && settled.is_none() {
                     idle = Some(
