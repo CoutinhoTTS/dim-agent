@@ -95,6 +95,33 @@ blindly. Use these methods rather than editing imported user files. `skills.set_
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
 
+### MCP OAuth
+
+HTTP and SSE servers that answer `401` use OAuth ([design](../../docs/design/appserver/mcp-oauth.md)).
+It applies to a remote entry without `auth` or an `Authorization` header whose URL is HTTPS or
+loopback HTTP; an entry's optional `oauth` object (`clientId`, `callbackPort`,
+`authServerMetadataUrl`, `scopes`) uses Claude Code's field names and carries no secret.
+
+- `mcp.auth.start({source, id, cwd?, clientSecret?})` needs an enabled entry. It discovers the
+  authorization server through Protected Resource Metadata (or `oauth.authServerMetadataUrl` when
+  the server publishes none), registers a client when needed, and returns
+  `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}`. The redirect URI is
+  `http://localhost:{callbackPort}/callback` (default 1456); the daemon runs no listener.
+- `mcp.auth.complete({attemptId, callbackUrl})` takes the full callback URL, captured by the
+  client's loopback listener or pasted by the user, validates it and exchanges the code. A wrong
+  redirect, `state` or `iss` leaves the attempt pending.
+- `mcp.auth.logout({source, id, cwd?})` revokes the tokens (RFC 7009) and deletes the record,
+  replying `{revoked}`. It is allowed for disabled entries and for entries that no longer use
+  OAuth.
+
+Credentials are keyed by server id and canonical URL, shared by every source and Session, and
+stored in `mcp-oauth.json` under the home root (version 1, mode 0600, atomic replace). Every
+request takes a bearer; tokens are refreshed 30 s before expiry and once after a `401`, one
+refresh per key across Sessions and daemons sharing the home. `mcp.catalog` entries gain
+`auth: {status: "required" | "authorized" | "expired", missingScopes?}`, and `session.mcp`
+reports `auth_required` until the key's credential changes, when the Session reconnects by
+itself. Tokens, codes and secrets never reach replies, errors, tool results or logs.
+
 Native storage remains v13 with lazy source-local import and durable source CAS.
 Existing v13 document bytes remain compatible. Unsupported databases, including
 the removed branch-only v14 representation, are rejected and preserved; there
@@ -120,7 +147,7 @@ Explicit disconnect drains all generations of the selected source/server, withou
 configuration; a later acquisition can reconnect. It reports cleanup failure rather than treating
 loader reconciliation as proof of successful cleanup.
 
-Standalone hosts using `McpPlugin` register `McpPublication` and its
+Standalone hosts using `McpPlugin::new(home_root)` register `McpPublication` and its
 `standalone_template` with their `Builtins` and include both rows in the immutable
 assembly. The publication plugin owns its coordinator worker: it starts after
 apply and is settled, with its cleanup result, when the plugin unloads. Pass an

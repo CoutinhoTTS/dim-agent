@@ -50,6 +50,7 @@ flowchart LR
   p16 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p17
   p13 -->|"dim_app_server::settings::SettingsService"| p17
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p16
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p15
   p14 -->|"dim_app_server::mcp::publication::Publication"| p15
   p13 -->|"dim_app_server::settings::SettingsService"| p15
   p13 -->|"dim_app_server::settings::SettingsService"| p14

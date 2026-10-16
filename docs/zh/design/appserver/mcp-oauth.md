@@ -1,6 +1,6 @@
 # MCP OAuth
 
-状态：已接受（维护者在 [#111](https://github.com/arcships/dim/pull/111) 评审通过）。路线图项 F4
+状态：守护进程侧已实现（维护者在 [#111](https://github.com/arcships/dim/pull/111) 评审通过）；CLI 部分（§13）归 CLI 负责人。路线图项 F4
 （[#75](https://github.com/arcships/dim/issues/75)）。总体设计：
 [附录 B.2 Mcp 行](../overview.md#b2-app-server-进程插件)。阶段：P2。语言：Rust。
 作用域：放在现有的 Mcp 进程插件内（[ADR 002](../../adr/002-plugin-scope.md)）。依据：
@@ -63,18 +63,22 @@ OAuth 协议步骤来自工作区里已有的官方 Rust SDK：rmcp 3.5.0 的 `a
 { "version": 1,
   "credentials": [
     { "serverId": "github", "url": "https://api.example.com/mcp",
-      "resource": "https://api.example.com/mcp",   // 校验过的 PRM resource，否则为 URL
+      "resource": "https://api.example.com/mcp",   // 授权请求发出的原值
       "issuer": "https://auth.example.com",        // 记录的授权服务器
-      "client": { "clientId": "…", "clientSecret?": "…",
-                  "registration": "preregistered" | "metadataDocument" | "dynamic",
-                  "redirectUri": "http://localhost:1456/callback" },
-      "tokens?": { "accessToken": "…", "refreshToken?": "…", "tokenType": "Bearer",
+      "tokenEndpoint": "https://auth.example.com/token",
+      "revocationEndpoint?": "https://auth.example.com/revoke",
+      "client?": { "clientId": "…", "clientSecret?": "…",
+                   "registration": "preregistered" | "dynamic",
+                   "redirectUri": "http://localhost:1456/callback",
+                   "authMethod": "none" | "client_secret_basic" | "client_secret_post" },
+      "tokens?": { "accessToken": "…", "refreshToken?": "…",
                    "expiresAt?": 0, "scopes": ["…"] },   // expiresAt：Unix 毫秒
-      "requestedScopes": ["…"],
-      "expired": false } ] }
+      "requestedScopes": ["…"] } ] }
 ```
 
 - **唯一写入者。** 只有 Mcp 写这个文件。
+- **自足。** 记录带有令牌端点、撤销端点和客户端的认证方式，因此刷新和登出不需要重新发现。
+  记录在尝试完成时连同客户端和令牌一起写入；放弃的尝试不留下任何东西。
 - **写入路径。** 写入时取存储的 FileStorage 锁，重读文件，只替换自己 key 的记录，再以 0600
   原子替换文件。Windows 上沿用 FileStorage 的 DACL 处理。
 - **令牌请求持锁。** 授权码交换、刷新和撤销从重读开始，经过请求，到替换为止一直持有这把锁，
@@ -84,19 +88,22 @@ OAuth 协议步骤来自工作区里已有的官方 Rust SDK：rmcp 3.5.0 的 `a
 - **发出即结算。** 已发出的令牌请求在 `McpAuth` 自己的任务中接收并持久化，不论谁在等待，所以
   调用方离开或卸载都不会丢掉轮换后的刷新令牌或已兑换的授权码。Mcp 卸载时会等待它。
 - **未知版本。** 所有服务器的 OAuth 都不可用（`mcp_auth_unsupported`），文件保留，绝不覆盖。
-  以后不兼容的格式使用新版本号，并单独做格式决定。
-- **刷新被拒。** 刷新被拒时删除 `tokens` 并置 `expired`，重启后状态仍在。
+  此时连接发出的请求不带 bearer，不需要登录的服务器照常工作。以后不兼容的格式使用新版本号，
+  并单独做格式决定。
+- **过期。** 没有 `tokens` 的记录即为过期。刷新被拒时删除 `tokens`，收到 `invalid_client` 时
+  还删除 `client`，重启后状态仍在。
 
 ### 4.2 进程内存（不持久化）
 
 | 状态 | 内容 | 生命周期 |
 | --- | --- | --- |
-| 记录缓存 | 解析后的文件 | 首次使用时加载；每次写入后替换 |
 | 质询 | 每个 key：任一连接最近一次看到的 `WWW-Authenticate`（`resource_metadata`、`scope`、`error`） | 到授权成功、登出或 Mcp 重载为止 |
 | 尝试 | `attemptId`、key、PKCE verifier、`state`、预期 `issuer`、元数据、客户端、重定向 URI、scope、`expiresAt` | 每个 key 至多一个；在 complete、过期（10 分钟）或同一 key 再次 start 时结束 |
-| 存储锁与版本 | FileStorage 锁前面的一把进程内异步锁；FileStorage 锁立即准入或失败，因此被另一进程持有时会重试，与托管 OAuth 宿主相同。另有每个 key 一个 watch 版本号，每次凭据变化时递增 | Mcp 代 |
+| 存储锁与变化通知 | FileStorage 锁前面的一把进程内异步锁；FileStorage 锁立即准入或失败，因此被另一进程持有时会重试，与托管 OAuth 宿主相同。另有每个 key 一个 watch，key 的记录每次变化时通知，并带上记录是否持有令牌：处于 `auth_required` 的 Session 在任何变化时重试，就绪的 Session 在令牌消失时作出反应 | Mcp 代 |
 
-PKCE verifier 与 `state` 从不持久化。守护进程重启会放弃待完成的尝试。
+PKCE verifier 与 `state` 从不持久化。守护进程重启会放弃待完成的尝试。没有记录缓存：每个请求
+不加锁地读取文件，这是安全的，因为写入都是原子替换；同一 home 上另一个守护进程做的刷新也能
+被看到。
 
 ### 4.3 配置（`mcp` 业务来源）
 
@@ -167,7 +174,8 @@ PKCE verifier 与 `state` 从不持久化。守护进程重启会放弃待完成
 3. **没有有效 PRM。** 规范写明"MCP clients MUST use OAuth 2.0 Protected Resource Metadata for
    authorization server discovery"，其发现流程在找不到时以"中止或使用预先配置的值"结束。
    - 设置了 `oauth.authServerMetadataUrl` 时使用该文档。well-known 形式的 URL 按发现结果同样校验；
-     其他 URL 是配置给定的信任锚点，记录其 `issuer`。此时资源为规范化的服务器 URL。
+     其他 URL 是配置给定的信任锚点，记录其 `issuer`。此时资源为 rmcp 授权请求序列化后的服务器
+     URL，记录原样重复这个值。
    - 否则为 `mcp_auth_discovery_failed`。
    - Mcp 从不在服务器源上猜测授权服务器，也从不使用 rmcp 合成的 `/authorize` 与 `/token` 端点。
    - 有效 PRM 总是优先于覆盖值，因此对发布了 PRM 的服务器，项目文件无法把用户引到另一个授权
@@ -230,7 +238,8 @@ PKCE verifier 与 `state` 从不持久化。守护进程重启会放弃待完成
 - **固定。** 设置了 `oauth.scopes` 时按原样请求。
 - **否则：**
   - 首次授权：质询的 `scope`，否则 PRM 的 `scopes_supported`，否则不带 `scope` 参数；
-  - 重新授权：`requestedScopes` 与最近一次质询 `scope` 的并集（提升授权）。
+  - 重新授权：`requestedScopes`、最近一次质询的 `scope` 与每个 `403` 要求的 scope 的并集（提升
+    授权）。只有记录的 issuer 仍是当前 issuer 时才计入 `requestedScopes`。
 - **`offline_access`。** 授权服务器在 `scopes_supported` 中列出它时加上，以便签发刷新令牌
   （规范中的 MAY）。
 
@@ -263,14 +272,18 @@ PKCE verifier 与 `state` 从不持久化。守护进程重启会放弃待完成
   因此刷新后的令牌无需重连即可使用。
 - **过期之前。** 剩余不足 30 秒的令牌在使用前刷新，与托管 OAuth 宿主和 rmcp 的余量相同。
   只在使用时刷新，没有后台定时器。
-- **遇到 `401`。** 用令牌 `rN` 发出的请求得到 `401` 时，连接把 `rN` 报告为被拒。只有记录仍为
+- **遇到 `401`。** 带不带 `WWW-Authenticate` 的 `401` 都算。用令牌 `rN` 发出的请求得到 `401` 时，连接把 `rN` 报告为被拒。只有记录仍为
   `rN` 时 `McpAuth` 才刷新；否则另一个 Session 已经刷新过。请求重试一次。被拒的请求服务器没有
   处理，重试不会重复任何效果。
 - **单飞。** 每个 key 同一时刻在所有 Session 中只有一次刷新：拿到锁的等待者重读记录，得到新令牌。
 - **轮换。** 新的刷新令牌取代旧的；没有返回新的就保留旧的。新记录在任何租约使用新访问令牌之前
   持久化。
-- **重新授权。** `invalid_grant`、没有刷新令牌，或刷新后仍 `401`，记录置为 `expired`。该 key
-  上的每个连接都报告 `auth_required`。
+- **重新授权。** `invalid_grant`、`invalid_client`、没有刷新令牌的令牌过期或被拒，或刷新后仍
+  `401`，记录置为 `expired`。该 key 上的每个 Session 随即报告 `auth_required`，不必等自己发出
+  请求。刷新遭到其他拒绝，或响应不是 OAuth 错误时，记录保留：访问令牌在有效期内照常使用，之后
+  请求失败，直到授权服务器恢复应答。
+- **存储错误。** 存储无法读取或版本未知时，请求不带 bearer 发出，不需要登录的服务器照常工作；
+  只由 `401` 决定。
 
 ### 5.7 提升授权（`403 insufficient_scope`）
 
@@ -278,6 +291,8 @@ PKCE verifier 与 `state` 从不持久化。守护进程重启会放弃待完成
 Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 都映射为 `InsufficientScope`。
 
 - 工具结果是 §8 的固定文本。
+- Session 发现服务器时（握手或 `tools/list`）遇到 `403`，没有工具可发布，于是报告
+  `auth_required`，直到凭据变化。
 - `McpAuth` 记下质询的 scope，目录中显示为 `missingScopes`。
 - 下一次 `mcp.auth.start` 请求 §5.5 的并集。提升授权由用户发起，不会循环。
 - 固定了 `oauth.scopes` 时，按固定值原样请求。用户把该 scope 加进固定值，与 Claude Code 中
@@ -287,7 +302,8 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 
 `mcp.auth.logout` 在授权服务器声明了 `revocation_endpoint`（RFC 7009）时，先撤销刷新令牌，
 再撤销访问令牌。然后无论撤销结果如何都删除记录，包括注册和任何客户端密钥。回复说明撤销是否成功。
-该 key 上的连接在下一次 `401` 时进入 `auth_required`。
+该 key 上的每个 Session 随即报告 `auth_required`。条目不再使用 OAuth 后（加了静态凭据，或改为
+明文 URL）也允许登出，因此已存的凭据总能删除。
 
 `mcp.remove` 不动凭据，因为另一来源中同 `id`、同 URL 的条目可能仍在使用；CLI 会先提示登出
 （§13）。孤立记录不起作用：其令牌只发往自己的 URL，且只用于该 key 的条目。
@@ -340,7 +356,7 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 | 需要授权或授权已过期 | `The MCP server "<id>" requires the user to sign in. Ask the user to sign in to it with /mcp.` |
 | `403 insufficient_scope` | `The MCP server "<id>" needs additional permissions for this tool (<scopes>). Ask the user to sign in to it again with /mcp.` |
 
-`<id>` 是配置的服务器 id，`<scopes>` 是质询中的 scope 名。二者都不是密钥，文本中没有 URL、
+`<id>` 是配置的服务器 id，`<scopes>` 是质询中的 scope 名；质询没有给出 scope 时省略括号。二者都不是密钥，文本中没有 URL、
 令牌、授权码或 issuer。
 
 ## 9. 接口
@@ -356,7 +372,7 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 | --- | --- | --- | --- |
 | `mcp.auth.start` | `{source: "user" \| "project", id, cwd?, clientSecret?}` | `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}` | 条目必须是已启用、无静态凭据的远程条目。只有配置了 `oauth.clientId` 才接受 `clientSecret`。`expiresAt` 为 Unix 毫秒，10 分钟后。取代同一 key 的待完成尝试 |
 | `mcp.auth.complete` | `{attemptId, callbackUrl}` | `{}` | §5.4。记录持久化后才返回 |
-| `mcp.auth.logout` | `{source, id, cwd?}` | `{revoked: boolean}` | 对禁用条目也可用。没有记录：`{revoked: false}` |
+| `mcp.auth.logout` | `{source, id, cwd?}` | `{revoked: boolean}` | 对禁用条目，以及不再使用 OAuth 的远程条目也可用。没有记录：`{revoked: false}` |
 
 不需要每次调用的进度（C1，PR [#83](https://github.com/arcships/dim/pull/83)）：`start` 直接
 返回 URL，也没有后台过程会完成尝试。
@@ -390,7 +406,7 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 
 | # | 决定 | 被否决的方案及原因 |
 | --- | --- | --- |
-| D1 | OAuth 引擎：rmcp 3.5.0 `auth`（`AuthorizationManager`），由 `McpAuth` 驱动并提供自己的 `CredentialStore` 与 `StateStore`；Mcp 补上附录 A 的缺口 | Dim 自写 OAuth 客户端要重新跟进官方 SDK 已在跟进的每次规范修订。rmcp 高层的 `OAuthState` 与 `AuthClient` 每个 HTTP 客户端持有一个 manager，默认用内存存储，会静默退回猜测的端点，也不能在 Session 之间共享一次刷新 |
+| D1 | OAuth 引擎：rmcp 3.5.0 `auth`（`AuthorizationManager`）负责发现、动态注册和授权请求（PKCE `S256`、`state`、`resource`），由 `McpAuth` 通过自己的 HTTP 客户端驱动，并用一个 `StateStore` 把 verifier 和 `state` 交给尝试。所有令牌请求（授权码交换、刷新、撤销）由 Mcp 自己发送，并补上附录 A 的缺口 | Dim 自写 OAuth 客户端要重新跟进官方 SDK 已在跟进的每次规范修订。rmcp 高层的 `OAuthState` 与 `AuthClient` 每个 HTTP 客户端持有一个 manager，默认用内存存储，会静默退回猜测的端点，也不能在 Session 之间共享一次刷新。通过 `CredentialStore` 使用 rmcp 的 `refresh_token`：重启后它发送基础 URL 而不是记录的 `resource`，`invalid_client` 只以文本报告，还要为一个 Mcp 在授权码交换时本就自己发送的请求在记录外包一层适配器 |
 | D2 | 所有部分都在 Mcp 内：一个进程级权威，加上现有的 Session 发现、连接实例和管理方法 | 单独的 OAuth 插件只把 Mcp 接到它自己的令牌上，是接线模块（ADR 002 D2）；托管 OAuth 宿主服务固定的 Provider，不认识 MCP 发现。每个 Session 一份凭据意味着每个 Session 登录一次 |
 | D3 | 发现严格按规范；`authServerMetadataUrl` 只在没有有效 PRM 时生效；拒绝缺少 PKCE 元数据和非 HTTPS 端点 | rmcp 的基础 URL 发现以及合成的 `/authorize`、`/token`、`/register`：规范要求用 PRM 发现，否则以中止或使用预先配置的值结束，猜测的端点可能把用户带到意外的页面。覆盖值优先于有效 PRM（Claude Code 的语义）会让项目文件把用户引到另一个授权服务器，即便服务器已经指明了自己的授权服务器 |
 | D4 | 注册：`clientId`，然后 CIMD（产品 URL，发布后），然后 DCR，然后 `mcp_auth_client_required`。机密客户端的密钥在登录时输入并存入记录 | 配置中的密钥（`clientSecretRef`）：`.mcp.json` 与项目共享，项目条目可以把密钥指向自己的令牌端点；而且要等 S8b |
@@ -418,7 +434,10 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
   的授权服务器仍可能遭受混淆攻击，所有符合规范的客户端都是如此。规范表示预计会把 `iss` 改为必需，
   届时这一风险消除。
 - **TLS。** 授权服务器端点，以及附带令牌时的 MCP 服务器，都要求 TLS；回环 `http` 是唯一例外，
-  用于本地开发。令牌只发往配置 URL 的源；旧版 SSE 传输已经拒绝跨源端点。
+  用于本地开发，而且只有 MCP 服务器也在回环上时，授权服务器端点才可以使用它。所有发现和注册
+  请求都经过 Mcp 的 HTTP 客户端，它拒绝其他明文 URL，也从不跟随重定向。对远程 MCP 服务器，任何
+  OAuth URL 都不得指向回环、私有、链路本地或云元数据主机，HTTPS 也不行（这是 rmcp 对授权服务器
+  元数据 URL 的规则，推广到所有端点）。令牌只发往配置 URL 的源；旧版 SSE 传输已经拒绝跨源端点。
 - **令牌受众。** 授权、令牌和刷新请求都带 `resource`。令牌从不发往其他服务器，`start` 也从不复用
   记录在另一个 issuer 下的客户端或令牌（§5.2）。
 - **存储。** 存储权限为 0600，经 FileStorage 原子替换。密钥不进入 Timeline、`ToolResult.content`、
@@ -497,15 +516,21 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
 | 同上 | 规范顺序之外的补充：路径形式与根路径形式之间多一个 `/{path}/.well-known/oauth-protected-resource` 候选；先读单数字段 `authorization_server` 再读 `authorization_servers`；对带路径的 issuer，在三个候选之后多一个根路径 `oauth-authorization-server` 候选。`issuer` 不符时中止发现，而不是尝试下一个授权服务器 | 接受：多出的 well-known 候选仍在被发现的源上，并且仍检查 `issuer`；单数字段是该列表的旧名；中止是失败时关闭 |
 | 无 | 缺少 `code_challenge_methods_supported` 时只发警告 | 拒绝（规范 MUST） |
 | 无 | 不检查授权服务器元数据中各端点的 scheme | 要求 HTTPS，回环除外 |
-| `configure_client`、CIMD 与 `register_client`（DCR） | 不持久化 `client_secret` | 记录保存它，每次操作重新应用 |
+| `configure_client` 与 `register_client`（DCR）；不使用 CIMD（§5.3） | 不持久化 `client_secret` | 记录保存它，每次操作重新应用 |
 | `get_authorization_url`（PKCE `S256`、`state`、`resource`；verifier、`state` 和预期 issuer 存于 Mcp 的内存 `StateStore`） | 它自己的选择取之前请求的、质询的和 PRM 的 scope 的并集，并集为空时退回授权服务器的 `scopes_supported` | 传入按 §5.5 选出的 scope |
 | 无 | `AuthorizationCallback::from_redirect_url` 忽略 `error`，也不比较重定向 URI；`exchange_code_for_token_with_issuer` 以 `debug` 级别记录授权码 | Mcp 自己解析并校验回调（含 `iss`），并自己发送授权码交换（§5.4） |
-| `refresh_token`（轮换、`resource`） | 加锁后不复查；每个调用方都会再刷新一次 | `McpAuth` 的存储锁加复查（§5.6） |
+| 无（不使用 `refresh_token`，D1） | `refresh_token` 从重启后的守护进程所没有的发现状态中取 `resource`，加锁后不复查，`invalid_client` 只以文本报告 | Mcp 自己在存储锁下发送刷新请求，带复查和轮换（§5.6） |
+| `StreamableHttpClientTransport` | 其 worker 等待第一条消息时不响应取消，因此关闭一个从未发送消息的传输不会结束 | 先轮询一次握手，再响应取消 |
 | `StreamableHttpError::AuthRequired` 与 `InsufficientScope` | 任何带 `WWW-Authenticate` 的 `403` 都是 `InsufficientScope` | Mcp 读取 `error="insufficient_scope"` |
 | 无 | 没有 RFC 7009 撤销 | `mcp.auth.logout` 中每个令牌一个请求 |
 | 无 | 没有 SSE 客户端传输（rmcp 0.11 已移除） | Dim 自己的旧版 SSE 传输附加租约并报告 `401` |
 
 ## 附录 B. 验收（流程测试）
+
+`crates/dim-app-server/tests/mcp_oauth_flow.rs` 在使用隔离 home 的守护进程上，经 `mcp.auth.*`、
+`mcp.catalog` 和 `session.mcp` 覆盖第 1 至 10 项，流式 HTTP 与旧版 SSE 都有。第 11 项通过发现
+阶段的 `403` 覆盖；工具调用的固定文本没有流程测试，因为测试模型不发起工具调用。第 12 项（issuer
+变化）尚无流程测试。
 
 在 `dim-app-server` 的流程测试中，以回环上的模拟 MCP 服务器和模拟授权服务器为对象，使用隔离的 home：
 
