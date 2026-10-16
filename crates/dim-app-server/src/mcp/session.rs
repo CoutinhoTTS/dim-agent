@@ -161,7 +161,7 @@ impl TypedPlugin for McpSessionPlugin {
         Box::pin(async move {
             let project = directory.settings.project_root(Path::new(&config.cwd));
             // Subscribe before any file reads, including the first discovery.
-            let settings = directory.settings.subscribe();
+            let settings = super::config::settings_changes(ctx)?;
             let applied = directory.publication.applied();
             let stopped = ctx.cancellation_token();
             let owner = Arc::new(McpSession {
@@ -236,7 +236,7 @@ impl Capability for McpSessionPlugin {
 /// What makes a Session re-read its selection: a settings write, a change
 /// the publisher applied (including external file edits), or a refresh.
 struct Changes {
-    settings: watch::Receiver<u64>,
+    settings: watch::Receiver<()>,
     applied: watch::Receiver<BTreeMap<crate::settings::SettingsScope, super::McpApplication>>,
     refresh: watch::Receiver<()>,
 }

@@ -55,6 +55,7 @@ flowchart LR
   p13 -->|"dim_app_server::settings::SettingsService"| p14
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p13
   p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p13
+  p6 -->|"dim_agent_capabilities::host::ModelHost"| p12
   p10 -->|"dim_app_server::codex_oauth::OpenAICodexOAuthService"| p12
   p11 -->|"dim_app_server::grok_oauth::GrokOAuthService"| p12
   p9 -->|"dim_app_server::managed_provider::ManagedProviders"| p12

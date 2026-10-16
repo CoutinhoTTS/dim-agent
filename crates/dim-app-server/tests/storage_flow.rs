@@ -8,7 +8,7 @@ use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-const INTERPRETER: &str = "dim/context-projection/v2";
+const INTERPRETER: &str = "dim/context-projection/v3";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
         sequence,
@@ -35,6 +35,30 @@ impl Drop for Database {
         let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
     }
 }
+/// A completed compaction replacing everything before `retain_from` with one
+/// summary message.
+fn completed(retain_from: &str, summary: &str, through: u64) -> ContextCompactionData {
+    ContextCompactionData {
+        turn_id: Some("completed-turn".into()),
+        request_id: Some("completed-request".into()),
+        command: None,
+        start: None,
+        through,
+        outcome: ContextCompactionResult::Completed {
+            retain_from: retain_from.into(),
+            replacement: vec![dim_agent_capabilities::history::summary_message(summary)],
+            strategy: "summary".into(),
+            diagnostics: serde_json::from_value(serde_json::json!({
+                "reason": "auto", "trigger": "threshold", "estimatedInputTokens": 1,
+                "entriesReplaced": 1, "modelCallCount": 1, "durationMs": 1,
+                "strategy": {"kind": "summary"}
+            }))
+            .unwrap(),
+            context_baseline: vec![],
+        },
+    }
+}
+
 fn key(session: &str, branch: &str) -> TimelineKey {
     TimelineKey {
         session_id: session.into(),
@@ -260,7 +284,7 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         full.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
         ["e2", "e7"]
     );
-    assert_eq!(compacted, full[1..]);
+    assert_eq!(compacted, full);
     let child = Timeline::restore(
         rutis::Ctx::root().unwrap(),
         key("s1", "child"),
@@ -1437,39 +1461,11 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
     )
     .await
     .unwrap();
-    let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-2").unwrap();
+    // The cut keeps the answer: the model-start of its request.
+    let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-3").unwrap();
     assert_eq!(checkpoint.resume.sequence, 5);
     assert!(!checkpoint.state.output.is_empty());
-    let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
-        "../../dim-agent-types/tests/fixtures/events.json"
-    ))
-    .unwrap();
-    let mut compaction = fixtures
-        .into_iter()
-        .filter(|event| {
-            event["type"] == "context"
-                && event["name"] == "compaction"
-                && event["data"]["status"] == "completed"
-        })
-        .find_map(
-            |event| match serde_json::from_value::<AgentEvent>(event).unwrap().kind {
-                EventKind::ContextCompaction(data) => Some(data),
-                _ => None,
-            },
-        )
-        .unwrap();
-    compaction.through = 5;
-    if let ContextCompactionResult::Completed {
-        cursor,
-        summary,
-        context_baseline,
-        ..
-    } = &mut compaction.outcome
-    {
-        *cursor = "event-2".into();
-        *summary = "summary".into();
-        context_baseline.clear();
-    }
+    let compaction = completed("event-3", "summary", 5);
     timeline.close().await.unwrap();
     append(
         &store,
@@ -1574,32 +1570,8 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
     append(&store, key("session", "main"), input_batch)
         .await
         .unwrap();
-    let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
-        "../../dim-agent-types/tests/fixtures/events.json"
-    ))
-    .unwrap();
-    let mut compaction = fixtures
-        .into_iter()
-        .find(|event| {
-            event["type"] == "context"
-                && event["name"] == "compaction"
-                && event["data"]["status"] == "completed"
-        })
-        .map(|event| serde_json::from_value::<AgentEvent>(event).unwrap())
-        .and_then(|event| match event.kind {
-            EventKind::ContextCompaction(data) => Some(data),
-            _ => None,
-        })
-        .unwrap();
-    compaction.through = 2;
-    let ContextCompactionResult::Completed {
-        cursor, summary, ..
-    } = &mut compaction.outcome
-    else {
-        panic!()
-    };
-    *cursor = "event-2".into();
-    *summary = "retained summary".into();
+    // Nothing is kept: the cut is the fact's own event, after every entry.
+    let compaction = completed("event-3", "retained summary", 2);
     let original = record(3, EventKind::ContextCompaction(compaction));
     append(&store, key("session", "main"), vec![original.clone()])
         .await
@@ -1611,7 +1583,7 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             .unwrap()
             .is_none()
     );
-    for (sequence, event_id) in [(1, "event-1"), (3, "wrong"), (4, "event-4")] {
+    for (sequence, event_id) in [(3, "wrong"), (4, "event-4")] {
         assert!(
             store
                 .save_snapshot(
@@ -1658,6 +1630,25 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             .unwrap()
             .is_none()
     );
+    // Anchoring is structural (#130): any existing event with its id and
+    // sequence anchors a snapshot; its owner decides whether it is usable.
+    let input_anchored = RecoverySnapshot {
+        sequence: 1,
+        event_id: "event-1".into(),
+        interpreter: INTERPRETER.into(),
+        state: "opaque".into(),
+    };
+    store
+        .save_snapshot(&key("session", "main"), input_anchored.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_snapshot(&key("session", "main"), 2, INTERPRETER)
+            .await
+            .unwrap(),
+        Some(input_anchored)
+    );
     store.close().await.unwrap();
     db.close().await.unwrap();
     drop(store);
@@ -1688,7 +1679,7 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
                         sequence,
                     },
                     state: ProjectionCheckpointState {
-                        compacted_through: "event-2".into(),
+                        retain_from: "event-3".into(),
                         ..Default::default()
                     },
                 },
@@ -1810,11 +1801,9 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
     connection
         .pragma_update(None, "foreign_keys", false)
         .unwrap();
-    for (branch, sequence, event_id) in [
-        ("main", 3, "wrong"),
-        ("main", 1, "event-1"),
-        ("orphan", 99, "missing"),
-    ] {
+    // An anchor of another kind is structurally valid (#130) and is left to
+    // the owner's decode, so only identity mismatches are injected here.
+    for (branch, sequence, event_id) in [("main", 3, "wrong"), ("orphan", 99, "missing")] {
         connection
             .execute(
                 "INSERT INTO timeline_snapshots VALUES ('session',?1,?2,?3,?4,'not json')",
@@ -1909,37 +1898,14 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     )
     .await
     .unwrap();
-    let checkpoint = projection_checkpoint(&prefix.context(3).await.unwrap(), "event-2").unwrap();
+    // The cut replaces the earlier input; the queued one is not placed yet.
+    let checkpoint = projection_checkpoint(&prefix.context(3).await.unwrap(), "event-3").unwrap();
     append(
         &store,
         key("nested", "main"),
         vec![record(
             4,
-            EventKind::ContextCompaction(ContextCompactionData {
-                turn_id: "completed-turn".into(),
-                request_id: "completed-request".into(),
-                through: 3,
-                outcome: ContextCompactionResult::Completed {
-                    cursor: "event-2".into(),
-                    summary: "earlier summary".into(),
-                    context_baseline: vec![],
-                    diagnostics: serde_json::from_value(
-                        serde_json::from_str::<Vec<serde_json::Value>>(include_str!(
-                            "../../dim-agent-types/tests/fixtures/events.json"
-                        ))
-                        .unwrap()
-                        .into_iter()
-                        .find(|event| {
-                            event["type"] == "context"
-                                && event["name"] == "compaction"
-                                && event["data"]["status"] == "completed"
-                        })
-                        .unwrap()["data"]["diagnostics"]
-                            .clone(),
-                    )
-                    .unwrap(),
-                },
-            }),
+            EventKind::ContextCompaction(completed("event-3", "earlier summary", 3)),
         )],
     )
     .await
@@ -2550,28 +2516,9 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         .await
         .unwrap();
         let checkpoint =
-            projection_checkpoint(&timeline.context(6).await.unwrap(), "event-2").unwrap();
+            projection_checkpoint(&timeline.context(6).await.unwrap(), "event-3").unwrap();
         assert_eq!(checkpoint.state.output, content);
-        let mut compaction: ContextCompactionData = serde_json::from_value(
-            serde_json::from_str::<Vec<serde_json::Value>>(include_str!(
-                "../../dim-agent-types/tests/fixtures/events.json"
-            ))
-            .unwrap()
-            .into_iter()
-            .find(|e| {
-                e["type"] == "context"
-                    && e["name"] == "compaction"
-                    && e["data"]["status"] == "completed"
-            })
-            .unwrap()["data"]
-                .clone(),
-        )
-        .unwrap();
-        compaction.through = 6;
-        let ContextCompactionResult::Completed { cursor, .. } = &mut compaction.outcome else {
-            unreachable!()
-        };
-        *cursor = "event-2".into();
+        let compaction = completed("event-3", "summary", 6);
         append(
             &store,
             key("native", "main"),
@@ -2657,7 +2604,22 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             .await
             .unwrap()
             .unwrap();
-        let checkpoint = (HistoryRenderer::default().decode_checkpoint)(&saved).unwrap();
+        let timeline = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            key("native", "main"),
+            vec![],
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let anchor = timeline
+            .local(saved.sequence..=saved.sequence)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        timeline.close().await.unwrap();
+        let checkpoint = (HistoryRenderer::default().decode_checkpoint)(&saved, &anchor).unwrap();
         assert_eq!(checkpoint.state.output, content);
         store.close().await.unwrap();
         db.close().await.unwrap();
@@ -2698,27 +2660,10 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
         )
     };
     let compaction = |sequence, through| {
-        let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
-            "../../dim-agent-types/tests/fixtures/events.json"
-        ))
-        .unwrap();
-        let mut data = fixtures
-            .into_iter()
-            .find_map(|event| {
-                if event["type"] != "context"
-                    || event["name"] != "compaction"
-                    || event["data"]["status"] != "completed"
-                {
-                    return None;
-                }
-                match serde_json::from_value::<AgentEvent>(event).unwrap().kind {
-                    EventKind::ContextCompaction(data) => Some(data),
-                    _ => None,
-                }
-            })
-            .unwrap();
-        data.through = through;
-        record(sequence, EventKind::ContextCompaction(data))
+        record(
+            sequence,
+            EventKind::ContextCompaction(completed("event-1", "summary", through)),
+        )
     };
     let created = |sequence, branch: &str| {
         record(

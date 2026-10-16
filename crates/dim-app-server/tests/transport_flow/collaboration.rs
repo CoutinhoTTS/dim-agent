@@ -268,6 +268,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .session_value(Arc::new(ModelHost(Arc::new(LargeReportModel))))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_plugin(DefaultPrepareModelPlugin::new);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
@@ -2028,7 +2029,10 @@ async fn undispatched_results_name_calls_from_their_starts() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -2045,6 +2049,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
         .session_value(Arc::new(ModelHost(Arc::new(PartialCallModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     dim_agent_capabilities::defaults::tool_host(
         &mut builder,
