@@ -244,47 +244,17 @@ An unversioned file, malformed record, unknown version or invalid UTF-8 returns
 the existing fixed `invalid_data` error, without file contents or parser details.
 Read failure never rewrites or deletes the original. There is no automatic
 migration, fallback to empty state or interpretation of an unknown format.
-Existing unversioned plugin files therefore require an explicit owner-approved
-migration before the affected plugin can read them with this format. This is
-separate from native SQLite storage and changes no database format.
+No distributed Rust App Server build used the unversioned PluginFiles format.
+Files from before v1 are development data: the owning plugin and data owner must
+explicitly decide whether to recreate that state or preserve it for manual
+recovery. The host never resets, converts or deletes these files on read. This
+baseline is separate from native SQLite storage and changes no database format.
 
 `backup(suffix)` remains a byte-for-byte copy of the stored file, including its
 envelope or any rejected legacy bytes. A backup must not decode, re-encode or
 upgrade its source. An explicit `replace` writes version 1; the caller still owns
 the decision to replace existing data and to make a successful backup first.
 Binary payload support is outside S10 and remains P3 work.
-
-##### Explicit migration of an unversioned file
-
-The plugin lease intentionally has no raw read. An owner can convert a known
-unversioned UTF-8 file offline with the native host tool, without changing normal
-`read()` or adding an automatic compatibility fallback:
-
-```sh
-cargo run --locked -p dim-app-server --example migrate_plugin_file -- \
-  --from-unversioned /absolute/authorized/plugin-root relative/state-file
-```
-
-Stop the App Server and the owning plugin first. The owner must identify each
-file as unversioned from its provenance; neither this command nor startup guesses
-from its contents. Do not use it on a versioned file or an unknown format. A
-legacy payload that happens to resemble the v1 envelope is preserved as text,
-not interpreted as an envelope. The command touches only the selected file and
-never prints its contents.
-
-The tool acquires the existing FileStorage lease, validates UTF-8, creates a
-flushed exclusive `<file>.before-v1` raw backup, then atomically replaces the file
-with the v1 envelope. On Unix both files have mode 0600; Windows uses existing
-FileStorage protection. An existing or partial backup blocks replacement, so an
-ordinary retry cannot wrap the file again. Do not delete or rename that backup
-to force a retry: inspect the original and backup with the owner first. If a
-replacement reports an error, its outcome may already have committed; do not
-retry blindly. Missing or invalid-UTF-8 input is left unchanged.
-
-This is an explicit format conversion, not a reset or a change to the plugin's
-payload schema. Startup and the named lease API continue to reject unversioned
-or unsupported records. Binary storage remains a separate P3 format decision;
-the v1 text layout does not define base64 records or binary auto-detection.
 
 ##### Rule check
 
@@ -300,8 +270,7 @@ the existing language-neutral service and error data unchanged.
 None (§4 rule 8). Existing atomic
 replacement and backup primitives cover the format. Acceptance uses disposable
 plugin roots to verify round-trip text, stored version, reopen, version rejection
-with byte preservation, explicit legacy conversion with backup/retry safety,
-and unchanged transaction/backup/lifecycle behavior.
+with byte preservation and unchanged transaction/backup/lifecycle behavior.
 
 ## Service contract
 

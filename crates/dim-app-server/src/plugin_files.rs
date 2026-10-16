@@ -22,23 +22,6 @@ struct StoredFile {
     text: String,
 }
 
-/// Explicit offline conversion of a file the owner identifies as unversioned.
-/// The exclusive backup prevents an ordinary retry from wrapping it twice.
-pub async fn migrate_unversioned_file(mut lease: FileLease) -> Result<(), FileStorageError> {
-    let cancel = CancellationToken::new();
-    let text = String::from_utf8(lease.read(&cancel).await?)
-        .map_err(|_| FileStorageError::Io(io::ErrorKind::InvalidData.into()))?;
-    let bytes = serde_json::to_vec(&StoredFile {
-        version: FORMAT_VERSION,
-        text,
-    })
-    .expect("text records contain only serializable fields");
-    lease
-        .backup("before-v1", private_permissions(), &cancel)
-        .await?;
-    lease.replace(bytes, private_permissions(), &cancel).await
-}
-
 fn failure(error: FileStorageError) -> Value {
     let code = match error {
         FileStorageError::Closed | FileStorageError::Cancelled => "closed",
