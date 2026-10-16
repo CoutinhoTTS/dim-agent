@@ -86,6 +86,10 @@ isolated loader key under the host; both create an `AgentAnchor` instance.
 
 宿主通过现有 loader 行配置直接追加的可选部件不是 AgentBuilder 的必需注册：其 Pending、Failed 或运行时缺失保留在 loader 状态中，不阻塞必需部件和首条输入。注册路径决定等待范围，不按语言、展示名或当前状态推断，也不新增 required/optional 标记或注册 API。所有行仍由同一个作用域分组持有并一起清理；服务的 `Deps`、Pending、audit 和失效传播不变。必需部件仍会等待自己声明的全部依赖，不能通过可选行绕过。
 
+因此，ShellInput、Attachments 等经 `AgentBuilder` 注册的第一方 Rust 部件也属于必需成员：它们不能 Active，Session 就不能发布。当前接受这一后果，因为这些部件的启动失败主要属于实现错误，其依赖是核心服务。若某个 Rust 功能开始依赖可能长期不可用的服务，应改由现有 loader 行安装；只有实际需求到来时才重新评估显式成员标记，现在不增加标记 API。
+
+必需部件在 `apply` 中登记的子插件仍由该部件等待；返回意味着其服务和订阅已就绪。debug 发布校验检查必需行及其子树的 Active 状态，发现未等待的子插件就拒绝发布；仅可选行及其子树不参加此 Active 校验。两者仍参加依赖读取和实例键审计。release 保留原有的作者责任与按注册行等待，不增加全进程诊断扫描。
+
 这修正装配自身的等待范围（[#132](https://github.com/arcships/dim/issues/132)，[ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)、[Session access §9.4](../../design/contracts/session-access.md#94-optional-parts-per-enabled-plugin)、[规则 §4.8](principles.md#4-通过时间线扩展行为)）。输入仍经原有分支初始化、ToolBinding 取样和 BranchOpening；不增加发布阶段或工具专用接线。顺序、批次、Timeline 及重载语义均不变。
 
 loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返回的行可能占用该等待。此限制保留在 #132 中，不因此增加后台创建管理器；部件仍应遵守 apply 只登记服务/订阅、发布后再开始业务工作的规则。

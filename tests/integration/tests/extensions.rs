@@ -92,6 +92,27 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     assert!(error.to_string().contains("ExternalConsumer"));
     assert!(agent.sessions().is_empty());
     agent.close().await.unwrap();
+
+    // Debug publication checks reject an owner returning with an unready child.
+    if cfg!(debug_assertions) {
+        for session_part in [true, false] {
+            let mut b = builder();
+            if session_part {
+                b.session_plugin(|_| UnawaitedChild);
+            } else {
+                b.timeline_plugin(|_| UnawaitedChild);
+            }
+            let agent = b.build();
+            let error = agent
+                .create_session(SessionConfig::default())
+                .await
+                .err()
+                .expect("required child prevents publication");
+            assert!(error.to_string().contains("unawaited-child"), "{error}");
+            assert!(agent.sessions().is_empty());
+            agent.close().await.unwrap();
+        }
+    }
     // Scoped service reads are strict in every build.
     let mut undeclared = builder();
     undeclared
@@ -363,6 +384,32 @@ struct NamedCapability {
     installed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pending: bool,
 }
+
+struct UnawaitedChild;
+impl TypedPlugin for UnawaitedChild {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "test.required-owner"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): Self::Deps,
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            ctx.plugin(capability_plugin(NamedCapability {
+                name: "unawaited-child",
+                bit: 0,
+                installed: Default::default(),
+                pending: true,
+            }));
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for UnawaitedChild {
+    fn keys(&self) -> KeysOf<Self> {}
+}
 impl Capability for NamedCapability {
     fn keys(&self) -> KeysOf<Self> {
         self.pending.then_some(())
@@ -456,8 +503,17 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
             }
         });
         let agent = b.build();
-        let result = agent.create_session(SessionConfig::default()).await;
-        assert!(result.is_err());
+        let error = agent
+            .create_session(SessionConfig::default())
+            .await
+            .err()
+            .expect("a required factory failure rejects creation");
+        if panic_at == 1 {
+            assert!(
+                error.to_string().contains("plugin factory panicked"),
+                "{error}"
+            );
+        }
         assert!(agent.sessions().is_empty());
         agent.close().await.unwrap();
     }

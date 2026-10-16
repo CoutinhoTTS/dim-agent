@@ -1075,7 +1075,6 @@ impl TimelineFactory {
                     *loaded = Some(branch.clone());
                     branch
                 };
-                validate(&session.ctx, created.view.id)?;
                 announce(
                     &branch.diagnostics,
                     &created.view,
@@ -1243,7 +1242,10 @@ async fn create_instance(
     }
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let waiting = rows(loader, &created.view, Some(&required));
-    match wait_active(ctx, &waiting, remaining, cancel).await {
+    match wait_active(ctx, &waiting, remaining, cancel)
+        .await
+        .and_then(|()| validate(ctx, created.view.id, &waiting))
+    {
         Ok(()) => Ok(created),
         Err(error) => Err((error, Some(created))),
     }
@@ -1381,7 +1383,6 @@ pub(crate) async fn build_session(
             required: current.required.clone(),
         });
         *owner.loaded.lock().unwrap() = Some(session.clone());
-        validate(host, created.view.id)?;
         announce(
             &owner.diagnostics,
             &created.view,
@@ -1527,13 +1528,24 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
 
 /// Assembly checks for plugin authors. A diagnostics snapshot walks the whole
 /// process tree, so release builds skip it to keep Session creation constant-time.
-fn validate(ctx: &Ctx, scope: PluginId) -> Result<()> {
+fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
     if !cfg!(debug_assertions) {
         return Ok(());
     }
     let snapshot = ctx.diagnostics();
     let members = subtree(&snapshot, scope);
+    let required: HashSet<_> = required
+        .iter()
+        .flat_map(|view| subtree(&snapshot, view.id))
+        .collect();
     for plugin in snapshot.plugins.iter().filter(|p| members.contains(&p.id)) {
+        // Required capabilities must await the children they register in apply.
+        if required.contains(&plugin.id) && plugin.state != FiberState::Active {
+            return Err(AgentError::Build(format!(
+                "{} is not Active after its scope became ready: {:?}",
+                plugin.name, plugin.state
+            )));
+        }
         for access in &plugin.accesses {
             // Scoped reads are strict; this still catches direct `get_as` reads.
             if access.external && !access.declared {
