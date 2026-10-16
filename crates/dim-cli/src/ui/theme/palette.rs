@@ -109,9 +109,11 @@ fn code(
     }
 }
 
-/// Syntax colours of the default theme, as palette slots.
+/// Syntax colours of the default theme, as palette slots: Amp's keywords
+/// and types blue, calls cyan, numbers yellow, strings green, operators
+/// plain.
 pub fn terminal_code_palette() -> CodePalette {
     code(
-        "ansi:5", "ansi:2", "ansi:3", "ansi:8", "ansi:4", "ansi:3", "ansi:3", "ansi:6", "default",
+        "ansi:4", "ansi:2", "ansi:3", "ansi:8", "ansi:6", "ansi:4", "ansi:3", "default", "default",
     )
 }

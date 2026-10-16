@@ -32,8 +32,7 @@ use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
 use crate::ui::transcript::block::{Block, Tone, group_rows, opens_group, project_row};
 use crate::ui::transcript::blocks::{
-    ASSISTANT_MARK, UserStyle, apply_gutter_mark, display_width, gutter_width, render_user,
-    truncate_cells,
+    ASSISTANT_MARK, UserStyle, display_width, gutter_width, render_user, truncate_cells,
 };
 use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
@@ -2013,8 +2012,6 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
-        let gutter = gutter_width(width);
-        let content = width.saturating_sub(gutter).max(1);
         let p = &self.palette;
 
         let is_message = |row: &ViewRow| row.kind.is_message();
@@ -2108,17 +2105,8 @@ impl App {
         }
 
         let markdown = &self.markdown;
-        let text_color = p.text.clone();
-        let render = |source: &str, content_width: usize, gutter: usize, first: bool| {
-            let rows = markdown.render(source, content_width, gutter);
-            if first {
-                apply_gutter_mark(rows, ASSISTANT_MARK, gutter, &|mark: &str| {
-                    fg(mark, &text_color)
-                })
-            } else {
-                rows
-            }
-        };
+        // Answers start at the margin, unmarked, as Amp prints them.
+        let render = |source: &str, width: usize| markdown.render(source, width, 0);
         let mut plan = self.planner.plan(
             SESSION_REVISION,
             &live_text,
@@ -2148,10 +2136,7 @@ impl App {
             } else {
                 chunk(&batch.lines)
             };
-            let source = batch.source.map(|s| Block::Assistant {
-                text: s.text,
-                first: s.first,
-            });
+            let source = batch.source.map(|s| Block::Assistant(s.text));
             (text, source.map(|source| (source, placement)))
         };
         let draw = |index: usize,
@@ -2231,13 +2216,13 @@ impl App {
                     // live region holds two rows for it meanwhile, so it
                     // neither grows nor shows half a diagram.
                     Some(pending) if pending.diagram => {
+                        // Where its code block will be drawn.
                         let lines = pending.text.lines().count().saturating_sub(1);
-                        let lead = " ".repeat(gutter);
-                        let rows = vec![
-                            format!("{lead}{}", fg("┌─ mermaid", &p.faint)),
+                        let lead = "    ";
+                        vec![
+                            format!("{lead}{}", fg("mermaid", &p.faint)),
                             format!(
-                                "{lead}{} {}",
-                                fg("│", &p.faint),
+                                "{lead}{}",
                                 fg(
                                     &tf(
                                         "drawing diagram… {count} lines",
@@ -2246,19 +2231,12 @@ impl App {
                                     &p.muted
                                 )
                             ),
-                        ];
-                        if pending.first {
-                            apply_gutter_mark(rows, ASSISTANT_MARK, gutter, &|mark: &str| {
-                                fg(mark, &p.text)
-                            })
-                        } else {
-                            rows
-                        }
+                        ]
                     }
                     Some(pending) if !pending.text.trim().is_empty() => {
-                        let (first, written) = (pending.first, pending.written);
+                        let written = pending.written;
                         let rows = render_open(pending.text, pending.open_fence, &|text| {
-                            render(text, content, gutter, first)
+                            render(text, width)
                         });
                         if written > 0 {
                             // The block's first rows are committed already:
@@ -2501,12 +2479,11 @@ impl Document for App {
         match &self.history[index] {
             // Markdown is the costly layout: count the wrapped source lines
             // under the blank row that opens the chunk.
-            Block::Assistant { text, .. } => {
+            Block::Assistant(text) => {
                 let width = cols.saturating_sub(2 + MARGIN).max(1);
-                let content = width.saturating_sub(gutter_width(width)).max(1);
                 1 + text
                     .lines()
-                    .map(|line| display_width(line).div_ceil(content).max(1))
+                    .map(|line| display_width(line).div_ceil(width).max(1))
                     .sum::<usize>()
             }
             _ => self.rows(index, cols).len(),
@@ -2879,8 +2856,6 @@ fn render_block(
     p: &Palette,
     markdown: &MarkdownRenderer,
 ) -> Vec<String> {
-    let gutter = gutter_width(width);
-    let content = width.saturating_sub(gutter).max(1);
     match block {
         // The startup banner is drawn at the full width by `banner`.
         Block::Banner => Vec::new(),
@@ -2892,15 +2867,7 @@ fn render_block(
                 surface: p.surface.as_deref(),
             },
         ),
-        Block::Assistant { text, first } => {
-            let rows = markdown.render(text, content, gutter);
-            if *first {
-                let color = p.text.clone();
-                apply_gutter_mark(rows, ASSISTANT_MARK, gutter, &|mark: &str| fg(mark, &color))
-            } else {
-                rows
-            }
-        }
+        Block::Assistant(text) => markdown.render(text, width, 0),
         Block::Thinking {
             text,
             elapsed_ms,

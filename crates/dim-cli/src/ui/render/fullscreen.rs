@@ -17,7 +17,7 @@
 //!  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓     █  Tab: the picked
 //!  ┃ › a user message                            ┃     ▅  message, boxed on
 //!  ┗━e to edit━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛     █  its blank rows
-//!  ◆ answer rows (the live tail scrolls with them)     █  scrollbar thumb
+//!  answer rows (the live tail scrolls with them)       █  scrollbar thumb
 //!  ╭──────────────────────────────────────────────╮       in eighths
 //!  │ › composer                                    │      dock: never
 //!  ╰──────────────────────────────────────────────╯      scrolls

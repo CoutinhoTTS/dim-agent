@@ -15,6 +15,9 @@ use xai_grok_markdown::{
 use crate::ui::theme::ansi::{Spec, spec, tui_color};
 use crate::ui::theme::{CodePalette, Palette, Theme};
 
+/// Columns fenced code is drawn in from its fence.
+const CODE_INDENT: usize = 4;
+
 pub struct MarkdownRenderer {
     style: MarkdownStyle,
     syntect: Syntect,
@@ -24,8 +27,6 @@ pub struct MarkdownRenderer {
     text_soft: TuiColor,
     /// Colour of horizontal rules (the `faint` role).
     rule: TuiColor,
-    /// Colour of the code block bracket (the `faint` role).
-    faint: TuiColor,
 }
 
 /// `color` as a foreground style; `dim` is the faint attribute.
@@ -38,10 +39,12 @@ fn fg(color: &str) -> Style {
     }
 }
 
-/// The role mapping onto the renderer's styles, as Amp draws Markdown:
-/// highlighted headings, bold accent inline code, plain bullets, faint
-/// table rules, accent underlined links.
+/// The role mapping onto the renderer's styles, as Amp draws Markdown: a
+/// blue (keybinding hue) first-level heading, highlighted second-level ones,
+/// bold accent inline code, plain bullets, faint table rules with a divider
+/// under every row, accent underlined links.
 fn markdown_style(p: &Palette) -> MarkdownStyle {
+    let heading_top = fg(&p.keybind).bold();
     let heading_accent = fg(&p.highlight).bold();
     let heading_plain = fg(&p.text).bold();
     let hidden = Style::new().dimmed().hidden();
@@ -49,7 +52,7 @@ fn markdown_style(p: &Palette) -> MarkdownStyle {
     let marker = fg(&p.muted);
     MarkdownStyle {
         heading_inner: [
-            heading_accent,
+            heading_top,
             heading_accent,
             heading_plain,
             heading_plain,
@@ -76,7 +79,7 @@ fn markdown_style(p: &Palette) -> MarkdownStyle {
         link_text: fg(&p.accent).underline(),
         link_url: fg(&p.muted),
         link_title: fg(&p.muted),
-        // The fence lines are redrawn as a `┌─ lang` / `└─` bracket in `render`.
+        // The fence lines are dropped in `render`.
         code_outer: fg(&p.muted),
         code_language: fg(&p.faint),
         code_untagged: fg(&p.text_soft),
@@ -84,7 +87,6 @@ fn markdown_style(p: &Palette) -> MarkdownStyle {
         table_outer: fg(&p.faint),
         text: fg(&p.text_soft),
         math: fg(&p.text_soft).italic(),
-        table_compact: true,
     }
 }
 
@@ -158,7 +160,6 @@ impl MarkdownRenderer {
             syntect: Syntect::new(tm_theme(&theme.code, &theme.palette.text_soft).as_bytes()),
             text_soft: color(&theme.palette.text_soft),
             rule: color(&theme.palette.faint),
-            faint: color(&theme.palette.faint),
         }
     }
 
@@ -171,7 +172,6 @@ impl MarkdownRenderer {
         // block structure and a code block's indentation.
         let source = crate::ui::transcript::blocks::expand_tabs(source);
         let text = source.trim_end_matches('\n');
-        let source_lines: Vec<&str> = text.split('\n').collect();
         let mut buffers = MarkdownBuffers::new();
         let (output, _) = render_markdown_ratatui_with_buffers_width(
             text,
@@ -190,17 +190,8 @@ impl MarkdownRenderer {
         let mut urls: Vec<String> = Vec::new();
         let pad = " ".repeat(gutter);
         let mut rows: Vec<String> = Vec::new();
-        let frame = |text: &str, italic: bool| -> Vec<Cell> {
-            let mut style = TuiStyle::default().fg(self.faint);
-            if italic {
-                style = style.add_modifier(Modifier::ITALIC);
-            }
-            text.graphemes(true)
-                .map(|g| (g.to_owned(), style, UnicodeWidthStr::width(g), None))
-                .collect()
-        };
-        // Indent of the open fence: fenced code is drawn as a dim bracket,
-        // `┌─ lang`, a `│ ` gutter on every body row, and `└─`.
+        // Indent of the open fence: fenced code is drawn as Amp draws it,
+        // without its fence lines, four columns in.
         let mut fence: Option<usize> = None;
         for (index, line) in output.lines.iter().enumerate() {
             let code = in_code(index);
@@ -211,25 +202,10 @@ impl MarkdownRenderer {
                     .iter()
                     .any(|f| text_of[indent..].starts_with(f))
             {
-                let lead = " ".repeat(indent);
-                let cells = match fence.take() {
-                    Some(_) => frame("└─", false),
-                    None => {
-                        fence = Some(indent);
-                        let language = text_of[indent..].trim_start_matches(['`', '~']).trim();
-                        let mut cells = frame(
-                            if language.is_empty() {
-                                "┌─"
-                            } else {
-                                "┌─ "
-                            },
-                            false,
-                        );
-                        cells.extend(frame(language, true));
-                        cells
-                    }
+                fence = match fence {
+                    Some(_) => None,
+                    None => Some(indent),
                 };
-                rows.push(format!("{pad}{lead}{}", cells_to_ansi(&cells, &urls)));
                 continue;
             }
             // A table row starts with a box character; a lone leading `│` is also
@@ -237,11 +213,6 @@ impl MarkdownRenderer {
             let trimmed = text_of.trim_start();
             let table = trimmed.starts_with(['┌', '├', '└'])
                 || (trimmed.starts_with('│') && trimmed.matches('│').count() >= 2);
-            let heading_one = output
-                .line_source_map
-                .get(index)
-                .and_then(|n| source_lines.get(*n))
-                .is_some_and(|l| l.starts_with("# "));
             let is_rule = !code
                 && !table
                 && text_of.trim().chars().count() >= 3
@@ -280,30 +251,41 @@ impl MarkdownRenderer {
                 }
             }
             if code {
-                let indent = fence.unwrap_or(0);
+                let indent = fence.unwrap_or(0) + CODE_INDENT;
                 let lead = " ".repeat(indent);
                 let skip = cells
                     .iter()
-                    .take(indent)
+                    .take(indent - CODE_INDENT)
                     .take_while(|cell| cell.0 == " ")
                     .count();
-                let body_width = width.saturating_sub(indent + 2).max(1);
+                let body_width = width.saturating_sub(indent).max(1);
                 for wrapped in wrap_cells_row(&cells[skip..], body_width, true) {
-                    let mut row = frame("│ ", false);
-                    row.extend(wrapped);
-                    rows.push(format!("{pad}{lead}{}", cells_to_ansi(&row, &urls)));
+                    rows.push(format!("{pad}{lead}{}", cells_to_ansi(&wrapped, &urls)));
                 }
                 continue;
             }
+            if table {
+                // Amp's tables have round corners.
+                for cell in &mut cells {
+                    if let Some(round) = match cell.0.as_str() {
+                        "┌" => Some("╭"),
+                        "┐" => Some("╮"),
+                        "└" => Some("╰"),
+                        "┘" => Some("╯"),
+                        _ => None,
+                    } {
+                        cell.0 = round.to_owned();
+                    }
+                }
+            } else if let Some(marker) = cells.iter().position(|cell| cell.0 != " ")
+                && cells[marker].0 == "•"
+                && cells.get(marker + 1).is_some_and(|cell| cell.0 == " ")
+            {
+                // The renderer's bullet goes back to the `-` Amp keeps.
+                cells[marker].0 = "-".to_owned();
+            }
             for wrapped in wrap_cells_row(&cells, width, false) {
                 rows.push(format!("{pad}{}", cells_to_ansi(&wrapped, &urls)));
-            }
-            if heading_one {
-                // A level-1 heading is underlined by a full-width rule.
-                let rule: Vec<Cell> = (0..width)
-                    .map(|_| ("─".to_owned(), TuiStyle::default().fg(self.rule), 1, None))
-                    .collect();
-                rows.push(format!("{pad}{}", cells_to_ansi(&rule, &urls)));
             }
         }
         while rows.last().is_some_and(|row| row.trim().is_empty()) {
@@ -400,7 +382,8 @@ fn merge_neutral_gaps(cells: &mut [Cell]) {
     }
 }
 
-/// Hanging indent of a wrapped row: under a list marker or a quote bar.
+/// Hanging indent of a wrapped row: under a numbered list marker or a quote
+/// bar. A `-` item continues at its margin, as Amp wraps it.
 fn hanging_indent(cells: &[Cell]) -> usize {
     let text: String = cells.iter().map(|c| c.0.as_str()).collect();
     let leading = text.len() - text.trim_start_matches(' ').len();
@@ -410,11 +393,10 @@ fn hanging_indent(cells: &[Cell]) -> usize {
         indent += 2;
         remaining = after;
     }
-    let bullet = remaining.strip_prefix("• ").map(|_| 2).or_else(|| {
-        let digits = remaining.bytes().take_while(u8::is_ascii_digit).count();
-        (digits > 0 && digits <= 9 && remaining[digits..].starts_with(". ")).then_some(digits + 2)
-    });
-    indent + bullet.unwrap_or(0)
+    let digits = remaining.bytes().take_while(u8::is_ascii_digit).count();
+    let number =
+        (digits > 0 && digits <= 9 && remaining[digits..].starts_with(". ")).then_some(digits + 2);
+    indent + number.unwrap_or(0)
 }
 
 /// Word wrap of one logical row (port of `wrapAnsiWords` + `layoutBlock`):
@@ -669,19 +651,18 @@ mod tests {
             "  ",
             "  A paragraph that streams in two pieces.",
             "  ",
-            "  • first bullet",
-            "  • second bullet",
+            "  - first bullet",
+            "  - second bullet",
             "  ",
-            "  ┌─ ts",
-            "  │ export const answer = 42",
-            "  └─",
+            "      export const answer = 42",
             "  ",
-            "  ┌─────┬───────┐",
+            "  ╭─────┬───────╮",
             "  │ col │ value │",
             "  ├─────┼───────┤",
             "  │ a   │ 1     │",
+            "  ├─────┼───────┤",
             "  │ b   │ 2     │",
-            "  └─────┴───────┘",
+            "  ╰─────┴───────╯",
             "  ",
             "  Final line.",
         ];
@@ -714,14 +695,14 @@ mod tests {
     }
 
     #[test]
-    fn list_items_hang_under_their_marker() {
+    fn list_items_keep_amps_dash_and_wrap_to_the_margin() {
         let rows = plain(&renderer().render(
             "- alpha beta gamma delta epsilon zeta eta theta iota",
             20,
             0,
         ));
-        assert!(rows[0].starts_with("• alpha"));
-        assert!(rows[1].starts_with("  "), "{rows:?}");
+        assert!(rows[0].starts_with("- alpha"));
+        assert!(!rows[1].starts_with(' '), "{rows:?}");
     }
 
     #[test]
@@ -731,16 +712,15 @@ mod tests {
             60,
             0,
         ));
-        assert_eq!(rows[2], "│     a, b := 0, 1", "{rows:?}");
-        assert_eq!(rows[4], "│         a, b = b, a+b", "{rows:?}");
+        assert_eq!(rows[1], "        a, b := 0, 1", "{rows:?}");
+        assert_eq!(rows[3], "            a, b = b, a+b", "{rows:?}");
     }
 
     #[test]
-    fn code_rows_wrap_hard_under_the_bracket_gutter() {
+    fn code_rows_wrap_hard_under_their_indent() {
         let rows = plain(&renderer().render("```\nabcdefghijklmnopqrstuvwxyz\n```", 10, 0));
-        assert_eq!(rows[0], "┌─");
-        assert_eq!(rows[1], "│ abcdefgh");
-        assert!(rows[2].starts_with("│ ijk"), "{rows:?}");
+        assert_eq!(rows[0], "    abcdef");
+        assert!(rows[1].starts_with("    ghi"), "{rows:?}");
     }
 
     #[test]
@@ -764,29 +744,30 @@ mod tests {
         assert_eq!(plain(&r.render("### Three", 40, 0)), vec!["### Three"]);
     }
 
-    // The element rendering the TS scrollback contract is built on: these
-    // tests pin it, so a change to the shared renderer shows up here.
+    // The elements as Amp draws them: these tests pin them, so a change to
+    // the shared renderer shows up here.
 
     #[test]
-    fn tables_keep_the_header_rule_and_outer_borders_without_body_dividers() {
+    fn tables_have_round_corners_and_a_divider_under_every_row() {
         let rows = plain(&renderer().render("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |", 40, 0));
         assert_eq!(
             rows,
             vec![
-                "┌───┬───┐",
+                "╭───┬───╮",
                 "│ a │ b │",
                 "├───┼───┤",
                 "│ 1 │ 2 │",
+                "├───┼───┤",
                 "│ 3 │ 4 │",
-                "└───┴───┘",
+                "╰───┴───╯",
             ]
         );
     }
 
     #[test]
-    fn fenced_code_draws_a_bracket_with_its_language() {
+    fn fenced_code_is_indented_without_its_fences() {
         let rows = plain(&renderer().render("```rust\nlet x = 1;\n```", 40, 0));
-        assert_eq!(rows, vec!["┌─ rust", "│ let x = 1;", "└─"]);
+        assert_eq!(rows, vec!["    let x = 1;"]);
     }
 
     #[test]
@@ -809,7 +790,7 @@ mod tests {
     #[test]
     fn task_items_keep_the_marker_and_the_box() {
         let rows = plain(&renderer().render("- [x] done\n- [ ] todo", 40, 0));
-        assert_eq!(rows, vec!["• [x] done", "• [ ] todo"]);
+        assert_eq!(rows, vec!["- [x] done", "- [ ] todo"]);
     }
 
     #[test]

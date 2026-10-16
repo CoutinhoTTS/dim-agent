@@ -389,8 +389,8 @@ Interactive recovery displays main-branch history. Noninteractive recovery emits
 The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
 
 ```text
- ◆ answer row                                                   ▁   scrollbar: last column,
- ◆ answer row (streaming tail scrolls with the transcript)      █   thumb in eighths of a row
+ answer row                                                     ▁   scrollbar: last column,
+ answer row (streaming tail scrolls with the transcript)        █   thumb in eighths of a row
                                                                 █
  ╭─ · working…  3s ──────────────────────────────────────────╮
  │ › Ask anything...                                          │      dock: queue, composer,
@@ -417,7 +417,7 @@ Pickers (`/resume`, `/models`, `/connect`, `/approvals`, `/theme`, `/language`, 
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    picked message: the box
  ┃ ┃ Explain this project                                   ┃    takes the blank rows
  ┗━e to edit━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛    around it, nothing moves
- ◆ The project …      ╭─ Command Palette ─────────────────╮
+ The project …        ╭─ Command Palette ─────────────────╮
                       │                                    │    palette: own query row,
                       │ > th                               │    transcript dimmed behind,
                       │                                    │    the selected row on an
@@ -436,7 +436,9 @@ Notifications reach a user who switched windows when the run finishes or waits o
 
 `/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. As in the TS build, English and Simplified Chinese are translated; the other languages read as English for now. Rows already in the transcript keep their language.
 
-The default theme (`System`) is Amp's: every colour is the terminal's own default foreground, a slot of its 16-colour palette (`ansi:N`) or the faint attribute, so it follows the terminal's colour scheme on dark and light backgrounds alike. Yellow is the accent (titles, the selected row, inline code), green the user's messages and successes, cyan headings, red errors; muted text is faint, table rules bright black, and code is highlighted in the terminal's base colours. `Dim Dark` and `Dim Light` take the same structure with Dim's green as the accent. A theme role is a colour spec: `#rrggbb`, `ansi:N`, `default` or `dim`.
+The default theme (`System`) is Amp's: every colour is the terminal's own default foreground, a slot of its 16-colour palette (`ansi:N`) or the faint attribute, so it follows the terminal's colour scheme on dark and light backgrounds alike. Yellow is the accent (titles, the selected row, inline code), green the user's messages and successes, blue first-level and cyan second-level headings, red errors; muted text is faint, table rules bright black, and code is highlighted in the terminal's base colours (keywords and types blue, calls cyan, numbers yellow, strings green).
+
+Answers are laid out as Amp prints them: at the margin with no mark, `-` list items that wrap back to the margin, fenced code indented four columns without its fences, and tables with round corners and a divider under every row. Thoughts keep Dim's own form. `Dim Dark` and `Dim Light` take the same structure with Dim's green as the accent. A theme role is a colour spec: `#rrggbb`, `ansi:N`, `default` or `dim`.
 
 `e` cannot rewrite history: the App Server has no rewind or fork, so the edited text is sent as a new message.
 

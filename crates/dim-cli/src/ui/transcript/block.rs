@@ -29,10 +29,7 @@ pub enum Block {
     /// A shell-mode run: recorded (`!`) from the transcript, private (`!!`)
     /// from the terminal alone.
     Shell(ShellRun),
-    Assistant {
-        text: String,
-        first: bool,
-    },
+    Assistant(String),
     /// A settled thought: one summary row, or the whole text when expanded.
     Thinking {
         text: String,
@@ -66,10 +63,7 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
         RowKind::Shell => {
             ShellRun::parse(&row.text).map_or_else(|| Block::User(row.text.clone()), Block::Shell)
         }
-        RowKind::AssistantMessage => Block::Assistant {
-            text: row.text.clone(),
-            first: true,
-        },
+        RowKind::AssistantMessage => Block::Assistant(row.text.clone()),
         RowKind::Thinking => Block::Thinking {
             text: row.text.clone(),
             elapsed_ms: row.elapsed_ms,

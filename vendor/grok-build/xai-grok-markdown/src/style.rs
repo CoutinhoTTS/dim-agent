@@ -153,9 +153,6 @@ pub struct MarkdownStyle {
     /// Style for rendered LaTeX math (inline `$...$`/`\(...\)` content after Unicode conversion, and display math block lines).
     /// In raw mode the style applies to the unconverted TeX source.
     pub math: Style,
-    /// Modified by dim-agent: omit the horizontal divider between body rows of a table (only the header
-    /// separator and the outer borders remain). `false` keeps the upstream rendering.
-    pub table_compact: bool,
 }
 
 impl MarkdownStyle {
@@ -204,7 +201,6 @@ impl MarkdownStyle {
             table_outer: adapt_style(self.table_outer),
             text: adapt_style(self.text),
             math: adapt_style(self.math),
-            table_compact: self.table_compact,
         }
     }
 }
@@ -298,6 +294,5 @@ pub mod test_style {
         table_outer: Style::new().bold(),
         text: Style::new(),
         math: Style::new().italic(),
-        table_compact: false,
     };
 }

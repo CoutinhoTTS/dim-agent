@@ -6,11 +6,8 @@
 //! batches of live streams, and for streams that finished (their settled twin
 //! arrived) only the remainder — never the part already written.
 
-use super::blocks::gutter_width;
-
-/// Lays out one batch of Markdown source: `(source, content_width, gutter,
-/// first)`; `first` batches carry the answer mark.
-pub type RenderFn<'a> = dyn Fn(&str, usize, usize, bool) -> Vec<String> + 'a;
+/// Lays out one batch of Markdown source at a width.
+pub type RenderFn<'a> = dyn Fn(&str, usize) -> Vec<String> + 'a;
 use super::split::split_streaming_markdown;
 use std::collections::HashMap;
 
@@ -26,8 +23,6 @@ pub struct TextBlock<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchSource {
     pub text: String,
-    /// The batch opened its message, which decides the gutter mark.
-    pub first: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -74,7 +69,6 @@ impl ActiveStream {
 /// The live part of a stream (see [`StreamPlanner::pending`]).
 pub struct Pending<'a> {
     pub text: &'a str,
-    pub first: bool,
     /// Rendered rows of `text` already committed: the live region skips them.
     pub written: usize,
     /// The marker run of a fence still open at the end of `text`.
@@ -210,7 +204,6 @@ impl StreamPlanner {
         let stream = self.active.iter().find(|s| s.id == id)?;
         Some(Pending {
             text: &stream.text[stream.committed_len..],
-            first: stream.committed_rows == 0,
             written: stream.open_rows,
             open_fence: stream.open_fence.as_deref(),
             diagram: stream.open_diagram,
@@ -272,8 +265,6 @@ fn plan_blocks(
     finalize: bool,
     render: &RenderFn<'_>,
 ) -> Batch {
-    let gutter = gutter_width(width);
-    let content_width = width.saturating_sub(gutter).max(1);
     let split = (!finalize).then(|| split_streaming_markdown(&stream.text));
     // A diagram is laid out from its whole source: it neither streams its
     // lines out nor closes early, and its source shows until it closes.
@@ -285,12 +276,10 @@ fn plan_blocks(
         .and_then(|s| s.open_fence.clone())
         .filter(|_| !stream.open_diagram);
     let end = split.as_ref().map_or(stream.text.len(), |s| s.settled_len);
-    let first = stream.committed_rows == 0;
     let batch = |stream: &ActiveStream, source: &str, lines: Vec<String>| Batch {
         lines: lines[stream.open_rows.min(lines.len())..].to_vec(),
         source: Some(BatchSource {
             text: source.to_owned(),
-            first,
         }),
         continues: stream.open_rows > 0,
     };
@@ -311,7 +300,7 @@ fn plan_blocks(
             closed = format!("{source}{newline}{run}");
             source = &closed;
         }
-        let lines = render(source, content_width, gutter, first);
+        let lines = render(source, width);
         let out = batch(stream, source, lines.clone());
         stream.committed_len = end;
         stream.committed_rows += lines.len();
@@ -325,9 +314,7 @@ fn plan_blocks(
         let stable = stream.text.rfind('\n').map_or(0, |at| at + 1);
         if stable > stream.committed_len {
             let source = &stream.text[stream.committed_len..stable];
-            let lines = render_open(source, Some(&run), &|text| {
-                render(text, content_width, gutter, first)
-            });
+            let lines = render_open(source, Some(&run), &|text| render(text, width));
             if lines.len() > stream.open_rows {
                 let out = batch(stream, source, lines.clone());
                 stream.open_rows = lines.len();
@@ -341,16 +328,11 @@ fn plan_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::transcript::blocks::{ASSISTANT_MARK, apply_gutter_mark, render_plain};
+    use crate::ui::transcript::blocks::render_plain;
 
-    /// Test renderer: plain wrapped text with the unstyled answer mark.
-    fn render_marked(source: &str, width: usize, gutter: usize, first: bool) -> Vec<String> {
-        let rows = render_plain(source, width, gutter);
-        if first {
-            apply_gutter_mark(rows, ASSISTANT_MARK, gutter, &|m: &str| m.to_owned())
-        } else {
-            rows
-        }
+    /// Test renderer: plain wrapped text.
+    fn render_marked(source: &str, width: usize) -> Vec<String> {
+        render_plain(source, width)
     }
 
     const W: usize = 40;
@@ -379,7 +361,7 @@ mod tests {
                 .is_empty()
         );
         let out = plan(&mut p, &[block("a", "First para\n\nSecond")], &[]);
-        assert_eq!(text_of(&out.active), vec!["◆ First para"]);
+        assert_eq!(text_of(&out.active), vec!["First para"]);
         // The same text again writes nothing.
         let again = plan(&mut p, &[block("a", "First para\n\nSecond")], &[]);
         assert!(again.active.is_empty());
@@ -394,7 +376,7 @@ mod tests {
         let fence = "Intro\n\n```rust\nfn a() {}\nfn b";
         // The intro closes; the fence's finished lines follow next frame.
         let out = plan(&mut p, &[block("a", fence)], &[]);
-        assert_eq!(text_of(&out.active), vec!["◆ Intro"]);
+        assert_eq!(text_of(&out.active), vec!["Intro"]);
         let out = plan(&mut p, &[block("a", fence)], &[]);
         assert_eq!(text_of(&out.active), vec!["```rust", "fn a() {}"]);
         assert!(!out.active[0].continues);

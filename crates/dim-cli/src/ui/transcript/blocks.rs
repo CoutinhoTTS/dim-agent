@@ -118,31 +118,10 @@ pub fn wrap_cells(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-/// Replaces the gutter of the first non-blank row with `mark` (`style`
-/// paints it). The gutter is reserved as blanks by the renderer, so the mark
-/// costs no width; the row's own text starts after the gutter cells.
-pub fn apply_gutter_mark(
-    lines: Vec<String>,
-    mark: &str,
-    gutter: usize,
-    style: &dyn Fn(&str) -> String,
-) -> Vec<String> {
-    let mut lines = lines;
-    if let Some(index) = lines.iter().position(|line| !line.trim().is_empty()) {
-        let rest: String = lines[index].chars().skip(gutter).collect();
-        lines[index] = format!("{}{rest}", style(&gutter_mark(mark, gutter)));
-    }
-    lines
-}
-
-/// Plain stand-in for the Markdown renderer: every row carries the reserved
-/// gutter blanks.
-pub fn render_plain(source: &str, content_width: usize, gutter: usize) -> Vec<String> {
-    let pad = " ".repeat(gutter);
-    wrap_cells(source.trim_end_matches('\n'), content_width)
-        .into_iter()
-        .map(|row| format!("{pad}{row}"))
-        .collect()
+/// Plain stand-in for the Markdown renderer.
+#[cfg(test)]
+pub fn render_plain(source: &str, width: usize) -> Vec<String> {
+    wrap_cells(source.trim_end_matches('\n'), width)
 }
 
 /// How a user message is painted: its colour (bar and italic text) and the
@@ -227,15 +206,6 @@ mod tests {
         // ZWJ emoji stays one cluster.
         let family = "👨\u{200d}👩\u{200d}👧";
         assert_eq!(wrap_cells(&format!("a{family}"), 2), vec!["a", family]);
-    }
-
-    #[test]
-    fn mark_goes_on_the_first_visible_row() {
-        let rows = vec!["  ".to_owned(), "  hello".to_owned()];
-        assert_eq!(
-            apply_gutter_mark(rows, ASSISTANT_MARK, 2, &|m: &str| m.to_owned()),
-            vec!["  ", "◆ hello"]
-        );
     }
 
     #[test]

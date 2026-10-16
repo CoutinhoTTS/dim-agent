@@ -1824,8 +1824,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             }
 
             // Row divider between body rows (not after last row)
-            // Modified by dim-agent: `table_compact` drops the divider.
-            if !self.ms.table_compact && i < state.rows.len().saturating_sub(1) {
+            if i < state.rows.len().saturating_sub(1) {
                 let row_sep = self.format_border_line(
                     &col_widths,
                     padding,
