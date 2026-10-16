@@ -16,11 +16,17 @@ only in the examples.
 cargo run --locked -p dim-agent-capabilities --example host_platform_isolation_spike
 # Linux, as an unprivileged user
 cargo run --locked -p dim-agent-capabilities --example host_platform_landlock_spike
+# Linux bubblewrap, through actual process/PTY handles
+cargo run --locked -p dim-agent-capabilities --example host_platform_bubblewrap_spike
+# Compare controlling-terminal behavior, without repeating the boundary flows
+cargo run --locked -p dim-agent-capabilities --example host_platform_bubblewrap_spike -- --terminal-controls
 ```
 
 Each example creates and removes its own temporary tree, without reading a product home or using
 credentials. A platform that does not match its example returns an explicit unsupported error.
-The Linux example requires Landlock ABI 4 or newer and refuses to run without that support.
+The Landlock example requires ABI 4 or newer. The bubblewrap example requires unprivileged user
+namespaces and installed `/usr/bin/bwrap` on the Debian baseline below. Neither downgrades when
+its mechanism is unavailable.
 
 ## macOS measurement
 
@@ -163,6 +169,50 @@ as a packet-level acceptance test. Those flows remain required for product integ
 is no bubblewrap latency comparison. The temporary machine and its fixtures are removed after
 calibration; the product backend and configuration remain unimplemented.
 
+## Linux bubblewrap process and terminal calibration
+
+Measured on 2026-10-16 in a second disposable isolated machine with the same Debian 13.7,
+Linux 7.2.9 ARM64 and bubblewrap 0.12.0 baseline, Rust 1.98.1 and UID 501. The
+[bubblewrap example](../../crates/dim-agent-capabilities/examples/host_platform_bubblewrap_spike.rs)
+uses actual `HostPlatform::spawn`, `ProcessTree`, `spawn_pty` and `PtyProcessTree` handles.
+It grants the fixture's workspace, a read-only helper directory, `/usr`, `/etc` and private
+runtime mounts. Its environment contains only PATH. No host share, SSH agent, product home
+or credential is used. Each completion has a five-second bound; packet non-arrival is checked
+for 300 ms after the isolated sender exits.
+
+| Flow | Observed result |
+| --- | --- |
+| User and network namespace | Payload retains UID 501; its network namespace differs from the collector's |
+| Host IPv4/IPv6 TCP | Plain control sends bytes to live listeners; isolated connection fails and no connection arrives |
+| Host IPv4/IPv6 UDP | Plain control delivers the exact datagram; isolated payload sends no datagram to either listener |
+| Host UNIX socket outside grants | Plain control exchanges bytes; the unmounted path is inaccessible inside the namespace |
+| ProcessTree cancellation | Termination completes; all recorded monitor, namespace-init and shell/sleep descendant PIDs disappear |
+| PTY input and resize | Payload reads terminal input, reports the changed size 41 × 132 and terminates with all recorded descendants gone |
+| Interactive bash job control | A stopped job resumes through `fg`, receives terminal input and finishes; subsequent background work is removed on PTY termination |
+| Invalid bind source | Setup fails before the payload marker is created |
+
+The terminal control compares plain PTY, bubblewrap with `--new-session`, and bubblewrap using
+the existing HostPlatform session. All have a tty on stdin, but `--new-session` loses the
+controlling terminal: `tcgetpgrp(0)` returns -1 and `/dev/tty` cannot be opened. Plain PTY and the
+existing-session variant retain both. Therefore startup output and `stty size` alone are not
+acceptance of interactive job control.
+
+The measured lifetime/interactive construction omits `--new-session`. Existing native spawn
+already calls `setsid` with null stdin and piped output; existing PTY spawn creates a new dedicated
+terminal. This composition exposes no surrounding host shell's terminal to the payload.
+Bubblewrap's parent-death handling and private PID namespace retain whole-tree settlement,
+including jobs that create their own process group. It does not add a terminal proxy or process
+supervisor. This justification is specific to these two HostPlatform entry points; it does not
+make arbitrary wrapper invocation safe with an inherited host terminal. See bubblewrap's
+[TIOCSTI warning](https://github.com/containers/bubblewrap/blob/main/README.md#limitations).
+The measured kernel has `dev.tty.legacy_tiocsti=1`; the example does not change that setting.
+
+These are native mechanism flows, not WorkspaceTools foreground/background execution or
+ShellSession integration with the proposed policy file. Environment selection, policy edits and
+actual consumer admission/result flows remain product acceptance work. No bubblewrap latency,
+external-network routing, abstract UNIX-socket or other-kernel guarantee is measured. The machine
+is deleted after collecting results; the checked-in example reproduces the flows.
+
 ## Existing implementation and integration points
 
 | Existing owner | Relevant behavior |
@@ -233,4 +283,8 @@ the measured flow assertions. Each retained helper serves repeated experiment op
 plain network control establishes that a refusal is not an unavailable endpoint, and the invalid
 policy marker establishes that the payload did not execute. The Linux wrapper runs restriction
 before threads and exec; its small ABI boundary avoids adding a library or product adapter for
-the experiment. No additional production abstraction is needed by these measured flows.
+the experiment. The bubblewrap fixture reuses one bounded PTY reader for its readiness, resize
+and foreground-job observations; removing repeated read tasks preserves all seven native flow
+groups. Process ancestry collection is necessary because PID-namespace numbers are not host PIDs;
+termination must verify that the actual monitored descendants disappear. No additional production
+abstraction is needed by these measured flows.

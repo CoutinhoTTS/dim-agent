@@ -142,8 +142,15 @@ and IPC namespaces, a private `/proc` and minimal `/dev`. Retain the unprivilege
 do not request elevated execution, capabilities, setuid mode or a host network namespace.
 Use a private user namespace and drop all capabilities for the payload. Resolve the installed
 `bwrap` from the host's captured PATH; no runtime download or installer.
-Use its parent-death handling and terminal separation while preserving the existing tree handle's
-ability to terminate and reap the whole command. No custom seccomp subsystem is proposed.
+Use its parent-death handling while retaining the existing tree handle's ability to terminate
+and reap the whole command. Terminal separation belongs to the existing HostPlatform entry
+points: native spawn already creates a new session with null stdin/piped output, and PTY spawn
+creates a dedicated terminal. Do not add bubblewrap `--new-session` to that PTY: measured controls
+show it loses the controlling terminal even though input and resizing still work. The existing
+session/PTY construction preserves interactive job control without exposing a surrounding host
+shell's terminal. The crate-local preparation is used only through these two entry points;
+arbitrary inherited-terminal invocation has no such guarantee. No terminal proxy, custom seccomp
+subsystem or additional process supervisor is proposed.
 
 Bubblewrap provides mount/network namespaces; its arguments determine the actual boundary.
 Its upstream documentation identifies mounted service sockets and terminal injection as security
@@ -160,9 +167,12 @@ retroactively expand the spike's runtime evidence.
 The [feasibility probe](host-platform-isolation-spike.md#linux-bubblewrap-feasibility) passes as
 UID 501 on Debian 13.7 / Linux 7.2.9 ARM64 with bubblewrap 0.12.0: workspace I/O, read-only
 bytes/mode, an inaccessible private fixture, symlink rejection, a private network namespace
-and basic PTY startup. This is not Linux HostPlatform process-tree/PTY or packet-level
-acceptance. Product integration must verify those flows and whole-tree settlement on that
-baseline. A container or kernel that refuses required namespaces is unsupported
+and basic PTY startup. A subsequent [native-handle calibration](host-platform-isolation-spike.md#linux-bubblewrap-process-and-terminal-calibration)
+also verifies actual ProcessTree/PtyProcessTree settlement, PTY input/resize, interactive bash
+job control and live host IPv4/IPv6 TCP/UDP plus unmounted UNIX-socket boundaries on that baseline.
+These fixtures do not establish product policy loading or exec/ShellSession integration.
+Product integration must verify the same boundary through its actual consumers. A container or
+kernel that refuses required namespaces is unsupported
 for isolation; command execution refuses without switching to a weaker Landlock policy or
 ordinary execution.
 
@@ -250,7 +260,7 @@ with the supported baselines recorded.
 ## Requirements raised to mechanism owners
 
 None. No new readiness phase, subscription, protocol, generic policy service or rutis feature is
-required. OS-baseline coverage and Linux native process/PTY settlement are HostPlatform
+required. OS-baseline coverage and product process/PTY acceptance are HostPlatform
 acceptance work, not requirements on core.
 
 ## Ablation review
