@@ -22,6 +22,23 @@ struct StoredFile {
     text: String,
 }
 
+/// Explicit offline conversion of a file the owner identifies as unversioned.
+/// The exclusive backup prevents an ordinary retry from wrapping it twice.
+pub async fn migrate_unversioned_file(mut lease: FileLease) -> Result<(), FileStorageError> {
+    let cancel = CancellationToken::new();
+    let text = String::from_utf8(lease.read(&cancel).await?)
+        .map_err(|_| FileStorageError::Io(io::ErrorKind::InvalidData.into()))?;
+    let bytes = serde_json::to_vec(&StoredFile {
+        version: FORMAT_VERSION,
+        text,
+    })
+    .expect("text records contain only serializable fields");
+    lease
+        .backup("before-v1", private_permissions(), &cancel)
+        .await?;
+    lease.replace(bytes, private_permissions(), &cancel).await
+}
+
 fn failure(error: FileStorageError) -> Value {
     let code = match error {
         FileStorageError::Closed | FileStorageError::Cancelled => "closed",
@@ -223,18 +240,16 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                             let cancel = CancellationToken::new();
                             let result = match method {
                                 "read" => match lease.read(&cancel).await {
-                                    Ok(bytes) => serde_json::from_slice::<StoredFile>(&bytes)
-                                        .map_err(|_| {
-                                            FileStorageError::Io(io::ErrorKind::InvalidData.into())
-                                        })
-                                        .and_then(|record| {
-                                            if record.version != FORMAT_VERSION {
-                                                return Err(FileStorageError::Io(
-                                                    io::ErrorKind::InvalidData.into(),
-                                                ));
-                                            }
-                                            Ok(json!(record.text).into())
-                                        }),
+                                    Ok(bytes) => match serde_json::from_slice::<StoredFile>(&bytes)
+                                    {
+                                        Ok(StoredFile {
+                                            version: FORMAT_VERSION,
+                                            text,
+                                        }) => Ok(json!(text).into()),
+                                        _ => Err(FileStorageError::Io(
+                                            io::ErrorKind::InvalidData.into(),
+                                        )),
+                                    },
                                     Err(FileStorageError::Io(error))
                                         if error.kind() == io::ErrorKind::NotFound =>
                                     {

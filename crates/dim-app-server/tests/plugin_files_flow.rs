@@ -1,7 +1,7 @@
 #![cfg(any(unix, windows))]
-use dim_agent_capabilities::file_storage::FileStoragePlugin;
+use dim_agent_capabilities::file_storage::{FileStorage, FileStorageError, FileStoragePlugin};
 use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
-use dim_app_server::plugin_files::PluginFilesPlugin;
+use dim_app_server::plugin_files::{PluginFilesPlugin, migrate_unversioned_file};
 use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use rutis_bridge::session::{HostDispatch, Value};
 use serde_json::json;
@@ -336,6 +336,93 @@ async fn versioned_records_reopen_and_preserve_rejected_files() {
             std::fs::read(directory.0.join(format!("{name}.preserved"))).unwrap(),
             bytes
         );
+    }
+    call(&scope, "close", vec![]).await;
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_legacy_migration_preserves_payloads_and_refuses_destructive_retries() {
+    let directory = Directory::new();
+    let (root, scope) = mount(&directory.0).await;
+    let storage = root.get::<FileStorage>().unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // Even envelope-shaped legacy text is opaque; the owner supplies its format.
+    for (index, text) in [
+        "",
+        "legacy 中文\n",
+        r#"{"version":1,"text":"legacy payload"}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("legacy-{index}");
+        let file = directory.0.join(&name);
+        std::fs::write(&file, text).unwrap();
+        let path = storage.path(0, &name).unwrap();
+        migrate_unversioned_file(storage.lock(&path, &cancel).await.unwrap())
+            .await
+            .unwrap();
+        let encoded = std::fs::read(&file).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap(),
+            json!({"version":1,"text":text})
+        );
+        assert_eq!(
+            std::fs::read(directory.0.join(format!("{name}.before-v1"))).unwrap(),
+            text.as_bytes()
+        );
+        let value = call(
+            &scope,
+            "withLock",
+            vec![
+                json!(name).into(),
+                Value::callback(|args| {
+                    let file = args.list()?.remove(0);
+                    Ok(Value::future(async move {
+                        Ok(call(&file, "read", vec![]).await)
+                    }))
+                }),
+            ],
+        )
+        .await
+        .json()
+        .unwrap();
+        assert_eq!(value, json!({"ok":true,"value":{"ok":true,"value":text}}));
+        assert!(
+            matches!(migrate_unversioned_file(storage.lock(&path, &cancel).await.unwrap()).await,
+            Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), encoded);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for file in [file, directory.0.join(format!("{name}.before-v1"))] {
+                assert_eq!(
+                    std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+    for (name, original, backup) in [
+        ("invalid", &b"\xff"[..], None),
+        ("interrupted", &b"legacy"[..], Some(&b"partial"[..])),
+    ] {
+        let file = directory.0.join(name);
+        let backup_file = directory.0.join(format!("{name}.before-v1"));
+        std::fs::write(&file, original).unwrap();
+        if let Some(bytes) = backup {
+            std::fs::write(&backup_file, bytes).unwrap();
+        }
+        let path = storage.path(0, name).unwrap();
+        assert!(
+            migrate_unversioned_file(storage.lock(&path, &cancel).await.unwrap())
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(file).unwrap(), original);
+        assert_eq!(std::fs::read(backup_file).ok().as_deref(), backup);
     }
     call(&scope, "close", vec![]).await;
     root.shutdown().await.unwrap();
