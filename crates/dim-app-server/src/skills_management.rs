@@ -2,16 +2,14 @@
 use crate::{
     methods::{ManagementMethods, SelectionScope},
     protocol::{canonical_cwd, optional_non_null},
-    settings::{
-        BusinessDocument, SettingsError, SettingsScope, SettingsService, Wake, settings_changes,
-    },
+    settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService},
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use dim_agent_capabilities::skills::{RefreshTarget, SkillStatus, SkillsCatalog, SkillsError};
 use dim_agent_capabilities::{
     host_platform::HostPlatform,
     skill_settings::{
-        SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
+        SOURCE, SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
         SkillSettingsSnapshot,
     },
 };
@@ -29,7 +27,7 @@ struct SkillDocument {
     extra: BTreeMap<String, serde_json::Value>,
 }
 impl BusinessDocument for SkillDocument {
-    const NAMESPACE: &'static str = "skills";
+    const NAMESPACE: &'static str = SOURCE;
     const USER_FILE: &'static str = "skills.json";
     fn validate(&self) -> crate::settings::Result<()> {
         if self.extra.contains_key("disabledSkillIds") {
@@ -47,11 +45,9 @@ impl BusinessDocument for SkillDocument {
 }
 
 /// Adapts the owner's business document to the reusable Skill catalog port.
-/// `wake` turns Settings' `skills` events into the port's `changes` until the
-/// catalog listens to the rutis event itself (#121).
+/// Settings announces its writes; the catalog listens to them itself.
 struct SkillStorage {
     settings: Arc<SettingsService>,
-    wake: Wake,
 }
 impl SkillSettings for SkillStorage {
     fn skills(
@@ -102,9 +98,6 @@ impl SkillSettings for SkillStorage {
                 .await?
                 .revision)
         })
-    }
-    fn changes(&self) -> tokio::sync::watch::Receiver<()> {
-        self.wake.subscribe()
     }
 }
 impl From<SettingsError> for SkillSettingsError {
@@ -203,16 +196,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
         (platform, settings): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let storage = Arc::new(SkillStorage {
-                settings,
-                wake: Wake::new(),
-            });
-            ctx.events().on(
-                ctx,
-                &settings_changes(SkillDocument::NAMESPACE),
-                storage.wake.clone(),
-            )?;
-            let settings = Arc::new(SkillSettingsHost(storage));
+            let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
                 ctx,
                 (platform, settings),
