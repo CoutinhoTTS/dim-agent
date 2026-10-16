@@ -10,7 +10,7 @@ use super::{
 use crate::{
     host::{HostError, ToolExecutionContext},
     host_platform::{
-        HostPlatform, Os, ProcessSpec, ProcessTree, ShellEdition, ShellKind, ShellStatus,
+        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, Os, ProcessTree, ShellKind,
     },
     tool_registry::definition,
 };
@@ -18,7 +18,6 @@ use dim_agent_runtime::Branch;
 use dim_agent_types::*;
 use serde_json::{Value, json};
 use std::{
-    ffi::OsString,
     io,
     path::{Component, Path, PathBuf},
     process::ExitStatus,
@@ -43,15 +42,6 @@ const OUTPUT_FILE_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
 /// Pipe reading continues this long after the root process exits.
 pub const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const DESCRIPTION_CHARS: usize = 200;
-
-const RUNTIME_BIN_ENV_KEYS: [&str; 5] = [
-    "DIMCODE_CLI_BIN",
-    "DIMCODE_UV_BIN",
-    "DIMCODE_PYTHON_BIN",
-    "DIMCODE_NODE_BIN",
-    "DIMCODE_BUNDLED_GIT_BIN",
-];
-const PLUGIN_BIN_DIRS_ENV: &str = "DIMCODE_PLUGIN_BIN_DIRS";
 
 pub fn definition_for(platform: &HostPlatform) -> ToolDefinition {
     let env_line = format!(
@@ -499,247 +489,6 @@ fn correct_windows_path(value: &str) -> String {
         return format!("{}{}", &value[1..3], value[3..].replace('/', "\\"));
     }
     value.to_owned()
-}
-
-fn windows_network_share(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().replace('/', "\\");
-    normalized.to_uppercase().starts_with("\\\\?\\UNC\\")
-        || (normalized.starts_with("\\\\") && !normalized.starts_with("\\\\?\\"))
-}
-
-/// TS `buildEnv`: the service start environment with forced overrides.
-fn build_env(platform: &HostPlatform) -> Vec<(OsString, OsString)> {
-    let mut env: Vec<(OsString, OsString)> = platform.env.clone();
-    if platform.os == Os::Windows
-        && let Some(entry) = env.iter_mut().find(|(key, _)| {
-            key.to_str()
-                .is_some_and(|key| key.eq_ignore_ascii_case("PATH"))
-        })
-    {
-        entry.0 = "PATH".into();
-    }
-    let forced = [
-        ("TERM", "dumb"),
-        ("NO_COLOR", "1"),
-        ("PAGER", "cat"),
-        ("GIT_PAGER", "cat"),
-        ("GH_PAGER", "cat"),
-    ];
-    env.retain(|(key, _)| key != "FORCE_COLOR" && !forced.iter().any(|(name, _)| key == name));
-    env.extend(
-        forced
-            .iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-    );
-    env
-}
-
-/// Builds exec's process from a shell freshly read with `HostPlatform::exec_shell`.
-/// Refusals are `(reason, code)`. Tool policies and cwd argument resolution
-/// belong to the caller; `cwd` is an already resolved working directory.
-pub async fn build_process_spec(
-    platform: &HostPlatform,
-    shell: &ShellStatus,
-    command: &str,
-    cwd: &Path,
-) -> Result<ProcessSpec, (String, &'static str)> {
-    let shell = match shell {
-        ShellStatus::Available(shell) => shell,
-        ShellStatus::Unavailable { code, reason } => return Err((reason.clone(), code)),
-    };
-    let kind = shell.edition.kind();
-    if platform.os == Os::Windows && kind == ShellKind::Cmd && windows_network_share(cwd) {
-        return Err((
-            "Command Prompt cannot use a network-share workspace as its current directory.".into(),
-            "EXEC_SHELL_CWD_UNSUPPORTED",
-        ));
-    }
-    if !tokio::fs::metadata(cwd)
-        .await
-        .is_ok_and(|metadata| metadata.is_dir())
-    {
-        return Err((
-            format!("Working directory not found: {}", cwd.display()),
-            "cwd_not_found",
-        ));
-    }
-    let env = build_env(platform);
-    let command = if kind == ShellKind::Posix {
-        prepend_runtime_path(
-            command,
-            &env,
-            platform,
-            &shell.executable_path,
-            shell.edition,
-            cwd,
-        )
-        .await
-        .map_err(|reason| (reason, "EXEC_SHELL_PATH_MAPPING_FAILED"))?
-    } else {
-        command.to_owned()
-    };
-    let args: &[&str] = match kind {
-        ShellKind::Posix => &["-lc"],
-        ShellKind::Powershell => &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
-        ShellKind::Cmd => &["/d", "/s", "/v:off", "/c"],
-    };
-    Ok(ProcessSpec {
-        executable: shell.executable_path.clone(),
-        args: args
-            .iter()
-            .map(OsString::from)
-            .chain([command.into()])
-            .collect(),
-        cwd: cwd.to_owned(),
-        env,
-    })
-}
-
-fn env_str<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a str> {
-    crate::host_platform::env_var(env, key).and_then(|value| value.to_str())
-}
-
-/// Product runtime directories that a login shell may drop from `PATH`.
-fn runtime_path_entries(env: &[(OsString, OsString)], windows_paths: bool) -> Vec<String> {
-    let mut output: Vec<String> = vec![];
-    let mut push = |entry: String| {
-        if !output.contains(&entry) {
-            output.push(entry);
-        }
-    };
-    for key in RUNTIME_BIN_ENV_KEYS {
-        if let Some(value) = env_str(env, key).filter(|value| !value.is_empty())
-            && Path::new(value).is_absolute()
-        {
-            let path = Path::new(value);
-            push(path.parent().unwrap_or(path).to_string_lossy().into_owned());
-        }
-    }
-    if let Some(value) = env_str(env, PLUGIN_BIN_DIRS_ENV).map(str::trim) {
-        let separator = if windows_paths { ';' } else { ':' };
-        value
-            .split(separator)
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty() && Path::new(entry).is_absolute())
-            .for_each(|entry| push(entry.to_owned()));
-    }
-    output
-}
-
-fn quote_posix(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-/// TS `prependRuntimePathForPosixCommand`.
-async fn prepend_runtime_path(
-    command: &str,
-    env: &[(OsString, OsString)],
-    platform: &HostPlatform,
-    shell: &Path,
-    edition: ShellEdition,
-    cwd: &Path,
-) -> Result<String, String> {
-    let git_bash = edition == ShellEdition::GitBash;
-    let entries = runtime_path_entries(env, git_bash);
-    if entries.is_empty() {
-        return Ok(command.to_owned());
-    }
-    let mapped = if git_bash {
-        map_git_bash_entries(&entries, platform, shell, env, cwd).await?
-    } else {
-        entries
-    };
-    let prefix: Vec<String> = mapped.iter().map(|entry| quote_posix(entry)).collect();
-    Ok(format!(
-        "export PATH={}:\"$PATH\"; {command}",
-        prefix.join(":")
-    ))
-}
-
-async fn map_git_bash_entries(
-    entries: &[String],
-    platform: &HostPlatform,
-    shell: &Path,
-    env: &[(OsString, OsString)],
-    cwd: &Path,
-) -> Result<Vec<String>, String> {
-    let cygpath = git_bash_cygpath(shell).ok_or_else(|| {
-        format!(
-            "Git Bash path converter is unavailable: {}",
-            shell.display()
-        )
-    })?;
-    let run = |args: [&str; 2]| {
-        capture(
-            platform,
-            ProcessSpec {
-                executable: cygpath.clone(),
-                args: args.iter().map(OsString::from).collect(),
-                cwd: cwd.to_owned(),
-                env: env.to_vec(),
-            },
-        )
-    };
-    let normalize = |value: &str| {
-        value
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_lowercase()
-    };
-    let mut output = vec![];
-    for entry in entries {
-        let result: Result<String, String> = async {
-            let mapped = run(["-u", entry]).await?.trim().to_owned();
-            if !mapped.starts_with('/') {
-                return Err(format!("cygpath returned a non-absolute path for {entry}"));
-            }
-            let bytes = entry.as_bytes();
-            let drive = bytes.len() >= 3
-                && bytes[0].is_ascii_alphabetic()
-                && bytes[1] == b':'
-                && matches!(bytes[2], b'\\' | b'/');
-            if drive || entry.starts_with("\\\\") {
-                let round_trip = run(["-w", &mapped]).await?.trim().to_owned();
-                if normalize(&round_trip) != normalize(entry) {
-                    return Err(format!("cygpath round-trip mismatch for {entry}"));
-                }
-            }
-            Ok(mapped)
-        }
-        .await;
-        output.push(result.map_err(|error| {
-            format!("Failed to map bundled runtime paths for Git Bash: {error}")
-        })?);
-    }
-    Ok(output)
-}
-
-fn git_bash_cygpath(bash: &Path) -> Option<PathBuf> {
-    let mut current = bash.parent()?;
-    for _ in 0..4 {
-        let git = current.join("cmd").join("git.exe");
-        let cygpath = current.join("usr").join("bin").join("cygpath.exe");
-        if git.is_file() && cygpath.is_file() {
-            return Some(cygpath);
-        }
-        current = current.parent()?;
-    }
-    None
-}
-
-/// Runs a product helper and returns its stdout.
-async fn capture(platform: &HostPlatform, spec: ProcessSpec) -> Result<String, String> {
-    let mut tree = platform.spawn(spec).map_err(|error| error.to_string())?;
-    let mut stdout = tree.stdout();
-    drop(tree.stderr());
-    let mut bytes = vec![];
-    let read = stdout.read_to_end(&mut bytes).await;
-    let status = tree.wait().await.map_err(|error| error.to_string())?;
-    read.map_err(|error| error.to_string())?;
-    if !status.success() {
-        return Err(format!("converter exited with {status}"));
-    }
-    String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
 // ------------------------------------------------------------------ output
@@ -1370,21 +1119,27 @@ pub(super) async fn execute(
         Err((message, code)) => return Ok(failed(message, code)),
     };
     let platform = &tools.platform;
-    let shell_status = platform.exec_shell().await;
-    let shell = match &shell_status {
-        ShellStatus::Available(shell) => shell,
-        ShellStatus::Unavailable { code, reason } => {
+    let cwd = match &input.cwd {
+        Some(value) => resolve_cwd(value, &tools.cwd, platform),
+        None => tools.cwd.clone(),
+    };
+    let (spec, shell) = match platform.build_process_spec(&input.command, &cwd).await {
+        Ok(built) => built,
+        Err(error)
+            if matches!(
+                error.code,
+                EXEC_SHELL_CONFIG_INVALID | EXEC_SHELL_UNAVAILABLE
+            ) =>
+        {
             return Ok(failed(
                 format!(
-                    "exec shell is unavailable ({code}): {reason} Fix exec-shell.json and retry."
+                    "exec shell is unavailable ({}): {} Fix exec-shell.json and retry.",
+                    error.code, error.reason
                 ),
                 "exec_shell_unavailable",
             ));
         }
-    };
-    let cwd = match &input.cwd {
-        Some(value) => resolve_cwd(value, &tools.cwd, platform),
-        None => tools.cwd.clone(),
+        Err(error) => return Ok(failed(error.reason, error.code)),
     };
     let kind = shell.edition.kind();
     if kind == ShellKind::Posix && has_unquoted_posix_background_ampersand(&input.command) {
@@ -1399,20 +1154,6 @@ pub(super) async fn execute(
     {
         return Ok(refused);
     }
-    let spec = match build_process_spec(platform, &shell_status, &input.command, &cwd).await {
-        Ok(spec) => spec,
-        Err((_, "cwd_not_found")) => {
-            let shown = input
-                .cwd
-                .as_deref()
-                .map_or_else(|| tools.cwd.to_string_lossy(), std::borrow::Cow::Borrowed);
-            return Ok(failed(
-                format!("Working directory not found: {shown}"),
-                "cwd_not_found",
-            ));
-        }
-        Err((message, code)) => return Ok(failed(message, code)),
-    };
     let task_id = format!("exec-{}", uuid::Uuid::new_v4());
     let background = input.run_in_background && !tools.member;
     let effective_timeout = (!(input.disable_timeout && background)).then_some(input.timeout_ms);
