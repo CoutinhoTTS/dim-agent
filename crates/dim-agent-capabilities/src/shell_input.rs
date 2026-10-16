@@ -9,6 +9,7 @@
 //! ends the wait for the reply, while the generation's cancellation or the
 //! Session's closing terminates the process tree.
 use crate::{
+    context_block::{element, raw, text},
     host_platform::{HostPlatform, ProcessTree},
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
@@ -20,6 +21,7 @@ use dim_agent_runtime::{
     AgentBuilder, Capability, Diagnostics, InSession, KeysOf, SessionConfig, SessionLifecycle,
     SessionPhase, SessionScope, scoped,
 };
+use dim_agent_types::{InputMessageData, InputMode};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -48,6 +50,8 @@ pub fn install(builder: &mut AgentBuilder) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Mode {
+    /// `!command`: the result is also written as an Append input.
+    Record,
     /// `!!command`: the result goes only to the caller.
     Private,
 }
@@ -290,11 +294,11 @@ impl ShellInput {
             };
             let code = exit.and_then(|status| status.code());
             let signal = exit.and_then(signal_name);
-            let (text, truncated) = output.bounded();
+            let (output, truncated) = output.bounded();
             let mut result = json!({
                 "runId": run.run_id,
                 "status": status,
-                "output": text,
+                "output": output,
                 "truncated": truncated,
                 "durationMs": started.elapsed().as_millis() as u64,
             });
@@ -308,6 +312,20 @@ impl ShellInput {
                 result["reason"] = reason.into();
             }
             let exit = code.map(|code| code.to_string()).or(signal);
+            if run.mode == Mode::Record {
+                result["recorded"] =
+                    match self.record(&run, status, exit.as_deref(), truncated, &output) {
+                        Ok(sequence) => json!({ "sequence": sequence }),
+                        Err(error) => {
+                            let error = RpcError::from(error);
+                            let mut rejected = json!({ "message": error.message });
+                            if let Some(data) = error.data {
+                                rejected["appError"] = data.app_error.into();
+                            }
+                            json!({ "error": rejected })
+                        }
+                    };
+            }
             let outcome = match exit {
                 Some(exit) => format!("{status}:{exit}"),
                 None => status.to_owned(),
@@ -319,6 +337,35 @@ impl ShellInput {
         ended.cancel();
         span.record("outcome", outcome.as_str());
         let _ = reply.send(result);
+    }
+
+    /// Writes the run's result once, as the Append input of design A.3 on
+    /// its branch; never retried.
+    fn record(
+        &self,
+        run: &RunInfo,
+        status: &str,
+        exit: Option<&str>,
+        truncated: bool,
+        output: &str,
+    ) -> dim_agent_runtime::Result<u64> {
+        let truncated = truncated.to_string();
+        let mut attributes = vec![("kind", "command"), ("status", status)];
+        if let Some(exit) = exit {
+            attributes.push(("exit", exit));
+        }
+        attributes.push(("truncated", &truncated));
+        let marker = element(
+            "dim-shell-input",
+            &attributes,
+            &text(&format!("$ {}\n{output}", run.command)),
+        );
+        let event = self.tree.get(&run.branch_id)?.input(InputMessageData {
+            blocks: vec![raw(marker, None)],
+            mode: Some(InputMode::Append),
+            ..InputMessageData::default()
+        })?;
+        Ok(event.sequence)
     }
 
     async fn stop(&self, value: Value, cancel: CancellationToken) -> Result<Value, RpcError> {

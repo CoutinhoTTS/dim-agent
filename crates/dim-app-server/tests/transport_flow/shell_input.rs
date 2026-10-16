@@ -102,6 +102,41 @@ impl Shell {
             .rpc("shell.stop", json!({"sessionId": sid, "runId": run_id}))
             .await
     }
+    /// Main-branch events after `after`, once the branch has dispatched them.
+    async fn events(&mut self, after: u64) -> Vec<Value> {
+        let sid = self.sid.clone();
+        assert_ok(
+            &self
+                .client
+                .rpc(
+                    "session.idle",
+                    json!({"sessionId": sid, "branchId": "main"}),
+                )
+                .await,
+        );
+        let page = self
+            .client
+            .rpc(
+                "session.history",
+                json!({"sessionId": sid, "branchId": "main", "after": after, "limit": 1000}),
+            )
+            .await;
+        page["result"]["events"].as_array().unwrap().clone()
+    }
+    /// The recorded inputs among main-branch events after `after`.
+    async fn recorded(&mut self, after: u64) -> Vec<Value> {
+        self.events(after)
+            .await
+            .into_iter()
+            .filter(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["blocks"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("<dim-shell-input "))
+            })
+            .collect()
+    }
     /// The last sequence of the main branch, read through `session.history`.
     async fn through(&mut self) -> u64 {
         let sid = self.sid.clone();
@@ -328,14 +363,15 @@ async fn a_private_run_replies_exec_bounded_output_and_writes_nothing() {
 }
 
 /// Design D4 and D5: one run per Session; a turn stop does not reach it;
-/// `shell.stop` terminates the whole tree and the run replies `stopped` with
+/// `shell.stop` terminates the whole tree and the run records `stopped` with
 /// the output read so far. A used runId is refused for this generation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_run_per_session_until_it_ends_or_is_stopped() {
     let mut shell = Shell::launch().await;
     let sid = shell.sid.clone();
+    let before = shell.through().await;
     assert_eq!(shell.list().await, json!([]));
-    let held = shell.send_run("held", HELD, "private").await;
+    let held = shell.send_run("held", HELD, "record").await;
     let (pid, child) = (
         written(&shell.work, "pid").await,
         written(&shell.work, "child").await,
@@ -344,7 +380,7 @@ async fn one_run_per_session_until_it_ends_or_is_stopped() {
     assert_eq!(runs.as_array().unwrap().len(), 1, "{runs}");
     assert_eq!(runs[0]["runId"], "held");
     assert_eq!(runs[0]["branchId"], "main");
-    assert_eq!(runs[0]["mode"], "private");
+    assert_eq!(runs[0]["mode"], "record");
     assert_eq!(runs[0]["command"], HELD);
     assert!(runs[0]["startedAt"].as_u64().unwrap() > 0);
 
@@ -371,6 +407,16 @@ async fn one_run_per_session_until_it_ends_or_is_stopped() {
     assert_eq!(result["output"], "started\n");
     assert!(result.get("exitCode").is_none() && result.get("signal").is_none());
     gone(&[&pid, &child]).await;
+    let recorded = shell.recorded(before).await;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["sequence"], result["recorded"]["sequence"]);
+    let text = recorded[0]["data"]["blocks"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with(
+            "<dim-shell-input kind=\"command\" status=\"stopped\" truncated=\"false\">\n$ sleep 600 &amp; "
+        ) && text.ends_with("\nstarted\n\n</dim-shell-input>"),
+        "{text}"
+    );
 
     assert_eq!(
         shell.stop("held").await["result"],
@@ -390,7 +436,7 @@ async fn one_run_per_session_until_it_ends_or_is_stopped() {
 async fn closing_the_session_terminates_the_run() {
     let mut shell = Shell::launch().await;
     let sid = shell.sid.clone();
-    let held = shell.send_run("held", HELD, "private").await;
+    let held = shell.send_run("held", HELD, "record").await;
     let (pid, child) = (
         written(&shell.work, "pid").await,
         written(&shell.work, "child").await,
@@ -405,12 +451,13 @@ async fn closing_the_session_terminates_the_run() {
 }
 
 /// Design D10: an Rpc reload during a run completes at once and the call
-/// replies `operation_interrupted`; the run stays with ShellInput and ends on
-/// its own.
+/// replies `operation_interrupted`; the run stays with ShellInput, ends on
+/// its own and is recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_rpc_reload_ends_the_wait_but_not_the_run() {
     let mut shell = Shell::launch().await;
-    let held = shell.send_run("held", WAITING, "private").await;
+    let before = shell.through().await;
+    let held = shell.send_run("held", WAITING, "record").await;
     let pid = written(&shell.work, "pid").await;
     tokio::time::timeout(Duration::from_secs(5), shell.server.restart("Rpc"))
         .await
@@ -430,5 +477,121 @@ async fn an_rpc_reload_ends_the_wait_but_not_the_run() {
     .await
     .expect("the run ends on its own");
     gone(&[&pid]).await;
+    let recorded = shell.recorded(before).await;
+    assert_eq!(recorded.len(), 1);
+    let text = recorded[0]["data"]["blocks"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ ")
+            && text.ends_with("\nstarted\nfinished\n\n</dim-shell-input>"),
+        "{text}"
+    );
+    shell.shutdown().await;
+}
+
+/// Design D1: `!command` while idle writes one Append input with the marker
+/// once the command has ended; it starts no turn and is consumed with the
+/// first model request of the next prompt, before the prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recorded_run_is_one_append_input_for_the_next_request() {
+    let mut shell = Shell::launch().await;
+    let sid = shell.sid.clone();
+    let before = shell.through().await;
+    let reply = shell.run("echo", "echo hi", "record").await;
+    let sequence = reply["result"]["recorded"]["sequence"].as_u64().unwrap();
+    // Other capabilities may append their own inputs meanwhile; only the
+    // recorded one and its application are this run's, and no turn starts.
+    let events = shell.events(before).await;
+    let input = events
+        .iter()
+        .find(|event| event["sequence"] == sequence)
+        .unwrap()
+        .clone();
+    assert_eq!(input["name"], "message");
+    assert_eq!(
+        input["data"],
+        json!({"mode": "append", "blocks": [{"type": "raw", "text":
+            "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ echo hi\nhi\n\n</dim-shell-input>"}]})
+    );
+    assert!(events.iter().any(|event| event["name"] == "applied"
+        && event["data"] == json!({"input_id": input["id"], "mode": "append"})));
+    assert!(
+        events.iter().all(|event| event["type"] != "turn"),
+        "{events:?}"
+    );
+
+    let prompt = shell
+        .client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": sid, "branchId": "main", "text": "next prompt"}),
+        )
+        .await;
+    let prompt = &prompt["result"]["event"]["id"];
+    let events = shell.events(sequence).await;
+    let position = |name: &str, input: &Value| {
+        events
+            .iter()
+            .position(|event| {
+                event["name"] == name && (input.is_null() || event["data"]["input_id"] == *input)
+            })
+            .unwrap_or_else(|| panic!("{name} {input}: {events:?}"))
+    };
+    let consumed = position("consumed", &input["id"]);
+    assert!(consumed < position("consumed", prompt));
+    assert!(position("consumed", prompt) < position("model-start", &Value::Null));
+    shell.shutdown().await;
+}
+
+/// Design D9: a caller that disconnects does not stop its run, which is
+/// recorded when it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disconnected_caller_does_not_stop_its_run() {
+    let mut shell = Shell::launch().await;
+    let before = shell.through().await;
+    let mut leaving = Client::new_version(&shell.server, false, 3).await;
+    let params = shell.run_params("held", WAITING, "record");
+    leaving.send("shell.run", params).await;
+    let pid = written(&shell.work, "pid").await;
+    drop(leaving);
+    std::fs::write(shell.work.join("go"), "").unwrap();
+    gone(&[&pid]).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while shell.recorded(before).await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the run is recorded");
+    assert_eq!(shell.list().await, json!([]));
+    shell.shutdown().await;
+}
+
+/// Design D8: unloading the Session during a run (a host's idle release, then
+/// a restore) terminates the tree and writes nothing; the command does not
+/// run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_reload_terminates_the_run_without_writing() {
+    let mut shell = Shell::launch().await;
+    let before = shell.through().await;
+    let held = shell.send_run("held", HELD, "record").await;
+    let (pid, child) = (
+        written(&shell.work, "pid").await,
+        written(&shell.work, "child").await,
+    );
+    std::fs::remove_file(shell.work.join("pid")).unwrap();
+    let session = shell
+        .server
+        .agent()
+        .unwrap()
+        .get_session(&shell.sid)
+        .unwrap();
+    assert!(session.unload_if_idle().await.unwrap());
+    let reply = shell.client.response(held).await;
+    assert_eq!(app_error(&reply), "operation_interrupted", "{reply}");
+    gone(&[&pid, &child]).await;
+    // The Session restores without the run.
+    assert_eq!(shell.list().await, json!([]));
+    assert!(shell.recorded(before).await.is_empty());
+    assert!(!shell.work.join("pid").exists());
     shell.shutdown().await;
 }
