@@ -7,13 +7,27 @@ use dim_agent_runtime::{
     SessionScope, SessionService, ToolNames,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Listener, TypedPlugin};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 use tokio::sync::watch;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::sync::CancellationToken;
+
+/// A provider updated its sets; emitted on its Session instance's channel.
+pub struct ToolProviderChanged;
+impl Event for ToolProviderChanged {
+    const NAME: &'static str = "tools.provider_changed";
+    type Value = ();
+}
+
+/// The registry replaced or withdrew sets; emitted after its state is updated.
+pub struct ToolsChanged;
+impl Event for ToolsChanged {
+    const NAME: &'static str = "tools.changed";
+    type Value = ();
+}
 
 pub trait ToolHandler: Send + Sync + 'static {
     fn execute(
@@ -41,8 +55,6 @@ impl SessionService for SessionToolSource {}
 pub trait ToolProvider: Send + Sync + 'static {
     /// Every complete set this provider currently offers, one per key.
     fn sets(&self) -> Vec<Arc<ToolSourceSet>>;
-    /// Signals that `sets()` changed; carries no data and may coalesce.
-    fn changed(&self) -> watch::Receiver<()>;
 }
 
 /// One complete version of a source's tools. The handlers are bound to this
@@ -93,6 +105,7 @@ struct Sources {
 type FixedTools = Vec<Arc<ToolContribution>>;
 
 pub struct ToolRegistry {
+    scope: SessionScope,
     /// Collected once on first use, after the Session services are Active.
     fixed: LazyLock<FixedTools, Box<dyn FnOnce() -> FixedTools + Send>>,
     /// Configured fixed tools and every registered contributor reserve names.
@@ -103,7 +116,6 @@ pub struct ToolRegistry {
     /// overwrites a later one.
     refreshing: Mutex<()>,
     sources: Mutex<Sources>,
-    changed: watch::Sender<()>,
     state: watch::Sender<ToolSourcesState>,
 }
 impl ToolRegistry {
@@ -157,10 +169,6 @@ impl ToolRegistry {
                 .and_then(Weak::upgrade),
         }
     }
-    /// Notified after a source set is replaced or withdrawn.
-    pub fn changed(&self) -> watch::Receiver<()> {
-        self.changed.subscribe()
-    }
     pub fn sources_state(&self) -> watch::Receiver<ToolSourcesState> {
         self.state.subscribe()
     }
@@ -169,7 +177,7 @@ impl ToolRegistry {
     /// validated as a whole and replaced atomically; a missing key is
     /// withdrawn. All providers are read on any change, so a set rejected for
     /// a name another source held is retried once that name is free.
-    fn refresh(&self) {
+    fn refresh(&self, ctx: &Ctx) {
         let _serial = self.refreshing.lock().unwrap();
         let offered: Vec<(&str, BTreeMap<String, Arc<ToolSourceSet>>)> = self
             .providers
@@ -270,7 +278,11 @@ impl ToolRegistry {
             modified
         });
         if changed {
-            self.changed.send_replace(());
+            let _ = ctx.events().emit(
+                ctx,
+                &EventKey::<ToolsChanged>::of().instance(self.scope.instance),
+                Arc::new(ToolsChanged),
+            );
         }
     }
 
@@ -307,6 +319,19 @@ impl ToolRegistry {
             }
         }
         Ok(())
+    }
+}
+
+impl Listener<ToolProviderChanged> for Arc<ToolRegistry> {
+    fn call<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        _: &'a ToolProviderChanged,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        Box::pin(async move {
+            self.refresh(ctx);
+            Ok(None)
+        })
     }
 }
 
@@ -419,15 +444,11 @@ impl TypedPlugin for ToolRegistryPlugin {
                 .into_iter()
                 .map(|(name, provider)| (name, provider.0.clone()))
                 .collect();
-            // Subscribe before the first read so no change is missed.
-            let changes: Vec<_> = providers
-                .iter()
-                .map(|(_, provider)| provider.changed())
-                .collect();
             let context = ctx.clone();
             let scope = self.scope;
             let contributed = self.contributed.clone();
             let registry = Arc::new(ToolRegistry {
+                scope,
                 fixed: LazyLock::new(Box::new(move || {
                     let mut fixed = Vec::new();
                     for name in &config.tools {
@@ -456,34 +477,15 @@ impl TypedPlugin for ToolRegistryPlugin {
                 providers,
                 refreshing: Mutex::default(),
                 sources: Mutex::default(),
-                changed: watch::Sender::new(()),
                 state: watch::Sender::new(ToolSourcesState::default()),
             });
-            registry.refresh();
-            let tasks = TaskTracker::new();
-            let lifecycle = ctx.cancellation_token();
-            let cleanup = tasks.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        cleanup.close();
-                        cleanup.wait().await;
-                        Ok(())
-                    })
-                }))
-            })?;
-            for mut changed in changes {
-                let (owner, lifecycle) = (registry.clone(), lifecycle.clone());
-                tasks.spawn(async move {
-                    loop {
-                        tokio::select! {
-                            _ = lifecycle.cancelled() => return,
-                            result = changed.changed() => if result.is_err() { return },
-                        }
-                        owner.refresh();
-                    }
-                });
-            }
+            // Subscribe before the first read; notifications carry no state.
+            ctx.events().on(
+                ctx,
+                &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
+                registry.clone(),
+            )?;
+            registry.refresh(ctx);
             ctx.provide_as(
                 self.scope.key::<ToolSourcesView>(),
                 Arc::new(ToolSourcesView(registry.sources_state())),

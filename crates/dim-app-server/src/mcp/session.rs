@@ -7,7 +7,8 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     tool_registry::{
-        SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolSourceSet,
+        SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
+        ToolSourceSet,
     },
 };
 use dim_agent_runtime::{
@@ -15,7 +16,7 @@ use dim_agent_runtime::{
     SessionLoader, SessionScope, SessionService, StateCell, scoped,
 };
 use dim_agent_types::{ToolCall, ToolDefinition, ToolMetadata, ToolResult, ToolSource};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, TypedPlugin};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -69,7 +70,8 @@ pub struct McpSession {
     connections: super::McpOwner,
     sets: Mutex<BTreeMap<String, Arc<ToolSourceSet>>>,
     state: StateCell<McpSessionState>,
-    changed: watch::Sender<()>,
+    ctx: Ctx,
+    scope: SessionScope,
     refresh: watch::Sender<()>,
     stopped: CancellationToken,
 }
@@ -113,7 +115,8 @@ impl McpSession {
         self.state.update(|state| {
             state.servers.insert(id.to_owned(), status);
         });
-        self.changed.send_replace(());
+        drop(sets);
+        self.tools_changed();
     }
     fn remove(&self, id: &str) {
         let mut sets = self.sets.lock().unwrap();
@@ -121,7 +124,15 @@ impl McpSession {
         self.state.update(|state| {
             state.servers.remove(id);
         });
-        self.changed.send_replace(());
+        drop(sets);
+        self.tools_changed();
+    }
+    fn tools_changed(&self) {
+        let _ = self.ctx.events().emit(
+            &self.ctx,
+            &EventKey::<ToolProviderChanged>::of().instance(self.scope.instance),
+            Arc::new(ToolProviderChanged),
+        );
     }
 }
 // The public management service must not expose executable handlers.
@@ -129,9 +140,6 @@ struct Sources(Arc<McpSession>);
 impl ToolProvider for Sources {
     fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
         self.0.sets.lock().unwrap().values().cloned().collect()
-    }
-    fn changed(&self) -> watch::Receiver<()> {
-        self.0.changed.subscribe()
     }
 }
 
@@ -173,7 +181,8 @@ impl TypedPlugin for McpSessionPlugin {
                 ),
                 sets: Mutex::default(),
                 state: StateCell::new(McpSessionState::default()),
-                changed: watch::Sender::new(()),
+                ctx: ctx.clone(),
+                scope: self.scope,
                 refresh: watch::Sender::new(()),
                 stopped: stopped.clone(),
             });
@@ -192,7 +201,6 @@ impl TypedPlugin for McpSessionPlugin {
                             closed: true,
                             ..Default::default()
                         });
-                        cleanup.changed.send_replace(());
                         // Wake eligibility bookkeeping even when stale bindings
                         // keep every lease alive. Never await the coordinator:
                         // Session tree disposal already owns these instances.

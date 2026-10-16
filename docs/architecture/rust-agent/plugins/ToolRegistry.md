@@ -2,7 +2,7 @@
 
 Owner: [tool_registry.rs](../../../../crates/dim-agent-capabilities/src/tool_registry.rs).
 Combines configured host tools and named contributions into the Session tool
-registry, exposing snapshots/change watches for branch adoption and pinning.
+registry, exposing snapshots and rutis change events for branch adoption and pinning.
 
 ## Dependencies
 
@@ -22,8 +22,13 @@ injected dependency on the optional providers.
 Missing or Pending providers omit only their tools and produce a `tool.attach`
 diagnostic. Later providers attach on the next registry reload. Selected duplicate
 tools and unknown host tools still fail initialization. Generic source
-providers can have tracked change watchers, but this local graph has no
-SessionToolSource injections. Cleanup joins watchers; reload rebuilds the
+providers emit `tools.provider_changed` on the Session instance's
+rutis channel after updating their state. The registry subscribes before its
+initial read and rereads the sets of its registered providers. Notifications
+carry no data because every refresh reads all those providers.
+After replacing or withdrawing sets it emits `tools.changed` on that Session's
+channel; ToolBinding owns the adoption task. This local graph has no
+SessionToolSource injections. Listeners end with their owning contexts; reload rebuilds the
 registry from fresh services. ToolBinding owns adoption and request pins.
 The standard library's `LazyLock` builds the complete fixed table in configuration
 order once per registry generation. It coordinates initialization; subsequent
@@ -60,12 +65,12 @@ and request snapshots.
 | §4 rule 2 | ToolBinding keeps accepted request snapshots; attachment never rebinds them. |
 | §4 rule 3 | No before callback is added. |
 | §4 rule 4 | Timeline and Dispatcher have no tool-provider-specific behavior. |
-| §4 rule 5 | Registry attachment is not an event consumer; existing producers own atomic batches. |
+| §4 rule 5 | Memory notifications add no Timeline batches; existing producers retain atomic commit ownership. |
 | §4 rule 6 | Declarations reach model context through Prompt adoption; results use ToolExecutor. |
 | §4 rule 7 | Contributions use the existing public scoped service; private provider state is not read. |
 | §4 rule 8 | No infrastructure change: first-read collection uses existing scoped lookup, ToolBinding initialization and BranchOpening. |
 | §4 rule 9 | Registry availability stays in memory and diagnostics, not new Timeline facts. |
-| §1 | ToolRegistry owns attachment, its watches and cleanup; App Server remains assembly only. |
+| §1 | ToolRegistry owns attachment and rutis subscriptions; App Server remains assembly only. |
 | ADR 002 D1 | The registry and contributions belong to one Session. |
 | ADR 002 D2 | No new registry, registration port or adapter plugin is added. |
 | ADR 002 D3 | Optional fixed contributors are not hard dependencies; existing required services retain Pending semantics. |

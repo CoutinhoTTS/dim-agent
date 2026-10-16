@@ -9,14 +9,14 @@ use dim_agent_capabilities::{
     host::*,
     tool_binding::ToolBinding,
     tool_registry::{
-        SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolRegistry,
-        ToolSourceSet, ToolSourcesView, definition,
+        SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
+        ToolRegistry, ToolSourceSet, ToolSourcesView, definition,
     },
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, TypedPlugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -24,7 +24,6 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// Calls and handler drops, by source version.
@@ -69,27 +68,35 @@ impl ToolHandler for Handler {
 }
 
 struct TestSource {
-    sets: Mutex<Vec<Arc<ToolSourceSet>>>,
-    changed: watch::Sender<()>,
+    sets: Arc<Mutex<Vec<Arc<ToolSourceSet>>>>,
+    // Initial values can be seeded before the Session owns an emitter.
+    emitter: Option<(Ctx, SessionScope)>,
 }
+impl SessionService for TestSource {}
+impl PublicService for TestSource {}
 impl TestSource {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            sets: Mutex::default(),
-            changed: watch::Sender::new(()),
+            sets: Arc::default(),
+            emitter: None,
         })
     }
     fn offer(&self, sets: Vec<Arc<ToolSourceSet>>) {
         *self.sets.lock().unwrap() = sets;
-        self.changed.send_replace(());
+        if let Some((ctx, scope)) = &self.emitter {
+            ctx.events()
+                .emit(
+                    ctx,
+                    &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
+                    Arc::new(ToolProviderChanged),
+                )
+                .unwrap();
+        }
     }
 }
 impl ToolProvider for TestSource {
     fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
         self.sets.lock().unwrap().clone()
-    }
-    fn changed(&self) -> watch::Receiver<()> {
-        self.changed.subscribe()
     }
 }
 
@@ -137,9 +144,14 @@ impl TypedPlugin for SourcePlugin {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let source = Arc::new(TestSource {
+                sets: self.source.sets.clone(),
+                emitter: Some((ctx.clone(), self.scope)),
+            });
+            ctx.provide_as(self.scope.key::<TestSource>(), source.clone())?;
             ctx.provide_as(
                 self.scope.named_key::<SessionToolSource>("mcp"),
-                Arc::new(SessionToolSource(self.source.clone())),
+                Arc::new(SessionToolSource(source)),
             )?;
             Ok(Effect::Done)
         })
@@ -650,6 +662,7 @@ async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_relea
     )]);
     let env = env(source.clone(), None);
     let session = env.session().await;
+    let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
 
     // The call starts on v1; v2 is adopted while it runs.
@@ -695,6 +708,7 @@ async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free()
     ]);
     let env = env(source.clone(), None);
     let session = env.session().await;
+    let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:a", "a1")]).await;
     let state = session.session_service::<ToolSourcesView>().unwrap().get();
     assert_eq!(state.0["mcp:a"].adopted.as_deref(), Some("a1"));
@@ -723,6 +737,7 @@ async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
     source.offer(vec![set("mcp:z", "z1", &["lookup"], &log, None)]);
     let env = env(source.clone(), None);
     let session = env.session().await;
+    let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:z", "z1")]).await;
     // `a` wants the name `z` holds.
     source.offer(vec![
@@ -809,6 +824,7 @@ async fn a_model_update_and_a_tool_adoption_both_take_effect() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     let env = env(source.clone(), None);
     let session = env.session().await;
+    let source = session.session_service::<TestSource>().unwrap();
     let (configured, _) = tokio::join!(
         session.configure(
             ConfigureUpdate {
@@ -843,7 +859,8 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
     struct StartupGate {
         scope: BranchScope,
         gate: Arc<Gate>,
-        ready: tokio::sync::mpsc::UnboundedSender<(Arc<Timeline>, Arc<ToolRegistry>)>,
+        ready:
+            tokio::sync::mpsc::UnboundedSender<(Arc<Timeline>, Arc<ToolRegistry>, Arc<TestSource>)>,
         fail: bool,
     }
     impl TypedPlugin for StartupGate {
@@ -851,6 +868,7 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
             BranchGate<ToolBinding>,
             InBranch<Timeline>,
             InSession<ToolRegistry>,
+            InSession<TestSource>,
         );
         fn name(&self) -> &str {
             "ToolBindingStartupGate"
@@ -858,10 +876,10 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         fn apply<'a>(
             &'a self,
             _ctx: &'a Ctx,
-            (_, InBranch(timeline), InSession(registry)): Self::Deps,
+            (_, InBranch(timeline), InSession(registry), InSession(source)): Self::Deps,
         ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
             Box::pin(async move {
-                self.ready.send((timeline, registry)).unwrap();
+                self.ready.send((timeline, registry, source)).unwrap();
                 self.gate.release.notified().await;
                 if self.fail {
                     return Err(CordisError::PluginFailed("assembly rejected".into()));
@@ -925,10 +943,11 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
                 })
                 .await
         });
-        let (timeline, registry) = tokio::time::timeout(Duration::from_secs(5), receive.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let (timeline, registry, source) =
+            tokio::time::timeout(Duration::from_secs(5), receive.recv())
+                .await
+                .unwrap()
+                .unwrap();
         let before = timeline.sequence();
         let mut published = timeline.watch();
         let mut sources = registry.sources_state();
