@@ -37,7 +37,12 @@ reqwest-mcp = { package = "reqwest", version = "0.13.2", default-features = fals
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
+[features]
+# Hooks that race flow tests use to hold an operation open.
+testing = []
+
 [dev-dependencies]
+dim-app-server = { path = ".", features = ["testing"] }
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 axum = { workspace = true, features = ["json"] }
 tokio-tungstenite.workspace = true

@@ -846,6 +846,7 @@ dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
+ "dim-app-server",
  "futures-util",
  "http",
  "regex",

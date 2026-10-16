@@ -14,6 +14,8 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
+#[cfg(feature = "testing")]
+pub use store::testing;
 use store::{Document, Record, Store};
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -156,6 +158,28 @@ struct Attempt {
     authorization: oauth::Authorization,
 }
 
+/// A key's sign-in attempts (design §7).
+#[derive(Default)]
+struct Attempts {
+    /// The key's current attempt; only it may redeem its code.
+    current: Option<Attempt>,
+    /// Completed sign-outs. A start that read the record before one
+    /// completed cannot make its attempt current.
+    signouts: u64,
+}
+impl Attempts {
+    /// Whether `id` is the current attempt.
+    fn is(&self, id: Uuid) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|attempt| attempt.id == id)
+    }
+    /// The current attempt, if it is `id`.
+    fn get(&mut self, id: Uuid) -> Option<&mut Attempt> {
+        self.current.as_mut().filter(|attempt| attempt.id == id)
+    }
+}
+
 struct KeyState {
     /// Notified on every change to the key's record; the value says whether
     /// the record holds tokens.
@@ -164,11 +188,6 @@ struct KeyState {
     challenge: Option<String>,
     /// Scopes a `403 insufficient_scope` asked for.
     missing_scopes: Vec<String>,
-    /// The key's current attempt; only it may redeem its code (design §7).
-    attempt: Option<Attempt>,
-    /// Completed sign-outs. A start that read the record before one
-    /// completed cannot make its attempt current.
-    signouts: u64,
 }
 impl Default for KeyState {
     fn default() -> Self {
@@ -176,8 +195,6 @@ impl Default for KeyState {
             usable: watch::Sender::new(false),
             challenge: None,
             missing_scopes: Vec::new(),
-            attempt: None,
-            signouts: 0,
         }
     }
 }
@@ -186,6 +203,11 @@ pub struct McpAuth {
     store: Store,
     http: reqwest_mcp::Client,
     keys: Mutex<HashMap<CredentialKey, KeyState>>,
+    /// Each key's attempts. This lock orders attempt state (design §7):
+    /// every change to it holds the lock, and an exchange holds it from its
+    /// final currency check through its publication. Its holders never wait
+    /// for the store lock or a network request.
+    attempts: tokio::sync::Mutex<HashMap<CredentialKey, Attempts>>,
     stopping: CancellationToken,
     gate: Mutex<()>,
     /// Token requests: once sent, settled here whoever waits for them.
@@ -201,6 +223,7 @@ impl McpAuth {
             store: Store::new(files, root)?,
             http: oauth::http()?,
             keys: Mutex::default(),
+            attempts: tokio::sync::Mutex::default(),
             stopping: CancellationToken::new(),
             gate: Mutex::new(()),
             tasks: TaskTracker::new(),
@@ -230,6 +253,19 @@ impl McpAuth {
 
     fn changed(&self, key: &CredentialKey, usable: bool) {
         self.key(key, |state| state.usable.send_replace(usable));
+    }
+
+    /// The attempts lock, for a caller that may leave while a publication
+    /// holds it.
+    async fn lock_attempts(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::MutexGuard<'_, HashMap<CredentialKey, Attempts>>, McpAuthError> {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(McpAuthError::Cancelled),
+            attempts = self.attempts.lock() => Ok(attempts),
+        }
     }
 
     /// Runs `work` on Mcp's own task: the caller leaving does not abandon a
@@ -292,7 +328,11 @@ impl McpAuth {
             }
             // Read before the record: a sign-out completing after this read
             // supersedes the attempt prepared from it.
-            let signouts = self.key(key, |state| state.signouts);
+            let signouts = self
+                .lock_attempts(cancel)
+                .await?
+                .get(key)
+                .map_or(0, |slot| slot.signouts);
             let previous = self.store.read(cancel).await?.get(key).cloned();
             let (challenge, missing_scopes) = self.key(key, |state| {
                 (state.challenge.clone(), state.missing_scopes.clone())
@@ -328,19 +368,19 @@ impl McpAuth {
                 expires_at,
             };
             // A new start replaces the key's attempt, unless a sign-out
-            // deleted the record it was prepared from.
-            self.key(key, |state| {
-                if state.signouts != signouts {
-                    return Err(McpAuthError::AttemptClosed);
-                }
-                state.attempt = Some(Attempt {
-                    id,
-                    expires_at,
-                    exchanging: false,
-                    authorization,
-                });
-                Ok(())
-            })?;
+            // deleted the record it was prepared from. A publication under
+            // way holds the lock, so the new attempt is current after it.
+            let mut attempts = self.lock_attempts(cancel).await?;
+            let slot = attempts.entry(key.clone()).or_default();
+            if slot.signouts != signouts {
+                return Err(McpAuthError::AttemptClosed);
+            }
+            slot.current = Some(Attempt {
+                id,
+                expires_at,
+                exchanging: false,
+                authorization,
+            });
             Ok(reply)
         }
         .await;
@@ -361,20 +401,20 @@ impl McpAuth {
         cancel: &CancellationToken,
     ) -> Result<(), McpAuthError> {
         let started = Instant::now();
-        // Validate under the key lock; a failed check leaves the attempt
-        // pending so a wrong paste can be retried.
+        // Validate under the attempts lock; a failed check leaves the
+        // attempt pending so a wrong paste can be retried.
         let (key, issuer, code) = {
-            let mut keys = self.keys.lock().unwrap();
-            let (key, state) = keys
+            let mut attempts = self.lock_attempts(cancel).await?;
+            let (key, slot) = attempts
                 .iter_mut()
-                .find(|(_, state)| state.attempt.as_ref().is_some_and(|a| a.id == attempt_id))
+                .find(|(_, slot)| slot.is(attempt_id))
                 .ok_or(McpAuthError::AttemptClosed)?;
-            let attempt = state.attempt.as_mut().unwrap();
+            let attempt = slot.current.as_mut().unwrap();
             if attempt.exchanging {
                 return Err(McpAuthError::AttemptClosed);
             }
             if oauth::now() >= attempt.expires_at {
-                state.attempt = None;
+                slot.current = None;
                 return Err(McpAuthError::AttemptClosed);
             }
             let authorization = &attempt.authorization;
@@ -387,7 +427,7 @@ impl McpAuth {
                 authorization.iss_required,
             )? {
                 oauth::Callback::Refused(code) => {
-                    state.attempt = None;
+                    slot.current = None;
                     return Err(McpAuthError::Failed(code));
                 }
                 oauth::Callback::Code(code) => {
@@ -408,8 +448,10 @@ impl McpAuth {
 
     /// Redeems the code of `attempt_id` for as long as it is the key's
     /// current attempt (design §7). A sign-out or a newer start supersedes
-    /// it at any await; it is checked under the store lock before the
-    /// request is sent, and again once the response is in.
+    /// it until the final currency check, once the response is in. From
+    /// that check through the store write and the wake the attempts lock is
+    /// held, so anything that supersedes it later is ordered after its
+    /// publication.
     async fn exchange(
         self: Arc<Self>,
         key: CredentialKey,
@@ -419,16 +461,30 @@ impl McpAuth {
         let mut locked = match self.store.lock(&self.stopping).await {
             Ok(locked) => locked,
             Err(error) => {
-                self.settle(&key, attempt_id, true);
+                // The code was not sent, so the user can retry.
+                if let Some(attempt) = self
+                    .attempts
+                    .lock()
+                    .await
+                    .get_mut(&key)
+                    .and_then(|slot| slot.get(attempt_id))
+                {
+                    attempt.exchanging = false;
+                }
                 return Err(closed(error));
             }
         };
-        let current = self.key(&key, |state| {
-            let attempt = state.attempt.as_ref().filter(|a| a.id == attempt_id)?;
-            let a = &attempt.authorization;
-            Some((a.verifier.clone(), a.client.clone(), a.binding.clone()))
-        });
-        // Superseded while waiting for the lock: the code is never sent.
+        let current = self
+            .attempts
+            .lock()
+            .await
+            .get_mut(&key)
+            .and_then(|slot| slot.get(attempt_id))
+            .map(|attempt| {
+                let a = &attempt.authorization;
+                (a.verifier.clone(), a.client.clone(), a.binding.clone())
+            });
+        // Superseded while waiting for the store lock: the code is never sent.
         let Some((verifier, client, binding)) = current else {
             return Err(McpAuthError::AttemptClosed);
         };
@@ -444,37 +500,44 @@ impl McpAuth {
             &binding.requested_scopes,
         )
         .await;
-        // The code may still be unredeemed, so the user can retry.
-        let pending = matches!(response, Err(oauth::TokenError::Unavailable));
-        // Tokens that will not be stored are revoked while the store lock is
-        // held, so the revocation precedes any later token request.
-        if !self.settle(&key, attempt_id, pending) {
+        // The final currency check.
+        let mut attempts = self.attempts.lock().await;
+        let Some(slot) = attempts.get_mut(&key).filter(|slot| slot.is(attempt_id)) else {
+            drop(attempts);
             // Superseded while the request was out: it is settled, but writes
-            // and wakes nothing.
+            // and wakes nothing. Its tokens are revoked while the store lock
+            // is held, so the revocation precedes any later token request.
             if let (Ok(tokens), Some(endpoint)) = (&response, &binding.revocation_endpoint) {
                 self.revoke(endpoint, &client, tokens).await;
             }
             return Err(McpAuthError::AttemptClosed);
-        }
-        match response {
+        };
+        // Tokens whose record could not be written, revoked once the
+        // attempts lock is released.
+        let mut unwritten = None;
+        let result = match response {
             Ok(tokens) => {
                 let record = Record::new(&key, binding.clone(), client.clone(), tokens.clone());
                 locked.document.put(record);
-                // The code is spent whether or not the record is written.
-                if let Err(error) = locked.write().await {
-                    if let Some(endpoint) = &binding.revocation_endpoint {
-                        self.revoke(endpoint, &client, &tokens).await;
-                    }
-                    return Err(error);
+                let written = locked.write().await;
+                if written.is_ok() {
+                    self.key(&key, |state| {
+                        state.challenge = None;
+                        state.missing_scopes.clear();
+                    });
+                    self.changed(&key, true);
+                } else {
+                    unwritten = Some(tokens);
                 }
-                self.key(&key, |state| {
-                    state.challenge = None;
-                    state.missing_scopes.clear();
-                });
-                self.changed(&key, true);
-                Ok(())
+                written
             }
-            Err(oauth::TokenError::Unavailable) => Err(McpAuthError::Unavailable),
+            // The code may still be unredeemed, so the user can retry.
+            Err(oauth::TokenError::Unavailable) => {
+                if let Some(attempt) = &mut slot.current {
+                    attempt.exchanging = false;
+                }
+                return Err(McpAuthError::Unavailable);
+            }
             Err(oauth::TokenError::InvalidClient) => {
                 // That registration is gone: clear it, and its tokens, if
                 // the record holds the same client.
@@ -494,24 +557,15 @@ impl McpAuth {
             }
             Err(oauth::TokenError::Rejected) => Err(McpAuthError::Failed("invalid_grant")),
             Err(oauth::TokenError::Failed(code)) => Err(McpAuthError::Failed(code)),
+        };
+        // The code is spent whether or not the record was written: the
+        // attempt ends with its publication.
+        slot.current = None;
+        drop(attempts);
+        if let (Some(tokens), Some(endpoint)) = (&unwritten, &binding.revocation_endpoint) {
+            self.revoke(endpoint, &client, tokens).await;
         }
-    }
-
-    /// Settles an exchange of `attempt_id` if it is still the key's current
-    /// attempt: `pending` keeps it for a retry, otherwise it ends. Returns
-    /// whether it was current.
-    fn settle(&self, key: &CredentialKey, attempt_id: Uuid, pending: bool) -> bool {
-        self.key(key, |state| {
-            let Some(attempt) = state.attempt.as_mut().filter(|a| a.id == attempt_id) else {
-                return false;
-            };
-            if pending {
-                attempt.exchanging = false;
-            } else {
-                state.attempt = None;
-            }
-            true
-        })
+        result
     }
 
     /// Revokes the refresh token, then the access token (RFC 7009), best
@@ -538,12 +592,14 @@ impl McpAuth {
         cancel: &CancellationToken,
     ) -> Result<bool, McpAuthError> {
         let started = Instant::now();
-        // Accepted: the pending attempt is closed before the lock wait, so
-        // an exchange still waiting for the lock never sends its code.
-        self.key(key, |state| state.attempt = None);
         let target = key.clone();
-        let result = self
-            .owned(cancel, move |auth| async move {
+        let result = async {
+            // Accepted: the pending attempt is closed before the store lock
+            // wait, so an exchange still waiting for it never sends its code.
+            if let Some(slot) = self.lock_attempts(cancel).await?.get_mut(key) {
+                slot.current = None;
+            }
+            self.owned(cancel, move |auth| async move {
                 let mut locked = auth.store.lock(&auth.stopping).await.map_err(closed)?;
                 let record = locked.document.remove(&target);
                 // The record is deleted whatever the revocation outcome.
@@ -561,16 +617,22 @@ impl McpAuth {
                 }
                 // Completed: an attempt started meanwhile may have been
                 // prepared from the deleted record, so it is closed too.
-                auth.key(&target, |state| {
-                    state.challenge = None;
-                    state.missing_scopes.clear();
-                    state.attempt = None;
-                    state.signouts += 1;
-                });
-                auth.changed(&target, false);
+                {
+                    let mut attempts = auth.attempts.lock().await;
+                    let slot = attempts.entry(target.clone()).or_default();
+                    slot.current = None;
+                    slot.signouts += 1;
+                    auth.key(&target, |state| {
+                        state.challenge = None;
+                        state.missing_scopes.clear();
+                    });
+                    auth.changed(&target, false);
+                }
                 Ok((revoked, record.map(|record| record.issuer)))
             })
-            .await;
+            .await
+        }
+        .await;
         let issuer = result.as_ref().ok().and_then(|(_, issuer)| issuer.clone());
         trace(key, issuer.as_deref(), "logout", outcome(&result), started);
         result.map(|(revoked, _)| revoked)

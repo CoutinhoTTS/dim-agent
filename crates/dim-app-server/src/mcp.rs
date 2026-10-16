@@ -3,6 +3,8 @@ mod auth;
 pub mod config;
 pub(crate) mod management;
 mod publication;
+#[cfg(feature = "testing")]
+pub use auth::testing;
 pub use auth::{McpAuth, McpAuthError};
 pub mod server;
 mod session;

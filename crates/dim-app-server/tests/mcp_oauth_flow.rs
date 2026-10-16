@@ -1241,9 +1241,10 @@ async fn step_up_project_entries_confidential_clients_and_sse() {
 }
 
 /// Only the key's current attempt redeems its code (design §7). Sign-out and
-/// a newer start supersede an attempt at every await of its exchange: once
-/// superseded it sends no code, and tokens a request already out obtains are
-/// revoked, never stored or published.
+/// a newer start supersede an attempt at every await of its exchange until
+/// its final currency check: once superseded it sends no code, and tokens a
+/// request already out obtains are revoked, never stored or published. After
+/// that check, its publication comes first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     let servers = Servers::start().await;
@@ -1369,6 +1370,48 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     );
     assert_eq!(daemon.store()["credentials"], stored);
     assert!(!resource.bearers.lock().unwrap().contains(&access_token));
+    client.mcp_state(&session, "docs", "ready").await;
+
+    // The review's publication window. A newer start finishes discovery while
+    // an exchange past its final check is writing its record: the start
+    // becomes current only once that publication is done, so a superseded
+    // attempt never stores or wakes after a newer start returned.
+    let first = client.ok("mcp.auth.start", user("docs")).await;
+    let callback = consent(&authority, &first, "code-e-secret");
+    let discovering = authority.hold("metadata");
+    let mut starting = daemon.connect().await;
+    let mut newer = tokio::spawn(async move { starting.ok("mcp.auth.start", user("docs")).await });
+    arrived(discovering).await;
+    let mut writing = dim_app_server::mcp::testing::hold_credential_write(&daemon.home);
+    let mut completing = daemon.connect().await;
+    let completed = tokio::spawn({
+        let complete = json!({"attemptId":first["attemptId"],"callbackUrl":callback});
+        async move { completing.ok("mcp.auth.complete", complete).await }
+    });
+    tokio::time::timeout(Duration::from_secs(20), writing.arrived())
+        .await
+        .expect("the record write arrives");
+    authority.unhold("metadata");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), &mut newer)
+            .await
+            .is_err(),
+        "a newer start returned while a sign-in was publishing"
+    );
+    drop(writing);
+    completed.await.unwrap();
+    let second = newer.await.unwrap();
+    let issued = authority.issued.load(Ordering::SeqCst);
+    assert_eq!(access(&daemon), format!("access-{issued}-secret"));
+    // The newer attempt is current and replaces the published credential.
+    let callback = consent(&authority, &second, "code-f-secret");
+    client
+        .ok(
+            "mcp.auth.complete",
+            json!({"attemptId":second["attemptId"],"callbackUrl":callback}),
+        )
+        .await;
+    assert_eq!(access(&daemon), format!("access-{}-secret", issued + 1));
     client.mcp_state(&session, "docs", "ready").await;
 
     // A sign-out that completes while a start prepares its attempt from the

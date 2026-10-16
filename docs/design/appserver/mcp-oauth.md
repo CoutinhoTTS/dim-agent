@@ -115,6 +115,7 @@ source or the Session (§10 D8).
 | --- | --- | --- |
 | Challenge | Per key: the last `WWW-Authenticate` (`resource_metadata`, `scope`, `error`) seen by any connection | Until authorization succeeds, sign-out or Mcp reload |
 | Attempt | `attemptId`, key, PKCE verifier, `state`, expected `issuer`, metadata, client, redirect URI, scopes, `expiresAt` | At most one per key; ends on complete, expiry (10 min), sign-out or a new start for the same key (§7) |
+| Attempts lock | One in-process async lock over every key's attempt and completed sign-outs: the single order of attempt state (§7). Its holders never wait for the store lock or a network request | Mcp generation |
 | Store lock and change watch | One in-process async lock in front of the FileStorage lock, which admits or fails at once, so a lock held by another process is retried, as the managed OAuth host does; plus a watch per key, notified on every change to the key's record with whether it holds tokens: Sessions waiting in `auth_required` retry on any change, and ready Sessions react when the tokens are gone | Mcp generation |
 
 The PKCE verifier and `state` are never persisted. A daemon restart abandons pending attempts.
@@ -389,8 +390,20 @@ the current attempt may redeem its code, store tokens or wake Sessions. Attempts
 daemon's memory (§4.2), so this rule orders operations within a daemon. A sign-in that completes
 in another daemon sharing the home after a sign-out is a later sign-in.
 
-- **`start`** makes its attempt current when it returns, replacing the previous one. If a
-  sign-out completed after `start` read the record, `start` answers `mcp_auth_attempt_closed`
+**One order.** The attempts lock (§4.2) is the single linearization point of attempt state.
+`start` holds it to make its attempt current, `logout` to close attempts when it is accepted and
+when it completes, `complete` to validate a callback, and the exchange for both currency checks.
+The exchange holds it from its final check until its outcome is published. Its holders never
+wait for the store lock or a network request, so waiting for it takes at most one local store
+write, never a token request or a refresh. Every `start` and `logout` is therefore ordered either
+before an exchange's final check, which then finds its attempt superseded, or after its
+publication: a newer attempt that completes later replaces the stored credential, and a
+sign-out deletes and revokes it. A superseded attempt never writes the store or wakes Sessions
+after a newer `start` has returned.
+
+- **`start`** makes its attempt current when it returns, replacing the previous one. A
+  publication under way holds the attempts lock, so the new attempt becomes current after it. If
+  a sign-out completed after `start` read the record, `start` answers `mcp_auth_attempt_closed`
   instead, because its attempt may reuse a client that the sign-out deleted.
 - **`logout`** closes the current attempt when it is accepted, before it waits for the store lock.
   It closes the attempt again once it has deleted the record, which ends an attempt started in
@@ -399,12 +412,18 @@ in another daemon sharing the home after a sign-out is a later sign-in.
   (§5.4). An authorization server error in the callback, or expiry, ends it too.
 - **The exchange** checks that its attempt is still current twice: after it takes the store lock,
   before it sends the token request, and when the response is in, before it writes the store.
+  From the second check it holds the attempts lock until its outcome is published: the record
+  written, the challenge and missing scopes cleared and the Sessions woken; after
+  `invalid_client`, the registration cleared; after a transport error, the attempt pending again.
   - Superseded before the request: the code is never sent.
   - Superseded while the request was out: the request is still settled (§4.1). Tokens it
     obtained are revoked (RFC 7009, best effort, the refresh token first) and discarded. The
     revocation runs while the store lock is still held, so it precedes any later token request.
     Nothing is written to the store, whatever the response, and no Session is woken.
   - Either way `complete` answers `mcp_auth_attempt_closed`.
+  - Current at the final check: the outcome is published before any later `start` or `logout`
+    takes effect. The code is spent, so the attempt ends even if the record cannot be written;
+    the tokens are then revoked once the attempts lock is released.
 - **A refresh** needs no such check. It re-reads the record under the store lock, so it sees any
   sign-in or sign-out that held the lock before it, and one that holds the lock after it
   replaces or deletes its result.
@@ -412,9 +431,9 @@ in another daemon sharing the home after a sign-out is a later sign-in.
 | Race | Outcome |
 | --- | --- |
 | Two `start` calls for one key | The later to return replaces the earlier; completing the earlier is `mcp_auth_attempt_closed` |
-| `start` while a `complete` is under way | The new attempt supersedes the old one. A code not yet sent is never sent; tokens already obtained are revoked and discarded; `complete` answers `mcp_auth_attempt_closed` |
+| `start` while a `complete` is under way | Until the old exchange's final check, the new attempt supersedes it: a code not yet sent is never sent, tokens already obtained are revoked and discarded, and `complete` answers `mcp_auth_attempt_closed`. After that check, `start` becomes current only once the old exchange has written its record and woken the Sessions; completing the new attempt replaces that record |
 | Two `complete` calls for one attempt | One exchange at a time: the second answers `mcp_auth_attempt_closed` at once. After a transport error the attempt is pending again |
-| `logout` while an attempt is pending or under way | The attempt closes when `logout` is accepted. An exchange still waiting for the store lock sends nothing; one whose request is out discards its tokens. `logout` then deletes the record and revokes its tokens |
+| `logout` while an attempt is pending or under way | The attempt closes when `logout` is accepted. An exchange still waiting for the store lock sends nothing; one whose request is out discards its tokens; one past its final check publishes first, and `logout` is accepted after it. `logout` then deletes the record and revokes its tokens |
 | `start` while `logout` runs | If the sign-out completes before `start` returns, `start` answers `mcp_auth_attempt_closed`; an attempt `start` made current before then closes when the sign-out completes |
 | `complete` while a refresh runs | Both hold the store lock in turn: a refresh after `complete` finds fresh tokens and does nothing; `complete` after a refresh replaces the tokens |
 | `logout` while a refresh runs | `logout` takes the store lock after it; the refreshed tokens are revoked and deleted. A refresh after `logout` finds no record |
@@ -510,7 +529,7 @@ callback URLs or authorization server `error_description` text from an unvalidat
 | D14 | `start` requires an enabled entry; sign-out is always allowed; one key is shared across sources | Sign-in on a disabled project entry would contact a URL from project files before the user enabled it (ADR 003 D3) |
 | D15 | An entry with static credentials never uses OAuth; OAuth needs `https` or loopback `http` | Falling back to OAuth after a static credential fails mixes two credential sources; a bearer token over cleartext can be stolen |
 | D16 | Keep rmcp's PRM acceptance: the `resource_metadata` URL must be same-origin, and `resource` may be the server URL or a parent path on the same origin | RFC 9728 does not require a same-origin metadata URL; accepting another origin would let any `401` point discovery at another host. RFC 9728 asks for an identical `resource`; requiring it would mean replacing rmcp's validation, while the parent-path rule keeps the token audience inside the server's origin |
-| D17 | Attempt currency (§7): the `attemptId` identifies an attempt, and only the key's current attempt redeems its code, checked after the store lock and again after the token response. Sign-out closes attempts when it is accepted and when it completes; a `start` prepared before a completed sign-out is refused. A superseded request already sent is settled, and its tokens are revoked best effort under the store lock and discarded. Holding the lock orders the revocation before a newer attempt's exchange: a server that revokes a whole session then refuses the newer code at sign-in, instead of leaving a stored credential that is already dead | Checking only before the request lets a response still in flight overwrite a newer attempt. Cancelling a request in flight breaks "settled once sent" (§4.1): a redeemed code would leave live tokens nobody knows about. Storing them and leaving cleanup to a later sign-out undoes a sign-out the user has already completed. Discarding without revocation leaves the tokens valid at the authorization server until they expire. Taking the store lock in `start` would queue each sign-in behind refreshes of up to 30 s. A generation counter per attempt would duplicate the `attemptId` |
+| D17 | Attempt currency (§7): the `attemptId` identifies an attempt, and only the key's current attempt redeems its code, checked after the store lock and again after the token response. One attempts lock orders every change of attempt state; the exchange holds it from the second check until its outcome is published, so a later `start` or sign-out takes effect after the publication. Sign-out closes attempts when it is accepted and when it completes; a `start` prepared before a completed sign-out is refused. A superseded request already sent is settled, and its tokens are revoked best effort under the store lock and discarded. Holding the store lock orders the revocation before a newer attempt's exchange: a server that revokes a whole session then refuses the newer code at sign-in, instead of leaving a stored credential that is already dead | Checking only before the request lets a response still in flight overwrite a newer attempt. Ending the attempt before the store write and publishing after it lets a newer `start` return while the write is pending, so a superseded attempt stores and wakes after the newer one is current. Writing first and rolling back when superseded lets lock-free readers use the tokens in between, and a failed rollback leaves them stored. Cancelling a request in flight breaks "settled once sent" (§4.1): a redeemed code would leave live tokens nobody knows about. Storing them and leaving cleanup to a later sign-out undoes a sign-out the user has already completed. Discarding without revocation leaves the tokens valid at the authorization server until they expire. Taking the store lock in `start` would queue each sign-in behind refreshes of up to 30 s. A generation counter per attempt would duplicate the `attemptId` |
 
 ## 11. Security
 
@@ -673,7 +692,9 @@ tests, using an isolated home:
     shows `missingScopes`, and the next `start` requests the union.
 12. **Issuer change.** When PRM names a new authorization server, `start` registers a DCR client
     again, and refuses a configured `clientId` with `mcp_auth_client_required` until sign-out.
-13. **Superseded attempts.** Each race is held open at the mock authorization server:
+13. **Superseded attempts.** Each race is held open at the mock authorization server, or at the
+    store write through the `testing` feature's hook, because FileStorage cannot be paused from
+    outside:
     - While a refresh holds the store lock, a sign-out closes the pending attempt and its
       callback is refused. The code is never sent, nothing is stored, and the Sessions require
       sign-in.
@@ -681,6 +702,9 @@ tests, using an isolated home:
       sent. A second callback for that attempt is refused while it waits.
     - A newer `start` supersedes an attempt whose token request is out; the tokens are revoked
       and never stored or used.
+    - A newer `start` that finishes discovery while an exchange past its final check is writing
+      its record returns only after that publication. Completing the newer attempt then replaces
+      the record.
     - A sign-out that completes during a `start` refuses that start, and the next `start`
       registers a new client.
 

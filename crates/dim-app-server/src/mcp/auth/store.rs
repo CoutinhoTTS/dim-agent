@@ -139,6 +139,8 @@ pub(super) struct Store {
     path: FilePath,
     /// In front of the FileStorage lock, which admits or fails at once.
     local: Mutex<()>,
+    #[cfg(feature = "testing")]
+    home: std::path::PathBuf,
 }
 
 /// The store held for one read-modify-write, including any token request
@@ -147,6 +149,8 @@ pub(super) struct Locked<'a> {
     _local: MutexGuard<'a, ()>,
     lease: FileLease,
     pub document: Document,
+    #[cfg(feature = "testing")]
+    home: &'a std::path::Path,
 }
 impl Locked<'_> {
     /// Commits once started: the replace ignores cancellation. A replace in
@@ -161,6 +165,8 @@ impl Locked<'_> {
             .insert("version".into(), VERSION.into());
         let mut bytes = serde_json::to_vec_pretty(&value).map_err(|_| McpAuthError::Unavailable)?;
         bytes.push(b'\n');
+        #[cfg(feature = "testing")]
+        testing::pause(self.home).await;
         #[cfg(unix)]
         let permissions = Some(std::os::unix::fs::PermissionsExt::from_mode(0o600));
         #[cfg(not(unix))]
@@ -184,6 +190,8 @@ impl Store {
     pub fn new(files: Arc<FileStorage>, root: usize) -> Result<Self, FileStorageError> {
         Ok(Self {
             path: files.path(root, FILE)?,
+            #[cfg(feature = "testing")]
+            home: files.root_path(root)?,
             files,
             local: Mutex::new(()),
         })
@@ -218,6 +226,8 @@ impl Store {
             _local: local,
             lease,
             document,
+            #[cfg(feature = "testing")]
+            home: &self.home,
         })
     }
 }
@@ -238,4 +248,54 @@ fn decode(read: Result<Vec<u8>, FileStorageError>) -> Result<Document, McpAuthEr
         return Err(McpAuthError::Unsupported);
     }
     serde_json::from_value(value).map_err(|_| McpAuthError::Unsupported)
+}
+
+/// Holds a credential store write open for race flow tests. Feature
+/// `testing` only; production builds have no hook.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+    use tokio::sync::oneshot;
+
+    type Hold = (PathBuf, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
+
+    /// Holds the next credential store write under `home`, before it
+    /// replaces the file, until this is dropped.
+    pub struct HeldWrite {
+        arrived: oneshot::Receiver<()>,
+        _release: oneshot::Sender<()>,
+    }
+    impl HeldWrite {
+        /// Resolves once the held write has arrived.
+        pub async fn arrived(&mut self) {
+            let _ = (&mut self.arrived).await;
+        }
+    }
+
+    pub fn hold_credential_write(home: &Path) -> HeldWrite {
+        let (arrive, arrived) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let home = home.canonicalize().expect("an existing home");
+        HOLDS.lock().unwrap().push((home, arrive, released));
+        HeldWrite {
+            arrived,
+            _release: release,
+        }
+    }
+
+    pub(super) async fn pause(home: &Path) {
+        let hold = {
+            let mut holds = HOLDS.lock().unwrap();
+            let index = holds.iter().position(|(held, ..)| held == home);
+            index.map(|index| holds.swap_remove(index))
+        };
+        if let Some((_, arrive, released)) = hold {
+            let _ = arrive.send(());
+            let _ = released.await;
+        }
+    }
 }
