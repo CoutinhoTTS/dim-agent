@@ -93,7 +93,7 @@ impl Fixture {
                 fs::canonicalize(&home).unwrap(),
             ]))),
             root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin)),
+            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0))),
             root.plugin(capability_plugin(Capture(capture.clone()))),
         ];
         wait_active(
