@@ -445,6 +445,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut service_catalog = rutis_loader::ServiceCatalog::new();
     service_catalog.register_shared("managedProvider");
     service_catalog.register_shared("pluginFiles");
+    service_catalog.register_shared("sessions");
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
