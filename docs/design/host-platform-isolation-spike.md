@@ -27,7 +27,9 @@ The Linux example requires Landlock ABI 4 or newer and refuses to run without th
 Measured on 2026-10-16: macOS 27.0.1 (26A434), ARM64, Rust 1.98.1, dev profile. Each operation has
 a five-second completion bound; the long-running process and PTY announce readiness before
 termination. Startup samples are 20 alternating plain/isolated executions of `/usr/bin/true`,
-including spawn, output drainage and exit. No warmup or parallel load.
+including spawn, output drainage and exit. No warmup or parallel load. These timings were
+captured for #112's original broad-read profile; they are not measurements of the current
+narrow-read fixture described below.
 
 | Spawn to exit | Median | p95 | Range |
 | --- | ---: | ---: | ---: |
@@ -84,11 +86,19 @@ Both macOS and Linux examples assert these boundaries:
 | Shell and its sleeping child | Existing `ProcessTree::terminate` completes; child PID no longer exists |
 | PTY process | Existing PTY starts, sends readiness bytes and terminates through its existing handle |
 
-The macOS fixture profile permits host reads except its private directory, permits writes only under
-its workspace and to `/dev/null`, and leaves networking denied. It demonstrates enforcement of
-these rules; it does not define the product's filesystem or network policy. In particular, the
-profile does not hide the rest of the user's readable files. PTY checks cover startup and
-termination, not every file/network restriction through an interactive shell.
+The original measured macOS profile in #112 permitted host reads except its private directory.
+The current macOS fixture instead grants content reads only under explicit system directories,
+its workspace and required devices, plus the literal root directory `/`. It grants metadata reads
+globally, writes only under its workspace and to `/dev/null`, and leaves networking denied. There
+is no fixture-specific private-path deny rule: default denial protects paths outside the grants.
+The fixture's PATH-only environment is explicit and contains no credentials.
+
+Measured narrow-read enforcement on 2026-10-16, on the same macOS 27.0.1 ARM64 baseline, passes
+the existing file/symlink, invalid-policy, process-tree and PTY flows. It additionally rejects
+chmod on the outside fixture without changing its mode, and TCP/UDP to live IPv4 and IPv6 host
+loopback listeners. The UDP plain control must deliver a datagram, not merely return success.
+PTY checks cover startup and termination, not every file/network restriction through an
+interactive shell. This remains a fixture, not enabled product isolation.
 
 The Linux fixture grants read/execute on `/usr`, `/bin`, available library directories and its
 own executable; the workspace gets the handled filesystem rights, and `/dev/null` permits read/write.
@@ -96,9 +106,62 @@ All handled TCP bind/connect operations are denied. UDP, UNIX sockets and ioctl 
 restricted by this ABI 4 fixture. Its libc calls and kernel ABI structs remain local to the example;
 no isolation backend is installed in HostPlatform.
 
-An exploratory Seatbelt profile allowing reads only under common system directories aborted `/bin/sh`
-with `SIGABRT`. Its cause is unknown; no production workaround or broader product permission is
-inferred from that result. The checked-in fixture states its broader read allowance explicitly.
+In controlled narrow-read probes, `/bin/sh` exited 134 without `(literal "/")` and printed its
+payload with that single additional literal grant. A clean environment and an already granted
+cwd did not remove the failure. The failing syscall has not been identified. The checked-in
+fixture retains that literal root-directory read; it does not grant reads of the root's descendants.
+No broad host/private-directory read allowance is needed by these exercised flows.
+
+## Linux bubblewrap feasibility
+
+Measured on 2026-10-16 in a disposable, isolated OrbStack Linux machine: Debian 13.7 (trixie),
+Linux `7.2.9-orbstack-00391-g2b298d05fbd4`, aarch64, bubblewrap 0.12.0. The probe ran as UID 501;
+root was used only to install packages. The machine shared no macOS files or SSH agent. This is
+ordinary unprivileged namespace execution, not a privileged container or a change to host policy.
+
+The command below shows the measured mount/namespace construction. Run it as an ordinary user
+on that Linux baseline; all fixture data is disposable. The shell array preserves quoted paths.
+
+```bash
+set -euo pipefail
+probe_root=$(mktemp -d /tmp/dim-f5-bwrap.XXXXXX)
+trap 'rm -rf -- "$probe_root"' EXIT
+workspace="$probe_root/workspace with ' quotes"
+readonly="$probe_root/readonly"
+private="$probe_root/private"
+mkdir -p "$workspace" "$readonly" "$private"
+printf workspace-input > "$workspace/input"
+printf readonly-input > "$readonly/input"
+printf private-sentinel > "$private/sentinel"
+chmod 600 "$readonly/input"
+ln -s "$private" "$workspace/escape"
+sandbox=(bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts
+  --die-with-parent --new-session --cap-drop ALL
+  --ro-bind /usr /usr --ro-bind /etc /etc
+  --symlink usr/bin /bin --symlink usr/sbin /sbin --symlink usr/lib /lib
+  --proc /proc --dev /dev --ro-bind "$readonly" "$readonly"
+  --bind "$workspace" "$workspace" --remount-ro / --chdir "$workspace"
+  --clearenv --setenv PATH /usr/bin:/bin)
+"${sandbox[@]}" /bin/sh -c 'cat input; printf written > output' </dev/null
+```
+
+The measured assertions were:
+
+| Flow | Observed result |
+| --- | --- |
+| Workspace path with spaces/quote | Reads `workspace-input`, writes `written` through exact argv |
+| Explicit read-only fixture | Reads succeed; append and chmod fail; original bytes and mode 0600 remain |
+| Unmounted private fixture | Read/create fail, no private bytes are returned and no file is created |
+| Workspace symlink to private fixture | Read fails |
+| Network namespace | Child `/proc/self/ns/net` identity differs from the parent's |
+| PTY setup | `script -q -e -c` runs the same argv with `--new-session` and prints `pty-ready` |
+
+The PTY collector has null stdin so it cannot consume the probe script. These preliminary
+mechanism checks did not use Linux HostPlatform's tree/PTY handles, test cancellation/reaping,
+or attempt packets to host TCP/UDP/UNIX listeners. A distinct network namespace is not reported
+as a packet-level acceptance test. Those flows remain required for product integration. There
+is no bubblewrap latency comparison. The temporary machine and its fixtures are removed after
+calibration; the product backend and configuration remain unimplemented.
 
 ## Existing implementation and integration points
 
@@ -124,7 +187,9 @@ request. This spike does not install that policy or change which calls execute w
 - **Linux:** the Landlock fixture passed all seven flow groups as UID 1000 on the kernel above.
   [Landlock's kernel documentation](https://docs.kernel.org/userspace-api/landlock.html)
   defines the inherited restriction model and ABI-dependent coverage. The probe uses its
-  existing syscall contract without a new crate. Bubblewrap is not measured or selected.
+  existing syscall contract without a new crate. The bubblewrap feasibility section measures a
+  separate candidate for the proposed product policy; it does not change the Landlock fixture's
+  rights or evidence.
 - **Windows:** isolation is unavailable in this spike; both examples refuse to run.
 
 The proposed [product policy](host-platform-isolation.md) specifies host-local filesystem,

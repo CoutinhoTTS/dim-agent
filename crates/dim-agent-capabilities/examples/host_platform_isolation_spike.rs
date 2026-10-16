@@ -9,6 +9,7 @@ mod macos {
     use std::{
         ffi::OsString,
         io::Read,
+        os::unix::fs::PermissionsExt,
         path::{Path, PathBuf},
         process::Output,
         time::{Duration, Instant},
@@ -17,14 +18,24 @@ mod macos {
 
     type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
     const LIMIT: Duration = Duration::from_secs(5);
-    // This probe permits host reads except its private fixture; it is not a product policy.
+    // This fixture exercises explicit read roots without installing a product policy.
     const PROFILE: &str = r#"
         (version 1)
         (deny default)
         (allow process*)
         (allow sysctl-read)
-        (allow file-read*)
-        (deny file-read* (subpath (param "PRIVATE")))
+        (allow file-read-metadata)
+        (allow file-read*
+            (literal "/")
+            (subpath "/System")
+            (subpath "/usr")
+            (subpath "/bin")
+            (subpath "/sbin")
+            (subpath "/Library/Apple")
+            (subpath "/private/etc")
+            (subpath (param "WORKSPACE"))
+            (literal "/dev/random")
+            (literal "/dev/urandom"))
         (allow file-write* (subpath (param "WORKSPACE")))
         (allow file-read* file-write* (literal "/dev/null"))
     "#;
@@ -45,12 +56,10 @@ mod macos {
         }
     }
 
-    fn isolated(mut spec: ProcessSpec, private: &Path, profile: &str) -> ProcessSpec {
+    fn isolated(mut spec: ProcessSpec, profile: &str) -> ProcessSpec {
         let mut args = vec![
             "-D".into(),
             format!("WORKSPACE={}", spec.cwd.display()).into(),
-            "-D".into(),
-            format!("PRIVATE={}", private.display()).into(),
             "-p".into(),
             profile.into(),
             spec.executable.into_os_string(),
@@ -118,7 +127,6 @@ mod macos {
                     "/bin/sh",
                     vec!["-c".into(), "cat input; printf written > output".into()],
                 ),
-                &private,
                 PROFILE,
             ),
         )
@@ -142,7 +150,6 @@ mod macos {
                             target.as_os_str().into(),
                         ],
                     ),
-                    &private,
                     PROFILE,
                 ),
             )
@@ -161,7 +168,6 @@ mod macos {
                         "/usr/bin/touch",
                         vec![target.as_os_str().into()],
                     ),
-                    &private,
                     PROFILE,
                 ),
             )
@@ -171,23 +177,65 @@ mod macos {
         }
         checks.push("outside write and symlink escape denied");
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let args = vec![
-            "-v".into(),
-            "-z".into(),
-            "-w".into(),
-            "1".into(),
-            "127.0.0.1".into(),
-            listener.local_addr()?.port().to_string().into(),
-        ];
-        success(&run(&platform, command(&workspace, "/usr/bin/nc", args.clone())).await?);
-        let blocked = run(
-            &platform,
-            isolated(command(&workspace, "/usr/bin/nc", args), &private, PROFILE),
-        )
-        .await?;
-        denied(&blocked);
-        checks.push("reachable loopback TCP denied in sandbox");
+        let mode = std::fs::metadata(&secret)?.permissions().mode();
+        denied(
+            &run(
+                &platform,
+                isolated(
+                    command(
+                        &workspace,
+                        "/bin/chmod",
+                        vec!["777".into(), secret.as_os_str().into()],
+                    ),
+                    PROFILE,
+                ),
+            )
+            .await?,
+        );
+        assert_eq!(std::fs::metadata(&secret)?.permissions().mode(), mode);
+        checks.push("outside metadata change denied");
+
+        for address in ["127.0.0.1", "::1"] {
+            let listener = tokio::net::TcpListener::bind((address, 0)).await?;
+            let args = vec![
+                "-v".into(),
+                "-z".into(),
+                "-w".into(),
+                "1".into(),
+                address.into(),
+                listener.local_addr()?.port().to_string().into(),
+            ];
+            success(&run(&platform, command(&workspace, "/usr/bin/nc", args.clone())).await?);
+            denied(
+                &run(
+                    &platform,
+                    isolated(command(&workspace, "/usr/bin/nc", args), PROFILE),
+                )
+                .await?,
+            );
+
+            let listener = tokio::net::UdpSocket::bind((address, 0)).await?;
+            let args = vec![
+                "-v".into(),
+                "-u".into(),
+                "-z".into(),
+                "-w".into(),
+                "1".into(),
+                address.into(),
+                listener.local_addr()?.port().to_string().into(),
+            ];
+            success(&run(&platform, command(&workspace, "/usr/bin/nc", args.clone())).await?);
+            let mut packet = [0; 64];
+            assert!(tokio::time::timeout(LIMIT, listener.recv(&mut packet)).await?? > 0);
+            denied(
+                &run(
+                    &platform,
+                    isolated(command(&workspace, "/usr/bin/nc", args), PROFILE),
+                )
+                .await?,
+            );
+        }
+        checks.push("reachable host IPv4/IPv6 TCP and UDP denied in sandbox");
 
         let marker = workspace.join("invalid-policy-ran");
         let invalid = run(
@@ -198,7 +246,6 @@ mod macos {
                     "/usr/bin/touch",
                     vec![marker.as_os_str().into()],
                 ),
-                &private,
                 "(version 1) (invalid-policy-operation)",
             ),
         )
@@ -213,7 +260,6 @@ mod macos {
                 "/bin/sh",
                 vec!["-c".into(), "sleep 60 & echo $!; wait".into()],
             ),
-            &private,
             PROFILE,
         ))?;
         let mut line = String::new();
@@ -239,7 +285,6 @@ mod macos {
                     "/bin/sh",
                     vec!["-c".into(), "printf ready; sleep 60".into()],
                 ),
-                &private,
                 PROFILE,
             ),
             PtySize { cols: 80, rows: 24 },
@@ -264,11 +309,7 @@ mod macos {
             success(
                 &run(
                     &platform,
-                    isolated(
-                        command(&workspace, "/usr/bin/true", vec![]),
-                        &private,
-                        PROFILE,
-                    ),
+                    isolated(command(&workspace, "/usr/bin/true", vec![]), PROFILE),
                 )
                 .await?,
             );

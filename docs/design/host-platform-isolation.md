@@ -20,7 +20,7 @@ The proposed enabled policy is:
 | Other host paths | No file-content read or write grant. Path metadata may be visible on macOS; directory names and existence are not confidential under this policy. |
 | Network | No access to host or external IPv4/IPv6 networks, including host loopback. Linux may permit communication within the new network namespace. No proxy, per-command exception, network approval or automatic retry without isolation. |
 | Environment | Retain only explicitly named entries from the existing ProcessSpec environment. Naming a variable grants its value, not access to a path it names. HostPlatform does not synthesize credential variables. |
-| Runtime files/devices | Only the Linux private namespace's `/proc`, backend-required null/random/terminal devices and the caller's existing stdio/PTY. These are execution mechanics, not additional host file grants. |
+| Runtime files/devices | Only the root directory itself, the Linux private namespace's `/proc`, backend-required null/random/terminal devices and the caller's existing stdio/PTY. A literal root-directory read does not grant descendant contents. |
 | Existing processes | A policy edit affects the next process start. An existing exec tree or persistent shell keeps its startup policy until its owner ends it. |
 
 This is a process filesystem/network boundary, not a sandbox for trusted plugins or a limit on
@@ -117,21 +117,24 @@ required runtime devices, writes only for writable directories/devices, and deny
 Use profile parameters for host paths; never embed an unescaped path into policy source. The
 profile is internal implementation data, not a second user-configurable policy language.
 
-The spike's broad `file-read*` allowance is not an acceptable implementation of this contract.
-Its narrow-read exploratory profile aborted `/bin/sh`; a follow-up local probe on 2026-10-16
-also exited 134 without payload output. The cause remains unknown. Implementation must first
-establish the required shell/runtime operations in the disposable spike fixture and demonstrate
-that the selected allowlist works. Do not compensate by granting all host reads, allowing
-networking or adding an unisolated fallback. Report an incompatible platform explicitly.
+The original spike's broad `file-read*` allowance is not an implementation of this contract.
+The current narrow-read fixture passes on macOS 27.0.1 with a literal `/` read in addition to
+its named read roots. Controlled probes fail before payload output without that literal; the
+specific failing syscall has not been identified. Keep the literal directory grant, not a
+recursive root read. Outside reads/writes/chmod, symlink escapes and host IPv4/IPv6 TCP/UDP
+are rejected; process-tree and PTY lifetime checks pass. Product configuration, environment
+selection and the actual exec/PTY consumer flows remain to be implemented and verified.
+Do not compensate for another baseline's failure with broader reads, networking or an
+unisolated fallback. Report an incompatible platform explicitly.
 
 The local `sandbox-exec(1)` manual marks the interface deprecated. Support is limited to actual
-OS versions that pass the enabled-policy acceptance flows; the existing macOS 27.0.1 spike is
-evidence for its exercised profile only.
+OS versions that pass the enabled-policy acceptance flows; macOS 27.0.1 fixture results are
+evidence for their exercised profiles only.
 
 ### Linux
 
 Select bubblewrap for the product policy: an empty mount namespace with configured read-only
-and writable binds at their original absolute paths, a private network namespace, private PID
+and writable binds at their original absolute paths, a read-only namespace skeleton, a private network namespace, private PID
 and IPC namespaces, a private `/proc` and minimal `/dev`. Retain the unprivileged calling user;
 do not request elevated execution, capabilities, setuid mode or a host network namespace.
 Use a private user namespace and drop all capabilities for the payload. Resolve the installed
@@ -151,9 +154,12 @@ chmod/chown. These differ from the proposed read-only mount boundary. See the
 [kernel contract](https://docs.kernel.org/userspace-api/landlock.html). Newer ABI rights do not
 retroactively expand the spike's runtime evidence.
 
-Bubblewrap has not been measured by #112. Before product integration, verify it as an ordinary
-user on the selected Linux baseline, including namespace availability, terminal behavior and
-process-tree settlement. A container or kernel that refuses required namespaces is unsupported
+The [feasibility probe](host-platform-isolation-spike.md#linux-bubblewrap-feasibility) passes as
+UID 501 on Debian 13.7 / Linux 7.2.9 ARM64 with bubblewrap 0.12.0: workspace I/O, read-only
+bytes/mode, an inaccessible private fixture, symlink rejection, a private network namespace
+and basic PTY startup. This is not Linux HostPlatform process-tree/PTY or packet-level
+acceptance. Product integration must verify those flows and whole-tree settlement on that
+baseline. A container or kernel that refuses required namespaces is unsupported
 for enabled isolation; do not silently switch to a weaker Landlock policy.
 
 ### Windows
@@ -235,8 +241,8 @@ requires the enabled policy through exec and PTY on macOS and Linux, with the ba
 ## Requirements raised to mechanism owners
 
 None. No new readiness phase, subscription, protocol, generic policy service or rutis feature is
-required. Strict-profile startup and Linux namespace availability are backend feasibility work
-inside HostPlatform, not requirements on core.
+required. OS-baseline coverage and Linux native process/PTY settlement are HostPlatform
+acceptance work, not requirements on core.
 
 ## Ablation review
 
