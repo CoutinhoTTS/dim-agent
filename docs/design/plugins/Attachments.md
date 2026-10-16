@@ -1,6 +1,6 @@
 # Attachments
 
-Status: Ready (pending maintainer confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Roadmap item P2 ([#66](https://github.com/arcships/dim/issues/66)). Implementation starts when C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83) in review), S5a ([#59](https://github.com/arcships/dim/issues/59), after S6 [#51](https://github.com/arcships/dim/issues/51)) and S11 ([#56](https://github.com/arcships/dim/issues/56), [#92](https://github.com/arcships/dim/pull/92) in review) have landed ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
+Status: Ready. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Roadmap item P2 ([#66](https://github.com/arcships/dim/issues/66)). Its dependencies have merged: C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)), S5a ([#59](https://github.com/arcships/dim/issues/59), [#95](https://github.com/arcships/dim/pull/95)), S6 ([#51](https://github.com/arcships/dim/issues/51), [#87](https://github.com/arcships/dim/pull/87)) and S11 ([#56](https://github.com/arcships/dim/issues/56), [#92](https://github.com/arcships/dim/pull/92)) ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
 Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (S11, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file through SessionStore's `sessionFiles` service and returns its path; the user's text quotes the path and the model reads the file with `read` when it needs it. Fork sharing and deletion of those files are SessionStore behaviour ([session files](../appserver/session-files.md)). No events.
 
@@ -301,11 +301,11 @@ The CLI reads images (clipboard, `@`, pasted paths), checks them (A.1) and sends
 
 Images in tool results are outside this requirement. How S11 reads the capability and where in ModelProvider it converts are S11's design.
 
-**SessionStore: `sessionFiles` (S5a, [#59](https://github.com/arcships/dim/issues/59), draft [#95](https://github.com/arcships/dim/pull/95)).** Nothing beyond S5a's design: `put` with the codes above, the name rule and the 16 MiB cap, the token checked right before txn 2, and `SessionFilesHost` in dim-agent-capabilities `host` (session files Appendix A). This review aligns session files §9.2 with A.2: the reply has no `lines`, `cancelled` maps to `service_reloading`, and `storage` to `storage_failed`.
+**SessionStore: `sessionFiles` (S5a, [#59](https://github.com/arcships/dim/issues/59), merged in [#95](https://github.com/arcships/dim/pull/95)).** Nothing beyond S5a's design: `put` with the codes above, the name rule and the 16 MiB cap, the token checked right before txn 2, and `SessionFilesHost` in dim-agent-capabilities `host` (session files Appendix A). This review aligns session files §9.2 with A.2: the reply has no `lines`, `cancelled` maps to `service_reloading`, and `storage` to `storage_failed`.
 
 **FileStorage (S6, [#51](https://github.com/arcships/dim/issues/51)).** None: Attachments reaches files only through SessionStore.
 
-**Rpc and Session facade: C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83) in review).** Nothing beyond the merged contract: key `attachment`, dispatch through the Session (restoring an unloaded one), `unknown_method` when the host does not record `attachment`, `service_reloading` while its provider is not active, and call ownership with `drain` interruption. Per-call progress is not used.
+**Rpc and Session facade: C1 ([#47](https://github.com/arcships/dim/issues/47), merged in [#83](https://github.com/arcships/dim/pull/83)).** Nothing beyond the merged contract: key `attachment`, dispatch through the Session (restoring an unloaded one), `unknown_method` when the host does not record `attachment`, `service_reloading` while its provider is not active, and call ownership with `drain` interruption. Per-call progress is not used.
 
 **App Server assembly (`serve`, assembly lane).** Install Attachments when `native_home` is set, recording `attachment` before Rpc's row is built (§1). These are a few lines in P2's implementation, appended after the assembly lane's work like other registrations ([roadmap §3.4](../roadmap.md#34-合入顺序与冲突点)).
 
@@ -399,7 +399,7 @@ Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked --
 
 ## Appendix G. Rust binding
 
-Attachments is implemented in Rust, in its own crate, which depends on dim-agent-runtime and dim-agent-capabilities and not on dim-app-server. C1's names below are those of [#83](https://github.com/arcships/dim/pull/83), in review; the binding follows any rename made there.
+Attachments is implemented in Rust, in its own crate, which depends on dim-agent-runtime and dim-agent-capabilities and not on dim-app-server. C1's names below are those merged in [#83](https://github.com/arcships/dim/pull/83).
 
 | Neutral contract | Rust binding |
 | --- | --- |

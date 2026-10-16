@@ -1,6 +1,6 @@
 # Attachments
 
-状态：Ready（待维护者确认）。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。路线图条目 P2（[#66](https://github.com/arcships/dim/issues/66)）。C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83) 评审中）、S5a（[#59](https://github.com/arcships/dim/issues/59)，在 S6 [#51](https://github.com/arcships/dim/issues/51) 之后）和 S11（[#56](https://github.com/arcships/dim/issues/56)，[#92](https://github.com/arcships/dim/pull/92) 评审中）合入后开始实现（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
+状态：Ready。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。路线图条目 P2（[#66](https://github.com/arcships/dim/issues/66)）。依赖均已合入：C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83)）、S5a（[#59](https://github.com/arcships/dim/issues/59)，[#95](https://github.com/arcships/dim/pull/95)）、S6（[#51](https://github.com/arcships/dim/issues/51)，[#87](https://github.com/arcships/dim/pull/87)）和 S11（[#56](https://github.com/arcships/dim/issues/56)，[#92](https://github.com/arcships/dim/pull/92)）（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
 
 让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（S11，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。Attachments 是一个小型 Session 插件，通过 `sessionMethods` 服务（Session 作用域，key `attachment`；[session-boundary](../contracts/session-boundary.md)）提供一个 Session 方法 `attachment.put`；契约是语言中立的，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法通过 SessionStore 的 `sessionFiles` 服务把文本附件（一次大段粘贴）存为不可变的 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为（[Session 文件](../appserver/session-files.md)）。没有事件。
 
@@ -301,11 +301,11 @@ CLI 读取图片（剪贴板、`@`、粘贴的路径），检查后（A.1）在 
 
 工具结果中的图片不在这项需求内。S11 如何读取能力、在 ModelProvider 的哪里转换，属于 S11 的设计。
 
-**SessionStore：`sessionFiles`（S5a，[#59](https://github.com/arcships/dim/issues/59)，草案 [#95](https://github.com/arcships/dim/pull/95)）。** 不超出 S5a 的设计：带上述错误码的 `put`、名称规则和 16 MiB 上限、在 txn 2 之前检查令牌，以及 dim-agent-capabilities `host` 中的 `SessionFilesHost`（Session 文件附录 A）。本次复核让 Session 文件 §9.2 与 A.2 一致：回复中没有 `lines`，`cancelled` 映射为 `service_reloading`，`storage` 映射为 `storage_failed`。
+**SessionStore：`sessionFiles`（S5a，[#59](https://github.com/arcships/dim/issues/59)，已在 [#95](https://github.com/arcships/dim/pull/95) 合入）。** 不超出 S5a 的设计：带上述错误码的 `put`、名称规则和 16 MiB 上限、在 txn 2 之前检查令牌，以及 dim-agent-capabilities `host` 中的 `SessionFilesHost`（Session 文件附录 A）。本次复核让 Session 文件 §9.2 与 A.2 一致：回复中没有 `lines`，`cancelled` 映射为 `service_reloading`，`storage` 映射为 `storage_failed`。
 
 **FileStorage（S6，[#51](https://github.com/arcships/dim/issues/51)）。** 无：Attachments 只经 SessionStore 访问文件。
 
-**Rpc 与 Session 门面：C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83) 评审中）。** 不超出已合入的契约：key `attachment`，经 Session 分发（恢复未加载的 Session），主机未记录 `attachment` 时为 `unknown_method`，提供方未激活时为 `service_reloading`，以及按 `drain` 中断方式的调用归属。不使用逐次调用的进度。
+**Rpc 与 Session 门面：C1（[#47](https://github.com/arcships/dim/issues/47)，已在 [#83](https://github.com/arcships/dim/pull/83) 合入）。** 不超出已合入的契约：key `attachment`，经 Session 分发（恢复未加载的 Session），主机未记录 `attachment` 时为 `unknown_method`，提供方未激活时为 `service_reloading`，以及按 `drain` 中断方式的调用归属。不使用逐次调用的进度。
 
 **App Server 装配（`serve`，装配线）。** 在设置了 `native_home` 时安装 Attachments，并在构建 Rpc 的行之前记录 `attachment`（§1）。这是 P2 实现中的几行改动，像其他登记一样在装配线的工作之后追加（[roadmap §3.4](../../../design/roadmap.md#34-合入顺序与冲突点)）。
 
@@ -399,7 +399,7 @@ P2 的流程测试，通过公开 RPC，在有原生存储和本地执行的 App
 
 ## 附录 G. Rust 绑定
 
-Attachments 用 Rust 实现，放在自己的 crate 中，依赖 dim-agent-runtime 和 dim-agent-capabilities，不依赖 dim-app-server。下面 C1 的名称来自 [#83](https://github.com/arcships/dim/pull/83)，仍在评审中；若评审中改名，绑定随之调整。
+Attachments 用 Rust 实现，放在自己的 crate 中，依赖 dim-agent-runtime 和 dim-agent-capabilities，不依赖 dim-app-server。下面 C1 的名称来自已合入的 [#83](https://github.com/arcships/dim/pull/83)。
 
 | 中立契约 | Rust 绑定 |
 | --- | --- |
