@@ -315,7 +315,7 @@ fn noninteractive_approval_denies_and_drains_outstanding_responses_before_detach
     });
     let output = wait(
         home.command()
-            .args(["--prompt", "exec"])
+            .args(["exec", "--json", "--prompt", "exec"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -329,7 +329,14 @@ fn noninteractive_approval_denies_and_drains_outstanding_responses_before_detach
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("never print me"));
-    assert!(output.stdout.is_empty());
+    let notices: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(notices.len(), 2);
+    assert_eq!(notices[0]["method"], "approval.request");
+    assert_eq!(notices[1]["method"], "session.event");
 }
 
 #[test]
@@ -355,7 +362,7 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
     });
     let output = wait(
         home.command()
-            .args(["--resume", "session", "--prompt", "continue"])
+            .args(["exec", "resume", "session", "--prompt", "continue"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -368,6 +375,292 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "new output\n");
+}
+
+#[test]
+fn exec_json_preserves_public_notifications_and_only_observes_the_selected_session() {
+    let home = Home::new();
+    let notices = vec![
+        json!({"jsonrpc":"2.0","method":"session.plugin.notice","params":{"sessionId":"session","branchId":"child","source":"fixture","future":{"control":"\u{1b}[2J\n"}}}),
+        json!({"jsonrpc":"2.0","method":"session.model.progress","params":{"sessionId":"session","branchId":"main","requestId":"request","textOffset":0,"text":"Hello","newField":true}}),
+        json!({"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session","branchId":"main","event":{"sequence":12,"type":"step","name":"text","data":{"turn_id":"turn","request_id":"request","delta":"Hello","newField":"preserved"}}}}),
+        json!({"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session","branchId":"main","event":{"sequence":25,"type":"turn","name":"end","data":{"turn_id":"turn","status":"failed","error":"fixture"}}}}),
+    ];
+    let emitted = notices.clone();
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[{"sequence":4,"type":"step","name":"text","data":{"turn_id":"old-turn","request_id":"old","delta":"history-only","newField":"preserved"}}],"through":8,"nextAfter":8,"done":true}));
+        let idle = wire.read("session.idle"); wire.reply(&idle,json!({"sequence":8}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "continue"); wire.reply(&submit,json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.closed",json!({"sessionId":"other"}));
+        wire.notice("session.model.progress",json!({"sessionId":"other","text":"other-session"}));
+        for notice in emitted { wire.send(notice); }
+        wire.reply(&idle,json!({"sequence":30})); wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "resume", "session", "--json", "-p", "continue"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let received: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(received, notices);
+    assert!(!stdout.contains("history-only"));
+    assert!(!stdout.contains("workspace:"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("session: session"));
+}
+
+#[test]
+fn f6_argument_errors_do_not_connect_or_create_product_state() {
+    let home = Home::new();
+    for args in [
+        vec!["exec", "--prompt", "one", "-p", "two"],
+        vec!["exec", "resume", "one", "--resume", "two", "-p", "text"],
+        vec!["--resume", "one", "exec", "resume", "two", "-p", "text"],
+        vec!["--json", "-p", "text"],
+        vec!["session", "export", "session"],
+        vec!["session", "export", "session", "--format", "xml"],
+        vec!["tui"],
+        vec!["exec"],
+    ] {
+        let output = home
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(!home.0.join("rust/daemon.sock").exists());
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn exec_json_interrupt_drains_the_stop_barrier_without_human_stdout() {
+    let home = Home::new();
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        entered.send(()).unwrap();
+        let stop = wire.read("session.stop");
+        wire.end(json!({"turn_id":"turn","status":"cancelled","reason":"interrupted"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.reply(&stop, json!({"sequence":30}));
+        wire.detach();
+    });
+    let child = home
+        .command()
+        .args(["exec", "-p", "wait", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let output = wait(child);
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let events: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["method"], "session.event");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Waiting for resource settlement"));
+}
+
+#[test]
+fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
+    for mode in ["stdout-json", "markdown", "existing", "history-error"] {
+        let home = Home::new();
+        let cli_dir = home.0.join("client");
+        let workspace = home.0.join("workspace");
+        fs::create_dir(&cli_dir).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let path = cli_dir.join("Session notes.md");
+        if mode == "existing" {
+            fs::write(&path, b"keep original bytes").unwrap();
+        }
+        let events = vec![
+            json!({"sequence":1,"type":"extension","name":"future","data":{"unknown":[1,2]},"extra":"preserved"}),
+            json!({"sequence":2,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"Keep ```code``` intact"},{"type":"image","source":{"type":"url","mediaType":"image/png","url":"https://invalid.example/not-fetched"}}]}}}),
+            json!({"sequence":3,"type":"step","name":"thinking","data":{"turn_id":"t","request_id":"r","delta":"A reason"}}),
+            json!({"sequence":4,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"Hello "}}),
+            json!({"sequence":5,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"world"}}),
+            json!({"sequence":6,"type":"step","name":"tool-use","data":{"turn_id":"t","request_id":"r","call":{"id":"call","name":"read","input":{"path":"file"}}}}),
+            json!({"sequence":7,"type":"step","name":"tool-completed","data":{"turn_id":"t","request_id":"r","call_event_id":"dispatch","call_id":"call","result":{"content":"```\n# must remain inside fence\n``````"}}}),
+            json!({"sequence":8,"type":"step","name":"tool-result","data":{"turn_id":"t","request_id":"r","results":[{"call_id":"call","result":{"content":"```\n# must remain inside fence\n``````"}}]}}),
+            json!({"sequence":9,"type":"branch","name":"create","data":{"branch":"child","at":{"kind":"create"},"source":{"kind":"host","operation_id":"export-fixture"},"prompt":"child contents are elsewhere"}}),
+            json!({"sequence":10,"type":"branch","name":"create-failed","data":{"status":"failed","branch":"child","createEvent":9,"error":"fixture"}}),
+            json!({"sequence":15,"type":"branch","name":"create-failed","data":{"status":"cancelled","branch":"cancelled-child","createEvent":14,"reason":"fixture"}}),
+        ];
+        let returned = events.clone();
+        let daemon = home.daemon(move |wire| {
+            let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+            let first = wire.read("session.history");
+            assert_eq!(first["params"],json!({"sessionId":"session","branchId":"main","after":0,"limit":256}));
+            wire.reply(&first,json!({"events":&returned[..10],"through":20,"nextAfter":12,"done":false}));
+            let second = wire.read("session.history");
+            assert_eq!(second["params"]["after"],12); assert_eq!(second["params"]["through"],20);
+            if mode == "history-error" {
+                wire.send(json!({"jsonrpc":"2.0","id":second["id"],"error":{"code":-32000,"message":"fixture history failure"}}));
+            } else {
+                wire.reply(&second,json!({"events":&returned[10..],"through":20,"nextAfter":20,"done":true}));
+            }
+        });
+        let mut command = home.command();
+        command.current_dir(&cli_dir).args([
+            "session",
+            "export",
+            "session",
+            "--format",
+            if mode == "stdout-json" {
+                "json"
+            } else {
+                "markdown"
+            },
+            "--cwd",
+            workspace.to_str().unwrap(),
+        ]);
+        if mode != "stdout-json" {
+            command.args(["--output", "Session notes.md"]);
+        }
+        let output = command.output().unwrap();
+        daemon.join().unwrap();
+        match mode {
+            "stdout-json" => {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let exported: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(
+                    exported,
+                    json!({"sessionId":"session","branchId":"main","through":20,"events":events})
+                );
+            }
+            "markdown" => {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.stdout.is_empty());
+                let markdown = fs::read_to_string(&path).unwrap();
+                for text in [
+                    "Keep ```code``` intact",
+                    "[Image attachment: image/png]",
+                    "### Reasoning",
+                    "Hello world",
+                    "### Tool call: read (call)",
+                    "### Tool result: call",
+                    "```````json",
+                    "Child branch child (contents not exported).",
+                    "Child branch child was not created.",
+                    "Child branch cancelled-child was not created.",
+                ] {
+                    assert!(markdown.contains(text), "{text}: {markdown}");
+                }
+                assert_eq!(markdown.matches("# must remain inside fence").count(), 1);
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            "existing" => {
+                assert!(!output.status.success());
+                assert_eq!(fs::read(&path).unwrap(), b"keep original bytes");
+                assert!(!String::from_utf8_lossy(&output.stderr).contains("Exported"));
+            }
+            _ => {
+                assert!(!output.status.success());
+                assert!(!path.exists());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("fixture history failure")
+                );
+            }
+        }
+        assert!(!workspace.join("Session notes.md").exists());
+    }
+}
+
+#[test]
+fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
+    let home = Home::new();
+    let cli_dir = home.0.join("client");
+    let workspace = home.0.join("workspace");
+    fs::create_dir_all(cli_dir.join("~")).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for _ in 0..2 {
+            let history = wire.read("session.history");
+            wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        }
+        let history = wire.read("session.history");
+        wire.send(json!({"jsonrpc":"2.0","id":history["id"],"error":{"code":-32000,"message":"fixture history failure"}}));
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .current_dir(&cli_dir)
+        .args(["tui", "--cwd", workspace.to_str().unwrap()]);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.until("\n> ");
+    terminal.write(b"/export markdown\n");
+    terminal.until("~ is literal.");
+    terminal.until("\n> ");
+    terminal.write(b"/export yaml bad.md\n");
+    terminal.until("Export format must be markdown or json");
+    terminal.until("\n> ");
+    terminal.write(b"/export json ~/Session notes.json\n");
+    terminal.until("Exported JSON: ~/Session notes.json");
+    terminal.until("\n> ");
+    terminal.write(b"/export json ~/Session notes.json\n");
+    terminal.until("Error:");
+    terminal.until("\n> ");
+    terminal.write(b"/export markdown failure.md\n");
+    terminal.until("fixture history failure");
+    terminal.until("\n> ");
+    terminal.write(b"/exit extra\n");
+    terminal.until("Usage: /exit");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    let path = cli_dir.join("~/Session notes.json");
+    let data: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(data["events"], json!([]));
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!cli_dir.join("failure.md").exists());
+    assert!(!workspace.join("~").exists());
 }
 
 #[test]
@@ -421,34 +714,41 @@ fn explicit_model_config_rejects_mock_and_mismatched_configured_profiles() {
 
 #[test]
 fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
-        wire.start(false);
-        let submit = wire.read("session.submit");
-        assert_eq!(submit["params"]["text"], "from stdin\n");
-        wire.reply(&submit, json!({"event":{}}));
-        let idle = wire.read("session.idle");
-        wire.end(json!({"turn_id":"turn","status":"failed","error":"credential should not print"}));
-        wire.reply(&idle, json!({"sequence":30}));
-        wire.detach();
-    });
-    let mut child = home
-        .command()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"from stdin\n")
-        .unwrap();
-    let output = wait(child);
-    daemon.join().unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("credential should not print"));
+    for explicit_exec in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.start(false);
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "from stdin\n");
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.end(
+                json!({"turn_id":"turn","status":"failed","error":"credential should not print"}),
+            );
+            wire.reply(&idle, json!({"sequence":30}));
+            wire.detach();
+        });
+        let mut command = home.command();
+        if explicit_exec {
+            command.arg("exec");
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"from stdin\n")
+            .unwrap();
+        let output = wait(child);
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("credential should not print"));
+    }
 }
 
 struct Terminal {
@@ -1070,6 +1370,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             config.to_str().unwrap(),
             "--cwd",
             home.0.to_str().unwrap(),
+            "exec",
             "--prompt",
             "read marker.txt",
         ])
@@ -1102,7 +1403,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             config.to_str().unwrap(),
             "--cwd",
             home.0.to_str().unwrap(),
-            "--resume",
+            "exec",
+            "resume",
             session,
             "--prompt",
             "continue",
@@ -1118,6 +1420,41 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "session continued\n"
+    );
+    let exported = home
+        .command()
+        .args([
+            "--server",
+            &binary,
+            "--model-config",
+            config.to_str().unwrap(),
+            "session",
+            "export",
+            session,
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let conversation: Value = serde_json::from_slice(&exported.stdout).unwrap();
+    assert_eq!(conversation["sessionId"], session);
+    assert_eq!(conversation["branchId"], "main");
+    assert!(
+        conversation["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["name"] == "text" && event["data"]["delta"] == "session continued")
+    );
+    assert!(
+        !String::from_utf8(exported.stdout)
+            .unwrap()
+            .contains("fixture-secret")
     );
     model.join().unwrap();
 }
