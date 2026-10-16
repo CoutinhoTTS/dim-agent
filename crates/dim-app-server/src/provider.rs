@@ -1750,14 +1750,19 @@ impl ProviderService {
         let protocol = model
             .endpoint
             .ok_or_else(|| failure("Missing model protocol"))?;
+        let base = current.config.clone().unwrap_or_default();
         let config = preferences
-            .configure(model, protocol, &current.config.clone().unwrap_or_default())
+            .configure(model, protocol, &base)
             .map_err(failure)?;
         Ok(ModelSelection {
             provider_id: current.provider_id.clone(),
             model_id: current.model_id.clone(),
             capability_snapshot: current.capability_snapshot.clone(),
-            config: Some(config),
+            config: if config == base {
+                current.config.clone()
+            } else {
+                Some(config)
+            },
             metadata: current.metadata.clone(),
         })
     }

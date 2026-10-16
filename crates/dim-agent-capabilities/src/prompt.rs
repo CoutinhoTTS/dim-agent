@@ -21,6 +21,23 @@ use uuid::Uuid;
 type Key = (String, PromptScope);
 type LoadedPrompts = Vec<(PromptSourceTarget, Option<PromptEntry>)>;
 
+fn validate_entry(target: &PromptSourceTarget, entry: &PromptEntry) -> Result<()> {
+    if entry.source != target.source || entry.scope != target.scope {
+        return Err(AgentError::InvalidInput(format!(
+            "prompt source {} returned a different identity",
+            target.source
+        )));
+    }
+    if entry.delivery == PromptDelivery::System
+        && !matches!(entry.scope, PromptScope::Branch { .. })
+    {
+        return Err(AgentError::InvalidInput(
+            "system prompts require branch scope".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct InitialPromptConfiguration(pub Option<ConfigureUpdate>);
 
 /// Rules and state enter the model context as inputs written with the change.
@@ -214,19 +231,7 @@ impl Prompt {
                 Ok(value) => value,
             };
             if let Some(entry) = &value {
-                if entry.source != target.source || entry.scope != target.scope {
-                    return Err(AgentError::InvalidInput(format!(
-                        "prompt source {} returned a different identity",
-                        target.source
-                    )));
-                }
-                if entry.delivery == PromptDelivery::System
-                    && !matches!(entry.scope, PromptScope::Branch { .. })
-                {
-                    return Err(AgentError::InvalidInput(
-                        "system prompts require branch scope".into(),
-                    ));
-                }
+                validate_entry(target, entry)?;
             }
             loaded.push((target.clone(), value));
         }
@@ -534,6 +539,11 @@ impl Prompt {
         model: Option<ModelSelection>,
         sources: Vec<(PromptSourceTarget, Option<PromptEntry>)>,
     ) -> Result<ConfigureOutcome> {
+        for (target, entry) in &sources {
+            if let Some(entry) = entry {
+                validate_entry(target, entry)?;
+            }
+        }
         let update = ConfigureUpdate {
             sources: sources.iter().map(|(target, _)| target.clone()).collect(),
             model,

@@ -138,7 +138,7 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                             result = &mut operation => result,
                             signal = tokio::signal::ctrl_c() => {
                                 signal?;
-                                println!("\nWaiting for configuration result; it may already be adopted.");
+                                println!("\nWaiting for configuration result before accepting more input.");
                                 operation.await
                             }
                         }

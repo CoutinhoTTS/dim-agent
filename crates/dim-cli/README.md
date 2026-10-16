@@ -39,7 +39,8 @@ See [CLI commands and exports](../../docs/design/cli-commands.md).
 At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
 reasoning effort, `/fast on|off` selects priority/default service tiers, and
 `/agent ID` adopts an Agent profile's prompt and optional model. Tools and
-permissions keep the current Session configuration. Bare commands list choices;
+permissions keep the current Session configuration. A profile with a model resets effort
+and service tier to that model's defaults; a prompt-only profile preserves them. Bare commands list choices;
 unsupported values leave the prompt usable. Commands in `--prompt` or piped input
 remain literal model input. See [model configuration](../../docs/design/model-configuration.md).
 

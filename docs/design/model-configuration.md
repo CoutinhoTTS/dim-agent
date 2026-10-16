@@ -61,6 +61,7 @@ session.model.update {
 } -> {model: {providerId, modelId}, outcome: "adopted" | "unchanged"}
 ```
 
+Without a target, at least one preference is required; an empty update is invalid.
 Both target fields are present or both absent; partial targets and explicit null
 are invalid. Explicit-target requests keep their current semantics. Without a
 target, read the current adopted configuration from Prompt's branch snapshot and apply
@@ -127,7 +128,9 @@ Prompt's existing branch service gains a resolved-source operation. Its data is 
 optional `ModelSelection` and a list of `{target: PromptSourceTarget, entry:
 PromptEntry | null}`; null revokes that target. The Rust binding reuses these types
 and Prompt's current loaded-source representation, derives the configure targets
-and freezes the values in the existing operation's pending record. It writes the
+and freezes the values in the existing operation's pending record. Each non-null entry
+must match its target source/scope; System entries require branch scope, matching
+the ordinary source-loading contract. It writes the
 existing configure command, enters the same Dispatcher/queue and publishes through
 the existing result path. The caller never writes the adopted result directly.
 

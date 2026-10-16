@@ -979,6 +979,9 @@ impl Connection {
                         .await?
                     }
                     (None, None) => {
+                        if p.model_preferences == crate::provider::ModelPreferences::default() {
+                            return Err(RpcError::invalid("Supply at least one model preference"));
+                        }
                         if rpc.config.product_home.is_none() {
                             return Err(provider_error(
                                 dim_agent_capabilities::host::HostError::failed(

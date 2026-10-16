@@ -146,6 +146,14 @@ impl ModelPreferences {
                 return Err("Reasoning effort is not supported by this model");
             }
         }
+        if self.reasoning_effort.is_some()
+            && config
+                .reasoning
+                .as_ref()
+                .is_some_and(|reasoning| *reasoning == ProviderReasoningConfig::default())
+        {
+            config.reasoning = None;
+        }
         if let Some(tier) = &self.service_tier {
             let supported = model
                 .metadata

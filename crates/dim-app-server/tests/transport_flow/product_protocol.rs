@@ -1070,6 +1070,9 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                 .await,
         );
         assert_eq!(adopted().tools, original.tools);
+        if preferences["reasoningEffort"] == "none" {
+            assert!(adopted().config.unwrap().reasoning.is_none());
+        }
     }
     let selected = adopted();
     let config = selected.config.as_ref().unwrap();
@@ -1090,6 +1093,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_eq!(client.rpc("session.model.update", json!({"sessionId":sid,"branchId":"main","modelPreferences":{"reasoningEffort":"low"}})).await["result"]["outcome"], "unchanged");
     assert_eq!(adopted(), selected);
     for fields in [
+        json!({}),
+        json!({"modelPreferences":{}}),
         json!({"providerId":"public-fixture"}),
         json!({"modelId":"beta"}),
         json!({"providerId":null,"modelId":null}),

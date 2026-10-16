@@ -1517,6 +1517,25 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
             )
             .await
             .unwrap();
+        if index == 0 {
+            let unchanged = provider
+                .apply_preferences(
+                    &dim_agent_types::ModelConfiguration {
+                        provider_id: selection.provider_id.clone(),
+                        model_id: selection.model_id.clone(),
+                        capability_snapshot: selection.capability_snapshot.clone(),
+                        config: None,
+                        metadata: None,
+                        tools: None,
+                        tool_sources: vec![],
+                    },
+                    ModelPreferences::default(),
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            assert!(unchanged.config.is_none());
+        }
         let selection = provider
             .apply_preferences(
                 &dim_agent_types::ModelConfiguration {
