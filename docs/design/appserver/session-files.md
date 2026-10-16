@@ -312,7 +312,7 @@ business directory.
 | --- | --- |
 | Parent | Every component but the last is opened as `open_directory` opens it: an existing directory reached without following links, never the reserved directory. A missing parent fails `Io` `NotFound`; there is no recursive creation, and callers create each level in order |
 | Reserved names | `path` already rejects the reserved prefix `.dim-file-storage-` and `auth.json.lock` by name (`InvalidPath`) |
-| Aliases | Aliases are checked the way `lock` checks them, before anything is created. The parent's reserved directory is ensured first, so any spelling the filesystem equates with it already exists. Then the lock keys for the last component and for `auth.json.lock` are opened in that reserved directory; if they are the same file, the name is an alias of the account marker and the call fails `InvalidPath` |
+| Aliases | Aliases are checked the way `lock` checks them, before anything is created. The parent's reserved directory is ensured first, so any spelling the filesystem equates with it already exists. Then the key for `auth.json.lock` is ensured in that reserved directory and the key for the last component is opened if it exists; if they are the same file, the name is an alias of the account marker and the call fails `InvalidPath` |
 | Create | An absent last component is created relative to the held parent handle: Unix `mkdirat` with mode `0700`; Windows `NtCreateFile` with `FILE_CREATE` and `FILE_DIRECTORY_FILE`, inheriting the parent's DACL |
 | Present | An existing directory is opened as `open_directory` opens it, so an alias of the reserved directory fails `InvalidPath`. An existing business directory counts as created, just as S6's `remove` counts an absent entry as removed. Any other existing entry (file, link, reparse point, special file) fails `Io` and is left untouched; links are never followed |
 | Durability | In both the created and the present case the parent is synced before the call returns, so a retry after `Unsynced` confirms durability. A sync failure returns `Unsynced` (the directory exists and is visible, durability unconfirmed); its message is generalized from "file replaced" to cover directories. Windows has no directory sync, as for `replace` |
@@ -320,10 +320,10 @@ business directory.
 | Cancellation | Checked up to the creation, which is the commit boundary. Once created, the sync result is reported |
 | Errors | `InvalidPath`, `Io` (`NotFound` parent, an existing non-directory entry, other I/O), `Unsynced`, `Closed`, `Cancelled`, `Worker` |
 
-The lock keys the alias check opens stay in the reserved directory, as keys for file names do;
-`remove` deletes them with the directory. The operation lives inside FileStorage's own module,
-beside `list` and `remove`, and holds the same generation admission. FileStorage's plugin page
-documents it when it is implemented.
+The alias check never creates a key for the new directory's name, so a put leaves no key behind
+in `<db>.session-files/.dim-file-storage-locks`, which is never removed (Design changes, D1). The
+operation lives inside FileStorage's own module, beside `list` and `remove`, and holds the same
+generation admission. FileStorage's plugin page documents it.
 
 ## 8. Storage format
 
@@ -666,6 +666,15 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
 `cargo test --workspace --locked`, and `cargo run --locked -p xtask -- graph` then `check`,
 because SessionStore provides a new service.
+
+## 17. Design changes in implementation
+
+Changes the implementation made to this design ([roadmap §5.3](../roadmap.md#53-实现中发现的变更)). Each affects
+only S5a.
+
+| # | Change | Why |
+| --- | --- | --- |
+| D1 | `create_directory` ensures the key for `auth.json.lock` and only opens the key for the new name, instead of opening both keys with creation (§7) | Opening a key with creation leaves a key file named after the directory, and FileStorage unlinks keys only when it removes their parent. `<db>.session-files` is never removed, so every put would have left one key there for good. An existing alias of the marker still resolves to the marker's key, so the check gives the same answer |
 
 ## Appendix A. Rust binding
 

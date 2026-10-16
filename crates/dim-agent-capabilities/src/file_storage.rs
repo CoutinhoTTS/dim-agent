@@ -394,10 +394,16 @@ impl FileStorage {
                 return Err(FileStorageError::InvalidPath("reserved storage directory"));
             }
             // Keys follow the filesystem's own name equivalence, as for `lock`.
-            let key = native::create_key(&locks, &name)?;
+            // The name's key is only opened: an alias of the marker resolves
+            // to the marker's key, and a new directory leaves no key behind
+            // in a parent that may never be removed.
             let marker = native::create_key(&locks, OsStr::new("auth.json.lock"))?;
-            if native::same_identity(&key, &marker)? {
-                return Err(FileStorageError::InvalidPath("reserved storage lock"));
+            match native::open_key(&locks, &name) {
+                Ok(key) if native::same_identity(&key, &marker)? => {
+                    return Err(FileStorageError::InvalidPath("reserved storage lock"));
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+                _ => {}
             }
             owner.check(&cancel)?;
             native::create_directory(&parent, &name)?;

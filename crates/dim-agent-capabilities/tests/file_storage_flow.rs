@@ -537,6 +537,20 @@ async fn directory_creation_stays_inside_the_authorized_root() {
         .create_directory(&path("files/one"), &cancel)
         .await
         .unwrap();
+    // The alias check leaves no key behind for a directory.
+    for created in ["files", "one"] {
+        let parent = if created == "files" {
+            root_path.clone()
+        } else {
+            root_path.join("files")
+        };
+        assert!(
+            !parent
+                .join(".dim-file-storage-locks")
+                .join(created)
+                .exists()
+        );
+    }
     #[cfg(unix)]
     for created in ["files", "files/one"] {
         let mode = fs::metadata(root_path.join(created))

@@ -72,18 +72,18 @@ error and is left untouched.
 
 Aliases are checked the way `lock` checks them, before anything is created. The
 parent's reserved directory is ensured first, so a name the filesystem equates
-with it is recognized by identity, and the lock keys for the name and for
-`auth.json.lock` are opened in it; if they are the same file, the name is an
-alias of the account marker. Both fail `InvalidPath`. The keys stay in the
-reserved directory, as keys for file names do, and removal deletes them with
-the directory.
+with it is recognized by identity. Then the key for `auth.json.lock` is ensured
+and the key for the name is opened if it exists; if they are the same file, the
+name is an alias of the account marker. Both fail `InvalidPath`. The name's key
+is never created, so making a directory leaves no key behind in a parent that
+may never be removed, such as SessionStore's Session-files directory.
 
 ```text
 create_directory(d/x):
   open d (no links, never the reserved directory)       missing -> NotFound
   ensure d/.dim-file-storage-locks
   x is the reserved directory under another spelling?    -> InvalidPath
-  key x is key auth.json.lock?                           -> InvalidPath
+  ensure key auth.json.lock; key x exists and is it?     -> InvalidPath
   cancelled?                                             -> Cancelled
   mkdirat(d, x, 0700); an existing entry is kept
   x is not a business directory?                         -> Io, untouched

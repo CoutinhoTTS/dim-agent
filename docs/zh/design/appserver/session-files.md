@@ -229,7 +229,7 @@ SELECT :fork, file_id FROM session_file_owners WHERE session_id = :source
 | --- | --- |
 | 父目录 | 除最后一个之外的每个组成部分都按 `open_directory` 的方式打开：不跟随链接到达的已有目录，且不是保留目录。父目录缺失时以 `Io` `NotFound` 失败；不递归创建，调用方按层依次创建 |
 | 保留名 | `path` 已经按名字拒绝保留前缀 `.dim-file-storage-` 和 `auth.json.lock`（`InvalidPath`） |
-| 别名 | 在创建任何东西之前，按 `lock` 的方式检查别名。先确保父目录中的保留目录存在，这样文件系统视为等同的任何拼写都已存在。然后在该保留目录中打开最后一个组成部分和 `auth.json.lock` 的锁键；二者是同一个文件时，名字就是账户标记的别名，调用以 `InvalidPath` 失败 |
+| 别名 | 在创建任何东西之前，按 `lock` 的方式检查别名。先确保父目录中的保留目录存在，这样文件系统视为等同的任何拼写都已存在。然后确保该保留目录中有 `auth.json.lock` 的锁键，并在最后一个组成部分的锁键存在时打开它；二者是同一个文件时，名字就是账户标记的别名，调用以 `InvalidPath` 失败 |
 | 创建 | 最后一个组成部分不存在时，相对已持有的父目录句柄创建：Unix 用 `mkdirat`，模式 `0700`；Windows 用 `NtCreateFile` 加 `FILE_CREATE` 和 `FILE_DIRECTORY_FILE`，继承父目录的 DACL |
 | 已存在 | 已存在的目录按 `open_directory` 的方式打开，所以保留目录的别名以 `InvalidPath` 失败。已存在的业务目录视为创建成功，正如 S6 的 `remove` 把不存在的条目视为已删除。其他已存在的条目（文件、链接、重解析点、特殊文件）以 `Io` 失败且不被改动；从不跟随链接 |
 | 持久性 | 无论是新建还是已存在，返回前都同步父目录，所以 `Unsynced` 之后的重试能确认持久性。同步失败时返回 `Unsynced`（目录存在且可见，持久性未确认）；它的消息从"file replaced"推广到也涵盖目录。Windows 没有目录同步，与 `replace` 相同 |
@@ -237,7 +237,7 @@ SELECT :fork, file_id FROM session_file_owners WHERE session_id = :source
 | 取消 | 一直检查到创建为止，创建就是提交边界；创建之后报告同步结果 |
 | 错误 | `InvalidPath`、`Io`（父目录 `NotFound`、已存在的非目录条目、其他 I/O）、`Unsynced`、`Closed`、`Cancelled`、`Worker` |
 
-别名检查打开的锁键留在保留目录中，与文件名的锁键一样；`remove` 会随目录一起删除它们。该操作位于 FileStorage 自己的模块内，与 `list`、`remove` 并列，使用相同的代次准入。实现时由 FileStorage 的插件页记录。
+别名检查从不为新目录的名字创建锁键，所以 put 不会在永不删除的 `<db>.session-files/.dim-file-storage-locks` 中留下锁键（设计变更 D1）。该操作位于 FileStorage 自己的模块内，与 `list`、`remove` 并列，使用相同的代次准入。FileStorage 的插件页记录了它。
 
 ## 8. 存储格式
 
@@ -467,6 +467,14 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 9. 读取准入，经由 Session 的工具路径：`put` 之后，在产品默认的 `workspace-write` 和 `read-only` 下，该 Session 对返回路径的 `read` 返回内容；分支不写 `approval/request`，它的权限状态（版本和策略）不变。拒绝读取另一个 Session 的文件或数据库目录属于 §11.2 那一项的验收，因为 `read` 不按路径限定（§11.1）。
 
 验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及先 `cargo run --locked -p xtask -- graph` 再 `check`，因为 SessionStore 提供了新服务。
+
+## 17. 实现中的设计变更
+
+实现对本设计所做的变更（[路线图 §5.3](../../../design/roadmap.md#53-实现中发现的变更)），都只影响 S5a。
+
+| # | 变更 | 原因 |
+| --- | --- | --- |
+| D1 | `create_directory` 确保 `auth.json.lock` 的锁键存在，对新名字的锁键只打开、不创建，不再带创建地打开两个锁键（§7） | 带创建地打开锁键会留下以目录命名的锁键文件，而 FileStorage 只在删除其父目录时才删除锁键。`<db>.session-files` 永远不会被删除，所以每次 put 都会在那里永久留下一个锁键。已存在的账户标记别名仍会解析到标记的锁键，检查结果不变 |
 
 ## 附录 A. Rust 绑定
 
