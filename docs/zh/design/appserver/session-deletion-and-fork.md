@@ -1,7 +1,8 @@
 # SessionStore Session 删除、清理与分叉
 
-状态：草稿（待评审）。路线图工作项 S5c（[#61](https://github.com/arcships/dim/issues/61)），在 S5a
-（[#59](https://github.com/arcships/dim/issues/59)）及其设计 [Session 文件](session-files.md) 之后。
+状态：已实现。路线图工作项 S5c（[#61](https://github.com/arcships/dim/issues/61)、
+[#97](https://github.com/arcships/dim/pull/97)），在 S5a（[#59](https://github.com/arcships/dim/issues/59)）及其设计
+[Session 文件](session-files.md) 之后，连同 [#127](https://github.com/arcships/dim/issues/127)（Collaboration）。§16 列出实现中的改动。
 总体设计：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 Rpc、Agents 与 SessionStore 行。作用域：
 [ADR 002](../../adr/002-plugin-scope.md) 进程作用域，位于现有的 Agents 与 SessionStore 插件内，另加两个 Rpc 内建方法。
 使用方：通过 `session.delete` 和 `session.fork` 调用的客户端，以及 CLI 的 `dimcode session` 命令（F6，
@@ -145,7 +146,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | 提交之后、回复之前 | 无行 | 目录已无；S 的文件无所有者 | 客户端重试得到 `{}` 并再次安排清扫；否则由 S5a 的下一次触发（另一次删除，或之后某一代的第一次写入）移除文件 |
 | 清扫期间 | S5a 的状态 | — | [Session 文件 §6](session-files.md) 的崩溃恢复表 |
 
-**为什么目录在提交之前移除。** 没有任何行记录命令输出目录。行删除之后，孤立的目录只能靠列出 `command-output/` 找到，而这个目录由同一数据库目录下的所有数据库共用（一个目录下两个 `--database` 文件），列目录无法区分已删除 Session 的目录和另一个存储的目录。先移除目录，任何已提交的删除都不会留下它。S5a 的文件采用相反的顺序，因为有行记录它们，清扫能找到。FileStorage 的移除不同步（[S6](https://github.com/arcships/dim/pull/87)）：断电后，被移除的目录可能重新出现，而之后以 `synchronous=FULL` 提交的事务仍然有效。提交之前同步父目录就消除了这个窗口。
+**为什么目录在提交之前移除。** 没有任何行记录命令输出目录。行删除之后，孤立的目录只能靠列出 `command-output/` 找到，而这个目录由同一数据库目录下的所有数据库共用（一个目录下两个 `--database` 文件），列目录无法区分已删除 Session 的目录和另一个存储的目录。先移除目录，任何已提交的删除都不会留下它。S5a 的文件采用相反的顺序，因为有行记录它们，清扫能找到。FileStorage 的移除原本不同步（[S6](https://github.com/arcships/dim/pull/87)）：断电后，被移除的目录可能重新出现，而之后以 `synchronous=FULL` 提交的事务仍然有效。现在 `remove` 在返回前同步父目录（§14），消除了这个窗口。
 
 被否决的方案：
 
@@ -192,7 +193,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 切点在 `main` 上，规则与 `session.branch_create` 相同（[tree.rs](../../../../crates/dim-app-server/src/connection/tree.rs) 的 `create_branch`）：`at` 不超过已发布的 `main` 头部，位于原子批次的末尾，并且 `history::validate_context_boundary` 接受 `at` 处的上下文（没有缺少结果的工具调用，没有未结束的模型输出）。Agents 获取源 Session 来做这项检查，需要时先恢复它，与 `session.branch_create` 相同。`at` 及之前的行不会改变，分叉期间的追加不影响复制。
 
-`at` 还必须是 `main` 的**静止点**：没有未结束的轮次，每个 Queue 或 Steer 输入都已消费，每个后台任务都已结束，并且它发出的唤醒输入（如果有）也在 `at` 及之前且已消费。如今重载正是从后两类事实开始工作的：Loop 为已采纳但未消费的 Queue 或 Steer 输入启动轮次（[agent_loop.rs](../../../../crates/dim-agent-capabilities/src/agent_loop.rs) 的 `rebuild`），InputQueue 在轮次结束时采纳排在它后面的 Queue 输入（[input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs)），BackgroundExec 把重载时仍未结束的任务记为失败，并用 Steer 输入唤醒分支（[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) 的 `rebuild`）。在 F 中，这些轮次会在源的 `cwd` 里重做源已经做过或正在做的工作。切点处未结束的轮次只会被重载记为失败，不会重新执行；要求切点处没有这样的轮次，F 打开时就不会多出一个源里没有的失败轮次。静止点上 F 的重载不会开始任何工作。Append 输入可以留下：它不启动轮次，会并入 F 中由客户端输入启动的下一次请求。这项检查读取 `main` 截至 `at` 的前缀，与 `validate_context_boundary` 放在一起（§14）。常见的分叉点，即某轮结束之后或某条用户消息之前，都是静止点，除非当时有后台任务在运行。
+`at` 还必须是 `main` 的**静止点**：没有未结束的轮次，每个 Queue 或 Steer 输入都已消费，每个后台任务都已结束，并且它发出的唤醒输入（如果有）也在 `at` 及之前且已消费。如今重载正是从后两类事实开始工作的：Loop 为已采纳但未消费的 Queue 或 Steer 输入启动轮次（[agent_loop.rs](../../../../crates/dim-agent-capabilities/src/agent_loop.rs) 的 `rebuild`），InputQueue 在轮次结束时采纳排在它后面的 Queue 输入（[input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs)），BackgroundExec 把重载时仍未结束的任务记为失败，并用 Steer 输入唤醒分支（[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) 的 `rebuild`）。在 F 中，这些轮次会在源的 `cwd` 里重做源已经做过或正在做的工作。切点处未结束的轮次只会被重载记为失败，不会重新执行；要求切点处没有这样的轮次，F 打开时就不会多出一个源里没有的失败轮次。静止点上 F 的重载不会开始任何工作。Append 输入可以留下：它不启动轮次，会并入 F 中由客户端输入启动的下一次请求。Agents 在 `main` 截至 `at` 的前缀上、紧接 `validate_context_boundary` 之后读取这些能力的事实来做这项检查（§14、§16 D1）。常见的分叉点，即某轮结束之后或某条用户消息之前，都是静止点，除非当时有后台任务在运行。
 
 **为什么只在 `main` 上。** 子分支的历史是各祖先的前缀加上它自己的事件，而每个分支的事件都从 1 编号。把它排成一条 `main` 要给事件重新编号，而压缩的 `through`、`branch/create.at`、`branch/start.createEvent`、批次终点和快照锚点都引用这些编号：存储将不得不改写其他所有者写下的事实。要继续某个子分支的工作，客户端在 Session 内从它创建分支。
 
@@ -267,7 +268,8 @@ TimelineTree 以 `branch/resume` 打开已有事件的根分支（[timeline_tree
 | 未结束的轮次、未消费的 Queue 或 Steer 输入、运行中的后台任务 | 不存在：切点是静止点（§6.2） |
 | 未消费的 Append 输入 | 保持待处理，并入 F 中由客户端输入启动的下一次请求 |
 | `main` 创建的分支 | 只有目录，没有事件。F 首次加载时 TimelineTree 在 F 的 `main` 上写 `branch/create-failed`（§6.3） |
-| 已送达但没有结果的 Collaboration 请求 | Collaboration 写出失败结果（`capability reloading`）。重载写出的结果不投递报告输入，因此不启动轮次。它不得停止源的成员（[#127](https://github.com/arcships/dim/issues/127)，§14） |
+| 已送达但没有结果的 Collaboration 请求 | Collaboration 写出失败结果（`capability reloading`）。重载写出的结果不投递报告输入，因此不启动轮次。它不停止源的成员：重载只停止成员关系以重载中的 Session 为 leader 的成员（[#127](https://github.com/arcships/dim/issues/127)，§14） |
+| 报告输入在切点之后的 Collaboration 结果 | F 保留结果但没有它的报告：重载不投递报告，与源在这段窗口内崩溃后相同。不会启动任何工作；模型仍可用 `agent` 工具读取结果 |
 | 生效中的目标（Goal，P5） | Goal 的 A11（§14） |
 
 **切点之后的子分支。** 子分支在自己的 Timeline 上运行，`main` 同时继续，所以源里可能有切点之后的子分支事件。F 一条都没有：
@@ -389,7 +391,10 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | [原生存储格式](../../../design/appserver/native-storage-format.md#s5c-格式决定) | S5c 格式决定：不改格式 |
 | [AcpGateway](../plugins/AcpGateway.md)、[RemoteGateway](../plugins/RemoteGateway.md) | 原文说分叉时重置预设，#26 已改为：预设随事实一起复制 |
 | [文档索引](../../../INDEX.md) | 链接到本页 |
-| [Session 文件](session-files.md) | §5.3 和 §12 原说节点离线时删除照样提交。这对其中的 Session 文件步骤成立；整个删除还会先在节点上移除命令输出（§11）。§5.2、§5.4 和 §6 不变，就是本页执行的步骤 |
+| [Session 文件](session-files.md) | §5.3 和 §12 原说节点离线时删除照样提交。这对其中的 Session 文件步骤成立；整个删除还会先在节点上移除命令输出（§11）。§5.2、§5.4 和 §6 不变，就是本页执行的步骤；§5.4 注明移除现在会同步 |
+| [FileStorage](../../../architecture/rust-agent/plugins/FileStorage.md) | 移除会同步被移除条目的父目录（§14） |
+| [单树装配](../../../architecture/rust-agent/single-tree.md) | `Agents` 重载一行：重载结算只停止重载中的 Session 所领导的成员（#127） |
+| [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段) | 状态说明：分叉复制存储的 `SessionConfig` 文本，`interactive` 的省略规则随之保留 |
 
 ## 13. 规则检查
 
@@ -418,9 +423,9 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 | 对象 | 需求 | 状态 |
 | --- | --- | --- |
-| FileStorage | `remove` 在报告成功之前同步被移除条目的父目录，同步失败时返回 `Unsynced`。Windows 没有目录同步，与 `replace` 一样依赖 NTFS 元数据日志。用于让删除的移除在提交之前落盘（§4） | 在 S5c 的实现中补充，与 S5a 中的 `create_directory` 一样；需与 FileStorage 的所有者确认 |
-| Loop、InputQueue、BackgroundExec | 与 `history::validate_context_boundary` 放在一起的只读静止点检查，作用于固定前缀：没有未结束的轮次，每个 Queue 或 Steer 输入都已消费，每个后台任务都已结束且其唤醒已消费（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 在 S5c 的实现中补充；需与其所有者确认 |
-| Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。如今重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | [#127](https://github.com/arcships/dim/issues/127)，负责人 @yyhhyyyyyy。`session.fork` 上线前必须完成；验收第 7 条 |
+| FileStorage | `remove` 在报告成功之前同步被移除条目的父目录（条目原本就不存在时也同步），同步失败时返回 `Unsynced`。Windows 没有目录同步，与 `replace` 一样依赖 NTFS 元数据日志。用于让删除的移除在提交之前落盘（§4） | 已在 S5c 中实现（[FileStorage](../../../architecture/rust-agent/plugins/FileStorage.md#listing-and-removal)） |
+| Loop、InputQueue、BackgroundExec | 作用于固定前缀的只读静止点检查：没有未结束的轮次，没有等着驱动轮次的 Queue 或 Steer 输入，每个后台任务都已结束且其唤醒已发出（§6.2）。某个能力的重载规则以后要从其他事实开始工作时，就把这些事实加入检查，分叉因此始终不会开始任何工作 | 已在 Agents 中实现，读取这些能力的公开事实，不改动它们（§16 D1）。它们的所有者保留这些事实；某条重载规则以后要从其他事实开始工作时，扩展 [agents.rs](../../../../crates/dim-app-server/src/agents.rs) 中的 `rest_point`。实现中发现、留给 BackgroundExec 所有者的问题：它的 `rebuild` 沿用了更早一代的分支关闭（`session.close` 或正常关机）留下的 `closing`，因此恢复之后不会重新发出崩溃中丢失的唤醒。`rest_point` 像实时唤醒那样把这个标志限定在本代之内，所以落在这样的 `exec/ended` 与其唤醒之间的切点会被拒绝 |
+| Collaboration | 分支重建时，已送达但没有结果的请求以失败结算；只有成员关系指明本 Session 是 leader 时才停止该成员。一般地，重载结算只处理本 Session 持有的资源。原先重建会停止事实中指名的任何已加载 Session（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs) 的 `rebuild`），因此分叉一个 leader 会停止源的成员 | 已实现（[#127](https://github.com/arcships/dim/issues/127)）。成员关系是进程内存，守护进程重启后同样不停止任何成员。验收第 7 条 |
 | Goal（P5，[#69](https://github.com/arcships/dim/issues/69)） | [Goal](../plugins/Goal.md) 的 A11 假设复制来的事实之后有 `branch/start`。分叉的 `main` 以 `branch/resume` 打开，复制来的前缀含有源的 `branch/start` 和目标块。Goal 采用 A11 的回退做法，在分叉首次加载时清除继承来的生效目标（这是一次创建性构建且 `main` 已有事件：`SessionIdentity.restored` 为 false），或修订 A11。分叉提交之后、清除之前崩溃，目标仍会生效；要有持久的边界，需要 Session 访问 A.3 推迟的来源记录。无论哪种做法，复制来的目标都不得在 F 中驱动轮次（§6.5） | P5 的 Goal 设计评审 |
 | S5b（[#60](https://github.com/arcships/dim/issues/60)） | 标题元数据行在删除事务中删除，分叉不复制 | S5b 的设计 |
 | [#32](https://github.com/arcships/dim/issues/32) | `submission_id` 移出 `input/message` 后，分叉在其事务中复制切点及之前输入的幂等记录，让 `session.input_lookup` 在分叉上继续能回答复制来的输入 | #32 的设计 |
@@ -438,7 +443,20 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 8. 分叉后删除源：F 能加载并读取它的 Session 文件；删除 F 后文件被移除。对同一源的删除与分叉竞争：要么 F 带着文件存在，要么分叉失败于 `session_closed`；绝不会出现没有文件的分叉。
 9. 在一次性存储上：命令输出目录已不在但行还在的 Session 能加载，随后删除能完成；删除提交后留下的无所有者文件行在下一代的第一次写入时被清扫。
 
+测试：第 1、2 条是 [deletion.rs](../../../../crates/dim-app-server/tests/transport_flow/deletion.rs) 中的 `delete_closes_a_running_session_and_removes_what_it_stored` 和 `unloaded_and_damaged_sessions_are_deleted_by_id`。第 3 到 8 条在 [fork.rs](../../../../crates/dim-app-server/tests/transport_flow/fork.rs) 中：`a_fork_copies_main_through_a_rest_point_and_starts_nothing`（第 3、4 条和第 5 条的 `interactive`），`a_fork_waits_for_background_work_and_keeps_preset_and_model`（第 4 条的后台任务、第 5 条的预设和模型、第 6 条的后台任务与批次切点，使用真实的 BackgroundExec），`a_fork_is_refused_unless_the_cut_is_a_rest_point`（第 6 条），`a_fork_of_a_leader_does_not_stop_the_source_member`（第 7 条），`a_fork_shares_session_files_and_outlives_its_source`（第 8 条）。[storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_fork_copies_main_through_the_cut_with_its_content_and_snapshots` 在存储层检查第 3 条的内容行和快照，包括只被 before 记录引用的内容。第 9 条是 [files/tests.rs](../../../../crates/dim-app-server/src/storage/files/tests.rs) 中的 `an_interrupted_delete_converges_on_retry_and_the_next_sweep`，它让删除停在移除输出与提交之间，另加 `unloaded_and_damaged_sessions_are_deleted_by_id` 中没有输出目录的 Session。
+
 验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo test --workspace --locked`。不改 Capability、装配或 crate 依赖，`xtask` 只需按常规在 CI 中运行。
+
+## 16. 实现中的设计变更
+
+实现对本设计所做的改动（[路线图 §5.3](../../../design/roadmap.md#53-实现中发现的变更)）。每项都只影响 S5c 自己的所有者。
+
+| # | 变更 | 理由 |
+| --- | --- | --- |
+| D1 | 静止点检查是 Agents 中的 `rest_point`：在 Agents 为 `validate_context_boundary` 已经读取的前缀上，只读地折叠 Loop、InputQueue 和 BackgroundExec 的公开事实，而不是放在能力 crate 中 `validate_context_boundary` 旁边的检查。其中的输入规则与 Loop 一致：在最后一次 `stop/interrupt` 之前已采纳、尚未消费的 Queue 或 Steer 输入允许留下，因为重载不会执行它（它会像 Append 输入一样并入下一次请求）；尚未采纳的输入则被拒绝。任务若不是在本代的分支关闭之后结束，就必须有唤醒，与实时唤醒的发出条件一致 | 它需要的事实都是公开事件，因此不需要这些能力提供 API，也不改动它们。要求所有这类输入都已消费，会拒绝刚停止一轮之后的切点，而那里并不会执行任何东西 |
+| D2 | `session.fork` 需要原生存储。没有原生存储的守护进程（不带 `--database` 的 mock 配置）不在 `hello.features` 中列出它，并回复 `unknown_method`（"Method requires native storage"）。`session.delete` 在那里同样与 `session.create` 一起列出；没有存储时它关闭 Session 并将其遗忘 | 分叉复制的是存储的行；内存中的 Timeline 没有可供复制的 SessionStore |
+| D3 | `session.delete` 对不是单一路径分量的 `sessionId` 回复 `session_invalid_input`，在关闭或移除任何东西之前 | 这个 id 构成 `command-output/<id>`。Session id 是 UUID；否则像 `<S>/.` 这样的 id 会移除 S 的命令输出，却不删除任何行 |
+| D4 | 分叉事务不再检查切点：它复制 `main` 截至 `at` 的行，运行时在构建分叉时校验这些行。校验失败的副本和任何失败的创建一样被回滚 | Agents 已在源上检查过切点（已发布的头部、批次末尾、上下文边界、静止点），而切点及之前的行不会改变；在事务中再检查一次，只会重复每次构建都会执行的校验 |
 
 ## 附录 A. Rust 绑定
 
@@ -451,13 +469,20 @@ impl AgentIndex {
     /// `session.fork`: acquire the source, check the cut, prepared creation (§6.5).
     pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session>;
 }
+/// The rest point of §6.2 over `main`'s prefix (D1).
+fn rest_point(events: &[Arc<AgentEvent>]) -> Result<(), String>;
 impl SessionStore {
+    /// `ctx` gives each file step the node's FileStorage; `files_root` is the
+    /// database directory's root.
+    pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self;
     /// Removes `command-output/<id>` (synced), then every row in one transaction;
     /// schedules the Session-file sweep.
     pub async fn delete_session(&self, id: &str) -> Result<()>;
     /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;
 }
+/// In `storage`: the output root's name below the database directory.
+pub const COMMAND_OUTPUT_DIRECTORY: &str = "command-output";
 ```
 
-`SessionStorePlugin` 已经接收数据库目录的根索引（S5a）。它在该根下移除 `command-output/<id>`，这就是守护进程交给 WorkspaceTools 作为输出根的目录（[main.rs](../../../../crates/dim-app-server/src/main.rs)）；这个名字只定义一次，两处共用。创建回滚路径（`TimelineStore::rollback_session`）调用与 `delete_session` 相同的行删除。
+`SessionStorePlugin` 已经接收数据库目录的根索引（S5a）。SessionStore 在该根下移除 `command-output/<id>`，这就是守护进程交给 WorkspaceTools 作为输出根的目录（[main.rs](../../../../crates/dim-app-server/src/main.rs)）；`COMMAND_OUTPUT_DIRECTORY` 是这个名字唯一的定义。创建回滚路径（`TimelineStore::rollback_session`）调用与 `delete_session` 相同的行删除。

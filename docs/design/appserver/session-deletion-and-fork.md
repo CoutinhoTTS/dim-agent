@@ -1,7 +1,9 @@
 # SessionStore Session deletion, cleanup and fork
 
-Status: Draft (for review). Roadmap item S5c ([#61](https://github.com/arcships/dim/issues/61)), after S5a
-([#59](https://github.com/arcships/dim/issues/59)) and its design, [Session files](session-files.md).
+Status: Implemented. Roadmap item S5c ([#61](https://github.com/arcships/dim/issues/61),
+[#97](https://github.com/arcships/dim/pull/97)), after S5a ([#59](https://github.com/arcships/dim/issues/59)) and its
+design, [Session files](session-files.md), with [#127](https://github.com/arcships/dim/issues/127) (Collaboration).
+§16 lists what the implementation changed.
 Overview: [Appendix B.2](../overview.md#b2-app-server-process-plugins), the Rpc, Agents and SessionStore rows. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) process scope, inside the existing Agents and SessionStore plugins, with two
 Rpc built-ins.
@@ -192,9 +194,10 @@ gone.
 an orphaned directory could only be found by listing `command-output/`, and that directory is shared by every
 database in the database directory (two `--database` files in one directory), so a listing cannot tell a deleted
 Session's directory from another store's. Removing it first means no committed delete ever leaves one behind. S5a's
-files follow the opposite order because their rows record them and the sweep can find them. FileStorage removal is
-not synced ([S6](https://github.com/arcships/dim/pull/87)): after a power loss a removed directory can reappear while
-the later commit, made with `synchronous=FULL`, stays. Syncing the parent before the commit closes that gap.
+files follow the opposite order because their rows record them and the sweep can find them. FileStorage removal was
+not synced ([S6](https://github.com/arcships/dim/pull/87)): after a power loss a removed directory could reappear while
+the later commit, made with `synchronous=FULL`, stays. `remove` now syncs the parent before it returns (§14), which
+closes that gap.
 
 Rejected alternatives:
 
@@ -261,8 +264,8 @@ and BackgroundExec ends a task it finds open as failed and wakes the branch with
 ([background.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) `rebuild`). In F those turns
 would run in the source's `cwd` for work the source already did or is still doing. A turn open at the cut is only failed by the reload,
 not run again; requiring none keeps F from opening with a failed turn the source never had. At a rest point F's reload
-starts nothing. Append inputs may remain: they start no turn and join the next request a client's input starts in F. The check reads `main`'s prefix through `at`,
-next to `validate_context_boundary` (§14). The usual fork points, after a turn ends or before a user message, are rest
+starts nothing. Append inputs may remain: they start no turn and join the next request a client's input starts in F. Agents checks it on `main`'s prefix through `at`,
+right after `validate_context_boundary`, by reading those capabilities' facts (§14, §16 D1). The usual fork points, after a turn ends or before a user message, are rest
 points unless a background task was running.
 
 **Why `main` only.** A child branch's history is its ancestors' prefixes followed by its own events, and each branch
@@ -362,7 +365,8 @@ F and S share `cwd`, so this keeps a fork from repeating the source's side effec
 | An open turn, a Queue or Steer input not consumed, a running background task | None: the cut is a rest point (§6.2) |
 | An Append input not consumed | Stays pending, and joins the next request a client's input starts in F |
 | A branch `main` created | Its directory without events. TimelineTree writes `branch/create-failed` on F's `main` at the first load (§6.3) |
-| A Collaboration request delivered without a result | Collaboration writes its failed result (`capability reloading`). A result written by a reload posts no report input, so no turn starts. It must not stop the source's member ([#127](https://github.com/arcships/dim/issues/127), §14) |
+| A Collaboration request delivered without a result | Collaboration writes its failed result (`capability reloading`). A result written by a reload posts no report input, so no turn starts. It does not stop the source's member: a reload stops only members whose relation names the reloading Session as their leader ([#127](https://github.com/arcships/dim/issues/127), §14) |
+| A Collaboration result whose report input comes after the cut | F keeps the result without its report: a reload posts no report, as for the source after a crash in that window. Nothing starts; the model can still read the result with the `agent` tool |
 | A live goal (Goal, P5) | Goal's A11 (§14) |
 
 **Child branches after the cut.** A child runs on its own Timeline while `main` goes on, so the source can hold child
@@ -526,7 +530,10 @@ unlike in a shared database directory, can attribute its entries.
 | [Native storage format](native-storage-format.md#s5c-格式决定) | S5c format decision: no change |
 | [AcpGateway](../plugins/AcpGateway.md), [RemoteGateway](../plugins/RemoteGateway.md) | Their text said the preset is reset on fork, which #26 replaced: the preset is copied with the facts |
 | [Documentation index](../../INDEX.md) | Link to this page |
-| [Session files](session-files.md) | §5.3 and §12 said a delete commits while the node is offline. That holds for its Session-file step; the delete as a whole removes the command output on the node first (§11). §5.2, §5.4 and §6 are unchanged and are the steps this page runs |
+| [Session files](session-files.md) | §5.3 and §12 said a delete commits while the node is offline. That holds for its Session-file step; the delete as a whole removes the command output on the node first (§11). §5.2, §5.4 and §6 are unchanged and are the steps this page runs; §5.4 notes that removal is now synced |
+| [FileStorage](../../architecture/rust-agent/plugins/FileStorage.md) | Removal syncs the parent of the removed entry (§14) |
+| [Single-tree assembly](../../architecture/rust-agent/single-tree.md) | The `Agents` reload row: reload settlement stops only members the reloading Session leads (#127) |
+| [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) | Its status line: a fork copies the stored `SessionConfig` text, so `interactive`'s omission rule carries over |
 
 ## 13. Rule check
 
@@ -555,9 +562,9 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 
 | To | Requirement | Status |
 | --- | --- | --- |
-| FileStorage | `remove` syncs the parent of the removed entry before it reports success, and returns `Unsynced` when that sync fails. Windows has no directory sync and relies on NTFS metadata journaling, as for `replace`. Needed so a delete's removal is durable before its commit (§4) | Supplement in S5c's implementation, as `create_directory` is in S5a; to be agreed with FileStorage's owner |
-| Loop, InputQueue, BackgroundExec | A read-only rest-point check over a fixed prefix, next to `history::validate_context_boundary`: no open turn, every Queue or Steer input consumed, every background task ended with its wake consumed (§6.2). A capability whose reload rule comes to start work from other facts adds them to the check, so a fork keeps starting nothing | Supplement in S5c's implementation; to be agreed with their owner |
-| Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. Today the rebuild stops any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would stop the source's member | [#127](https://github.com/arcships/dim/issues/127), owner @yyhhyyyyyy. Required before `session.fork` ships; acceptance 7 |
+| FileStorage | `remove` syncs the parent of the removed entry before it reports success, also when the entry was already absent, and returns `Unsynced` when that sync fails. Windows has no directory sync and relies on NTFS metadata journaling, as for `replace`. Needed so a delete's removal is durable before its commit (§4) | Implemented in S5c ([FileStorage](../../architecture/rust-agent/plugins/FileStorage.md#listing-and-removal)) |
+| Loop, InputQueue, BackgroundExec | A read-only rest-point check over a fixed prefix: no open turn, no Queue or Steer input waiting to drive a turn, every background task ended with its wake posted (§6.2). A capability whose reload rule comes to start work from other facts adds them to the check, so a fork keeps starting nothing | Implemented in Agents as a fold over these capabilities' public facts, with no change to them (§16 D1). Their owners keep those facts and extend `rest_point` in [agents.rs](../../../crates/dim-app-server/src/agents.rs) when a reload rule comes to start work from other facts. Found on the way, for BackgroundExec's owner: its `rebuild` keeps `closing` from an earlier generation's branch close (a `session.close` or a graceful shutdown), so after a restore it does not repost a wake lost in a crash. `rest_point` scopes that flag to the generation, as the live wake does, so a cut between such an `exec/ended` and its wake is refused |
+| Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. The rebuild stopped any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would have stopped the source's member | Implemented ([#127](https://github.com/arcships/dim/issues/127)). Relations are process memory, so after a daemon restart nothing is stopped either. Acceptance 7 |
 | Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | [Goal](../plugins/Goal.md) A11 assumed a `branch/start` after the copied facts. A fork's `main` opens with `branch/resume`, and the copied prefix holds the source's `branch/start` and goal blocks. Goal applies its A11 fallback, clearing an inherited live goal on the fork's first load (a creating build whose `main` already has events: `SessionIdentity.restored` is false), or revises A11. A crash between the fork's commit and that clear leaves the goal live; a durable boundary would need the provenance record that session access A.3 defers. Either way, a copied goal must not drive a turn in F (§6.5) | Goal's design review in P5 |
 | S5b ([#60](https://github.com/arcships/dim/issues/60)) | Title metadata rows are removed in the delete transaction and not copied by a fork | S5b's design |
 | [#32](https://github.com/arcships/dim/issues/32) | When `submission_id` leaves `input/message`, the fork copies the idempotency records of inputs at or before the cut in its transaction, so `session.input_lookup` on a fork keeps answering for copied inputs | #32's design |
@@ -591,9 +598,36 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 9. On disposable stores: a Session whose command output directory is gone but whose rows remain loads, and a delete
    then completes; unowned file rows left by a delete commit are swept on the next generation's first put.
 
+Tests: 1 and 2 are `delete_closes_a_running_session_and_removes_what_it_stored` and
+`unloaded_and_damaged_sessions_are_deleted_by_id` in
+[deletion.rs](../../../crates/dim-app-server/tests/transport_flow/deletion.rs). 3 to 8 are in
+[fork.rs](../../../crates/dim-app-server/tests/transport_flow/fork.rs):
+`a_fork_copies_main_through_a_rest_point_and_starts_nothing` (3, 4 and the `interactive` of 5),
+`a_fork_waits_for_background_work_and_keeps_preset_and_model` (the background task of 4, the preset and model of 5,
+and the background and batch cuts of 6, with the real BackgroundExec), `a_fork_is_refused_unless_the_cut_is_a_rest_point`
+(6), `a_fork_of_a_leader_does_not_stop_the_source_member` (7) and `a_fork_shares_session_files_and_outlives_its_source`
+(8). `a_fork_copies_main_through_the_cut_with_its_content_and_snapshots` in
+[storage_flow.rs](../../../crates/dim-app-server/tests/storage_flow.rs) checks the content rows and snapshots of 3 at
+the store, including content that only a before trace references. 9 is
+`an_interrupted_delete_converges_on_retry_and_the_next_sweep` in
+[files/tests.rs](../../../crates/dim-app-server/src/storage/files/tests.rs), which stops a delete between its output
+removal and its commit, together with the Session without output in `unloaded_and_damaged_sessions_are_deleted_by_id`.
+
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and
 `cargo test --workspace --locked`. No Capability, assembly or crate dependency changes, so `xtask` is not needed
 beyond its usual CI run.
+
+## 16. Design changes in implementation
+
+Changes the implementation made to this design ([roadmap §5.3](../roadmap.md#53-实现中发现的变更)). Each affects only
+S5c's own owners.
+
+| # | Change | Why |
+| --- | --- | --- |
+| D1 | The rest-point check is `rest_point` in Agents, a read-only fold over the public facts of Loop, InputQueue and BackgroundExec on the prefix Agents already reads for `validate_context_boundary`, instead of a check next to `validate_context_boundary` in the capabilities crate. Its input rule follows Loop's: a Queue or Steer input applied before the last `stop/interrupt` and not consumed is allowed, because a reload does not run it (it joins the next request, as an Append input does); an input not yet applied is refused. A task's wake is required when the task ended outside a branch close of its own generation, as the live wake is posted | Every fact it needs is a public event, so it needs no API from those capabilities and no change to them. Requiring every such input to be consumed would refuse the cut right after a stopped turn, where nothing would run |
+| D2 | `session.fork` needs the native store. A daemon without one (the mock profile without `--database`) does not list it in `hello.features` and answers `unknown_method` ("Method requires native storage"). `session.delete` is listed with `session.create` there too; without a store it closes the Session and forgets it | A fork copies stored rows; in-memory Timelines have no SessionStore to copy from |
+| D3 | `session.delete` refuses a `sessionId` that is not a single path component with `session_invalid_input`, before anything is closed or removed | The id names `command-output/<id>`. Session ids are UUIDs; an id such as `<S>/.` would otherwise remove S's command output while deleting no row |
+| D4 | The fork transaction does not check the cut again: it copies `main`'s rows through `at`, and the runtime validates the fork's rows when it builds it. A copy that fails validation rolls back like any failed creation | Agents has checked the cut on the source (published head, batch end, context boundary, rest point), and rows through the cut never change, so a second check inside the transaction would repeat the validation every build already runs |
 
 ## Appendix A. Rust binding
 
@@ -606,16 +640,23 @@ impl AgentIndex {
     /// `session.fork`: acquire the source, check the cut, prepared creation (§6.5).
     pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session>;
 }
+/// The rest point of §6.2 over `main`'s prefix (D1).
+fn rest_point(events: &[Arc<AgentEvent>]) -> Result<(), String>;
 impl SessionStore {
+    /// `ctx` gives each file step the node's FileStorage; `files_root` is the
+    /// database directory's root.
+    pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self;
     /// Removes `command-output/<id>` (synced), then every row in one transaction;
     /// schedules the Session-file sweep.
     pub async fn delete_session(&self, id: &str) -> Result<()>;
     /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;
 }
+/// In `storage`: the output root's name below the database directory.
+pub const COMMAND_OUTPUT_DIRECTORY: &str = "command-output";
 ```
 
-`SessionStorePlugin` already takes the database directory's root index (S5a). It removes `command-output/<id>` under
-that root, the directory the daemon gives WorkspaceTools as its output root
-([main.rs](../../../crates/dim-app-server/src/main.rs)); the name is defined once and used by both. The creation rollback
+`SessionStorePlugin` already takes the database directory's root index (S5a). SessionStore removes `command-output/<id>`
+under that root, the directory the daemon gives WorkspaceTools as its output root
+([main.rs](../../../crates/dim-app-server/src/main.rs)); `COMMAND_OUTPUT_DIRECTORY` is the one definition of its name. The creation rollback
 path (`TimelineStore::rollback_session`) calls the same row removal as `delete_session`.
