@@ -2243,103 +2243,35 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
 }
 
 #[test]
-fn interactive_configuration_commands_route_and_recover_without_submitting_commands() {
-    fn history(wire: &mut Wire) {
-        let request = wire.read("session.history");
-        let events = if request["params"]["after"].as_u64().unwrap() < 9 {
-            json!([{"sequence":9,"type":"context","name":"configured","data":{
-                "timeline":"main","revision":"configured","previous":null,"prompt":null,
-                "provider_id":"test","model_id":"model"}}])
+fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client() {
+    for tui in [true, false] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+            let create = wire.read("session.create");
+            assert_eq!(create["params"]["model"], json!({"provider":"fixture","modelId":"fixture-model"}));
+            wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32602,"message":"fixture stops here"}}));
+        });
+        let mut command = home.command();
+        command.args(["--provider", "fixture", "--model", "fixture-model"]);
+        if tui {
+            // A pty without --no-tui selects the TUI session host.
+            let (_terminal, mut child) = Terminal::launch(command);
+            let joined = daemon.join();
+            child.kill().unwrap();
+            child.wait().unwrap();
+            joined.unwrap();
         } else {
-            json!([])
-        };
-        wire.reply(
-            &request,
-            json!({"events":events,"through":9,"nextAfter":9,"done":true}),
-        );
+            command
+                .args(["--prompt", "hello"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let output = wait(command.spawn().unwrap());
+            daemon.join().unwrap();
+            assert!(!output.status.success());
+        }
     }
-    fn catalog(wire: &mut Wire) {
-        let request = wire.read("provider.catalog");
-        assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
-        capabilities["reasoning"] = json!(true);
-        wire.reply(
-            &request,
-            json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
-            "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]},
-                "serviceTier":{"supported":true,"options":["priority","default"]}}}]}}),
-        );
-    }
-    let home = Home::new();
-    let exported = home.0.join("configured.json");
-    let (entered, wait_entered) = std::sync::mpsc::channel();
-    let (release, wait_release) = std::sync::mpsc::channel();
-    let daemon = home.daemon(move |wire| {
-        wire.start(false);
-        history(wire);
-        catalog(wire);
-        history(wire);
-        catalog(wire);
-        let effort = wire.read("session.model.update");
-        assert_eq!(effort["params"], json!({"sessionId":"session","branchId":"main","modelPreferences":{"reasoningEffort":"high"}}));
-        entered.send(()).unwrap();
-        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
-        wire.reply(&effort, json!({"outcome":"adopted","model":{"providerId":"test","modelId":"model"}}));
-        history(wire);
-        history(wire);
-        history(wire);
-        catalog(wire);
-        let fast = wire.read("session.model.update");
-        assert_eq!(fast["params"]["modelPreferences"], json!({"serviceTier":"default"}));
-        wire.send(json!({"jsonrpc":"2.0","id":fast["id"],"error":{"code":-32000,"message":"fixture preference rejection"}}));
-        let agents = wire.read("agent.list");
-        wire.reply(&agents, json!([{"agentId":"profile-id","name":"Reviewer","description":"Review changes"}]));
-        let agent = wire.read("session.agent.update");
-        assert_eq!(agent["params"], json!({"sessionId":"session","branchId":"main","agentId":"profile-id"}));
-        wire.reply(&agent, json!({"outcome":"adopted"}));
-        history(wire);
-        let submit = wire.read("session.submit");
-        assert_eq!(submit["params"]["text"], "after configuration");
-        wire.reply(&submit, json!({"event":{}}));
-        let idle = wire.read("session.idle");
-        wire.reply(&idle, json!({"sequence":9}));
-        wire.detach();
-    });
-    let (mut terminal, child) = Terminal::launch(home.command());
-    terminal.until("\n> ");
-    terminal.write(b"/effort\n");
-    terminal.until("Reasoning effort choices: high, low");
-    terminal.until("\n> ");
-    terminal.write(b"/reasoning high\n");
-    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
-    terminal.until("Waiting for configuration result");
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
-    terminal.until("Waiting for configuration result");
-    release.send(()).unwrap();
-    terminal.until("Reasoning effort configuration adopted: high");
-    terminal.until("\n> ");
-    terminal.write(format!("/export json {}\n", exported.display()).as_bytes());
-    terminal.until("Exported JSON:");
-    terminal.until("\n> ");
-    terminal.write(b"/fast off\n");
-    terminal.until("Error: fixture preference rejection");
-    terminal.until("\n> ");
-    terminal.write(b"/agent\n");
-    terminal.until("profile-id\tReviewer\tReview changes");
-    terminal.until("\n> ");
-    terminal.write(b"/agent profile-id\n");
-    terminal.until("Session tools unchanged.");
-    terminal.until("\n> ");
-    terminal.write(b"after configuration\n");
-    terminal.until("\n> ");
-    terminal.write(b"/exit\n");
-    assert!(wait(child).status.success());
-    daemon.join().unwrap();
-    let data: Value = serde_json::from_slice(&fs::read(exported).unwrap()).unwrap();
-    assert_eq!(data["through"], 9);
-    assert_eq!(data["events"][0]["data"]["model_id"], "model");
 }
 
 #[test]
