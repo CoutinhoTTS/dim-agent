@@ -13,7 +13,7 @@ static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
-    history::HistoryRenderer,
+    history::{HistoryRenderer, summary_message},
     host::*,
     timeline_tree::TreeCommands,
 };
@@ -150,24 +150,36 @@ impl ContextModel for BoundedContext {
             + serde_json::to_vec(&request.system).unwrap().len()) as f64
             / 4.
     }
+}
+/// Replaces the history before the retained turns with a fixed summary.
+struct FixedSummary;
+impl CompactionStrategy for FixedSummary {
+    fn name(&self) -> &str {
+        "fixed"
+    }
     fn compact(
         &self,
         input: CompactionInput,
         _: CancellationToken,
-    ) -> HostFuture<'_, ContextCompactionResult> {
+    ) -> HostFuture<'_, StrategyOutcome> {
         Box::pin(async move {
-            let diagnostics = serde_json::from_value(serde_json::json!({
-                "reason":"auto", "candidateMessageCount":input.history.len(), "inputMessageCount":input.history.len(), "retainedMessageCount":0,
-                "retainedTokenBudget":0,"retainedTokens":0,"serializedChars":100,"estimatedInputTokens":input.estimated_input_tokens,
-                "estimatedCompressedTokens":20,"estimatedPostCompactionTokens":20,"summaryInputBudget":1000,
-                "preflightInputTokens":100,"preflightOutputTokens":20,"compactedToolPayloadCount":0,"droppedMessageCount":0,
-                "chunkCount":1,"summaryChars":5,"estimatedSummaryTokens":5,"modelCallCount":1,"durationMs":1
-            })).unwrap();
-            Ok(ContextCompactionResult::Completed {
-                cursor: input.history.last().unwrap().id.clone(),
-                summary: "Prior turns completed.".into(),
-                diagnostics: Box::new(diagnostics),
-                context_baseline: vec![],
+            let diagnostics = StrategyDiagnostics {
+                model_call_count: 0,
+                record: CompactionStrategyRecord {
+                    kind: "fixed".into(),
+                    details: Default::default(),
+                },
+            };
+            Ok(match input.cut() {
+                Some(cut) => StrategyOutcome::Completed {
+                    retain_from: cut.retain_from.clone(),
+                    replacement: vec![summary_message("Prior turns completed.")],
+                    diagnostics,
+                },
+                None => StrategyOutcome::Skipped {
+                    reason: "nothing_to_compact".into(),
+                    diagnostics,
+                },
             })
         })
     }
@@ -222,6 +234,9 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compactor {
             samples: samples.clone(),
         })))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(
+            FixedSummary,
+        )))))
         .session_plugin(DefaultPrepareModelPlugin::new)
         .session_plugin(move |scope| CaptureTree {
             scope: *scope,

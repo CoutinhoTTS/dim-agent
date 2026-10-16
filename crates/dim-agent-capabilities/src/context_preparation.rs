@@ -1,5 +1,5 @@
 use crate::{
-    context_policy::ContextPolicy,
+    context_policy::{ContextPolicy, configured_request},
     history::{HistoryRenderer, context_configuration, context_messages, with_input_guide},
     host::*,
     prompt_state::{PromptSnapshot, scope_is_visible},
@@ -237,6 +237,30 @@ struct PreparationState {
     rebuilt: u64,
 }
 
+/// What a preparation at the committed head would write into
+/// `context/budget`, plus the compaction threshold.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub through: u64,
+    pub context_window: f64,
+    pub output_tokens: f64,
+    pub threshold_tokens: f64,
+    pub estimated_input_tokens: f64,
+    pub baseline_source: BaselineSource,
+}
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ContextOpError {
+    /// No `context/configured` in the branch's history.
+    #[error("Context is not configured; adopt a model first")]
+    NotConfigured,
+    /// The window facts could not be resolved, or no policy is bound.
+    #[error("{0}")]
+    Model(HostError),
+    #[error("{0}")]
+    Read(AgentError),
+}
+
 pub struct ContextPreparation {
     state: Mutex<PreparationState>,
     tasks: TaskTracker,
@@ -259,6 +283,8 @@ impl ContextPreparation {
     ) -> dim_agent_runtime::Result<()> {
         state.rebuilt = events.last().map_or(0, |event| event.sequence);
         let mut open: Vec<ContextPrepareData> = Vec::new();
+        // An automatic compaction start without its result was in flight.
+        let mut started: Vec<(u64, ContextCompactionStartData)> = Vec::new();
         let settled = |open: &mut Vec<ContextPrepareData>, turn: &str, request: &str| {
             open.retain(|source| source.turn_id != turn || source.request_id != request)
         };
@@ -270,8 +296,29 @@ impl ContextPreparation {
                 EventKind::ContextPrepare(source) => open.push(source.clone()),
                 EventKind::ModelCall(call) => settled(&mut open, &call.turn_id, &call.request_id),
                 EventKind::ModelOutputEnd(end) => settled(&mut open, &end.turn_id, &end.request_id),
+                EventKind::ContextCompactionStart(data) if data.command.is_none() => {
+                    started.push((event.sequence, data.clone()))
+                }
+                EventKind::ContextCompaction(data) => {
+                    started.retain(|(sequence, _)| Some(*sequence) != data.start)
+                }
                 _ => {}
             }
+        }
+        for (start, data) in started {
+            self.timeline.append(
+                EventKind::ContextCompaction(ContextCompactionData {
+                    turn_id: data.turn_id,
+                    request_id: data.request_id,
+                    command: None,
+                    start: Some(start),
+                    through: data.through,
+                    outcome: ContextCompactionResult::Cancelled {
+                        reason: CAPABILITY_RELOADING.into(),
+                    },
+                })
+                .into(),
+            )?;
         }
         for source in open {
             self.complete(source, Err(HostError::failed(CAPABILITY_RELOADING)))?;
@@ -334,7 +381,7 @@ impl ContextPreparation {
                 .unwrap_or_else(|| CAPABILITY_RELOADING.into());
             (Err(HostError::Cancelled(reason)), None)
         } else {
-            match AssertUnwindSafe(self.prepare(source.clone(), cancel))
+            match AssertUnwindSafe(self.prepare(source.clone(), cancel, &generation))
                 .catch_unwind()
                 .await
             {
@@ -395,10 +442,50 @@ impl ContextPreparation {
             None => Ok(()),
         }
     }
+    /// The current head's budget; writes nothing.
+    pub async fn usage(
+        &self,
+        cancel: CancellationToken,
+    ) -> std::result::Result<ContextUsage, ContextOpError> {
+        let policy = self.policy.as_ref().ok_or_else(|| {
+            ContextOpError::Model(HostError::failed("Context compaction is not available"))
+        })?;
+        let through = self.timeline.committed();
+        let context = self
+            .history
+            .context(&self.timeline, through)
+            .await
+            .map_err(ContextOpError::Read)?;
+        let history = (self.history.render)(&context).map_err(|error| {
+            ContextOpError::Read(AgentError::fault("ContextPreparation", error))
+        })?;
+        let request =
+            configured_request(&context, &history).ok_or(ContextOpError::NotConfigured)?;
+        let view = policy
+            .view(request, context, history, Vec::new())
+            .map_err(ContextOpError::Model)?;
+        let model = policy
+            .resolver
+            .resolve(view.prepared.clone(), cancel)
+            .await
+            .map_err(ContextOpError::Model)?;
+        let estimate = policy
+            .estimate(&view.prepared, model.as_ref(), view.events())
+            .map_err(ContextOpError::Model)?;
+        Ok(ContextUsage {
+            through,
+            context_window: model.context_window(),
+            output_tokens: model.output_tokens(),
+            threshold_tokens: model.threshold_tokens(),
+            estimated_input_tokens: estimate.input,
+            baseline_source: estimate.source,
+        })
+    }
     async fn prepare(
         &self,
         source: ContextPrepareData,
         cancel: CancellationToken,
+        generation: &CancellationToken,
     ) -> std::result::Result<Arc<ModelRequest>, HostError> {
         crate::context_policy::check_cancel(&cancel)?;
         let cached = self
@@ -446,10 +533,27 @@ impl ContextPreparation {
                 "Context preparation must preserve the timeline history prefix; additional messages may be appended.",
             ));
         }
+        // Why a compaction this preparation started was cancelled.
+        let cancelled = || {
+            let state = self.state.lock().unwrap();
+            if generation.is_cancelled() || state.closed {
+                return CAPABILITY_RELOADING.to_owned();
+            }
+            state
+                .stop_reason
+                .clone()
+                .or_else(|| {
+                    state
+                        .steer
+                        .steered(&source.request_id)
+                        .then(|| REPLACED_BY_STEER.to_owned())
+                })
+                .unwrap_or_else(|| "Operation cancelled".to_owned())
+        };
         match &self.policy {
             Some(policy) => {
                 policy
-                    .prepare(request, &source, context, history, cancel)
+                    .prepare(request, &source, context, history, cancel, &cancelled)
                     .await
             }
             None => Ok(request),
@@ -481,6 +585,7 @@ impl TypedPlugin for ContextPreparationPlugin {
         InBranch<Dispatcher>,
         InSession<PrepareContextHost>,
         InSession<ContextModelHost>,
+        InSession<CompactionStrategyHost>,
         InSession<HistoryRenderer>,
         InBranch<Diagnostics>,
         InBranch<TimelineIdentity>,
@@ -496,6 +601,7 @@ impl TypedPlugin for ContextPreparationPlugin {
             InBranch(dispatcher),
             InSession(host),
             InSession(context),
+            InSession(strategy),
             InSession(history),
             InBranch(diagnostics),
             InBranch(identity),
@@ -513,11 +619,8 @@ impl TypedPlugin for ContextPreparationPlugin {
                 errors: Mutex::new(Vec::new()),
                 prepared: Mutex::new(None),
                 host,
-                policy: context.0.as_ref().map(|resolver| ContextPolicy {
-                    timeline: timeline.clone(),
-                    resolver: resolver.clone(),
-                    history: history.clone(),
-                }),
+                policy: ContextPolicy::bind(&timeline, &context, &strategy, &history)
+                    .map_err(|error| CordisError::PluginFailed(error.into()))?,
                 timeline,
                 history,
                 diagnostics,

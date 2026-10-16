@@ -145,6 +145,7 @@ fn model_agent(root: &rutis::Ctx, recorder: &Arc<Recorder>, model: Arc<dyn Model
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     dim_agent_capabilities::defaults::install(&mut builder);
     install(&mut builder, root, recorder);

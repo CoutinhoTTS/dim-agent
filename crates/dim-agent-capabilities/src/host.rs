@@ -425,33 +425,95 @@ pub trait ToolDriver: Send + Sync + 'static {
 }
 pub struct ToolHost(pub Arc<dyn ToolDriver>);
 
-#[derive(Debug, Clone)]
+/// What ContextPolicy hands a strategy: the entries from the previous cut
+/// on, the previous result, the request whose context is compacted and the
+/// cuts the retention rule allows.
+#[derive(Clone)]
 pub struct CompactionInput {
+    /// The projected entries from the previous `retain_from` on.
     pub history: Vec<HistoryEntry>,
     pub checkpoint: Option<CompactionCheckpoint>,
+    pub request: Arc<ModelRequest>,
+    pub model: Arc<dyn ContextModel>,
+    /// Event id of the first event of the oldest of the last K turns.
+    pub retain_limit: Option<String>,
+    /// Every legal cut, in order; a strategy returns one of their
+    /// `retain_from`.
+    pub cuts: Vec<CompactionCut>,
+    /// Budget recovery: a cut after `retain_limit` is allowed when none lies
+    /// at or before it.
+    pub fallback: bool,
+    pub trigger: CompactionTrigger,
     pub estimated_input_tokens: f64,
     pub baseline_source: BaselineSource,
     pub baseline_prompt_tokens: Option<f64>,
     pub delta_tokens: Option<f64>,
     pub provider_budget: Option<ProviderOutputBudgetFacts>,
 }
+/// A legal cut: `history[..entry]` is replaced, `history[entry..]` is kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionCut {
+    pub retain_from: String,
+    pub entry: usize,
+    /// At or before `retain_limit`.
+    pub within_limit: bool,
+}
+impl CompactionInput {
+    /// The latest cut within the retention limit or, under recovery, the
+    /// latest cut when none is within it.
+    pub fn cut(&self) -> Option<&CompactionCut> {
+        self.cuts
+            .iter()
+            .rev()
+            .find(|cut| cut.within_limit)
+            .or_else(|| self.cuts.last().filter(|_| self.fallback))
+    }
+}
 #[derive(Debug, Clone)]
 pub struct CompactionCheckpoint {
-    pub cursor: String,
-    pub summary: String,
+    pub retain_from: String,
+    pub replacement: Arc<[Message]>,
     pub context_baseline: Arc<[ContextBaselineEntry]>,
 }
+/// Window facts of the model whose context is prepared.
 pub trait ContextModel: Send + Sync + 'static {
     fn context_window(&self) -> f64;
     fn output_tokens(&self) -> f64;
     fn threshold_tokens(&self) -> f64;
     fn count_tokens(&self, request: &ModelRequest) -> f64;
+}
+/// A strategy's diagnostics: its model calls and its own record.
+#[derive(Debug, Clone)]
+pub struct StrategyDiagnostics {
+    pub model_call_count: u64,
+    pub record: CompactionStrategyRecord,
+}
+#[derive(Debug, Clone)]
+pub enum StrategyOutcome {
+    Completed {
+        retain_from: String,
+        replacement: Vec<Message>,
+        diagnostics: StrategyDiagnostics,
+    },
+    Skipped {
+        reason: String,
+        diagnostics: StrategyDiagnostics,
+    },
+}
+/// Produces the replacement of the history before a cut. Replay never calls
+/// it: a committed result is replayed by its record alone.
+pub trait CompactionStrategy: Send + Sync + 'static {
+    /// Written into `context/compaction-start` and the result.
+    fn name(&self) -> &str;
     fn compact(
         &self,
         input: CompactionInput,
         cancel: CancellationToken,
-    ) -> HostFuture<'_, ContextCompactionResult>;
+    ) -> HostFuture<'_, StrategyOutcome>;
 }
+/// An explicit optional binding, like `ContextModelHost`; the policy exists
+/// when both are `Some`.
+pub struct CompactionStrategyHost(pub Option<Arc<dyn CompactionStrategy>>);
 pub trait ResolveContextModel: Send + Sync + 'static {
     fn resolve(
         &self,
