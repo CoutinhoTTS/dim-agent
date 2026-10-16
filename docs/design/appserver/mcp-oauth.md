@@ -89,7 +89,8 @@ source or the Session (§10 D8).
   an attempt completes, with its client and tokens; an abandoned attempt leaves nothing.
 - **Write path.** A write takes the store's FileStorage lock, re-reads the file, replaces only its
   own key's record and atomically replaces the file with mode 0600. On Windows the file keeps the
-  FileStorage DACL handling.
+  FileStorage DACL handling. A replace that is in place but whose sync failed counts as written:
+  readers already see it, and a crash that loses it ends like the kill in §7.
 - **Token requests hold the lock.** A code exchange, refresh or revocation holds that lock from
   the re-read through the request to the replace, as the managed OAuth host does. Two daemons
   can share a home (for example `--product-home` with different `--database` paths), and the
@@ -98,7 +99,9 @@ source or the Session (§10 D8).
   registration run outside the lock.
 - **Settled once sent.** A token request that has been sent is received and persisted on
   `McpAuth`'s own task, whoever is waiting for it, so neither the caller's departure nor an unload
-  loses a rotated refresh token or a redeemed code. Mcp's unload waits for it.
+  loses a rotated refresh token or a redeemed code. Mcp's unload waits for it. A code exchange
+  whose attempt was superseded meanwhile, or whose record cannot be written, is still received,
+  but its tokens are revoked and discarded instead (§7).
 - **Unknown version.** OAuth is unavailable for every server (`mcp_auth_unsupported`) and the
   file is preserved, never overwritten. Connections then send requests without a bearer, so
   servers that need no sign-in keep working. A later incompatible format gets a new version and
@@ -111,7 +114,7 @@ source or the Session (§10 D8).
 | State | Content | Lifetime |
 | --- | --- | --- |
 | Challenge | Per key: the last `WWW-Authenticate` (`resource_metadata`, `scope`, `error`) seen by any connection | Until authorization succeeds, sign-out or Mcp reload |
-| Attempt | `attemptId`, key, PKCE verifier, `state`, expected `issuer`, metadata, client, redirect URI, scopes, `expiresAt` | At most one per key; ends on complete, expiry (10 min) or a new start for the same key |
+| Attempt | `attemptId`, key, PKCE verifier, `state`, expected `issuer`, metadata, client, redirect URI, scopes, `expiresAt` | At most one per key; ends on complete, expiry (10 min), sign-out or a new start for the same key (§7) |
 | Store lock and change watch | One in-process async lock in front of the FileStorage lock, which admits or fails at once, so a lock held by another process is retried, as the managed OAuth host does; plus a watch per key, notified on every change to the key's record with whether it holds tokens: Sessions waiting in `auth_required` retry on any change, and ready Sessions react when the tokens are gone | Mcp generation |
 
 The PKCE verifier and `state` are never persisted. A daemon restart abandons pending attempts.
@@ -262,12 +265,13 @@ be retried:
 4. **Authorization server error.** An `error` parameter ends the attempt with `mcp_auth_failed`,
    carrying the RFC 6749 error code only, for example `access_denied`. A callback with neither
    `error` nor `code` is `mcp_auth_callback_invalid` and leaves the attempt pending.
-5. **Exchange.** Mcp sends the token request itself: `code`, `code_verifier`, `redirect_uri`,
-   `client_id`, `resource` and the record's client authentication. It does not call rmcp's
-   exchange function, which logs the code (Appendix A). Success ends the attempt and persists the
-   record before replying. A token error ends the attempt with `mcp_auth_failed`. A transport
-   error keeps it pending (`mcp_auth_unavailable`); if the server had already redeemed the code,
-   the retry fails with `mcp_auth_failed` and the user starts again.
+5. **Exchange.** While the attempt is the key's current one (§7), Mcp sends the token request
+   itself: `code`, `code_verifier`, `redirect_uri`, `client_id`, `resource` and the record's
+   client authentication. It does not call rmcp's exchange function, which logs the code
+   (Appendix A). Success ends the attempt and persists the record before replying. A token error
+   ends the attempt with `mcp_auth_failed`. A transport error keeps it pending
+   (`mcp_auth_unavailable`); if the server had already redeemed the code, the retry fails with
+   `mcp_auth_failed` and the user starts again.
 
 ### 5.5 Scopes
 
@@ -348,6 +352,9 @@ that carries the header to `InsufficientScope`.
 server's `revocation_endpoint` (RFC 7009) when one is advertised. It then deletes the record,
 including the registration and any client secret, whatever the revocation outcome. The reply
 says whether revocation succeeded. Every Session on the key then reports `auth_required`.
+From the moment it is accepted, sign-out closes the key's pending attempt, and it closes any
+attempt started before it completes, so a sign-in already under way in the same daemon cannot
+undo it (§7).
 Sign-out is also allowed once an entry no longer uses OAuth (static credentials added, or a
 cleartext URL), so a stored credential can always be removed.
 
@@ -377,11 +384,40 @@ and clears the challenge. The catalog then has no `auth` field.
 
 ## 7. Timing and conflicts
 
+**Attempt currency.** A key has at most one current attempt, identified by its `attemptId`. Only
+the current attempt may redeem its code, store tokens or wake Sessions. Attempts live in one
+daemon's memory (§4.2), so this rule orders operations within a daemon. A sign-in that completes
+in another daemon sharing the home after a sign-out is a later sign-in.
+
+- **`start`** makes its attempt current when it returns, replacing the previous one. If a
+  sign-out completed after `start` read the record, `start` answers `mcp_auth_attempt_closed`
+  instead, because its attempt may reuse a client that the sign-out deleted.
+- **`logout`** closes the current attempt when it is accepted, before it waits for the store lock.
+  It closes the attempt again once it has deleted the record, which ends an attempt started in
+  the meantime.
+- **`complete`** ends the attempt when its exchange settles, except after a transport error
+  (§5.4). An authorization server error in the callback, or expiry, ends it too.
+- **The exchange** checks that its attempt is still current twice: after it takes the store lock,
+  before it sends the token request, and when the response is in, before it writes the store.
+  - Superseded before the request: the code is never sent.
+  - Superseded while the request was out: the request is still settled (§4.1). Tokens it
+    obtained are revoked (RFC 7009, best effort, the refresh token first) and discarded. The
+    revocation runs while the store lock is still held, so it precedes any later token request.
+    Nothing is written to the store, whatever the response, and no Session is woken.
+  - Either way `complete` answers `mcp_auth_attempt_closed`.
+- **A refresh** needs no such check. It re-reads the record under the store lock, so it sees any
+  sign-in or sign-out that held the lock before it, and one that holds the lock after it
+  replaces or deletes its result.
+
 | Race | Outcome |
 | --- | --- |
-| Two `start` calls for one key | The second replaces the first; completing the first is `mcp_auth_attempt_closed` |
+| Two `start` calls for one key | The later to return replaces the earlier; completing the earlier is `mcp_auth_attempt_closed` |
+| `start` while a `complete` is under way | The new attempt supersedes the old one. A code not yet sent is never sent; tokens already obtained are revoked and discarded; `complete` answers `mcp_auth_attempt_closed` |
+| Two `complete` calls for one attempt | One exchange at a time: the second answers `mcp_auth_attempt_closed` at once. After a transport error the attempt is pending again |
+| `logout` while an attempt is pending or under way | The attempt closes when `logout` is accepted. An exchange still waiting for the store lock sends nothing; one whose request is out discards its tokens. `logout` then deletes the record and revokes its tokens |
+| `start` while `logout` runs | If the sign-out completes before `start` returns, `start` answers `mcp_auth_attempt_closed`; an attempt `start` made current before then closes when the sign-out completes |
 | `complete` while a refresh runs | Both hold the store lock in turn: a refresh after `complete` finds fresh tokens and does nothing; `complete` after a refresh replaces the tokens |
-| `logout` while a refresh runs | `logout` takes the store lock after it; the refreshed tokens are revoked and deleted |
+| `logout` while a refresh runs | `logout` takes the store lock after it; the refreshed tokens are revoked and deleted. A refresh after `logout` finds no record |
 | Two Sessions get `401` together | One refresh (§5.6); both retry with the new lease |
 | Entry URL edited | New key, so the new generation starts `absent` and becomes `required` on its first `401`; the old record is inert |
 | Entry disabled or removed during an attempt | The attempt may still complete and persist; nothing connects until the entry is enabled |
@@ -445,7 +481,7 @@ Per-call progress (C1, PR [#83](https://github.com/arcships/dim/pull/83)) is not
 | `mcp_auth_unsupported` | stdio entry; `auth` or `Authorization` header configured; plain `http` server off loopback; a store in an unknown format version | Stop: fix the entry, or run the Dim version that wrote the store |
 | `mcp_auth_discovery_failed` | No PRM and no `authServerMetadataUrl`; `resource` or `issuer` mismatch; no `S256`; non-HTTPS endpoint | Fix the server or set `authServerMetadataUrl` |
 | `mcp_auth_client_required` | No client ID, no usable CIMD, no `registration_endpoint`; or a configured `clientId` recorded with another issuer | Set `oauth.clientId`; after an issuer change, sign out first |
-| `mcp_auth_attempt_closed` | Unknown, expired, completed or replaced attempt | Start again |
+| `mcp_auth_attempt_closed` | Unknown, expired, completed or replaced attempt, or one closed by sign-out; a `start` overtaken by a sign-out | Start again |
 | `mcp_auth_callback_invalid` | Redirect URI, `state` or `iss` mismatch; no `code` | Paste the right URL; the attempt stays pending |
 | `mcp_auth_failed` | The authorization server refused: `error` in the callback, a token error, a registration rejected | Start again after fixing the cause |
 | `mcp_auth_unavailable` | Network failure, timeout or 5xx at the authorization server; store I/O | Retry |
@@ -474,6 +510,7 @@ callback URLs or authorization server `error_description` text from an unvalidat
 | D14 | `start` requires an enabled entry; sign-out is always allowed; one key is shared across sources | Sign-in on a disabled project entry would contact a URL from project files before the user enabled it (ADR 003 D3) |
 | D15 | An entry with static credentials never uses OAuth; OAuth needs `https` or loopback `http` | Falling back to OAuth after a static credential fails mixes two credential sources; a bearer token over cleartext can be stolen |
 | D16 | Keep rmcp's PRM acceptance: the `resource_metadata` URL must be same-origin, and `resource` may be the server URL or a parent path on the same origin | RFC 9728 does not require a same-origin metadata URL; accepting another origin would let any `401` point discovery at another host. RFC 9728 asks for an identical `resource`; requiring it would mean replacing rmcp's validation, while the parent-path rule keeps the token audience inside the server's origin |
+| D17 | Attempt currency (§7): the `attemptId` identifies an attempt, and only the key's current attempt redeems its code, checked after the store lock and again after the token response. Sign-out closes attempts when it is accepted and when it completes; a `start` prepared before a completed sign-out is refused. A superseded request already sent is settled, and its tokens are revoked best effort under the store lock and discarded. Holding the lock orders the revocation before a newer attempt's exchange: a server that revokes a whole session then refuses the newer code at sign-in, instead of leaving a stored credential that is already dead | Checking only before the request lets a response still in flight overwrite a newer attempt. Cancelling a request in flight breaks "settled once sent" (§4.1): a redeemed code would leave live tokens nobody knows about. Storing them and leaving cleanup to a later sign-out undoes a sign-out the user has already completed. Discarding without revocation leaves the tokens valid at the authorization server until they expire. Taking the store lock in `start` would queue each sign-in behind refreshes of up to 30 s. A generation counter per attempt would duplicate the `attemptId` |
 
 ## 11. Security
 
@@ -597,7 +634,7 @@ no second HTTP stack. The `xtask check` dependency rules are re-run with the cha
 
 ## Appendix B. Acceptance (flow tests)
 
-`crates/dim-app-server/tests/mcp_oauth_flow.rs` drives items 1 to 10 through `mcp.auth.*`,
+`crates/dim-app-server/tests/mcp_oauth_flow.rs` drives items 1 to 10 and 13 through `mcp.auth.*`,
 `mcp.catalog` and `session.mcp` on a daemon with an isolated home, for streamable HTTP and legacy
 SSE. Item 11 is covered through a `403` while discovering; the fixed tool-call text has no flow
 test, because the test model makes no tool calls. Item 12, an issuer change, has no flow test yet.
@@ -636,6 +673,16 @@ tests, using an isolated home:
     shows `missingScopes`, and the next `start` requests the union.
 12. **Issuer change.** When PRM names a new authorization server, `start` registers a DCR client
     again, and refuses a configured `clientId` with `mcp_auth_client_required` until sign-out.
+13. **Superseded attempts.** Each race is held open at the mock authorization server:
+    - While a refresh holds the store lock, a sign-out closes the pending attempt and its
+      callback is refused. The code is never sent, nothing is stored, and the Sessions require
+      sign-in.
+    - A newer `start` supersedes an attempt whose exchange waits for the lock; its code is never
+      sent. A second callback for that attempt is refused while it waits.
+    - A newer `start` supersedes an attempt whose token request is out; the tokens are revoked
+      and never stored or used.
+    - A sign-out that completes during a `start` refuses that start, and the next `start`
+      registers a new client.
 
 ## Appendix C. Deferred
 

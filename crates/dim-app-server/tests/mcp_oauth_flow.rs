@@ -224,8 +224,10 @@ struct Authority {
     code_expires_in: AtomicU64,
     reject_refresh: AtomicBool,
     invalid_client: AtomicBool,
-    hold_refresh: AtomicBool,
-    refreshing: Notify,
+    /// Requests that wait for `release` before they are answered: a token
+    /// grant type, or `metadata`. `held` tells the test one arrived.
+    holds: Mutex<HashSet<&'static str>>,
+    held: Notify,
     release: Notify,
     refreshes: AtomicUsize,
     issued: AtomicUsize,
@@ -241,6 +243,24 @@ impl Authority {
     fn base(&self) -> &str {
         self.base.get().unwrap()
     }
+    async fn pause(&self, point: &str) {
+        if self.holds.lock().unwrap().contains(point) {
+            let released = self.release.notified();
+            self.held.notify_waiters();
+            released.await;
+        }
+    }
+    /// Holds requests at `point` until `unhold`; the returned future
+    /// resolves when one arrives.
+    fn hold(&self, point: &'static str) -> tokio::sync::futures::Notified<'_> {
+        let held = self.held.notified();
+        self.holds.lock().unwrap().insert(point);
+        held
+    }
+    fn unhold(&self, point: &str) {
+        self.holds.lock().unwrap().remove(point);
+        self.release.notify_waiters();
+    }
     fn issue(&self, expires_in: u64, scope: &str) -> Value {
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         let (access, refresh) = (format!("access-{n}-secret"), format!("refresh-{n}-secret"));
@@ -253,6 +273,7 @@ impl Authority {
     }
 }
 async fn authorization_metadata(State(authority): State<Arc<Authority>>) -> Json<Value> {
+    authority.pause("metadata").await;
     let base = authority.base();
     let authorize = if authority.cleartext.load(Ordering::SeqCst) {
         "http://auth.example.test/authorize".to_owned()
@@ -311,6 +332,7 @@ async fn token(
     assert!([resource.url(), resource.sse_url()].contains(&form["resource"]));
     match form["grant_type"].as_str() {
         "authorization_code" => {
+            authority.pause("authorization_code").await;
             assert_eq!(form["redirect_uri"], "http://localhost:1456/callback");
             let Some((challenge, scope)) = authority.codes.lock().unwrap().remove(&form["code"])
             else {
@@ -323,11 +345,7 @@ async fn token(
         }
         "refresh_token" => {
             authority.refreshes.fetch_add(1, Ordering::SeqCst);
-            if authority.hold_refresh.load(Ordering::SeqCst) {
-                let released = authority.release.notified();
-                authority.refreshing.notify_waiters();
-                released.await;
-            }
+            authority.pause("refresh_token").await;
             if authority.invalid_client.load(Ordering::SeqCst) {
                 return refused(StatusCode::UNAUTHORIZED, "invalid_client");
             }
@@ -510,6 +528,21 @@ impl Client {
             .unwrap()["auth"]
             .clone()
     }
+    /// Waits until a callback no longer reaches the attempt because it is
+    /// exchanging or closed. Each probe carries a wrong `state`, so it
+    /// changes nothing while the attempt is pending.
+    async fn until_closed(&mut self, attempt: &Value, callback: &str) {
+        let probe =
+            json!({"attemptId":attempt,"callbackUrl":callback.replace("state=", "state=x")});
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while self.error("mcp.auth.complete", probe.clone()).await != "mcp_auth_attempt_closed"
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the attempt stays open");
+    }
     /// Signs in through `start` and the user's consent; returns the attempt.
     async fn sign_in(&mut self, authority: &Authority, target: Value, code: &str) -> Value {
         let started = self.ok("mcp.auth.start", target).await;
@@ -578,7 +611,8 @@ impl Daemon {
         .unwrap();
         Self { server, home, work }
     }
-    async fn client(&self) -> Client {
+    /// Another connection, for a call that waits while this test goes on.
+    async fn connect(&self) -> Client {
         let mut client = Client(
             BufReader::new(
                 UnixStream::connect(self.server.unix_path.as_ref().unwrap())
@@ -590,6 +624,10 @@ impl Daemon {
         client
             .ok("hello", json!({"protocolVersion":3,"clientKind":"other"}))
             .await;
+        client
+    }
+    async fn client(&self) -> Client {
+        let mut client = self.connect().await;
         // A model to create Sessions with; the mock host never contacts it.
         let caps = dim_agent_types::ModelCapabilities {
             context_window: 32000,
@@ -633,6 +671,22 @@ fn consent(authority: &Authority, started: &Value, code: &str) -> String {
         query["state"],
         url::form_urlencoded::byte_serialize(authority.base().as_bytes()).collect::<String>()
     )
+}
+
+/// Whether a token request carried the authorization code.
+fn sent(authority: &Authority, code: &str) -> bool {
+    authority
+        .token_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|form| form.get("code").map(String::as_str) == Some(code))
+}
+
+async fn arrived(held: tokio::sync::futures::Notified<'_>) {
+    tokio::time::timeout(Duration::from_secs(20), held)
+        .await
+        .expect("the held request arrives");
 }
 
 fn user(id: &str) -> Value {
@@ -782,8 +836,7 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
     // Two Sessions rejected together: exactly one refresh request.
     let second = daemon.session(&mut client).await;
     client.mcp_state(&second, "docs", "ready").await;
-    authority.hold_refresh.store(true, Ordering::SeqCst);
-    let refreshing = authority.refreshing.notified();
+    let refreshing = authority.hold("refresh_token");
     let before = resource.unauthorized.load(Ordering::SeqCst);
     resource.valid.lock().unwrap().remove("access-3-secret");
     client
@@ -796,8 +849,7 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         .await
         .unwrap();
     until(|| resource.unauthorized.load(Ordering::SeqCst) >= before + 2).await;
-    authority.hold_refresh.store(false, Ordering::SeqCst);
-    authority.release.notify_waiters();
+    authority.unhold("refresh_token");
     until(|| {
         resource
             .bearers
@@ -816,8 +868,7 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
 
     // A refresh already sent when Mcp reloads is still persisted: the unload
     // waits for it.
-    authority.hold_refresh.store(true, Ordering::SeqCst);
-    let refreshing = authority.refreshing.notified();
+    let refreshing = authority.hold("refresh_token");
     resource.valid.lock().unwrap().remove("access-4-secret");
     client
         .ok("session.mcp.refresh", json!({"sessionId":first}))
@@ -836,8 +887,7 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
             }
         })
         .await;
-        authority.hold_refresh.store(false, Ordering::SeqCst);
-        authority.release.notify_waiters();
+        authority.unhold("refresh_token");
     };
     let (restarted, ()) = tokio::join!(daemon.server.restart("Mcp"), release);
     restarted.unwrap();
@@ -1186,6 +1236,161 @@ async fn step_up_project_entries_confidential_clients_and_sse() {
         .clone();
     assert_eq!(exchange["client"], "pre-client");
     assert!(!exchange.contains_key("client_secret"));
+    daemon.close().await;
+    servers.stop.cancel();
+}
+
+/// Only the key's current attempt redeems its code (design §7). Sign-out and
+/// a newer start supersede an attempt at every await of its exchange: once
+/// superseded it sends no code, and tokens a request already out obtains are
+/// revoked, never stored or published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
+    let servers = Servers::start().await;
+    let (resource, authority) = (servers.resource.clone(), servers.authority.clone());
+    let daemon = Daemon::start(&[("docs", json!({"type":"http","url":resource.url()}))]).await;
+    let mut client = daemon.client().await;
+    let session = daemon.session(&mut client).await;
+    client
+        .sign_in(&authority, user("docs"), "code-1-secret")
+        .await;
+    client.mcp_state(&session, "docs", "ready").await;
+    let access = |daemon: &Daemon| {
+        daemon.store()["credentials"][0]["tokens"]["accessToken"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // The review's interleaving. A refresh holds the store lock, sign-out
+    // queues behind it, then the pending attempt's callback arrives.
+    let started = client.ok("mcp.auth.start", user("docs")).await;
+    let attempt = started["attemptId"].clone();
+    let callback = consent(&authority, &started, "code-a-secret");
+    let held = authority.hold("refresh_token");
+    resource.valid.lock().unwrap().remove(&access(&daemon));
+    client
+        .ok("session.mcp.refresh", json!({"sessionId":session}))
+        .await;
+    arrived(held).await;
+    let mut signing_out = daemon.connect().await;
+    let logout = tokio::spawn(async move { signing_out.ok("mcp.auth.logout", user("docs")).await });
+    // Sign-out closed the attempt when it was accepted, so the callback is
+    // refused instead of queueing behind it.
+    client.until_closed(&attempt, &callback).await;
+    assert_eq!(
+        client
+            .error(
+                "mcp.auth.complete",
+                json!({"attemptId":attempt,"callbackUrl":callback})
+            )
+            .await,
+        "mcp_auth_attempt_closed"
+    );
+    authority.unhold("refresh_token");
+    assert_eq!(logout.await.unwrap(), json!({"revoked":true}));
+    // Sign-out stands: the code was never sent and nothing is stored, so no
+    // Session can take a credential from the attempt.
+    assert!(!sent(&authority, "code-a-secret"));
+    assert_eq!(daemon.store()["credentials"], json!([]));
+    client.mcp_state(&session, "docs", "auth_required").await;
+    assert_eq!(
+        client.catalog_auth(json!({}), "docs").await,
+        json!({"status":"required"})
+    );
+
+    // A newer start supersedes an attempt whose exchange waits for the store
+    // lock: once the lock is free the code is not sent.
+    client
+        .sign_in(&authority, user("docs"), "code-2-secret")
+        .await;
+    client.mcp_state(&session, "docs", "ready").await;
+    let first = client.ok("mcp.auth.start", user("docs")).await;
+    let callback = consent(&authority, &first, "code-b-secret");
+    let complete = json!({"attemptId":first["attemptId"],"callbackUrl":callback});
+    let held = authority.hold("refresh_token");
+    resource.valid.lock().unwrap().remove(&access(&daemon));
+    client
+        .ok("session.mcp.refresh", json!({"sessionId":session}))
+        .await;
+    arrived(held).await;
+    let mut completing = daemon.connect().await;
+    let waiting = tokio::spawn({
+        let complete = complete.clone();
+        async move { completing.error("mcp.auth.complete", complete).await }
+    });
+    client.until_closed(&first["attemptId"], &callback).await;
+    // A second callback for the attempt is refused while the first waits.
+    assert_eq!(
+        client.error("mcp.auth.complete", complete).await,
+        "mcp_auth_attempt_closed"
+    );
+    let second = client.ok("mcp.auth.start", user("docs")).await;
+    authority.unhold("refresh_token");
+    assert_eq!(waiting.await.unwrap(), "mcp_auth_attempt_closed");
+    assert!(!sent(&authority, "code-b-secret"));
+    let callback = consent(&authority, &second, "code-c-secret");
+    client
+        .ok(
+            "mcp.auth.complete",
+            json!({"attemptId":second["attemptId"],"callbackUrl":callback}),
+        )
+        .await;
+    client.mcp_state(&session, "docs", "ready").await;
+
+    // A newer start supersedes an attempt whose token request is out. The
+    // request is settled; its tokens are revoked, not stored, and never used.
+    let stored = daemon.store()["credentials"].clone();
+    let revoked = authority.revocations.lock().unwrap().len();
+    let first = client.ok("mcp.auth.start", user("docs")).await;
+    let callback = consent(&authority, &first, "code-d-secret");
+    let held = authority.hold("authorization_code");
+    let mut completing = daemon.connect().await;
+    let waiting = tokio::spawn({
+        let complete = json!({"attemptId":first["attemptId"],"callbackUrl":callback});
+        async move { completing.error("mcp.auth.complete", complete).await }
+    });
+    arrived(held).await;
+    client.ok("mcp.auth.start", user("docs")).await;
+    authority.unhold("authorization_code");
+    assert_eq!(waiting.await.unwrap(), "mcp_auth_attempt_closed");
+    assert!(sent(&authority, "code-d-secret"));
+    let issued = authority.issued.load(Ordering::SeqCst);
+    let (access_token, refresh_token) = (
+        format!("access-{issued}-secret"),
+        format!("refresh-{issued}-secret"),
+    );
+    assert_eq!(
+        authority.revocations.lock().unwrap().as_slice()[revoked..],
+        [
+            (refresh_token, "refresh_token".to_owned()),
+            (access_token.clone(), "access_token".to_owned())
+        ]
+    );
+    assert_eq!(daemon.store()["credentials"], stored);
+    assert!(!resource.bearers.lock().unwrap().contains(&access_token));
+    client.mcp_state(&session, "docs", "ready").await;
+
+    // A sign-out that completes while a start prepares its attempt from the
+    // record supersedes that start, so the deleted client never returns: the
+    // next start registers again.
+    let registrations = authority.registrations.lock().unwrap().len();
+    let held = authority.hold("metadata");
+    let mut starting = daemon.connect().await;
+    let waiting = tokio::spawn(async move { starting.error("mcp.auth.start", user("docs")).await });
+    arrived(held).await;
+    assert_eq!(
+        client.ok("mcp.auth.logout", user("docs")).await,
+        json!({"revoked":true})
+    );
+    authority.unhold("metadata");
+    assert_eq!(waiting.await.unwrap(), "mcp_auth_attempt_closed");
+    assert_eq!(authority.registrations.lock().unwrap().len(), registrations);
+    client.ok("mcp.auth.start", user("docs")).await;
+    assert_eq!(
+        authority.registrations.lock().unwrap().len(),
+        registrations + 1
+    );
     daemon.close().await;
     servers.stop.cancel();
 }

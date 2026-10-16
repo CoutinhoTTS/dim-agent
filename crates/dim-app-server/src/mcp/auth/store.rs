@@ -149,7 +149,9 @@ pub(super) struct Locked<'a> {
     pub document: Document,
 }
 impl Locked<'_> {
-    /// Commits once started: the replace ignores cancellation.
+    /// Commits once started: the replace ignores cancellation. A replace in
+    /// place whose sync failed counts as written: readers already see it,
+    /// and a crash that loses it ends like a kill (design §7).
     pub async fn write(&mut self) -> Result<(), McpAuthError> {
         let mut value =
             serde_json::to_value(&self.document).map_err(|_| McpAuthError::Unavailable)?;
@@ -163,10 +165,18 @@ impl Locked<'_> {
         let permissions = Some(std::os::unix::fs::PermissionsExt::from_mode(0o600));
         #[cfg(not(unix))]
         let permissions = None;
-        self.lease
+        match self
+            .lease
             .replace(bytes, permissions, &CancellationToken::new())
             .await
-            .map_err(|_| McpAuthError::Unavailable)
+        {
+            Ok(()) => Ok(()),
+            Err(FileStorageError::Unsynced(error)) => {
+                tracing::warn!(target: "mcp.auth", %error, "credential store written, durability unconfirmed");
+                Ok(())
+            }
+            Err(_) => Err(McpAuthError::Unavailable),
+        }
     }
 }
 
