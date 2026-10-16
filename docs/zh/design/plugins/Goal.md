@@ -1,6 +1,8 @@
 # Goal
 
-状态：草案。总体设计：[overview §4](../overview.md)。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md)）。作用域：Session + 分支（[ADR 002](../../adr/002-plugin-scope.md)）。
+状态：草案。总体设计：[overview §4](../overview.md)。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md)）。作用域：Session + 分支（[ADR 002](../../adr/002-plugin-scope.md)）。依赖（[路线图](../../../design/roadmap.md) P5）：C1、C3、C4、C5、S1、S8b（[#118](https://github.com/arcships/dim/issues/118)）。
+
+注：指向 F1（PR #108）、S8a（PR #90）和 S8b（PR #119）设计的链接目前指向各自分支；这些 PR 合并后改为仓库内路径。
 
 需求（[功能列表](../../../feature-list.md)，BranchScope Agent 行为）：`/goal` 设置、编辑、暂停、恢复和清除目标（"切换 Goal 模式"）；Goal 续跑朝明确的目标继续工作，并记录完成或受阻。
 
@@ -41,9 +43,9 @@ flowchart LR
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
 | `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`；`sessionMethods` key `session.goal`；经 `Branch::input` 写变更输入 |
-| `GoalBranchPlugin` | 分支 | `B:Timeline`、`B:Dispatcher`、Settings 来源 `goal`（外层作用域） | `goal`（分支作用域；只有 `get`），仅供 Session 部分使用；折叠结果、续跑决策和 Goal 自己的写入 |
+| `GoalBranchPlugin` | 分支 | `B:Timeline`、`B:Dispatcher`、用于其来源 `goal` 的进程服务 `settings`（S8b，[#118](https://github.com/arcships/dim/issues/118)） | `goal`（分支作用域；只有 `get`），仅供 Session 部分使用；折叠结果、续跑决策和 Goal 自己的写入 |
 
-两个部分都在插件的 `provides` 中声明各自的服务；ToolRegistry 和 Rpc 按名称和作用域收集它们。安装了 Goal 的装配用 `AgentBuilder::session_methods` 记录 `session.goal`，因此该装配的每个 Session 都列出这个命名空间并运行 Goal 的 Session 部分（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)，已知命名空间）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4），按交付的样子使用（Settings 在写入和读取持久化文件时应用默认值和范围：Rust 中通过 Goal 的 `BusinessDocument` 的 `validate` 与 `Default`，S8b 之后通过 Goal 清单声明的 schema），通过数据更新改变，从不重载。Settings 没有订阅 API（[S8a，PR #90](https://github.com/arcships/dim/pull/90)）：一次写入在通道 `settings/goal` 上发出 rutis 事件 `settings.changed {source, scope, revision}`，不带文档本身。Settings 的读取是异步的，而 Dispatcher 处理器从不等待，因此分支部分在加载时读取一次文档，在 `apply` 中用 `ctx.events().on` 监听，每收到一次 `settings.changed` 就重新读取，每次决策都使用最近读到的文档；变更在其重新读取之后的第一次决策时生效。Goal 的工具都不写它；它经客户端方法 `settings.read`/`settings.update` 写入（S8b，尚未实现）。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end` 和 `stop/interrupt` 的公开数据契约；从不读取其他插件的状态。
+两个部分都在插件的 `provides` 中声明各自的服务；ToolRegistry 和 Rpc 按名称和作用域收集它们。安装了 Goal 的装配用 `AgentBuilder::session_methods` 记录 `session.goal`，因此该装配的每个 Session 都列出这个命名空间并运行 Goal 的 Session 部分（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)，已知命名空间）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）。Goal 是 TypeScript 插件，只通过 S8b 的语言中立进程服务 `settings` 读取它（[Settings 服务](https://github.com/arcships/dim/blob/roadmap/s8b-settings-named-service/docs/zh/design/appserver/settings-service.md)，[#118](https://github.com/arcships/dim/issues/118)，PR #119），从不经 App Server 的类型。Goal 的包清单按 S8b §3.1 声明该来源：`source: "goal"`，一个用户文件，没有项目文件（只有用户作用域），没有 user-only 字段，JSON Schema 中 `maxContinuations` 为整数，`minimum: 1`、`maximum: 1000`、`default: 20`（A4）。Settings 在写入和读取持久化文件时应用默认值并校验，因此 Goal 按交付的样子使用文档；变更是数据更新，从不重载。Settings 没有订阅 API（[S8a，PR #90](https://github.com/arcships/dim/pull/90)；S8b 保持如此）：一次提交的写入在通道 `settings/goal` 上发出 rutis 事件 `settings.changed`，载荷是可序列化的 `{source, scope, revision}`，从不带文档本身。`settings.read` 是异步的，而 Dispatcher 处理器从不等待，因此分支部分在加载时调用一次 `settings.read {source: "goal", scope: "user"}`，在 `apply` 中监听 `settings.changed`（TypeScript 部分经 C4 的 rutis 事件绑定接收事件，S8b §4.5），每收到一次事件就重新读取，每次决策都使用最近读到的文档；变更在其重新读取之后的第一次决策时生效。Goal 的工具都不写它；它经客户端方法 `settings.read`/`settings.update` 写入（S8b，尚未实现）。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end` 和 `stop/interrupt` 的公开数据契约；从不读取其他插件的状态。
 
 ## 2. 数据与状态
 
@@ -269,7 +271,7 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 | §1 Capability 与 App Server 边界 | 两个部分都是各自包中的 Capability；Rpc 只分派 `sessionMethods`。 |
 | ADR 002 D1 作用域跟随状态所有者 | 工具与方法是 Session 服务；目标、其折叠结果与决策是分支状态。 |
 | ADR 002 D2 不设接线模块 | ToolRegistry 与 Rpc 按名字和作用域收集 Goal 的服务；没有模块指名 Goal。 |
-| ADR 002 D3 依赖跟随作用域 | 分支部分依赖分支服务与外层的 Settings 来源；重载重新折叠，可接受。 |
+| ADR 002 D3 依赖跟随作用域 | 分支部分依赖分支服务与外层的进程服务 `settings`（S8b）；重载重新折叠，可接受。 |
 | ADR 002 D4 结构性配置与业务配置分离 | `goal` 来源中的 `maxContinuations` 是业务配置，加载时读取，收到 `settings.changed` 时重新读取；变更从不重载 Goal。 |
 | ADR 002 D5 合同语言中立 | 工具、方法、分支服务与块格式以中立形式给出；附录 G 只是一种绑定。 |
 
@@ -407,7 +409,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 目标轮次内的压缩步骤（准备中的自动压缩，或步骤边界处的手动压缩） | `turn/start` < 压缩事实 < `turn/end` N | 该步骤不产生 `turn/end`：不决策；轮次在压缩后的上下文上继续，由 N 照常决策 | Loop；Goal |
 | 没有轮次运行时的手动压缩 | `context/compact` < `context/compaction-start` < `context/compaction`，没有 `turn/*` | 不决策，不续跑；C4 用到的最新 `turn/end` 与 `turn_open` 不变 | Loop；Goal |
 | 轮次结束时有待执行的手动压缩 | `turn/end` N < 压缩事实 | 该步骤在 N 之后立即运行，不属于任何轮次；Goal 照常对 N 决策；其续跑等到该步骤的 `context/compaction` 之后，再驱动一个基于压缩后上下文准备的轮次 | Loop；Goal |
-| 压缩步骤期间中断 | 步骤运行中 < `stop/interrupt` M | 步骤以 `cancelled`（或 `completed`）结束；若 C1 成立且 `A < M`，Goal 在 M 上暂停（`interrupted`），与其他中断相同；没有轮次时，已在等待该步骤的续跑仍驱动一轮，模型最后看到暂停（§4.1） | Loop；Goal |
+| 压缩步骤期间中断（已决定：压缩不做特殊处理） | 步骤运行中 < `stop/interrupt` M | 步骤以 `cancelled`（或 `completed`）结束；若 C1 成立且 `A < M`，Goal 按现有中断规则在 M 上暂停（`interrupted`）；没有轮次时，已待处理的续跑仍多驱动一轮，模型最后看到暂停（§4.1，E18） | Loop；Goal |
 | 子分支或分叉 `main` 上的压缩 | — | 继承前缀中可能带有父分支的目标块和压缩记录；本地起始 `clear` 要么位于 `retain_from` 之前（基线中两个 key 都已退役），要么被原样保留，因此不会把父目标显示为存活；折叠只用本地事件 | 历史投影；Goal |
 | 子分支在目标写入与其消费之间切出 | 写入 < 切点 < 已消费 | 子分支不采纳它；子分支的折叠结果没有目标；若其前缀中有存活的目标 key，Goal 写入起始 `clear`（§3.4） | InputQueue（子分支）；Goal |
 | 子分支在消费之后切出 | 已消费 < 切点 < `branch/start` | 子分支的折叠结果没有目标；Goal 写入起始 `clear`；不续跑；在那里的 `goal_update` 只影响子分支（A3） | Goal |
@@ -495,6 +497,6 @@ Goal 优先使用 TypeScript；Rust 实现（或在 #4 之前先用 Rust 起步�
 | `goal` | `B:Goal`，key `BranchScope::key::<Goal>()`，`get` 返回折叠结果 |
 | Key | `const OBJECTIVE_KEY: &str = "objective"` 与 `const STATUS_KEY: &str = "status"`，以 `KeyUse::Live(name)` / `KeyUse::Retire(name)` 写入，存为 `goal:objective` / `goal:status`；续跑不带 `KeyUse` |
 | 卸载清理函数 | `ctx.effect` |
-| `goal` Settings 来源 | `goal` 文档的 `BusinessDocument`；加载时以及每次收到来自 `settings_changes("goal")` 的 `settings.changed` 事件时调用 `SettingsService::read`，用 `ctx.events().on` 监听（S8a） |
+| `goal` Settings 来源 | 不做 Rust 绑定：即使先用 Rust 起步，也经命名服务 `settings`（S8b `read`）读取，并跟随 `settings/goal` 上的 `settings.changed`；该来源在 Goal 的包清单中声明，不是 Rust 文档类型 |
 | 写入任务 | Dispatcher 处理器在分支部分的 `ctx` 上登记的任务，以做出决定的序号为键；随卸载结束 |
 | 写入 | 经 `S:TreeCommands` 调用 `Branch::input`，来自 Session 部分的调用和写入任务 |
