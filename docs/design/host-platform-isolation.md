@@ -105,8 +105,8 @@ and retains ordinary execution until it has an accepted backend contract.
 
 Raw HostPlatform spawn/PTY remain available for ShellInput and trusted host uses. Product isolation
 is promised only for the listed model consumers. Shell/runtime discovery stays outside the command
-sandbox. The accepted ShellInput Q4 transparency assumption is immaterial to this scope: its user
-commands do not use F5, and their normal-exit/disconnect behavior is unchanged.
+sandbox. ShellInput Q4 keeps its user commands outside F5; their normal-exit/disconnect behavior is
+unchanged.
 
 ## Platform bindings
 
