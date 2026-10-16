@@ -719,30 +719,43 @@ impl AgentIndex {
         config: &SessionConfig,
         version: u32,
     ) -> Option<(String, BoxFuture<'static, dim_agent_runtime::Result<()>>)> {
-        let store = self.session_store.as_ref()?;
-        let id = uuid::Uuid::new_v4().to_string();
-        let store = store.clone();
-        let prepared_id = id.clone();
-        let config = config.clone();
+        let store = self.session_store.clone()?;
+        let stored = config.clone();
         let agent_id = host.agent_id.clone();
+        Some(self.prepared(config.cwd.clone(), move |id| {
+            Box::pin(async move {
+                store
+                    .create_owned_session(&id, &stored, &agent_id, version)
+                    .await
+            })
+        }))
+    }
+    /// A new Session id and the prepare step of its prepared creation: the
+    /// project of `cwd` is authorized, then `step` writes the Session's rows.
+    /// Creation, `launch` and a fork share it (S5c §9).
+    fn prepared(
+        &self,
+        cwd: String,
+        step: impl FnOnce(String) -> BoxFuture<'static, dim_agent_runtime::Result<()>>,
+    ) -> (String, BoxFuture<'static, dim_agent_runtime::Result<()>>) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let step = step(id.clone());
         let settings = self.settings.clone();
         let stopping = self.stopping.clone();
-        Some((
+        (
             id,
             Box::pin(async move {
                 if let Some(settings) = settings {
                     settings
-                        .authorize_project(config.cwd.clone().into(), &stopping)
+                        .authorize_project(cwd.into(), &stopping)
                         .await
                         .map_err(|error| {
                             AgentError::fault("project authorization", error.to_string())
                         })?;
                 }
-                store
-                    .create_owned_session(&prepared_id, &config, &agent_id, version)
-                    .await
+                step.await
             }),
-        ))
+        )
     }
 
     pub(crate) async fn create_session(
@@ -788,6 +801,41 @@ impl AgentIndex {
         inner.versions.remove(id);
         inner.unavailable_sessions.remove(id);
         Ok(())
+    }
+    /// `session.fork` ([S5c §6](../../../docs/design/appserver/session-deletion-and-fork.md#6-fork)):
+    /// acquires the source, restoring it if needed, and checks the cut as
+    /// `session.branch_create` does (at most the published `main` head, the
+    /// end of an atomic batch, a context boundary) and as a rest point. The
+    /// fork is a prepared creation whose prepare step is SessionStore's fork
+    /// transaction; it belongs to the source's Agent and protocol version,
+    /// and its `main` opens with `branch/resume`.
+    pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session> {
+        let store = self
+            .session_store
+            .clone()
+            .ok_or_else(|| AgentError::InvalidInput("a fork needs the native store".into()))?;
+        let usage = self.acquire(source).await?;
+        let session = &usage.session;
+        session.local_page("main", at, 1, at).await?;
+        let prefix = session.context("main", at).await?;
+        dim_agent_capabilities::history::validate_context_boundary(&prefix)
+            .and_then(|()| rest_point(&prefix.events))
+            .map_err(AgentError::InvalidInput)?;
+        let version = self
+            .version_of(source)
+            .ok_or_else(|| AgentError::Closed(source.into()))?;
+        let config = session.config().clone();
+        let source = source.to_owned();
+        let (id, prepare) = self.prepared(config.cwd.clone(), move |fork| {
+            Box::pin(async move { store.fork_session(&source, &fork, at).await })
+        });
+        let fork = usage
+            .host
+            .agent
+            .create_prepared_session(id, config, prepare)
+            .await?;
+        self.insert_version(fork.id(), &usage.host.agent_id, version);
+        Ok(fork)
     }
     /// `agent.create`: one more Agent, a peer of every other. A requested
     /// profile comes from outside the process and may only select provided
@@ -1014,6 +1062,88 @@ impl AgentIndex {
     pub(crate) fn forget(&self, agent_id: &str) {
         self.directory.forget(agent_id);
     }
+}
+
+/// Whether a fork whose `main` holds `events` starts no work when it loads
+/// ([S5c §6.2](../../../docs/design/appserver/session-deletion-and-fork.md#62-the-cut)).
+/// The reload rules that start work read these facts: Loop and InputQueue
+/// start a turn for an open turn's work or for a Queue or Steer input not
+/// yet consumed, unless it was applied before the last interrupt;
+/// BackgroundExec fails a task it finds open, and a task that ended while
+/// its generation was not closing posts a wake input that belongs before
+/// the cut. This reads only their public facts;
+/// a capability whose reload rule comes to start work from other facts
+/// adds them here, so a fork keeps starting nothing.
+fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String> {
+    use dim_agent_capabilities::workspace_tools::background::WAKE_RESULT_TAG;
+    use dim_agent_types::{ExecStatus, InputMode, InterruptScope};
+    let mut turn = false;
+    let mut interrupted_at = 0;
+    let mut closing = false;
+    // Inputs that drive a turn, by event id, with their `input/applied`.
+    let mut inputs: BTreeMap<&str, Option<u64>> = BTreeMap::new();
+    let mut tasks = BTreeSet::new();
+    // Waking `exec/ended` events without their wake input.
+    let mut wakes = BTreeSet::new();
+    for event in events {
+        match &event.kind {
+            EventKind::TurnStart(_) => turn = true,
+            EventKind::TurnEnd(_) => turn = false,
+            // A branch close ends its generation's wakes; the next
+            // generation, which opens the branch again, posts them.
+            EventKind::BranchStart(_) | EventKind::BranchResume(_) => closing = false,
+            EventKind::StopInterrupt(data) => {
+                interrupted_at = event.sequence;
+                closing |= data.scope == InterruptScope::Branch;
+            }
+            EventKind::InputMessage(data) => {
+                if data.effective_mode() != InputMode::Append {
+                    inputs.insert(&event.id, None);
+                }
+                if let Some(ended) = event
+                    .tags
+                    .iter()
+                    .flatten()
+                    .find_map(|tag| tag.strip_prefix(WAKE_RESULT_TAG))
+                {
+                    wakes.remove(ended);
+                }
+            }
+            EventKind::InputApplied(data) => {
+                if let Some(applied) = inputs.get_mut(data.input_id.as_str()) {
+                    *applied = Some(event.sequence);
+                }
+            }
+            EventKind::InputConsumed(data) => {
+                inputs.remove(data.input_id.as_str());
+            }
+            EventKind::ExecStarted(data) => {
+                tasks.insert(data.task_id.as_str());
+            }
+            EventKind::ExecEnded(data) => {
+                tasks.remove(data.task_id.as_str());
+                if data.status != ExecStatus::Cancelled && !closing {
+                    wakes.insert(event.id.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+    let cause = if turn {
+        "a turn is open"
+    } else if inputs
+        .values()
+        .any(|applied| applied.is_none_or(|sequence| sequence > interrupted_at))
+    {
+        "an input is waiting to be consumed"
+    } else if !tasks.is_empty() {
+        "a background task is running"
+    } else if !wakes.is_empty() {
+        "a background task has not woken the branch"
+    } else {
+        return Ok(());
+    };
+    Err(format!("the fork position is not a rest point: {cause}"))
 }
 
 fn truncate_preview(value: &str, limit: usize) -> String {

@@ -77,6 +77,7 @@ pub enum Call {
     Idle(Idle),
     Close(SessionId),
     Delete(SessionId),
+    Fork(Fork),
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
     AgentCreate(AgentCreate),
@@ -286,6 +287,14 @@ pub struct SessionList {
 pub struct SessionId {
     pub session_id: String,
 }
+/// `session.fork`: `at` is the last `main` sequence the fork inherits.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Fork {
+    pub session_id: String,
+    #[serde(deserialize_with = "cursor")]
+    pub at: u64,
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Attach {
@@ -368,7 +377,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 21] = [
+const BUILTIN_METHODS: [&str; 22] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -384,6 +393,7 @@ const BUILTIN_METHODS: [&str; 21] = [
     "session.idle",
     "session.close",
     "session.delete",
+    "session.fork",
     "approval.respond",
     "session.branch_create",
     "agent.create",
@@ -461,6 +471,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.idle" => Call::Idle(params(raw_params)?),
             "session.close" => Call::Close(params(raw_params)?),
             "session.delete" => Call::Delete(params(raw_params)?),
+            "session.fork" => Call::Fork(params(raw_params)?),
             "approval.respond" => Call::ApprovalRespond(params(raw_params)?),
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),
@@ -531,6 +542,13 @@ pub struct CreateResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_path: Option<String>,
 }
+/// The fork's id and its `main` head once it is published.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkResult {
+    pub session_id: String,
+    pub sequence: u64,
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
@@ -584,6 +602,7 @@ pub enum Reply {
     Contributed(Value),
     Ping(PingResult),
     Create(CreateResult),
+    Fork(ForkResult),
     List(Vec<SessionInfo>),
     Summaries(Vec<SessionSummary>),
     Submit(SubmitResult),

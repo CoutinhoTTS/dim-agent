@@ -354,6 +354,7 @@ impl Connection {
                     | Call::Summaries(_)
                     | Call::SessionMethods(_)
                     | Call::Delete(_)
+                    | Call::Fork(_)
             )
         {
             return Err(RpcError::app(
@@ -419,6 +420,17 @@ impl Connection {
             Call::Delete(p) => {
                 self.authorize_version(rpc, &p.session_id)?;
                 (None, None)
+            }
+            // A fork copies the native store's rows.
+            Call::Fork(p) => {
+                if rpc.config.database_path.is_none() {
+                    return Err(RpcError::app(
+                        -32601,
+                        "unknown_method",
+                        "Method requires native storage",
+                    ));
+                }
+                (Some(&p.session_id), None)
             }
             Call::AgentCreate(_) | Call::AgentList | Call::AgentClose(_) => {
                 if self.protocol_version() < 3 {
@@ -792,6 +804,18 @@ impl Connection {
                     tracing::error!(%error, session_id=%params.session_id, "Session delete failed");
                     RpcError::from(error)
                 }),
+            Call::Fork(params) => match rpc.index.fork(&params.session_id, params.at).await {
+                Ok(fork) => fork
+                    .sequence("main")
+                    .map(|sequence| {
+                        Reply::Fork(ForkResult {
+                            session_id: fork.id().to_owned(),
+                            sequence,
+                        })
+                    })
+                    .map_err(RpcError::from),
+                Err(error) => Err(RpcError::from(error)),
+            },
             Call::ApprovalRespond(params) => {
                 let branch = params.branch_id.clone().unwrap_or_else(|| "main".into());
                 // Accepted commands belong to the Session and continue after disconnect.

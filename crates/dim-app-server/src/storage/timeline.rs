@@ -459,6 +459,121 @@ impl SessionStore {
         self.timeline.sweep_files.notify_one();
         Ok(())
     }
+    /// The prepare step of `session.fork` ([S5c §6.3](../../../../docs/design/appserver/session-deletion-and-fork.md#63-what-a-fork-copies)),
+    /// after Agents checked the cut: in one transaction `fork` gets the
+    /// source's `SessionConfig` text and owner, the source's `main` through
+    /// `at` with the content rows its events reference and the snapshots
+    /// anchored on them, a directory without events for every branch `main`
+    /// created by then, and an owner row for every Session file the source
+    /// owns. Rows are copied as stored. A source whose delete committed first
+    /// is `Closed`. The runtime validates the copy when it builds the fork.
+    pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
+        let (source, fork) = (source.to_owned(), fork.to_owned());
+        self.timeline
+            .db
+            .run(move |connection| {
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(error)?;
+                let config: Option<String> = tx
+                    .query_row(
+                        "SELECT config FROM agent_sessions WHERE session_id=?1",
+                        [&source],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(error)?;
+                let Some(config) = config else {
+                    return Err(AgentError::Closed(source));
+                };
+                let cut = sql_sequence(at)?;
+                tx.execute(
+                    "INSERT INTO agent_sessions VALUES (?1, ?2, ?3)",
+                    params![
+                        fork,
+                        config,
+                        sql_sequence(dim_agent_runtime::core::unix_millis())?
+                    ],
+                )
+                .map_err(error)?;
+                tx.execute(
+                    "INSERT INTO session_owners (session_id, agent_id, protocol_version) \
+                     SELECT ?2, agent_id, protocol_version FROM session_owners WHERE session_id=?1",
+                    params![source, fork],
+                )
+                .map_err(error)?;
+                let branches = tx
+                    .prepare("SELECT branch_id, info FROM timeline_branches WHERE session_id=?1")
+                    .map_err(error)?
+                    .query_map([&source], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                    .map_err(error)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(error)?;
+                for (id, info) in branches {
+                    let parsed: TimelineInfo = serde_json::from_str(&info).map_err(error)?;
+                    // `main` through the cut; a branch `main` created by
+                    // then as a creation that never started.
+                    let head = if id == "main" {
+                        cut
+                    } else if parsed.parent.as_deref() == Some("main")
+                        && parsed.create_anchor.is_some_and(|anchor| anchor <= at)
+                    {
+                        0
+                    } else {
+                        continue;
+                    };
+                    tx.execute(
+                        "INSERT INTO timeline_branches VALUES (?1, ?2, ?3, ?4)",
+                        params![fork, id, info, head],
+                    )
+                    .map_err(error)?;
+                }
+                tx.execute(
+                    "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body, event_id) \
+                     SELECT ?2, branch_id, sequence, last_sequence, kind, body, event_id FROM timeline_events \
+                     WHERE session_id=?1 AND branch_id='main' AND sequence<=?3",
+                    params![source, fork, cut],
+                )
+                .map_err(error)?;
+                // Only the content rows the copied events reference.
+                let mut references = BTreeSet::new();
+                {
+                    let mut bodies = tx
+                        .prepare("SELECT body FROM timeline_events WHERE session_id=?1")
+                        .map_err(error)?;
+                    let bodies = bodies
+                        .query_map([&fork], |row| row.get::<_, String>(0))
+                        .map_err(error)?;
+                    for body in bodies {
+                        let row: Row = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+                        for wire in row.wires() {
+                            references.extend(wire.references().map(str::to_owned));
+                        }
+                    }
+                }
+                {
+                    let mut copy = tx
+                        .prepare(
+                            "INSERT INTO timeline_content (session_id, hash, kind, body) \
+                             SELECT ?2, hash, kind, body FROM timeline_content WHERE session_id=?1 AND hash=?3",
+                        )
+                        .map_err(error)?;
+                    for hash in &references {
+                        copy.execute(params![source, fork, hash]).map_err(error)?;
+                    }
+                }
+                tx.execute(
+                    "INSERT INTO timeline_snapshots (session_id, branch_id, sequence, interpreter, event_id, state) \
+                     SELECT ?2, branch_id, sequence, interpreter, event_id, state FROM timeline_snapshots \
+                     WHERE session_id=?1 AND branch_id='main' AND sequence<=?3",
+                    params![source, fork, cut],
+                )
+                .map_err(error)?;
+                files::share(&tx, &source, &fork).map_err(error)?;
+                tx.commit().map_err(error)
+            })
+            .await
+    }
     pub async fn create_owned_session(
         &self,
         session_id: &str,
@@ -606,6 +721,14 @@ enum Row {
         started_at: u64,
         records: Vec<WireEvent>,
     },
+}
+impl Row {
+    fn wires(&self) -> &[WireEvent] {
+        match self {
+            Row::Event { record } => std::slice::from_ref(record),
+            Row::Output { records, .. } => records,
+        }
+    }
 }
 fn head(connection: &Connection, key: &TimelineKey) -> Result<u64> {
     connection

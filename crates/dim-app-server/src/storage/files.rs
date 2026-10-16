@@ -139,10 +139,6 @@ enum Commit {
 /// S5c's fork step, run inside the fork's own transaction: the fork owns
 /// every file its source owns. No file is touched, so a fork succeeds while
 /// the node is offline.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "S5c's fork transaction is its first caller")
-)]
 pub(super) fn share(connection: &Connection, source: &str, fork: &str) -> rusqlite::Result<usize> {
     connection.execute(
         "INSERT INTO session_file_owners (session_id, file_id) SELECT ?2, file_id FROM session_file_owners WHERE session_id = ?1",

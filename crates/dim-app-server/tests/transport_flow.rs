@@ -70,6 +70,9 @@ mod session_methods;
 #[path = "transport_flow/deletion.rs"]
 mod deletion;
 
+#[path = "transport_flow/fork.rs"]
+mod fork;
+
 enum Transport {
     Unix(BufReader<UnixStream>),
     Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),

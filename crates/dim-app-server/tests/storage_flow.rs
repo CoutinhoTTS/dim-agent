@@ -2663,3 +2663,206 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
         db.close().await.unwrap();
     }
 }
+
+/// S5c §6.3 at the store: a fork copies `main` through the cut as stored,
+/// only the content rows its events and before traces reference, only the
+/// snapshots anchored on copied events, and the branches `main` created by
+/// then as directories without events; a missing source is closed.
+#[tokio::test]
+async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    // Rows are written as the Timeline writer writes them.
+    let store = SqliteTimelineStore::new(db.clone());
+    let config = SessionConfig {
+        interactive: false,
+        ..SessionConfig::default()
+    };
+    store.create_session("source", &config).await.unwrap();
+    let call = |sequence, text: &str| {
+        record(
+            sequence,
+            EventKind::ModelCall(ModelCallData {
+                turn_id: "turn".into(),
+                request_id: format!("request-{sequence}"),
+                request: Arc::new(ModelRequest::new(
+                    "mock",
+                    "test",
+                    vec![Message::text(Role::User, text)],
+                )),
+                configuration: None,
+                prompt: None,
+            }),
+        )
+    };
+    let compaction = |sequence, through| {
+        let fixtures: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../dim-agent-types/tests/fixtures/events.json"
+        ))
+        .unwrap();
+        let mut data = fixtures
+            .into_iter()
+            .find_map(|event| {
+                if event["type"] != "context"
+                    || event["name"] != "compaction"
+                    || event["data"]["status"] != "completed"
+                {
+                    return None;
+                }
+                match serde_json::from_value::<AgentEvent>(event).unwrap().kind {
+                    EventKind::ContextCompaction(data) => Some(data),
+                    _ => None,
+                }
+            })
+            .unwrap();
+        data.through = through;
+        record(sequence, EventKind::ContextCompaction(data))
+    };
+    let created = |sequence, branch: &str| {
+        record(
+            sequence,
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: BranchSource::Host {
+                    operation_id: "op".into(),
+                },
+                branch: branch.into(),
+                prompt: "child prompt".into(),
+            }),
+        )
+    };
+    // 1 carries a before trace whose draft holds its own request.
+    let mut first = call(1, "before the cut");
+    let EventKind::ModelCall(traced) = &first.event.kind else {
+        unreachable!()
+    };
+    let mut traced = traced.clone();
+    traced.request = Arc::new(ModelRequest::new(
+        "mock",
+        "test",
+        vec![Message::text(Role::User, "only in the trace")],
+    ));
+    first.trace = Some(TimelineTrace {
+        event_id: first.event.id.clone(),
+        original: EventDraft::new(first.event.kind.clone()),
+        steps: vec![TraceStep {
+            handler: "before".into(),
+            result: Some(EventDraft::new(EventKind::ModelCall(traced))),
+        }],
+    });
+    for records in [
+        vec![first],
+        vec![compaction(2, 1)],
+        vec![created(3, "child")],
+        vec![call(4, "after the cut")],
+        vec![compaction(5, 4)],
+        vec![created(6, "later")],
+    ] {
+        append(&store, key("source", "main"), records)
+            .await
+            .unwrap();
+    }
+    append(
+        &store,
+        key("source", "child"),
+        vec![
+            record(
+                1,
+                EventKind::BranchStart(BranchStartData {
+                    parent: Some("main".into()),
+                    create_event: Some(3),
+                }),
+            ),
+            call(2, "child request"),
+        ],
+    )
+    .await
+    .unwrap();
+    for sequence in [2, 5] {
+        store
+            .save_snapshot(
+                &key("source", "main"),
+                RecoverySnapshot {
+                    sequence,
+                    event_id: format!("event-{sequence}"),
+                    interpreter: INTERPRETER.into(),
+                    state: "state".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    sessions.fork_session("source", "fork", 3).await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    let column = |sql: &str| -> Vec<String> {
+        connection
+            .prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        column(
+            "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='fork' ORDER BY sequence"
+        ),
+        column(
+            "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='source' AND branch_id='main' AND sequence<=3 ORDER BY sequence"
+        )
+    );
+    assert_eq!(
+        column(
+            "SELECT branch_id || ':' || sequence || ':' || info FROM timeline_branches WHERE session_id='fork' ORDER BY branch_id"
+        ),
+        column(
+            "SELECT branch_id || ':' || CASE branch_id WHEN 'main' THEN 3 ELSE 0 END || ':' || info FROM timeline_branches WHERE session_id='source' AND branch_id IN ('main', 'child') ORDER BY branch_id"
+        )
+    );
+    let content =
+        column("SELECT body FROM timeline_content WHERE session_id='fork' AND kind='message'");
+    assert_eq!(content.len(), 2, "{content:?}");
+    for text in ["before the cut", "only in the trace"] {
+        assert!(content.iter().any(|body| body.contains(text)), "{text}");
+    }
+    assert_eq!(
+        column(
+            "SELECT session_id || ':' || sequence FROM timeline_snapshots WHERE session_id='fork'"
+        ),
+        ["fork:2"]
+    );
+    assert_eq!(
+        column("SELECT config FROM agent_sessions WHERE session_id='fork'"),
+        column("SELECT config FROM agent_sessions WHERE session_id='source'")
+    );
+    // The copy is a valid Session: the child is a creation that never
+    // started, and the fork's main resumes from the copied snapshot.
+    let branches = store.branches("fork").await.unwrap();
+    assert_eq!(
+        branches
+            .iter()
+            .map(|branch| (branch.info.id.as_str(), branch.sequence))
+            .collect::<Vec<_>>(),
+        [("child", 0), ("main", 3)]
+    );
+    assert_eq!(
+        store
+            .latest_snapshot(&key("fork", "main"), 3, INTERPRETER)
+            .await
+            .unwrap()
+            .map(|snapshot| snapshot.sequence),
+        Some(2)
+    );
+
+    assert!(matches!(
+        sessions.fork_session("missing", "orphan", 0).await,
+        Err(AgentError::Closed(_))
+    ));
+    assert!(column("SELECT session_id FROM agent_sessions WHERE session_id='orphan'").is_empty());
+    drop((connection, sessions));
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
