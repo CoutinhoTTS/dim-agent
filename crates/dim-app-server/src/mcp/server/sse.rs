@@ -1,8 +1,11 @@
 //! Legacy HTTP+SSE: one GET event stream and a server-advertised POST endpoint.
 //! rmcp still owns JSON-RPC, negotiation, correlation and cancellation messages.
-use super::{McpServerError, Result};
+use super::{Authorization, HttpError, McpServerError, Result};
 use futures_util::StreamExt;
-use reqwest_mcp::{Client, Url, header::HeaderMap};
+use reqwest_mcp::{
+    Client, StatusCode, Url,
+    header::{HeaderMap, WWW_AUTHENTICATE},
+};
 use rmcp::{
     RoleClient,
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
@@ -20,6 +23,7 @@ pub(super) struct SseTransport {
     endpoint: Url,
     headers: HeaderMap,
     auth: Option<String>,
+    authorization: Option<Authorization>,
     stream: Option<BoxedSseResponse>,
     stopping: CancellationToken,
 }
@@ -28,23 +32,54 @@ impl SseTransport {
     pub async fn connect(
         client: Client,
         config: &StreamableHttpClientTransportConfig,
+        authorization: Option<Authorization>,
         stopping: CancellationToken,
     ) -> Result<Self> {
         let base =
             Url::parse(&config.uri).map_err(|_| McpServerError::Configuration("invalid URL"))?;
         // Reuse the SDK's bounded SSE decoder directly, without its Streamable
         // HTTP worker or reconnect policy. It preserves endpoint events.
-        let mut stream = client
-            .get_stream_with_max_sse_event_size(
+        let get = |token| {
+            client.get_stream_with_max_sse_event_size(
                 config.uri.clone(),
                 None,
                 None,
-                config.auth_header.clone(),
+                token,
                 config.custom_headers.clone(),
                 config.max_sse_event_size,
             )
-            .await
-            .map_err(|_| McpServerError::RequestFailed)?;
+        };
+        let stream = match &authorization {
+            None => get(config.auth_header.clone()).await,
+            Some(authorization) => authorization
+                .credential
+                .send(get, |result| match result {
+                    Err(HttpError::AuthRequired(error)) => {
+                        Some(Some(error.www_authenticate_header.clone()))
+                    }
+                    Err(HttpError::Client(error))
+                        if error.status() == Some(StatusCode::UNAUTHORIZED) =>
+                    {
+                        Some(None)
+                    }
+                    _ => None,
+                })
+                .await
+                .map_err(|refusal| authorization.refused(refusal))?,
+        };
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(HttpError::InsufficientScope(error)) => {
+                return Err(authorization
+                    .as_ref()
+                    .and_then(|a| a.insufficient_scope(&error.www_authenticate_header))
+                    .map_or(
+                        McpServerError::RequestFailed,
+                        McpServerError::InsufficientScope,
+                    ));
+            }
+            Err(_) => return Err(McpServerError::RequestFailed),
+        };
         let endpoint = loop {
             let event = stream
                 .next()
@@ -78,6 +113,7 @@ impl SseTransport {
             endpoint,
             headers: config.custom_headers.clone().into_iter().collect(),
             auth: config.auth_header.clone(),
+            authorization,
             stream: Some(stream),
             stopping,
         })
@@ -89,22 +125,54 @@ impl Transport<RoleClient> for SseTransport {
         &mut self,
         item: TxJsonRpcMessage<RoleClient>,
     ) -> impl Future<Output = Result<()>> + Send + 'static {
-        let mut request = self
-            .client
-            .post(self.endpoint.clone())
-            .headers(self.headers.clone())
-            .timeout(Duration::from_secs(60))
-            .json(&item);
-        if let Some(auth) = &self.auth {
-            request = request.bearer_auth(auth);
-        }
+        let (client, endpoint, headers) = (
+            self.client.clone(),
+            self.endpoint.clone(),
+            self.headers.clone(),
+        );
+        let (auth, authorization) = (self.auth.clone(), self.authorization.clone());
         let stopping = self.stopping.clone();
         async move {
+            let post = |token: Option<String>| {
+                let request = client
+                    .post(endpoint.clone())
+                    .headers(headers.clone())
+                    .timeout(Duration::from_secs(60))
+                    .json(&item);
+                match token {
+                    Some(token) => request.bearer_auth(token).send(),
+                    None => request.send(),
+                }
+            };
+            let send = async {
+                match &authorization {
+                    None => Ok(post(auth).await),
+                    Some(authorization) => authorization
+                        .credential
+                        .send(post, |result| match result {
+                            Ok(response) if response.status() == StatusCode::UNAUTHORIZED => {
+                                Some(challenge(response))
+                            }
+                            _ => None,
+                        })
+                        .await
+                        .map_err(|refusal| authorization.refused(refusal)),
+                }
+            };
             let response = tokio::select! {
                 biased;
                 _ = stopping.cancelled() => return Err(McpServerError::Closed),
-                response = request.send() => response.map_err(|_| McpServerError::RequestFailed)?,
+                response = send => response?.map_err(|_| McpServerError::RequestFailed)?,
             };
+            if response.status() == StatusCode::FORBIDDEN
+                && let Some(scopes) = challenge(&response).and_then(|header| {
+                    authorization
+                        .as_ref()
+                        .and_then(|authorization| authorization.insufficient_scope(&header))
+                })
+            {
+                return Err(McpServerError::InsufficientScope(scopes));
+            }
             if !response.status().is_success() {
                 return Err(McpServerError::RequestFailed);
             }
@@ -144,4 +212,12 @@ impl Transport<RoleClient> for SseTransport {
         self.stream.take();
         Ok(())
     }
+}
+
+fn challenge(response: &reqwest_mcp::Response) -> Option<String> {
+    response
+        .headers()
+        .get(WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
