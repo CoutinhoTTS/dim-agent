@@ -1812,7 +1812,12 @@ impl CollaborationCapability {
     }
 
     /// Reload: operations of an earlier generation without `delivered` are
-    /// refused, its delivered requests without `result` fail.
+    /// refused, its delivered requests without `result` fail. Settlement
+    /// acts only on what this Session holds: a member is stopped only while
+    /// its relation names this Session as its leader. A fork's copied
+    /// request names its source's member, which keeps working for the
+    /// source (#127); after a daemon restart no relation exists, so nothing
+    /// is stopped.
     fn rebuild(
         &self,
         timeline: &Arc<Timeline>,
@@ -1870,13 +1875,21 @@ impl CollaborationCapability {
             );
         }
         // A request left by the previous generation ends once the branch is
-        // Active: its member stops first, then the result is written. A branch
-        // that never starts leaves it to the next generation.
+        // Active: a member this Session leads stops first, then the result
+        // is written. A branch that never starts leaves it to the next
+        // generation.
         for (op, (agent_id, session_id)) in open {
-            let member = self
+            let leads = self
                 .collaboration
-                .index
-                .session(&session_id)
+                .directory
+                .relations
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .is_some_and(|relation| relation.leader == self.session_id);
+            let member = leads
+                .then(|| self.collaboration.index.session(&session_id))
+                .flatten()
                 .map(|(_, member)| member);
             let (timeline, phase) = (timeline.clone(), phase.clone());
             tasks.spawn(async move {
