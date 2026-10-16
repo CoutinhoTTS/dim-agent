@@ -5,7 +5,9 @@ use crate::{
     display::{self, Display, Event, Progress},
     input::Input,
 };
-use dim_agent_types::{ApprovalCallData, ModelId};
+use dim_agent_types::{
+    ApprovalCallData, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -252,12 +254,46 @@ async fn configure(
         }
     } else {
         history(client, session_id, display, true).await?;
-        let capabilities = display
-            .model_capabilities
+        let model = display
+            .model
             .as_ref()
-            .ok_or("Model preference choices are unavailable; select a catalog model")?;
+            .ok_or("The adopted model is unavailable")?;
+        #[derive(Deserialize)]
+        struct Snapshot {
+            catalog: Option<Catalog>,
+        }
+        #[derive(Deserialize)]
+        struct Catalog {
+            models: Vec<CatalogModel>,
+        }
+        #[derive(Deserialize)]
+        struct CatalogModel {
+            id: String,
+            capabilities: ModelCapabilities,
+            metadata: Option<Preferences>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Preferences {
+            reasoning: Option<ModelReasoning>,
+            service_tier: Option<ModelServiceTier>,
+        }
+        let snapshot: Snapshot = client
+            .typed("provider.catalog", json!({"providerId":model.provider_id}))
+            .await?;
+        let catalog = snapshot
+            .catalog
+            .ok_or("Model preference catalog is unavailable")?;
+        let catalog_model = catalog
+            .models
+            .into_iter()
+            .find(|entry| entry.id == model.model_id)
+            .ok_or("The adopted model is absent from the catalog")?;
+        let metadata = catalog_model
+            .metadata
+            .ok_or("This model does not advertise preference choices")?;
         let preference = if command == "/fast" {
-            capabilities
+            metadata
                 .service_tier
                 .as_ref()
                 .filter(|tier| {
@@ -277,10 +313,10 @@ async fn configure(
                 }
             }
         } else {
-            let reasoning = capabilities
+            let reasoning = metadata
                 .reasoning
                 .as_ref()
-                .filter(|reasoning| reasoning.supported && capabilities.capabilities.reasoning)
+                .filter(|reasoning| reasoning.supported && catalog_model.capabilities.reasoning)
                 .ok_or("This model does not advertise reasoning preferences")?;
             let mut choices = reasoning.effort_options.clone().unwrap_or_default();
             if reasoning.off.is_some() && !choices.iter().any(|choice| choice == "none") {

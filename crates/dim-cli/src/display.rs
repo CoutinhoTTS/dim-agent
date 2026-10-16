@@ -52,8 +52,13 @@ pub struct Event {
     pub sequence: u64,
     pub content: EventContent,
 }
+#[derive(Deserialize)]
+pub struct Configuration {
+    pub provider_id: String,
+    pub model_id: String,
+}
 pub enum EventContent {
-    Configuration(Box<ContextConfiguredData>),
+    Configuration(Configuration),
     Input(InputMessageData),
     TurnEnd(TurnEndData),
     Text(TextData),
@@ -132,7 +137,7 @@ struct TextPosition {
 }
 
 pub struct Display {
-    pub model_capabilities: Option<ModelCapabilitySnapshot>,
+    pub model: Option<Configuration>,
     pub cursor: u64,
     pub failed: bool,
     pub muted: bool,
@@ -146,7 +151,7 @@ pub struct Display {
 impl Display {
     pub fn new(interactive: bool) -> Self {
         Self {
-            model_capabilities: None,
+            model: None,
             cursor: 0,
             failed: false,
             muted: false,
@@ -223,7 +228,7 @@ impl Display {
         self.cursor = event.sequence;
         match event.content {
             EventContent::Configuration(data) => {
-                self.model_capabilities = data.settings.capability_snapshot;
+                self.model = Some(data);
             }
             EventContent::Input(data) if history => {
                 if let Some(user) = data.user {

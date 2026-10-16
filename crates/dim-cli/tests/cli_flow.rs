@@ -589,15 +589,10 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
 fn interactive_configuration_commands_route_and_recover_without_submitting_commands() {
     fn history(wire: &mut Wire) {
         let request = wire.read("session.history");
-        let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
-        capabilities["reasoning"] = json!(true);
         let events = if request["params"]["after"].as_u64().unwrap() < 9 {
             json!([{"sequence":9,"type":"context","name":"configured","data":{
-                "timeline":"main","revision":"configured","settings":{"providerId":"test","modelId":"model",
-                    "capabilitySnapshot":{"target":{"providerId":"test","modelId":"model"},"capabilities":capabilities,
-                        "reasoning":{"supported":true,"effortOptions":["high","low"]},
-                        "serviceTier":{"supported":true,"options":["priority","default"]}}}}}])
+                "timeline":"main","revision":"configured","previous":null,"prompt":null,
+                "provider_id":"test","model_id":"model"}}])
         } else {
             json!([])
         };
@@ -606,13 +601,28 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
             json!({"events":events,"through":9,"nextAfter":9,"done":true}),
         );
     }
+    fn catalog(wire: &mut Wire) {
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities =
+            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &request,
+            json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]},
+                "serviceTier":{"supported":true,"options":["priority","default"]}}}]}}),
+        );
+    }
     let home = Home::new();
     let (entered, wait_entered) = std::sync::mpsc::channel();
     let (release, wait_release) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.start(false);
         history(wire);
+        catalog(wire);
         history(wire);
+        catalog(wire);
         let effort = wire.read("session.model.update");
         assert_eq!(effort["params"], json!({"sessionId":"session","branchId":"main","modelPreferences":{"reasoningEffort":"high"}}));
         entered.send(()).unwrap();
@@ -620,6 +630,7 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
         wire.reply(&effort, json!({"outcome":"adopted","model":{"providerId":"test","modelId":"model"}}));
         history(wire);
         history(wire);
+        catalog(wire);
         let fast = wire.read("session.model.update");
         assert_eq!(fast["params"]["modelPreferences"], json!({"serviceTier":"default"}));
         wire.send(json!({"jsonrpc":"2.0","id":fast["id"],"error":{"code":-32000,"message":"fixture preference rejection"}}));

@@ -78,6 +78,10 @@ guessed complete selection.
 
 `/effort VALUE`, alias `/reasoning VALUE`, sends `reasoningEffort` without a target.
 Values come from declared `effortOptions` and the existing reasoning-off declaration.
+The CLI reads the adopted provider/model identity from the public
+`context/configured` view, then reads choices from the existing `provider.catalog`
+response. The public event does not expose internal model settings or capability
+snapshots. Catalog choices are display data; Provider validates each update.
 `none` needs that declaration or an advertised native `none`. Unsupported values
 fail without adoption; no value is guessed from a model name.
 
