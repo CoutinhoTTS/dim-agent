@@ -1056,11 +1056,8 @@ impl TimelineStore for SqliteTimelineStore {
             self.db.run(move |connection| {
                 let anchor = read_events(connection, &key, snapshot.sequence..=snapshot.sequence, false)?
                     .pop().ok_or_else(|| error("snapshot anchor is missing"))?;
-                if anchor.event.id != snapshot.event_id
-                    || !matches!(&anchor.event.kind, EventKind::ContextCompaction(data)
-                        if matches!(data.outcome, ContextCompactionResult::Completed { .. }))
-                {
-                    return Err(error("snapshot anchor is not the identified completed compaction"));
+                if anchor.event.id != snapshot.event_id {
+                    return Err(error("snapshot anchor is not the identified event"));
                 }
                 connection.execute(
                     "INSERT OR REPLACE INTO timeline_snapshots VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1081,7 +1078,7 @@ impl TimelineStore for SqliteTimelineStore {
             let interpreter = interpreter.to_owned();
             self.db.run(move |connection| {
                 connection.query_row(
-                    "SELECT s.sequence, s.event_id, s.interpreter, s.state FROM timeline_snapshots s JOIN timeline_events e ON e.session_id=s.session_id AND e.branch_id=s.branch_id AND e.sequence=s.sequence AND e.event_id=s.event_id WHERE s.session_id=?1 AND s.branch_id=?2 AND s.sequence<=?3 AND s.interpreter=?4 AND typeof(s.sequence)='integer' AND s.sequence>0 AND typeof(s.event_id)='text' AND typeof(s.state)='text' AND e.kind='context/compaction' AND json_valid(e.body) AND json_extract(e.body, '$.record.event.data.status')='completed' AND json_extract(e.body, '$.record.event.id')=s.event_id AND json_extract(e.body, '$.record.event.sequence')=s.sequence ORDER BY s.sequence DESC LIMIT 1",
+                    "SELECT s.sequence, s.event_id, s.interpreter, s.state FROM timeline_snapshots s JOIN timeline_events e ON e.session_id=s.session_id AND e.branch_id=s.branch_id AND e.sequence=s.sequence AND e.event_id=s.event_id WHERE s.session_id=?1 AND s.branch_id=?2 AND s.sequence<=?3 AND s.interpreter=?4 AND typeof(s.sequence)='integer' AND s.sequence>0 AND typeof(s.event_id)='text' AND typeof(s.state)='text' AND json_valid(e.body) AND json_extract(e.body, '$.record.event.id')=s.event_id AND json_extract(e.body, '$.record.event.sequence')=s.sequence ORDER BY s.sequence DESC LIMIT 1",
                     params![key.session_id, key.branch_id, sql_sequence(through)?, interpreter],
                     |row| Ok(RecoverySnapshot { sequence: read_sequence(row, 0)?, event_id: row.get(1)?, interpreter: row.get(2)?, state: row.get(3)? }),
                 ).optional().map_err(error)
