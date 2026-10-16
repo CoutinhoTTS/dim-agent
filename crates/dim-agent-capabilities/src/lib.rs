@@ -51,6 +51,7 @@ impl SessionService for host::PrepareContextHost {}
 impl SessionService for host::ContextModelHost {}
 impl SessionService for host::CompactionStrategyHost {}
 impl SessionService for host::PromptHost {}
+impl SessionService for permission::CommandRulesHost {}
 impl SessionService for host::ModelHost {}
 impl SessionService for host::ToolHost {}
 impl SessionService for methods::SessionMethods {}

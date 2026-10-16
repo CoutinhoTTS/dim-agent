@@ -54,6 +54,7 @@ impl Shell {
                 output_root: target.join("outputs"),
             },
         );
+        dim_app_server::permission_rules::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
         let model = models.default_model().clone();
         let server = serve(
