@@ -9,7 +9,9 @@ use super::{
 };
 use crate::{
     host::{HostError, ToolExecutionContext},
-    host_platform::{HostPlatform, Os, ProcessSpec, ProcessTree, ShellEdition, ShellKind},
+    host_platform::{
+        HostPlatform, Os, ProcessSpec, ProcessTree, ShellEdition, ShellKind, ShellStatus,
+    },
     tool_registry::definition,
 };
 use dim_agent_runtime::Branch;
@@ -39,7 +41,7 @@ const PREVIEW_BUFFER_HEADROOM_BYTES: usize = OUTPUT_PREVIEW_MAX_BYTES * 2;
 /// Maximum bytes written to one exec output file.
 const OUTPUT_FILE_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
 /// Pipe reading continues this long after the root process exits.
-const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
+pub const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const DESCRIPTION_CHARS: usize = 200;
 
 const RUNTIME_BIN_ENV_KEYS: [&str; 5] = [
@@ -532,6 +534,67 @@ fn build_env(platform: &HostPlatform) -> Vec<(OsString, OsString)> {
     env
 }
 
+/// Builds exec's process from a shell freshly read with `HostPlatform::exec_shell`.
+/// Refusals are `(reason, code)`. Tool policies and cwd argument resolution
+/// belong to the caller; `cwd` is an already resolved working directory.
+pub async fn build_process_spec(
+    platform: &HostPlatform,
+    shell: &ShellStatus,
+    command: &str,
+    cwd: &Path,
+) -> Result<ProcessSpec, (String, &'static str)> {
+    let shell = match shell {
+        ShellStatus::Available(shell) => shell,
+        ShellStatus::Unavailable { code, reason } => return Err((reason.clone(), code)),
+    };
+    let kind = shell.edition.kind();
+    if platform.os == Os::Windows && kind == ShellKind::Cmd && windows_network_share(cwd) {
+        return Err((
+            "Command Prompt cannot use a network-share workspace as its current directory.".into(),
+            "EXEC_SHELL_CWD_UNSUPPORTED",
+        ));
+    }
+    if !tokio::fs::metadata(cwd)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Err((
+            format!("Working directory not found: {}", cwd.display()),
+            "cwd_not_found",
+        ));
+    }
+    let env = build_env(platform);
+    let command = if kind == ShellKind::Posix {
+        prepend_runtime_path(
+            command,
+            &env,
+            platform,
+            &shell.executable_path,
+            shell.edition,
+            cwd,
+        )
+        .await
+        .map_err(|reason| (reason, "EXEC_SHELL_PATH_MAPPING_FAILED"))?
+    } else {
+        command.to_owned()
+    };
+    let args: &[&str] = match kind {
+        ShellKind::Posix => &["-lc"],
+        ShellKind::Powershell => &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+        ShellKind::Cmd => &["/d", "/s", "/v:off", "/c"],
+    };
+    Ok(ProcessSpec {
+        executable: shell.executable_path.clone(),
+        args: args
+            .iter()
+            .map(OsString::from)
+            .chain([command.into()])
+            .collect(),
+        cwd: cwd.to_owned(),
+        env,
+    })
+}
+
 fn env_str<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a str> {
     crate::host_platform::env_var(env, key).and_then(|value| value.to_str())
 }
@@ -684,16 +747,16 @@ async fn capture(platform: &HostPlatform, spec: ProcessSpec) -> Result<String, S
 /// Incremental canonical UTF-8 decoding of one stream (ADR 018): invalid and
 /// truncated bytes become `<0xNN>`, never U+FFFD.
 #[derive(Default)]
-struct Decoder {
+pub struct Decoder {
     pending: Vec<u8>,
 }
 impl Decoder {
-    fn write(&mut self, chunk: &[u8]) -> String {
+    pub fn write(&mut self, chunk: &[u8]) -> String {
         let mut input = std::mem::take(&mut self.pending);
         input.extend_from_slice(chunk);
         self.decode(&input, false)
     }
-    fn end(&mut self) -> String {
+    pub fn end(&mut self) -> String {
         let input = std::mem::take(&mut self.pending);
         self.decode(&input, true)
     }
@@ -747,7 +810,7 @@ fn escape_byte(byte: u8) -> String {
 }
 
 /// Removes control characters except `\t\n\r`, and U+FFF9–U+FFFB.
-fn sanitize(text: &str) -> String {
+pub fn sanitize(text: &str) -> String {
     text.chars()
         .filter(|&ch| {
             !(matches!(ch, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}')
@@ -781,7 +844,7 @@ fn head_bytes(text: &str, max: usize) -> &str {
 }
 
 /// TS `truncatePreview`: the last 2000 lines within 50 KiB.
-fn truncate_preview(text: &str) -> String {
+pub fn truncate_preview(text: &str) -> String {
     let sanitized = sanitize(text);
     if sanitized.is_empty() {
         return sanitized;
@@ -1307,12 +1370,13 @@ pub(super) async fn execute(
         Err((message, code)) => return Ok(failed(message, code)),
     };
     let platform = &tools.platform;
-    let shell = match &platform.shell {
-        crate::host_platform::ShellStatus::Available(shell) => shell,
-        crate::host_platform::ShellStatus::Unavailable { code, reason } => {
+    let shell_status = platform.exec_shell().await;
+    let shell = match &shell_status {
+        ShellStatus::Available(shell) => shell,
+        ShellStatus::Unavailable { code, reason } => {
             return Ok(failed(
                 format!(
-                    "exec shell is unavailable ({code}): {reason} Fix exec-shell.json and restart the service."
+                    "exec shell is unavailable ({code}): {reason} Fix exec-shell.json and retry."
                 ),
                 "exec_shell_unavailable",
             ));
@@ -1323,12 +1387,6 @@ pub(super) async fn execute(
         None => tools.cwd.clone(),
     };
     let kind = shell.edition.kind();
-    if platform.os == Os::Windows && kind == ShellKind::Cmd && windows_network_share(&cwd) {
-        return Ok(failed(
-            "Command Prompt cannot use a network-share workspace as its current directory.",
-            "EXEC_SHELL_CWD_UNSUPPORTED",
-        ));
-    }
     if kind == ShellKind::Posix && has_unquoted_posix_background_ampersand(&input.command) {
         return Ok(failed(
             "exec manages background tasks; remove shell background markers such as & and set runInBackground to true when the result can be handled later.",
@@ -1341,40 +1399,19 @@ pub(super) async fn execute(
     {
         return Ok(refused);
     }
-    if !tokio::fs::metadata(&cwd)
-        .await
-        .is_ok_and(|metadata| metadata.is_dir())
-    {
-        let shown = input
-            .cwd
-            .clone()
-            .unwrap_or_else(|| tools.cwd.to_string_lossy().into_owned());
-        return Ok(failed(
-            format!("Working directory not found: {shown}"),
-            "cwd_not_found",
-        ));
-    }
-    let env = build_env(platform);
-    let mut command = input.command.clone();
-    if kind == ShellKind::Posix {
-        command = match prepend_runtime_path(
-            &command,
-            &env,
-            platform,
-            &shell.executable_path,
-            shell.edition,
-            &cwd,
-        )
-        .await
-        {
-            Ok(command) => command,
-            Err(message) => return Ok(failed(message, "EXEC_SHELL_PATH_MAPPING_FAILED")),
-        };
-    }
-    let args: Vec<&str> = match kind {
-        ShellKind::Posix => vec!["-lc"],
-        ShellKind::Powershell => vec!["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
-        ShellKind::Cmd => vec!["/d", "/s", "/v:off", "/c"],
+    let spec = match build_process_spec(platform, &shell_status, &input.command, &cwd).await {
+        Ok(spec) => spec,
+        Err((_, "cwd_not_found")) => {
+            let shown = input
+                .cwd
+                .as_deref()
+                .map_or_else(|| tools.cwd.to_string_lossy(), std::borrow::Cow::Borrowed);
+            return Ok(failed(
+                format!("Working directory not found: {shown}"),
+                "cwd_not_found",
+            ));
+        }
+        Err((message, code)) => return Ok(failed(message, code)),
     };
     let task_id = format!("exec-{}", uuid::Uuid::new_v4());
     let background = input.run_in_background && !tools.member;
@@ -1385,16 +1422,7 @@ pub(super) async fn execute(
         cwd: cwd_text,
         timeout_ms: effective_timeout.map_or(-1, |timeout| timeout as i64),
     };
-    let spawned = platform.spawn(ProcessSpec {
-        executable: shell.executable_path.clone(),
-        args: args
-            .into_iter()
-            .map(OsString::from)
-            .chain([OsString::from(command)])
-            .collect(),
-        cwd: cwd.clone(),
-        env,
-    });
+    let spawned = platform.spawn(spec);
     let mut tree = match spawned {
         Ok(tree) => tree,
         Err(error) => {

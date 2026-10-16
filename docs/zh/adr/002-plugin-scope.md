@@ -115,8 +115,8 @@ issue #4 的工作。
 
 ## 现有插件
 
-现有插件已遵循 D1。有一项配置不符合 D4：exec shell 在 HostPlatform 的 `apply` 中只读取一次；
-它应作为业务配置在每次 spawn 时读取。
+现有插件遵循 D1。HostPlatform 通过每次执行命令时调用 `exec_shell()` 读取 exec shell 的业务
+配置来遵循 D4；修改它不会重载插件。
 
 ## 影响
 
