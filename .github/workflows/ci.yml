@@ -41,7 +41,7 @@ jobs:
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
           cargo test --locked -p dim-cli --test cli_flow -- --ignored
-      - name: Verify public Node provider bridge
+      - name: Verify public Node bindings
         shell: bash
         run: |
           set -euo pipefail
@@ -49,4 +49,4 @@ jobs:
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"
-          cargo test --locked -p dim-app-server --test transport_flow node_managed_provider_recovers_credentials_and_failure_is_local -- --ignored
+          cargo test --locked -p dim-app-server --test transport_flow node_ -- --ignored

@@ -1,8 +1,8 @@
 # Session TypeScript parts
 
-Status: proposed tool/method binding design for [C4 #63](https://github.com/arcships/dim/issues/63),
-with native broadcast choices requiring owner alignment. Production implementation and full C4
-acceptance are pending. The [spike](session-typescript-spike.md)
+Status: tool/method bindings implemented for [C4 #63](https://github.com/arcships/dim/issues/63).
+Native broadcast choices require owner alignment; broadcast implementation and full C4 acceptance
+remain pending. The [spike](session-typescript-spike.md)
 establishes transport feasibility; its private service names and combined fixture are not this API.
 
 ## Scope and ownership
@@ -30,8 +30,8 @@ remain unchanged. This work does not expose arbitrary runtime services through t
 
 The initial usable entry is the public App Server embedding API:
 `serve(builder, ServerConfig { session_typescript: Some(...), .. })`. It runs an actual App Server and its
-normal Rpc path; an example must demonstrate a protected local connection with a disposable home.
-This configuration field is proposed here and does not exist yet. General CLI installation,
+normal Rpc path. The [embedding example](../../crates/dim-app-server/examples/session_typescript.rs)
+uses a protected Unix connection and a disposable storage home. General CLI installation,
 marketplaces and editable plugin intent remain PluginManager work.
 
 The input contains the existing `LocalRuntime::node` arguments (`node`, `jsRuntime`, `anchor`,
@@ -79,6 +79,9 @@ a second runtime. On the existing online resolution, compare the Node descriptio
 with the row snapshot before loading that row. A mismatch is a row resolution error; it does
 not alter the configured names. The same resolved factory retains the original schema,
 dependency declarations, scoped factory, metadata and configuration validation.
+
+Rows naming the same module must use the same snapshot; distinct row ids alone do not make
+conflicting structural declarations valid.
 
 At this external configuration boundary reject malformed identities, unsupported method modes,
 duplicate tools, duplicate namespaces, host-tool collisions and the C1 reserved-name/namespace
@@ -190,6 +193,13 @@ which cannot implement `drain`. The native call ends its Promise lease on normal
 TypeScript code cooperatively settles after cancellation; no timeout or forced-success reply
 is invented for an uncooperative plugin.
 
+`rows.load` can reply before the native projection publishes its exported services. The original
+row subscribes to the existing `ServiceChanged` event before loading, reads only its declared
+method-service keys, and waits for their publication before binding C1. Its context owns the
+subscription; context cancellation ends the wait. The foreign cleanup is registered immediately
+after loading, so a failed declaration or cancelled binding still releases that row. This wait
+does not make another optional row required or change Session publication.
+
 ## Native Session broadcast
 
 Use rutis' existing node `Events` / Cordis `Link` path. Do not invoke a `notice` service to
@@ -286,28 +296,36 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 
 ## Impact and verification
 
-| Area | Necessary change after contract approval |
+| Area | Implementation and remaining boundary |
 | --- | --- |
 | App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, names/catalog derived from `provides`, optional Session rows and native resolver factory composition. |
 | ToolRegistry and its page | Native/foreign owner selection and declaration decoding at its existing first read. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
-| Session broadcast | Owner serialization, native projection and activation delivery after their contracts are settled; no hard dependency on optional transport. C6 owns notice data. |
+| Session broadcast | Pending: owner serialization, native projection and activation delivery after their contracts are settled; no hard dependency on optional transport. C6 owns notice data. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
 | Documentation | Owner pages, App Server README and Session-boundary Appendix F updated to the actually implemented subset. |
 | Tests and fixture | One real App Server/Node flow using a disposable home and local Rpc; focused malformed-boundary cases in that flow. |
 
-The flow must cover two Sessions sharing a Node PID; an Active tool declared on the immediate
+The executable Node/Rpc flows cover two Sessions sharing a Node PID; an Active tool declared on the immediate
 first model request after create and restore and executed through ToolExecutor; a pending optional
 part that does not block native use; a later Active tool omitted until reload; disabled rows;
-actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; native
-Session broadcast isolation and unload; continued native/other-Session use after one part closes.
+actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; continued
+native/other-Session use after one part closes. Native Session broadcast isolation and unload
+remain acceptance requirements for the pending broadcast binding.
 Gate each observed transition on an actual service/event/fence, not a sleep. Boundary cases cover
 declaration mismatch, invalid tool/method reply, name collisions and cancellation without leaking
 a Promise lease. Reuse C3/C1 tests for their unchanged native semantics.
 
-No automated test is warranted for this documentation-only change. The existing spike and local
-same-row/native-event experiments are evidence for their stated boundaries, not results for the
-product implementation. Full product acceptance and cross-platform evidence remain pending.
+The existing CI Node step executes the product Node/Rpc flows alongside the managed-provider
+flow. The Active-at-first-read fixture explicitly hard-depends on the TS method provider; it is
+a test host configuration, not a product readiness guarantee. Separate ordinary assembly covers
+Pending and disabled rows without delaying native Session use. Invalid tool/method declarations,
+malformed replies, online snapshot mismatch and conflicting module snapshots are boundary cases
+in those flows. The protected embedding example may observe Pending and prints durable history;
+submit/idle success alone does not certify that a TypeScript tool executed.
+
+The spike and local native-event experiments remain evidence only for their stated boundaries.
+Full C4 acceptance, broadcast delivery and cross-platform evidence remain pending.
 
 ## Ablation
 

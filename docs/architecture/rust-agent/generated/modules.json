@@ -401,8 +401,11 @@
       "file": "crates/dim-agent-capabilities/src/methods.rs",
       "unexpandedMacros": [
         "format",
+        "json",
         "tokio::pin",
-        "tokio::select"
+        "tokio::select",
+        "tracing::warn",
+        "vec"
       ]
     },
     {
@@ -666,7 +669,9 @@
       "file": "crates/dim-agent-capabilities/src/tool_registry.rs",
       "unexpandedMacros": [
         "format",
-        "tracing::warn"
+        "json",
+        "tracing::warn",
+        "vec"
       ]
     },
     {
@@ -1629,6 +1634,17 @@
       "file": "crates/dim-app-server/src/provider/secrets.rs",
       "unexpandedMacros": [
         "format",
+        "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::session_typescript",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/session_typescript.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json",
         "tokio::select"
       ]
     },
@@ -6804,6 +6820,7 @@
       "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError::failed",
         "path HostFuture",
         "path ToolExecutionContext",
         "path ToolHost"
@@ -6836,7 +6853,9 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
-        "use dim_agent_runtime::SessionConfig"
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity"
       ]
     },
     {
@@ -9730,6 +9749,15 @@
       "references": [
         "mod provider",
         "path provider::ProviderPlugin::default"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::session_typescript",
+      "references": [
+        "mod session_typescript",
+        "path session_typescript::Parts::new",
+        "path session_typescript::SessionTypeScriptConfig"
       ]
     },
     {
@@ -13451,6 +13479,57 @@
         "path StaticAuth::AwsBedrock",
         "path StaticAuth::Bearer",
         "path failure"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path SessionMethods::provide_foreign",
+        "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path valid_tool_name",
+        "use dim_agent_capabilities::tool_registry::valid_tool_name"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "path SESSION_GROUP",
+        "use dim_agent_runtime::AgentBuilder",
+        "use dim_agent_runtime::SESSION_GROUP"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_app_server",
+      "references": [
+        "path Result",
+        "path ServerError::Configuration",
+        "use crate::Result",
+        "use crate::ServerError"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::SessionNamespaces::new"
       ]
     },
     {

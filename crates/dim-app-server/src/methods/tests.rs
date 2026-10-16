@@ -98,7 +98,7 @@ impl Capability for Broken {
 fn decl(name: &str, interruption: Interruption) -> MethodDecl {
     MethodDecl::new(name, false, interruption)
 }
-fn rejected(result: Result<Accepted, RpcError>) -> &'static str {
+fn rejected(result: Result<Accepted, RpcError>) -> String {
     result.err().unwrap().data.unwrap().app_error
 }
 

@@ -1,8 +1,8 @@
 # Methods and tool contributions
 
-Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integration-by-existing-mechanisms), [Appendix B Rpc and ToolRegistry](../overview.md#appendix-b-supplements-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D3, D5. Phase: P0. Language: neutral contracts; Rust binding in [Appendix F](#appendix-f-rust-binding). The proposed [C4 binding](../session-typescript.md) defines the non-Rust assembly and language-boundary subset; it is not implemented yet.
+Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integration-by-existing-mechanisms), [Appendix B Rpc and ToolRegistry](../overview.md#appendix-b-supplements-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D3, D5. Phase: P0. Language: neutral contracts; Rust binding in [Appendix F](#appendix-f-rust-binding). The [C4 binding](../session-typescript.md) implements a non-Rust Session tool/method subset; native broadcast remains pending.
 
-This contract defines three named services in the language-neutral form of ADR 002 D5. Each is identified by a service name, a scope and an instance key; its methods take and return serializable data; errors are data; cancellation is a protocol action. A plugin in any language provides them by declaring them in its `provides` (loader row), and consumers collect them by name and scope. They are built on mechanisms the runtime already has: named services collected per scope and Rpc's existing dispatch through the Session, as `approval.respond` does today. Implementation status: `managementMethods` (#14), `sessionMethods` (C1) and the `toolContribution` attach rule (C3) are implemented through the Rust bindings in Appendix F; of `callChannel`, only per-call `progress` (C1) is implemented. The rest of `callChannel` and `provides`-based registration (#4) are not implemented, nor are `ConnectionEntry {name, deviceId}`, routing by `deviceId` and exported rutis links (proposed for P3, with RemoteGateway).
+This contract defines three named services in the language-neutral form of ADR 002 D5. Each is identified by a service name, a scope and an instance key; its methods take and return serializable data; errors are data; cancellation is a protocol action. A plugin in any language provides them by declaring them in its `provides` (loader row), and consumers collect them by name and scope. They are built on mechanisms the runtime already has: named services collected per scope and Rpc's existing dispatch through the Session, as `approval.respond` does today. Implementation status: `managementMethods` (#14), `sessionMethods` (C1) and the `toolContribution` attach rule (C3) are implemented through the Rust bindings in Appendix F; of `callChannel`, only per-call `progress` (C1) is implemented. The C4 embedding entry also derives Session tools/namespaces from `provides` and binds their neutral DTO subset. The rest of `callChannel` and general plugin installation are not implemented, nor are `ConnectionEntry {name, deviceId}`, routing by `deviceId` and exported rutis links (proposed for P3, with RemoteGateway).
 
 | Service | Scope | Key | Provided by | Collected by |
 | --- | --- | --- | --- | --- |
@@ -183,7 +183,7 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. R
 
 Withdrawn: rutis is an external dependency, so no requirement is raised to it. Rpc dispatches management methods with what rutis provides today (keyed reads, the configured `Owners` and `loader.get(row)`, §3.2); how `hello.features` reports them is Rpc's own design.
 
-Named services from non-Rust plugins rely on #4; its five items are in [session access §9](session-access.md#9-requirements-raised-to-mechanism-owners).
+The implemented foreign Session subset is [C4](../session-typescript.md); general plugin installation remains separate work.
 
 ## Appendix A. Interface details
 
@@ -191,7 +191,7 @@ Shapes are JSON with camelCase fields; a `?` after a field name marks it optiona
 
 ### A.1 Method contributions
 
-`sessionMethods` (Session, key namespace) and `managementMethods` (process, key namespace) have the same two methods. This neutral form is not implemented; the implemented Rust bindings of both are described in Appendix F.
+`sessionMethods` (Session, key namespace) and `managementMethods` (process, key namespace) have the same two methods. C4 implements the Session subset described in Appendix F; management methods retain their native binding.
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
@@ -217,7 +217,7 @@ Shapes are JSON with camelCase fields; a `?` after a field name marks it optiona
 { "code": -32000, "appError": "string", "message": "string" }
 ```
 
-Implemented today (Appendix F): `MethodDecl.name`, `MethodDecl.mutating`, and `interruption` and `progress` as Rust-only fields. `notifications`, `reply`, `callId`, `origin` and `handedOff` are not implemented.
+Implemented today (Appendix F): `MethodDecl.name`, `MethodDecl.mutating`, `interruption` and `progress`; C4 decodes these fields from foreign Session declarations and supplies a fresh `callId`. `notifications`, `reply`, `origin` and `handedOff` are not implemented.
 
 Cancellation and interruption: the provider replies to its own calls, not Rpc. Two events interrupt an admitted call: the unload of the provider's generation and the unload of the Rpc load that admitted it. On either, the handler's cancellation token fires, for `drain` calls too. A `report` call then replies `operation_interrupted` at once (the operation may already have committed) and settles afterwards; a `drain` call replies with its own result. The provider's unload waits for every call it accepted, `report` calls included. A caller's disconnect cancels nothing.
 
@@ -421,7 +421,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 
 ## Appendix F. Rust binding
 
-The neutral services above map to Rust as follows. The `toolContribution` binding and its first-read attachment rule are implemented (C3). The `managementMethods` (#14) and `sessionMethods` (C1) bindings are implemented, as a subset that does not yet meet ADR 002 D5: the neutral `describe`/`call` form, `MethodCall`/`MethodReply` and `callChannel` other than `progress` are not implemented, and only Rust plugins can provide them. Non-Rust plugins will provide services by name through rutis-bridge (`TypeKey::named`, `host_key(name)` with `dyn HostDispatch`) once #4 lands.
+The neutral services map to the existing native owners below. C3 retains its first-read tool attachment rule. The [C4 binding](../session-typescript.md) accepts Session services as `dyn HostDispatch` at `host_key_in("toolContribution:<tool>", session_instance)` and `host_key_in("sessionMethods:<namespace>", session_instance)`. ToolRegistry decodes the declaration once and retains that generation's handler. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives names from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods (#14) retain their native binding. Connection notifications, handoff, origin and native Session broadcast are outside the implemented C4 subset.
 
 | Neutral service | Rust type and key | Registration in Rust assemblies | Collection | Status |
 | --- | --- | --- | --- | --- |
@@ -443,10 +443,10 @@ pub enum Interruption { Report, Drain }
 pub struct MethodDecl {
     pub name: String,
     pub mutating: bool,
-    #[serde(skip)]
-    pub interruption: Interruption, // Rust-only; not serialized
-    #[serde(skip)]
-    pub progress: bool,             // Rust-only; not serialized
+    #[serde(skip_serializing)]
+    pub interruption: Interruption, // required in foreign declarations
+    #[serde(skip_serializing)]
+    pub progress: bool,             // required in foreign declarations
 }
 impl MethodProvider { // one provider generation: declarations, handler, admitted calls
     pub fn new(ctx: &Ctx, namespace: &str, declarations: Vec<MethodDecl>, handler: Handler)
@@ -469,6 +469,6 @@ impl ManagementMethods { // Deref<Target = MethodProvider>
 
 `Progress` binds A.2 `progress` per call rather than through a `callChannel` process service: Rpc passes each admitted call a sink that writes `management.progress {id, method, data}` to the calling connection, and the admission hands it to the handler only when the method declares `progress` and closes it before it hands over the reply. The sink queues progress under its own allowance on the connection, so progress never takes room from the reply or durable notifications. Management methods use the same path; none declares `progress` today.
 
-Not implemented: the neutral `describe`/`call` binding (a provider that takes `MethodCall` and returns `MethodReply` or `MethodError`), `callChannel`'s connection notifications and final-reply handoff, and the `notifications` and `reply` declaration fields. Their shapes are those of A.1 and A.2; the Rust names are chosen when they are implemented.
+C4's Session `describe`/`call` binding accepts the required declaration fields above, `{callId, method, params}`, a cancellation Promise and a per-call progress callback. It decodes `{kind:"value", value}` or owned `{code, appError, message}` errors. Unsupported declaration/reply fields and malformed data fail at this boundary. Not implemented: the corresponding foreign management binding, `callChannel` connection notifications/final-reply handoff, `origin`, and the `notifications` and `reply` declaration fields.
 
-`ToolContribution` and `ToolHandler` are the existing types in `dim-agent-capabilities/src/tool_registry.rs`; once #4 lands, the generated binding wraps a named tool service from another language in a `ToolHandler`.
+`ToolContribution` and `ToolHandler` remain the native types in `dim-agent-capabilities/src/tool_registry.rs`. C4 decodes a foreign synchronous declaration at the existing first read and wraps its async execute service in a `ToolHandler`. Each execution derives a child cancellation token so completing one call cannot cancel other tools in the same batch.
