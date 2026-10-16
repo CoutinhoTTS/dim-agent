@@ -690,6 +690,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "tokio::select",
         "tracing::warn",
         "vec"
       ]

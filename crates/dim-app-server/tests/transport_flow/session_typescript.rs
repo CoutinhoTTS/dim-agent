@@ -35,28 +35,6 @@ fn fixture() -> SessionTypeScriptConfig {
     }
 }
 
-// This host explicitly requires the fixture's method provider, so the
-// Active-at-first-read scenario does not depend on scheduler timing.
-struct ActiveFixture(SessionScope);
-impl TypedPlugin for ActiveFixture {
-    type Deps = (rutis::KeyedGate<SessionMethods>,);
-    fn name(&self) -> &str {
-        "ActiveTypeScriptFixture"
-    }
-    fn apply<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async { Ok(rutis::Effect::Done) })
-    }
-}
-impl Capability for ActiveFixture {
-    fn keys(&self) -> KeysOf<Self> {
-        (rutis::DepKey::dynamic("session.typescript").instance(self.0.instance),)
-    }
-}
-
 struct CheckedModel(tokio::sync::mpsc::UnboundedSender<Vec<String>>);
 impl ModelDriver for CheckedModel {
     fn invoke(
@@ -164,7 +142,6 @@ impl ToolDriver for SlowTools {
 
 async fn start(
     mut config: ServerConfig,
-    active: bool,
 ) -> (
     RunningServer,
     tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
@@ -174,14 +151,12 @@ async fn start(
         "dm-ts-{}/server.sock",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     )));
-    let (builder, recv, release) = setup(active);
+    let (builder, recv, release) = setup();
     let server = serve(builder, config).await.unwrap();
     (server, recv, release)
 }
 
-fn setup(
-    active: bool,
-) -> (
+fn setup() -> (
     AgentBuilder,
     tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
     Arc<tokio::sync::Notify>,
@@ -198,9 +173,6 @@ fn setup(
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
-    if active {
-        builder.session_plugin(|scope| ActiveFixture(*scope));
-    }
     (builder, recv, release)
 }
 
@@ -243,13 +215,10 @@ async fn started(client: &mut Client, id: u64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
-    let (server, mut requests, release) = start(
-        ServerConfig {
-            session_typescript: Some(fixture()),
-            ..Default::default()
-        },
-        true,
-    )
+    let (server, mut requests, release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
     let first = new_session(&mut client, json!(["ts_echo", "native_slow", "echo"])).await;
@@ -341,6 +310,30 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
             .await["error"]["code"],
         -32603
     );
+    let empty = client
+        .rpc("session.typescript.undefined", json!({"sessionId":first}))
+        .await;
+    assert_ok(&empty);
+    assert_eq!(empty["result"], Value::Null);
+    for method in ["extra_value", "extra_error", "handed_off"] {
+        assert_eq!(
+            client
+                .rpc(
+                    &format!("session.typescript.{method}"),
+                    json!({"sessionId":first})
+                )
+                .await["error"]["code"],
+            -32603
+        );
+    }
+    let progress_call = client
+        .send("session.typescript.status", json!({"sessionId":first}))
+        .await;
+    let progress = client.read("TypeScript progress before reply").await;
+    assert_eq!(progress["method"], "management.progress");
+    assert_eq!(progress["params"]["id"], progress_call);
+    assert_eq!(progress["params"]["data"]["phase"], "started");
+    assert_ok(&client.response(progress_call).await);
     submit(&mut client, &first, r#"tool:ts_echo {"text":"malformed"}"#).await;
     assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| result.result.is_error == Some(true)))));
 
@@ -424,7 +417,7 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
         session_typescript: Some(fixture()),
         ..Default::default()
     };
-    let (server, _requests, _) = start(config.clone(), true).await;
+    let (server, _requests, _) = start(config.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
     submit(&mut client, &session_id, r#"tool:ts_echo {"text":"saved"}"#).await;
@@ -432,14 +425,9 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     server.shutdown();
     server.join().await.unwrap();
 
-    let (server, mut requests, _) = start(config.clone(), true).await;
+    let (server, mut requests, _) = start(config.clone()).await;
     assert!(server.agent().unwrap().get_session(&session_id).is_none());
     let mut client = Client::new_version(&server, false, 3).await;
-    assert_ok(
-        &client
-            .rpc("session.typescript.status", json!({"sessionId":session_id}))
-            .await,
-    );
     submit(
         &mut client,
         &session_id,
@@ -528,7 +516,7 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
 
     let mut config = config;
     config.session_typescript.as_mut().unwrap().rows[0]["disabled"] = json!(true);
-    let (server, mut requests, _) = start(config, false).await;
+    let (server, mut requests, _) = start(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     submit(&mut client, &session_id, r#"tool:echo {"text":"native"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
@@ -550,12 +538,18 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-type Control = (SessionScope, rutis::Ctx, Arc<rutis_loader::Loader>);
+type Control = (
+    SessionScope,
+    rutis::Ctx,
+    Arc<rutis_loader::Loader>,
+    Arc<dim_agent_capabilities::tool_registry::ToolRegistry>,
+);
 struct ControlledGate(SessionScope, tokio::sync::mpsc::UnboundedSender<Control>);
 impl TypedPlugin for ControlledGate {
     type Deps = (
         Arc<rutis_loader::Loader>,
         rutis::KeyedGate<rutis_loader::RuntimeRows>,
+        InSession<dim_agent_capabilities::tool_registry::ToolRegistry>,
     );
     fn name(&self) -> &str {
         "ControlledTypeScriptDependency"
@@ -563,10 +557,12 @@ impl TypedPlugin for ControlledGate {
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (loader, _): Self::Deps,
+        (loader, _, InSession(registry)): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            self.1.send((self.0, ctx.clone(), loader)).unwrap();
+            self.1
+                .send((self.0, ctx.clone(), loader, registry))
+                .unwrap();
             Ok(rutis::Effect::Done)
         })
     }
@@ -575,7 +571,7 @@ impl Capability for ControlledGate {
     fn keys(&self) -> KeysOf<Self> {
         // Observe the settled initial metadata, rather than a fiber replaced
         // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
-        ((), rutis::DepKey::dynamic("session-node"))
+        ((), rutis::DepKey::dynamic("session-node"), self.0)
     }
 }
 
@@ -601,7 +597,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     gate["disabled"] = json!(true);
     parts.rows.push(json!({"id":"typescript", "name":entry.with_file_name("session-late.ts"), "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-late.json")).unwrap()}));
     parts.rows.push(gate);
-    let (mut builder, mut requests, _) = setup(false);
+    let (mut builder, mut requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
     let server = serve(
@@ -619,7 +615,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     .unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     let session = new_session(&mut client, json!(["late", "echo"])).await;
-    let (scope, ctx, loader) = controls.recv().await.unwrap();
+    let (scope, ctx, loader, _) = controls.recv().await.unwrap();
     let view = loader
         .entries()
         .into_iter()
@@ -694,25 +690,43 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
 async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_native_tools() {
     let mut parts = fixture();
     parts.rows[0]["config"] = json!({"badDeclaration":true});
-    let (server, mut requests, _) = start(
-        ServerConfig {
-            session_typescript: Some(parts),
-            ..Default::default()
-        },
-        true,
-    )
+    let trace_home = std::env::temp_dir().join(format!("dm-ts-trace-{}", uuid::Uuid::new_v4()));
+    let (server, mut requests, _) = start(ServerConfig {
+        session_typescript: Some(parts),
+        trace_directory: trace_home.clone(),
+        ..Default::default()
+    })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let session = new_session(&mut client, json!(["ts_echo", "echo"])).await;
-    submit(&mut client, &session, r#"tool:echo {"text":"native"}"#).await;
+    let mut params = create(json!(["ts_echo", "echo"]));
+    params["trace"] = json!(true);
+    let created = client.rpc("session.create", params).await;
+    assert_ok(&created);
+    let session = created["result"]["sessionId"].as_str().unwrap();
+    let trace_path = created["result"]["tracePath"].as_str().unwrap();
+    submit(&mut client, session, r#"tool:echo {"text":"native"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
     assert_ok(
         &client
             .rpc("session.typescript.status", json!({"sessionId":session}))
             .await,
     );
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId":session}))
+            .await,
+    );
+    let records = read_trace(trace_path).await;
+    assert!(
+        records
+            .iter()
+            .any(|row| row["record"]["fields"]["operation"] == "tool.attach"
+                && row["record"]["fields"]["outcome"] == "invalid-declaration:ts_echo"),
+        "{records:?}"
+    );
     server.shutdown();
     server.join().await.unwrap();
+    std::fs::remove_dir_all(trace_home).unwrap();
 
     for bad_methods in [json!(true), json!("unsupported"), Value::Null] {
         let mut parts = fixture();
@@ -722,7 +736,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
             parts.rows[0]["provides"]["toolContribution:ghost"] =
                 json!({"declaration":"sync", "execute":"async"});
         }
-        let (mut builder, mut requests, _) = setup(false);
+        let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
         builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
         let server = serve(
@@ -740,7 +754,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         .unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
         let session = new_session(&mut client, json!(["ts_echo", "echo"])).await;
-        let (scope, _, loader) = controls.recv().await.unwrap();
+        let (scope, _, loader, _) = controls.recv().await.unwrap();
         let entry = loader
             .entries()
             .into_iter()
@@ -813,7 +827,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         let mut parts = fixture();
         parts.rows[0]["disabled"] = json!(true);
         parts.rows[0]["provides"] = change;
-        let (mut builder, _, _) = setup(false);
+        let (mut builder, _, _) = setup();
         // A disabled foreign row must not claim the native ShellInput owner.
         dim_agent_capabilities::shell_input::install(&mut builder);
         let error = serve(
@@ -834,7 +848,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     repeated["id"] = json!("different-row");
     repeated["provides"] = json!({});
     parts.rows.push(repeated);
-    let (builder, _, _) = setup(false);
+    let (builder, _, _) = setup();
     let error = serve(
         builder,
         ServerConfig {
@@ -849,4 +863,246 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         error.to_string().contains("same provides snapshot"),
         "{error}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_tool_only_first_request_on_create_and_restore() {
+    let home = std::env::temp_dir().join(format!("dm-ts-tool-{}", uuid::Uuid::new_v4()));
+    let mut parts = fixture();
+    let entry = PathBuf::from(parts.rows[0]["name"].as_str().unwrap());
+    parts.rows[0]["name"] = json!(entry.with_file_name("session-tool-only.ts"));
+    parts.rows[0]["provides"] = serde_json::from_str(include_str!(
+        "../../../../runtime/fixtures/session-tool-only.json"
+    ))
+    .unwrap();
+    let config = ServerConfig {
+        database_path: Some(home.join("sessions.sqlite")),
+        trace_directory: home.join("trace"),
+        session_typescript: Some(parts),
+        ..Default::default()
+    };
+    let mut saved: Option<String> = None;
+    for text in ["created", "restored"] {
+        let (server, mut requests, _) = start(config.clone()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let session_id = match &saved {
+            Some(id) => {
+                assert!(server.agent().unwrap().get_session(id).is_none());
+                id.clone()
+            }
+            None => new_session(&mut client, json!(["ts_echo", "echo"])).await,
+        };
+        submit(
+            &mut client,
+            &session_id,
+            &format!(r#"tool:ts_echo {{"text":"{text}"}}"#),
+        )
+        .await;
+        assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
+        let session = server.agent().unwrap().get_session(&session_id).unwrap();
+        let history = session.history("main", None).await.unwrap();
+        let result = history
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolResult(batch) => batch.results.first(),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(result.result.is_error, Some(true));
+        let dim_agent_types::ToolContent::Text(content) = &result.result.content else {
+            panic!("text result")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(content).unwrap()["arguments"]["text"],
+            text
+        );
+        saved = Some(session_id);
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_handlers() {
+    let (mut builder, _requests, _) = setup();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::env::temp_dir().join(format!(
+                "dm-ts-{}/server.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))),
+            session_typescript: Some(fixture()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    let (scope, _, loader, registry) = controls.recv().await.unwrap();
+    let retained = registry.fixed("ts_echo").unwrap();
+    let old = client
+        .rpc("session.typescript.status", json!({"sessionId":session_id}))
+        .await;
+    assert_ok(&client.rpc("session.submit", json!({"sessionId":session_id,"branchId":"main","text":r#"tool:ts_echo {"text":"cancel"}"#})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "session.typescript.wait_tool",
+                json!({"sessionId":session_id}),
+            )
+            .await,
+    );
+    let view = loader
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.id == "typescript"
+                && entry.instance.as_ref().is_some_and(|instance| {
+                    instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                })
+        })
+        .unwrap()
+        .view
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), view.restart())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut state = view.watch();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.borrow().state != rutis::FiberState::Active {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":session_id,"branchId":"main"}),
+            )
+            .await,
+    );
+    let session = server.agent().unwrap().get_session(&session_id).unwrap();
+    assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| result.result.is_error == Some(true)))));
+    let result = retained
+        .handler
+        .execute(
+            ToolCall {
+                id: "retained".into(),
+                name: "ts_echo".into(),
+                input: serde_json::from_value(json!({"text":"must not execute"})).unwrap(),
+            },
+            ToolExecutionContext {
+                turn_id: "retained".into(),
+                request_id: "retained".into(),
+                branch_id: "main".into(),
+            },
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("generation is unloading")
+    );
+    let current = client
+        .rpc("session.typescript.status", json!({"sessionId":session_id}))
+        .await;
+    assert_ok(&current);
+    assert_ne!(current["result"]["generation"], old["result"]["generation"]);
+    assert_eq!(current["result"]["calls"], 0);
+    submit(
+        &mut client,
+        &session_id,
+        r#"tool:echo {"text":"native survives row reload"}"#,
+    )
+    .await;
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_unload_cancels_a_stalled_describe() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut parts = fixture();
+    parts.rows[0]["config"] =
+        json!({"hangDescribe":{"host":"127.0.0.1","port":listener.local_addr().unwrap().port()}});
+    let (mut builder, mut requests, _) = setup();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::env::temp_dir().join(format!(
+                "dm-ts-{}/server.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))),
+            session_typescript: Some(parts),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let creating = client
+        .send("session.create", create(json!(["ts_echo", "echo"])))
+        .await;
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let (scope, _, loader, _) = controls.recv().await.unwrap();
+    let view = loader
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.id == "typescript"
+                && entry.instance.as_ref().is_some_and(|instance| {
+                    instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                })
+        })
+        .unwrap()
+        .view
+        .unwrap();
+    assert_eq!(view.state().state, rutis::FiberState::Loading);
+    tokio::time::timeout(Duration::from_secs(5), view.dispose())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read(&mut socket, &mut [0])
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        0,
+        "foreign row cleanup must close its socket"
+    );
+    let created = client.response(creating).await;
+    assert_ok(&created);
+    let session_id = created["result"]["sessionId"].as_str().unwrap();
+    submit(
+        &mut client,
+        session_id,
+        r#"tool:echo {"text":"native after cancelled binding"}"#,
+    )
+    .await;
+    assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
+    server.shutdown();
+    server.join().await.unwrap();
 }

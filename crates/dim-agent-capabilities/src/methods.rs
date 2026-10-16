@@ -366,6 +366,7 @@ enum DirectReply {
 enum ForeignReply {
     Value {
         kind: DirectReply,
+        #[serde(default)]
         value: Value,
     },
     Error {
@@ -393,8 +394,12 @@ impl SessionMethods {
         let declarations = service
             .invoke("describe", BridgeValue::List(vec![]))
             .map_err(|error| CordisError::PluginFailed(error.into()))?;
-        let declarations = settle(declarations)
-            .await
+        let cancelled = ctx.cancellation_token();
+        let declarations = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("Session method binding cancelled".into())),
+            declarations = settle(declarations) => declarations,
+        }
             .and_then(|value| value.json())
             .map_err(|error| CordisError::PluginFailed(error.into()))?;
         let declarations: Vec<MethodDecl> = serde_json::from_value(declarations)

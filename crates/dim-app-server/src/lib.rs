@@ -32,6 +32,7 @@ use dim_agent_runtime::{
     Agent, AgentBuilder, AgentError, SessionConfig, register_capability, wait_active,
 };
 use rutis::{Ctx, FiberView};
+use rutis_loader::RowsSource;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -214,6 +215,7 @@ pub const RESTARTABLE: [&str; 5] = ["Rpc", "Connection", "Transport", "Agents", 
 struct Processes {
     loader: rutis_loader::Loader,
     view: FiberView,
+    runtime_rows: Vec<rutis::TypeKey>,
 }
 impl Processes {
     /// The loader and the fiber of every top-level row (the process plugins).
@@ -251,10 +253,21 @@ impl Processes {
                     _ => ready = false,
                 }
             }
+            // RuntimeRows publishes its catalog after the process plugin's apply returns.
+            let unpublished = self.runtime_rows.iter().find(|key| {
+                root.get_as::<rutis_loader::RuntimeRows>((*key).clone())
+                    .is_none()
+            });
+            ready &= unpublished.is_none();
             if ready {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
+                if let Some(key) = unpublished {
+                    return Err(AgentError::Build(format!(
+                        "runtime row declarations were not published: {key:?}"
+                    )));
+                }
                 return wait_active(root, &views, Duration::ZERO, &CancellationToken::new()).await;
             }
             tokio::time::sleep_until(
@@ -694,6 +707,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if let Some(row) = private_row {
         rows.push(row);
     }
+    let runtime_rows = session_parts
+        .iter()
+        .map(|parts| rutis_loader::RuntimeRows::key(parts.rows_runtime.runtime_name()))
+        .chain(
+            node_resolver
+                .iter()
+                .map(|resolver| rutis_loader::RuntimeRows::key(resolver.runtime_name())),
+        )
+        .collect();
     let mut resolver = rutis_loader::Chain::new().with(builtins);
     if let Some(parts) = session_parts {
         resolver = resolver.with_shared(parts.resolver);
@@ -713,6 +735,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let processes = Processes {
         loader,
         view: loader_view,
+        runtime_rows,
     };
     let assembly = rutis_loader::Layer::new(
         "assembly",

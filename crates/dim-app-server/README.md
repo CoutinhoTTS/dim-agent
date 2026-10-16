@@ -426,9 +426,16 @@ cargo run --locked -p dim-app-server --example session_typescript -- \
   "$(command -v node)" "$PWD/runtime/node_modules/@arcships/rutis-runtime"
 ```
 
-Rows are optional: an immediate method call may report `service_reloading`; a tool that is not
-Active at the first registry read stays omitted until reload. Successful submit/idle replies
-certify native processing, not execution of an omitted tool; the example prints durable history
-to show the actual result. The acceptance fixture explicitly requires its TS provider to verify
-Active-at-first-read execution; ordinary Pending/disabled flows verify native continuity.
+After process reconciliation, existing startup readiness waits for the configured runtime's
+`RuntimeRows` catalog publication. The SDK refreshes its legal offline placeholder with the
+online declaration before publishing that catalog; the online `provides` must match the host
+snapshot. Each Session row then remains Loading until all its declared tool/method services are
+projected and its C1 methods are bound. Tool declarations are still read only at the first
+ToolRegistry read. Ordinary create/restore flows exercise the immediate first request, including
+a tool-only module without a test-only required dependency.
+
+Rows remain optional: a row genuinely Pending on a missing dependency does not delay native
+Session use; its methods may report `service_reloading` and its tools stay omitted until reload
+if absent at the first registry read. Successful submit/idle replies certify native processing,
+not execution of an omitted tool; the example prints durable history to show the actual result.
 Session broadcast and autonomous background work are outside this implemented binding subset.

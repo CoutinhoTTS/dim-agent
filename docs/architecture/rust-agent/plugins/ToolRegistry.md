@@ -47,10 +47,16 @@ authorization; a new tool is not model-visible until adoption.
 Named foreign tools use `toolContribution:<name>` through the existing bridge's
 instance key. The same first read decodes their synchronous `declaration()` as
 `ToolDefinition`, checks identity/risk, and retains that generation's handler.
+The handler also retains the original row context's existing cancellation token,
+published under the same tool service name and Session instance as a typed native
+key. Row cancellation rejects later executions through that handler and ends its
+in-flight native wait; the old table never selects a replacement generation.
+TypeScript effects still own settlement of the JavaScript work.
 Malformed declarations are omitted with an attach diagnostic. Execution maps the
 native call/context and Session configuration to the neutral A.5 request, then
 decodes `ToolResult` once. Each call's cancellation Promise uses a child of the
 batch token, so finishing its lease cannot cancel another call in that batch.
+Row cancellation ends the affected call's lease without cancelling the batch token.
 
 Initial attachment and adoption satisfy
 [Session boundary A.5](../../../design/contracts/session-boundary.md#a5-tool-contribution)

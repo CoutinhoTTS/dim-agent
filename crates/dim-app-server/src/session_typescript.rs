@@ -14,6 +14,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Local Node runtime arguments and ordinary loader rows, with a
 /// `RowSchema.provides` snapshot for names needed before Node starts.
@@ -153,22 +154,33 @@ impl Resolver for SessionResolver {
                 .get(name)
                 .ok_or_else(|| LoaderError::NotFound { name: name.into() })?;
             let original = self.runtime.resolve(name).await?;
-            if let Some(actual) = original.meta.get("provides")
-                && actual != &Value::Object(snapshot.clone())
-            {
-                return Err(LoaderError::Resolve {
-                    name: name.into(),
-                    message: "row provides differs from its structural declaration".into(),
-                });
+            match original.meta.get("provides") {
+                Some(Value::Object(actual)) if actual == snapshot => {}
+                // The pinned SDK resolves this placeholder again before releasing RuntimeRows.
+                None if original.meta["source"] == "runtime"
+                    && original.meta["schema"]
+                        == "unavailable: the Cordis runtime is not running" => {}
+                _ => {
+                    return Err(LoaderError::Resolve {
+                        name: name.into(),
+                        message: "row provides differs from its structural declaration".into(),
+                    });
+                }
             }
             let namespaces: Arc<[String]> = snapshot
                 .keys()
                 .filter_map(|name| name.strip_prefix("sessionMethods:").map(str::to_owned))
                 .collect();
+            let tools: Arc<[String]> = snapshot
+                .keys()
+                .filter(|name| name.starts_with("toolContribution:"))
+                .cloned()
+                .collect();
             let mut resolved = Resolved::new(Arc::new(BoundFactory {
                 inner: original.factory.clone(),
                 scope: None,
                 namespaces: namespaces.clone(),
+                tools: tools.clone(),
             }))
             .with_schema(original.schema.clone())
             .with_meta(original.meta.clone());
@@ -192,6 +204,7 @@ impl Resolver for SessionResolver {
                         instance: build.instance(SESSION_GROUP)?,
                     }),
                     namespaces: namespaces.clone(),
+                    tools: tools.clone(),
                 }))
             }));
             Ok(Arc::new(resolved))
@@ -203,6 +216,7 @@ struct BoundFactory {
     inner: Arc<dyn PluginFactory<Value>>,
     scope: Option<SessionScope>,
     namespaces: Arc<[String]>,
+    tools: Arc<[String]>,
 }
 impl PluginFactory<Value> for BoundFactory {
     fn name(&self) -> &str {
@@ -221,6 +235,7 @@ impl PluginFactory<Value> for BoundFactory {
                 CordisError::PluginFailed("TypeScript part outside a Session".into())
             })?,
             namespaces: self.namespaces.clone(),
+            tools: self.tools.clone(),
         }))
     }
 }
@@ -229,12 +244,13 @@ struct BoundRow {
     inner: Box<dyn Plugin>,
     scope: SessionScope,
     namespaces: Arc<[String]>,
+    tools: Arc<[String]>,
 }
-struct ProjectedMethods {
+struct ProjectedServices {
     keys: Arc<[TypeKey]>,
     changed: Arc<tokio::sync::Notify>,
 }
-impl rutis::Listener<rutis::ServiceChanged> for ProjectedMethods {
+impl rutis::Listener<rutis::ServiceChanged> for ProjectedServices {
     fn call<'a>(
         &'a self,
         _: &'a Ctx,
@@ -263,12 +279,24 @@ impl Plugin for BoundRow {
         ctx: &'a Ctx,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            for name in self.tools.iter() {
+                ctx.provide_as(
+                    TypeKey::keyed_dynamic::<CancellationToken>(name.as_str())
+                        .with_instance(self.scope.instance),
+                    Arc::new(ctx.cancellation_token()),
+                )?;
+            }
             let keys: Arc<[TypeKey]> = self
                 .namespaces
                 .iter()
                 .map(|namespace| {
                     host_key_in(&format!("sessionMethods:{namespace}"), self.scope.instance)
                 })
+                .chain(
+                    self.tools
+                        .iter()
+                        .map(|name| host_key_in(name, self.scope.instance)),
+                )
                 .collect();
             let changed = Arc::new(tokio::sync::Notify::new());
             // rows.load may reply before its service notification is projected.
@@ -279,7 +307,7 @@ impl Plugin for BoundRow {
                 Some(ctx.events().on(
                     ctx,
                     &rutis::EventKey::of(),
-                    ProjectedMethods {
+                    ProjectedServices {
                         keys: keys.clone(),
                         changed: changed.clone(),
                     },
@@ -288,7 +316,7 @@ impl Plugin for BoundRow {
             let cleanup = self.inner.apply(ctx).await?;
             ctx.effect(move || cleanup)?;
             let cancelled = ctx.cancellation_token();
-            for (namespace, key) in self.namespaces.iter().zip(keys.iter()) {
+            for (index, key) in keys.iter().enumerate() {
                 let service = loop {
                     if let Some(service) = ctx.get_as::<dyn HostDispatch>(key.clone()) {
                         break service;
@@ -298,7 +326,9 @@ impl Plugin for BoundRow {
                         _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("Session part binding cancelled".into())),
                     }
                 };
-                SessionMethods::provide_foreign(ctx, &self.scope, namespace, service).await?;
+                if let Some(namespace) = self.namespaces.get(index) {
+                    SessionMethods::provide_foreign(ctx, &self.scope, namespace, service).await?;
+                }
             }
             if let Some(listener) = listener {
                 listener

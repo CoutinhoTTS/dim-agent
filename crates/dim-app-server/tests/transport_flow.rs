@@ -150,7 +150,6 @@ impl Client {
     }
     async fn send(&mut self, method: &str, params: Value) -> u64 {
         self.id += 1;
-        eprintln!("RPC {}: {method}", self.id);
         let value = json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params});
         self.raw(value).await;
         self.id

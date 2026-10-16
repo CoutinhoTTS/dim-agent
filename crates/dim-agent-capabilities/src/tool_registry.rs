@@ -370,6 +370,7 @@ impl ToolHandler for HostTool {
 
 struct ForeignTool {
     service: Arc<dyn HostDispatch>,
+    generation: Arc<CancellationToken>,
     session_id: String,
     config: Arc<SessionConfig>,
 }
@@ -381,6 +382,9 @@ impl ToolHandler for ForeignTool {
         cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
         Box::pin(async move {
+            if self.generation.is_cancelled() {
+                return Err(HostError::failed("tool provider generation is unloading"));
+            }
             let cancel = cancel.child_token();
             let _finish = cancel.clone().drop_guard();
             let cancelled = Value::future(async move {
@@ -399,8 +403,11 @@ impl ToolHandler for ForeignTool {
                 .service
                 .invoke("execute", Value::List(vec![args.into(), cancelled]))
                 .map_err(|error| HostError::failed(error.to_string()))?;
-            let result = settle(reply)
-                .await
+            let result = tokio::select! {
+                biased;
+                _ = self.generation.cancelled() => return Err(HostError::failed("tool provider generation is unloading")),
+                result = settle(reply) => result,
+            }
                 .and_then(|value| value.json())
                 .map_err(|error| HostError::failed(error.to_string()))?;
             serde_json::from_value(result)
@@ -414,7 +421,15 @@ fn foreign_tool(
     name: &str,
     identity: &SessionIdentity,
     config: Arc<SessionConfig>,
+    ctx: &Ctx,
+    scope: &SessionScope,
 ) -> Result<Arc<ToolContribution>, String> {
+    let generation = ctx
+        .get_as::<CancellationToken>(
+            rutis::TypeKey::keyed_dynamic::<CancellationToken>(format!("toolContribution:{name}"))
+                .with_instance(scope.instance),
+        )
+        .ok_or("foreign tool has no owning generation")?;
     let value = service
         .invoke("declaration", Value::List(vec![]))
         .and_then(|value| value.json())
@@ -428,6 +443,7 @@ fn foreign_tool(
         definition,
         handler: Arc::new(ForeignTool {
             service,
+            generation,
             session_id: identity.session_id.clone(),
             config,
         }),
@@ -539,8 +555,14 @@ impl TypedPlugin for ToolRegistryPlugin {
                                     scope.instance,
                                 )) {
                                     Some(service) => {
-                                        match foreign_tool(service, name, &identity, config.clone())
-                                        {
+                                        match foreign_tool(
+                                            service,
+                                            name,
+                                            &identity,
+                                            config.clone(),
+                                            &context,
+                                            &scope,
+                                        ) {
                                             Ok(tool) => Some(tool),
                                             Err(error) => {
                                                 let span = diagnostics.span(
