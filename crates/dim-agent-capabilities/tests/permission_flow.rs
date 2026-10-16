@@ -100,7 +100,7 @@ fn agent(tools: Arc<RiskTools>) -> Agent {
     builder.build()
 }
 /// The default profile with `rules` bound in place of its empty host.
-fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<TestRules>) -> Agent {
+fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> Agent {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
@@ -742,4 +742,92 @@ async fn unreadable_rules_deny_command_calls_only() {
     })
     .await
     .expect("unreadable rules flow completed");
+}
+
+/// No rules; while `hold` is set a read waits for `release`.
+#[derive(Default)]
+struct HeldRules {
+    hold: std::sync::atomic::AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+impl ReadCommandRules for HeldRules {
+    fn rules(&self, _: CancellationToken) -> HostFuture<'_, Vec<CommandRule>> {
+        Box::pin(async move {
+            if self.hold.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(Vec::new())
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_policy_tightened_during_the_rules_read_decides_the_call() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let tools = Arc::new(RiskTools::default());
+        let rules = Arc::new(HeldRules::default());
+        let agent = ruled_agent(tools.clone(), rules.clone());
+
+        // First decision: FullAccess when the read starts, ReadOnly when it ends.
+        let session = agent
+            .create_session(config(preset(PermissionPreset::FullAccess)))
+            .await
+            .unwrap();
+        rules.hold.store(true, Ordering::SeqCst);
+        submit_exec(&session, "ls").await;
+        rules.entered.notified().await;
+        let permission = session.service::<Permission>("main").unwrap();
+        permission
+            .update(0, preset(PermissionPreset::ReadOnly))
+            .await
+            .unwrap();
+        rules.release.notify_one();
+        session.idle("main").await.unwrap();
+        assert_eq!(
+            text(&last_result(&session, "main").await),
+            "Tool `exec` is not allowed by the read-only preset (starting processes)"
+        );
+        session.close().await.unwrap();
+
+        // Recheck after an allow response: the tool is disallowed meanwhile.
+        rules.hold.store(false, Ordering::SeqCst);
+        let session = agent
+            .create_session(config(preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        submit_exec(&session, "ls").await;
+        let id = approval_request(&session, "ls").await;
+        rules.hold.store(true, Ordering::SeqCst);
+        let approval = session.service::<Approval>("main").unwrap();
+        approval
+            .respond(&id, ApprovalDecision::Allow)
+            .await
+            .unwrap();
+        rules.entered.notified().await;
+        let permission = session.service::<Permission>("main").unwrap();
+        permission
+            .update(
+                0,
+                PermissionPolicy {
+                    preset: PermissionPreset::WorkspaceWrite,
+                    allowed_tools: vec![],
+                    disallowed_tools: vec!["exec".into()],
+                },
+            )
+            .await
+            .unwrap();
+        rules.release.notify_one();
+        session.idle("main").await.unwrap();
+        assert_eq!(
+            text(&last_result(&session, "main").await),
+            "Tool `exec` is disallowed by the permission policy"
+        );
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 0);
+        session.close().await.unwrap();
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("policy race flow completed");
 }

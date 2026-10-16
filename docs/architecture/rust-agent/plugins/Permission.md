@@ -26,7 +26,8 @@ Command rules are read on each decision of an `execute_process` call with a
 string `command`, never cached, stored or replayed. A matching deny rule denies
 under every preset; a matching allow rule only turns an approval question into
 an allow, for a command without shell separators; a failed read denies the
-command call. See [permission command rules](../../../design/appserver/permission-command-rules.md).
+command call. The policy is taken after the read, so a change dispatched while
+it waits decides the call. See [permission command rules](../../../design/appserver/permission-command-rules.md).
 
 ## Tests
 
@@ -36,7 +37,8 @@ command call. See [permission command rules](../../../design/appserver/permissio
 `updates_are_versioned_per_branch_take_effect_when_dispatched_and_survive_restore`,
 `allow_rules_answer_approval_only_for_simple_commands_within_the_preset`,
 `deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_time`,
-`unreadable_rules_deny_command_calls_only`.
+`unreadable_rules_deny_command_calls_only`,
+`a_policy_tightened_during_the_rules_read_decides_the_call`.
 
 <!-- generated:plugin Permission — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

@@ -79,7 +79,7 @@ pub struct Permission {
     inner: Mutex<Inner>,
 }
 impl Permission {
-    /// Decides with the policy dispatched at the time of the call and, for a
+    /// Decides with the policy dispatched when the decision is made and, for a
     /// command call, the rules read now. Only a cancelled read is an error.
     pub async fn decide(
         &self,
@@ -87,6 +87,18 @@ impl Permission {
         risk: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<Decision, HostError> {
+        let command = match (Risk::of(risk), call.input.get("command")) {
+            (Risk::Execute, Some(serde_json::Value::String(command))) => Some(command.as_str()),
+            _ => None,
+        };
+        let rules = match command {
+            Some(_) => match self.rules.0.rules(cancel.clone()).await {
+                Err(HostError::Cancelled(reason)) => return Err(HostError::Cancelled(reason)),
+                read => Some(read),
+            },
+            None => None,
+        };
+        // Taken after the read: a policy dispatched while it waited applies.
         let policy = self.state.get().policy;
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
@@ -94,15 +106,11 @@ impl Permission {
                 reason: format!("Tool `{name}` is disallowed by the permission policy"),
             });
         }
-        let Some(command) = (match (Risk::of(risk), call.input.get("command")) {
-            (Risk::Execute, Some(serde_json::Value::String(command))) => Some(command.as_str()),
-            _ => None,
-        }) else {
+        let (Some(command), Some(rules)) = (command, rules) else {
             return Ok(decide(&policy, name, risk));
         };
-        let rules = match self.rules.0.rules(cancel.clone()).await {
+        let rules = match rules {
             Ok(rules) => rules,
-            Err(HostError::Cancelled(reason)) => return Err(HostError::Cancelled(reason)),
             // A deny rule may exist.
             Err(error) => {
                 return Ok(Decision::Deny {

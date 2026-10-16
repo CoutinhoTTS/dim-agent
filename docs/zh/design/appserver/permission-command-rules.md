@@ -356,3 +356,6 @@ App Server 流程（`crates/dim-app-server/tests/`）：
    （"Tool execution cancelled"）结束并返回取消，与该时刻批次被停止相同。
 4. **端口的 future 类型（§4.2）。** `HostFuture<'_, T>` 是现有的
    `BoxFuture<'_, Result<T, HostError>>` 别名。
+5. **策略快照（§5.2，评审）。** 规则读取是一次判定中唯一的等待；策略（`disallowedTools`、
+   `allowedTools`、预设）在读取之后获取，因此读取等待期间分发的 `permission/changed` 决定该调用，
+   首次判定与复核都是如此。

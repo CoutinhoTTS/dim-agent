@@ -385,3 +385,6 @@ Corrections to the draft found against the code; the sections above already stat
    cancellation is returned, as for a batch stopped at that point.
 4. **Port future type (§4.2).** `HostFuture<'_, T>` is the existing alias of
    `BoxFuture<'_, Result<T, HostError>>`.
+5. **Policy snapshot (§5.2, review).** The rules read is the only wait in a decision; the policy
+   (`disallowedTools`, `allowedTools`, preset) is taken after it, so a `permission/changed`
+   dispatched while the read waits decides the call, at the first decision and at the recheck.
