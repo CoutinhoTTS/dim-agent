@@ -20,7 +20,7 @@ The proposed enabled policy is:
 | Other host paths | No file-content read or write grant. Path metadata may be visible on macOS; directory names and existence are not confidential under this policy. |
 | Network | No access to host or external IPv4/IPv6 networks, including host loopback. Linux may permit communication within the new network namespace. No proxy, per-command exception, network approval or automatic retry without isolation. |
 | Environment | Retain only explicitly named entries from the existing ProcessSpec environment. Naming a variable grants its value, not access to a path it names. HostPlatform does not synthesize credential variables. |
-| Runtime devices | Only backend-required null/random/terminal devices and the caller's existing stdio/PTY. These are execution mechanics, not additional workspace grants. |
+| Runtime files/devices | Only the Linux private namespace's `/proc`, backend-required null/random/terminal devices and the caller's existing stdio/PTY. These are execution mechanics, not additional host file grants. |
 | Existing processes | A policy edit affects the next process start. An existing exec tree or persistent shell keeps its startup policy until its owner ends it. |
 
 This is a process filesystem/network boundary, not a sandbox for trusted plugins or a limit on
@@ -58,8 +58,11 @@ fails within the boundary; Permission approval does not widen it.
 
 All five fields are required in a present file. Unknown fields, missing/unknown versions,
 malformed data, unreadable files, non-absolute paths, nonexistent/non-directory roots and invalid
-environment names are configuration errors. Roots are canonicalized at this external boundary;
-the same resolved root cannot occur in both lists. A writable descendant inside a read-only
+environment names are configuration errors. Names must be nonempty and contain neither NUL nor `=`.
+Roots are canonicalized at this external boundary;
+the same resolved root cannot occur in both lists. Writable roots must not overlap the configured
+application home, which holds the policy and other host authority; a command cannot edit its own
+execution policy or enabled plugin configuration. A writable descendant inside a read-only
 directory is an explicit write grant; grants are additive, so a read-only descendant does not
 subtract a writable ancestor's authority. Each environment name selects an exact existing key;
 an absent key adds nothing. The lists may be empty. Disabled configuration still validates.
@@ -174,6 +177,8 @@ or the policy file body.
 HostPlatform remains publishable when isolation configuration is invalid or unavailable, as it
 does for shell preferences; only affected execution fails. File tools and unrelated Sessions
 remain usable. A disabled policy cannot be selected by a model argument or approval response.
+The chosen file contents and grants are one startup snapshot. Concurrent host policy/path changes
+do not add a new atomicity guarantee; no lock, grant lease or filesystem virtualization is added.
 Restore/fork uses the current host policy for new processes and never restores authority from
 history. Detach, close and process cancellation retain their current ownership and semantics.
 
@@ -195,7 +200,8 @@ writes and metadata changes; an escaping symlink; TCP and UDP to live host liste
 UNIX socket outside grants; real PTY execution and resizing; and whole-tree cancellation with
 descendants reaped. Exercise foreground and background exec, live policy edits for the next
 process, retention of running-shell policy, exact environment filtering, malformed/unavailable
-policy without a payload marker, and disabled compatibility. Use only disposable roots/home,
+policy without a payload marker, refusal of writable roots overlapping application home, and
+disabled compatibility. Use only disposable roots/home,
 credentials-free environment and local listeners. Windows exercises explicit refusal without
 the payload marker. Do not add a separate test for every private parser/helper.
 
