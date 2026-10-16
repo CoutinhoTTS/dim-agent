@@ -1,11 +1,13 @@
 use super::{
     CatalogEntry, CatalogVersion, CatalogView, RefreshTarget, SkillIssue, SkillStatus, SkillsError,
+    Wake,
     discovery::{RootKind, RootSnapshot, scan_root},
 };
 use crate::{
     host_platform::HostPlatform,
+    settings::settings_changes,
     skill_settings::{
-        SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
+        SOURCE, SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
         SkillSettingsSnapshot,
     },
 };
@@ -276,7 +278,10 @@ impl SkillsCatalogPlugin {
     ) -> Result<Arc<SkillsCatalog>, CordisError> {
         let settings = settings.0.clone();
         let lifecycle = ctx.cancellation_token();
-        let mut changes = settings.changes();
+        // Listen before the first read, so no later write goes unread.
+        let (wake, mut changes) = watch::channel(());
+        ctx.events()
+            .on(ctx, &settings_changes(SOURCE), Wake(wake))?;
         let initial = settings
             .skills(lifecycle.child_token())
             .await
@@ -325,10 +330,11 @@ impl Capability for SkillsCatalogPlugin {
     }
 }
 
-/// In-memory `SkillSettings` for tests and embedded hosts without storage.
+/// In-memory `SkillSettings` for tests and embedded hosts without storage. The
+/// catalog is its only writer and reads back its own writes, so it announces
+/// nothing.
 pub struct MemorySkillSettings {
     state: Mutex<SkillSettingsSnapshot>,
-    changed: watch::Sender<()>,
 }
 impl Default for MemorySkillSettings {
     fn default() -> Self {
@@ -337,7 +343,6 @@ impl Default for MemorySkillSettings {
                 version: "0".into(),
                 disabled: BTreeSet::new(),
             }),
-            changed: watch::channel(()).0,
         }
     }
 }
@@ -357,25 +362,18 @@ impl SkillSettings for MemorySkillSettings {
         _: CancellationToken,
     ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>> {
         Box::pin(async move {
-            let version = {
-                let mut state = self.state.lock().unwrap();
-                if state.version != expected {
-                    return Err(SkillSettingsError::Conflict);
-                }
-                if enabled {
-                    state.disabled.remove(&id);
-                } else {
-                    state.disabled.insert(id);
-                }
-                let next = state.version.parse::<u64>().unwrap_or_default() + 1;
-                state.version = next.to_string();
-                state.version.clone()
-            };
-            self.changed.send_replace(());
-            Ok(version)
+            let mut state = self.state.lock().unwrap();
+            if state.version != expected {
+                return Err(SkillSettingsError::Conflict);
+            }
+            if enabled {
+                state.disabled.remove(&id);
+            } else {
+                state.disabled.insert(id);
+            }
+            let next = state.version.parse::<u64>().unwrap_or_default() + 1;
+            state.version = next.to_string();
+            Ok(state.version.clone())
         })
-    }
-    fn changes(&self) -> watch::Receiver<()> {
-        self.changed.subscribe()
     }
 }

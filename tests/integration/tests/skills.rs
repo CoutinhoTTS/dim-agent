@@ -1,7 +1,8 @@
 mod local_support;
 
 use dim_agent_capabilities::{
-    skill_settings::SkillSettings,
+    settings::{SettingsChanged, SettingsScope, settings_changes},
+    skill_settings::{SOURCE, SkillSettings},
     skills::{RefreshTarget, SkillIssue, SkillStatus, SkillsBranch, SkillsError},
 };
 use dim_agent_runtime::capability_plugin;
@@ -393,6 +394,36 @@ async fn enablement_changes_the_list_and_loading() {
     wait_view_change(&session, &before).await;
     assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-1"));
 
+    // Another writer of the Skills source: Sessions follow the write once
+    // Settings announces it, not before.
+    let before = view_version(&session);
+    let current = env.settings.skills(Default::default()).await.unwrap();
+    let revision = env
+        .settings
+        .clone()
+        .update_skills(current.version, b.clone(), false, Default::default())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(view_version(&session), before);
+    env.root
+        .events()
+        .emit(
+            &env.root,
+            &settings_changes(SOURCE),
+            std::sync::Arc::new(SettingsChanged {
+                source: SOURCE,
+                scope: SettingsScope::User,
+                revision,
+            }),
+        )
+        .unwrap();
+    wait_view_change(&session, &before).await;
+    assert_eq!(
+        result_text(&load(&env, &session, "b").await),
+        "Skill is disabled: b"
+    );
+
     assert_eq!(
         env.catalog()
             .set_enabled("user:missing", false, Some(&layout.cwd))
@@ -401,10 +432,9 @@ async fn enablement_changes_the_list_and_loading() {
         SkillsError::UnknownSkill("user:missing".into())
     );
 
-    // An empty view clears the list.
+    // An empty view clears the list; `b` is already disabled.
     for id in [
         "user:a".to_owned(),
-        b,
         format!("workspace:{}:nested/d", layout.project.to_string_lossy()),
     ] {
         let before = view_version(&session);
@@ -490,9 +520,6 @@ impl SkillSettings for SlowFirstResponse {
             Ok(version)
         })
     }
-    fn changes(&self) -> tokio::sync::watch::Receiver<()> {
-        self.inner.changes()
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -563,7 +590,7 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
     root.shutdown().await.unwrap();
 }
 
-/// Fails the settings reads that follow a write, `fail_after_write` times.
+/// Fails the next `failing` settings reads; a write fails its read-back.
 struct FailingReads {
     inner: std::sync::Arc<dim_agent_capabilities::skills::MemorySkillSettings>,
     failing: std::sync::atomic::AtomicUsize,
@@ -606,18 +633,13 @@ impl SkillSettings for FailingReads {
         std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
     > {
         Box::pin(async move {
-            // The write's read-back and its notification's read both fail.
-            // Armed before the write publishes its notification, so the
-            // listener cannot read before the faults are in place.
-            self.failing.store(2, std::sync::atomic::Ordering::SeqCst);
+            // The write's read-back fails.
+            self.failing.store(1, std::sync::atomic::Ordering::SeqCst);
             self.inner
                 .clone()
                 .update_skills(expected, id, enabled, cancel)
                 .await
         })
-    }
-    fn changes(&self) -> tokio::sync::watch::Receiver<()> {
-        self.inner.changes()
     }
 }
 
@@ -772,15 +794,7 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
         matches!(failed, Err(SkillsError::SettingsSync(_))),
         "{failed:?}"
     );
-    // Reads work again once both faults are consumed: the next query
-    // catches up without a new change.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while settings.failing.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the listener read after the change");
+    // Reads work again: the next query catches up without a new change.
     let view = catalog.query(Some(&layout.cwd)).await.unwrap();
     let entry = view
         .entries

@@ -107,6 +107,21 @@ pub struct RefreshTarget {
     pub project: Option<PathBuf>,
 }
 
+/// Wakes its owner's task on each event it listens to. rutis awaits one
+/// channel's listeners in turn, so the owner works in its own task, never in
+/// the listener; wakes coalesce and the owner rereads current state.
+struct Wake(tokio::sync::watch::Sender<()>);
+impl<E: rutis::Event<Value = ()>> rutis::Listener<E> for Wake {
+    fn call<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        _: &'a E,
+    ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
+        self.0.send_replace(());
+        Box::pin(async { Ok(None) })
+    }
+}
+
 /// What a Session's model may see and load. `version` digests every Skill's
 /// identity and body, so a body-only change is a new view.
 #[derive(Debug)]

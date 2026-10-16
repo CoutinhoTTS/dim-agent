@@ -16,7 +16,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | `ToolContribution` / `SessionToolSource`，经 `AgentBuilder` 静态登记 | `dim-agent-capabilities/src/tool_registry.rs` | C3 |
 | Session 门面的 `history(branch, through)`：上限是已发布的头部，只读已发布的事件（内部 `Timeline::history` 才以已分配的头部为上限） | `dim-agent-runtime/src/agent.rs` | 不需要新接口：先取已发布的 head（`sequence`），再 `history(Some(head))`（#50） |
 | `PluginFilesPlugin`（UTF-8、锁） | `dim-app-server/src/plugin_files.rs` | S10 |
-| Settings 业务来源（MCP/Skills），变更经 rutis 事件 `settings.changed` 通知（S8a 已改） | `dim-app-server/src/settings.rs` | S8a |
+| Settings 业务来源（MCP/Skills），变更经 rutis 事件 `settings.changed` 通知（S8a 已改） | `dim-app-server/src/settings.rs`；事件合同在 `dim-agent-capabilities/src/settings.rs` | S8a |
 | 自动压缩事实；生产压缩宿主仍是 `ContextModelHost(None)` | `context_preparation.rs`、`main.rs` | 独立功能 |
 
 相关 PR：

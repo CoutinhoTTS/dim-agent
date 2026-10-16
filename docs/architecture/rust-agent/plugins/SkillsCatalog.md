@@ -10,17 +10,21 @@ project `.agents/skills` roots into queryable views with issues.
 | Service | Purpose |
 | --- | --- |
 | `P:HostPlatform` | Resolve the user home root. |
-| `P:SkillSettingsHost` | Read/update enablement and watch settings versions. |
+| `P:SkillSettingsHost` | Read and update enablement. |
 
 ## Events and lifetime
 
-No Timeline events; catalog versions are watch notifications. First use scans
-roots via blocking work; explicit refresh updates cached discovery. A tracked
-settings watcher serializes readbacks so stale responses cannot overwrite newer
-settings. Cancellation closes the catalog; cleanup joins its watcher. Reload
-creates fresh discovery caches. Read failures remain explicit and queries can
-retry unavailable settings; this is not a filesystem watcher or proof that a
-settings mutation was durably saved. xtask supplies in-memory settings.
+No Timeline events; catalog versions are watch notifications. Before its first
+settings read, the catalog listens with `ctx.events().on` to `settings.changed`
+on `settings_changes(SOURCE)`, its Settings source `skills`. The listener only
+wakes a tracked reader, which rereads the settings one read at a time so a stale
+response cannot overwrite newer settings. A host whose storage changes outside
+the catalog announces those writes there; the catalog reads back its own writes,
+so `MemorySkillSettings` (xtask, tests) announces nothing. First use scans roots
+via blocking work; explicit refresh updates cached discovery. Cancellation closes
+the catalog; cleanup joins its reader. Reload creates fresh discovery caches.
+Read failures remain explicit and queries can retry unavailable settings; this
+is not a filesystem watcher or proof that a settings mutation was durably saved.
 
 ## Tests
 
