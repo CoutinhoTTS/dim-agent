@@ -18,5 +18,6 @@
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
+- [Settings service](design/appserver/settings-service.md) (S8b draft)
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)
