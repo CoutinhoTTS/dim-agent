@@ -636,6 +636,7 @@ async fn launch_configured(
                 .join(dim_app_server::storage::COMMAND_OUTPUT_DIRECTORY),
         },
     );
+    dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     let server = serve(
         builder,

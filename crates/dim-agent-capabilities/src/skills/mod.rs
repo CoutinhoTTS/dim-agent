@@ -6,7 +6,9 @@ mod content;
 mod discovery;
 mod session;
 
-pub use catalog::{MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin};
+pub use catalog::{
+    CatalogChanged, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin, catalog_changes,
+};
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
 use dim_agent_runtime::AgentBuilder;
@@ -105,6 +107,21 @@ pub struct RefreshTarget {
     pub user: bool,
     /// The Session cwd whose project root is rescanned.
     pub project: Option<PathBuf>,
+}
+
+/// Wakes its owner's task on each event it listens to. rutis awaits one
+/// channel's listeners in turn, so the owner works in its own task, never in
+/// the listener; wakes coalesce and the owner rereads current state.
+struct Wake(tokio::sync::watch::Sender<()>);
+impl<E: rutis::Event<Value = ()>> rutis::Listener<E> for Wake {
+    fn call<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        _: &'a E,
+    ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
+        self.0.send_replace(());
+        Box::pin(async { Ok(None) })
+    }
 }
 
 /// What a Session's model may see and load. `version` digests every Skill's

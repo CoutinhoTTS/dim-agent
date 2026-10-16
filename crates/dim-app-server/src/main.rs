@@ -11,7 +11,7 @@ use dim_agent_capabilities::{
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
-use dim_app_server::{ServerConfig, ShutdownReason, collaboration, serve};
+use dim_app_server::{ServerConfig, ShutdownReason, collaboration, permission_rules, serve};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 #[cfg(windows)]
@@ -218,6 +218,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ModelProviderPlugin::process,
                 WorkspaceToolsConfig { output_root },
             );
+            permission_rules::install(&mut builder);
             builder
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));

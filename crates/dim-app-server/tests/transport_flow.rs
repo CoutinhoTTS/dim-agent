@@ -67,6 +67,9 @@ mod summaries;
 #[path = "transport_flow/management.rs"]
 mod management;
 
+#[path = "transport_flow/permission_rules.rs"]
+mod permission_rules;
+
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;
 

@@ -23,6 +23,7 @@ pub mod prompt_registry;
 pub mod prompt_sources;
 pub mod prompt_state;
 pub mod session_broadcast;
+pub mod settings;
 pub mod shell_session;
 pub mod shell_tools;
 pub mod skill_settings;
@@ -50,6 +51,7 @@ impl SessionService for host::PrepareContextHost {}
 impl SessionService for host::ContextModelHost {}
 impl SessionService for host::CompactionStrategyHost {}
 impl SessionService for host::PromptHost {}
+impl SessionService for permission::CommandRulesHost {}
 impl SessionService for host::ModelHost {}
 impl SessionService for host::ToolHost {}
 impl SessionService for methods::SessionMethods {}

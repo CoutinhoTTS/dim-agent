@@ -82,7 +82,17 @@ Standalone `AgentBuilder::build` owns a root and loader; `build_in(ctx)` owns an
 isolated loader key under the host; both create an `AgentAnchor` instance.
 `build_at(loader, ctx)` uses the host's existing loader.
 
-登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建必须检查 loader 的逐行失败报告，没有 fiber 的失败行也不能忽略；报告成功后仍须等待全部能力 Active，失败则回滚整个候选实例。
+登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建检查 loader 的逐行失败报告，按登记生成的真实 row ID 等待 AgentBuilder 注册的部件，包括作用域根和显式请求的扩展；这些必需行即使没有 fiber，失败也不能忽略。失败则回滚整个候选实例。
+
+宿主通过现有 loader 行配置直接追加的可选部件不是 AgentBuilder 的必需注册：其 Pending、Failed 或运行时缺失保留在 loader 状态中，不阻塞必需部件和首条输入。注册路径决定等待范围，不按语言、展示名或当前状态推断，也不新增 required/optional 标记或注册 API。所有行仍由同一个作用域分组持有并一起清理；服务的 `Deps`、Pending、audit 和失效传播不变。必需部件仍会等待自己声明的全部依赖，不能通过可选行绕过。
+
+因此，ShellInput、Attachments 等经 `AgentBuilder` 注册的第一方 Rust 部件也属于必需成员：它们不能 Active，Session 就不能发布。当前接受这一后果，因为这些部件的启动失败主要属于实现错误，其依赖是核心服务。若某个 Rust 功能开始依赖可能长期不可用的服务，应改由现有 loader 行安装；只有实际需求到来时才重新评估显式成员标记，现在不增加标记 API。
+
+必需部件在 `apply` 中登记的子插件仍由该部件等待；返回意味着其服务和订阅已就绪。debug 发布校验检查必需行及其子树的 Active 状态，发现未等待的子插件就拒绝发布；仅可选行及其子树不参加此 Active 校验。两者仍参加依赖读取和实例键审计。release 保留原有的作者责任与按注册行等待，不增加全进程诊断扫描。
+
+这修正装配自身的等待范围（[#132](https://github.com/arcships/dim/issues/132)，[ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)、[Session access §9.4](../../design/contracts/session-access.md#94-optional-parts-per-enabled-plugin)、[规则 §4.8](principles.md#4-通过时间线扩展行为)）。输入仍经原有分支初始化、ToolBinding 取样和 BranchOpening；不增加发布阶段或工具专用接线。顺序、批次、Timeline 及重载语义均不变。
+
+loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返回的行可能占用该等待。此限制保留在 #132 中，不因此增加后台创建管理器；部件仍应遵守 apply 只登记服务/订阅、发布后再开始业务工作的规则。
 
 首次 loader 装配也属于 Agent 已登记的创建操作；调用方取消等待不取消装配拥有权，`Agent::close()` 等待在途创建及其回滚后才释放 loader。请求的 Session 扩展由 `SessionExtension` 行装载，该行显式注入 `SessionIdentity`，不等待普通 Session 能力全部就绪。扩展与普通能力一起受候选 Session 的启动期限、Active 检查和分组回滚约束；作用域及扩展装配入口只初始化一次，不作为可独立重启的业务能力。嵌套实例归 Session 分组所有，不归创建它的行所有。
 
