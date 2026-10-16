@@ -82,6 +82,8 @@ display, while the submitted text and file bytes retain their original values.
 | `Ctrl+V` reaching the CLI | Read clipboard file entries, image data or text and insert them at the cursor. |
 | `Ctrl+C` with an idle nonempty draft | Clear the draft and release its local image data. With an empty draft, use the existing exit behavior. |
 | `Ctrl+C` during a running turn | Keep the existing stop and settlement flow. |
+| `Ctrl+C` twice during terminal paste | Cancel the unfinished paste and retain the preceding draft, including when its closing delimiter is missing. This consecutive pair is reserved; a single Ctrl+C byte is literal paste content. |
+| EOF key | Exit only with an empty draft; otherwise keep editing. Ctrl+Z is an EOF key only on Windows. |
 
 Enable bracketed paste only while the composer owns input, and restore terminal modes and
 paste settings when it yields or exits. The Unix input path must receive paste bytes before

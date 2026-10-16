@@ -11,11 +11,14 @@ and exits; redirected stdin supplies the prompt when `-p` is absent.
 Session. Session handles and diagnostics go to stderr. The stream preserves
 public fields, includes live observations after attach and does not replay stored
 history. Approval is denied, the turn is stopped and settled, and exec exits 3.
-Ctrl+C waits for settlement and exits 130.
+Ctrl+C waits for settlement and exits 130. Further interrupts while settling
+keep waiting; they do not carry over to the next interactive prompt.
 
 `exec --image PATH` adds a local PNG, JPEG, WebP or GIF; repeat it for several
-images or omit text for an image-only request. With text, the text part comes
-first and images retain argument order. Relative image paths use the invoking
+images or omit text for an image-only request. Empty or whitespace-only text is
+omitted when images are present; other text is preserved exactly and comes first.
+Images retain argument order. Without `-p`, redirected stdin is read through EOF,
+including for image-only requests. Relative image paths use the invoking
 process's cwd, including with `--cwd` or `exec resume`; image URLs are not fetched.
 
 ```text
@@ -30,12 +33,16 @@ The CLI reads and checks all local images before connecting: at most 20 images,
 5 MiB of image-file bytes each, and 8000 pixels per side. Format comes from bytes,
 including when a filename has another extension. Invalid/truncated headers fail;
 pixels are not resized or rewritten. The `image` dependency enables only these
-four formats and reads dimensions without decoding pixels. The final encoded
-request must fit 16 MiB; several valid files can still exceed that limit.
+four formats and reads dimensions without decoding pixels. Local symbolic links
+are followed, and file type is checked on the opened file. The combined base64
+size is checked before connecting; the final encoded request, including its JSON
+envelope and text, must still fit 16 MiB.
 
 An error reply to `session.submit` can follow an already queued input. The CLI
-reports uncertainty and exits without resending, even while the connection stays
-open. Resume the printed Session handle to inspect its state.
+reports uncertainty for publication failures and unclassified errors and exits
+without resending, even while the connection stays open. Known pre-commit input,
+Session, service and method rejections report their original error. Resume the
+printed Session handle to inspect an uncertain outcome.
 
 The idle prompt edits a multiline draft. Enter sends; Ctrl+J inserts a newline.
 Terminal bracketed paste inserts one group without submitting embedded newlines.
@@ -45,11 +52,20 @@ Multiline pastes and pastes over 16 KiB appear as atomic markers:
 > Explain [Paste 1: 120 lines]
   and compare with the current file.
 Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear
+Ctrl+C twice: cancel paste
 ```
 
 Arrows move by grapheme or display row; Home/End select the logical line's ends.
 Backspace/Delete remove an entire marker. Ctrl+C clears a nonempty idle draft;
-with an empty draft it exits. EOF exits without submitting the draft. Text wraps
+with an empty draft it exits. An EOF key exits only when the draft is empty;
+otherwise the draft remains editable. Ctrl+Z is an EOF key only on Windows.
+If a paste never delivers its closing delimiter, press Ctrl+C twice to discard
+that paste while keeping the preceding draft. That consecutive pair is reserved
+inside bracketed paste; a single Ctrl+C byte remains literal paste content.
+Paste bytes are not newline-normalized. Line labels follow Rust str::lines():
+standalone CR is retained but is not a line separator.
+An external interrupt discards the current paste and clears the idle draft.
+Text wraps
 and scrolls with the terminal size, and draft control characters are escaped for
 display while the original text is retained. A terminal reporting zero geometry
 uses 80 columns and 24 rows for the missing dimensions.
@@ -62,6 +78,9 @@ reply, retains a confirmed path and sends no further put or model input.
 Connection loss or an uncertain submission reply exits without retrying.
 Recognized commands require plain single-line input; attached command drafts are
 retained before any put or execution.
+An ordinary single-line terminal paste is plain text, so a pasted command runs
+only after the user presses Enter. Text resembling a stored-paste reference is
+ordinary user text, not an authenticated attachment handle.
 
 Type `@` and a local path to see matching entries. Up/Down selects a suggestion;
 Tab enters a directory or inserts a file, and Esc closes suggestions without changing

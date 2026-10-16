@@ -1,20 +1,29 @@
 use crate::Result;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use dim_agent_types::{ContentBlock, ImageSource, ImageSourceType};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
-    fs::File,
+    fs::OpenOptions,
     io::Read,
     path::{Path, PathBuf},
 };
 
 pub fn load(paths: &[PathBuf]) -> Result<Vec<ContentBlock>> {
+    let mut encoded_size = 0;
     paths
         .iter()
         .map(|path| {
             file(path)
-                .and_then(|content| match content {
-                    content @ ContentBlock::Image { .. } => Ok(content),
-                    _ => Err("Expected PNG, JPEG, WebP or GIF image data".into()),
+                .and_then(|content| {
+                    let ContentBlock::Image { ref source } = content else {
+                        return Err("Expected PNG, JPEG, WebP or GIF image data".into());
+                    };
+                    encoded_size += source.data.as_ref().expect("local image data").len();
+                    if encoded_size > 16 * 1024 * 1024 {
+                        return Err("Images exceed 16 MiB after base64 encoding".into());
+                    }
+                    Ok(content)
                 })
                 .map_err(|error| format!("Cannot use image {}: {error}", path.display()).into())
         })
@@ -22,10 +31,14 @@ pub fn load(paths: &[PathBuf]) -> Result<Vec<ContentBlock>> {
 }
 
 pub fn file(path: &Path) -> Result<ContentBlock> {
-    if !std::fs::metadata(path)?.is_file() {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
         return Err("Expected a local ordinary file".into());
     }
-    let mut file = File::open(path)?;
     let mut bytes = Vec::new();
     (&mut file).take(32).read_to_end(&mut bytes)?;
     let image_intent = image::guess_format(&bytes).is_ok()

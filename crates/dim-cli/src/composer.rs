@@ -458,9 +458,13 @@ impl Draft {
                 let reply = loop {
                     tokio::select! {
                         biased;
-                        _ = interrupts.recv(), if !cancelled => {
-                            cancelled = true;
-                            println!("Waiting for the text attachment to settle...");
+                        _ = interrupts.recv() => {
+                            if cancelled {
+                                println!("Still waiting for the text attachment to settle...");
+                            } else {
+                                cancelled = true;
+                                println!("Waiting for the text attachment to settle...");
+                            }
                         }
                         result = &mut response => break result?,
                     }
@@ -635,11 +639,18 @@ impl Decoder {
     fn next(&mut self) -> Option<Key> {
         loop {
             if let Some(paste) = &mut self.paste {
-                if let Some(end) = self
+                let end = self
                     .bytes
                     .windows(PASTE_END.len())
-                    .position(|s| s == PASTE_END)
+                    .position(|s| s == PASTE_END);
+                if let Some(cancel) = self.bytes.windows(2).position(|s| s == b"\x03\x03")
+                    && end.is_none_or(|end| cancel < end)
                 {
+                    self.bytes.clear();
+                    self.paste = None;
+                    return Some(Key::Rejected("Paste cancelled; draft retained"));
+                }
+                if let Some(end) = end {
                     paste.append(&self.bytes[..end]);
                     self.bytes.drain(..end + PASTE_END.len());
                     let paste = self.paste.take().expect("paste end");
@@ -660,7 +671,9 @@ impl Decoder {
             let &first = self.bytes.first()?;
             let key = match first {
                 3 => Key::Interrupt,
-                4 | 26 => Key::Eof,
+                4 => Key::Eof,
+                #[cfg(windows)]
+                26 => Key::Eof,
                 8 | 127 => Key::Backspace,
                 9 => Key::Tab,
                 10 => Key::Newline,
@@ -712,13 +725,17 @@ impl Decoder {
                         0xf0..=0xf4 => 4,
                         _ => 1,
                     };
-                    if self.bytes.len() < length {
-                        return None;
-                    }
+                    let length = length.min(self.bytes.len());
                     let value = std::str::from_utf8(&self.bytes[..length]);
                     let key = match value {
                         Ok(text) => Key::Text(text.into()),
-                        Err(_) => Key::Rejected("Terminal input must be UTF-8; draft retained"),
+                        Err(error) => {
+                            let length = error.error_len()?;
+                            self.bytes.drain(..length);
+                            return Some(Key::Rejected(
+                                "Terminal input must be UTF-8; draft retained",
+                            ));
+                        }
                     };
                     self.bytes.drain(..length);
                     return Some(key);
@@ -834,7 +851,7 @@ impl Screen {
             &escaped(notice.unwrap_or(if completion.is_some() {
                 "Tab: select or enter directory   Esc: close suggestions"
             } else {
-                "Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear"
+                "Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear  Ctrl+C twice: cancel paste"
             })),
             size.0.saturating_sub(1),
         ));
@@ -914,12 +931,7 @@ pub async fn edit(
                 }
                 draft.clear();
                 clipboard_read = None;
-                if let Some(paste) = &mut decoder.paste {
-                    paste.bytes.clear();
-                    paste.rejected = Some("Paste cancelled; draft cleared");
-                } else {
-                    decoder = Decoder::default();
-                }
+                decoder = Decoder::default();
                 notice = None;
                 completion = None;
                 dismissed = false;
@@ -1012,7 +1024,8 @@ pub async fn edit(
                     return Ok(true);
                 }
                 Key::Enter => {}
-                Key::Eof => return Ok(false),
+                Key::Eof if draft.parts.is_empty() => return Ok(false),
+                Key::Eof => notice = Some("Draft retained; clear it before exiting".into()),
                 Key::Interrupt if draft.parts.is_empty() => return Ok(false),
                 Key::Interrupt => {
                     draft.clear();

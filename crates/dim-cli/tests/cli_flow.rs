@@ -314,6 +314,8 @@ fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
         "empty",
         "stdin",
         "whitespace",
+        "whitespace_prompt",
+        "symlink",
         "twenty",
         "terminal",
     ] {
@@ -337,6 +339,11 @@ fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
             images.push(json!({"type":"image","source":{"type":"base64","mediaType":media_type,"data":STANDARD.encode(bytes)}}));
             paths.push(path);
         }
+        if source == "symlink" {
+            let link = home.0.join("linked.png");
+            std::os::unix::fs::symlink(home.0.join(&paths[0]), &link).unwrap();
+            paths[0] = link.to_str().unwrap().into();
+        }
         if source == "twenty" {
             images = images.iter().cycle().take(20).cloned().collect();
             paths = paths.iter().cycle().take(20).cloned().collect();
@@ -345,11 +352,11 @@ fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
             "prompt" => Some("compare /exit literally"),
             "empty" => Some(""),
             "stdin" => Some("stdin\r\nwith trailing newline\n"),
-            "whitespace" => Some(" \t\n"),
+            "whitespace" | "whitespace_prompt" => Some(" \t\n"),
             _ => None,
         };
         let mut expected = Vec::new();
-        if let Some(text) = text {
+        if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
             expected.push(json!({"type":"text","text":text}));
         }
         expected.extend(images);
@@ -375,7 +382,7 @@ fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
         if source == "prompt" {
             command.args(["resume", "session", "--json"]);
         }
-        if matches!(source, "prompt" | "empty") {
+        if matches!(source, "prompt" | "empty" | "whitespace_prompt") {
             command.args(["-p", text.unwrap()]);
         }
         if matches!(source, "stdin" | "whitespace") {
@@ -423,6 +430,11 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
     for (name, bytes, reason) in [
         ("text", b"not an image".to_vec(), "PNG, JPEG, WebP or GIF"),
         ("truncated", png[..8].to_vec(), "Invalid or truncated"),
+        (
+            "png_header_only",
+            png[..33].to_vec(),
+            "Invalid or truncated",
+        ),
         ("jpeg", b"\xff\xd8\xff".to_vec(), "Invalid or truncated"),
         ("gif", b"GIF89a".to_vec(), "Invalid or truncated"),
         ("webp", b"RIFF\0\0\0\0WEBP".to_vec(), "Invalid or truncated"),
@@ -436,6 +448,16 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
         (
             "tall",
             image_fixture(image::ImageFormat::Gif, 1, 8001),
+            "8000",
+        ),
+        (
+            "jpeg_wide",
+            image_fixture(image::ImageFormat::Jpeg, 8001, 1),
+            "8000",
+        ),
+        (
+            "webp_tall",
+            image_fixture(image::ImageFormat::WebP, 1, 8001),
             "8000",
         ),
         ("large", oversized, "5 MiB"),
@@ -459,6 +481,9 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
         assert!(output.stdout.is_empty());
         assert!(!home.0.join("rust").exists());
     }
+    let fifo = home.0.join("fifo");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     for args in [
         vec!["--image", "missing.png"],
         vec!["tui", "--image", "missing.png"],
@@ -466,6 +491,7 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
         vec!["exec", "--image", "missing.png"],
         vec!["exec", "--image", "http://127.0.0.1:9/missing.png"],
         vec!["exec", "--image", home.0.to_str().unwrap()],
+        vec!["exec", "--image", fifo.to_str().unwrap()],
         std::iter::once("exec")
             .chain(["--image", "missing.png"].repeat(21))
             .collect(),
@@ -484,36 +510,56 @@ fn invalid_exec_images_fail_before_connecting_or_creating_home() {
 
 #[test]
 fn exec_images_check_the_combined_encoded_frame_before_sending() {
-    let home = Home::new();
-    let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
-    png.resize(5 * 1024 * 1024, 0);
-    let image = home.0.join("large.png");
-    fs::write(&image, png).unwrap();
-    let daemon = home.daemon(|wire| {
-        wire.start(false);
-        wire.detach();
-    });
-    let mut command = home.command();
-    command.arg("exec").stdin(Stdio::null());
-    for _ in 0..3 {
-        command.arg("--image").arg(&image);
+    for size in [5 * 1024 * 1024, 4 * 1024 * 1024 - 3] {
+        let home = Home::new();
+        let early = size > 4 * 1024 * 1024;
+        let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
+        png.resize(size, 0);
+        let image = home.0.join("large.png");
+        fs::write(&image, png).unwrap();
+        let daemon = if early {
+            fs::remove_dir_all(home.0.join("rust")).unwrap();
+            None
+        } else {
+            Some(home.daemon(|wire| {
+                wire.start(false);
+                wire.detach();
+            }))
+        };
+        let mut command = home.command();
+        command.arg("exec").stdin(Stdio::null());
+        for _ in 0..3 {
+            command.arg("--image").arg(&image);
+        }
+        let output = command.output().unwrap();
+        if let Some(daemon) = daemon {
+            daemon.join().unwrap();
+        } else {
+            assert!(!home.0.join("rust").exists());
+        }
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
+        assert!(output.stdout.is_empty());
     }
-    let output = command.output().unwrap();
-    daemon.join().unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
-    assert!(output.stdout.is_empty());
 }
 
 #[test]
 fn submit_errors_on_a_live_connection_exit_without_resending() {
-    for app_error in ["submission_unknown", "publication_failed"] {
+    for (app_error, uncertain) in [
+        (Some("submission_unknown"), true),
+        (Some("publication_failed"), true),
+        (None, true),
+        (Some("session_invalid_input"), false),
+        (Some("invalid_params"), false),
+    ] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
             wire.start(false);
             let submit = wire.read("session.submit");
-            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"committed","sequence":9,"create_at":1,"type":"input","name":"message","data":{"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"once"}]},"mode":"queue"}}}));
-            wire.send(json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,"message":"Publication failed after queueing input","data":{"appError":app_error}}}));
+            if uncertain {
+                wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"committed","sequence":9,"create_at":1,"type":"input","name":"message","data":{"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"once"}]},"mode":"queue"}}}));
+            }
+            wire.send(json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,"message":"Submission failed","data":app_error.map(|code| json!({"appError":code}))}}));
             wire.detach();
         });
         let output = home
@@ -524,9 +570,15 @@ fn submit_errors_on_a_live_connection_exit_without_resending() {
         daemon.join().unwrap();
         assert_eq!(output.status.code(), Some(1));
         let diagnostic = String::from_utf8_lossy(&output.stderr);
-        assert!(diagnostic.contains("session: session"));
-        assert!(diagnostic.contains("input may already be queued"));
-        assert!(diagnostic.contains("instead of sending it again"));
+        assert!(diagnostic.contains("Submission failed"));
+        if uncertain {
+            assert!(diagnostic.contains("session: session"));
+            assert!(diagnostic.contains("input may already be queued"));
+            assert!(diagnostic.contains("instead of sending it again"));
+        } else {
+            assert!(!diagnostic.contains("input may already be queued"));
+            assert!(!diagnostic.contains("instead of sending it again"));
+        }
     }
 }
 
@@ -1425,6 +1477,11 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
             "remove keep [Paste 1: 2 lines]",
             "ABC",
             "first\nZsecond",
+            "kept across EOF",
+            "shift\nenter\nworks",
+            "after malformed UTF-8",
+            "standalone\rCR\r",
+            "resized draft",
         ] {
             let submit = wire.read("session.submit");
             assert_eq!(submit["params"]["text"], expected);
@@ -1457,7 +1514,33 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
     terminal.until("\n> ");
     terminal.raw(b"first\nsecond\x1b[H\x1b[A\x1b[BZ\x1b[F\r");
     terminal.until("\n> ");
-    terminal.write(b"/exit\n");
+    terminal.write(b"kept across EOF");
+    terminal.raw(b"\x04");
+    terminal.until("Draft retained; clear it before exiting");
+    terminal.raw(b"\x1a\r");
+    terminal.until("\n> ");
+    terminal.raw(b"shift\x1b[13;2uenter\x1b[27;2;13~works\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\xf0after malformed UTF-8\r");
+    terminal.until("\n> ");
+    terminal.paste("standalone\rCR\r");
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.raw(b"\r");
+    terminal.until("\n> ");
+    let size = libc::winsize {
+        ws_row: 6,
+        ws_col: 15,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0
+    );
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGWINCH) }, 0);
+    terminal.raw(b"resized draft\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\x04");
     assert!(wait(child).status.success());
     daemon.join().unwrap();
     let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
@@ -1548,7 +1631,7 @@ fn interactive_paste_put_rejection_retains_confirmed_paths_without_uploading_aga
         wire.reply(&submit, json!({"event":{}}));
         let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
         let put = wire.read("attachment.put");
-        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32601,"message":"unknown_method"}}));
+        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32601,"message":"unknown_method","data":{"appError":"unknown_method"}}}));
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], "clean draft");
         wire.reply(&submit, json!({"event":{}}));
@@ -1612,6 +1695,8 @@ fn interactive_paste_cancellation_drains_the_put_and_reuses_its_confirmed_path()
     admitted.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     terminal.until("Waiting for the text attachment to settle");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Still waiting for the text attachment to settle");
     release.send(()).unwrap();
     terminal.until("Preparation cancelled");
     terminal.write(b"\n");
@@ -1701,6 +1786,9 @@ fn interactive_paste_boundaries_reject_without_losing_the_existing_draft() {
     let (mut terminal, child) = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"kept");
+    terminal.raw(b"\x1b[200~unfinished\x03");
+    terminal.raw(b"\x03");
+    terminal.until("Paste cancelled; draft retained");
     terminal.raw(b"\x1b[200~\xff\x1b[201~");
     terminal.until("Paste must be UTF-8");
     terminal.paste(&"x".repeat(10 * 1024 * 1024 + 1));
@@ -2872,7 +2960,8 @@ fn interrupted_shell_reply_retains_its_run_for_explicit_stop_and_settlement_feed
 #[test]
 fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (release, finish) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.start(false);
         let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
         let idle = wire.read("session.idle");
@@ -2881,8 +2970,14 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
         wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"command":"inspect"}},"reason":"review"}));
         wire.reply(&run,json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"deferred output","truncated":false}));
         let stop=wire.read("session.stop");
+        finish.recv_timeout(Duration::from_secs(10)).unwrap();
         wire.notice("approval.cancelled",json!({"sessionId":"session","requestId":"approval"}));
         wire.reply(&idle,json!({"sequence":40})); wire.reply(&stop,json!({"sequence":40}));
+        let next = wire.read("session.submit");
+        assert_eq!(next["params"]["text"], "after interrupts");
+        wire.reply(&next,json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle,json!({"sequence":40}));
         wire.detach();
     });
     let (mut terminal, child) = Terminal::launch(home.command());
@@ -2894,6 +2989,11 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
     assert!(!terminal.transcript.contains("deferred output"));
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     terminal.until("[stopping] Waiting for resource settlement");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("[stopping] Still waiting for resource settlement");
+    release.send(()).unwrap();
+    terminal.until("\n> ");
+    terminal.write(b"after interrupts\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(wait(child).status.success());
