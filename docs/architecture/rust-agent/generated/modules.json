@@ -1331,6 +1331,46 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::auth",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/auth.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "tokio::select",
+        "tracing::info"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::auth::oauth",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::auth",
+      "file": "crates/dim-app-server/src/mcp/auth/oauth.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::auth::store",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::auth",
+      "file": "crates/dim-app-server/src/mcp/auth/store.rs",
+      "unexpandedMacros": [
+        "tokio::select",
+        "tracing::warn"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::auth::store::testing",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::auth::store",
+      "file": "crates/dim-app-server/src/mcp/auth/store.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_app_server::mcp::config",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -9619,7 +9659,7 @@
       "to": "dim_app_server::mcp",
       "references": [
         "mod mcp",
-        "path mcp::McpPlugin"
+        "path mcp::McpPlugin::new"
       ]
     },
     {
@@ -11426,6 +11466,14 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
@@ -11456,6 +11504,26 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::auth",
+      "references": [
+        "mod auth",
+        "path McpAuth",
+        "path McpAuth::new",
+        "path McpAuthError",
+        "path auth",
+        "use auth::McpAuth",
+        "use auth::McpAuthError"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::auth::store::testing",
+      "references": [
+        "use auth::testing"
       ]
     },
     {
@@ -11536,6 +11604,157 @@
       ]
     },
     {
+      "from": "dim_app_server::mcp::auth",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth",
+      "to": "dim_app_server::mcp::auth::oauth",
+      "references": [
+        "mod oauth",
+        "path oauth::Authorization",
+        "path oauth::Callback::Code",
+        "path oauth::Callback::Refused",
+        "path oauth::Grant::Code",
+        "path oauth::Grant::Refresh",
+        "path oauth::Request",
+        "path oauth::TokenError::Failed",
+        "path oauth::TokenError::InvalidClient",
+        "path oauth::TokenError::Rejected",
+        "path oauth::TokenError::Unavailable",
+        "path oauth::callback",
+        "path oauth::http",
+        "path oauth::loopback",
+        "path oauth::now",
+        "path oauth::revoke",
+        "path oauth::token"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth",
+      "to": "dim_app_server::mcp::auth::store",
+      "references": [
+        "mod store",
+        "path Document",
+        "path Record",
+        "path Record::new",
+        "path Store",
+        "path Store::new",
+        "path store::Client",
+        "path store::Tokens",
+        "use store::Document",
+        "use store::Record",
+        "use store::Store"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth",
+      "to": "dim_app_server::mcp::auth::store::testing",
+      "references": [
+        "use store::testing"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpOAuthSettings",
+        "path McpServerSettings",
+        "path McpServerSettings::Remote",
+        "use super::config::BearerAuth",
+        "use super::config::McpOAuthSettings",
+        "use super::config::McpServerSettings"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::oauth",
+      "to": "dim_app_server::mcp::auth",
+      "references": [
+        "path McpAuthError",
+        "path McpAuthError::CallbackInvalid",
+        "path McpAuthError::ClientRequired",
+        "path McpAuthError::DiscoveryFailed",
+        "path McpAuthError::Failed",
+        "path McpAuthError::Unavailable",
+        "use super::McpAuthError"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::oauth",
+      "to": "dim_app_server::mcp::auth::store",
+      "references": [
+        "path AuthMethod::ClientSecretBasic",
+        "path AuthMethod::ClientSecretPost",
+        "path AuthMethod::None",
+        "path Binding",
+        "path Client",
+        "path Record",
+        "path Registration::Dynamic",
+        "path Registration::Preregistered",
+        "path Tokens",
+        "use super::store::AuthMethod",
+        "use super::store::Binding",
+        "use super::store::Client",
+        "use super::store::Record",
+        "use super::store::Registration",
+        "use super::store::Tokens"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::oauth",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpOAuthSettings",
+        "path config",
+        "path config::loopback",
+        "use crate::mcp::config",
+        "use crate::mcp::config::McpOAuthSettings"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::store",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileLease",
+        "path FilePath",
+        "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Io",
+        "path FileStorageError::Locked",
+        "path FileStorageError::Unsynced",
+        "use dim_agent_capabilities::file_storage::FileLease",
+        "use dim_agent_capabilities::file_storage::FilePath",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::store",
+      "to": "dim_app_server::mcp::auth",
+      "references": [
+        "path CredentialKey",
+        "path McpAuthError",
+        "path McpAuthError::Cancelled",
+        "path McpAuthError::Unavailable",
+        "path McpAuthError::Unsupported",
+        "use super::CredentialKey",
+        "use super::McpAuthError"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::store",
+      "to": "dim_app_server::mcp::auth::store::testing",
+      "references": [
+        "mod testing",
+        "path testing::pause"
+      ]
+    },
+    {
       "from": "dim_app_server::mcp::config",
       "to": "dim_agent_capabilities::settings",
       "references": [
@@ -11598,16 +11817,38 @@
         "path McpChange::Remove",
         "path McpChange::SetEnabled",
         "path McpError",
+        "path McpError::Auth",
         "path McpError::Cancelled",
         "path McpError::Closed",
+        "path McpError::Disabled",
         "path McpError::InvalidId",
         "path McpError::Settings",
         "path McpError::UnknownServer",
         "path McpError::Worker",
         "path McpService",
+        "path super::McpServerEntry",
         "use super::McpChange",
         "use super::McpError",
         "use super::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_app_server::mcp::auth",
+      "references": [
+        "path AuthState::Authorized",
+        "path AuthState::Expired",
+        "path AuthState::Required",
+        "path McpAuth",
+        "path McpAuthError::Closed",
+        "path McpAuthError::Unsupported",
+        "path credential_key",
+        "path stored_key",
+        "use super::auth::AuthState",
+        "use super::auth::McpAuth",
+        "use super::auth::McpAuthError",
+        "use super::auth::credential_key",
+        "use super::auth::stored_key"
       ]
     },
     {
@@ -11820,7 +12061,7 @@
         "path McpChange::Put",
         "path McpChange::SetEnabled",
         "path McpConnection",
-        "path McpPlugin",
+        "path McpPlugin::new",
         "path McpService",
         "use crate::mcp::McpChange",
         "use crate::mcp::McpPlugin",
@@ -11916,10 +12157,20 @@
     },
     {
       "from": "dim_app_server::mcp::server",
-      "to": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::auth",
       "references": [
-        "path McpService",
-        "use super::McpService"
+        "path Credential",
+        "path McpAuth",
+        "path Refusal",
+        "path Refusal::Expired",
+        "path Refusal::Required",
+        "path Refusal::Unavailable",
+        "path credential_key",
+        "path super::auth::CredentialKey",
+        "use super::auth::Credential",
+        "use super::auth::McpAuth",
+        "use super::auth::Refusal",
+        "use super::auth::credential_key"
       ]
     },
     {
@@ -11958,11 +12209,18 @@
       "from": "dim_app_server::mcp::server::sse",
       "to": "dim_app_server::mcp::server",
       "references": [
+        "path Authorization",
+        "path HttpError::AuthRequired",
+        "path HttpError::Client",
+        "path HttpError::InsufficientScope",
         "path McpServerError",
         "path McpServerError::Configuration",
+        "path McpServerError::InsufficientScope",
         "path McpServerError::InvalidResponse",
         "path McpServerError::RequestFailed",
         "path Result",
+        "use super::Authorization",
+        "use super::HttpError",
         "use super::McpServerError",
         "use super::Result"
       ]
@@ -12075,12 +12333,21 @@
     },
     {
       "from": "dim_app_server::mcp::session",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ToolContent::Text",
+        "use dim_agent_types::ToolContent"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
         "path ToolDefinition",
         "path ToolMetadata",
         "path ToolResult",
+        "path ToolResult::default",
         "path ToolSource::Dynamic",
         "use dim_agent_types::ToolCall",
         "use dim_agent_types::ToolDefinition",
@@ -12129,9 +12396,15 @@
       "from": "dim_app_server::mcp::session",
       "to": "dim_app_server::mcp::server",
       "references": [
+        "path McpServerError::AuthRequired",
+        "path McpServerError::Cancelled",
+        "path McpServerError::Closed",
+        "path McpServerError::InsufficientScope",
+        "path McpServerState::AuthRequired",
+        "path McpServerState::Closed",
+        "path McpServerState::Failed",
         "path McpTool",
-        "path super::server::McpServerError::Cancelled",
-        "path super::server::McpServerError::Closed",
+        "use super::server::McpServerError",
         "use super::server::McpServerState",
         "use super::server::McpTool"
       ]
@@ -14531,6 +14804,10 @@
     {
       "module": "dim_app_server::managed_provider::management",
       "path": "OAuthError::Worker"
+    },
+    {
+      "module": "dim_app_server::mcp::auth::oauth",
+      "path": "char::is_control"
     },
     {
       "module": "dim_app_server::mcp::server",

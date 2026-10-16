@@ -84,6 +84,10 @@
     "to": "dim-agent-runtime"
   },
   {
+    "from": "dim-app-server",
+    "to": "dim-app-server"
+  },
+  {
     "from": "dim-cli",
     "to": "dim-agent-types"
   },
