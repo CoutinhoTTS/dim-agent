@@ -68,8 +68,8 @@ impl ToolHandler for Handler {
 }
 
 struct TestSource {
-    sets: Arc<Mutex<Vec<Arc<ToolSourceSet>>>>,
-    // Initial values can be seeded before the Session owns an emitter.
+    sets: Mutex<Vec<Arc<ToolSourceSet>>>,
+    // Initial values are moved into the next Session's source.
     emitter: Option<(Ctx, SessionScope)>,
 }
 impl SessionService for TestSource {}
@@ -77,21 +77,27 @@ impl PublicService for TestSource {}
 impl TestSource {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            sets: Arc::default(),
+            sets: Mutex::default(),
             emitter: None,
         })
     }
-    fn offer(&self, sets: Vec<Arc<ToolSourceSet>>) {
+    fn seed(&self, sets: Vec<Arc<ToolSourceSet>>) {
+        assert!(self.emitter.is_none(), "seed before creating the Session");
         *self.sets.lock().unwrap() = sets;
-        if let Some((ctx, scope)) = &self.emitter {
-            ctx.events()
-                .emit(
-                    ctx,
-                    &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
-                    Arc::new(ToolProviderChanged),
-                )
-                .unwrap();
-        }
+    }
+    fn offer(&self, sets: Vec<Arc<ToolSourceSet>>) {
+        let (ctx, scope) = self
+            .emitter
+            .as_ref()
+            .expect("offer through the Session's TestSource service");
+        *self.sets.lock().unwrap() = sets;
+        ctx.events()
+            .emit(
+                ctx,
+                &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
+                Arc::new(ToolProviderChanged),
+            )
+            .unwrap();
     }
 }
 impl ToolProvider for TestSource {
@@ -145,7 +151,7 @@ impl TypedPlugin for SourcePlugin {
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let source = Arc::new(TestSource {
-                sets: self.source.sets.clone(),
+                sets: Mutex::new(std::mem::take(&mut *self.source.sets.lock().unwrap())),
                 emitter: Some((ctx.clone(), self.scope)),
             });
             ctx.provide_as(self.scope.key::<TestSource>(), source.clone())?;
@@ -648,13 +654,99 @@ async fn fixed_contributors_are_sampled_before_the_first_request_without_initial
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
+    struct Emitter(tokio::sync::mpsc::UnboundedSender<Ctx>);
+    impl rutis::Plugin for Emitter {
+        fn name(&self) -> &str {
+            "SourceEmitter"
+        }
+        fn apply<'a>(
+            &'a self,
+            ctx: &'a Ctx,
+        ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+            Box::pin(async move {
+                self.0.send(ctx.clone()).unwrap();
+                Ok(Effect::Done)
+            })
+        }
+    }
+    struct Pause(Arc<Gate>);
+    impl rutis::Listener<ToolProviderChanged> for Pause {
+        fn call<'a>(
+            &'a self,
+            _: &'a Ctx,
+            _: &'a ToolProviderChanged,
+        ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
+            Box::pin(async move {
+                self.0.entered.notify_one();
+                self.0.release.notified().await;
+                Ok(None)
+            })
+        }
+    }
+
+    let (source, log) = (TestSource::new(), Arc::new(Log::default()));
+    source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+    let env = env(source.clone(), None);
+    let session = env.session().await;
+    source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+    let other = env.session().await;
+    adopted(&session, "main", &[("mcp:a", "v1")]).await;
+    adopted(&other, "main", &[("mcp:a", "v1")]).await;
+    let source = session.session_service::<TestSource>().unwrap();
+    let (ctx, scope) = source.emitter.as_ref().unwrap();
+    let key = EventKey::<ToolProviderChanged>::of().instance(scope.instance);
+
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = ctx.plugin(Emitter(send));
+    (&emitter).await.unwrap();
+    let emitting = receive.recv().await.unwrap();
+
+    // Hold one dispatch after its registry read so the next accepted change
+    // remains queued until its emitter has started closing.
+    let gate = Arc::new(Gate::default());
+    ctx.events().once(ctx, &key, Pause(gate.clone())).unwrap();
+    ctx.events()
+        .emit(ctx, &key, Arc::new(ToolProviderChanged))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    *source.sets.lock().unwrap() = vec![set("mcp:a", "v2", &["lookup"], &log, None)];
+    emitting
+        .events()
+        .emit(&emitting, &key, Arc::new(ToolProviderChanged))
+        .unwrap();
+    let disposal = emitter.shutdown();
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), disposal)
+        .await
+        .unwrap()
+        .unwrap();
+
+    adopted(&session, "main", &[("mcp:a", "v2")]).await;
+    // The other Session has its own source state and scoped notification key.
+    assert_eq!(
+        other.session_service::<ToolSourcesView>().unwrap().get().0["mcp:a"]
+            .adopted
+            .as_deref(),
+        Some("v1")
+    );
+    env.turn(&session, "main", &["lookup"]).await;
+    assert_eq!(last_result(&session, "main").await, "v2 ran lookup");
+    env.turn(&other, "main", &["lookup"]).await;
+    assert_eq!(last_result(&other, "main").await, "v1 ran lookup");
+    env.agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_released() {
     let (source, log, hold) = (
         TestSource::new(),
         Arc::new(Log::default()),
         Arc::new(Gate::default()),
     );
-    source.offer(vec![set(
+    source.seed(vec![set(
         "mcp:a",
         "v1",
         &["lookup"],
@@ -701,7 +793,7 @@ async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_relea
 async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     // `gate` is a fixed tool; `b` repeats `a`'s tool.
-    source.offer(vec![
+    source.seed(vec![
         set("mcp:a", "a1", &["find"], &log, None),
         set("mcp:b", "b1", &["find", "other"], &log, None),
         set("mcp:c", "c1", &["gate"], &log, None),
@@ -735,7 +827,7 @@ async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
-    source.offer(vec![set("mcp:z", "z1", &["lookup"], &log, None)]);
+    source.seed(vec![set("mcp:z", "z1", &["lookup"], &log, None)]);
     let env = env(source.clone(), None);
     let session = env.session().await;
     let source = session.session_service::<TestSource>().unwrap();
@@ -774,7 +866,7 @@ async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_child_branch_binds_the_inherited_tools() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
-    source.offer(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+    source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
     let env = env(source.clone(), None);
     let session = env.session().await;
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
@@ -802,7 +894,7 @@ async fn a_child_branch_binds_the_inherited_tools() {
 async fn a_restored_branch_adopts_the_new_versions_before_its_first_request() {
     let store = Arc::new(MemoryTimelineStore::default());
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
-    source.offer(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+    source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
     let env1 = env(source, Some(store.clone()));
     let session = env1.session().await;
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
@@ -811,7 +903,7 @@ async fn a_restored_branch_adopts_the_new_versions_before_its_first_request() {
 
     // A new process: the source offers a new version of the same key.
     let source = TestSource::new();
-    source.offer(vec![set("mcp:a", "v2", &["lookup"], &log, None)]);
+    source.seed(vec![set("mcp:a", "v2", &["lookup"], &log, None)]);
     let env2 = env(source, Some(store));
     let restored = env2.agent.restore_session(id).await.unwrap();
     adopted(&restored, "main", &[("mcp:a", "v2")]).await;
@@ -897,7 +989,7 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
 
     for fail in [false, true] {
         let (source, log) = (TestSource::new(), Arc::new(Log::default()));
-        source.offer(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+        source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
         let model = Arc::new(ScriptedModel::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder

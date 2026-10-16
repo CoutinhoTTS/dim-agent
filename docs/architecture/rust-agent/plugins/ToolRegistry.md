@@ -27,7 +27,9 @@ rutis channel after updating their state. The registry subscribes before its
 initial read and rereads the sets of its registered providers. Notifications
 carry no data because every refresh reads all those providers.
 After replacing or withdrawing sets it emits `tools.changed` on that Session's
-channel; ToolBinding owns the adoption task. This local graph has no
+channel from its own context, independent of the source event's emitter lifetime.
+Rejected notification emissions are logged. ToolBinding owns the adoption task.
+This local graph has no
 SessionToolSource injections. Listeners end with their owning contexts; reload rebuilds the
 registry from fresh services. ToolBinding owns adoption and request pins.
 The standard library's `LazyLock` builds the complete fixed table in configuration
@@ -55,7 +57,8 @@ configuration uses the same fixed table through PrepareModelHost / `bind_current
 exercises the configured real-tool registry.
 [tool_binding.rs](../../../../tests/integration/tests/tool_binding.rs) covers
 immediate first requests, Pending providers, restoration, provider replacement
-and request snapshots.
+and request snapshots. A queued source notification whose emitter closes still
+reaches branch adoption, while another Session keeps its own source version.
 
 ## Rule check
 

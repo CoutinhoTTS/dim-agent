@@ -153,8 +153,6 @@ impl SessionService for SessionToolSource {}
 pub trait ToolProvider: Send + Sync + 'static {
     /// Every complete set this provider currently offers, one per key.
     fn sets(&self) -> Vec<Arc<ToolSourceSet>>;
-    /// Signals that `sets()` changed; carries no data and may coalesce.
-    fn changed(&self) -> tokio::sync::watch::Receiver<()>;
 }
 
 pub struct ToolSourceSet {
@@ -164,7 +162,7 @@ pub struct ToolSourceSet {
 }
 ```
 
-来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；`changed()` 可合并，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
+来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；替换集合后用自身上下文向 `EventKey::<ToolProviderChanged>::of().instance(session_scope.instance)` 发出通知，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
 
 ### 7.3 状态
 
@@ -197,6 +195,7 @@ ToolRegistry 的来源变化是 Session 内状态，不写 Timeline。以下 rut
 | `tools.changed` | ToolRegistry → 各分支 ToolBinding | 空通知；注册表完成集合替换/撤销及状态更新后发出 |
 
 注册表先订阅再初读来源；来源通知变化时重读全部已登记来源，因此另一来源让出工具名后，被拒来源能自动恢复。
+注册表用自身上下文发出 `tools.changed`，不借用来源通知携带的发送方上下文；来源方与注册表均记录发送失败。
 ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任务；发布前的唤醒保留到原有 BranchLifecycle 激活后处理，关闭时退出。
 每个分支继续通过 Prompt 串行采用工具集合，只有该采用事实影响后续请求；现有请求的 handler 快照不变。
 `ToolSourcesView::subscribe` 仍提供只读状态，不用作部件间的空变更信号。

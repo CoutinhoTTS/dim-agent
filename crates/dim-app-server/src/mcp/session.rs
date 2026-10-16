@@ -128,11 +128,13 @@ impl McpSession {
         self.tools_changed();
     }
     fn tools_changed(&self) {
-        let _ = self.ctx.events().emit(
+        if let Err(error) = self.ctx.events().emit(
             &self.ctx,
             &EventKey::<ToolProviderChanged>::of().instance(self.scope.instance),
             Arc::new(ToolProviderChanged),
-        );
+        ) {
+            tracing::warn!(%error, "failed to publish tools.provider_changed");
+        }
     }
 }
 // The public management service must not expose executable handlers.
@@ -196,6 +198,8 @@ impl TypedPlugin for McpSessionPlugin {
                     Box::pin(async move {
                         drain.close();
                         drain.wait().await;
+                        // The registry depends on this SessionToolSource and
+                        // unloads with it; shutdown needs no change notice.
                         cleanup.sets.lock().unwrap().clear();
                         cleanup.state.set(McpSessionState {
                             closed: true,

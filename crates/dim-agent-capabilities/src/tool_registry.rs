@@ -52,6 +52,8 @@ impl SessionService for ToolContribution {}
 pub struct SessionToolSource(pub Arc<dyn ToolProvider>);
 impl SessionService for SessionToolSource {}
 
+/// After replacing its sets, a provider emits `ToolProviderChanged` with
+/// `EventKey::of().instance(session_scope.instance)` from its own context.
 pub trait ToolProvider: Send + Sync + 'static {
     /// Every complete set this provider currently offers, one per key.
     fn sets(&self) -> Vec<Arc<ToolSourceSet>>;
@@ -105,6 +107,7 @@ struct Sources {
 type FixedTools = Vec<Arc<ToolContribution>>;
 
 pub struct ToolRegistry {
+    ctx: Ctx,
     scope: SessionScope,
     /// Collected once on first use, after the Session services are Active.
     fixed: LazyLock<FixedTools, Box<dyn FnOnce() -> FixedTools + Send>>,
@@ -177,7 +180,7 @@ impl ToolRegistry {
     /// validated as a whole and replaced atomically; a missing key is
     /// withdrawn. All providers are read on any change, so a set rejected for
     /// a name another source held is retried once that name is free.
-    fn refresh(&self, ctx: &Ctx) {
+    fn refresh(&self) {
         let _serial = self.refreshing.lock().unwrap();
         let offered: Vec<(&str, BTreeMap<String, Arc<ToolSourceSet>>)> = self
             .providers
@@ -277,12 +280,14 @@ impl ToolRegistry {
             *state = statuses;
             modified
         });
-        if changed {
-            let _ = ctx.events().emit(
-                ctx,
+        if changed
+            && let Err(error) = self.ctx.events().emit(
+                &self.ctx,
                 &EventKey::<ToolsChanged>::of().instance(self.scope.instance),
                 Arc::new(ToolsChanged),
-            );
+            )
+        {
+            tracing::warn!(%error, "failed to publish tools.changed");
         }
     }
 
@@ -325,11 +330,11 @@ impl ToolRegistry {
 impl Listener<ToolProviderChanged> for Arc<ToolRegistry> {
     fn call<'a>(
         &'a self,
-        ctx: &'a Ctx,
+        _ctx: &'a Ctx,
         _: &'a ToolProviderChanged,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
-            self.refresh(ctx);
+            self.refresh();
             Ok(None)
         })
     }
@@ -448,6 +453,7 @@ impl TypedPlugin for ToolRegistryPlugin {
             let scope = self.scope;
             let contributed = self.contributed.clone();
             let registry = Arc::new(ToolRegistry {
+                ctx: ctx.clone(),
                 scope,
                 fixed: LazyLock::new(Box::new(move || {
                     let mut fixed = Vec::new();
@@ -485,7 +491,7 @@ impl TypedPlugin for ToolRegistryPlugin {
                 &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
                 registry.clone(),
             )?;
-            registry.refresh(ctx);
+            registry.refresh();
             ctx.provide_as(
                 self.scope.key::<ToolSourcesView>(),
                 Arc::new(ToolSourcesView(registry.sources_state())),
