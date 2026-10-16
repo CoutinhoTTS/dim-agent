@@ -137,9 +137,13 @@ Allow once? [y/N]
 
 Input is one line per turn. Only `y` or `yes` permits a pending tool operation once; empty input or any other answer denies it. Tool status records and approval reasons are displayed without dumping arbitrary tool arguments or tool result bodies. Model and external text are filtered at the terminal boundary to remove control sequences.
 
-The terminal keeps the scrollback. There is no alternate-screen interface, terminal UI dependency, multiline editor or client-side input queue. Input typed during execution is discarded before the next input or approval prompt so it cannot accidentally approve an operation.
+The terminal keeps the scrollback. There is no alternate-screen interface, terminal UI dependency, multiline editor or client-side input queue. Ordinary text typed during execution is discarded with a message to wait for the prompt; pending typeahead is cleared before an approval prompt so it cannot accidentally approve an operation.
+
+Interactive `!command` runs in the Session's working directory through `shell.run` and records the command and bounded output for the next model request, without starting a turn. `!!command` keeps its output private to this caller. Both also work during model execution. An approval prompt owns its answer line. Commands use the daemon's shell/environment and null stdin. Progress is incomplete; the final bounded output is displayed again, including truncation and recording failures. Commands are never retried after an RPC or transport error. Piped or `--prompt` text keeps its literal meaning.
 
 While a turn is running, `Ctrl+C` requests stop and waits for the server's resource and output delivery barrier. A second interrupt does not skip settlement. Once the prompt returns, `Ctrl+C` or EOF exits. The client detaches; it does not delete the session or shut down a shared daemon.
+
+During a shell run, the first `Ctrl+C` stops that run; a second stops the model turn. Both replies settle before the prompt returns. EOF stops the caller's run and turn before detaching. Disconnecting does not stop Session work: a recorded shell result can still appear in history. A second command from this caller is refused until its pending replies settle. [P1 ShellInput](../../docs/design/plugins/ShellInput.md) defines process and background-child lifetime.
 
 Every session handle is printed; noninteractive handles go to stderr. Restore it explicitly:
 

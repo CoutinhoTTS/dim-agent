@@ -56,6 +56,105 @@ struct ApprovalCancelled {
     request_id: String,
 }
 
+struct ShellRun {
+    request: Option<u64>,
+    run_id: String,
+    stop: Option<u64>,
+    stopping: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellResult {
+    run_id: String,
+    status: String,
+    exit_code: Option<i32>,
+    signal: Option<String>,
+    reason: Option<String>,
+    output: String,
+    truncated: bool,
+    recorded: Option<Recorded>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Recorded {
+    Written { sequence: u64 },
+    Failed { error: RecordingError },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingError {
+    app_error: Option<String>,
+    message: String,
+}
+
+async fn start_shell(
+    client: &mut Client,
+    session_id: &str,
+    text: &str,
+    display: &mut Display,
+) -> Result<Option<ShellRun>> {
+    let (mode, command) = match text.strip_prefix("!!") {
+        Some(command) => ("private", command),
+        None => ("record", text.strip_prefix('!').expect("shell prefix")),
+    };
+    if command.trim().is_empty() {
+        display.record("Usage: !command (record output) or !!command (private output)")?;
+        return Ok(None);
+    }
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let request = client.send("shell.run", json!({"sessionId":session_id,"branchId":"main","runId":run_id,"command":command,"mode":mode})).await?;
+    display.record(&format!("[shell started] {mode}"))?;
+    Ok(Some(ShellRun {
+        request: Some(request),
+        run_id,
+        stop: None,
+        stopping: false,
+    }))
+}
+
+fn shell_result(value: Value, run_id: &str, display: &mut Display) -> Result<()> {
+    let result: ShellResult =
+        serde_json::from_value(value).map_err(|_| "Invalid shell.run response")?;
+    if result.run_id != run_id {
+        return Err("Unexpected shell.run identity".into());
+    }
+    display.record(&format!("[shell output] (final)\n{}", result.output))?;
+    let mut status = format!("[shell {}]", result.status);
+    if let Some(code) = result.exit_code {
+        status.push_str(&format!(" exit: {code}"));
+    }
+    if let Some(signal) = result.signal {
+        status.push_str(&format!(" signal: {signal}"));
+    }
+    if let Some(reason) = result.reason {
+        status.push_str(&format!(" {reason}"));
+    }
+    if result.truncated {
+        status.push_str(" (output truncated)");
+    }
+    display.record(&status)?;
+    match result.recorded {
+        Some(Recorded::Written { sequence }) => {
+            display.record(&format!("[shell recorded] sequence: {sequence}"))?;
+        }
+        Some(Recorded::Failed { error }) => {
+            display.record(&format!(
+                "[shell recording failed] {}{}",
+                error.message,
+                error
+                    .app_error
+                    .map(|code| format!(" ({code})"))
+                    .unwrap_or_default()
+            ))?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
 fn decode<T: serde::de::DeserializeOwned>(value: Value, method: &str) -> Result<T> {
     serde_json::from_value(value).map_err(|_| format!("Invalid {method} notification").into())
 }
@@ -148,6 +247,9 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
             }
             display.failed = false;
             code = wait_turn(client, &session_id, Some(&text), &mut display, &mut input).await?;
+            if input.is_none() {
+                break;
+            }
             if code != 0 && code != 130 && code != 2 {
                 return Ok(code);
             }
@@ -218,7 +320,12 @@ async fn wait_turn(
     display: &mut Display,
     input: &mut Option<Input>,
 ) -> Result<i32> {
+    let mut shell = None;
     let mut submit = match prompt {
+        Some(text) if input.is_some() && text.starts_with('!') => {
+            shell = start_shell(client, session_id, text, display).await?;
+            None
+        }
         Some(text) => Some(client.send("session.submit", json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"text":text,"mode":"queue"})).await?),
         None => None,
     };
@@ -247,10 +354,9 @@ async fn wait_turn(
             && idle.is_none()
             && stop.is_none()
             && approval_replies.is_empty()
+            && shell.is_none()
+            && deferred.is_empty()
         {
-            while let Some(notice) = deferred.pop_front() {
-                render(notice, session_id, display)?;
-            }
             display.cursor = display.cursor.max(sequence);
             display.finish_text()?;
             return Ok(if code != 0 {
@@ -283,31 +389,60 @@ async fn wait_turn(
                 .prompt("Allow once? [y/N] ")?;
             prompted = true;
         }
-        let event = tokio::select! {
-            signal = tokio::signal::ctrl_c(), if stop.is_none() && settled.is_none() => {
-                signal?;
-                if !display.json { println!(); }
-                display.record("[stopping] Waiting for resource settlement")?;
-                code = 130;
-                approvals.clear(); prompted = false;
-                stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI interrupted"})).await?);
-                continue;
-            }
-            line = async {
-                match input.as_mut() { Some(reader) if prompted => reader.line().await, _ => pending().await }
-            } => {
-                let approval = approvals.pop_front().expect("prompted approval");
-                let line = line?;
-                let allow = line.as_ref().is_some_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"));
-                approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
-                prompted = false;
-                if line.is_none() && stop.is_none() {
+        let event = if !prompted && let Some(event) = deferred.pop_front() {
+            event
+        } else {
+            tokio::select! {
+                signal = tokio::signal::ctrl_c(), if (stop.is_none() && settled.is_none()) || shell.as_ref().is_some_and(|run| run.request.is_some() && !run.stopping) => {
+                    signal?;
+                    if !display.json { println!(); }
+                    if let Some(run) = shell.as_mut().filter(|run| run.request.is_some() && !run.stopping) {
+                        run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
+                        run.stopping = true;
+                        if !prompted { display.record("[shell stopping] Waiting for command settlement")?; }
+                        continue;
+                    }
+                    display.record("[stopping] Waiting for resource settlement")?;
                     code = 130;
-                    stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI input closed"})).await?);
+                    approvals.clear(); prompted = false;
+                    stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI interrupted"})).await?);
+                    continue;
                 }
-                continue;
+                line = async {
+                    match input.as_mut() { Some(reader) if stop.is_none() => reader.line().await, _ => pending().await }
+                } => {
+                    let line = line?;
+                    if prompted {
+                        let approval = approvals.pop_front().expect("prompted approval");
+                        let allow = line.as_ref().is_some_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"));
+                        approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
+                        prompted = false;
+                    } else if let Some(text) = &line {
+                        if text.starts_with('!') {
+                            if shell.is_some() {
+                                display.record("[shell busy] This caller already has a pending command")?;
+                            } else {
+                                shell = start_shell(client, session_id, text, display).await?;
+                            }
+                        } else if !text.trim().is_empty() {
+                            display.record("[busy] Wait for the prompt to send a message; !command and !!command remain available")?;
+                        }
+                    }
+                    if line.is_none() {
+                        *input = None;
+                        if let Some(run) = shell.as_mut().filter(|run| run.request.is_some() && !run.stopping) {
+                            run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
+                            run.stopping = true;
+                        }
+                    }
+                    if line.is_none() && stop.is_none() && settled.is_none() {
+                        code = 130;
+                        stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI input closed"})).await?);
+                    }
+                    continue;
+                }
+                message = client.next() => message?,
             }
-            message = client.next() => message?,
         };
         if display.json
             && let Message::Notice { method, params } = &event
@@ -322,6 +457,39 @@ async fn wait_turn(
             output.flush()?;
         }
         match event {
+            event @ Message::Response { id, .. }
+                if prompted
+                    && shell
+                        .as_ref()
+                        .is_some_and(|run| run.request == Some(id) || run.stop == Some(id)) =>
+            {
+                deferred.push_back(event)
+            }
+            Message::Response { id, result }
+                if shell.as_ref().is_some_and(|run| run.request == Some(id)) =>
+            {
+                let run = shell.as_mut().expect("shell reply");
+                match result {
+                    Ok(value) => shell_result(value, &run.run_id, display)?,
+                    Err(error) => display.record(&format!("[shell error] {error}"))?,
+                }
+                run.request = None;
+                if run.stop.is_none() {
+                    shell = None;
+                }
+            }
+            Message::Response { id, result }
+                if shell.as_ref().is_some_and(|run| run.stop == Some(id)) =>
+            {
+                if let Err(error) = result {
+                    display.record(&format!("[shell stop error] {error}"))?;
+                }
+                let run = shell.as_mut().expect("shell stop reply");
+                run.stop = None;
+                if run.request.is_none() {
+                    shell = None;
+                }
+            }
             Message::Response { id, result } if Some(id) == submit => {
                 result?;
                 submit = None;
@@ -394,10 +562,28 @@ async fn wait_turn(
                 }
             }
             notice @ Message::Notice { .. } if prompted => deferred.push_back(notice),
-            notice @ Message::Notice { .. } => {
-                while let Some(notice) = deferred.pop_front() {
-                    render(notice, session_id, display)?;
+            Message::Notice { method, params }
+                if method == "management.progress"
+                    && params["id"].as_u64().is_some_and(|id| {
+                        shell.as_ref().is_some_and(|run| run.request == Some(id))
+                    })
+                    && params["method"] == "shell.run" =>
+            {
+                #[derive(Deserialize)]
+                struct ShellProgress {
+                    text: String,
+                    skipped: Option<u64>,
                 }
+                let progress: ShellProgress = serde_json::from_value(params["data"].clone())
+                    .map_err(|_| "Invalid shell.run progress")?;
+                if let Some(skipped) = progress.skipped {
+                    display.record(&format!(
+                        "[shell progress] skipped {skipped} bytes; final output follows"
+                    ))?;
+                }
+                display.record(&format!("[shell progress] (incomplete)\n{}", progress.text))?;
+            }
+            notice @ Message::Notice { .. } => {
                 render(notice, session_id, display)?;
             }
         }
