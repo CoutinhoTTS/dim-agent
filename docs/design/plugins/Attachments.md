@@ -126,7 +126,7 @@ Compaction keeps neither images nor file contents verbatim, only the summary (a 
 | --- | --- | --- |
 | `attachment.put` | `sessionMethods` (Session, key `attachment`) | Store a text attachment as a Session file, return its path |
 | CLI image checks | Client contract (A.1, A.3) | Sniff the format and enforce limits before submitting |
-| Image handling at request build | ModelProvider supplement (proposed, A.1) | Send each image block or replace it with a text placeholder per the request's model |
+| Image handling at request build | ModelProvider supplement (implemented, S11, A.1) | Send each image block or replace it with a text placeholder per the request's model |
 | `attachment_*` errors | `appError` on `attachment.put` | Rejection reasons |
 
 ## 7. Security
@@ -175,14 +175,16 @@ CLI checks, before submitting:
 
 Limits (A2): at most 20 images per submission, 5 MiB decoded each, 8000 px per side; violations rejected, never resized. Blocks keep their order.
 
-ModelProvider supplement (proposed, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)), applied to every image block when it builds a model request:
+ModelProvider supplement (implemented in S11, `model_provider/images.rs`; [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)), applied to every image block when it builds a model request:
 
 | Image block | Request content |
 | --- | --- |
 | The request's model accepts image input and the adapter accepts the block's format and size | Sent as is |
 | The model does not accept image input (Provider catalog) | Text `[Image omitted: the current model does not accept images.]` |
 | Capability unknown | Sent as is; the provider decides (A4) |
-| URL source, undecodable data, or a format or size the adapter does not accept | Text `[Image omitted: the image cannot be sent to this model.]` (A10) |
+| URL source, missing or undecodable base64 data, or a format other than PNG, JPEG, WebP or GIF | Text `[Image omitted: the image cannot be sent to this model.]` (A10) |
+
+Size is not checked here: no adapter publishes a per-model image size limit, so an oversized image is sent and the provider decides, as for unknown capability (A4). The CLI limits (A2) still apply before submitting.
 
 The history is never changed; each request decides again from its own model.
 
