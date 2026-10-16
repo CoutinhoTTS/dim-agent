@@ -144,6 +144,7 @@ impl Client {
     }
     async fn send(&mut self, method: &str, params: Value) -> u64 {
         self.id += 1;
+        eprintln!("RPC {}: {method}", self.id);
         let value = json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params});
         self.raw(value).await;
         self.id
@@ -158,7 +159,7 @@ impl Client {
             Transport::Ws(stream) => stream.send(Message::Text(text.into())).await.unwrap(),
         }
     }
-    async fn read(&mut self) -> Value {
+    async fn read(&mut self, expected: &str) -> Value {
         tokio::time::timeout(Duration::from_secs(10), async {
             match &mut self.transport {
                 Transport::Unix(stream) => {
@@ -180,14 +181,14 @@ impl Client {
             }
         })
         .await
-        .expect("response deadline")
+        .unwrap_or_else(|error| panic!("deadline waiting for {expected}: {error}"))
     }
     async fn response(&mut self, id: u64) -> Value {
         if let Some(index) = self.notices.iter().position(|v| v["id"] == id) {
             return self.notices.remove(index);
         }
         loop {
-            let value = self.read().await;
+            let value = self.read(&format!("response {id}")).await;
             if value["id"] == id {
                 return value;
             }
@@ -203,7 +204,7 @@ impl Client {
             return self.notices.remove(index);
         }
         loop {
-            let value = self.read().await;
+            let value = self.read(&format!("notice {method}")).await;
             if value["method"] == method {
                 return value;
             }
@@ -1197,7 +1198,7 @@ async fn handshake_errors_and_trace_are_real_transport_boundaries() {
     client
         .raw(json!({"jsonrpc":"2.0","id":-1.5,"method":"daemon.ping"}))
         .await;
-    let negative_id = client.read().await;
+    let negative_id = client.read("response -1.5").await;
     assert_eq!(negative_id["id"], json!(-1.5));
     assert_ok(&negative_id);
     let unknown = client.rpc("unknown", json!({})).await;
@@ -1504,7 +1505,7 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
         let attach = client
             .send("session.attach", json!({"sessionId":session.id()}))
             .await;
-        let reply = client.read().await;
+        let reply = client.read(&format!("response {attach}")).await;
         assert_eq!(reply["id"], attach, "the reply precedes every notification");
         assert_eq!(reply["result"], json!({}));
         assert_eq!(
