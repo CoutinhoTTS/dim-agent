@@ -579,6 +579,10 @@ mod windows_flow {
             }
         });
         let (mut output, mut consumed) = (Vec::new(), 0);
+        // ConPTY inherits the terminal cursor before starting console output.
+        until(&receive, &mut output, &mut consumed, "\x1b[6n");
+        writer.write_all(b"\x1b[1;1R").unwrap();
+        writer.flush().unwrap();
         until(&receive, &mut output, &mut consumed, "CONSOLE_STAGE_1");
         until(&receive, &mut output, &mut consumed, "Ctrl+J: newline");
         writer
