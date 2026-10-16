@@ -314,6 +314,11 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::config::SessionConfig@session",
             "scope": null,
             "status": "Ready"
@@ -330,6 +335,12 @@
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          },
           {
             "service": "dim_agent_runtime::config::SessionConfig@session",
             "scope": null,
@@ -350,6 +361,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "provider": 6,
+            "declared": true,
+            "external": true
+          },
           {
             "service": "dim_agent_runtime::config::SessionConfig@session",
             "provider": 6,
@@ -481,6 +498,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::host::ContextModelHost@session",
             "scope": null,
             "status": "Ready"
@@ -509,6 +531,12 @@
         "resolved": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "scope": null,
             "provider": 6,
             "generation": 1
@@ -547,6 +575,12 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "provider": 6,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "provider": 6,
             "declared": true,
             "external": true
@@ -820,6 +854,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::host::ContextModelHost@session",
             "scope": null,
             "status": "Ready"
@@ -853,6 +892,12 @@
         "resolved": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "scope": null,
             "provider": 6,
             "generation": 1
@@ -897,6 +942,12 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "provider": 6,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "provider": 6,
             "declared": true,
             "external": true
@@ -1509,6 +1560,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
+        "provider": 6,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::host::ContextModelHost@session",
         "provider": 6,
         "generation": 1,
@@ -1547,6 +1604,12 @@
       {
         "service": "dim_agent_capabilities::methods::SessionMethods#session.input@session",
         "provider": 10,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+        "provider": 6,
         "generation": 1,
         "removing": false
       },

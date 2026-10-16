@@ -44,6 +44,7 @@ flowchart LR
   p21 -->|"dim_agent_capabilities::permission::Permission@main"| p22
   p13 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p22
   p13 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p22
+  p6 -->|"dim_agent_capabilities::permission::CommandRulesHost@session"| p21
   p6 -->|"dim_agent_runtime::config::SessionConfig@session"| p21
   p13 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p21
   p13 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p21
@@ -53,6 +54,7 @@ flowchart LR
   p13 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p20
   p13 -->|"dim_agent_runtime::diagnostics::Diagnostics@main"| p20
   p6 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p19
+  p6 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p19
   p6 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p19
   p7 -->|"dim_agent_capabilities::host::PrepareModelHost@session"| p19
   p23 -->|"dim_agent_capabilities::tool_binding::ToolBinding@main"| p19
@@ -71,6 +73,7 @@ flowchart LR
   p6 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p17
   p13 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p17
   p6 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p16
+  p6 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p16
   p6 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p16
   p6 -->|"dim_agent_capabilities::host::PrepareContextHost@session"| p16
   p13 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p16
