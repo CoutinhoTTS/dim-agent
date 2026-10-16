@@ -3,7 +3,10 @@ mod local_support;
 use dim_agent_capabilities::{
     settings::{SettingsChanged, SettingsScope, settings_changes},
     skill_settings::{SOURCE, SkillSettings},
-    skills::{RefreshTarget, SkillIssue, SkillStatus, SkillsBranch, SkillsError},
+    skills::{
+        CatalogChanged, RefreshTarget, SkillIssue, SkillStatus, SkillsBranch, SkillsError,
+        catalog_changes,
+    },
 };
 use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
@@ -355,22 +358,48 @@ async fn skill_loads_the_latest_view_after_queue_and_steer_interleave() {
     env.agent.close().await.unwrap();
 }
 
+/// The latest version announced on the catalog channel.
+struct Announced(tokio::sync::watch::Sender<u64>);
+impl rutis::Listener<CatalogChanged> for Announced {
+    fn call<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        changed: &'a CatalogChanged,
+    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
+        self.0.send_replace(changed.version);
+        Box::pin(async { Ok(None) })
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enablement_changes_the_list_and_loading() {
     let dirs = Dirs::new();
     let layout = layout(&dirs);
     let env = env(&dirs, Options::default()).await;
+    let (announced, mut seen) = tokio::sync::watch::channel(0);
+    env.root
+        .events()
+        .on(&env.root, &catalog_changes(), Announced(announced))
+        .unwrap();
     let session = env.session(&layout.cwd, "").await.unwrap();
     run(&session, "first").await;
     let b = format!("workspace:{}:b", layout.project.to_string_lossy());
 
     let before = view_version(&session);
-    let (entry, _) = env
+    let (entry, version) = env
         .catalog()
         .set_enabled(&b, false, Some(&layout.cwd))
         .await
         .unwrap();
     assert!(!entry.enabled);
+    // Sessions follow the catalog's announcement of the version it reports.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        seen.wait_for(|seen| *seen == version),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let persisted = env
         .settings
         .skills(Default::default())

@@ -5465,9 +5465,11 @@
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "mod catalog",
+        "use catalog::CatalogChanged",
         "use catalog::MemorySkillSettings",
         "use catalog::SkillsCatalog",
-        "use catalog::SkillsCatalogPlugin"
+        "use catalog::SkillsCatalogPlugin",
+        "use catalog::catalog_changes"
       ]
     },
     {
@@ -5710,7 +5712,7 @@
         "path SkillView",
         "path SkillsError",
         "path super::INSTRUCTIONS",
-        "path super::SkillsError",
+        "path super::Wake",
         "use super::SkillSummary",
         "use super::SkillView",
         "use super::SkillsError"
@@ -5721,6 +5723,7 @@
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "path SkillsCatalog",
+        "path super::catalog_changes",
         "use super::SkillsCatalog"
       ]
     },

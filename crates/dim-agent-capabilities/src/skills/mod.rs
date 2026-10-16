@@ -6,7 +6,9 @@ mod content;
 mod discovery;
 mod session;
 
-pub use catalog::{MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin};
+pub use catalog::{
+    CatalogChanged, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin, catalog_changes,
+};
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
 use dim_agent_runtime::AgentBuilder;
