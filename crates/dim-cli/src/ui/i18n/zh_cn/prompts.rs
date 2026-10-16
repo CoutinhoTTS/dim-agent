@@ -19,9 +19,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Approve for me" => "智能权限",
         "Full access" => "完全访问权限",
         "Run {tool}" => "运行 {tool}",
-        "approved once: {subject}" => "已单次批准：{subject}",
-        "approved always: {subject}" => "已始终批准：{subject}",
-        "rejected: {subject}" => "已拒绝：{subject}",
         "Changing the approvals mode from here is not yet available" => {
             "暂不支持在此处更改 approvals 模式"
         }
@@ -112,6 +109,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Search git history" => "搜索 git 历史",
         "Edit" => "编辑",
         "Write" => "写入",
+        "Create" => "创建",
         " (detached)" => "（后台）",
         "Checked on background task" => "查看了后台任务",
         "Waiting…" => "等待中…",

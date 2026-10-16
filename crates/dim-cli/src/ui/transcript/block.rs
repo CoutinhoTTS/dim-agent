@@ -137,6 +137,7 @@ mod tests {
             result_text: None,
             result_is_error: false,
             diff: None,
+            exit_code: None,
         }
     }
 
@@ -256,20 +257,14 @@ mod tests {
     }
 
     #[test]
-    fn a_long_command_keeps_four_rows_and_counts_the_rest() {
+    fn a_long_command_is_shown_whole() {
         let body: Vec<String> = (1..=40).map(|i| format!("row {i}")).collect();
         let command = format!("cat > gen.txt <<'EOF'\n{}\nEOF", body.join("\n"));
         let rows = [call("exec", json!({ "command": command }), Some(""))];
-        assert_eq!(
-            drawn(&rows, Detail::Expanded, 80),
-            [
-                "✓ Ran 1 command ▾",
-                "  $ cat > gen.txt <<'EOF'",
-                "  row 1",
-                "  row 2",
-                "  … +39 lines"
-            ]
-        );
+        let lines = drawn(&rows, Detail::Expanded, 80);
+        assert_eq!(lines.len(), 1 + 42);
+        assert_eq!(lines[1], "  $ cat > gen.txt <<'EOF'");
+        assert_eq!(lines[42], "  EOF");
     }
 
     #[test]
@@ -281,10 +276,17 @@ mod tests {
             Some(&output.join("\n")),
         )];
         let lines = drawn(&rows, Detail::Expanded, 80);
+        let shown: Vec<&str> = lines[2..]
+            .iter()
+            .map(|l| l.trim_end_matches([' ', '█']))
+            .collect();
         let expected: Vec<String> = (99_986..=100_000)
             .map(|i| format!("    line {i}"))
             .collect();
-        assert_eq!(lines[2..], expected[..]);
+        assert_eq!(shown, expected);
+        // The scrollbar in the last column has its thumb at the end.
+        assert!(lines[2..].iter().all(|l| l.chars().count() == 80));
+        assert!(lines[16].ends_with('█') && lines[2].ends_with(' '));
     }
 
     #[test]

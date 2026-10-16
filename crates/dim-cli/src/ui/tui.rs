@@ -1281,7 +1281,6 @@ impl App {
                 branch_id,
                 allow,
                 remember,
-                audit,
             } => {
                 self.answered.insert(request_id.clone());
                 self.host.send(Command::Approval {
@@ -1290,7 +1289,6 @@ impl App {
                     allow,
                     remember,
                 });
-                self.notices.push(audit);
                 self.prompt = None;
                 self.sync_prompt();
             }
@@ -1518,10 +1516,7 @@ impl App {
     }
 
     fn toggle_tool_details(&mut self) {
-        let (detail, label) = match self.tool_detail {
-            Detail::Collapsed => (Detail::Expanded, t("expanded")),
-            Detail::Expanded => (Detail::Collapsed, t("collapsed")),
-        };
+        let detail = self.tool_detail.flipped();
         self.tool_detail = detail;
         // Every group follows, as Amp's toggle redraws the transcript.
         self.group_details.clear();
@@ -1533,18 +1528,15 @@ impl App {
             }
         }
         self.request_reflow();
-        let saved = crate::ui::config::write(
+        // The redrawn transcript says what changed; only a failed save
+        // needs a word.
+        if let Some(error) = crate::ui::config::write(
             &self.home,
             TOOL_DETAILS_KEY,
             (detail == Detail::Expanded).into(),
-        );
-        self.notices.push(match saved {
-            None => tf("Tool details {state}", &[("state", label)]),
-            Some(error) => tf(
-                "Tool details {state} (not saved: {error})",
-                &[("state", label), ("error", &error)],
-            ),
-        });
+        ) {
+            self.set_notice(tf("Tool details not saved: {error}", &[("error", &error)]));
+        }
     }
 
     fn run_command(&mut self, name: &str, _args: &str) -> Outcome {

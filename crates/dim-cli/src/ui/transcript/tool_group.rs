@@ -87,14 +87,14 @@ enum Mark {
 
 /// `Truncate` keeps one row. `Wrap` continues under the text column and keeps
 /// the text's own line breaks, up to [`WRAP_MAX_ROWS`], ending the last in
-/// `…`; `WrapCounted` gives that last row to a `… +N lines` count, so a pasted
-/// script or heredoc cannot fill the history for good. `Tail` keeps the last
-/// [`TAIL_MAX_ROWS`] rows, as a command's output is shown.
+/// `…`; `Whole` keeps every row, as Amp prints a command however long.
+/// `Tail` keeps the last [`TAIL_MAX_ROWS`] rows, as a command's output is
+/// shown, with a scrollbar beside them when there are more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Overflow {
     Truncate,
     Wrap,
-    WrapCounted,
+    Whole,
     Tail,
 }
 
@@ -164,6 +164,7 @@ struct Call<'a> {
     state: State,
     result: Option<&'a str>,
     diff: Option<&'a str>,
+    exit_code: Option<i64>,
 }
 
 impl<'a> Call<'a> {
@@ -184,6 +185,7 @@ impl<'a> Call<'a> {
             state,
             result: row.result_text.as_deref(),
             diff: row.diff.as_deref(),
+            exit_code: row.exit_code,
         }
     }
 
@@ -360,13 +362,27 @@ fn classify(call: Call<'_>) -> Item<'_> {
         }
         "exec" | "bash" => {
             let command = call.string("command").unwrap_or("").to_owned();
+            // A read-only command that exited non-zero still explored, as
+            // Amp shows it: done, with its output and without the exit note.
+            let output = call.exit_code.filter(|code| *code != 0).and_then(|code| {
+                let note = format!("Command exited with code {code}.");
+                call.result
+                    .map(|text| text.strip_suffix(note.as_str()).unwrap_or(text).trim_end())
+            });
             let read_only = if call.background() {
                 None
             } else {
-                explore_command(&command, call.result)
+                explore_command(&command, output.or(call.result))
             };
             match read_only {
-                Some((kind, label, detail)) => explore(call, kind, label, detail),
+                Some((kind, label, detail)) => {
+                    let mut call = call;
+                    if output.is_some() {
+                        call.state = State::Done;
+                        call.result = output;
+                    }
+                    explore(call, kind, label, detail)
+                }
                 None => Item::Command { call, command },
             }
         }
@@ -678,7 +694,7 @@ fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
             State::Done => Mark::Command,
         }),
         spans,
-        overflow: Overflow::WrapCounted,
+        overflow: Overflow::Whole,
         hang: 0,
     });
     // A detached command's result only says it started; its output arrives
@@ -698,19 +714,19 @@ fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
 }
 
 fn append_edit(lines: &mut Vec<Line>, call: &Call<'_>, write: bool, single: bool) {
-    let label = if write {
-        "Write"
-    } else if single && call.state == State::Done {
-        "Edited"
-    } else {
-        "Edit"
-    };
     let diff = if call.state == State::Failed {
         Vec::new()
     } else {
         edit_lines(call, write)
     };
     let (added, removed) = diff_counts(&diff);
+    // Amp names a written file by what happened to it.
+    let label = match (write, removed) {
+        (true, 0) => "Create",
+        (true, _) => "Write",
+        _ if single && call.state == State::Done => "Edited",
+        _ => "Edit",
+    };
     let mut spans = vec![
         span(format!("{} ", t(label)), Tone::Text),
         span(call.path(), Tone::Path),
@@ -1233,9 +1249,18 @@ pub fn render_group(group: &ToolGroup, width: usize, p: &Palette, spinner: &str)
                     .is_some_and(|next| next.indent > line.indent))
             .then_some("▾")
         };
-        let reserve = if disclosure.is_some() { 2 } else { 0 };
         let mark = line.mark.map(|mark| mark_text(mark, spinner, p));
         let lead = line.indent + if mark.is_some() { 2 } else { 0 };
+        // Output with more rows than the tail shows gets a scrollbar in the
+        // last column, its thumb at the end, as Amp draws it.
+        let content = (line.overflow == Overflow::Tail)
+            .then(|| wrapped_rows(&line.spans, width.saturating_sub(lead + 2).max(1)))
+            .filter(|rows| *rows > TAIL_MAX_ROWS);
+        let reserve = if disclosure.is_some() || content.is_some() {
+            2
+        } else {
+            0
+        };
         let rest_indent = line.indent + line.hang;
         let laid = layout(
             &line.spans,
@@ -1244,6 +1269,10 @@ pub fn render_group(group: &ToolGroup, width: usize, p: &Palette, spinner: &str)
             line.overflow,
         );
         let last = laid.len().saturating_sub(1);
+        let bar = content.and_then(|content| {
+            let view = laid.len();
+            crate::ui::render::fullscreen::scrollbar(view, content, content.saturating_sub(view), p)
+        });
         for (index, cells) in laid.iter().enumerate() {
             let disclosure = match disclosure {
                 Some(glyph) if index == last => format!(" {}", fg(glyph, &p.text)),
@@ -1257,7 +1286,13 @@ pub fn render_group(group: &ToolGroup, width: usize, p: &Palette, spinner: &str)
             } else {
                 " ".repeat(rest_indent)
             };
-            rows.push(format!("{prefix}{}{disclosure}", paint_cells(cells, p)));
+            let mut row = format!("{prefix}{}{disclosure}", paint_cells(cells, p));
+            if let Some(cell) = bar.as_ref().and_then(|bar| bar.get(index)) {
+                let used = display_width(&prefix) + cells.iter().map(|c| c.2).sum::<usize>();
+                row.push_str(&" ".repeat(width.saturating_sub(used + 1)));
+                row.push_str(cell);
+            }
+            rows.push(row);
         }
     }
     rows
@@ -1389,6 +1424,13 @@ fn layout(
         rows.drain(..excess);
         return rows;
     }
+    if overflow == Overflow::Whole {
+        return sources
+            .iter()
+            .enumerate()
+            .flat_map(|(index, source)| rows_of(source, index, false, usize::MAX))
+            .collect();
+    }
     let cap = WRAP_MAX_ROWS;
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for (index, source) in sources.iter().enumerate() {
@@ -1400,27 +1442,21 @@ fn layout(
     if rows.len() <= cap {
         return rows;
     }
-    if overflow == Overflow::WrapCounted {
-        // Counted, not laid out: each line takes its width over the row, at
-        // least one — the rows a hard wrap would take.
-        let total: usize = sources
-            .iter()
-            .map(|source| {
-                let width: usize = source.iter().map(|(t, _)| display_width(t)).sum();
-                width.div_ceil(rest_width).max(1)
-            })
-            .sum();
-        let hidden = total.saturating_sub(cap - 1).max(1);
-        rows.truncate(cap - 1);
-        let more = tf("… +{count} lines", &[("count", &hidden.to_string())]);
-        rows.push(cells_of(&more, Tone::Muted));
-        return rows;
-    }
     rows.truncate(cap);
     if let Some(last) = rows.last_mut() {
         *last = ellipsize(last, rest_width);
     }
     rows
+}
+
+/// About how many rows the spans take at `width`, without laying them out:
+/// each source line its width over the row, at least one.
+fn wrapped_rows(spans: &[Span], width: usize) -> usize {
+    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+    normalize(&text)
+        .split('\n')
+        .map(|line| display_width(line).div_ceil(width).max(1))
+        .sum()
 }
 
 fn cells_of(text: &str, tone: Tone) -> Vec<Cell> {

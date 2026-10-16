@@ -27,13 +27,12 @@ pub enum Effect {
     /// The prompt wants to leave without answering anything.
     Close,
     Exit,
-    /// Answer an approval request. `audit` is the transcript note.
+    /// Answer an approval request.
     Approval {
         request_id: String,
         branch_id: String,
         allow: bool,
         remember: bool,
-        audit: String,
     },
     Answers {
         request_id: String,
@@ -239,10 +238,6 @@ impl PermissionPrompt {
         }
     }
 
-    fn subject(&self) -> String {
-        collapse(&self.tool_name)
-    }
-
     fn command_preview(&self) -> String {
         let field = |key: &str| self.input.get(key);
         match field("command").or_else(|| field("cmd")) {
@@ -278,18 +273,11 @@ impl PermissionPrompt {
     }
 
     fn decide(&self, allow: bool, remember: bool) -> Effect {
-        let template = match (allow, remember) {
-            (true, false) => "approved once: {subject}",
-            (true, true) => "approved always: {subject}",
-            _ => "rejected: {subject}",
-        };
-        let audit = tf(template, &[("subject", &self.subject())]);
         Effect::Approval {
             request_id: self.request_id.clone(),
             branch_id: self.branch_id.clone(),
             allow,
             remember,
-            audit,
         }
     }
 
@@ -1117,14 +1105,8 @@ mod tests {
         p.handle_key(key(KeyCode::Right));
         match p.handle_key(key(KeyCode::Enter)) {
             Effect::Approval {
-                allow,
-                remember,
-                audit,
-                ..
-            } => {
-                assert!(allow && remember);
-                assert_eq!(audit, "approved always: edit");
-            }
+                allow, remember, ..
+            } => assert!(allow && remember),
             other => panic!("{other:?}"),
         }
         // The session-wide switches are not wired yet and never answer.

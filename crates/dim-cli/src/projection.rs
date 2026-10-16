@@ -209,6 +209,7 @@ impl Projection {
             result_text: None,
             result_is_error: false,
             diff: None,
+            exit_code: None,
         }));
         self.rows.len() - 1
     }
@@ -287,13 +288,12 @@ impl Projection {
             ToolContent::Text(text) => text.clone(),
             ToolContent::Blocks(blocks) => text_of(blocks),
         });
+        let structured = |key: &str| result.structured_content.as_ref()?.get(key);
         // The edit tool reports the display diff of what it changed.
-        row.diff = result
-            .structured_content
-            .as_ref()
-            .and_then(|content| content.get("diff"))
+        row.diff = structured("diff")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        row.exit_code = structured("exitCode").and_then(Value::as_i64);
     }
 }
 

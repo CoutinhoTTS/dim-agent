@@ -66,6 +66,8 @@ pub struct ViewRow {
     pub result_text: Option<String>,
     pub result_is_error: bool,
     pub diff: Option<String>,
+    /// A finished command's exit code (the exec tool reports it).
+    pub exit_code: Option<i64>,
 }
 
 impl ViewRow {
