@@ -244,8 +244,9 @@ the candidate arguments stop redirected background work on normal exit, and mere
 parent-death handling does not preserve the documented later-command stop method. It does not
 exercise actual ShellInput/WorkspaceTools policy loading, Session/App Server shutdown, another
 kernel or the proposed product environment filtering. No product argument, process lifetime,
-protocol, background registry or supervisor is changed. Resolve the authoritative compatibility
-contract before implementation. The machine has no host share or SSH agent and is deleted after
+protocol, background registry or supervisor is changed. User ShellInput is excluded from F5
+by #76's maintainer scope; this result does not establish a failure of BackgroundExec's retained
+live-process handoff. Its actual isolated task stop/unload remains product acceptance. The machine has no host share or SSH agent and is deleted after
 collecting the results.
 
 ## Existing implementation and integration points
@@ -280,12 +281,12 @@ request. This spike does not install that policy or change which calls execute w
   behavior is separate from the proposed product contract's explicit Windows exception, which
   retains ordinary execution while Windows isolation is unsupported.
 
-The proposed [product policy](host-platform-isolation.md) requires isolation by default on macOS
-and Linux, with host-local filesystem/environment grants and an offline boundary. Missing policy
-or unavailable isolation refuses execution on those platforms; unsupported Windows retains
-ordinary execution without loading the policy. It requires design review before
-implementation. F5 remains open until product isolated exec on both macOS and Linux passes its
-acceptance; this spike does not establish the narrower proposed policy or select its backend.
+The proposed [product policy](host-platform-isolation.md) is configurable and enabled by default
+for model exec/background work and persistent shells on macOS/Linux. A missing policy file uses
+explicit system-read/workspace-write defaults; local configuration controls network, environment
+and disablement. User ShellInput commands are excluded. Unsupported Windows retains ordinary
+execution. Product policy needs design review and actual model-consumer acceptance on both
+macOS and Linux; these mechanism probes do not establish that integration.
 
 Unmeasured boundaries include inherited file descriptors, hard links, filesystem mutation during
 startup and non-TCP sockets. Their effect on the selected policy needs evaluation; this spike

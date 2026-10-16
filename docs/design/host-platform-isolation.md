@@ -1,127 +1,112 @@
 # HostPlatform process isolation
 
 Status: proposed product contract for [F5 #76](https://github.com/arcships/dim/issues/76).
-Not implemented. The [spike report](host-platform-isolation-spike.md) records the measured
-mechanisms; it does not establish the policy below. Architecture review precedes implementation.
+Not implemented. Requirements come from [overview Appendix B.1](overview.md#b1-session-and-branch-capabilities),
+the [feature list](../feature-list.md), and #76's maintainer decision: configurable isolation
+for model-initiated execution. The [spike report](host-platform-isolation-spike.md) supplies
+mechanism evidence, not product requirements. Implementation waits for design review.
 
 ## Scope and policy
 
-HostPlatform requires isolation by default on macOS and Linux, applying an execution-node-local
-policy before a command starts. Windows currently has no supported isolation backend and retains
-ordinary execution as an explicit platform exception. There is no isolation enable/disable setting.
-The consumers are WorkspaceTools exec, including background execution, user-started ShellInput
-commands, and ShellSession PTY creation. Descendants inherit the boundary. The App Server, model
-connections, MCP servers
-and trusted in-process/TypeScript plugins are outside this change. MCP isolation remains the
-separate open question in [overview §9](overview.md#9-open-questions).
+Isolation covers WorkspaceTools exec, its BackgroundExec handoff, and persistent ShellSession
+creation. User-typed `!` / `!!` commands belong to ShellInput and use ordinary spawn; they are
+outside F5 ([ADR 003 D1](../adr/003-approval-scope.md)). App Server, model connections, MCP servers
+and trusted plugins are outside this process boundary. MCP isolation remains a separate
+[open question](overview.md#9-open-questions).
 
-The isolation policy is:
+On macOS/Linux isolation is enabled by default and can be configured or disabled locally.
+Unsupported Windows preserves ordinary execution. When enabled, missing backend support or
+failed setup refuses the payload; it never silently retries without isolation.
 
-| Resource | Contract |
+| Resource | Default and configuration |
 | --- | --- |
-| File contents | Only configured read-only and writable directories are readable. Writable directories also permit ordinary file creation, modification, removal and execution, subject to the host user's existing permissions. No implicit grant from an executable, cwd, Session, permission preset or FileStorage root. |
-| Other host paths | No file-content read or write grant. Path metadata may be visible on macOS; directory names and existence are not confidential under this policy. |
-| Network | No access to host or external IPv4/IPv6 networks, including host loopback. Linux may permit communication within the new network namespace. No proxy, per-command exception, network approval or automatic retry without isolation. |
-| Environment | Retain only explicitly named entries from the existing ProcessSpec environment. Naming a variable grants its value, not access to a path it names. HostPlatform does not synthesize credential variables. |
-| Runtime files/devices | Only the root directory itself, the Linux private namespace's `/proc`, backend-required null/random/terminal devices and the caller's existing stdio/PTY. A literal root-directory read does not grant descendant contents. |
-| Existing processes | A policy edit affects the next process start. An existing exec tree or persistent shell keeps its startup policy until its owner ends it. |
+| Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Explicit read/write lists replace those defaults and may be empty. |
+| Workspace | The immutable Session `cwd`, supplied by the consumer. A model's per-command cwd never expands the grant. |
+| Network | Disabled by default; `network: true` enables host/external networking. No per-command exception or approval matrix. |
+| Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER. No credential variables are synthesized. |
+| Runtime | Backend-required devices and the caller's existing stdio/PTY; Linux has its private /proc and namespace skeleton. No implicit host /tmp or home mount. |
+| Running processes | Policy is a startup snapshot. Edits affect the next process; running exec and persistent shells retain their original boundary. |
 
-This is a process filesystem/network boundary, not a sandbox for trusted plugins or a limit on
-CPU, memory, output size or the semantics of authorized data. A permitted directory can contain
-credentials, executable code, hard links or service sockets. Granting that directory exposes those
-objects: in particular, a mounted UNIX socket can delegate host authority. Do not automatically
-mount home, `/run`, host `/tmp`, SSH agents or Docker sockets. No claim is made that aliases of
-an authorized writable inode elsewhere on the host remain unchanged. These limits must appear
-in the configuration documentation, rather than being hidden behind the word "sandbox".
+A missing policy file uses these defaults; it does not prevent all commands from starting.
+The platform's default system roots are calibrated as part of its supported baseline: macOS
+uses /System, /usr, /bin, /sbin, /Library/Apple and /private/etc; Linux uses its installed system
+executable, loader/library and /etc roots, including the needed absolute-path aliases. Optional
+architecture-specific system directories are included only where installed. These are platform
+runtime grants, not an implicit read grant to the user's home. Additional toolchains, caches,
+temporary directories or downloads may require local configuration. The default must pass a
+real system-shell/workspace read/write flow on each supported baseline.
+
+This isolates process file/network access, not trusted plugins, all tools, CPU, memory or output
+size. A granted directory may contain credentials, executable code, hard links or service sockets;
+that data and delegated authority are exposed. A workspace containing the application home also
+contains host configuration: a writable workspace grant does not promise to protect files inside
+it. Do not claim safety for credentials or UNIX sockets inside an allowed tree. With isolation
+disabled, commands have the existing host user's ordinary access; disabling is an explicit local
+policy choice. These limits belong in user configuration documentation.
 
 ## Configuration owner and format
 
-HostPlatform owns `host-isolation.json` under the execution node's configured application home,
-read through its declared FileStorage dependency. It is not read from the project, client or
-Session. Remote execution uses the remote host's own file. HostPlatformConfig gains an optional
-`isolation_file` location: FileStorage root index and relative path, as with `exec-shell.json`.
-The location is structural loader configuration; file contents are not loader configuration.
+HostPlatform owns `host-isolation.json` under the execution node's application home, through
+its declared FileStorage dependency. It is not project, client or Session configuration; remote
+execution reads the remote node's file. HostPlatformConfig supplies an optional file location,
+as with exec-shell.json. The location is structural; the file's policy is business data.
 
-The new file has an explicit format version. For example, a macOS host could authorize:
+The file is a new, versioned format. Version 1 accepts `enabled`, `network`, `readOnlyPaths`,
+`writablePaths` and `environment`. Each omitted policy field uses the default in the table;
+an explicitly empty list grants none of that resource. Only `version` is required when a file
+exists. Examples:
+
+```json
+{"version": 1, "enabled": false}
+```
+
+An explicit Linux policy can keep isolation enabled, allow downloads and name a writable workspace:
 
 ```json
 {
   "version": 1,
-  "readOnlyPaths": ["/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc"],
-  "writablePaths": ["/Users/example/project", "/Users/example/dim-command-tmp"],
-  "environment": ["PATH", "HOME", "LANG", "TERM", "NO_COLOR", "TMPDIR"]
+  "enabled": true,
+  "network": true,
+  "readOnlyPaths": ["/usr", "/bin", "/sbin", "/lib", "/etc"],
+  "writablePaths": ["/workspace/project"],
+  "environment": ["PATH", "HOME", "LANG", "TERM", "NO_COLOR"]
 }
 ```
 
-The paths are host administrator choices, not a portable preset or a validated macOS profile.
-The example directory and TMPDIR value must already exist and agree. No path is created or
-added to the grants automatically. A Linux host lists its own executable/library/configuration
-directories and toolchain caches. A command that needs an ungranted cache or dependency download
-fails within the boundary; Permission approval does not widen it.
+The path list is node-specific; it is not a portable Linux runtime promise. Preserve executable
+aliases at their requested absolute destinations while resolving/validating their host roots
+once at this external boundary. Unknown fields, missing/unknown versions, malformed/unreadable
+files, non-absolute or nonexistent/non-directory roots and invalid environment names are errors.
+Names are nonempty and contain neither NUL nor '='. A resolved root cannot be in both lists.
+Writable roots also permit reads; grants are additive. Naming an environment value grants no
+filesystem access to the path it contains. No file is written merely because defaults are used.
 
-All four fields are required. Unknown fields, missing/unknown versions,
-malformed data, unreadable files, non-absolute paths, nonexistent/non-directory roots and invalid
-environment names are configuration errors. Names must be nonempty and contain neither NUL nor `=`.
-Roots are canonicalized at this external boundary;
-the same resolved root cannot occur in both lists. Writable roots must not overlap the configured
-application home, which holds the policy and other host authority; a command cannot edit its own
-execution policy or enabled plugin configuration. A writable descendant inside a read-only
-directory is an explicit write grant; grants are additive, so a read-only descendant does not
-subtract a writable ancestor's authority. Each environment name selects an exact existing key;
-an absent key adds nothing. The lists may be empty.
-
-On macOS and Linux, a missing file or a host profile with no configured policy location is a
-configuration error: exec and PTY startup refuse before starting the payload. Reading does not
-create a default file or grant the cwd, project or host home. The host administrator supplies
-the file and its explicit grants before commands can run. Windows skips policy loading and
-preserves ordinary execution until a supported Windows isolation contract exists. Existing
-files and running processes are not migrated or modified.
-
-On macOS and Linux, read and validate once for each new process, not once per Session or loader
-generation. Do not cache policy, install a watcher, subscribe to Session events, reload plugins or restart running
-shells when the file changes. Read at use time satisfies ADR 002 D4 without new machinery.
+Read at each model process start; no cache, watcher, Session subscription, loader reload or
+restart of an existing shell. No configured location, or a missing file at that location, uses
+the defined default. An existing invalid file fails explicitly. `enabled: false` returns the
+ordinary ProcessSpec without requiring a sandbox backend. Windows skips this unsupported policy
+and retains ordinary execution until it has an accepted backend contract.
 
 ## Existing call flow
 
-1. The existing consumer performs its tool or shell-input admission and constructs ProcessSpec.
-   WorkspaceTools continues to use `build_process_spec` for the current shell and its command
-   checks. ShellInput uses the same builder inside its existing cancellable preparation, before
-   final run admission. ShellSession retains its existing persistent-shell selection.
-2. All three consumers pass that spec through one HostPlatform-owned asynchronous preparation
-   operation immediately before starting it. On macOS and Linux, HostPlatform reads its required
-   policy, filters the existing environment and constructs the selected backend's executable/argv/cwd.
-   On Windows, it returns the original spec unchanged without reading an isolation file. The
-   original command and every path remain separate argv values, never interpolated into a shell command.
-3. The prepared spec goes to the existing synchronous `spawn` or `spawn_pty`. Backend setup
-   finishes before exec of the payload. A failed setup must not run the payload.
-4. The consumer retains the existing ProcessTree/PtyProcessTree, output pumps, cancellation,
-   background handoff and terminal-state responsibilities. No isolation task supervisor or
-   independent process-lifetime state is added.
+1. WorkspaceTools builds its existing ProcessSpec. ShellSession selects its existing persistent
+   shell. Their owning Session configuration supplies the workspace separately from the model's
+   requested working directory. ShellInput never enters this preparation.
+2. A crate-local HostPlatform operation prepares that spec once before spawn:
+   `prepare_isolated_process(spec, workspace: &Path).await -> Result<ProcessSpec, ProcessSpecError>`.
+   It reads policy, selects the existing environment names and constructs backend argv/profile.
+   Explicitly disabled policy and unsupported Windows return the original spec. No public service,
+   protocol or ProcessSpec field is added.
+3. The consumer calls existing synchronous spawn or spawn_pty. Backend setup precedes payload
+   execution; a failed setup runs no payload. Arguments and paths stay separate argv values.
+4. Existing process/PTY trees, pumps, cancellation and terminal facts remain with their current
+   owners. The background handoff moves the already-running ExecProcess; it does not start another
+   namespace, change policy or require another supervisor.
 
-ShellInput includes isolation in its existing preparation/call-token race, before the final
-registry admission and synchronous spawn. Do not await policy I/O under its admission lock.
-Refusal or pre-admission cancellation leaves the runId unused and writes no Append input;
-already admitted runs retain the generation's ownership, stop and `!`/`!!` recording semantics.
-
-The preparation is an actual ProcessSpec transformation at the process-execution boundary,
-not another service, registry or authorization port. Raw spawn/PTY primitives remain available
-for trusted host probes and embeddings; they do not promise isolation. Internal shell/runtime
-discovery stays outside the command sandbox. Consequently, this contract is guaranteed for the
-listed product consumers, not for arbitrary trusted code that starts a process by another API.
-Other features integrate at their own documented execution boundary, without special caller tags.
-
-Crate-local operation: `HostPlatform::prepare_isolated_process(spec).await ->
-Result<ProcessSpec, ProcessSpecError>`, visible only within dim-agent-capabilities. Only the Windows
-exception returns the original spec unchanged. All three consumers already live in that crate, so
-the operation does not need to be a new public service API.
-No public wire method, event or language-neutral service is introduced. ProcessSpec and the
-existing `{code, reason}` error data retain their single definitions.
-
-The accepted [ShellInput design Q4](plugins/ShellInput.md#appendix-f-decisions-and-deferrals) assumes
-transparent isolation in `spawn` without a consumer change. This proposal instead retains raw
-spawn for trusted host uses and prepares the three product consumers asynchronously. Architecture
-review must align that integration choice with P1 before implementation; the proposal does not
-silently supersede P1's contract.
+Raw HostPlatform spawn/PTY remain available for ShellInput and trusted host uses. Product isolation
+is promised only for the listed model consumers. Shell/runtime discovery stays outside the command
+sandbox. The accepted ShellInput Q4 transparency assumption is immaterial to this scope: its user
+commands do not use F5, and their normal-exit/disconnect behavior is unchanged.
 
 ## Platform bindings
 
@@ -129,7 +114,8 @@ silently supersede P1's contract.
 
 Use the measured `/usr/bin/sandbox-exec` argv entry point with a HostPlatform-owned generated
 Seatbelt profile. Start from deny-default, allow reads only for the configured directories and
-required runtime devices, writes only for writable directories/devices, and deny networking.
+required runtime devices, writes only for writable directories/devices, and deny networking when
+network is disabled. Explicitly enabled network permits the normal network operations.
 Use profile parameters for host paths; never embed an unescaped path into policy source. The
 profile is internal implementation data, not a second user-configurable policy language.
 
@@ -147,173 +133,126 @@ The local `sandbox-exec(1)` manual marks the interface deprecated. Support is li
 OS versions that pass the isolation acceptance flows; macOS 27.0.1 fixture results are
 evidence for their exercised profiles only.
 
+
 ### Linux
 
-Select bubblewrap for the product policy: an empty mount namespace with configured read-only
-and writable binds at their original absolute paths, a read-only namespace skeleton, a private network namespace, private PID
-and IPC namespaces, a private `/proc` and minimal `/dev`. Retain the unprivileged calling user;
-do not request elevated execution, capabilities, setuid mode or a host network namespace.
-Use a private user namespace and drop all capabilities for the payload. Resolve the installed
-`bwrap` from the host's captured PATH; no runtime download or installer.
-Use its parent-death handling while retaining the existing tree handle's ability to terminate
-and reap the whole command. Terminal separation belongs to the existing HostPlatform entry
-points: native spawn already creates a new session with null stdin/piped output, and PTY spawn
-creates a dedicated terminal. Do not add bubblewrap `--new-session` to that PTY: measured controls
-show it loses the controlling terminal even though input and resizing still work. The existing
-session/PTY construction preserves interactive job control without exposing a surrounding host
-shell's terminal. The crate-local preparation is used only through these two entry points;
-arbitrary inherited-terminal invocation has no such guarantee. No terminal proxy, custom seccomp
-subsystem or additional process supervisor is proposed.
+Use bubblewrap with an empty mount namespace and configured read-only/writable binds at their
+original destinations, private PID/IPC namespaces, a private /proc and minimal /dev. Retain the
+unprivileged user, use a private user namespace and drop payload capabilities. Resolve installed
+bwrap through the captured host PATH; do not download or elevate a backend. With network disabled,
+unshare the network namespace; with network enabled, retain the host network. Backend failure
+while enabled refuses execution, rather than selecting a weaker or unisolated path.
 
-Bubblewrap provides mount/network namespaces; its arguments determine the actual boundary.
-Its upstream documentation identifies mounted service sockets and terminal injection as security
-considerations. Both must be checked in the real spawn and PTY flows; merely seeing a child
-PID is insufficient. See [upstream policy and limits](https://github.com/containers/bubblewrap/blob/main/README.md)
-and [command options](https://github.com/containers/bubblewrap/blob/main/bwrap.xml).
+Retain the existing ProcessTree/PtyProcessTree and bubblewrap parent-death handling. Native spawn
+already establishes a session and piped output; PTY spawn owns its terminal. Do not add
+`--new-session` to the PTY path: measured input/resize still worked but controlling-terminal/job
+control did not. No terminal proxy, custom seccomp system or process supervisor is added.
+See the upstream [policy limits](https://github.com/containers/bubblewrap/blob/main/README.md) and
+[options](https://github.com/containers/bubblewrap/blob/main/bwrap.xml). The existing
+[native-handle calibration](host-platform-isolation-spike.md#linux-bubblewrap-process-and-terminal-calibration)
+checks tree settlement, PTY/job control and live IPv4/IPv6 TCP/UDP and UNIX-socket boundaries on
+Debian 13.7 / Linux 7.2.9 ARM64, UID 501, bubblewrap 0.12.0. It does not verify product policy.
 
-The measured Landlock wrapper is not the selected backend. Its ABI 4 policy does not cover UDP
-or UNIX sockets, and Landlock's documented filesystem limits include metadata operations such as
-chmod/chown. These differ from the proposed read-only mount boundary. See the
-[kernel contract](https://docs.kernel.org/userspace-api/landlock.html). Newer ABI rights do not
-retroactively expand the spike's runtime evidence.
+Landlock is not selected for this boundary: the measured ABI 4 wrapper does not cover UDP/UNIX
+sockets or all read-only metadata operations. See its [kernel contract](https://docs.kernel.org/userspace-api/landlock.html).
+Those measured limits are not claims about every newer ABI.
 
-The [feasibility probe](host-platform-isolation-spike.md#linux-bubblewrap-feasibility) passes as
-UID 501 on Debian 13.7 / Linux 7.2.9 ARM64 with bubblewrap 0.12.0: workspace I/O, read-only
-bytes/mode, an inaccessible private fixture, symlink rejection, a private network namespace
-and basic PTY startup. A subsequent [native-handle calibration](host-platform-isolation-spike.md#linux-bubblewrap-process-and-terminal-calibration)
-also verifies actual ProcessTree/PtyProcessTree settlement, PTY input/resize, interactive bash
-job control and live host IPv4/IPv6 TCP/UDP plus unmounted UNIX-socket boundaries on that baseline.
-These fixtures do not establish product policy loading or consumer integration.
-Product integration must verify the same boundary through its actual consumers. A container or
-kernel that refuses required namespaces is unsupported
-for isolation; command execution refuses without switching to a weaker Landlock policy or
-ordinary execution.
+### Background lifetime
 
-#### ShellInput background compatibility
+The existing [BackgroundExec](../architecture/rust-agent/plugins/BackgroundExec.md) owns model
+background tasks. `exec::hand_off` passes the same live ExecProcess to `BackgroundExec::start`;
+its existing task retains the tree until completion. Returning a ToolResult or stopping a turn
+therefore does not drop that process. There is no cross-command namespace PID handoff.
 
-[ShellInput A.2](plugins/ShellInput.md#a2-execution) permits `!cmd &` to
-finish the run while redirected background work outlives it, the Session and App Server.
-The native cancellation probe keeps its command root alive; it does not verify this normal-exit
-contract. A separate [normal-exit calibration](host-platform-isolation-spike.md#linux-bubblewrap-normal-exit-and-background-compatibility)
-uses actual HostPlatform wait/drop and redirected background work on the same Linux baseline:
+| Transition | Existing owner contract |
+| --- | --- |
+| Foreground becomes background | Move the live process/tree and its startup policy; retain the same namespace. |
+| Turn stops | BackgroundExec keeps the task running and retains its completion/wake ownership. |
+| Explicit task stop or branch/Session unload | Existing task cancellation terminates/releases the owned tree before terminal settlement. |
+| Command completes normally | Record exec/ended once and publish the existing bounded wake; no orphan process is reclassified as a new task. |
+| App Server dies | Backend parent-death handling terminates isolated descendants; no work is recovered from history. |
 
-| Construction | Root wait | Background executes after wait/drop | A later fresh command can address `$!` |
-| --- | --- | --- | --- |
-| Ordinary spawn control | Exit 0 | Yes | Yes |
-| Private PID namespace and `--die-with-parent` | Exit 0 | No | No |
-| Same boundary without `--die-with-parent` | Exit 0 | Yes | No |
+Shell backgrounding inside a command does not create a BackgroundExec task: normal root exit
+completes that command, with the backend's namespace cleanup. Long-lived model work uses the
+existing runInBackground handoff and keeps its command root alive.
+Task control uses the existing taskId and host-owned tree, not `kill $!` from a fresh namespace.
+ShellSession likewise retains its original PTY/tree for the shell's lifetime. Product acceptance
+must verify transfer, later task stop and Session shutdown with the actual isolated model paths.
 
-The selected candidate arguments therefore contradict P1's normal-exit background behavior.
-Removing parent-death handling alone is insufficient: the surviving child's namespace PID is
-not addressable from the next command's new namespace. No parent-death relaxation is adopted by
-this calibration. Product isolation arguments and P1's lifetime/manual-stop contract must be
-aligned before implementation. Session/App Server shutdown and product consumer admission are
-not exercised by this mechanism probe.
-
-Do not infer background survival from whole-tree cancellation, assume a namespace PID can be
-used by a later isolated command, or add a run supervisor/protocol to hide the mismatch. Verify
-run completion, redirected descendant lifetime, current grants and the documented way to stop
-that work. If the selected isolation boundary changes P1 A.2, align the authoritative designs
-before implementation; no lifetime change is accepted by this proposal alone.
+The separate [normal-exit calibration](host-platform-isolation-spike.md#linux-bubblewrap-normal-exit-and-background-compatibility)
+shows redirected `!cmd &` descendants do not satisfy ShellInput's outliving/PID contract under the
+candidate private-PID/parent-death arguments. That is valid evidence for excluding user ShellInput
+from isolation; it is not proof that a held BackgroundExec tree dies when its tool call returns.
+No PID translation, detached-namespace registry or new stop protocol is proposed.
 
 ### Windows
 
-Windows retains ordinary exec and PTY execution, with the original ProcessSpec environment and
-existing process-tree ownership. HostPlatform does not load an isolation file on this platform.
-This is the sole platform exception to mandatory isolation; it is not evidence of Windows
-isolation support. No Windows sandbox substitute or backend is included in F5.
+Windows has no supported isolation backend. It keeps the original exec/PTY, environment and tree
+ownership and does not load this file. Do not present that path as isolated or simulate a sandbox
+with path checks or Permission rules.
 
-## Errors and lifetime
+## Failure and persistence
 
-Preparation uses existing ProcessSpecError data:
-
-| Code | Meaning |
-| --- | --- |
-| `HOST_ISOLATION_CONFIG_INVALID` | Required macOS/Linux policy location or file is missing, or the configuration cannot be read, parsed or validated. |
-| `HOST_ISOLATION_UNAVAILABLE` | macOS/Linux isolation has no usable backend, including a missing backend executable. |
-
-Runtime setup failure, including a namespace/profile refusal, is an existing spawn failure or
-backend nonzero exit with its diagnostic, according to where it occurs. It is not a successful
-command and never retries the payload without isolation. Tool errors use the existing tool-result
-path; ShellInput uses its existing preparation-refusal mapping and ShellSession its existing
-startup-failure response. No JSON-RPC numeric error code,
-permission category or Timeline format is added. Diagnostic text must not echo environment values
-or the policy file body.
-
-HostPlatform remains publishable when isolation configuration is invalid or unavailable, as it
-does for shell preferences; only affected execution fails. File tools and unrelated Sessions
-remain usable. A model argument or approval response cannot disable isolation or select the
-Windows exception on another platform.
-The chosen file contents and grants are one startup snapshot. Concurrent host policy/path changes
-do not add a new atomicity guarantee; no lock, grant lease or filesystem virtualization is added.
-Restore/fork uses the current host policy for new processes and never restores authority from
-history. Detach, close and process cancellation retain their current ownership and semantics.
+Policy parsing/setup failure runs no payload. Enabled isolation has no implicit fallback; explicit
+disablement is ordinary execution. Approval never widens filesystem/network policy. Existing
+consumers report their existing typed error/result; no new approval category or Timeline fact.
+The policy is a startup snapshot. Concurrent path/policy edits add no atomicity guarantee, grant
+lease or filesystem virtualization. Restore/fork uses current local policy for each new process.
 
 ## Impact and acceptance
 
 | Location | Necessary change |
 | --- | --- |
-| HostPlatform | Own file location, boundary parsing, mandatory macOS/Linux preparation, Windows bypass and backend argv/profile construction. Reuse FileStorage and existing process/error types. |
-| WorkspaceTools exec / ShellInput / ShellSession | Prepare their existing ProcessSpec before their existing spawn/PTY call; preserve admission, shell checks and tree ownership. ShellInput keeps preparation cancellable before its atomic admission. |
-| App Server assembly / xtask example assembly | Supply host-local file location through HostPlatformConfig, with the existing conditional FileStorage dependency. Regenerate architecture output only when implementation changes assembly. |
-| HostPlatform and integration flow configurations | Update existing HostPlatformConfig literals for the optional field; embeddings using an exhaustive literal need the same source update. |
-| Owner docs and flow tests | Describe the actual supported OS baseline, configuration and refusals; verify actual shell execution through public product flows. |
+| HostPlatform | Local policy parsing/defaults and backend transformation; reuse FileStorage, ProcessSpec and error types. |
+| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY; preserve admission and tree ownership. |
+| BackgroundExec | Preserve its existing live-process handoff, taskId control and terminal facts; no new process service. |
+| ShellInput | None; user commands continue ordinary spawn. |
+| Product assembly | Supply optional local file location through existing HostPlatformConfig/conditional FileStorage; default policy works without a file. |
+| Owner docs and flows | Supported baselines, real model exec/background/PTY acceptance and explicit disabled/Windows paths. |
 
-No core, loader protocol, SessionConfig, event fixture, persistence database, MCP policy or CLI
-management operation changes. Direct host-local file editing is sufficient for the first scope.
+Verify actual model foreground/background exec and persistent shells on macOS/Linux: default
+system-shell plus workspace read/write without a file, configured stricter/wider roots, symlink
+escape, outside file/metadata denial, TCP/UDP denial with network disabled and success against live
+listeners when enabled, ungranted UNIX sockets, PTY input/resize/job control, tree stop/unload and
+background task survival across a turn stop. Verify later taskId stop, one terminal/wake, Session
+shutdown and no process replay. Policy edits affect only new processes; malformed existing files
+refuse payload startup; explicit disablement executes normally without requiring a backend.
+A model-supplied cwd outside the workspace must not enlarge default writes. Reuse ShellInput's
+existing ordinary `!`/`!!` flows as the exclusion control. Windows uses ordinary exec/PTY.
 
-Reuse the spike fixtures and existing local-execution/persistent-shell flows. On both supported
-OS baselines, demonstrate allowed reads/writes and shell descendants; denied outside reads,
-writes and metadata changes; an escaping symlink; TCP and UDP to live host listeners; a host
-UNIX socket outside grants; real PTY execution and resizing; and whole-tree cancellation with
-descendants reaped. Exercise foreground and background exec, live policy edits for the next
-process, retention of running-shell policy, exact environment filtering, malformed/unavailable
-policy without a payload marker, missing location/file refusal without implicit grants, and
-refusal of writable roots overlapping application home. Use only disposable roots/home,
-credentials-free environment and local listeners. Windows exercises ordinary exec and PTY with
-the original environment, without requiring or reading the isolation file. Do not add a separate
-test for every private parser/helper.
-
-Cover actual `shell.run`/`shell.stop` user flows alongside exec and PTY, including preparation
-interruption, reuse of an unadmitted runId, and Append/private mode outcomes. Isolation refusal
-must start no process and produce no command-result input. Reuse the existing ShellInput flow.
-
-Do not claim F5 complete from the spike, design approval or one backend. Product acceptance
-requires mandatory isolation through exec, user shell commands and PTY on macOS and Linux and the Windows exception,
-with the supported baselines recorded.
+Use disposable homes, roots and local listeners. Mechanism probes do not establish defaults,
+product policy loading or the real consumers. F5 remains open until actual isolated model exec
+and PTY acceptance pass on both supported platforms. CLI startup timing is a separate fix, [#158](https://github.com/arcships/dim/pull/158).
 
 ## Rule check
 
 | Rule | Application |
 | --- | --- |
-| §1 | Extend the existing process owner. No new capability, registry, supervisor or lock. |
-| §4 rule 1 | No other owner's business state is changed; admission and result publication remain with the existing consumer. |
-| §4 rule 2 | Existing handoff to exec/background ownership is unchanged; preparation precedes process start. |
+| §1 | Extend the existing process owner; no new capability, registry, supervisor or lock. |
+| §4 rule 1 | Consumer admission/results retain their existing owners. |
+| §4 rule 2 | Background transfer retains the live tree and its startup boundary. |
 | §4 rule 3 | No before callback or commit-time I/O. |
-| §4 rule 4 | Timeline, Dispatcher and assembly have no isolation-specific behavior. |
+| §4 rule 4 | Core and assembly contain no isolation business branch. |
 | §4 rule 5 | No new batch or dispatch semantics. |
-| §4 rule 6 | Only existing tool results/adopted inputs enter model context. |
-| §4 rule 7 | Consumers use HostPlatform and existing tree handles; configuration uses declared FileStorage. |
-| §4 rule 8 | Existing contracts suffice; backend/platform limitations stay in F5. |
-| §4 rule 9 | Host safety settings and backend diagnostics are not new Timeline facts. |
-| ADR 002 D1 | Process owner holds host policy location; each executing consumer owns its process lifetime. |
-| ADR 002 D2 | No wiring plugin or cross-scope access host. |
-| ADR 002 D3 | Existing consumers depend on HostPlatform; no dependency on an optional isolation provider. |
-| ADR 002 D4 | Business policy is read at each new process; loader rows retain only its structural location. |
-| ADR 002 D5 | No new cross-language service; existing data/error types and native process binding are reused. |
+| §4 rule 6 | Only existing tool results and adopted inputs enter model context. |
+| §4 rule 7 | Public HostPlatform/tree interfaces and declared FileStorage only. |
+| §4 rule 8 | Existing mechanisms suffice; platform limits stay in F5. |
+| §4 rule 9 | Host policy and diagnostics are not Timeline facts. |
+| ADR 002 D1 | Host owns local policy; consumers own their executing process lifetime. |
+| ADR 002 D2 | No wiring or cross-scope policy service. |
+| ADR 002 D3 | No optional isolation-provider dependency. |
+| ADR 002 D4 | Read business policy per process; loader retains only its structural location. |
+| ADR 002 D5 | Existing data/error/process contracts; no new language-neutral service. |
 
 ## Requirements raised to mechanism owners
 
-None. No new readiness phase, subscription, protocol, generic policy service or rutis feature is
-required. OS-baseline coverage and product process/PTY acceptance are HostPlatform
-acceptance work, not requirements on core.
+None. Defaults, configuration and backend acceptance belong to HostPlatform. No new readiness,
+subscription, protocol, supervisor or rutis feature is required.
 
-## Ablation review
+## Ablation
 
-Retain one owner file, one preparation operation and the existing spawn/tree APIs. Separate
-read/write roots express the actual filesystem grant; environment names prevent implicit host
-credential inheritance. A fixed offline policy avoids a proxy, approval matrix and network
-exception state. Platform selection removes an enable/disable flag; unsupported Windows keeps
-its existing execution path. Read at use time removes caches, change subscriptions and reload
-coordination.
-No additional abstraction is required by these consumers.
+One local file and its explicit defaults replace a policy service or watcher. One preparation
+operation reuses existing spawn/PTY and native errors. BackgroundExec already holds the process;
+no namespace/PID manager is needed. User ShellInput stays outside this boundary. Network is one
+local setting rather than per-command exceptions. No isolation product code is introduced by
+this design/probe PR.

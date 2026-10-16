@@ -43,11 +43,11 @@ The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exerc
 Seatbelt, Landlock and bubblewrap wrappers through these existing process and PTY APIs. It
 does not install product isolation. The proposed host-local policy, consumer
 integration and platform acceptance are in the [F5 product design](../../../design/host-platform-isolation.md).
-That proposed contract requires isolation by default on macOS/Linux and refuses command startup
-when the required policy or backend is missing. Unsupported Windows retains ordinary execution.
-It has no enable/disable setting and grants no implicit access to the cwd or host home.
-The Linux normal-exit probe demonstrates a P1 background-lifetime/PID incompatibility with the
-candidate arguments; the product design retains that compatibility gate before implementation.
+The proposed policy is configurable and enabled by default for model exec/background work and
+persistent shells on macOS/Linux. A missing file uses system-read/workspace-write defaults;
+local configuration can change roots, network/environment and disable isolation. User ShellInput
+commands remain ordinary spawn. BackgroundExec retains its existing live process/tree; no
+namespace PID registry is introduced. Unsupported Windows preserves ordinary execution.
 
 ## Command construction
 
