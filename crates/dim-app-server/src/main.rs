@@ -1,14 +1,17 @@
 use dim_agent_aimux::{AimuxModels, ConfiguredModelPlugin, config::ModelConfigFile};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
+    context_methods::{self, ContextMethodsPlugin},
+    context_model::ProductContextModel,
     defaults,
     history::HistoryRenderer,
-    host::{ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
+    summary_strategy::ProductSummaryStrategyPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
-use dim_app_server::{ServerConfig, ShutdownReason, collaboration, serve};
+use dim_app_server::{ServerConfig, ShutdownReason, collaboration, permission_rules, serve};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 #[cfg(windows)]
@@ -215,14 +218,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ModelProviderPlugin::process,
                 WorkspaceToolsConfig { output_root },
             );
+            permission_rules::install(&mut builder);
             builder
                 .session_value(Arc::new(HistoryRenderer::default()))
-                .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-                .session_value(Arc::new(ContextModelHost(None)));
+                .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
             if models.is_some() {
-                builder.session_plugin(ConfiguredModelPlugin::new);
+                // A --models file adopts no capability snapshot: no compaction.
+                builder
+                    .session_value(Arc::new(ContextModelHost(None)))
+                    .session_value(Arc::new(CompactionStrategyHost(None)))
+                    .session_plugin(ConfiguredModelPlugin::new);
             } else {
-                builder.session_plugin(DefaultPrepareModelPlugin::new);
+                builder
+                    .session_value(Arc::new(ContextModelHost(Some(Arc::new(
+                        ProductContextModel,
+                    )))))
+                    .session_plugin(ProductSummaryStrategyPlugin::new)
+                    .session_plugin(ContextMethodsPlugin::new)
+                    .session_methods(context_methods::NAMESPACE)
+                    .session_plugin(DefaultPrepareModelPlugin::new);
             }
             collaboration::install(&mut builder);
         } else if mock_model {

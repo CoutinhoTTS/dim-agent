@@ -466,7 +466,10 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     use dim_agent_types::{EventKind, TurnOutcome};
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -482,6 +485,7 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
         }))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
@@ -655,7 +659,10 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     use dim_agent_types::EventKind;
     let declared = Arc::new(DeclaredTools(Default::default()));
@@ -666,6 +673,7 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
         .session_value(Arc::new(ModelHost(declared.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new)
         .session_tool("probe")
         .session_plugin(|scope| ProbeContributor(*scope));
@@ -772,7 +780,10 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     use dim_agent_types::EventKind;
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -788,6 +799,7 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
         }))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
@@ -876,7 +888,10 @@ async fn state_notifications_follow_a_loop_reload() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -891,6 +906,7 @@ async fn state_notifications_follow_a_loop_reload() {
         }))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
