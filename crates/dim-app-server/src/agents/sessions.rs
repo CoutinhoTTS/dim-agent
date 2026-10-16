@@ -356,103 +356,106 @@ impl AgentIndex {
         self: &Arc<Self>,
         request: LaunchRequest,
     ) -> Result<LaunchReply, SessionsError> {
-        self.until_unloaded(async {
-            if request.policy.as_ref().is_some_and(|policy| {
-                policy
-                    .allowed_tools
-                    .iter()
-                    .chain(&policy.disallowed_tools)
-                    .any(|name| name.trim().is_empty())
-            }) {
-                return Err(SessionsError::rejected("Tool names must not be empty"));
-            }
-            let host = self.host(request.agent.as_deref()).ok_or_else(|| {
-                let id = request.agent.as_deref().unwrap_or(self.default_agent_id());
-                match self.unavailable_agent(id) {
-                    Some(reason) => SessionsError::new(SessionsErrorCode::Failed, reason),
-                    None => SessionsError::new(
-                        SessionsErrorCode::AgentUnknown,
-                        format!("unknown agent: {id}"),
-                    ),
+        let (host, config, policy) = self
+            .until_unloaded(async {
+                if request.policy.as_ref().is_some_and(|policy| {
+                    policy
+                        .allowed_tools
+                        .iter()
+                        .chain(&policy.disallowed_tools)
+                        .any(|name| name.trim().is_empty())
+                }) {
+                    return Err(SessionsError::rejected("Tool names must not be empty"));
                 }
-            })?;
-            let cwd = session_cwd(&request.cwd)
-                .await
-                .map_err(|error| SessionsError::rejected(error.message))?;
-            // Read once under a lease; a starter that cannot be read fails
-            // the launch rather than falling back to a possibly wider bound.
-            let bound = match &request.starter {
-                Some(starter) => {
-                    let lease = self.acquire(&starter.session_id).await?;
-                    lease
-                        .session
-                        .get::<PermissionState>(&starter.branch_id)?
-                        .ok_or_else(|| SessionsError::reloading("the starter's Permission"))?
-                        .policy
-                }
-                None => self.session_defaults.permission_policy.clone(),
-            };
-            let requested = match request.policy {
-                Some(policy) => policy,
-                None if request.starter.is_some() => bound.clone(),
-                None => PermissionPolicy::default(),
-            };
-            let policy = cap(&requested, &bound);
-            let mut config = super::session_config(&host.profile, &self.session_defaults);
-            config.cwd = cwd;
-            config.permission_policy = policy.clone();
-            config.interactive = false;
-            if self.selects_models {
-                let selection = self
-                    .model_selection()
-                    .ok_or_else(|| SessionsError::reloading("model selection"))?;
-                config.model = selection
-                    .0
-                    .resolve(
-                        request.model.or_else(|| host.profile.model.clone()),
-                        Some(config.cwd.clone().into()),
-                        self.stopping.clone(),
-                    )
+                let host = self.host(request.agent.as_deref()).ok_or_else(|| {
+                    let id = request.agent.as_deref().unwrap_or(self.default_agent_id());
+                    match self.unavailable_agent(id) {
+                        Some(reason) => SessionsError::new(SessionsErrorCode::Failed, reason),
+                        None => SessionsError::new(
+                            SessionsErrorCode::AgentUnknown,
+                            format!("unknown agent: {id}"),
+                        ),
+                    }
+                })?;
+                let cwd = session_cwd(&request.cwd)
                     .await
-                    .map_err(|error| {
-                        SessionsError::new(
-                            SessionsErrorCode::Failed,
-                            format!("model resolution: {error}"),
-                        )
-                    })?;
-            } else if let Some(model) = request.model {
-                config.model = ModelSelection {
-                    provider_id: model.provider_id,
-                    model_id: model.model_id,
-                    capability_snapshot: None,
-                    config: None,
-                    metadata: None,
+                    .map_err(|error| SessionsError::rejected(error.message))?;
+                // Read once under a lease; a starter that cannot be read fails
+                // the launch rather than falling back to a possibly wider bound.
+                let bound = match &request.starter {
+                    Some(starter) => {
+                        let lease = self.acquire(&starter.session_id).await?;
+                        lease
+                            .session
+                            .get::<PermissionState>(&starter.branch_id)?
+                            .ok_or_else(|| SessionsError::reloading("the starter's Permission"))?
+                            .policy
+                    }
+                    None => self.session_defaults.permission_policy.clone(),
                 };
-            }
-            // Clients see a loaded Session once its protocol version is
-            // registered: creation and registration finish together even
-            // when the caller stops waiting.
-            let index = self.clone();
-            let session = tokio::spawn(async move {
-                let session = index
-                    .create_session(&host, config, PROTOCOL_VERSION)
-                    .await?;
-                index.retain_versions();
-                index.insert_version(session.id(), &host.agent_id, PROTOCOL_VERSION);
-                Ok::<_, AgentError>(session)
+                let requested = match request.policy {
+                    Some(policy) => policy,
+                    None if request.starter.is_some() => bound.clone(),
+                    None => PermissionPolicy::default(),
+                };
+                let policy = cap(&requested, &bound);
+                let mut config = super::session_config(&host.profile, &self.session_defaults);
+                config.cwd = cwd;
+                config.permission_policy = policy.clone();
+                config.interactive = false;
+                if self.selects_models {
+                    let selection = self
+                        .model_selection()
+                        .ok_or_else(|| SessionsError::reloading("model selection"))?;
+                    config.model = selection
+                        .0
+                        .resolve(
+                            request.model.or_else(|| host.profile.model.clone()),
+                            Some(config.cwd.clone().into()),
+                            self.stopping.clone(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            SessionsError::new(
+                                SessionsErrorCode::Failed,
+                                format!("model resolution: {error}"),
+                            )
+                        })?;
+                } else if let Some(model) = request.model {
+                    config.model = ModelSelection {
+                        provider_id: model.provider_id,
+                        model_id: model.model_id,
+                        capability_snapshot: None,
+                        config: None,
+                        metadata: None,
+                    };
+                }
+                Ok((host, config, policy))
             })
-            .await
-            .map_err(|error| SessionsError::new(SessionsErrorCode::Failed, error.to_string()))?
-            .map_err(|error| match error {
-                AgentError::Reloading(_) => SessionsError::from(error),
-                error => SessionsError::new(SessionsErrorCode::Failed, error.to_string()),
-            })?;
-            Ok(LaunchReply {
-                session_id: session.id().to_owned(),
-                policy,
-            })
+            .await?;
+        // Clients see a loaded Session once its protocol version is
+        // registered: creation and registration finish together even when
+        // the caller stops waiting. Once admitted, the reply is the creation's
+        // own outcome, not the index unload: a `reloading` reply would invite
+        // a retry while this task may still create the first Session (§6.1).
+        let index = self.clone();
+        let session = tokio::spawn(async move {
+            let session = index
+                .create_session(&host, config, PROTOCOL_VERSION)
+                .await?;
+            index.retain_versions();
+            Ok::<_, AgentError>(session)
         })
         .await
+        .map_err(|error| SessionsError::new(SessionsErrorCode::Failed, error.to_string()))?
+        .map_err(|error| match error {
+            AgentError::Reloading(_) => SessionsError::from(error),
+            error => SessionsError::new(SessionsErrorCode::Failed, error.to_string()),
+        })?;
+        Ok(LaunchReply {
+            session_id: session.id().to_owned(),
+            policy,
+        })
     }
 
     /// Writes `input/message` and replies once it is published.

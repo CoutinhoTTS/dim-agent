@@ -587,6 +587,47 @@ async fn idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop() 
     server.join().await.unwrap();
 }
 
+/// An index reload after launch admitted creation must not reply a retryable
+/// `reloading` while the Session is still created: the reply is the
+/// creation's own outcome (§6.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_admitted_before_an_index_reload_replies_the_created_session() {
+    let store = Store::new();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(Some(store.database())).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let before = agent.sessions().len();
+    // Hold the writer so creation waits after admission, on its rows.
+    let lock = rusqlite::Connection::open(store.database()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let launch = tokio::spawn({
+        let sessions = sessions.clone();
+        let cwd = std::env::temp_dir();
+        async move { sessions.call("launch", json!({"cwd":cwd})).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!launch.is_finished());
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        lock.execute_batch("COMMIT").unwrap();
+    });
+    restarted.unwrap();
+    let reply = launch.await.unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    let session = agent
+        .get_session(reply["value"]["sessionId"].as_str().unwrap())
+        .unwrap();
+    assert!(!session.config().interactive);
+    assert_eq!(agent.sessions().len(), before + 1);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_ends_reloading_on_an_index_reload_and_session_closed_on_close() {
     let Served {

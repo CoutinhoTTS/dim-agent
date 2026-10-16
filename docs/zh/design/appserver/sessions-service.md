@@ -267,7 +267,7 @@ Agents 像拥有其他 Session 一样拥有启动的 Session 的实例与记录�
 
 ### 8.3 Agents 索引重载
 
-AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引取消其停止令牌时，进行中的调用以 `reloading` 结束；新调用以 `reloading` 失败，直到下一个索引激活。使用方不重载。回复为 `reloading` 的 `input` 或 `withdraw`，用 `lookup` 或 `history` 解决。
+AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引取消其停止令牌时，进行中的调用以 `reloading` 结束；新调用以 `reloading` 失败，直到下一个索引激活。使用方不重载。回复为 `reloading` 的 `input` 或 `withdraw`，用 `lookup` 或 `history` 解决。已开始创建 Session 的 `launch` 不会被截断：它回复该创建的结果，因为 `reloading` 回复会在第一个 Session 仍被创建时招致重试（§6.1）。
 
 ### 8.4 调用期间使用方重载
 
@@ -454,7 +454,7 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现；没�
 2. **启动**（`launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defaults`）。启动方被 `permission/changed` 收窄后，启动的 Session 为非交互，其 `PermissionState` 等于上限，回复中也返回该上限。没有启动方时：full-access 请求被宿主默认值限制，不带策略即为 read-only。未知 Agent 以 `agent_unknown` 失败，错误的 `cwd` 以 `rejected` 失败，已关闭的启动方以 `session_closed` 失败。
 3. **输入与查找**（`input_replies_after_publication_and_lookup_waits_for_committed_inputs`）。标记在前，user 内容在后。回复后立即调用 `history {atLeast: sequence}` 成功。`lookup` 对写入的 id 返回 `accepted`，对其他 id 返回 `unknown`，对重复的 id 返回 `ambiguous`。原生存储被锁住、发布暂停时，`input` 的回复和提交后开始的 `lookup` 都会等待，之后 `lookup` 读到 `accepted`。
 4. **空闲**（`idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop`）。截止点覆盖每条输入的消费及其 `turn/end`。审批待处理时，`idle` 一直等待，直到 `stop`。
-5. **重载与关闭**（`idle_ends_reloading_on_an_index_reload_and_session_closed_on_close`）。`idle` 期间 Agents 索引重载，以 `reloading` 结束它；测试部分保持装载，下一次调用成功。`idle` 期间关闭 Session，以 `session_closed` 结束它。
+5. **重载与关闭**（`idle_ends_reloading_on_an_index_reload_and_session_closed_on_close`）。`idle` 期间 Agents 索引重载，以 `reloading` 结束它；测试部分保持装载，下一次调用成功。`idle` 期间关闭 Session，以 `session_closed` 结束它。`launch` 等待被锁住的原生存储时重载（`launch_admitted_before_an_index_reload_replies_the_created_session`），回复已创建的 Session。
 6. **历史**（`history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries`）。`limit` 为 1 的各页连起来到达固定的 head，与分支事件一致；一页会读完两个事件的批次；批次中间的游标、`future_sequence` 及其他边界错误都有检查。
 7. **删除（随 S5c）。** `idle` 期间的删除以 `session_closed` 结束它。有 `sessions.delete` 时：插件在运行结束后删除启动的 Session，之后对它的调用以 `session_closed` 失败，再删除一次也成功。
 
@@ -469,7 +469,7 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现；没�
 | 3 | 每个类型化方法接收与其线上形态对应的请求类型（`LookupRequest`、`WithdrawRequest`、`StopRequest`），不再用位置参数 | 每种形态一个类型；具名服务只负责解码与编码 |
 | 4 | `history` 拒绝同时给出 `atLeast` 与 `through`，并返回不经过滤的全部事件 | 两者以相互冲突的方式决定 `through`。过滤后一页可能结束在批次中间，下一次的 `after` 会被拒绝 |
 | 5 | `stop` 或 `idle` 的等待失败，只要不是 Session 已关闭、分支不存在或重载，都回复 `failed` | 这些失败是分支的分发失败。把处理器的 `InvalidInput` 映射为 `rejected` 会归咎于调用方 |
-| 6 | `launch` 在一个比调用活得更久的任务中创建并登记 Session | 被放弃的调用不能留下一个已装载、客户端却看不到的 Session |
+| 6 | `launch` 在一个比调用活得更久的任务中创建并登记 Session；该任务开始后，回复等待它而不是索引重载 | 被放弃的调用不能留下一个已装载、客户端却看不到的 Session；`reloading` 回复不能招致重复启动 |
 | 7 | 代码放在子模块 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs) | `agents.rs` 只保留目录与索引 |
 | 8 | 流程测试从一个 Session 部分取得 `sessions` | `serve` 不接受额外的进程行；该部分像进程插件一样按名称注入服务 |
 

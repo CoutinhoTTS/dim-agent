@@ -359,7 +359,9 @@ Like every Session, a launched Session stays loaded until it is closed or the pr
 
 AgentScope and the Sessions keep running, and the `sessions` service stays. Calls in flight end `reloading` when the
 old index cancels its stopping token; new calls fail `reloading` until the next index is active. Consumers do not
-reload. An `input` or `withdraw` whose reply was `reloading` is resolved with `lookup` or `history`.
+reload. An `input` or `withdraw` whose reply was `reloading` is resolved with `lookup` or `history`. A `launch` that
+has started creating its Session is not cut short: it replies that creation's outcome, because a `reloading` reply
+would invite a retry while the first Session is still created (§6.1).
 
 ### 8.4 Consumer reload during a call
 
@@ -626,7 +628,8 @@ S5c):
    consumption and its `turn/end`. With an approval pending, `idle` stays open until `stop`.
 5. **Reload and close** (`idle_ends_reloading_on_an_index_reload_and_session_closed_on_close`). An Agents index reload
    during `idle` ends it with `reloading`; the test part stays loaded and its next call succeeds. A close during `idle`
-   ends it with `session_closed`.
+   ends it with `session_closed`. A reload while a `launch` waits on its locked native store
+   (`launch_admitted_before_an_index_reload_replies_the_created_session`) replies the created Session.
 6. **History** (`history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries`). Pages with `limit` 1 chain to
    the fixed head and equal the branch's events, a page finishes a two-event batch, and a cursor inside that batch,
    `future_sequence` and the other boundary errors are checked.
@@ -644,7 +647,7 @@ Each change stays within S2 (roadmap §5.3); the contract's `sessions` part is u
 | 3 | Each typed method takes the request type of its wire shape (`LookupRequest`, `WithdrawRequest`, `StopRequest`) instead of positional arguments | One type per shape; the named service only decodes and encodes |
 | 4 | `history` rejects `atLeast` together with `through`, and returns every event unfiltered | The two set `through` in conflicting ways. A filtered page could end inside a batch, and the next `after` would be rejected |
 | 5 | A failed `stop` or `idle` wait that is not a closed Session, a missing branch or a reload replies `failed` | Those failures are the branch's dispatch failures. Mapping a handler's `InvalidInput` to `rejected` would blame the caller |
-| 6 | `launch` creates and registers the Session in one task that outlives the call | A dropped call must not leave a loaded Session that clients cannot see |
+| 6 | `launch` creates and registers the Session in one task that outlives the call, and once that task starts, the reply waits for it rather than the index reload | A dropped call must not leave a loaded Session that clients cannot see, and a `reloading` reply must not invite a duplicate launch |
 | 7 | The code is the submodule [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs) | `agents.rs` keeps the directory and the index |
 | 8 | The flow tests reach `sessions` from a Session part | `serve` takes no extra process rows; the part injects the service by name, as a process plugin does |
 
