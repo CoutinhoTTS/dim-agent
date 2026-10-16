@@ -324,7 +324,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - **凭据与失败。** 连接来自 `ProviderConnectionResolver`，只在本次调用内使用。调用经 `invoke_with_recovery` 运行，即 ModelProvider 的失败与凭据策略。S4 抽出了它；如果 F1 先合入，由 F1 做同样的抽取。
 - **输出。** 丢弃 thinking 输出。工具停止或空文本算失败。
 - **记录文本。** 按角色标注的文本：工具调用写名称和输入，工具结果写文本，图片写 `[image]`。
-- **分块。** 单条超过一次调用输入预算的，从中间截断，计入 `compactedToolPayloadCount`。更长的记录分块折叠：每次调用拿到当前摘要和下一块。
+- **分块。** 一次调用的输入预算为 `context_window − output_tokens`，用 `count_tokens` 对整个摘要请求（系统提示、携带的摘要、外层格式和本块）计数，与其他所有请求的计数方式相同，不另设按字符计的规则。更长的记录分块折叠：每次调用拿到当前摘要和能放下的条目。单条放不下的，按字节在 UTF-8 字符边界上从中间截断，截断标记计入预算，并计入 `compactedToolPayloadCount`。
 - **诊断。** 摘要对象（`kind: "summary"`、`summaryChars`、`estimatedSummaryTokens`、`chunkCount`、`compactedToolPayloadCount`、`droppedMessageCount`）；公共部分由 ContextPolicy 填写。
 
 ### 5.3 一条压缩路径（ContextPolicy）
@@ -615,4 +615,5 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 至多一条未完成指令 | 评审中维护者的决定：重复请求在交互边界去重。`AgentLoop::compact` 加入未完成的指令而不再写入新指令，压缩槽至多一条指令，另一条指令未完成时消费到的指令被跳过，等待方按自己的指令 id 匹配（§4.1、§5.4、验收 7）。这取代了此前的当前/待处理拆分，指令因此不会再与运行中的步骤交错。 |
 | 快照锚点 | Timeline 保留 §4.3 的结构检查。原先的 `resume ≤ through` 需要读取锚点内容，改为结构性的“resume 在锚点所在分支上早于锚点”，`through` 早于锚点由所有者的解码回调检查。 |
 | 原生存储示例 | [native-storage-format](../../../design/appserver/native-storage-format.md) 中的记录示例改用新记录和 v3 解释器。 |
+| 摘要预算 | 评审修正：分块与截断用窗口事实的 `count_tokens` 对整个摘要请求计数，对照 `context_window − output_tokens`（§5.2），以 CJK 为主的历史不再超出窗口；`product_summary.rs` 检查每个摘要请求。 |
 | 验收 | 验收 1、3、6（崩溃与重启）和 8 在二进制流程测试 `transport_flow/compaction.rs` 中运行。验收 2、4、5 以及 6 中的重载、中断和失败情形在 `dim-agent-capabilities/tests/context_flow`（`manual_compaction.rs` 和既有压缩测试）中运行。事实与快照之间的崩溃由 `compaction_events.rs` 的快照失败测试覆盖。 |

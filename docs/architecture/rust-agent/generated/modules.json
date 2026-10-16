@@ -6059,6 +6059,7 @@
       "from": "dim_agent_capabilities::summary_strategy",
       "to": "dim_agent_capabilities::history",
       "references": [
+        "path summary_message",
         "use crate::history::summary_message"
       ]
     },
@@ -6144,6 +6145,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path CompactionStrategyRecord",
+        "path ModelRequest",
         "path ModelRequest::new",
         "path SystemPrompt::Text"
       ]

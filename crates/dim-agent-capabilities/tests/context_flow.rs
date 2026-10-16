@@ -702,6 +702,8 @@ mod compaction_events;
 mod context_reads;
 #[path = "context_flow/manual_compaction.rs"]
 mod manual_compaction;
+#[path = "context_flow/product_summary.rs"]
+mod product_summary;
 
 struct ExpandFinal {
     scope: BranchScope,

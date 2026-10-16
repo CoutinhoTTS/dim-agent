@@ -451,9 +451,12 @@ How the summary is produced:
 - **Output.** Thinking output is dropped. A tool stop or an empty text is a failure.
 - **Transcript.** Role-labelled text: tool calls as name and input, tool results as text, images
   as `[image]`.
-- **Chunking.** An entry larger than one call's input budget is truncated in the middle and
-  counted in `compactedToolPayloadCount`. A longer transcript is folded in chunks: each call
-  gets the running summary and the next chunk.
+- **Chunking.** One call's input budget is `context_window − output_tokens`, checked with
+  `count_tokens` on the whole summarizer request (system prompt, carried summary, envelope and
+  chunk), the same accounting as every other request; there is no separate character rule. A
+  longer transcript is folded in chunks: each call gets the running summary and as many entries
+  as fit. An entry that does not fit alone is truncated in the middle by bytes on UTF-8 character
+  boundaries, with the marker inside the budget, and counted in `compactedToolPayloadCount`.
 - **Diagnostics.** The summary object (`kind: "summary"`, `summaryChars`,
   `estimatedSummaryTokens`, `chunkCount`, `compactedToolPayloadCount`, `droppedMessageCount`);
   ContextPolicy fills the common part.
@@ -844,4 +847,5 @@ fix, the smallest choice was made and is recorded here.
 | One outstanding command | Maintainer's decision during review: repeated requests are deduplicated at the interaction boundary. `AgentLoop::compact` joins an outstanding command instead of writing another, the slot holds at most one command, a command consumed while another is outstanding is skipped, and the waiter matches its own command id (§4.1, §5.4, acceptance 7). This replaces an earlier active/pending split, so commands can no longer interleave with a running step. |
 | Snapshot anchor | Timeline keeps the structural checks of §4.3. The old `resume ≤ through` check needed the anchor's content; it is replaced by the structural "resume precedes the anchor on the anchor's branch", and the owner's decode checks `through` before the anchor. |
 | Native storage example | The record example in [native-storage-format](../appserver/native-storage-format.md) uses the changed record and the v3 interpreter. |
+| Summarizer budget | Review fix: chunk packing and truncation count the whole summarizer request with the window facts' `count_tokens` against `context_window − output_tokens` (§5.2), so CJK-heavy history no longer exceeds the window; `product_summary.rs` checks every summarizer request. |
 | Acceptance | Acceptance 1, 3, 6 (crash and restart) and 8 run in the binary flow test `transport_flow/compaction.rs`. Acceptance 2, 4, 5 and the reload, interrupt and failure cases of 6 run in `dim-agent-capabilities/tests/context_flow` (`manual_compaction.rs` and the existing compaction tests). The crash between fact and snapshot is covered by the snapshot-failure test in `compaction_events.rs`. |
