@@ -1474,3 +1474,177 @@ async fn buffered_text_is_committed_once_a_second_old() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
+    use dim_agent_capabilities::input_queue::{InputQueue, Withdrawal};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let agent = builder(
+            Arc::new(RecordingModel(requests.clone())),
+            Arc::new(BoundaryTools {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+        )
+        .build();
+        let session = agent
+            .create_session(SessionConfig {
+                tools: vec!["boundary".into()],
+                permission_policy: dim_agent_runtime::PermissionPolicy {
+                    preset: dim_agent_runtime::PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session
+            .submit("tool:boundary {}".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        entered.notified().await;
+        // Both queue inputs wait for the running turn; the steer is applied.
+        let first = session
+            .submit("first queued".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let second = session
+            .submit("second queued".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let steered = session
+            .submit("applied steer".into(), InputMode::Steer, "main")
+            .await
+            .unwrap();
+        let queue = session.service::<InputQueue>("main").unwrap();
+        let withdraw = |input_id: &str| InputWithdrawData {
+            input_id: input_id.into(),
+            reason: Some("user removed it".into()),
+        };
+
+        let (answer, replacement) = queue.withdraw(withdraw(&first.id), None).await.unwrap();
+        let Withdrawal::Deleted { sequence } = answer else {
+            panic!("held input not deleted: {answer:?}")
+        };
+        assert!(replacement.is_none());
+        // A second withdrawal, an unknown id and an applied input write nothing.
+        assert_eq!(
+            queue.withdraw(withdraw(&first.id), None).await.unwrap().0,
+            Withdrawal::NotHeld
+        );
+        assert_eq!(
+            queue.withdraw(withdraw("unknown"), None).await.unwrap().0,
+            Withdrawal::NotHeld
+        );
+        let mut dispatch = session.dispatch_watch("main").unwrap();
+        while !session
+            .history("main", None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| {
+                matches!(&event.kind,
+            EventKind::InputApplied(data) if data.input_id == steered.id)
+            })
+        {
+            dispatch.changed().await.unwrap();
+        }
+        assert_eq!(
+            queue.withdraw(withdraw(&steered.id), None).await.unwrap().0,
+            Withdrawal::NotHeld
+        );
+        // Withdraw and re-submit as Steer: one batch, the new input joins this turn.
+        let user = UserInput {
+            content: vec![ContentBlock::Text {
+                text: "second, now as steer".into(),
+            }],
+        };
+        let (answer, replacement) = queue
+            .withdraw(
+                withdraw(&second.id),
+                Some(InputMessageData {
+                    user: Some(user),
+                    mode: Some(InputMode::Steer),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(answer, Withdrawal::Deleted { .. }));
+        let replacement = replacement.unwrap();
+        // A replacement that is not Steer is rejected before anything is written.
+        assert!(
+            queue
+                .withdraw(
+                    withdraw(&second.id),
+                    Some(InputMessageData::text("x", Some(InputMode::Queue)))
+                )
+                .await
+                .is_err()
+        );
+
+        release.notify_one();
+        session.idle("main").await.unwrap();
+        let events = session.history("main", None).await.unwrap();
+        let deleted: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::InputDeleted(data) => Some((event.sequence, data.input_id.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deleted,
+            [
+                (sequence, first.id.clone()),
+                (deleted[1].0, second.id.clone())
+            ]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::InputWithdraw(_)))
+                .count(),
+            5
+        );
+        for id in [&first.id, &second.id] {
+            assert!(!events.iter().any(|event| matches!(&event.kind,
+                EventKind::InputApplied(data) if &data.input_id == id)));
+            assert!(!events.iter().any(|event| matches!(&event.kind,
+                EventKind::InputConsumed(data) if &data.input_id == id)));
+        }
+        assert!(events.iter().any(|event| matches!(&event.kind,
+            EventKind::InputConsumed(data) if data.input_id == replacement.id)));
+        // Deleted inputs never reach the model, and no turn is left to run them.
+        let requests = requests.lock().unwrap().clone();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.messages.iter().any(|message| [
+                    Message::text(Role::User, "first queued"),
+                    Message::text(Role::User, "second queued")
+                ]
+                .contains(message)))
+        );
+        assert!(
+            requests
+                .last()
+                .unwrap()
+                .messages
+                .contains(&Arc::new(Message::text(Role::User, "second, now as steer")))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+                .count(),
+            1
+        );
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}

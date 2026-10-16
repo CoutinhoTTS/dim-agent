@@ -80,6 +80,8 @@ fn install_with_prompt_capability_and_branch(
     builder
         .session_plugin(SessionBroadcastEndPlugin::new)
         .session_plugin(TimelineTreePlugin::new)
+        .session_plugin(crate::input_queue::InputMethodsPlugin::new)
+        .session_methods(crate::input_queue::INPUT_METHODS)
         .session_tool_registry(ToolRegistryPlugin::new)
         .timeline_plugin(SessionBroadcastPlugin::new)
         .timeline_plugin(TreeTimelinePlugin::new)
