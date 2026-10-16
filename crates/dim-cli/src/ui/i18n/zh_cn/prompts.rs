@@ -22,20 +22,20 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Changing the approvals mode from here is not yet available" => {
             "暂不支持在此处更改 approvals 模式"
         }
-        "y allow · n reject · ←→/tab move · enter confirm" => {
-            "Y 允许 · N 拒绝 · ←→/Tab 移动 · Enter 确认"
+        "y allow · n reject · ←→/Tab move · Enter confirm" => {
+            "y 允许 · n 拒绝 · ←→/Tab 移动 · Enter 确认"
         }
         // prompts.rs: AskUser
         "Confirm" => "确认",
-        "type answer · enter save · esc back" => "输入回答 · Enter 保存 · Esc 返回",
-        "enter submit · number edit · tab/←→ back · esc cancel" => {
-            "Enter 提交 · 数字键修改 · Tab/←→ 返回 · Esc 取消"
+        "Enter save · Esc back" => "Enter 保存 · Esc 返回",
+        "Enter submit · 1-9 edit · Tab/←→ back · Esc cancel" => {
+            "Enter 提交 · 1-9 修改 · Tab/←→ 返回 · Esc 取消"
         }
-        "↑↓ move · space toggle · enter next · tab/←→ switch · esc cancel" => {
+        "↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc cancel" => {
             "↑↓ 移动 · Space 勾选 · Enter 下一题 · Tab/←→ 切题 · Esc 取消"
         }
-        "↑↓ move · number select · enter next · tab/←→ switch · esc cancel" => {
-            "↑↓ 移动 · 数字键选择 · Enter 下一题 · Tab/←→ 切题 · Esc 取消"
+        "↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc cancel" => {
+            "↑↓ 移动 · 1-9 选择 · Enter 下一题 · Tab/←→ 切题 · Esc 取消"
         }
         "AskUserQuestion received an invalid payload." => "AskUserQuestion 收到无效的数据。",
         "Missing answer for Q{index}" => "第 {index} 题缺少回答",
@@ -56,7 +56,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "读取类工具自动执行，写入类工具需确认"
         }
         "current" => "当前",
-        "↑↓/tab move · enter apply · esc back" => "↑↓/Tab 移动 · Enter 应用 · Esc 返回",
+        "↑↓/Tab move · Enter apply · Esc back" => "↑↓/Tab 移动 · Enter 应用 · Esc 返回",
         "Confirm Full Access" => "确认开启完全授权",
         "Cancel" => "取消",
         "Tab switch  Enter confirm  Esc cancel" => "Tab 切换  Enter 确认  Esc 取消",

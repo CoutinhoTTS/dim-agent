@@ -8,7 +8,7 @@ use crate::ui::prompts::Effect;
 use crate::ui::terminal::KeyEvent;
 use crate::ui::theme::Palette;
 
-const HINT: &str = "enter open · ^R refresh";
+const HINT: &str = "Enter open · Ctrl+R refresh · Esc close";
 
 pub struct SessionsPanel {
     list: ListPanel,
@@ -156,7 +156,7 @@ mod tests {
         let key = |code| KeyEvent::new(code, Modifiers::NONE);
         let shown = |panel: &SessionsPanel| -> Vec<String> {
             panel
-                .render(60, 9, &p)
+                .render(60, 10, &p)
                 .iter()
                 // The selected row sits on the accent bar: mark it `›`.
                 .map(|r| {

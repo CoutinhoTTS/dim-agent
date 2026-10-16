@@ -3,12 +3,12 @@
 //! sign-in, custom providers and model editing are not built yet).
 
 use crate::model::session::{OauthEvent, ProviderAction, ProviderEntry};
-use crate::ui::composer::palette::{footer, title_plain};
+use crate::ui::composer::palette::title_plain;
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::oauth_view::OauthView;
 use crate::ui::prompts::Effect;
-use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered};
+use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, key_hints};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
@@ -19,8 +19,8 @@ const SUGGESTED_KEY: &str = "__suggested__";
 const DIM_OAUTH_KEY: &str = "__dim_oauth__";
 const PROVIDERS_KEY: &str = "__providers__";
 const ADD_CUSTOM_KEY: &str = "__add_custom__";
-const LIST_HINT: &str = "type filter · enter open · esc clear/close";
-const FORM_HINT: &str = "type value · ↑↓/tab move · enter activate · esc back";
+const LIST_HINT: &str = "Enter open · Esc clear/close";
+const FORM_HINT: &str = "↑↓/Tab move · Enter activate · Esc back";
 
 pub struct ProvidersPanel {
     list: ListPanel,
@@ -282,14 +282,12 @@ impl ProvidersPanel {
         };
         let inner = width.saturating_sub(4).max(1);
         let fields = form.rows();
-        let mut content = vec![
-            title_plain(
-                &tf("Connect {providerId}", &[("providerId", &form.provider_id)]),
-                inner,
-                p,
-            ),
-            String::new(),
-        ];
+        let title = title_plain(
+            &tf("Connect {providerId}", &[("providerId", &form.provider_id)]),
+            inner,
+            p,
+        );
+        let mut content = vec![String::new()];
         let last_input = fields
             .iter()
             .rposition(|f| matches!(f, Field::BaseUrl | Field::ApiKey))
@@ -342,10 +340,8 @@ impl ProvidersPanel {
                 fg(&truncate_cells(&text, inner.saturating_sub(2)), color)
             ));
         }
-        content.push(String::new());
-        content.push(fg(&truncate_cells(t(FORM_HINT), inner), &p.muted));
-        let _ = (footer, display_width);
-        bordered(&content, width, None, &p.border, None)
+        let hint = key_hints(t(FORM_HINT), p);
+        bordered(&content, width, None, &p.border, Some(&title), Some(&hint))
     }
 }
 

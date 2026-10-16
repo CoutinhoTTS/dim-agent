@@ -9,7 +9,7 @@ use crate::ui::prompts::Effect;
 use crate::ui::terminal::KeyEvent;
 use crate::ui::theme::Palette;
 
-const HINT: &str = "type filter · enter select · esc clear/close";
+const HINT: &str = "Enter select · Esc clear/close";
 const EDIT_MODELS: &str = "__edit_models__";
 const SECTION: &str = "Models";
 
@@ -29,8 +29,7 @@ impl ModelsPanel {
                 "No models available. Connect a provider first.",
                 "No matching models.",
                 false,
-            )
-            .with_total_count(),
+            ),
             current: None,
         }
     }
@@ -63,9 +62,7 @@ impl ModelsPanel {
                 row.search = model.display_name.clone();
                 items.push(row);
             }
-            let mut edit = Item::new(EDIT_MODELS, t("Edit models"), "");
-            edit.counted = false;
-            items.push(edit);
+            items.push(Item::new(EDIT_MODELS, t("Edit models"), ""));
             items
         });
         self.list.set_items(items, current.as_deref());

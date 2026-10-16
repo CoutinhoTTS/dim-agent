@@ -490,7 +490,7 @@ impl OauthView {
         }
         content.push(String::new());
         content.push(fg(&truncate_cells(self.hint(), inner), &p.muted));
-        bordered(&content, width, None, &p.border, None)
+        bordered(&content, width, None, &p.border, None, None)
     }
 }
 

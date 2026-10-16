@@ -694,7 +694,7 @@ const OVERLAY_LIST_WIDTH: usize = 100;
 /// Tallest a fullscreen overlay is drawn.
 const OVERLAY_MAX_ROWS: usize = 30;
 /// Least rows inside the fullscreen composer box.
-const FULLSCREEN_COMPOSER_ROWS: usize = 2;
+const FULLSCREEN_COMPOSER_ROWS: usize = 3;
 
 /// Messages a resume shows at first, and per `/history` page.
 const HISTORY_WINDOW: usize = 100;
@@ -1860,8 +1860,10 @@ impl App {
         });
         let inner = cols.saturating_sub(2 * MARGIN + 4).max(1);
         let shell = self.composer.shell();
+        // Fullscreen's input is Amp's: no prompt mark, no placeholder.
         let prompt = match shell {
             Some(shell) => format!("{} ", shell.prefix()),
+            None if self.fullscreen => String::new(),
             None => "\u{203a} ".to_owned(),
         };
         let prompt = prompt.as_str();
@@ -1887,17 +1889,15 @@ impl App {
         let palette_overlay =
             self.fullscreen && self.prompt.is_none() && self.composer.palette_open();
         let (cursor_row, cursor_col) = if self.composer.is_empty() || palette_overlay {
+            let placeholder = match shell {
+                Some(_) => t(SHELL_PLACEHOLDER),
+                None if self.fullscreen => "",
+                None => t(COMPOSER_PLACEHOLDER),
+            };
             rows.push(format!(
                 "{}{}",
                 fg(prompt, prompt_color),
-                fg(
-                    t(if shell.is_some() {
-                        SHELL_PLACEHOLDER
-                    } else {
-                        COMPOSER_PLACEHOLDER
-                    }),
-                    &p.muted
-                )
+                fg(placeholder, &p.muted)
             ));
             (0, prompt_width)
         } else {
@@ -1925,7 +1925,10 @@ impl App {
             Shell::Private => t("!! shell mode · not sent to the model"),
         });
         let tinted = |label: &str| fg(label, shell_color);
-        let title = match (status.as_deref(), shell_title) {
+        // Fullscreen keeps the run status in the bottom border, as Amp
+        // does; scrollback shows it in the top one.
+        let top_status = status.as_deref().filter(|_| !self.fullscreen);
+        let title = match (top_status, shell_title) {
             (Some(text), _) => Some((text, &muted as &dyn Fn(&str) -> String)),
             (None, Some(title)) => Some((title, &tinted as &dyn Fn(&str) -> String)),
             (None, None) => None,
@@ -1935,13 +1938,34 @@ impl App {
         } else {
             &p.border
         };
-        live.extend(boxed(
-            &rows,
-            cols,
-            &|edge| fg(edge, border),
-            &|_, body| body.to_owned(),
-            title,
-        ));
+        let edge = |edge: &str| fg(edge, border);
+        let mut composer_box = boxed(&rows, cols, &edge, &|_, body| body.to_owned(), title);
+        if self.fullscreen {
+            // Amp's prompt box: the model at the top right, the status at
+            // the bottom left and the workspace at the bottom right; there
+            // is no status row under it.
+            let outer = cols.saturating_sub(2 + MARGIN).max(4);
+            let margin = " ".repeat(MARGIN);
+            let title = title.map(|(text, label)| label(text));
+            let model = self.label.as_deref().map(|label| fg(label, &p.highlight));
+            let place = fg(&workspace_label(&self.branch), &p.muted);
+            let last = composer_box.len() - 1;
+            composer_box[0] = format!(
+                "{margin}{}",
+                border_line(("╭", "╮"), title.as_deref(), model.as_deref(), outer, &edge)
+            );
+            composer_box[last] = format!(
+                "{margin}{}",
+                border_line(
+                    ("╰", "╯"),
+                    self.dock_status(status.as_deref()).as_deref(),
+                    Some(&place),
+                    outer,
+                    &edge
+                )
+            );
+        }
+        live.extend(composer_box);
         // Panels sit under the composer: a runtime prompt, or the command
         // palette while a command is being typed.
         let outer = cols.saturating_sub(2 + MARGIN).max(4);
@@ -1968,7 +1992,7 @@ impl App {
                 Some(Prompt::Settings(prompt)) => list(prompt.render(list_width, budget, p)),
                 None if palette_overlay => {
                     let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
-                    let page = budget.saturating_sub(6).clamp(3, 16);
+                    let page = budget.saturating_sub(5).clamp(3, 16);
                     self.composer
                         .palette_overlay(width, page, p)
                         .map(|(rows, query)| Overlay {
@@ -1996,7 +2020,9 @@ impl App {
         if let Some(panel) = panel {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
-        live.push(self.status_line(cols));
+        if !self.fullscreen {
+            live.push(self.status_line(cols));
+        }
         frame.cursor = Some((
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
@@ -2410,10 +2436,10 @@ impl App {
         out
     }
 
-    fn status_line(&self, cols: usize) -> String {
-        // mode, approvals mode, then the one status slot: a transient notice,
-        // else what the session is waiting for.
-        let slot = match &self.notice {
+    /// The one status slot: a transient notice, else what the session is
+    /// waiting for.
+    fn slot(&self) -> Option<String> {
+        match &self.notice {
             Some((text, _)) => Some(text.clone()),
             None => match &self.snapshot {
                 Some(s) if !s.questions.is_empty() => Some(t("answer required").to_owned()),
@@ -2421,7 +2447,36 @@ impl App {
                 Some(s) if s.running => Some(t("esc interrupt").to_owned()),
                 _ => None,
             },
-        };
+        }
+    }
+
+    /// Fullscreen's bottom border label, Amp's status corner: the run
+    /// status, the slot (a notice in the highlight colour) and the approvals
+    /// mode when it is not the default one.
+    fn dock_status(&self, run: Option<&str>) -> Option<String> {
+        let p = &self.palette;
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(run) = run {
+            parts.push(fg(run, &p.muted));
+        }
+        if let Some(slot) = self.slot() {
+            let color = if self.notice.is_some() {
+                &p.highlight
+            } else {
+                &p.muted
+            };
+            parts.push(fg(&slot, color));
+        }
+        let mode = status_label(&self.approvals);
+        if mode != status_label("default") {
+            parts.push(fg(&format!("\u{23f5}\u{23f5} {mode}"), &p.muted));
+        }
+        (!parts.is_empty()).then(|| parts.join("  "))
+    }
+
+    fn status_line(&self, cols: usize) -> String {
+        // mode, approvals mode, then the one status slot.
+        let slot = self.slot();
         let mut left = format!(
             "{}AGENT  \u{23f5}\u{23f5} {}",
             " ".repeat(MARGIN),
@@ -2545,7 +2600,7 @@ fn queue_strip(items: &[(String, String)], cols: usize, p: &Palette) -> Vec<Stri
         },
     );
     let margin = " ".repeat(MARGIN);
-    bordered(&rows, outer, None, &p.border, Some(&title))
+    bordered(&rows, outer, None, &p.border, Some(&title), None)
         .into_iter()
         .map(|row| format!("{margin}{row}"))
         .collect()
@@ -2957,7 +3012,7 @@ fn banner(cols: usize, p: &Palette, branch: &str) -> String {
     let body_width = cols.saturating_sub(2 + MARGIN).max(4) - 4;
     let greeting = [
         tf("Welcome to DIM {version}!", &[("version", version)]),
-        t("Type / for commands · Ctrl+P for the palette").to_owned(),
+        t("Type / for commands · Ctrl+O for the palette").to_owned(),
     ];
     let header = startup_header(&greeting, body_width);
     let mut info = vec![String::new()];
@@ -3065,6 +3120,22 @@ fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
     rows
 }
 
+/// The working directory, `~` for the home, and the git branch: what Amp
+/// writes in its prompt box's bottom border.
+fn workspace_label(branch: &str) -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cwd = match cwd.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("~{rest}")
+        }
+        _ => cwd,
+    };
+    format!("{cwd} ({branch})")
+}
+
 fn git_branch() -> Option<String> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -3126,20 +3197,11 @@ fn boxed(
     let inner = outer - 4;
     let margin = " ".repeat(MARGIN);
     let mut out = Vec::with_capacity(rows.len() + 2);
-    let top = match status {
-        // `╭─ `, the label, then a space and at least one `─` before `╮`.
-        Some((text, label)) if outer >= 7 => {
-            let (text, width) = clip(text, outer - 6);
-            format!(
-                "{}{}{}",
-                edge("╭─ "),
-                label(&text),
-                edge(&format!(" {}╮", "─".repeat(outer - 5 - width)))
-            )
-        }
-        _ => edge(&format!("╭{}╮", "─".repeat(outer - 2))),
-    };
-    out.push(format!("{margin}{top}"));
+    let status = status.map(|(text, label)| label(&clip(text, outer.saturating_sub(6)).0));
+    out.push(format!(
+        "{margin}{}",
+        border_line(("╭", "╮"), status.as_deref(), None, outer, edge)
+    ));
     for (index, row) in rows.iter().enumerate() {
         let (text, width) = clip(row, inner);
         let body = format!(" {text}{} ", " ".repeat(inner.saturating_sub(width)));
@@ -3155,6 +3217,44 @@ fn boxed(
         edge(&format!("╰{}╯", "─".repeat(outer - 2)))
     ));
     out
+}
+
+/// One border row `outer` columns wide between `corners`: a styled label
+/// after `─ ` on the left, another before ` ─` on the right, as Amp's prompt
+/// box carries them. A label that does not fit is left out, the right one
+/// first.
+fn border_line(
+    corners: (&str, &str),
+    left: Option<&str>,
+    right: Option<&str>,
+    outer: usize,
+    edge: Painter,
+) -> String {
+    let room = outer.saturating_sub(2);
+    let left = left.map(|label| (label, width_of(label) + 3));
+    let mut right = right.map(|label| (label, width_of(label) + 3));
+    let used = |l: Option<(&str, usize)>, r: Option<(&str, usize)>| {
+        l.map_or(0, |l| l.1) + r.map_or(0, |r| r.1)
+    };
+    if used(left, right) >= room {
+        right = None;
+    }
+    let left = left.filter(|l| l.1 < room);
+    let fill = room - used(left, right);
+    let mut line = edge(corners.0);
+    if let Some((label, _)) = left {
+        line.push_str(&edge("─ "));
+        line.push_str(label);
+        line.push_str(&edge(" "));
+    }
+    line.push_str(&edge(&"─".repeat(fill)));
+    if let Some((label, _)) = right {
+        line.push_str(&edge(" "));
+        line.push_str(label);
+        line.push_str(&edge(" ─"));
+    }
+    line.push_str(&edge(corners.1));
+    line
 }
 
 /// Display width of `text`, ignoring CSI/OSC escape sequences.

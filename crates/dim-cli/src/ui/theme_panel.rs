@@ -10,7 +10,7 @@ use crate::ui::theme::themes::THEMES;
 use crate::ui::theme::{Appearance, ColorMode, Palette};
 
 pub const SYSTEM: &str = "system";
-const HINT: &str = "↑↓ preview · enter apply · esc cancel";
+const HINT: &str = "↑↓ preview · Enter apply · Esc cancel";
 
 /// `(id, label)` of the themes this terminal may use.
 pub fn entries(mode: ColorMode, appearance: Appearance) -> Vec<(&'static str, &'static str)> {

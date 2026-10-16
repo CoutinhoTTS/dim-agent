@@ -3,9 +3,9 @@
 
 use std::cell::Cell;
 
-use crate::ui::composer::palette::{Columns, Kind, Row, footer, panel_row, title};
-use crate::ui::i18n::{t, tf};
-use crate::ui::render::panel::{bordered, follow_window};
+use crate::ui::composer::palette::{Columns, Kind, Row, panel_row, title_plain};
+use crate::ui::i18n::t;
+use crate::ui::render::panel::{bordered, follow_window, key_hints};
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
@@ -20,8 +20,6 @@ pub struct Item {
     pub search: String,
     /// A group header: drawn, never selected, hidden while filtering.
     pub heading: bool,
-    /// Counted in a `Total: N` footer (an action row is not).
-    pub counted: bool,
     /// Stays in the list whatever the filter says.
     pub sticky: bool,
 }
@@ -34,7 +32,6 @@ impl Item {
             detail: detail.into(),
             search: String::new(),
             heading: false,
-            counted: true,
             sticky: false,
         }
     }
@@ -46,7 +43,6 @@ impl Item {
             detail: String::new(),
             search: String::new(),
             heading: true,
-            counted: false,
             sticky: false,
         }
     }
@@ -68,11 +64,9 @@ pub struct ListPanel {
     loading_text: &'static str,
     empty_text: &'static str,
     no_match_text: &'static str,
-    /// `Total: N` instead of `i / n` in the footer (the model picker).
-    total_count: bool,
     /// The detail follows the label on one string (`name  detail`).
     inline_detail: bool,
-    /// Headings stay while filtering, and `i / n` counts every row.
+    /// Headings stay while filtering.
     all_rows: bool,
     /// Typed characters filter the list.
     filterable: bool,
@@ -104,7 +98,6 @@ impl ListPanel {
             loading_text,
             empty_text,
             no_match_text,
-            total_count: false,
             inline_detail: false,
             all_rows: false,
             filterable: true,
@@ -119,13 +112,8 @@ impl ListPanel {
         }
     }
 
-    pub fn with_total_count(mut self) -> Self {
-        self.total_count = true;
-        self
-    }
-
-    /// The provider list's layout: details inline, every row counted,
-    /// headings kept while filtering.
+    /// The provider list's layout: details inline, headings kept while
+    /// filtering.
     pub fn with_inline_rows(mut self) -> Self {
         self.inline_detail = true;
         self.all_rows = true;
@@ -262,8 +250,9 @@ impl ListPanel {
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
-        let filter_row = usize::from(!self.filter.is_empty());
-        let page = rows.saturating_sub(4 + filter_row).max(1);
+        // A filterable list has Amp's `> query` row between blank rows.
+        let query_rows = if self.filterable { 3 } else { 0 };
+        let page = rows.saturating_sub(2 + query_rows).max(1);
         self.page.set(page);
         let list: Vec<Row> = shown
             .iter()
@@ -289,12 +278,14 @@ impl ListPanel {
             })
             .collect();
         let columns = Columns::of(&list, inner);
-        let mut content = vec![title(t(self.title), inner, p)];
-        if filter_row == 1 {
-            content.push(fg(
-                &truncate_cells(&tf("filter: {value}", &[("value", &self.filter)]), inner),
-                &p.muted,
+        let mut content = Vec::new();
+        if self.filterable {
+            content.push(String::new());
+            content.push(format!(
+                "> {}",
+                truncate_cells(&self.filter, inner.saturating_sub(2))
             ));
+            content.push(String::new());
         }
         let selectable: Vec<usize> = list
             .iter()
@@ -335,25 +326,13 @@ impl ListPanel {
                 }
             }
         }
-        let position = if self.all_rows && !selectable.is_empty() {
-            format!(
-                "{} / {}",
-                selectable[self.selected.min(selectable.len() - 1)] + 1,
-                list.len()
-            )
-        } else if self.total_count {
-            let counted = shown.iter().filter(|i| !i.heading && i.counted).count();
-            tf("Total: {count}", &[("count", &counted.to_string())])
-        } else if selectable.is_empty() {
-            "0 / 0".to_owned()
-        } else {
-            format!(
-                "{} / {}",
-                self.selected.min(selectable.len() - 1) + 1,
-                selectable.len()
-            )
-        };
-        content.push(footer(&position, t(self.hint), inner, p));
-        bordered(&content, width, None, &p.border, None)
+        bordered(
+            &content,
+            width,
+            None,
+            &p.border,
+            Some(&title_plain(t(self.title), inner, p)),
+            Some(&key_hints(t(self.hint), p)),
+        )
     }
 }

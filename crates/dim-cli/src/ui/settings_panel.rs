@@ -142,7 +142,7 @@ impl SettingsPanel {
         ];
         let mut list = ListPanel::new(
             "Settings",
-            "↑↓ move · enter select · ←→/space change · esc close",
+            "↑↓ move · Enter select · ←→/Space change · Esc close",
             "",
             "",
             "",

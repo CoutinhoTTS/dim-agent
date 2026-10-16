@@ -2,10 +2,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
         // providers_panel.rs
         "Providers" => "模型服务",
-        "type filter · enter open · esc clear/close" => "输入筛选 · Enter 打开 · Esc 清除/关闭",
-        "type value · ↑↓/tab move · enter activate · esc back" => {
-            "输入值 · ↑↓/Tab 移动 · Enter 执行 · Esc 返回"
-        }
+        "Enter open · Esc clear/close" => "Enter 打开 · Esc 清除/关闭",
+        "↑↓/Tab move · Enter activate · Esc back" => "↑↓/Tab 移动 · Enter 执行 · Esc 返回",
         "Loading providers..." => "正在加载模型服务…",
         "No matching providers." => "无匹配的模型服务。",
         "Custom providers are not available yet" => "暂不支持自定义模型服务",

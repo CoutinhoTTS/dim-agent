@@ -1,10 +1,10 @@
 //! The `/approvals` panel: the default tool-approval mode, with a
 //! confirmation before full access (port of `renderApprovals`).
 
-use crate::ui::composer::palette::{footer, title};
+use crate::ui::composer::palette::title_plain;
 use crate::ui::i18n::t;
 use crate::ui::prompts::Effect;
-use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, confirm_panel};
+use crate::ui::render::panel::{IDLE_MARKER, SELECTED_MARKER, bordered, confirm_panel, key_hints};
 use crate::ui::terminal::{KeyCode, KeyEvent};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
@@ -33,7 +33,7 @@ pub const MODES: [(&str, &str, &str, &str); 3] = [
     ),
 ];
 
-const HINT: &str = "↑↓/tab move · enter apply · esc back";
+const HINT: &str = "↑↓/Tab move · Enter apply · Esc back";
 const CONFIRM_HINT: &str = "Tab switch  Enter confirm  Esc cancel";
 const CONFIRM_BODY: &str = "Full access reduces confirmation prompts and can run sensitive actions, file changes, or external commands directly. Use it only when you trust the current task.";
 
@@ -129,7 +129,7 @@ impl ApprovalsPanel {
         }
         let inner = width.saturating_sub(4).max(1);
         let build = |roomy: bool, detail_lines: usize| -> Vec<String> {
-            let mut content = vec![title(t("Tool Approvals"), inner, p)];
+            let mut content = Vec::new();
             if roomy {
                 content.push(String::new());
             }
@@ -180,18 +180,19 @@ impl ApprovalsPanel {
             if roomy {
                 content.push(String::new());
             }
-            content.push(footer(
-                &format!("{} / {}", self.selected + 1, MODES.len()),
-                t(HINT),
-                inner,
-                p,
-            ));
             content
         };
         let content = [build(true, 2), build(true, 1), build(false, 1)]
             .into_iter()
             .find(|lines| lines.len() + 2 <= max_rows)
             .unwrap_or_else(|| build(false, 1));
-        bordered(&content, width, None, &p.border, None)
+        bordered(
+            &content,
+            width,
+            None,
+            &p.border,
+            Some(&title_plain(t("Tool Approvals"), inner, p)),
+            Some(&key_hints(t(HINT), p)),
+        )
     }
 }

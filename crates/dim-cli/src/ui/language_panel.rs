@@ -25,7 +25,7 @@ impl LanguagePanel {
     pub fn new(saved: Option<Locale>) -> Self {
         let mut list = ListPanel::new(
             "Language",
-            "↑↓ preview · enter save · esc restore",
+            "↑↓ preview · Enter save · Esc restore",
             "",
             "",
             "",

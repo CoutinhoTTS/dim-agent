@@ -63,7 +63,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Thought" => "已思考",
         "Thought for {duration}" => "已思考 {duration}",
         "Welcome to DIM {version}!" => "欢迎使用 DIM {version}！",
-        "Type / for commands · Ctrl+P for the palette" => "输入 / 查看命令 · Ctrl+P 打开命令面板",
+        "Type / for commands · Ctrl+O for the palette" => "输入 / 查看命令 · Ctrl+O 打开命令面板",
         "Workspace" => "工作区",
         "Git branch" => "Git 分支",
         "Bye!" => "再见！",
@@ -107,7 +107,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "退出应用",
 
         // composer/palette.rs
-        "type filter · enter select · esc clear/close" => "输入筛选 · Enter 选择 · Esc 清除/关闭",
+        "Enter select · Esc clear/close" => "Enter 选择 · Esc 清除/关闭",
         "esc close" => "Esc 关闭",
         "Suggestions" => "建议",
         "Skills" => "技能",
@@ -122,8 +122,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pasted text" => "粘贴的文本",
 
         // list_panel.rs
-        "filter: {value}" => "筛选：{value}",
-        "Total: {count}" => "总数：{count}",
 
         // settings_panel.rs
         "on" => "开启",
@@ -144,22 +142,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Model" => "模型",
         "not set" => "未设置",
         "Settings" => "设置",
-        "↑↓ move · enter select · ←→/space change · esc close" => {
+        "↑↓ move · Enter select · ←→/Space change · Esc close" => {
             "↑↓ 移动 · Enter 选择 · ←→/Space 修改 · Esc 关闭"
         }
 
         // language_panel.rs
-        "↑↓ preview · enter save · esc restore" => "↑↓ 预览 · Enter 保存 · Esc 恢复",
+        "↑↓ preview · Enter save · Esc restore" => "↑↓ 预览 · Enter 保存 · Esc 恢复",
         "System default ({locale})" => "系统默认（{locale}）",
 
         // theme_panel.rs
-        "↑↓ preview · enter apply · esc cancel" => "↑↓ 预览 · Enter 应用 · Esc 取消",
+        "↑↓ preview · Enter apply · Esc cancel" => "↑↓ 预览 · Enter 应用 · Esc 取消",
         "System" => "系统",
         "Could not save the theme: {error}" => "无法保存主题：{error}",
 
         // sessions_panel.rs
         "Sessions" => "会话",
-        "enter open · ^R refresh" => "Enter 打开 · ^R 刷新",
+        "Enter open · Ctrl+R refresh · Esc close" => "Enter 打开 · Ctrl+R 刷新 · Esc 关闭",
         "Loading sessions..." => "正在加载会话...",
         "No saved sessions yet." => "暂无已保存的会话。",
         "No matching sessions." => "无匹配的会话。",

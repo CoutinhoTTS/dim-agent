@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::panel::{
-    IDLE_MARKER, SELECTED_MARKER, bordered, choices, confirm_panel, visible_width,
+    IDLE_MARKER, SELECTED_MARKER, bordered, choices, confirm_panel, key_hints, visible_width,
 };
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
@@ -307,15 +307,17 @@ impl PermissionPrompt {
 
     pub fn render(&self, width: usize, p: &Palette) -> Vec<String> {
         let inner = width.saturating_sub(4).max(1);
-        let mut content = vec![paint(
+        // Amp's panel frame: the title in the top border, the keys in the
+        // bottom one.
+        let title = paint(
             &truncate_cells(t("Permission required"), inner),
             Paint {
                 fg: Some(&p.warning),
                 bold: true,
                 ..Paint::default()
             },
-        )];
-        content.push(String::new());
+        );
+        let mut content = vec![String::new()];
         for line in self.lines() {
             let text = truncate_cells(&line, inner);
             let text = if text.is_empty() {
@@ -334,11 +336,8 @@ impl PermissionPrompt {
         let labels: Vec<String> = ACTIONS.iter().map(|a| a.label().to_owned()).collect();
         content.push(choices(&labels, self.selected, p));
         content.push(String::new());
-        content.push(fg(
-            &truncate_cells(t("y allow · n reject · ←→/tab move · enter confirm"), inner),
-            &p.muted,
-        ));
-        bordered(&content, width, None, &p.border, None)
+        let hint = key_hints(t("y allow · n reject · ←→/Tab move · Enter confirm"), p);
+        bordered(&content, width, None, &p.border, Some(&title), Some(&hint))
     }
 }
 
@@ -691,7 +690,7 @@ impl AskUserPrompt {
     }
 
     pub fn render(&self, width: usize, max_rows: usize, p: &Palette) -> Vec<String> {
-        const CHROME: usize = 6;
+        const CHROME: usize = 4;
         let inner = width.saturating_sub(4).max(1);
         let limit = max_rows.saturating_sub(CHROME).max(1);
         let roomy = self.body(inner, true);
@@ -704,23 +703,22 @@ impl AskUserPrompt {
         for line in fit_body(&body, limit) {
             content.push(line_text(&line, inner, p));
         }
-        content.push(String::new());
-        content.push(fg(&truncate_cells(&self.hint(), inner), &p.muted));
-        bordered(&content, width, None, &p.border, None)
+        let hint = key_hints(&self.hint(), p);
+        bordered(&content, width, None, &p.border, None, Some(&hint))
     }
 
     fn hint(&self) -> String {
         if self.typing {
-            return t("type answer · enter save · esc back").to_owned();
+            return t("Enter save · Esc back").to_owned();
         }
         if self.on_confirm_tab() {
-            return t("enter submit · number edit · tab/←→ back · esc cancel").to_owned();
+            return t("Enter submit · 1-9 edit · Tab/←→ back · Esc cancel").to_owned();
         }
         match self.question() {
             Some(q) if Self::multi(q) => {
-                t("↑↓ move · space toggle · enter next · tab/←→ switch · esc cancel").to_owned()
+                t("↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc cancel").to_owned()
             }
-            _ => t("↑↓ move · number select · enter next · tab/←→ switch · esc cancel").to_owned(),
+            _ => t("↑↓ move · 1-9 select · Enter next · Tab/←→ switch · Esc cancel").to_owned(),
         }
     }
 
@@ -1132,13 +1130,14 @@ mod tests {
             .iter()
             .map(|r| strip(r))
             .collect();
-        assert!(rows[1].contains("Permission required"));
-        assert!(rows[3].contains("# source: tool_rule"));
-        assert!(rows[4].contains("$ edit {\"path\":\"src/index.ts\"}"));
-        assert!(rows[6].contains("› Allow once   "));
-        assert!(rows[6].contains("Allow always   "));
-        assert!(rows[6].contains("Approve for me   "));
-        assert!(rows[8].contains("y allow · n reject · ←→/tab move · enter confirm"));
+        // Amp's frame: the title in the top border, the keys in the bottom.
+        assert!(rows[0].starts_with("╭─ Permission required ─"));
+        assert!(rows[2].contains("# source: tool_rule"));
+        assert!(rows[3].contains("$ edit {\"path\":\"src/index.ts\"}"));
+        assert!(rows[5].contains("› Allow once   "));
+        assert!(rows[5].contains("Allow always   "));
+        assert!(rows[5].contains("Approve for me   "));
+        assert!(rows[7].ends_with("─ y allow · n reject · ←→/Tab move · Enter confirm ─╯"));
     }
 
     #[test]
@@ -1229,7 +1228,9 @@ mod tests {
         assert!(text[7].contains("  2 [ ] Ramen"));
         assert!(text[9].contains("  4 [ ] Type your own answer"));
         assert!(
-            text[11].contains("↑↓ move · space toggle · enter next · tab/←→ switch · esc cancel")
+            text.last()
+                .unwrap()
+                .ends_with("─ ↑↓ move · Space toggle · Enter next · Tab/←→ switch · Esc cancel ─╯")
         );
     }
 

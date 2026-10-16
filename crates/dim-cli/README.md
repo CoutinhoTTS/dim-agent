@@ -392,10 +392,11 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
  answer row                                                     ▁   scrollbar: last column,
  answer row (streaming tail scrolls with the transcript)        █   thumb in eighths of a row
                                                                 █
- ╭─ · working…  3s ──────────────────────────────────────────╮
- │ › Ask anything...                                          │      dock: queue, composer,
- ╰────────────────────────────────────────────────────────────╯      panels and status stay
- AGENT  ⏵⏵ default  esc interrupt                 provider / model    pinned to the bottom
+ ╭──────────────────────────────────────── provider / model ─╮      dock: queue, composer
+ │                                                            │      and panels stay pinned
+ │                                                            │      to the bottom; the box
+ │                                                            │      borders carry the model,
+ ╰─ · working…  3s  esc interrupt ──── ~/project (branch) ─╯      the status and the place
 ```
 
 | Fullscreen input | Effect |
@@ -411,7 +412,9 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
 
-Pickers (`/resume`, `/models`, `/connect`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts stay under the composer.
+The composer box is Amp's: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
+
+Pickers (`/resume`, `/models`, `/connect`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts stay under the composer. Every panel is framed as Amp frames its own: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count.
 
 ```text
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    picked message: the box

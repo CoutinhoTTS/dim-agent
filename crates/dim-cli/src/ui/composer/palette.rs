@@ -328,6 +328,7 @@ pub fn render(state: &PaletteState, rows: &[Row], width: usize, p: &Palette) -> 
         Some(PAGE_SIZE + CHROME_ROWS),
         &p.border,
         None,
+        None,
     )
 }
 
@@ -355,9 +356,8 @@ pub fn render_overlay(
         String::new(),
     ];
     content.extend(list(state, rows, inner, page, p));
-    // The footer stays at the bottom however few commands match.
+    // The box keeps its height however few commands match.
     content.resize(OVERLAY_QUERY_ROWS + page, String::new());
-    content.push(footer(&position(state, rows), t(HINT), inner, p));
     let title = paint(
         t("Command Palette"),
         Paint {
@@ -366,7 +366,7 @@ pub fn render_overlay(
             ..Paint::default()
         },
     );
-    bordered(&content, width, None, &p.border, Some(&title))
+    bordered(&content, width, None, &p.border, Some(&title), None)
 }
 
 /// The visible window of `rows`, `page` rows at most.

@@ -4,7 +4,7 @@
 //! as sources ([`Document`]): only each block's height is kept for the
 //! current width, and rows are rendered for the blocks near the viewport and
 //! dropped again once it moves away. Every frame paints the visible slice
-//! above the dock (queue, composer, panels, status) pinned to the bottom of
+//! above the dock (queue, composer, panels) pinned to the bottom of
 //! the screen, with a scrollbar in the last column once the transcript is
 //! taller than its viewport. A shorter transcript starts at the top and
 //! grows down towards the dock. While the view follows new output it never
@@ -18,10 +18,9 @@
 //!  ┃ › a user message                            ┃     ▅  message, boxed on
 //!  ┗━e to edit━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛     █  its blank rows
 //!  answer rows (the live tail scrolls with them)       █  scrollbar thumb
-//!  ╭──────────────────────────────────────────────╮       in eighths
-//!  │ › composer                                    │      dock: never
-//!  ╰──────────────────────────────────────────────╯      scrolls
-//!  AGENT  ⏵⏵ normal                     provider / model
+//!  ╭───────────────────────────── provider / model ─╮      in eighths
+//!  │ composer                                       │      dock: never
+//!  ╰─ status ────────────────── ~/project (branch) ─╯      scrolls
 //! ```
 //!
 //! An overlay (the command palette, a picker) is centred over the

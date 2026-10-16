@@ -118,13 +118,16 @@ pub fn clip(text: &str, max: usize) -> (String, usize) {
 }
 
 /// Borders in `color`, one column of padding, rows padded with blanks to
-/// `height` when given. `title` sits in the top border (`╭─ Queue (1) ──╮`).
+/// `height` when given. `title` sits in the top border (`╭─ Queue (1) ──╮`)
+/// and `hint` at the right of the bottom one (`╰── Esc close ─╯`), as Amp
+/// frames its panels.
 pub fn bordered(
     content: &[String],
     width: usize,
     height: Option<usize>,
     color: &str,
     title: Option<&str>,
+    hint: Option<&str>,
 ) -> Vec<String> {
     let inner = width.saturating_sub(2);
     let content_width = inner.saturating_sub(2);
@@ -157,8 +160,35 @@ pub fn bordered(
             out.push(format!("{}{}{}", edge("│"), " ".repeat(inner), edge("│")));
         }
     }
-    out.push(edge(&format!("╰{}╯", "─".repeat(inner))));
+    out.push(match hint {
+        Some(hint) if inner > visible_width(hint) + 3 => {
+            let fill = inner - visible_width(hint) - 3;
+            format!(
+                "{}{hint}{}",
+                edge(&format!("╰{} ", "─".repeat(fill))),
+                edge(" ─╯")
+            )
+        }
+        _ => edge(&format!("╰{}╯", "─".repeat(inner))),
+    });
     out
+}
+
+/// A `key action · key action` hint as Amp paints it in a bottom border:
+/// each key (the first word of a part) in the keybinding colour, the rest
+/// muted.
+pub fn key_hints(hint: &str, p: &Palette) -> String {
+    hint.split(" · ")
+        .map(|part| match part.split_once(' ') {
+            Some((key, action)) => format!(
+                "{}{}",
+                fg(key, &p.keybind),
+                fg(&format!(" {action}"), &p.muted)
+            ),
+            None => fg(part, &p.keybind),
+        })
+        .collect::<Vec<_>>()
+        .join(&fg(" · ", &p.muted))
 }
 
 /// Horizontal choice row: the focused option carries the accent marker.
@@ -213,7 +243,7 @@ pub fn confirm_panel(
     content.push(choices(options, focused, p));
     content.push(String::new());
     content.push(fg(&truncate_cells(hint, inner), &p.muted));
-    bordered(&content, width, None, &p.border, None)
+    bordered(&content, width, None, &p.border, None, None)
 }
 
 #[cfg(test)]
@@ -237,7 +267,14 @@ mod tests {
 
     #[test]
     fn titled_border_and_fixed_height() {
-        let rows = bordered(&["a".into()], 30, Some(5), "#555555", Some("Queue (1)"));
+        let rows = bordered(
+            &["a".into()],
+            30,
+            Some(5),
+            "#555555",
+            Some("Queue (1)"),
+            None,
+        );
         let text: Vec<String> = rows.iter().map(|r| plain(r)).collect();
         assert_eq!(text.len(), 5);
         assert!(text[0].starts_with("╭─ Queue (1) ─"));
