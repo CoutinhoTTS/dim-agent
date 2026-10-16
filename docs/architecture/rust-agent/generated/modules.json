@@ -1397,7 +1397,8 @@
         "format",
         "matches",
         "tokio::pin",
-        "tokio::select"
+        "tokio::select",
+        "tracing::warn"
       ]
     },
     {
