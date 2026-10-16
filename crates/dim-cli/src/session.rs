@@ -31,6 +31,11 @@ struct History {
 }
 
 #[derive(Deserialize)]
+struct Configured {
+    outcome: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EventNotice {
     session_id: String,
@@ -116,6 +121,27 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
             if text.trim().is_empty() {
                 continue;
             }
+            if matches!(
+                text.split_whitespace().next(),
+                Some("/effort" | "/reasoning" | "/fast" | "/agent")
+            ) {
+                let result = {
+                    let operation = configure(client, &session_id, &text, &mut display);
+                    tokio::pin!(operation);
+                    tokio::select! {
+                        result = &mut operation => result,
+                        signal = tokio::signal::ctrl_c() => {
+                            signal?;
+                            println!("\nWaiting for configuration result; it may already be adopted.");
+                            operation.await
+                        }
+                    }
+                };
+                if let Err(error) = result {
+                    display.record(&format!("Error: {error}"))?;
+                }
+                continue;
+            }
             display.failed = false;
             code = wait_turn(client, &session_id, Some(&text), &mut display, &mut input).await?;
             if code != 0 && code != 130 && code != 2 {
@@ -146,7 +172,7 @@ async fn history(
     render: bool,
 ) -> Result<()> {
     let mut through = None;
-    let mut after = 0;
+    let mut after = display.cursor;
     display.muted = !render;
     loop {
         let mut params =
@@ -180,6 +206,125 @@ async fn history(
             return Ok(());
         }
     }
+}
+
+async fn configure(
+    client: &mut Client,
+    session_id: &str,
+    text: &str,
+    display: &mut Display,
+) -> Result<()> {
+    let words: Vec<_> = text.split_whitespace().collect();
+    let command = words[0];
+    if words.len() > 2 {
+        return Err(format!("Usage: {command} [VALUE]").into());
+    }
+    let value = words.get(1).copied();
+    if command == "/agent" {
+        if let Some(agent_id) = value {
+            let result: Configured = client
+                .typed(
+                    "session.agent.update",
+                    json!({"sessionId":session_id,"branchId":"main","agentId":agent_id}),
+                )
+                .await?;
+            display.record(&format!(
+                "Agent prompt/model configuration {}; Session tools unchanged.",
+                result.outcome
+            ))?;
+        } else {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Agent {
+                agent_id: String,
+                name: String,
+                description: String,
+            }
+            let agents: Vec<Agent> = client.typed("agent.list", json!({})).await?;
+            display.record("ID\tNAME\tDESCRIPTION")?;
+            for agent in agents {
+                display.record(&format!(
+                    "{}\t{}\t{}",
+                    agent.agent_id, agent.name, agent.description
+                ))?;
+            }
+            return Ok(());
+        }
+    } else {
+        history(client, session_id, display, true).await?;
+        let capabilities = display
+            .model_capabilities
+            .as_ref()
+            .ok_or("Model preference choices are unavailable; select a catalog model")?;
+        let preference = if command == "/fast" {
+            capabilities
+                .service_tier
+                .as_ref()
+                .filter(|tier| {
+                    tier.supported
+                        && ["priority", "default"]
+                            .iter()
+                            .all(|value| tier.options.iter().any(|option| option == value))
+                })
+                .ok_or("This model does not advertise priority/default service tiers")?;
+            match value {
+                Some("on") => Some(json!({"serviceTier":"priority"})),
+                Some("off") => Some(json!({"serviceTier":"default"})),
+                Some(_) => return Err("Usage: /fast [on|off]".into()),
+                None => {
+                    display.record("Service tier choices: on (priority), off (default)")?;
+                    None
+                }
+            }
+        } else {
+            let reasoning = capabilities
+                .reasoning
+                .as_ref()
+                .filter(|reasoning| reasoning.supported && capabilities.capabilities.reasoning)
+                .ok_or("This model does not advertise reasoning preferences")?;
+            let mut choices = reasoning.effort_options.clone().unwrap_or_default();
+            if reasoning.off.is_some() && !choices.iter().any(|choice| choice == "none") {
+                choices.push("none".into());
+            }
+            if let Some(value) = value {
+                if !choices.iter().any(|choice| choice == value) {
+                    return Err("Reasoning effort is not advertised by this model".into());
+                }
+                Some(json!({"reasoningEffort":value}))
+            } else {
+                display.record(&format!(
+                    "Reasoning effort choices: {}",
+                    if choices.is_empty() {
+                        "unavailable".into()
+                    } else {
+                        choices.join(", ")
+                    }
+                ))?;
+                None
+            }
+        };
+        if let Some(preference) = preference {
+            let result: Configured = client
+                .typed(
+                    "session.model.update",
+                    json!({"sessionId":session_id,"branchId":"main","modelPreferences":preference}),
+                )
+                .await?;
+            display.record(&format!(
+                "{} configuration {}: {}",
+                if command == "/fast" {
+                    "Service tier"
+                } else {
+                    "Reasoning effort"
+                },
+                result.outcome,
+                value.expect("preference value")
+            ))?;
+        } else {
+            return Ok(());
+        }
+    }
+    history(client, session_id, display, true).await
 }
 
 async fn wait_turn(

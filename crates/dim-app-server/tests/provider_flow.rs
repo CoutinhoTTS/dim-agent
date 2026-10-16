@@ -1459,7 +1459,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
         entry.capabilities.reasoning = true;
         entry.metadata = Some(
             serde_json::from_value(json!({
-                "reasoning":{"supported":true,"effortOptions":["high"]},
+                "reasoning":{"supported":true,"effortOptions":["high","low"]},
                 "serviceTier":{"supported":true,"options":["priority"]}
             }))
             .unwrap(),
@@ -1512,6 +1512,25 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                 ModelPreferences {
                     reasoning_effort: Some("high".into()),
                     service_tier: (!anthropic && !xai).then(|| "priority".into()),
+                },
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let selection = provider
+            .apply_preferences(
+                &dim_agent_types::ModelConfiguration {
+                    provider_id: selection.provider_id.clone(),
+                    model_id: selection.model_id.clone(),
+                    capability_snapshot: selection.capability_snapshot.clone(),
+                    config: selection.config.clone(),
+                    metadata: selection.metadata.clone(),
+                    tools: None,
+                    tool_sources: vec![],
+                },
+                ModelPreferences {
+                    reasoning_effort: Some("low".into()),
+                    ..Default::default()
                 },
                 &cancel,
             )
@@ -1581,9 +1600,9 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
             }
         }
         if anthropic {
-            assert_eq!(sent.body["output_config"]["effort"], "high");
+            assert_eq!(sent.body["output_config"]["effort"], "low");
         } else if suffix.ends_with("/responses") {
-            assert_eq!(sent.body["reasoning"]["effort"], "high");
+            assert_eq!(sent.body["reasoning"]["effort"], "low");
             assert_eq!(
                 sent.body.get("service_tier").and_then(Value::as_str),
                 (!xai).then_some("priority")
@@ -1593,7 +1612,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                 assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
             }
         } else {
-            assert_eq!(sent.body["reasoning_effort"], "high");
+            assert_eq!(sent.body["reasoning_effort"], "low");
             assert_eq!(
                 sent.body.get("service_tier").and_then(Value::as_str),
                 (!xai).then_some("priority")

@@ -700,22 +700,41 @@ async fn configuration_is_atomic_failure_safe_and_inherited() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    let adopted = session
-        .configure(
-            ConfigureUpdate {
-                sources: vec![PromptSourceTarget {
-                    source: "rules".into(),
-                    scope: PromptScope::Branch {
-                        timeline: "main".into(),
-                    },
-                }],
-                model: Some(configuration("one")),
+    let frozen = vec![(
+        PromptSourceTarget {
+            source: "rules".into(),
+            scope: PromptScope::Branch {
+                timeline: "main".into(),
             },
-            "main",
-        )
+        },
+        Some(entry("rules", "1", "rules one")),
+    )];
+    let adopted = session
+        .service::<dim_agent_capabilities::prompt::Prompt>("main")
+        .unwrap()
+        .configure_loaded(Some(configuration("one")), frozen.clone())
         .await
         .unwrap();
     assert_eq!(adopted, ConfigureOutcome::Adopted);
+    assert_eq!(
+        session
+            .service::<dim_agent_capabilities::prompt::Prompt>("main")
+            .unwrap()
+            .configure_loaded(Some(configuration("one")), frozen)
+            .await
+            .unwrap(),
+        ConfigureOutcome::Unchanged
+    );
+    assert_eq!(
+        session
+            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .configuration
+            .unwrap()
+            .model_id,
+        "one"
+    );
     let events = session.history("main", None).await.unwrap();
     let changed = events
         .iter()
@@ -883,20 +902,15 @@ async fn overlapping_load_is_superseded_and_close_joins_cancellation() {
         }
     });
     started.notified().await;
-    host.0
-        .lock()
-        .unwrap()
-        .insert("rules".into(), Reply::Entry(entry("rules", "new", "new")));
     let replacement = tokio::spawn({
         let session = session.clone();
         async move {
             session
-                .configure(
-                    ConfigureUpdate {
-                        sources: vec![target],
-                        model: Some(configuration("one")),
-                    },
-                    "main",
+                .service::<dim_agent_capabilities::prompt::Prompt>("main")
+                .unwrap()
+                .configure_loaded(
+                    Some(configuration("one")),
+                    vec![(target, Some(entry("rules", "new", "new")))],
                 )
                 .await
                 .unwrap()
@@ -1515,6 +1529,15 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
     // The stored source version is gone, so ToolBinding re-adopts the
     // current tools once; the model and the system prompt stay adopted.
     assert_eq!(configured.len(), 2);
+    assert_eq!(
+        session
+            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .configuration
+            .as_ref(),
+        configured.last().map(|data| data.settings.as_ref())
+    );
     for data in &configured {
         assert_eq!(data.settings.model_id, "adopted-model");
         assert_eq!(

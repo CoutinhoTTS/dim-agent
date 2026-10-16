@@ -3,7 +3,9 @@
 Owner: [prompt.rs](../../../../crates/dim-agent-capabilities/src/prompt.rs) and
 [prompt_state.rs](../../../../crates/dim-agent-capabilities/src/prompt_state.rs).
 Loads and adopts prompt/model/tool configuration in timeline order, exposes
-ConfigureControl and projects adopted prompt state.
+ConfigureControl and projects adopted prompt and configuration state.
+`Branch::get<PromptSnapshot>()` reads the last adopted `context/configured` without
+replaying history; rebuilding restores it from checkpoint configuration and facts.
 
 ## Dependencies
 
@@ -31,6 +33,15 @@ work; opening handlers register receipts and return. Cleanup cancels pending
 loads, joins tasks and settles waiters. Constructed host-load futures are joined
 even after cancellation. Reload projects committed context; runtime waiter IDs
 do not resume host operations. Source loading alone is not adoption.
+
+`Prompt::configure_loaded` accepts frozen source values and an optional model on
+the existing branch service. It derives targets, registers values in the existing
+pending operation and writes the same configure-request/result commands; it uses
+the same supersession, serial adoption and atomic publication. A source entry has
+its target's identity, guaranteed by the producer. A missing entry revokes that
+target. Dropping the reply waiter does not revoke a committed command. The
+[model configuration contract](../../../design/model-configuration.md) records the
+owners, rule check and complete-candidate concurrency limit.
 
 ## Tests
 

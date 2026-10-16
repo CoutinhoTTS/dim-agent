@@ -2,8 +2,26 @@
 
 `dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`.
 
-Proposed model commands and atomic Agent configuration adoption are specified in
-[model configuration](../../docs/design/model-configuration.md); they are not implemented.
+At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
+reasoning effort, `/fast on|off` selects priority/default service tiers, and
+`/agent ID` adopts an Agent profile's prompt and optional model. Tools and
+permissions keep the current Session configuration. Bare commands list choices;
+unsupported values leave the prompt usable. Commands in `--prompt` or piped input
+remain literal model input. See [model configuration](../../docs/design/model-configuration.md).
+
+```text
+> /effort high
+Reasoning effort configuration adopted: high
+> /fast off
+Service tier configuration adopted: off
+> /agent <agent-id>
+Agent prompt/model configuration adopted; Session tools unchanged.
+> _
+```
+
+Ctrl+C during a configuration command waits for its result before accepting
+another line, because adoption may already have committed. The client does not
+automatically retry uncertain commands.
 
 Build both native programs from the repository root:
 

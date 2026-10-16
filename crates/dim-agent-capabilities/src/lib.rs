@@ -81,6 +81,7 @@ impl PublicService for dyn exec_stop::ExecStop {}
 impl PublicService for workspace_tools::file_reads::FileReads {}
 impl PublicService for wait::Wait {}
 impl PublicService for skills::SkillsBranch {}
+impl PublicService for prompt::Prompt {}
 impl PublicService for tool_registry::ToolSourcesView {}
 impl PublicService for methods::SessionMethods {}
 impl SessionService for tool_registry::ToolSourcesView {}

@@ -3,7 +3,7 @@ use dim_agent_capabilities::host::ModelProtocol;
 use dim_agent_types::*;
 use serde::Deserialize;
 
-/// A complete choice for one adoption, not a patch to the previous model.
+/// Preferences applied to the caller's chosen model configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelPreferences {
@@ -22,8 +22,12 @@ impl ModelPreferences {
         &self,
         model: &ProviderModel,
         protocol: ModelProtocol,
+        base: &ModelConfig,
     ) -> Result<ModelConfig, &'static str> {
-        let mut config = model.config.clone();
+        if protocol == ModelProtocol::Bedrock && *self != Self::default() {
+            return Err("Model preferences are not supported by Bedrock");
+        }
+        let mut config = base.clone();
         if let Some(effort) = &self.reasoning_effort {
             let reasoning = model
                 .metadata
@@ -35,19 +39,63 @@ impl ModelPreferences {
                 .effort_options
                 .as_ref()
                 .is_some_and(|options| options.contains(effort));
+            // Effort replaces the mutually exclusive enable/budget mode.
+            if let Some(previous) = &mut config.reasoning {
+                previous.effort = None;
+                previous.enabled = None;
+                previous.budget_tokens = None;
+            }
+            if let Some(options) = &mut config.provider_options {
+                match protocol {
+                    ModelProtocol::Anthropic => {
+                        if let Some(options) = &mut options.anthropic {
+                            options.effort = None;
+                            options.thinking = None;
+                        }
+                    }
+                    ModelProtocol::OpenaiCompatible => {
+                        if let Some(options) = &mut options.openai_compatible {
+                            options.reasoning_effort = None;
+                            options.thinking = None;
+                            options.enable_thinking = None;
+                        }
+                    }
+                    ModelProtocol::Gemini => {
+                        if let Some(thinking) = options
+                            .gemini
+                            .as_mut()
+                            .and_then(|options| options.thinking_config.as_mut())
+                        {
+                            thinking.thinking_budget = None;
+                        }
+                    }
+                    ModelProtocol::OpenaiChat | ModelProtocol::OpenaiResponses => {
+                        if let Some(options) = &mut options.openai {
+                            options.reasoning_effort = None;
+                        }
+                    }
+                    ModelProtocol::Bedrock => unreachable!("preferences reject Bedrock"),
+                    ModelProtocol::Xai | ModelProtocol::XaiResponses => {
+                        if let Some(options) = &mut options.xai {
+                            options.reasoning_effort = None;
+                        }
+                    }
+                }
+            }
             if effort == "none" {
                 match (&reasoning.off, protocol) {
                     (Some(ReasoningOff::ThinkingType { value }), ModelProtocol::Anthropic)
                         if value == "disabled" =>
                     {
-                        config.provider_options.get_or_insert_default().anthropic =
-                            Some(AnthropicProviderOptions {
-                                thinking: Some(AnthropicThinking {
-                                    thinking_type: Some(AnthropicThinkingType::Disabled),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            });
+                        config
+                            .provider_options
+                            .get_or_insert_default()
+                            .anthropic
+                            .get_or_insert_default()
+                            .thinking = Some(AnthropicThinking {
+                            thinking_type: Some(AnthropicThinkingType::Disabled),
+                            ..Default::default()
+                        });
                     }
                     (
                         Some(ReasoningOff::ThinkingType { value }),
@@ -56,21 +104,21 @@ impl ModelPreferences {
                         config
                             .provider_options
                             .get_or_insert_default()
-                            .openai_compatible = Some(OpenAiCompatibleProviderOptions {
-                            thinking: Some(CompatibleThinking {
-                                thinking_type: Some(ThinkingType::Disabled),
-                            }),
-                            ..Default::default()
+                            .openai_compatible
+                            .get_or_insert_default()
+                            .thinking = Some(CompatibleThinking {
+                            thinking_type: Some(ThinkingType::Disabled),
                         });
                     }
                     (Some(ReasoningOff::ThinkingBudget { value: 0 }), ModelProtocol::Gemini) => {
-                        config.provider_options.get_or_insert_default().gemini =
-                            Some(GeminiProviderOptions {
-                                thinking_config: Some(GeminiThinkingConfig {
-                                    thinking_budget: Some(0.),
-                                    ..Default::default()
-                                }),
-                            });
+                        config
+                            .provider_options
+                            .get_or_insert_default()
+                            .gemini
+                            .get_or_insert_default()
+                            .thinking_config
+                            .get_or_insert_default()
+                            .thinking_budget = Some(0.);
                     }
                     (
                         Some(ReasoningOff::EnableThinking { value: false }),
@@ -79,16 +127,12 @@ impl ModelPreferences {
                         config
                             .provider_options
                             .get_or_insert_default()
-                            .openai_compatible = Some(OpenAiCompatibleProviderOptions {
-                            enable_thinking: Some(false),
-                            ..Default::default()
-                        });
+                            .openai_compatible
+                            .get_or_insert_default()
+                            .enable_thinking = Some(false);
                     }
                     (None, _) if native => {
-                        config.reasoning = Some(ProviderReasoningConfig {
-                            effort: Some(effort.clone()),
-                            ..Default::default()
-                        });
+                        config.reasoning.get_or_insert_default().effort = Some(effort.clone());
                     }
                     _ => {
                         return Err(
@@ -97,10 +141,7 @@ impl ModelPreferences {
                     }
                 }
             } else if native && !effort.is_empty() {
-                config.reasoning = Some(ProviderReasoningConfig {
-                    effort: Some(effort.clone()),
-                    ..Default::default()
-                });
+                config.reasoning.get_or_insert_default().effort = Some(effort.clone());
             } else {
                 return Err("Reasoning effort is not supported by this model");
             }

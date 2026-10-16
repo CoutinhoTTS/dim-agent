@@ -1,7 +1,6 @@
 # Model preferences and Agent configuration
 
-Status: Proposed for [F3 #74](https://github.com/arcships/dim/issues/74).
-The commands and API changes below are not implemented.
+Implementation contract for [F3 #74](https://github.com/arcships/dim/issues/74).
 It follows the [design rules](../architecture/rust-agent/principles.md),
 [plugin scope](../adr/002-plugin-scope.md) and existing
 [Prompt](../architecture/rust-agent/plugins/Prompt.md) contracts.
@@ -26,6 +25,13 @@ capabilities and existing branches. `AgentProfile.tools` is not applied.
 The Session entry extends Agents' public entry surface. Its factory captures only
 configuration and instance identity; services come from `Deps`. Provider remains a
 per-call lookup. Rpc's generic Session-method dispatch does not implement modes.
+
+`AgentsSession` injects process `AgentIndex` and Session `TreeCommands`, provides
+`sessionMethods["session.agent"]`, and reads the addressed branch's public Prompt
+service per call. `SessionMethods::provide` owns admission, tasks and cleanup;
+unload reports interruption and releases the waiter without revoking committed
+Prompt commands. The entry stores no adopted configuration. Its implementation is
+[Agents' configuration entry](../../crates/dim-app-server/src/agents/configuration.rs).
 
 ## Existing mechanisms
 
@@ -61,6 +67,8 @@ target, read the current adopted configuration from Prompt's branch snapshot and
 only supplied preferences to that captured base. Other configuration values remain
 unchanged. Provider owns validation and native reasoning-off/tier mapping; the CLI
 does not reconstruct complete preferences from provider-specific request fields.
+Changing effort replaces mutually exclusive reasoning enable/budget controls;
+unrelated sampling, token limits, service tier and metadata are preserved.
 
 This extends the business request's choice of base configuration. `ConfigureUpdate`,
 `ModelSelection`, Timeline events and Session facades remain unchanged. No change
@@ -177,9 +185,9 @@ descriptions; selection uses an exact ID. Empty/unavailable choices are explicit
 
 ```text
 > /effort high
-Reasoning effort adopted: high
+Reasoning effort configuration adopted: high
 > /fast off
-Service tier adopted: default
+Service tier configuration adopted: off
 > /agent
 ID                 NAME              DESCRIPTION
 <agent-id>         Reviewer          Review changes
@@ -191,7 +199,9 @@ Error: this model does not advertise priority/default service tiers.
 ```
 
 Enter submits a command; errors keep the prompt and Session. Ctrl+C/EOF keep the
-existing behavior. Lines wrap at terminal width and use existing escaping. No
+existing behavior for turns. Ctrl+C during configuration waits for its accepted
+operation's result before another line; the reply may describe an already adopted
+change. Lines wrap at terminal width and use existing escaping. No
 overlay, fullscreen UI, input queue or typeahead change. Command text does not
 become model input; headless prompt/stdin content keeps its literal meaning.
 

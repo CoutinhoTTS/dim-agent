@@ -268,6 +268,7 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "/fast on");
         assert!(!submit["params"]["submissionId"].as_str().unwrap().is_empty());
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"model-request","textOffset":0,"text":"你\u{1b}[2J好"}));
         wire.reply(&submit, json!({"event":{}}));
@@ -282,7 +283,7 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     });
     let output = wait(
         home.command()
-            .args(["--prompt", "hello"])
+            .args(["--prompt", "/fast on"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -582,6 +583,85 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
         terminal.transcript
     );
     assert!(!terminal.transcript.contains("never print me"));
+}
+
+#[test]
+fn interactive_configuration_commands_route_and_recover_without_submitting_commands() {
+    fn history(wire: &mut Wire) {
+        let request = wire.read("session.history");
+        let mut capabilities =
+            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        capabilities["reasoning"] = json!(true);
+        let events = if request["params"]["after"].as_u64().unwrap() < 9 {
+            json!([{"sequence":9,"type":"context","name":"configured","data":{
+                "timeline":"main","revision":"configured","settings":{"providerId":"test","modelId":"model",
+                    "capabilitySnapshot":{"target":{"providerId":"test","modelId":"model"},"capabilities":capabilities,
+                        "reasoning":{"supported":true,"effortOptions":["high","low"]},
+                        "serviceTier":{"supported":true,"options":["priority","default"]}}}}}])
+        } else {
+            json!([])
+        };
+        wire.reply(
+            &request,
+            json!({"events":events,"through":9,"nextAfter":9,"done":true}),
+        );
+    }
+    let home = Home::new();
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        history(wire);
+        history(wire);
+        let effort = wire.read("session.model.update");
+        assert_eq!(effort["params"], json!({"sessionId":"session","branchId":"main","modelPreferences":{"reasoningEffort":"high"}}));
+        entered.send(()).unwrap();
+        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+        wire.reply(&effort, json!({"outcome":"adopted","model":{"providerId":"test","modelId":"model"}}));
+        history(wire);
+        history(wire);
+        let fast = wire.read("session.model.update");
+        assert_eq!(fast["params"]["modelPreferences"], json!({"serviceTier":"default"}));
+        wire.send(json!({"jsonrpc":"2.0","id":fast["id"],"error":{"code":-32000,"message":"fixture preference rejection"}}));
+        let agents = wire.read("agent.list");
+        wire.reply(&agents, json!([{"agentId":"profile-id","name":"Reviewer","description":"Review changes"}]));
+        let agent = wire.read("session.agent.update");
+        assert_eq!(agent["params"], json!({"sessionId":"session","branchId":"main","agentId":"profile-id"}));
+        wire.reply(&agent, json!({"outcome":"adopted"}));
+        history(wire);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "after configuration");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":9}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"/effort\n");
+    terminal.until("Reasoning effort choices: high, low");
+    terminal.until("\n> ");
+    terminal.write(b"/reasoning high\n");
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for configuration result");
+    release.send(()).unwrap();
+    terminal.until("Reasoning effort configuration adopted: high");
+    terminal.until("\n> ");
+    terminal.write(b"/fast off\n");
+    terminal.until("Error: fixture preference rejection");
+    terminal.until("\n> ");
+    terminal.write(b"/agent\n");
+    terminal.until("profile-id\tReviewer\tReview changes");
+    terminal.until("\n> ");
+    terminal.write(b"/agent profile-id\n");
+    terminal.until("Session tools unchanged.");
+    terminal.until("\n> ");
+    terminal.write(b"after configuration\n");
+    terminal.until("\n> ");
+    terminal.write(&[4]);
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
 }
 
 #[test]

@@ -53,6 +53,7 @@ pub struct Event {
     pub content: EventContent,
 }
 pub enum EventContent {
+    Configuration(Box<ContextConfiguredData>),
     Input(InputMessageData),
     TurnEnd(TurnEndData),
     Text(TextData),
@@ -81,6 +82,9 @@ impl<'de> Deserialize<'de> for Event {
             ));
         }
         let content = match (wire.r#type.as_str(), wire.name.as_str()) {
+            ("context", "configured") => EventContent::Configuration(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
             ("input", "message") => EventContent::Input(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
@@ -128,6 +132,7 @@ struct TextPosition {
 }
 
 pub struct Display {
+    pub model_capabilities: Option<ModelCapabilitySnapshot>,
     pub cursor: u64,
     pub failed: bool,
     pub muted: bool,
@@ -141,6 +146,7 @@ pub struct Display {
 impl Display {
     pub fn new(interactive: bool) -> Self {
         Self {
+            model_capabilities: None,
             cursor: 0,
             failed: false,
             muted: false,
@@ -216,6 +222,9 @@ impl Display {
         }
         self.cursor = event.sequence;
         match event.content {
+            EventContent::Configuration(data) => {
+                self.model_capabilities = data.settings.capability_snapshot;
+            }
             EventContent::Input(data) if history => {
                 if let Some(user) = data.user {
                     let text = user
