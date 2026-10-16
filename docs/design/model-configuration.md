@@ -185,10 +185,11 @@ configuration-superseded, reload/interruption and Session-closed contracts.
 
 ## Scrollback interaction
 
-Commands run at the existing idle prompt. Bare `/effort` and `/fast` show supported
-choices from published `context/configured` history/notifications without mutation
-or a new query method. Bare `/agent` uses existing `agent.list` IDs, names and
-descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
+Commands run at the existing idle prompt. Bare `/effort` and `/fast` read the
+adopted provider/model identity from public `context/configured` history/notifications
+and show supported choices from the existing `provider.catalog` response, without
+mutation or a new query method. Bare `/agent` uses existing `agent.list` IDs, names
+and descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
 
 ```text
 > /effort high
