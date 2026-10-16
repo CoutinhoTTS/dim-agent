@@ -14,7 +14,7 @@
 | [SessionTitle](SessionTitle.md) | — | 观察首条用户输入的采纳、`session.rename` | — | P1 |
 | [Goal](Goal.md) | — | `goal_update` 工具、`session.goal.*` | 由 `goal:objective` 与 `goal:status` 块折叠出的目标状态、续跑 | P2 |
 | [Web](Web.md) | — | `web_search`、`web_fetch` 工具 | — | P2 |
-| [ContextCompaction](ContextCompaction.md)（Loop 与 ContextPreparation 的补充） | — | 生产 `ContextModelHost`、`session.context.*` | Loop 中的 `context/compact` 指令与压缩步骤；ContextPreparation 中的 K 轮切点与用量查询 | P2 |
+| [ContextCompaction](ContextCompaction.md)（Loop 与 ContextPreparation 的补充） | — | `ContextModelHost`、摘要 `CompactionStrategyHost`、`session.context.*` | Loop 中的 `context/compact` 指令与压缩步骤；ContextPreparation 中的 K 轮切点与用量查询 | P2 |
 | [Hooks](Hooks.md) | — | 规则、Session 开始 Hook | before 回调、工具调用后与 turn 结束 Hook | 待设计 |
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
