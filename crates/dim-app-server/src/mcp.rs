@@ -1,7 +1,11 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
+mod auth;
 pub mod config;
 pub(crate) mod management;
 mod publication;
+#[cfg(feature = "testing")]
+pub use auth::testing;
+pub use auth::{McpAuth, McpAuthError};
 pub mod server;
 mod session;
 pub use publication::{McpApplication, McpOwner, McpPublication};
@@ -9,6 +13,7 @@ pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState,
 
 use crate::settings::{SettingsError, SettingsScope, SettingsService};
 use config::{McpProjectEnablement, McpServerSettings, McpSettings};
+use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::{Capability, KeysOf};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use server::{McpServer, McpServerError};
@@ -36,6 +41,8 @@ pub enum McpError {
     Unavailable,
     #[error(transparent)]
     Server(#[from] McpServerError),
+    #[error(transparent)]
+    Auth(#[from] McpAuthError),
     #[error("MCP directory is closed")]
     Closed,
     #[error("MCP operation cancelled")]
@@ -97,6 +104,10 @@ impl McpConnection {
     }
     pub fn tool_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.service.tool_changes()
+    }
+    /// Changes when the server's OAuth credential changes; `None` without OAuth.
+    pub fn credential_changes(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.service.credential_changes()
     }
     pub async fn tools(&self, cancel: &CancellationToken) -> server::Result<Vec<server::McpTool>> {
         self.service.tools(cancel).await
@@ -213,6 +224,44 @@ impl McpService {
                 }
             }
             Ok(catalog)
+        })
+        .await
+    }
+
+    /// One source's entry, with its effective configuration, whether or not
+    /// another source shadows it.
+    pub async fn entry(
+        &self,
+        source: SettingsScope,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<McpServerEntry> {
+        self.run(cancel, move |settings, cancel| async move {
+            let configuration = settings
+                .read::<McpSettings>(source, &cancel)
+                .await?
+                .document
+                .mcp_servers
+                .remove(&id)
+                .ok_or(McpError::UnknownServer)?;
+            let enablement = match source {
+                SettingsScope::User => McpProjectEnablement::default(),
+                SettingsScope::Project(_) => settings
+                    .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
+                    .await
+                    .map(|snapshot| snapshot.document)
+                    .unwrap_or_default(),
+            };
+            Ok(McpServerEntry {
+                source,
+                configuration: config::effective(
+                    &settings,
+                    source,
+                    &id,
+                    configuration,
+                    &enablement,
+                )?,
+            })
         })
         .await
     }
@@ -380,18 +429,32 @@ async fn set_project_enabled(
     }
 }
 
-pub struct McpPlugin;
+/// The directory, its management methods and the OAuth credential authority,
+/// whose store `mcp-oauth.json` lives in the home root.
+pub struct McpPlugin {
+    home_root: usize,
+}
+impl McpPlugin {
+    pub fn new(home_root: usize) -> Self {
+        Self { home_root }
+    }
+}
 impl TypedPlugin for McpPlugin {
-    type Deps = (Arc<SettingsService>, Arc<publication::Publication>);
+    type Deps = (
+        Arc<SettingsService>,
+        Arc<publication::Publication>,
+        Arc<FileStorage>,
+    );
     fn name(&self) -> &str {
         "Mcp"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings, publication): Self::Deps,
+        (settings, publication, files): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let auth = McpAuth::new(files, self.home_root).map_err(CordisError::PluginFailed)?;
             let service = Arc::new(McpService {
                 settings,
                 publication,
@@ -399,7 +462,7 @@ impl TypedPlugin for McpPlugin {
                 gate: Mutex::new(()),
                 tasks: TaskTracker::new(),
             });
-            let owner = service.clone();
+            let (owner, closing) = (service.clone(), auth.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
@@ -408,11 +471,14 @@ impl TypedPlugin for McpPlugin {
                             owner.tasks.close();
                         }
                         owner.tasks.wait().await;
+                        // Token requests already sent are settled first.
+                        closing.close().await;
                         Ok(())
                     })
                 }))
             })?;
-            management::provide(ctx, service.clone(), service.settings.clone())?;
+            management::provide(ctx, service.clone(), service.settings.clone(), auth.clone())?;
+            ctx.provide_as(TypeKey::of::<McpAuth>(), auth)?;
             ctx.provide_as(TypeKey::of::<McpService>(), service)?;
             Ok(Effect::Done)
         })
@@ -420,6 +486,6 @@ impl TypedPlugin for McpPlugin {
 }
 impl Capability for McpPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        ((), ())
+        ((), (), ())
     }
 }

@@ -167,7 +167,7 @@ put 作为 SessionStore 自己的任务运行：调用方不再等待就会取�
                                                      移除失去所有者的文件
 ```
 
-所有者行要在 `agent_sessions` 之前删除，因为 `session_file_owners` 引用它。Session 创建回滚（`rollback_creation`）也同样删除所有者行。分叉的创建被回滚时，它的文件仍以源为所有者；除非源在此期间已被删除，那时文件变为无主并被清扫。提交后，最后一个所有者是 S 的文件变为无主，由清扫移除。节点离线时删除照样提交，文件以无主行的形式等待，直到清扫到达该节点。
+所有者行要在 `agent_sessions` 之前删除，因为 `session_file_owners` 引用它。Session 创建回滚（`rollback_creation`）也同样删除所有者行。分叉的创建被回滚时，它的文件仍以源为所有者；除非源在此期间已被删除，那时文件变为无主并被清扫。提交后，最后一个所有者是 S 的文件变为无主，由清扫移除。这一步不需要节点：节点离线时它的行照样提交，文件以无主行的形式等待，直到清扫到达该节点。整个删除还会先在节点上移除该 Session 的命令输出（[删除与分叉 §11](session-deletion-and-fork.md#11-资源节点p3)）。
 
 ### 5.4 清扫
 
@@ -191,7 +191,7 @@ put 作为 SessionStore 自己的任务运行：调用方不再等待就会取�
 | 在当前 SessionStore 代次的一次清扫在某节点上完成之前，该节点上的每次写入（D3） | 崩溃或重载的代次留下的 pending 行、删除失败留下的无主行，以及因断电而重新出现的已删目录 |
 | S5c 清理 | 主动回收 |
 
-第 3 步是安全的：目录只属于一个数据库（§3.1），而写入先提交行、再创建目录。列目录返回的每个目录，到读取行的时候要么已经有行（pending 或已拥有的文件，清扫会跳过），要么从来没有行。之所以需要它，是因为 FileStorage 的删除不做同步（[S6](https://github.com/arcships/dim/pull/87)）：断电后，已删除的目录可能重新出现，而以 `synchronous=FULL` 提交的行删除不会回来。SessionStore 以外创建的条目也同样移除：这个目录归 SessionStore 所有。
+第 3 步是安全的：目录只属于一个数据库（§3.1），而写入先提交行、再创建目录。列目录返回的每个目录，到读取行的时候要么已经有行（pending 或已拥有的文件，清扫会跳过），要么从来没有行。之所以需要它，是因为目录可能没有行：断电后，已删除的目录可能重新出现，而以 `synchronous=FULL` 提交的行删除不会回来。S5c 之前 FileStorage 的删除不做同步（[S6](https://github.com/arcships/dim/pull/87)）；现在删除在返回前同步父目录，在能同步目录的主机上关闭了这个窗口。SessionStore 以外创建的条目也同样移除：这个目录归 SessionStore 所有。
 
 每个节点同时至多运行一次清扫；清扫期间的触发会再安排一轮。清扫是 SessionStore 自己的后台工作，卸载时取消并排空；FileStorage 的删除可以重试，所以这是安全的。
 
@@ -298,7 +298,7 @@ CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)
 
 ### 9.2 Attachments 如何使用
 
-Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中声明 `S:SessionIdentity` 和进程服务 `sessionFiles`：这是对外层作用域核心部件的依赖（D3）。SessionStore 重载会让 Attachments 重载，它的规则检查已接受这一点。处理 `attachment.put` 时，它调用 `put(sessionId = 自身 Session, name, content = 文本的 UTF-8 字节)`，回复 `{attachmentId: fileId, path, bytes}` 以及它自己统计的 `lines`。Attachments 不引用 SessionStore 的任何类型；Rust 绑定见附录 A。
+Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中声明 `S:SessionIdentity` 和进程服务 `sessionFiles`：这是对外层作用域核心部件的依赖（D3）。SessionStore 重载会让 Attachments 重载，它的规则检查已接受这一点。处理 `attachment.put` 时，它调用 `put(sessionId = 自身 Session, name, content = 文本的 UTF-8 字节)`，回复 `{attachmentId: fileId, path, bytes}`。Attachments 不引用 SessionStore 的任何类型；Rust 绑定见附录 A。
 
 | `sessionFiles` 错误 | `attachment.put` 结果 |
 | --- | --- |
@@ -306,8 +306,8 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 | `invalid` | `attachment_invalid` |
 | `too_large` | `attachment_too_large`（Attachments 的 10 MiB 限制低于 SessionStore 的，因此不会发生） |
 | `node_unavailable` | `node_unavailable` |
-| `cancelled` | `operation_interrupted`，即该调用的 `report` 中断 |
-| `storage` | `storage_failed`；Attachments 在 P2 的设计复核中加入这个码（§15） |
+| `cancelled` | `service_reloading`：没有存储任何内容，且该调用是 `drain`，因此以这个结果回复 |
+| `storage` | `storage_failed`，与 SessionTitle 对同一失败的映射相同（§15） |
 
 ## 10. 错误、限制与不可变性
 
@@ -406,7 +406,7 @@ SessionStore 从 `session_file_owners` 回答"S 拥有哪些文件"，其主键 
 | 同一 Session 的两次写入 | 两个独立的文件 | — |
 | 写入时节点离线 | `node_unavailable`；什么都不保存；不重载任何东西 | SessionStore |
 | 分叉时节点离线 | 不受影响：不碰任何文件 | 原生存储 |
-| 删除时节点离线 | 删除提交；无主行等待清扫 | 清扫 |
+| 删除时节点离线 | Session 文件这一步无需节点即可提交；无主行等待清扫。整个删除见[删除与分叉 §11](session-deletion-and-fork.md#11-资源节点p3) | 清扫 |
 | 写入期间 FileStorage 重载 | `node_unavailable` 或 `storage`；放弃并清扫 | SessionStore |
 | 写入期间 SessionStore 重载 | 在 txn 2 之前取消（放弃），或已提交；Attachments 随之重载 | SessionStore 卸载 |
 | 进程重启 | 遗留物在第一次写入时或下一次删除之后被清扫 | 清扫 |
