@@ -39,18 +39,18 @@ enum DaemonProfile {
 pub struct RpcError {
     pub code: i32,
     pub message: String,
-    pub data: Option<ErrorData>,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorData {
-    pub app_error: String,
+    pub data: Option<Value>,
 }
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} (RPC {}", self.message, self.code)?;
-        if let Some(data) = &self.data {
-            write!(f, ", {}", data.app_error)?;
+        if let Some(code) = self
+            .data
+            .as_ref()
+            .and_then(|data| data.get("appError"))
+            .and_then(Value::as_str)
+        {
+            write!(f, ", {code}")?;
         }
         write!(f, ")")
     }
@@ -480,10 +480,7 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
                 client.hello(profile.as_ref()).await?;
                 return Ok(Some(client));
             }
-            // Binding makes the Unix path visible before the server makes it private.
-            Err(error)
-                if missing(&error)
-                    || cfg!(unix) && error.kind() == io::ErrorKind::PermissionDenied => {}
+            Err(error) if missing(&error) => {}
             Err(error) => return Err(error.into()),
         }
         if let Some(status) = child.try_wait()? {

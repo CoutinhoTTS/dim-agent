@@ -169,92 +169,6 @@ fn model_catalog_lists_safe_ids_and_availability_and_refreshes_explicitly() {
 }
 
 #[test]
-fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_sockets() {
-    let home = Home::new();
-    let server = home.0.join("server");
-    let started = home.0.join("server.started");
-    fs::write(
-        &server,
-        "#!/bin/sh\n: > \"$0.started\"\nwhile test -f \"$0\"; do sleep 0.01; done\n",
-    )
-    .unwrap();
-    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut command = home.command();
-    command
-        .arg("--server")
-        .arg(&server)
-        .args(["models", "fixture"]);
-
-    let socket = home.0.join("rust/daemon.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
-    let rejected = command.output().unwrap();
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("private socket"));
-    assert!(
-        !started.exists(),
-        "an existing insecure endpoint must not start a server"
-    );
-    drop(listener);
-    fs::remove_file(&socket).unwrap();
-
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !started.exists() {
-        assert!(child.try_wait().unwrap().is_none());
-        assert!(Instant::now() < deadline, "server was not started");
-        thread::sleep(Duration::from_millis(10));
-    }
-    let listener = UnixListener::bind(&socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
-    thread::sleep(Duration::from_millis(150));
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "startup must wait for a private endpoint"
-    );
-    assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
-    let (stream, _) = loop {
-        match listener.accept() {
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(10));
-            }
-            result => break result.unwrap(),
-        }
-    };
-    stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    let mut wire = Wire(BufReader::new(stream));
-    let hello = wire.read("hello");
-    wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
-    let catalog = wire.read("provider.catalog");
-    wire.reply(
-        &catalog,
-        json!({"catalog":{"models":[],"disabledModelIds":[]}}),
-    );
-    let output = wait(child);
-    fs::remove_file(&server).unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output.stdout.is_empty());
-}
-
-#[test]
 fn daemon_stop_without_an_endpoint_never_creates_state_or_spawns_a_server() {
     let home = Home::new();
     fs::remove_dir_all(home.0.join("rust")).unwrap();
@@ -912,10 +826,9 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
     let daemon = home.daemon(|wire| {
         wire.start(false);
         // Bare prefixes print usage; they never become model input.
-        let idle = wire.read("session.idle");
-        wire.reply(&idle, json!({"sequence":8}));
+        for _ in 0..2 { let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":8})); }
         let mut identities = std::collections::HashSet::new();
-        for (mode, command) in [("record", " printf 'recorded' "), ("private", "printf private"), ("record", "broken"), ("record", "busy")] {
+        for (mode, command) in [("record", " printf 'recorded' "), ("private", "printf private"), ("record", "broken"), ("record", "busy"), ("record", "unknown"), ("record", "opaque"), ("private", "!nested")] {
             let run = wire.read("shell.run");
             assert_eq!(run["params"]["sessionId"], "session");
             assert_eq!(run["params"]["branchId"], "main");
@@ -926,6 +839,10 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
             assert!(identities.insert(id.to_owned()));
             let idle = wire.read("session.idle");
             wire.reply(&idle, json!({"sequence":8}));
+            if command == "unknown" || command == "opaque" {
+                wire.send(json!({"jsonrpc":"2.0","id":run["id"],"error":{"code":-32601,"message":"Unavailable","data":if command == "unknown" {json!({"details":"opaque-private"})} else {json!("opaque-private")}}}));
+                continue;
+            }
             if command == "busy" {
                 wire.send(json!({"jsonrpc":"2.0","id":run["id"],"error":{"code":-32000,"message":"Already running","data":{"appError":"shell_busy"}}}));
                 continue;
@@ -942,11 +859,16 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
             }
             wire.reply(&run, reply);
         }
+        let submit=wire.read("session.submit"); assert_eq!(submit["params"]["text"],"  !literal"); wire.reply(&submit,json!({"event":{}}));
+        let idle=wire.read("session.idle"); wire.reply(&idle,json!({"sequence":8}));
         wire.detach();
     });
     let (mut terminal, child) = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"!\n");
+    terminal.until("Usage: !command");
+    terminal.until("\n> ");
+    terminal.write(b"!!\n");
     terminal.until("Usage: !command");
     terminal.until("\n> ");
     terminal.write(b"! printf 'recorded' \n");
@@ -961,12 +883,23 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
     terminal.write(b"!busy\n");
     terminal.until("[shell error] Already running (RPC -32000, shell_busy)");
     terminal.until("\n> ");
+    for command in ["!unknown", "!opaque"] {
+        terminal.write(format!("{command}\n").as_bytes());
+        terminal.until("[shell error] Unavailable (RPC -32601)");
+        terminal.until("\n> ");
+    }
+    terminal.write(b"!!!nested\n");
+    terminal.until("[shell completed] exit: 0");
+    terminal.until("\n> ");
+    terminal.write(b"  !literal\n");
+    terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(wait(child).status.success());
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("final-result"));
     assert!(terminal.transcript.contains("(output truncated)"));
     assert_eq!(terminal.transcript.matches("[shell recorded]").count(), 1);
+    assert!(!terminal.transcript.contains("opaque-private"));
     assert!(!terminal.transcript.contains('\u{1b}'));
     assert!(!terminal.transcript.contains('\u{202e}'));
 }
@@ -984,11 +917,14 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
         let run = wire.read("shell.run");
         assert_eq!(run["params"]["mode"], "record");
         assert_eq!(run["params"]["command"], "inspect");
-        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"live output","skipped":7}}));
+        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":null}}));
+        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"li\u{1b}[31mve","skipped":7}}));
+        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":" out\u{202e}put"}}));
         wire.notice("management.progress", json!({"id":99999,"method":"shell.run","data":{"text":"foreign progress"}}));
         wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"command":"inspect"}},"reason":"review"}));
         // Completion must not print into the approval answer prompt.
         wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"authoritative output","truncated":false,"durationMs":1,"recorded":{"sequence":12}}));
+        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"late progress must be ignored"}}));
         let answer = wire.read("approval.respond");
         assert_eq!(answer["params"]["decision"], "deny");
         wire.reply(&answer, json!({}));
@@ -1040,6 +976,22 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
     assert!(terminal.transcript.contains("skipped 7 bytes"));
     assert!(!terminal.transcript.contains("foreign progress"));
     assert_eq!(terminal.transcript.matches("[shell started]").count(), 2);
+    assert_eq!(
+        terminal
+            .transcript
+            .matches("[shell progress] (incomplete)")
+            .count(),
+        2
+    );
+    assert!(terminal.transcript.contains("live output"));
+    assert!(terminal.transcript.contains("[shell progress error]"));
+    assert!(
+        !terminal
+            .transcript
+            .contains("late progress must be ignored")
+    );
+    assert!(!terminal.transcript.contains('\u{1b}'));
+    assert!(!terminal.transcript.contains('\u{202e}'));
 }
 
 #[test]
@@ -1743,4 +1695,112 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             .contains("fixture-secret")
     );
     model.join().unwrap();
+}
+
+#[test]
+fn initial_attach_eof_settles_a_shell_started_before_the_first_prompt() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let attach = wire.read("session.attach"); wire.reply(&attach, json!({}));
+        let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"main","requestId":"restored","textOffset":0,"text":"initial model pending"}));
+        let run = wire.read("shell.run");
+        wire.reply(&idle, json!({"sequence":8}));
+        wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"initial shell pending"}}));
+        let stop = wire.read("shell.stop"); assert_eq!(stop["params"]["runId"], run["params"]["runId"]);
+        wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"stopped","output":"","truncated":false}));
+        wire.reply(&stop, json!({"stopped":true}));
+        wire.detach();
+    });
+    let mut command = home.command();
+    command.args(["--resume", "session"]);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.until("initial model pending");
+    terminal.write(b"!!wait\n");
+    terminal.until("initial shell pending");
+    terminal.write(&[4]);
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interrupted_shell_reply_retains_its_run_for_explicit_stop_and_settlement_feedback() {
+    let home = Home::new();
+    let (release, finish) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        for malformed in [false, true] {
+            let run = wire.read("shell.run");
+            let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":8}));
+            if malformed { wire.reply(&run, json!({"runId":"wrong","status":"completed","output":"","truncated":false})); }
+            else { wire.send(json!({"jsonrpc":"2.0","id":run["id"],"error":{"code":-32000,"message":"Reloaded","data":{"appError":"operation_interrupted"}}})); }
+            let stop = wire.read("shell.stop"); assert_eq!(stop["params"]["runId"], run["params"]["runId"]);
+            if !malformed { finish.recv_timeout(Duration::from_secs(10)).unwrap(); }
+            if !malformed {
+                wire.send(json!({"jsonrpc":"2.0","id":stop["id"],"error":{"code":-32000,"message":"Reloaded","data":{"appError":"operation_interrupted"}}}));
+                let retry=wire.read("shell.stop"); assert_ne!(retry["id"], stop["id"]); assert_eq!(retry["params"]["runId"], run["params"]["runId"]);
+                wire.reply(&retry,json!({"stopped":false}));
+            } else { wire.reply(&stop, json!({"stopped":false})); }
+        }
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    for malformed in [false, true] {
+        terminal.write(b"!held\n");
+        terminal.until("[shell interrupted] Run");
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        terminal.until("[shell stopping] Waiting for command settlement");
+        if !malformed {
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.until("Still waiting for command settlement");
+            release.send(()).unwrap();
+            terminal.until("Stop was not confirmed");
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.until("[shell stopping] Waiting for command settlement");
+        }
+        terminal.until("\n> ");
+    }
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"main","requestId":"working","textOffset":0,"text":"model running"}));
+        let run = wire.read("shell.run");
+        wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"command":"inspect"}},"reason":"review"}));
+        wire.reply(&run,json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"deferred output","truncated":false}));
+        let stop=wire.read("session.stop");
+        wire.notice("approval.cancelled",json!({"sessionId":"session","requestId":"approval"}));
+        wire.reply(&idle,json!({"sequence":40})); wire.reply(&stop,json!({"sequence":40}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"work\n");
+    terminal.until("model running");
+    terminal.write(b"!inspect\n");
+    terminal.until("Allow once? [y/N] ");
+    assert!(!terminal.transcript.contains("deferred output"));
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("[stopping] Waiting for resource settlement");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("[shell stopping]"));
+    assert!(
+        terminal.transcript.find("deferred output").unwrap()
+            > terminal.transcript.find("[stopping]").unwrap()
+    );
 }

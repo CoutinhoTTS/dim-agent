@@ -61,6 +61,7 @@ struct ShellRun {
     run_id: String,
     stop: Option<u64>,
     stopping: bool,
+    progress_started: bool,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +113,7 @@ async fn start_shell(
         run_id,
         stop: None,
         stopping: false,
+        progress_started: false,
     }))
 }
 
@@ -201,7 +203,7 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
         display.failed = false;
         display.muted = false;
         let mut code = wait_turn(client, &session_id, None, &mut display, &mut input).await?;
-        if code != 0 {
+        if code != 0 || interactive && input.is_none() {
             return Ok(code);
         }
         if let Some(prompt) = &options.prompt {
@@ -393,13 +395,17 @@ async fn wait_turn(
             event
         } else {
             tokio::select! {
-                signal = tokio::signal::ctrl_c(), if (stop.is_none() && settled.is_none()) || shell.as_ref().is_some_and(|run| run.request.is_some() && !run.stopping) => {
+                signal = tokio::signal::ctrl_c(), if (stop.is_none() && settled.is_none()) || shell.is_some() => {
                     signal?;
                     if !display.json { println!(); }
-                    if let Some(run) = shell.as_mut().filter(|run| run.request.is_some() && !run.stopping) {
+                    if let Some(run) = shell.as_mut().filter(|run| !prompted && !run.stopping) {
                         run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
                         run.stopping = true;
-                        if !prompted { display.record("[shell stopping] Waiting for command settlement")?; }
+                        display.record("[shell stopping] Waiting for command settlement")?;
+                        continue;
+                    }
+                    if settled.is_some() || stop.is_some() {
+                        display.record("[shell stopping] Still waiting for command settlement")?;
                         continue;
                     }
                     display.record("[stopping] Waiting for resource settlement")?;
@@ -430,7 +436,7 @@ async fn wait_turn(
                     }
                     if line.is_none() {
                         *input = None;
-                        if let Some(run) = shell.as_mut().filter(|run| run.request.is_some() && !run.stopping) {
+                        if let Some(run) = shell.as_mut().filter(|run| !run.stopping) {
                             run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
                             run.stopping = true;
                         }
@@ -469,24 +475,53 @@ async fn wait_turn(
                 if shell.as_ref().is_some_and(|run| run.request == Some(id)) =>
             {
                 let run = shell.as_mut().expect("shell reply");
+                let mut retained = false;
                 match result {
-                    Ok(value) => shell_result(value, &run.run_id, display)?,
-                    Err(error) => display.record(&format!("[shell error] {error}"))?,
+                    Ok(value) => {
+                        if let Err(error) = shell_result(value, &run.run_id, display) {
+                            display.record(&format!("[shell error] {error}"))?;
+                            retained = true;
+                        }
+                    }
+                    Err(error) => {
+                        retained = error
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("appError"))
+                            .and_then(Value::as_str)
+                            == Some("operation_interrupted");
+                        display.record(&format!("[shell error] {error}"))?;
+                    }
                 }
                 run.request = None;
-                if run.stop.is_none() {
+                if retained {
+                    display.record(&format!("[shell interrupted] Run {} may still be running. Record-mode output may still be recorded. Ctrl+C stops it.", run.run_id))?;
+                } else if run.stop.is_none() {
                     shell = None;
                 }
             }
             Message::Response { id, result }
                 if shell.as_ref().is_some_and(|run| run.stop == Some(id)) =>
             {
+                let interrupted = result.as_ref().err().is_some_and(|error| {
+                    error
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("appError"))
+                        .and_then(Value::as_str)
+                        == Some("operation_interrupted")
+                });
                 if let Err(error) = result {
                     display.record(&format!("[shell stop error] {error}"))?;
                 }
                 let run = shell.as_mut().expect("shell stop reply");
                 run.stop = None;
-                if run.request.is_none() {
+                if interrupted {
+                    run.stopping = false;
+                    display.record(
+                        "[shell interrupted] Stop was not confirmed; Ctrl+C can request it again",
+                    )?;
+                } else if run.request.is_none() {
                     shell = None;
                 }
             }
@@ -574,14 +609,22 @@ async fn wait_turn(
                     text: String,
                     skipped: Option<u64>,
                 }
-                let progress: ShellProgress = serde_json::from_value(params["data"].clone())
-                    .map_err(|_| "Invalid shell.run progress")?;
+                let Ok(progress) = serde_json::from_value::<ShellProgress>(params["data"].clone())
+                else {
+                    display.record("[shell progress error] Invalid shell.run progress")?;
+                    continue;
+                };
                 if let Some(skipped) = progress.skipped {
                     display.record(&format!(
                         "[shell progress] skipped {skipped} bytes; final output follows"
                     ))?;
                 }
-                display.record(&format!("[shell progress] (incomplete)\n{}", progress.text))?;
+                let run = shell.as_mut().expect("shell progress");
+                if !run.progress_started {
+                    display.record("[shell progress] (incomplete)")?;
+                    run.progress_started = true;
+                }
+                display.shell_progress(&progress.text)?;
             }
             notice @ Message::Notice { .. } => {
                 render(notice, session_id, display)?;
