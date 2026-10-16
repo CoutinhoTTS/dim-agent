@@ -76,6 +76,7 @@ flowchart LR
   p34 -->|"dim_agent_capabilities::permission::Permission@main"| p35
   p26 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p35
   p26 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p35
+  p10 -->|"dim_agent_capabilities::permission::CommandRulesHost@session"| p34
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p34
   p26 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p34
   p26 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p34
