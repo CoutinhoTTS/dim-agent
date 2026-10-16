@@ -127,8 +127,8 @@ records (`RequiredCheck`) and the Management plugin are withdrawn.
 
 ## Existing plugins
 
-Existing plugins already follow D1. One configuration item does not follow D4: the exec shell is
-read once in HostPlatform's `apply`; it should be business configuration read at each spawn.
+Existing plugins follow D1. HostPlatform follows D4 by reading the exec shell's business
+configuration through `exec_shell()` for each command; changing it does not reload plugins.
 
 ## Consequences
 

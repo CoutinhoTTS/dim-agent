@@ -31,5 +31,5 @@ tasks emit no wake and old arrivals are not replayed after WaitBranch reload.
 | 作用域 | Session |
 | 注入 | `S:TreeCommands` |
 | 提供 | `S:ToolContribution#wait` |
-| 被注入于 | `ToolRegistry` |
+| 被注入于 | — |
 <!-- /generated -->

@@ -173,7 +173,7 @@ fn xml_tag(name: &str, value: &str) -> String {
 
 /// The runtime environment (TS `renderRuntimeEnvironment`): one tag per
 /// line, values escaped; the date is its own source.
-fn environment(platform: &HostPlatform, cwd: &str) -> String {
+fn environment(platform: &HostPlatform, shell: &ShellStatus, cwd: &str) -> String {
     let os = match platform.os {
         Os::Macos => "darwin",
         Os::Linux => "linux",
@@ -183,7 +183,7 @@ fn environment(platform: &HostPlatform, cwd: &str) -> String {
         xml_tag("cwd", cwd),
         xml_tag("home", &platform.home.to_string_lossy()),
     ];
-    match &platform.shell {
+    match shell {
         ShellStatus::Available(ExecShellRuntime {
             executable_path,
             edition,
@@ -322,7 +322,11 @@ impl LoadPrompt for Sources {
                     (body, PromptDelivery::Context, order)
                 }
                 ENVIRONMENT => (
-                    Some(environment(&self.platform, &self.config.cwd)),
+                    Some(environment(
+                        &self.platform,
+                        &self.platform.exec_shell().await,
+                        &self.config.cwd,
+                    )),
                     PromptDelivery::State,
                     200,
                 ),

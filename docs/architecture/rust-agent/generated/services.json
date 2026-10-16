@@ -1279,12 +1279,12 @@
             "status": "Ready"
           },
           {
-            "service": "dim_agent_capabilities::tool_registry::ToolContribution#branch@session",
+            "service": "dim_agent_runtime::config::SessionConfig@session",
             "scope": null,
             "status": "Ready"
           },
           {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
             "scope": null,
             "status": "Ready"
           }
@@ -1297,13 +1297,13 @@
             "generation": 1
           },
           {
-            "service": "dim_agent_capabilities::tool_registry::ToolContribution#branch@session",
+            "service": "dim_agent_runtime::config::SessionConfig@session",
             "scope": null,
-            "provider": 9,
+            "provider": 6,
             "generation": 1
           },
           {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
             "scope": null,
             "provider": 6,
             "generation": 1
@@ -1317,13 +1317,13 @@
             "external": true
           },
           {
-            "service": "dim_agent_capabilities::tool_registry::ToolContribution#branch@session",
-            "provider": 9,
+            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "provider": 6,
             "declared": true,
             "external": true
           },
           {
-            "service": "dim_agent_runtime::config::SessionConfig@session",
+            "service": "dim_agent_runtime::diagnostics::Diagnostics@session",
             "provider": 6,
             "declared": true,
             "external": true
