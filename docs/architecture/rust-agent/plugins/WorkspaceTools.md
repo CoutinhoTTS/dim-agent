@@ -42,12 +42,16 @@ refusal, timeouts and background ownership. Its existing `exec_shell_unavailable
 tool-result code is preserved, with instructions to fix the file and retry.
 
 The same module exports the existing `Decoder::{write,end}`, `sanitize`,
-`truncate_preview` and `EXIT_STDIO_GRACE`. Keep one incremental decoder per pipe;
+`truncate_preview` and `EXIT_STDIO_GRACE`, and for ShellInput `capture_preview`,
+`tail_bytes`, `signal_name` and `pump`. Keep one incremental decoder per pipe;
 finish it at EOF or when the read grace ends. Invalid/truncated bytes become
 `<0xNN>`. Sanitization removes control characters except tab/CR/LF, and
-U+FFF9–U+FFFB. The preview keeps the last 2000 lines within 50 KiB on UTF-8
-boundaries. Pipe reads retain their 100 ms grace after the root exits. These
-are the existing output rules, exposed without changing their behavior.
+U+FFF9–U+FFFB. `capture_preview` keeps the bounded output tail (the last
+100 KiB from a line start) that `truncate_preview` cuts to the last 2000 lines
+within 50 KiB on UTF-8 boundaries. `pump` reads one pipe through its own
+decoder into an `OutputSink` (exec's sink also offloads to the output file) and
+keeps reading for the 100 ms grace after the root exits. These are the existing
+output rules, exposed without changing their behavior.
 
 ## Rule check
 
