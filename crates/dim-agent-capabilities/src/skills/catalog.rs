@@ -328,7 +328,7 @@ impl Capability for SkillsCatalogPlugin {
 /// In-memory `SkillSettings` for tests and embedded hosts without storage.
 pub struct MemorySkillSettings {
     state: Mutex<SkillSettingsSnapshot>,
-    changed: watch::Sender<Option<SettingsVersion>>,
+    changed: watch::Sender<()>,
 }
 impl Default for MemorySkillSettings {
     fn default() -> Self {
@@ -337,7 +337,7 @@ impl Default for MemorySkillSettings {
                 version: "0".into(),
                 disabled: BTreeSet::new(),
             }),
-            changed: watch::channel(None).0,
+            changed: watch::channel(()).0,
         }
     }
 }
@@ -371,11 +371,11 @@ impl SkillSettings for MemorySkillSettings {
                 state.version = next.to_string();
                 state.version.clone()
             };
-            self.changed.send_replace(Some(version.clone()));
+            self.changed.send_replace(());
             Ok(version)
         })
     }
-    fn changes(&self) -> watch::Receiver<Option<SettingsVersion>> {
+    fn changes(&self) -> watch::Receiver<()> {
         self.changed.subscribe()
     }
 }

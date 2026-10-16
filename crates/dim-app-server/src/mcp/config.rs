@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 /// Wakes the returned receiver on every committed write to MCP's Settings
@@ -13,7 +12,7 @@ use std::{
 pub(super) fn settings_changes(
     ctx: &rutis::Ctx,
 ) -> std::result::Result<tokio::sync::watch::Receiver<()>, rutis::CordisError> {
-    let wake = Wake(Arc::new(tokio::sync::watch::Sender::new(())));
+    let wake = crate::settings::Wake::new();
     for source in [McpSettings::NAMESPACE, McpProjectEnablement::NAMESPACE] {
         ctx.events().on(
             ctx,
@@ -26,19 +25,7 @@ pub(super) fn settings_changes(
         &crate::settings::project_authorizations(),
         wake.clone(),
     )?;
-    Ok(wake.0.subscribe())
-}
-#[derive(Clone)]
-struct Wake(Arc<tokio::sync::watch::Sender<()>>);
-impl<E: rutis::Event<Value = ()>> rutis::Listener<E> for Wake {
-    fn call<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        _: &'a E,
-    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
-        self.0.send_replace(());
-        Box::pin(async { Ok(None) })
-    }
+    Ok(wake.subscribe())
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]

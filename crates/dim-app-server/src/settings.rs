@@ -79,6 +79,29 @@ pub fn project_authorizations() -> EventKey<ProjectAuthorized> {
     EventKey::dynamic("settings/projects")
 }
 
+/// Wakes a receiver on every event it listens to, for an owner whose read
+/// loop waits on a watch receiver: it rereads the source after each wake.
+#[derive(Clone)]
+pub(crate) struct Wake(Arc<tokio::sync::watch::Sender<()>>);
+impl Wake {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(tokio::sync::watch::Sender::new(())))
+    }
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0.subscribe()
+    }
+}
+impl<E: Event<Value = ()>> rutis::Listener<E> for Wake {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: &'a E,
+    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
+        self.0.send_replace(());
+        Box::pin(async { Ok(None) })
+    }
+}
+
 pub trait BusinessDocument: Default + Serialize + DeserializeOwned + Send + Sync + 'static {
     const NAMESPACE: &'static str;
     const USER_FILE: &'static str;

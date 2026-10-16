@@ -237,10 +237,22 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     );
     let project_root = first.unwrap();
     assert_eq!(project_root, same.unwrap());
-    // Authorizing the same directory twice announces it once.
-    saw(&mut authorized, |a: &ProjectAuthorized| a.cwd == project).await;
-    assert_eq!(authorized.borrow().len(), 1);
-    assert_eq!(authorized.borrow()[0].root, project_root);
+    // Authorizing the same directory twice announces it once. Events of one
+    // channel arrive in emit order, so a later authorization is a barrier.
+    let barrier = home.join("barrier");
+    fs::create_dir(&barrier).unwrap();
+    settings
+        .authorize_project(barrier.clone(), &cancel)
+        .await
+        .unwrap();
+    saw(&mut authorized, |a: &ProjectAuthorized| a.cwd == barrier).await;
+    let announced: Vec<_> = authorized
+        .borrow()
+        .iter()
+        .filter(|a| a.cwd == project)
+        .map(|a| a.root)
+        .collect();
+    assert_eq!(announced, [project_root]);
     let scope = SettingsScope::Project(project_root);
     let snapshot = settings.read::<McpSettings>(scope, &cancel).await.unwrap();
     let document = serde_json::from_value::<McpSettings>(serde_json::json!({"mcpServers":{"late":{"command":"node","enabled":false}},"future":{"keep":7}})).unwrap();
@@ -510,8 +522,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         result => panic!("unexpected file CAS: {result:?}"),
     };
     saw(&mut changes, change(SettingsScope::User, &saved.revision)).await;
-    // One write, one event: the conflicting writer announced nothing.
-    assert_eq!(changes.borrow().len(), 1);
     assert_eq!(settings.project_path(1).unwrap(), project);
     assert_eq!(settings.project_sources().len(), 2);
     assert!(matches!(
@@ -528,7 +538,8 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .read::<Document>(SettingsScope::Project(2), &cancel)
         .await
         .unwrap();
-    let before = changes.borrow().len();
+    // The user write above; counted below, behind a barrier.
+    let before = 1;
     let project_saved = settings
         .update(
             SettingsScope::Project(1),
@@ -544,7 +555,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         change(SettingsScope::Project(1), &project_saved.revision),
     )
     .await;
-    assert_eq!(changes.borrow().len(), before + 1);
     assert_eq!(
         settings
             .read::<Document>(SettingsScope::Project(2), &cancel)
@@ -568,6 +578,8 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         change(SettingsScope::Project(2), &other_saved.revision),
     )
     .await;
+    // One source's events arrive in emit order, so the last write is a
+    // barrier: one event per write, none from the conflicting writer.
     assert_eq!(changes.borrow().len(), before + 2);
     assert_eq!(
         settings

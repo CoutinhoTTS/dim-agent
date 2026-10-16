@@ -3,8 +3,7 @@ use crate::{
     methods::{ManagementMethods, SelectionScope},
     protocol::{canonical_cwd, optional_non_null},
     settings::{
-        BusinessDocument, SettingsChanged, SettingsError, SettingsScope, SettingsService,
-        settings_changes,
+        BusinessDocument, SettingsError, SettingsScope, SettingsService, Wake, settings_changes,
     },
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
@@ -47,26 +46,12 @@ impl BusinessDocument for SkillDocument {
     }
 }
 
-struct SkillRelay(Arc<SkillStorage>);
-impl rutis::Listener<SettingsChanged> for SkillRelay {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        change: &'a SettingsChanged,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        if change.scope == SettingsScope::User {
-            self.0.changed.send_replace(Some(change.revision.clone()));
-        }
-        Box::pin(async { Ok(None) })
-    }
-}
-
 /// Adapts the owner's business document to the reusable Skill catalog port.
-/// `changed` relays Settings' `skills` events to the port's `changes` until the
-/// catalog listens to the rutis event itself.
+/// `wake` turns Settings' `skills` events into the port's `changes` until the
+/// catalog listens to the rutis event itself (#121).
 struct SkillStorage {
     settings: Arc<SettingsService>,
-    changed: tokio::sync::watch::Sender<Option<SettingsVersion>>,
+    wake: Wake,
 }
 impl SkillSettings for SkillStorage {
     fn skills(
@@ -118,8 +103,8 @@ impl SkillSettings for SkillStorage {
                 .revision)
         })
     }
-    fn changes(&self) -> tokio::sync::watch::Receiver<Option<SettingsVersion>> {
-        self.changed.subscribe()
+    fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.wake.subscribe()
     }
 }
 impl From<SettingsError> for SkillSettingsError {
@@ -220,12 +205,12 @@ impl TypedPlugin for SkillsCatalogPlugin {
         Box::pin(async move {
             let storage = Arc::new(SkillStorage {
                 settings,
-                changed: tokio::sync::watch::Sender::new(None),
+                wake: Wake::new(),
             });
             ctx.events().on(
                 ctx,
                 &settings_changes(SkillDocument::NAMESPACE),
-                SkillRelay(storage.clone()),
+                storage.wake.clone(),
             )?;
             let settings = Arc::new(SkillSettingsHost(storage));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
