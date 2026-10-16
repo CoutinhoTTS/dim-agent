@@ -21,7 +21,8 @@ Each process owner provides `ManagementMethods` under its namespace during
 Rpc does not depend on any owner ([methods contract §3.2](../contracts/session-boundary.md#32-management-method)).
 Assembly passes Rpc its profile's namespaces, each with the loader row of the
 owner that provides it (`account`, `account.codex`, `account.grok` and `provider`
-with a product home; `mcp`, `skills` and `permission` with local execution). Adding an owner
+with a product home; `settings` (SettingsMethods) wherever Settings is assembled; `mcp`, `skills`
+and `permission` with local execution). Adding an owner
 adds its pair where its row is registered, and Rpc refuses to load when a pair
 names no row. On each call Rpc makes a keyed read of the namespace that owns the
 name and dispatches to its active provider; it reads that owner row's status
@@ -34,8 +35,9 @@ dispatch. Adding a method changes its owner's declaration, parsing and
 implementation.
 
 Account, Codex, Grok, Provider and Mcp provide their methods directly, without
-adapter rows. Settings supplies generic BusinessDocument persistence, not
-approvals, a method contribution or a configuration namespace.
+adapter rows. Settings supplies generic BusinessDocument persistence and the declared sources of
+[the settings service](settings-service.md), not approvals, a method contribution or a configuration
+namespace; SettingsMethods, which depends on it, owns `settings.read`/`settings.update`.
 MCP owns its configuration types in `mcp/config.rs`; the Skills owner supplies
 the existing `SkillSettingsHost`. App Server's SkillsCatalog mounts the reusable catalog
 and publishes both catalog and management interfaces in one plugin, with the

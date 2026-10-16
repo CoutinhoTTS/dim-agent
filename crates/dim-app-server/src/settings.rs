@@ -1,18 +1,27 @@
-//! Business-owned documents with source-local persistence and CAS.
+//! Business-owned documents with source-local persistence and CAS: Rust
+//! `BusinessDocument` sources and the JSON Schema sources non-Rust owners
+//! declare (settings-service design).
+mod declared;
 mod native;
 
 use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
 use dim_agent_runtime::{Capability, KeysOf, When};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
+    any::TypeId,
     collections::BTreeMap,
+    marker::PhantomData,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+use declared::Declared;
+pub(crate) use declared::{Read, Update};
+pub use declared::{SourceDeclaration, Writer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
@@ -20,6 +29,18 @@ pub enum SettingsError {
     Storage(FileStorageError),
     #[error("invalid settings: {0}")]
     Invalid(&'static str),
+    /// Not a declared source; Rust sources are served by their owners.
+    #[error("unknown settings source")]
+    UnknownSource,
+    #[error("invalid settings scope: {0}")]
+    InvalidScope(&'static str),
+    /// A written document breaks its declared schema. The message names the
+    /// instance path, never the value.
+    #[error("invalid settings document: {0}")]
+    Document(String),
+    /// An owner write changes the user-only field at this JSON Pointer.
+    #[error("settings field {0} is changed only by the user")]
+    UserOnlyField(String),
     #[error("settings changed; read the current version before updating")]
     Conflict,
     #[error("settings service is closed")]
@@ -46,7 +67,7 @@ pub type Result<T> = std::result::Result<T, SettingsError>;
 pub use dim_agent_capabilities::settings::{SettingsChanged, SettingsScope, settings_changes};
 
 /// A project directory newly authorized for project sources.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAuthorized {
     pub root: usize,
     pub cwd: PathBuf,
@@ -89,10 +110,51 @@ pub trait BusinessDocument: Default + Serialize + DeserializeOwned + Send + Sync
     const PROJECT_FILE: Option<&'static str> = None;
     fn validate(&self) -> Result<()>;
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SettingsSnapshot<D> {
     pub revision: String,
     pub document: D,
+}
+
+/// How one source's documents cross the persistence boundary, so Rust and
+/// declared sources share the file and native paths, keyed by source name.
+trait Format: Send + Sync + 'static {
+    type Document: Serialize + Send + 'static;
+    fn source(&self) -> &str;
+    /// Decodes and checks a persisted document; `None` is a missing file.
+    fn decode(&self, bytes: Option<&[u8]>) -> Result<Self::Document>;
+}
+struct Typed<D>(PhantomData<fn() -> D>);
+impl<D: BusinessDocument> Format for Typed<D> {
+    type Document = D;
+    fn source(&self) -> &str {
+        D::NAMESPACE
+    }
+    fn decode(&self, bytes: Option<&[u8]>) -> Result<D> {
+        let document: D = match bytes {
+            Some(bytes) => serde_json::from_slice(bytes)
+                .map_err(|_| SettingsError::Invalid("invalid settings document"))?,
+            None => D::default(),
+        };
+        document.validate()?;
+        Ok(document)
+    }
+}
+fn typed<D: BusinessDocument>() -> Arc<Typed<D>> {
+    Arc::new(Typed(PhantomData))
+}
+
+/// Who holds a source name or file: a Rust document type or one declaration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Claimant {
+    Rust(TypeId),
+    Declared(usize),
+}
+fn claim_names(source: &str, user_file: &str, project_file: Option<&str>) -> Vec<String> {
+    [format!("namespace {source}"), format!("user {user_file}")]
+        .into_iter()
+        .chain(project_file.map(|file| format!("project {file}")))
+        .collect()
 }
 
 pub struct SettingsService {
@@ -105,9 +167,11 @@ pub struct SettingsService {
     updates: TaskTracker,
     /// Settings' own plugin context, which emits change events.
     events: Ctx,
-    /// The document type that first used each namespace and file; another
-    /// type naming one of them would share its persisted source.
-    claims: Mutex<BTreeMap<String, std::any::TypeId>>,
+    /// The claimant of each namespace and file; another claimant naming one
+    /// of them would share its persisted source.
+    claims: Mutex<BTreeMap<String, Claimant>>,
+    /// The declared sources, compiled once at apply.
+    declared: BTreeMap<String, Arc<Declared>>,
 }
 impl SettingsService {
     pub async fn authorize_project(
@@ -157,11 +221,11 @@ impl SettingsService {
     }
     /// Announces a committed write on the source's channel. Callers hold the
     /// commit order (the gate or the native connection), so events follow it.
-    fn publish<D: BusinessDocument>(&self, scope: SettingsScope, revision: &str) {
+    fn publish(&self, source: &str, scope: SettingsScope, revision: &str) {
         self.emit(
-            &settings_changes(D::NAMESPACE),
+            &settings_changes(source),
             SettingsChanged {
-                source: D::NAMESPACE,
+                source: source.to_owned(),
                 scope,
                 revision: revision.to_owned(),
             },
@@ -184,42 +248,33 @@ impl SettingsService {
         if let Some(file) = D::PROJECT_FILE {
             validate_file(file)?;
         }
-        self.claim::<D>()?;
+        self.claim(
+            Claimant::Rust(TypeId::of::<D>()),
+            claim_names(D::NAMESPACE, D::USER_FILE, D::PROJECT_FILE),
+        )?;
+        self.locate(D::USER_FILE, D::PROJECT_FILE, scope)
+    }
+    fn locate(
+        &self,
+        user_file: &str,
+        project_file: Option<&str>,
+        scope: SettingsScope,
+    ) -> Result<FilePath> {
         let (root, file) = match scope {
-            SettingsScope::User => (self.home_root, D::USER_FILE),
+            SettingsScope::User => (self.home_root, user_file),
             SettingsScope::Project(root) => {
                 self.project_path(root)?;
                 (
                     root,
-                    D::PROJECT_FILE
-                        .ok_or(SettingsError::Invalid("document has no project source"))?,
+                    project_file.ok_or(SettingsError::Invalid("document has no project source"))?,
                 )
             }
         };
         Ok(self.files.path(root, file)?)
     }
-    fn claim<D: BusinessDocument>(&self) -> Result<()> {
-        let owner = std::any::TypeId::of::<D>();
-        let names = [
-            format!("namespace {}", D::NAMESPACE),
-            format!("user {}", D::USER_FILE),
-        ]
-        .into_iter()
-        .chain(D::PROJECT_FILE.map(|file| format!("project {file}")));
+    fn claim(&self, claimant: Claimant, names: Vec<String>) -> Result<()> {
         let mut claims = self.claims.lock().unwrap();
-        let names: Vec<_> = names.collect();
-        if names
-            .iter()
-            .any(|name| claims.get(name).is_some_and(|claimed| *claimed != owner))
-        {
-            return Err(SettingsError::Invalid(
-                "settings source belongs to another document type",
-            ));
-        }
-        for name in names {
-            claims.insert(name, owner);
-        }
-        Ok(())
+        claim(&mut claims, claimant, names)
     }
     fn check_open(&self, cancel: &CancellationToken) -> Result<()> {
         if self.stopping.is_cancelled() {
@@ -237,10 +292,7 @@ impl SettingsService {
     ) -> Result<SettingsSnapshot<D>> {
         self.check_open(cancel)?;
         let path = self.path::<D>(scope)?;
-        if scope == SettingsScope::User && self.database.is_some() {
-            return self.native_read::<D>(path, cancel).await;
-        }
-        decode(self.files.read(&path, cancel).await)
+        self.read_source(typed::<D>(), path, scope, cancel).await
     }
     pub async fn update<D: BusinessDocument>(
         self: &Arc<Self>,
@@ -251,6 +303,42 @@ impl SettingsService {
     ) -> Result<SettingsSnapshot<D>> {
         document.validate()?;
         let path = self.path::<D>(scope)?;
+        self.replace(
+            typed::<D>(),
+            path,
+            scope,
+            expected,
+            document,
+            |_, _| Ok(()),
+            cancel,
+        )
+        .await
+    }
+    async fn read_source<F: Format>(
+        &self,
+        format: Arc<F>,
+        path: FilePath,
+        scope: SettingsScope,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<F::Document>> {
+        if scope == SettingsScope::User && self.database.is_some() {
+            return self.native_read(format, path, cancel).await;
+        }
+        snapshot(&*format, self.files.read(&path, cancel).await)
+    }
+    /// CAS on the revision. `check` sees the current and the new document
+    /// under the same lease (or native transaction) as the revision check.
+    #[allow(clippy::too_many_arguments)]
+    async fn replace<F: Format>(
+        self: &Arc<Self>,
+        format: Arc<F>,
+        path: FilePath,
+        scope: SettingsScope,
+        expected: &str,
+        document: F::Document,
+        check: impl FnOnce(&F::Document, &F::Document) -> Result<()> + Send + 'static,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<F::Document>> {
         let task = {
             let _guard = self.gate.lock().unwrap();
             self.check_open(cancel)?;
@@ -260,14 +348,15 @@ impl SettingsService {
             self.updates.spawn(async move {
                 if scope == SettingsScope::User && owner.database.is_some() {
                     return owner
-                        .native_replace(path, expected, document, &cancel)
+                        .native_replace(format, path, expected, document, check, &cancel)
                         .await;
                 }
                 let mut lease = owner.lease(&path, &cancel).await?;
-                let current: SettingsSnapshot<D> = decode(lease.read(&cancel).await)?;
+                let current = snapshot(&*format, lease.read(&cancel).await)?;
                 if current.revision != expected {
                     return Err(SettingsError::Conflict);
                 }
+                check(&current.document, &document)?;
                 let mut bytes = serde_json::to_vec_pretty(&document)
                     .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
                 bytes.push(b'\n');
@@ -277,12 +366,12 @@ impl SettingsService {
                     // The new content is what readers now see: consumers follow
                     // it, and the caller learns it may not survive a crash.
                     Err(FileStorageError::Unsynced(error)) => {
-                        owner.publish::<D>(scope, &revision);
+                        owner.publish(format.source(), scope, &revision);
                         return Err(FileStorageError::Unsynced(error).into());
                     }
                     Err(error) => return Err(error.into()),
                 }
-                owner.publish::<D>(scope, &revision);
+                owner.publish(format.source(), scope, &revision);
                 Ok(SettingsSnapshot { revision, document })
             })
         };
@@ -306,6 +395,24 @@ impl SettingsService {
             }
         }
     }
+}
+fn claim(
+    claims: &mut BTreeMap<String, Claimant>,
+    claimant: Claimant,
+    names: Vec<String>,
+) -> Result<()> {
+    if names
+        .iter()
+        .any(|name| claims.get(name).is_some_and(|claimed| *claimed != claimant))
+    {
+        return Err(SettingsError::Invalid(
+            "settings source belongs to another document type",
+        ));
+    }
+    for name in names {
+        claims.insert(name, claimant);
+    }
+    Ok(())
 }
 fn validate_namespace(value: &str) -> Result<()> {
     if value.is_empty()
@@ -345,23 +452,18 @@ fn revision(bytes: Option<&[u8]>) -> String {
         |bytes| format!("{:x}", Sha256::digest(bytes)),
     )
 }
-fn decode<D: BusinessDocument>(
+fn snapshot<F: Format>(
+    format: &F,
     read: std::result::Result<Vec<u8>, FileStorageError>,
-) -> Result<SettingsSnapshot<D>> {
+) -> Result<SettingsSnapshot<F::Document>> {
     let bytes = match read {
         Ok(bytes) => Some(bytes),
         Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let document: D = match &bytes {
-        Some(bytes) => serde_json::from_slice(bytes)
-            .map_err(|_| SettingsError::Invalid("invalid settings document"))?,
-        None => D::default(),
-    };
-    document.validate()?;
     Ok(SettingsSnapshot {
+        document: format.decode(bytes.as_deref())?,
         revision: revision(bytes.as_deref()),
-        document,
     })
 }
 
@@ -371,6 +473,10 @@ pub struct SettingsPlugin {
     project_roots: Vec<usize>,
     projects: Arc<Mutex<BTreeMap<PathBuf, usize>>>,
     native: bool,
+    /// Rust sources the composition root registers, claimed before any
+    /// declaration so a declaration cannot take one of their names.
+    reserved: Vec<(TypeId, Vec<String>)>,
+    declarations: Vec<SourceDeclaration>,
 }
 impl SettingsPlugin {
     pub fn new(home_root: usize, project_roots: Vec<usize>) -> Self {
@@ -379,6 +485,8 @@ impl SettingsPlugin {
             project_roots,
             projects: Arc::new(Mutex::new(BTreeMap::new())),
             native: false,
+            reserved: Vec::new(),
+            declarations: Vec::new(),
         }
     }
     pub fn native(home_root: usize, project_roots: Vec<usize>) -> Self {
@@ -386,6 +494,20 @@ impl SettingsPlugin {
             native: true,
             ..Self::new(home_root, project_roots)
         }
+    }
+    /// Reserves a Rust source's names: a declaration naming one fails assembly.
+    pub fn reserve<D: BusinessDocument>(mut self) -> Self {
+        self.reserved.push((
+            TypeId::of::<D>(),
+            claim_names(D::NAMESPACE, D::USER_FILE, D::PROJECT_FILE),
+        ));
+        self
+    }
+    /// The declared sources this Settings serves. Each is checked and compiled
+    /// in `apply`; an invalid or duplicate declaration fails assembly.
+    pub fn declare(mut self, declarations: Vec<SourceDeclaration>) -> Self {
+        self.declarations.extend(declarations);
+        self
     }
 }
 impl TypedPlugin for SettingsPlugin {
@@ -399,6 +521,35 @@ impl TypedPlugin for SettingsPlugin {
         (files, When(database)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let mut claims = BTreeMap::new();
+            for (owner, names) in &self.reserved {
+                claim(&mut claims, Claimant::Rust(*owner), names.clone())
+                    .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?;
+            }
+            let mut declared = BTreeMap::new();
+            for (index, declaration) in self.declarations.iter().enumerate() {
+                let failed = |reason: String| {
+                    CordisError::PluginFailed(
+                        format!(
+                            "settings source {} of {}: {reason}",
+                            declaration.source, declaration.owner
+                        )
+                        .into(),
+                    )
+                };
+                let compiled = Declared::compile(declaration.clone()).map_err(failed)?;
+                claim(
+                    &mut claims,
+                    Claimant::Declared(index),
+                    claim_names(
+                        &declaration.source,
+                        &declaration.user_file,
+                        declaration.project_file.as_deref(),
+                    ),
+                )
+                .map_err(|error| failed(error.to_string()))?;
+                declared.insert(declaration.source.clone(), Arc::new(compiled));
+            }
             for root in &self.project_roots {
                 let path = files
                     .root_path(*root)
@@ -414,7 +565,8 @@ impl TypedPlugin for SettingsPlugin {
                 gate: Mutex::new(()),
                 updates: TaskTracker::new(),
                 events: ctx.clone(),
-                claims: Mutex::new(BTreeMap::new()),
+                claims: Mutex::new(claims),
+                declared,
             });
             let owner = service.clone();
             ctx.effect(move || {
@@ -430,6 +582,7 @@ impl TypedPlugin for SettingsPlugin {
                     })
                 }))
             })?;
+            declared::provide(ctx, &service)?;
             ctx.provide_as(TypeKey::of::<SettingsService>(), service)?;
             Ok(Effect::Done)
         })

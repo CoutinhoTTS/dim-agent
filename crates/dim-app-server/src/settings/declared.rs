@@ -1,0 +1,345 @@
+//! Declared sources (settings-service §3–§4): JSON documents checked against
+//! the owner's JSON Schema, the owner's `settings` service and the client's
+//! `settings.*` management methods.
+use super::*;
+use rutis_bridge::session::{Error, HostDispatch, Reply, Value as RpcValue, host_key};
+use serde_json::{Value, json};
+
+/// One `settings` entry of a package manifest (§3.1). Until manifests are
+/// read (C4), the composition root registers declarations directly.
+#[derive(Clone, Debug)]
+pub struct SourceDeclaration {
+    /// The package id of the manifest; not written in the entry.
+    pub owner: String,
+    pub source: String,
+    pub user_file: String,
+    /// Present when the source also has project scope.
+    pub project_file: Option<String>,
+    /// JSON Schema (draft 2020-12) whose root is `type: object`.
+    pub schema: Value,
+    /// JSON Pointers to members reachable through `properties`.
+    pub user_only: Vec<String>,
+}
+
+/// The two write paths: an owner write may not change a user-only field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Writer {
+    Owner,
+    Client,
+}
+
+pub(super) struct Declared {
+    declaration: SourceDeclaration,
+    validator: jsonschema::Validator,
+}
+impl Declared {
+    /// Checks a declaration once, where it enters the host.
+    pub(super) fn compile(declaration: SourceDeclaration) -> std::result::Result<Self, String> {
+        let error = |error: SettingsError| error.to_string();
+        validate_namespace(&declaration.source).map_err(error)?;
+        validate_file(&declaration.user_file).map_err(error)?;
+        if let Some(file) = &declaration.project_file {
+            validate_file(file).map_err(error)?;
+        }
+        if declaration.schema.get("type") != Some(&json!("object")) {
+            return Err("schema root must be `type: object`".into());
+        }
+        let validator = jsonschema::draft202012::new(&declaration.schema)
+            .map_err(|error| format!("schema does not compile: {}", error.masked()))?;
+        for pointer in &declaration.user_only {
+            if !reachable(&declaration.schema, pointer) {
+                return Err(format!(
+                    "user-only pointer {pointer} does not name a declared member"
+                ));
+            }
+        }
+        let declared = Self {
+            declaration,
+            validator,
+        };
+        declared
+            .prepare(json!({}))
+            .map_err(|error| format!("default document is invalid: {error}"))?;
+        Ok(declared)
+    }
+    /// Defaults, then the schema, then the `*Ref` rule (§3.2).
+    fn prepare(&self, mut document: Value) -> std::result::Result<Value, String> {
+        if !document.is_object() {
+            return Err("document must be an object".into());
+        }
+        fill(&self.declaration.schema, &mut document);
+        if let Some(error) = self.validator.iter_errors(&document).next() {
+            return Err(format!("{}: {}", error.instance_path(), error.masked()));
+        }
+        empty_reference(&document, &mut String::new()).map_or(Ok(()), |path| {
+            Err(format!("{path}: reference must be a non-empty string"))
+        })?;
+        Ok(document)
+    }
+    /// An owner write fails at the first user-only member it changes.
+    fn user_only(&self, current: &Value, next: &Value) -> Result<()> {
+        match self
+            .declaration
+            .user_only
+            .iter()
+            .find(|pointer| current.pointer(pointer) != next.pointer(pointer))
+        {
+            Some(pointer) => Err(SettingsError::UserOnlyField(pointer.clone())),
+            None => Ok(()),
+        }
+    }
+}
+impl Format for Declared {
+    type Document = Value;
+    fn source(&self) -> &str {
+        &self.declaration.source
+    }
+    fn decode(&self, bytes: Option<&[u8]>) -> Result<Value> {
+        let document = match bytes {
+            Some(bytes) => serde_json::from_slice(bytes)
+                .map_err(|_| SettingsError::Invalid("invalid settings document"))?,
+            None => json!({}),
+        };
+        self.prepare(document).map_err(|_| {
+            SettingsError::Invalid("persisted settings document does not match its schema")
+        })
+    }
+}
+/// Fills missing members that have a `default`, through `properties` only.
+fn fill(schema: &Value, value: &mut Value) {
+    let (Some(properties), Value::Object(members)) =
+        (schema.get("properties").and_then(Value::as_object), value)
+    else {
+        return;
+    };
+    for (name, property) in properties {
+        if let Some(default) = property.get("default")
+            && !members.contains_key(name)
+        {
+            members.insert(name.clone(), default.clone());
+        }
+        if let Some(member) = members.get_mut(name) {
+            fill(property, member);
+        }
+    }
+}
+/// The path of the first `<name>Ref` member that is not a non-empty string.
+fn empty_reference(value: &Value, path: &mut String) -> Option<String> {
+    let length = path.len();
+    let found = match value {
+        Value::Object(members) => members.iter().find_map(|(name, member)| {
+            path.truncate(length);
+            path.push('/');
+            path.push_str(&name.replace('~', "~0").replace('/', "~1"));
+            if name.len() > 3 && name.ends_with("Ref") && member.as_str().is_none_or(str::is_empty)
+            {
+                return Some(path.clone());
+            }
+            empty_reference(member, path)
+        }),
+        Value::Array(items) => items.iter().enumerate().find_map(|(index, item)| {
+            path.truncate(length);
+            path.push_str(&format!("/{index}"));
+            empty_reference(item, path)
+        }),
+        _ => None,
+    };
+    path.truncate(length);
+    found
+}
+/// Whether an RFC 6901 pointer names an object member through `properties`.
+fn reachable(schema: &Value, pointer: &str) -> bool {
+    let Some(tokens) = pointer.strip_prefix('/') else {
+        return false;
+    };
+    tokens
+        .split('/')
+        .try_fold(schema, |schema, token| {
+            schema
+                .get("properties")?
+                .get(token.replace("~1", "/").replace("~0", "~"))
+        })
+        .is_some()
+}
+
+impl SettingsService {
+    fn declared(&self, source: &str, scope: SettingsScope) -> Result<(Arc<Declared>, FilePath)> {
+        let declared = self
+            .declared
+            .get(source)
+            .cloned()
+            .ok_or(SettingsError::UnknownSource)?;
+        if let SettingsScope::Project(root) = scope {
+            if declared.declaration.project_file.is_none() {
+                return Err(SettingsError::InvalidScope("source has no project scope"));
+            }
+            if self.project_path(root).is_err() {
+                return Err(SettingsError::InvalidScope("unauthorized project"));
+            }
+        }
+        let path = self.locate(
+            &declared.declaration.user_file,
+            declared.declaration.project_file.as_deref(),
+            scope,
+        )?;
+        Ok((declared, path))
+    }
+    /// Reads a declared source; a missing file is the default document.
+    pub async fn read_declared(
+        &self,
+        source: &str,
+        scope: SettingsScope,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<Value>> {
+        self.check_open(cancel)?;
+        let (declared, path) = self.declared(source, scope)?;
+        self.read_source(declared, path, scope, cancel).await
+    }
+    /// Replaces a declared source if `expected` is its current revision, and
+    /// returns the stored document (with defaults).
+    pub async fn update_declared(
+        self: &Arc<Self>,
+        source: &str,
+        scope: SettingsScope,
+        expected: &str,
+        document: Value,
+        writer: Writer,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<Value>> {
+        let (declared, path) = self.declared(source, scope)?;
+        let document = declared
+            .prepare(document)
+            .map_err(SettingsError::Document)?;
+        let rules = declared.clone();
+        self.replace(
+            declared,
+            path,
+            scope,
+            expected,
+            document,
+            move |current, next| match writer {
+                Writer::Client => Ok(()),
+                Writer::Owner => rules.user_only(current, next),
+            },
+            cancel,
+        )
+        .await
+    }
+}
+
+/// `read` requests of both paths.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Read {
+    pub(crate) source: String,
+    pub(crate) scope: SettingsScope,
+}
+/// `update` requests of both paths.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Update {
+    pub(crate) source: String,
+    pub(crate) scope: SettingsScope,
+    pub(crate) expected_revision: String,
+    pub(crate) document: Value,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Projects {}
+
+/// The service error codes (§6).
+fn code(error: &SettingsError) -> &'static str {
+    match error {
+        SettingsError::UnknownSource => "unknown_source",
+        SettingsError::InvalidScope(_) => "invalid_scope",
+        SettingsError::Document(_) | SettingsError::Invalid(_) => "invalid_document",
+        SettingsError::UserOnlyField(_) => "user_only_field",
+        SettingsError::Conflict => "conflict",
+        SettingsError::Storage(FileStorageError::Unsynced(_)) => "unsynced",
+        SettingsError::Closed => "closed",
+        SettingsError::Cancelled => "cancelled",
+        SettingsError::Storage(_) | SettingsError::Persistence | SettingsError::Worker(_) => {
+            "failed"
+        }
+    }
+}
+/// `{ok: true, value}` or `{ok: false, error: {code, message}}`, as `sessions`.
+fn envelope(result: Result<impl Serialize>) -> RpcValue {
+    match result {
+        Ok(value) => json!({"ok": true, "value": value}),
+        Err(error) => {
+            json!({"ok": false, "error": {"code": code(&error), "message": error.to_string()}})
+        }
+    }
+    .into()
+}
+fn request<T: DeserializeOwned>(args: RpcValue) -> std::result::Result<T, Error> {
+    let invalid = || Error::Value("expected one settings request object".into());
+    let Value::Array(args) = args.json()? else {
+        return Err(invalid());
+    };
+    let [request] = <[Value; 1]>::try_from(args).map_err(|_| invalid())?;
+    serde_json::from_value(request).map_err(|_| invalid())
+}
+
+/// The owner path: `settings` by name for every language (§4.2). It has no
+/// caller identity; each source has one owner (AGENTS.md rule 11).
+struct Dispatch(Arc<SettingsService>);
+impl HostDispatch for Dispatch {
+    fn methods(&self) -> Option<Value> {
+        Some(json!({"read": "async", "update": "async", "projects": "sync"}))
+    }
+    fn invoke(&self, method: &str, args: RpcValue) -> Reply {
+        let service = self.0.clone();
+        // Dropping the call cancels it; a committed write stays committed.
+        let cancel = CancellationToken::new();
+        match method {
+            "projects" => {
+                let Projects {} = request(args)?;
+                let projects: Vec<_> = service
+                    .project_sources()
+                    .into_iter()
+                    .map(|(root, cwd)| ProjectAuthorized { root, cwd })
+                    .collect();
+                Ok(envelope(Ok(json!({ "projects": projects }))))
+            }
+            "read" => {
+                let Read { source, scope } = request(args)?;
+                Ok(RpcValue::future(async move {
+                    let _cancel = cancel.clone().drop_guard();
+                    Ok(envelope(
+                        service.read_declared(&source, scope, &cancel).await,
+                    ))
+                }))
+            }
+            "update" => {
+                let update: Update = request(args)?;
+                Ok(RpcValue::future(async move {
+                    let _cancel = cancel.clone().drop_guard();
+                    Ok(envelope(
+                        service
+                            .update_declared(
+                                &update.source,
+                                update.scope,
+                                &update.expected_revision,
+                                update.document,
+                                Writer::Owner,
+                                &cancel,
+                            )
+                            .await,
+                    ))
+                }))
+            }
+            _ => Err(Error::Value(format!("unknown settings method {method}"))),
+        }
+    }
+}
+
+/// Provides the owner service `settings`.
+pub(super) fn provide(
+    ctx: &Ctx,
+    service: &Arc<SettingsService>,
+) -> std::result::Result<(), CordisError> {
+    ctx.provide_as::<dyn HostDispatch>(host_key("settings"), Arc::new(Dispatch(service.clone())))?;
+    Ok(())
+}

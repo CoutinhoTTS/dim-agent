@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 /// User scope only: no project file can grant itself a rule.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PermissionSettings {
+pub(crate) struct PermissionSettings {
     #[serde(default)]
     command_rules: Vec<CommandRule>,
 }
