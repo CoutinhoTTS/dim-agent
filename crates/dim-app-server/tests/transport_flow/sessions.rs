@@ -627,3 +627,96 @@ async fn idle_ends_reloading_on_an_index_reload_and_session_closed_on_close() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// Issue #62: a process plugin launches a Session, writes input, waits for
+/// idle and withdraws a held input by its `inputId`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_consumer_launches_writes_waits_and_withdraws_by_input_id() {
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        calls,
+    } = serve_sessions(None).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    // The first input's approval keeps its turn open, so the second is held.
+    let session = awaiting_approval(&sessions, &agent).await;
+    let at = json!({"sessionId":session.id(),"branchId":"main"});
+    let first = sessions
+        .ok(
+            "lookup",
+            json!({"sessionId":session.id(),"branchId":"main","submissionId":"test:confirm"}),
+        )
+        .await;
+    let held = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:held",
+                json!([{"type":"text","text":"later"}]),
+            ),
+        )
+        .await;
+    let withdraw = |input: &Value, reason: Option<&str>| {
+        let mut request = at.clone();
+        request["inputId"] = input["inputId"].clone();
+        if let Some(reason) = reason {
+            request["reason"] = json!(reason);
+        }
+        request
+    };
+    let deleted = sessions
+        .ok("withdraw", withdraw(&held, Some("superseded")))
+        .await;
+    assert_eq!(deleted["status"], "deleted", "{deleted}");
+    let sequence = deleted["sequence"].as_u64().unwrap();
+    // Replied after publication.
+    assert!(session.sequence("main").unwrap() >= sequence);
+    // Already deleted, applied or unknown: nothing is written.
+    for request in [
+        withdraw(&held, None),
+        withdraw(&first, None),
+        withdraw(&json!({"inputId":"unknown"}), None),
+    ] {
+        assert_eq!(
+            sessions.ok("withdraw", request).await,
+            json!({"status":"notHeld"})
+        );
+    }
+    let mut no_branch = withdraw(&held, None);
+    no_branch["branchId"] = json!("missing");
+    for (request, code) in [
+        (withdraw(&json!({"inputId":""}), None), "rejected"),
+        (withdraw(&held, Some(&"x".repeat(4096))), "rejected"),
+        (no_branch, "branch_missing"),
+    ] {
+        assert_eq!(sessions.error("withdraw", request).await, code);
+    }
+
+    sessions.ok("stop", at.clone()).await;
+    let cutoff = sessions.ok("idle", at).await["sequence"].as_u64().unwrap();
+    let history = session.local("main", ..=cutoff).await.unwrap();
+    let held = held["inputId"].as_str().unwrap();
+    let first = first["inputId"].as_str().unwrap();
+    assert!(history.iter().any(|event| matches!(&event.kind,
+        EventKind::InputWithdraw(data) if data.input_id == held && data.reason.as_deref() == Some("superseded"))));
+    assert!(history.iter().any(|event| event.sequence == sequence
+        && matches!(&event.kind,
+        EventKind::InputDeleted(data) if data.input_id == held)));
+    assert!(!history.iter().any(|event| matches!(&event.kind,
+        EventKind::InputApplied(data) if data.input_id == held)));
+    assert!(history.iter().any(|event| matches!(&event.kind,
+        EventKind::InputConsumed(data) if data.input_id == first)));
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::InputDeleted(_)))
+            .count(),
+        1
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.shutdown();
+    server.join().await.unwrap();
+}

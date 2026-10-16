@@ -5,11 +5,14 @@
 //! name and looks up the index on each call.
 use super::AgentIndex;
 use crate::protocol::{PROTOCOL_VERSION, session_cwd};
-use dim_agent_capabilities::permission::PermissionState;
+use dim_agent_capabilities::{
+    input_queue::{InputQueue, Withdrawal},
+    permission::PermissionState,
+};
 use dim_agent_runtime::{AgentError, Publication, Session};
 use dim_agent_types::{
-    AgentEvent, ContentBlock, EventKind, InputBlock, InputMessageData, InputMode, ModelId,
-    ModelSelection, PermissionPolicy, PermissionPreset, UserInput,
+    AgentEvent, ContentBlock, EventKind, InputBlock, InputMessageData, InputMode,
+    InputWithdrawData, ModelId, ModelSelection, PermissionPolicy, PermissionPreset, UserInput,
 };
 use rutis::Ctx;
 use rutis_bridge::session::{HostDispatch, Reply, Value};
@@ -108,6 +111,18 @@ pub enum LookupReply {
         sequence: u64,
     },
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WithdrawRequest {
+    pub session_id: String,
+    pub branch_id: String,
+    /// The `inputId` the caller received when it wrote the input.
+    pub input_id: String,
+    /// Copied into `input/withdraw` for clients to show.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,6 +492,32 @@ impl AgentIndex {
         .await
     }
 
+    /// Withdraws an input the caller wrote, by its `inputId`, through the
+    /// branch's InputQueue, and returns InputQueue's decision. A deletion
+    /// replies once `input/deleted` is published.
+    pub async fn withdraw(&self, request: WithdrawRequest) -> Result<Withdrawal, SessionsError> {
+        self.until_unloaded(async {
+            let lease = self.acquire(&request.session_id).await?;
+            let publication = lease.session.publication(&request.branch_id)?;
+            let (withdrawal, _) = lease
+                .session
+                .service::<InputQueue>(&request.branch_id)?
+                .withdraw(
+                    InputWithdrawData {
+                        input_id: request.input_id,
+                        reason: request.reason,
+                    },
+                    None,
+                )
+                .await?;
+            if let Withdrawal::Deleted { sequence } = withdrawal {
+                published(&publication, sequence).await?;
+            }
+            Ok(withdrawal)
+        })
+        .await
+    }
+
     /// Interrupts the branch's turn and replies once it has settled, with
     /// the dispatched sequence.
     pub async fn stop(&self, request: StopRequest) -> Result<u64, SessionsError> {
@@ -536,7 +577,7 @@ impl HostDispatch for SessionsService {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({
             "launch": "async", "input": "async", "lookup": "async",
-            "stop": "async", "idle": "async",
+            "withdraw": "async", "stop": "async", "idle": "async",
         }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
@@ -585,6 +626,10 @@ async fn call(
         "launch" => reply(index.launch(request(args)?).await?),
         "input" => reply(index.input(request(args)?).await?),
         "lookup" => reply(index.lookup(request(args)?).await?),
+        "withdraw" => reply(match index.withdraw(request(args)?).await? {
+            Withdrawal::Deleted { sequence } => json!({"status": "deleted", "sequence": sequence}),
+            Withdrawal::NotHeld => json!({"status": "notHeld"}),
+        }),
         "stop" => reply(json!({"sequence": index.stop(request(args)?).await?})),
         "idle" => reply(json!({"sequence": index.idle(request(args)?).await?})),
         _ => Err(SessionsError::rejected(format!(
