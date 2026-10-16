@@ -15,6 +15,7 @@
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
+- [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
