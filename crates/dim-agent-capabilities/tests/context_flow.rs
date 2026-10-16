@@ -700,6 +700,8 @@ mod checkpoint_projection;
 mod compaction_events;
 #[path = "context_flow/context_reads.rs"]
 mod context_reads;
+#[path = "context_flow/manual_compaction.rs"]
+mod manual_compaction;
 
 struct ExpandFinal {
     scope: BranchScope,
