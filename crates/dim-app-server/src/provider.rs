@@ -1,5 +1,6 @@
 //! Product catalog, static connections and model selection. OAuth plugins own
 //! managed credentials; this plugin owns provider configuration and SQLite records.
+mod auxiliary;
 mod drivers;
 mod legacy;
 pub(crate) mod management;
@@ -2126,6 +2127,7 @@ impl TypedPlugin for ProviderPlugin {
         Arc<OpenAICodexOAuthService>,
         Arc<GrokOAuthService>,
         When<Arc<ProviderSecretHost>>,
+        Arc<ModelHost>,
     );
     fn name(&self) -> &str {
         "Provider"
@@ -2133,7 +2135,7 @@ impl TypedPlugin for ProviderPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (db, oauth, codex, grok, When(secret_host)): Self::Deps,
+        (db, oauth, codex, grok, When(secret_host), host): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(ProviderService {
@@ -2173,6 +2175,10 @@ impl TypedPlugin for ProviderPlugin {
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver))?;
+            ctx.provide(AuxiliaryModelHost(Arc::new(auxiliary::AuxiliaryModel {
+                owner: service.clone(),
+                host,
+            })))?;
             management::provide(ctx, service.clone())?;
             ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
             Ok(Effect::Done)
@@ -2181,6 +2187,6 @@ impl TypedPlugin for ProviderPlugin {
 }
 impl Capability for ProviderPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        ((), (), (), (), self.secret_host.then_some(()))
+        ((), (), (), (), self.secret_host.then_some(()), ())
     }
 }

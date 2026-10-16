@@ -753,224 +753,54 @@ pub struct CompactionUsage {
     pub output_tokens: Option<f64>,
 }
 
+/// Strategy-neutral diagnostics of a compaction: ContextPolicy fills the
+/// common part, the strategy owns `strategy`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompactionDiagnosticsRecord {
     pub reason: CompactionReason,
+    pub trigger: CompactionTrigger,
+    /// Timeline event id of the first event kept verbatim; absent when the
+    /// strategy found no cut.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::optional_non_null"
     )]
-    pub trigger: Option<CompactionTrigger>,
+    pub retain_from: Option<String>,
+    /// Timeline event id the cut must not pass, unless under recovery.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::optional_non_null"
     )]
-    pub source_run_id: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub baseline_source: Option<BaselineSource>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub coverage: Option<CompactionCoverage>,
-    #[serde(with = "crate::finite_number")]
-    pub candidate_message_count: f64,
-    #[serde(with = "crate::finite_number")]
-    pub input_message_count: f64,
-    #[serde(with = "crate::finite_number")]
-    pub retained_message_count: f64,
-    #[serde(with = "crate::finite_number")]
-    pub retained_token_budget: f64,
-    #[serde(with = "crate::finite_number")]
-    pub retained_tokens: f64,
-    #[serde(with = "crate::finite_number")]
-    pub serialized_chars: f64,
+    pub retain_limit: Option<String>,
+    /// The request before compaction, from `count_tokens`.
     #[serde(with = "crate::finite_number")]
     pub estimated_input_tokens: f64,
-    #[serde(with = "crate::finite_number")]
-    pub estimated_compressed_tokens: f64,
-    #[serde(with = "crate::finite_number")]
-    pub estimated_post_compaction_tokens: f64,
-    #[serde(with = "crate::finite_number")]
-    pub summary_input_budget: f64,
-    #[serde(with = "crate::finite_number")]
-    pub preflight_input_tokens: f64,
-    #[serde(with = "crate::finite_number")]
-    pub preflight_output_tokens: f64,
-    #[serde(with = "crate::finite_number")]
-    pub compacted_tool_payload_count: f64,
-    #[serde(with = "crate::finite_number")]
-    pub dropped_message_count: f64,
-    #[serde(with = "crate::finite_number")]
-    pub chunk_count: f64,
-    #[serde(with = "crate::finite_number")]
-    pub summary_chars: f64,
-    #[serde(with = "crate::finite_number")]
-    pub estimated_summary_tokens: f64,
-    #[serde(with = "crate::finite_number")]
-    pub model_call_count: f64,
-    #[serde(with = "crate::finite_number")]
-    pub duration_ms: f64,
+    /// The projected request after compaction, from `count_tokens`; absent
+    /// when nothing was replaced.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::optional_non_null"
     )]
     #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub source_turn_id: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub baseline_prompt_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub delta_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub planned_output_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub min_visible_output_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub requested_thinking_budget_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub adjusted_thinking_budget_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub reasoning_effort_budget_estimate_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub effective_planned_output_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub system_prompt_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub chunk_target_input_budget: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub max_chunk_input_tokens: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub summary_request_context_ratio: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub request_envelope_margin: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub recursive_depth: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    #[serde(serialize_with = "crate::finite_number::serialize_optional")]
-    pub omitted_token_estimate: Option<f64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub thinking_budget_clamped: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub budget_estimate_source: Option<BudgetEstimateSource>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub compaction_reasoning_effort: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub tail_truncated_message_id: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub usage: Option<CompactionUsage>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub failure_code: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::optional_non_null"
-    )]
-    pub fallback_reason: Option<CompactionFallbackReason>,
+    pub estimated_output_tokens: Option<f64>,
+    #[serde(with = "crate::safe_integer")]
+    pub entries_replaced: u64,
+    #[serde(with = "crate::safe_integer")]
+    pub model_call_count: u64,
+    #[serde(with = "crate::safe_integer")]
+    pub duration_ms: u64,
+    pub strategy: CompactionStrategyRecord,
+}
+
+/// The strategy's own diagnostics: `kind` names the strategy, the other
+/// fields are its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionStrategyRecord {
+    pub kind: String,
+    #[serde(flatten)]
+    pub details: JsonObject,
 }

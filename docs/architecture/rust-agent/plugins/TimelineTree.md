@@ -38,5 +38,5 @@ Session close, and closing is not deletion of persisted history.
 | 作用域 | Session |
 | 注入 | `S:SessionIdentity`、`S:TimelineFactory`、`S:dyn TimelineStore` |
 | 提供 | `S:TimelineTree`、`S:ToolContribution#branch`、`S:TreeCommands`、`S:dyn TimelineTreeControl` |
-| 被注入于 | `ShellInput`、`TreeTimeline`、`Wait`、`WorkspaceTools` |
+| 被注入于 | `InputMethods`、`ShellInput`、`TreeTimeline`、`Wait`、`WorkspaceTools` |
 <!-- /generated -->

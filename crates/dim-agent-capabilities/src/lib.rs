@@ -3,6 +3,8 @@ pub mod agent_loop;
 pub mod approval;
 pub(crate) mod branch_input;
 pub mod context_block;
+pub mod context_methods;
+pub mod context_model;
 mod context_policy;
 pub mod context_preparation;
 pub mod defaults;
@@ -27,6 +29,7 @@ pub mod shell_tools;
 pub mod skill_settings;
 pub mod skills;
 pub mod steer;
+pub mod summary_strategy;
 pub mod timeline_tree;
 pub mod tool_binding;
 pub mod tool_executor;
@@ -46,6 +49,7 @@ impl SessionService for skills::SessionSkills {}
 impl SessionService for host::PrepareModelHost {}
 impl SessionService for host::PrepareContextHost {}
 impl SessionService for host::ContextModelHost {}
+impl SessionService for host::CompactionStrategyHost {}
 impl SessionService for host::PromptHost {}
 impl SessionService for host::ModelHost {}
 impl SessionService for host::ToolHost {}
@@ -80,3 +84,5 @@ impl PublicService for skills::SkillsBranch {}
 impl PublicService for tool_registry::ToolSourcesView {}
 impl PublicService for methods::SessionMethods {}
 impl SessionService for tool_registry::ToolSourcesView {}
+impl PublicService for agent_loop::AgentLoop {}
+impl PublicService for context_preparation::ContextPreparation {}
