@@ -167,6 +167,8 @@ in the same Session; do not put it again merely because another item or submissi
 Insert `[Pasted text: <path> (<lines> lines)]` at the item's position. An ordinary file reference
 inserts its absolute path as text, and an image inserts the existing `ContentBlock::Image` with
 base64 `ImageSource`. Text, references, paste expansions and images retain their relative order.
+Selecting a file through `@` or a dropped path lets the model read that file through the
+existing `read` tool, including files outside the workspace; selection does not upload its bytes.
 No display marker id enters the model input. Use `UserInput.content` (`Vec<ContentBlock>`, wire
 `user.content`) for mixed parts; the existing plain-text submission remains usable for text-only
 input. Model-provider `MessagePart` is not the submission type.
@@ -207,6 +209,16 @@ $ printf '%s\n' 'Describe the screenshot' | dimcode exec --image screenshot.png
 ```
 
 ## Impact and verification
+
+Implement multiline and large paste handling first: bracketed paste, atomic markers,
+submit-time `attachment.put`, draft retention and headless `--image`. The encoded-request guard
+in #153 applies at the shared client boundary. Add the nonempty-draft `Ctrl+C` clear behavior
+to the CLI README and help with this implementation.
+
+Native clipboard images/files, `@` completion and dropped-path imports follow separately.
+Their implementation PR identifies any clipboard dependency and its license and records
+native calibration on each supported platform. Completion of the first step does not imply
+these insertion sources are available.
 
 | Area | Required client work |
 | --- | --- |
