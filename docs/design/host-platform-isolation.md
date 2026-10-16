@@ -35,8 +35,9 @@ in the configuration documentation, rather than being hidden behind the word "sa
 
 HostPlatform owns `host-isolation.json` under the execution node's configured application home,
 read through its declared FileStorage dependency. It is not read from the project, client or
-Session. Remote execution uses the remote host's own file. A loader configuration stores only
-the FileStorage root index and relative location, as with `exec-shell.json`.
+Session. Remote execution uses the remote host's own file. HostPlatformConfig gains an optional
+`isolation_file` location: FileStorage root index and relative path, as with `exec-shell.json`.
+The location is structural loader configuration; file contents are not loader configuration.
 
 The new file has an explicit format version. For example, a macOS host could authorize:
 
@@ -99,8 +100,10 @@ discovery stays outside the command sandbox. Consequently, this contract is guar
 listed product consumers, not for arbitrary trusted code that starts a process by another API.
 Other features integrate at their own documented execution boundary, without special caller tags.
 
-Rust binding: `HostPlatform::prepare_isolated_process(spec).await ->
-Result<ProcessSpec, ProcessSpecError>`. Disabled policy returns the original spec unchanged.
+Crate-local operation: `HostPlatform::prepare_isolated_process(spec).await ->
+Result<ProcessSpec, ProcessSpecError>`, visible only within dim-agent-capabilities. Disabled policy
+returns the original spec unchanged. Both consumers already live in that crate, so the operation
+does not need to be a new public service API.
 No public wire method, event or language-neutral service is introduced. ProcessSpec and the
 existing `{code, reason}` error data retain their single definitions.
 
@@ -189,6 +192,7 @@ history. Detach, close and process cancellation retain their current ownership a
 | HostPlatform | Own file location, boundary parsing, enabled-policy preparation and backend argv/profile construction. Reuse FileStorage and existing process/error types. |
 | WorkspaceTools exec / ShellSession | Prepare their existing ProcessSpec before their existing spawn/PTY call; preserve admission, shell checks and tree ownership. |
 | App Server assembly / xtask example assembly | Supply host-local file location through HostPlatformConfig, with the existing conditional FileStorage dependency. Regenerate architecture output only when implementation changes assembly. |
+| HostPlatform and integration flow configurations | Update existing HostPlatformConfig literals for the optional field; embeddings using an exhaustive literal need the same source update. |
 | Owner docs and flow tests | Describe the actual supported OS baseline, configuration and refusals; verify actual shell execution through public product flows. |
 
 No core, loader protocol, SessionConfig, event fixture, persistence database, MCP policy or CLI
