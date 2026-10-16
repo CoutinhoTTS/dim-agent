@@ -2,9 +2,9 @@
 
 Status: Implemented in S2 ([#98](https://github.com/arcships/dim/pull/98)); `sessions.delete` (§6.8) was added once S5c
 ([#97](https://github.com/arcships/dim/pull/97)) had merged. Informed by a spike (§2); the changes made during
-implementation are in §17. Roadmap item S2 ([#62](https://github.com/arcships/dim/issues/62)), after C2 ([#48](https://github.com/arcships/dim/issues/48),
-merged) and S1 ([#58](https://github.com/arcships/dim/issues/58), merged in
-[#94](https://github.com/arcships/dim/pull/94)). Contract:
+implementation are in §17. Roadmap item S2 ([#62](https://github.com/arcships/dim/issues/62)), after C2
+([#48](https://github.com/arcships/dim/issues/48), merged) and S1 ([#58](https://github.com/arcships/dim/issues/58),
+merged in [#94](https://github.com/arcships/dim/pull/94)). Contract:
 [session access A.1](../contracts/session-access.md#a1-the-sessions-service). Overview:
 [Appendix B.2](../overview.md#b2-app-server-process-plugins), Agents row. Scope: [ADR 002](../../adr/002-plugin-scope.md)
 process scope, inside the existing Agents plugin. Consumers: [Scheduler](../plugins/Scheduler.md) (P6) and
@@ -222,11 +222,15 @@ Writes are not deduplicated (A.2). After `publication_unknown`, `reloading` or a
 `ambiguous`.
 
 Agents first waits until the branch has nothing committed and unpublished (`Publication::has_pending` is false), or
-until the branch closes. Publication catches up after each batch, so the wait is short; a Timeline failure ends it
-with `failed`. Agents then scans the published local pages for `input/message` with that `submission_id`. So
-`unknown` is final for every write that returned before the lookup began. After a restart it is also correct: the
-unpublished tail was lost with the process. Rpc's `session.input_lookup` calls the same code, and its boundary keeps
-parsing its own parameters. The scan is O(events on the branch); callers use it only after an uncertain outcome.
+until the branch closes; a Timeline failure ends it with `failed`. Publication catches up after each batch, so on a
+quiet branch the wait is short. It waits for a moment with nothing pending, though, not only for what was committed
+before the call: on a branch that keeps committing, such as a long turn writing batch after batch to slow storage, it
+lasts until the commits pause. Waiting only for the sequence committed at the call would need that sequence from
+`Publication`, a facade addition; it is not raised, because callers look up only after an uncertain outcome. Agents then
+scans the published local pages for `input/message` with that `submission_id`. So `unknown` is final for every write
+that returned before the lookup began. After a restart it is also correct: the unpublished tail was lost with the
+process. Rpc's `session.input_lookup` calls the same code, and its boundary keeps parsing its own parameters. The scan
+is O(events on the branch); callers use it only after an uncertain outcome.
 
 ### 6.4 idle
 
@@ -302,9 +306,12 @@ retry and no event of its own. S1 owns the command, the decision, the result fac
 
 Errors: `rejected` (S1's validation: an empty `inputId`, a `reason` over 2048 bytes), `session_closed`,
 `branch_missing`, `reloading`, `publication_unknown`. A `reloading` reply after the command was written leaves the
-outcome to InputQueue's successor. Once
-dispatch has passed the command, which every later `idle` cutoff has, history holds exactly one of `input/applied`
-and `input/deleted` for an input the caller wrote.
+outcome to InputQueue's successor. A close that starts after the command was written also replies `reloading`, not
+`session_closed`: InputQueue ends with the close before it decides, and S1 reports that as `Reloading`. That is the
+accurate code, because `session_closed` promises that nothing was written, while the command is committed and is
+decided from history when the Session next loads. A retry then fails `session_closed`. Once dispatch has passed the
+command, which every later `idle` cutoff has, history holds exactly one of `input/applied` and `input/deleted` for an
+input the caller wrote.
 
 ### 6.7 history
 
@@ -313,10 +320,10 @@ and `input/deleted` for an input the caller wrote.
 | Item | Rule |
 | --- | --- |
 | `through` | With `atLeast`: the published head (`Session::sequence`); below `atLeast`, `future_sequence`. Otherwise the requested `through`, which must not exceed the head (else `future_sequence`), or the head |
-| `events` | The branch's own events in `(after, through]`, read with `Session::local_page`. `after` (default 0) must end a batch. A page takes `limit` events (default 256) when that many remain, then runs to the end of that batch, so it can exceed `limit`; it never passes `through`. With a published head or an `idle` cutoff as `through`, every batch is whole. The caller pages with `after` set to the last returned sequence until it reaches `through` |
+| `events` | The branch's own events in `(after, through]`, read with `Session::local_page`. `after` (default 0) must end a batch. A page takes `limit` events (1 to 256, default 256) when that many remain, then runs to the end of that batch, so it can exceed `limit`; it never passes `through`. With a published head or an `idle` cutoff as `through`, every batch is whole. The caller pages with `after` set to the last returned sequence until it reaches `through` |
 | Form | Every event of the branch as an `AgentEvent` record, in the serde form `session.history` uses for the events it shows. Nothing is filtered, so the last sequence of a page always ends a batch |
 | Ancestors | Not included. Launched Sessions are read on `main`, which has none. A way to read a child branch's prefix is added when a consumer needs one |
-| Errors | `rejected` (`after` > `through`, `after` inside a batch, `limit` 0, `atLeast` together with `through`), `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
+| Errors | `rejected` (`after` > `through`, `after` inside a batch, `limit` outside 1 to 256, `atLeast` together with `through`), `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
 
 ### 6.8 delete
 
@@ -438,9 +445,9 @@ job every five minutes adds about 288 a day. So the consumers delete them (D14):
   with the CLI's cleanup by age or count, composed from `session.summaries` and `session.delete` (S5c §5.1; F6,
   [#77](https://github.com/arcships/dim/issues/77)).
 - **Method.** `sessions.delete {sessionId}` → `{}` forwards to S5c's `AgentIndex::delete`
-  ([#97](https://github.com/arcships/dim/pull/97)): admission gate, close, then the Session's rows and files (§6.8). S5c's
-  `session.delete` is an Rpc built-in, which a process plugin cannot call. Like every `sessions` method it carries no
-  caller identity, so it does not check that the caller launched the Session (§11).
+  ([#97](https://github.com/arcships/dim/pull/97)): admission gate, close, then the Session's rows and files (§6.8).
+  S5c's `session.delete` is an Rpc built-in, which a process plugin cannot call. Like every `sessions` method it
+  carries no caller identity, so it does not check that the caller launched the Session (§11).
 - **Dependency order.** S5c's `AgentIndex::delete`, then `sessions.delete` in the Agents lane (§6.8), added with its
   A.1 row once S5c and S2 had both merged (nothing was stubbed, roadmap §3.6). The consumers' deletes come next (P6
   [#70](https://github.com/arcships/dim/issues/70), P7 [#71](https://github.com/arcships/dim/issues/71)).
@@ -453,7 +460,7 @@ job every five minutes adds about 288 a day. So the consumers delete them (D14):
 | `agent_unknown` | `launch` | No loaded Agent has that id | false |
 | `session_closed` | All but `delete` (for `launch`, the starter) | The Session is closed, deleted or unknown; nothing written | false |
 | `branch_missing` | All but `delete` (for `launch`, the starter) | No such branch; nothing written | false |
-| `reloading` | All | The Agents index, the model-selection host, the starter's Permission or S1's withdrawal service is not active, or the index unloaded during the call. For `input` and `withdraw` the outcome is uncertain: `lookup` or `history` first. A `delete` fails `reloading` only before it starts (§6.8) | true |
+| `reloading` | All | The Agents index, the model-selection host, the starter's Permission or S1's withdrawal service is not active (also when the Session closes after a `withdraw` wrote its command, §6.6), or the index unloaded during the call. For `input` and `withdraw` the outcome is uncertain: `lookup` or `history` first. A `delete` fails `reloading` only before it starts (§6.8) | true |
 | `future_sequence` | `history` | `atLeast` or `through` beyond the published head | false |
 | `ambiguous` | `lookup` | More than one input has that `submissionId` | false |
 | `publication_unknown` | `input`, `withdraw` | Committed, publication not confirmed; `lookup` or `history` after recovery | true |
@@ -682,6 +689,7 @@ Each change stays within S2 (roadmap §5.3); the contract's `sessions` part is u
 | 6 | `launch` creates and registers the Session in one task that outlives the call, and once that task starts, the reply waits for it rather than the index reload | A dropped call must not leave a loaded Session that clients cannot see, and a `reloading` reply must not invite a duplicate launch |
 | 7 | The code is the submodule [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs) | `agents.rs` keeps the directory and the index |
 | 8 | The flow tests reach `sessions` from a Session part | `serve` takes no extra process rows; the part injects the service by name, as a process plugin does |
+| 9 | `history` rejects a `limit` above 256, its default | Review of #98: D11 pages to bound a reply across the bridge, and an unbounded `limit` returned the whole branch in one page. Collaboration's `agent` read also rejects a `limit` above its default |
 
 ## Appendix A. Rust binding
 

@@ -177,7 +177,7 @@ Agents 取得该分支的发布观察器，调用 `Session::input`；它像对�
 
 `{sessionId, branchId, submissionId}` → `{status: "accepted", inputId, sequence}` 或 `{status: "unknown"}`；错误 `ambiguous`。
 
-Agents 先等到该分支没有已提交但未发布的事件（`Publication::has_pending` 为 false），或分支关闭。每个批次之后发布都会追上，因此等待很短；Timeline 失败时以 `failed` 结束等待。然后在已发布的本地页中扫描带该 `submission_id` 的 `input/message`。因此，对于查找开始前已经返回的写入，`unknown` 是最终结果。重启后同样正确：未发布的尾部随进程丢失了。Rpc 的 `session.input_lookup` 调用同一份代码，其边界仍自行解析参数。扫描为 O(分支上的事件数)；调用方只在结果不确定后使用它。
+Agents 先等到该分支没有已提交但未发布的事件（`Publication::has_pending` 为 false），或分支关闭；Timeline 失败时以 `failed` 结束等待。每个批次之后发布都会追上，因此在安静的分支上等待很短。不过它等的是某一时刻没有任何待发布事件，而不只是调用前已提交的部分：在不断提交的分支上（例如一个长 turn 接连向较慢的存储写入批次），它会持续到提交暂停。只等待调用时已提交的序号，需要 `Publication` 提供该序号，这是门面的新增；目前不提出，因为调用方只在结果不确定后才查找。然后在已发布的本地页中扫描带该 `submission_id` 的 `input/message`。因此，对于查找开始前已经返回的写入，`unknown` 是最终结果。重启后同样正确：未发布的尾部随进程丢失了。Rpc 的 `session.input_lookup` 调用同一份代码，其边界仍自行解析参数。扫描为 O(分支上的事件数)；调用方只在结果不确定后使用它。
 
 ### 6.4 idle
 
@@ -220,7 +220,7 @@ Agents 先等到该分支没有已提交但未发布的事件（`Publication::ha
 
 Agents 在该分支上用 `Session::service::<InputQueue>` 取得 S1 的 InputQueue，调用 `withdraw(InputWithdrawData { input_id, reason }, None)`，并返回它的决定。S1 在写入 `input/deleted` 后就回复，此时该事件已提交但不一定已发布，因此对 `deleted`，Agents 与 `input` 一样等它发布后才回复（D8）；分支先关闭或失败时回复 `publication_unknown`。S2 不增加语义：不检查归属，因为调用方凭写入时拿到的 `input_id` 撤回（合同 §9.3）；不重试，也不写自己的事件。指令、决定、结果事实与格式决定都归 S1（[A.4](../contracts/session-access.md#a4-撤回)）；§14.1 记录了 S1 交付的内容。
 
-错误：`rejected`（S1 的校验：`inputId` 为空、`reason` 超过 2048 字节）、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`。指令写入后才收到的 `reloading`，结果交给 InputQueue 的后继实例决定。分发越过该指令之后（之后任何 `idle` 截止点都已越过），历史中对调用方写入的输入恰好有 `input/applied` 与 `input/deleted` 之一。
+错误：`rejected`（S1 的校验：`inputId` 为空、`reason` 超过 2048 字节）、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`。指令写入后才收到的 `reloading`，结果交给 InputQueue 的后继实例决定。指令写入后才开始的关闭同样回复 `reloading`，而不是 `session_closed`：InputQueue 在作出决定前随关闭结束，S1 将其报告为 `Reloading`。这是准确的错误码，因为 `session_closed` 表示什么都没写入，而这条指令已提交，Session 下次装载时按历史决定。之后重试会以 `session_closed` 失败。分发越过该指令之后（之后任何 `idle` 截止点都已越过），历史中对调用方写入的输入恰好有 `input/applied` 与 `input/deleted` 之一。
 
 ### 6.7 history
 
@@ -229,10 +229,10 @@ Agents 在该分支上用 `Session::service::<InputQueue>` 取得 S1 的 InputQu
 | 项 | 规则 |
 | --- | --- |
 | `through` | 带 `atLeast` 时：已发布 head（`Session::sequence`）；低于 `atLeast` 时为 `future_sequence`。否则为请求的 `through`（不能超过 head，否则 `future_sequence`），或 head |
-| `events` | 该分支自己在 `(after, through]` 内的事件，用 `Session::local_page` 读取。`after`（缺省为 0）必须是某批次的结尾。剩余事件足够时，一页先取 `limit` 条（缺省 256），再读到该批次结尾，因此可能超过 `limit`；它从不越过 `through`。以已发布 head 或 `idle` 截止点作为 `through` 时，每个批次都完整。调用方把 `after` 设为上一页最后的序号继续读，直到 `through` |
+| `events` | 该分支自己在 `(after, through]` 内的事件，用 `Session::local_page` 读取。`after`（缺省为 0）必须是某批次的结尾。剩余事件足够时，一页先取 `limit` 条（1 到 256，缺省 256），再读到该批次结尾，因此可能超过 `limit`；它从不越过 `through`。以已发布 head 或 `idle` 截止点作为 `through` 时，每个批次都完整。调用方把 `after` 设为上一页最后的序号继续读，直到 `through` |
 | 形式 | 分支的每个事件都作为 `AgentEvent` 记录返回，序列化形式与 `session.history` 展示事件时相同。不做过滤，因此一页最后的序号总是某个批次的结尾 |
 | 祖先 | 不包含。启动的 Session 在 `main` 上读取，`main` 没有祖先。等有使用方需要时，再增加读取子分支前缀的方式 |
-| 错误 | `rejected`（`after` > `through`、`after` 位于批次中间、`limit` 为 0、同时给出 `atLeast` 与 `through`）、`future_sequence`、`session_closed`、`branch_missing`、`reloading` |
+| 错误 | `rejected`（`after` > `through`、`after` 位于批次中间、`limit` 不在 1 到 256 之间、同时给出 `atLeast` 与 `through`）、`future_sequence`、`session_closed`、`branch_missing`、`reloading` |
 
 ### 6.8 delete
 
@@ -317,7 +317,7 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 | `agent_unknown` | `launch` | 没有已装载的 Agent 使用该 id | false |
 | `session_closed` | 除 `delete` 外全部（对 `launch` 指启动方） | Session 已关闭、已删除或未知；未写入 | false |
 | `branch_missing` | 除 `delete` 外全部（对 `launch` 指启动方） | 没有该分支；未写入 | false |
-| `reloading` | 全部 | Agents 索引、模型选择宿主、启动方的 Permission 或 S1 的撤回服务未激活，或调用期间索引卸载。对 `input` 与 `withdraw` 结果不确定：先 `lookup` 或 `history`。`delete` 只在开始前以 `reloading` 失败（§6.8） | true |
+| `reloading` | 全部 | Agents 索引、模型选择宿主、启动方的 Permission 或 S1 的撤回服务未激活（`withdraw` 写入指令后 Session 关闭时也是，§6.6），或调用期间索引卸载。对 `input` 与 `withdraw` 结果不确定：先 `lookup` 或 `history`。`delete` 只在开始前以 `reloading` 失败（§6.8） | true |
 | `future_sequence` | `history` | `atLeast` 或 `through` 超过已发布 head | false |
 | `ambiguous` | `lookup` | 不止一条输入使用该 `submissionId` | false |
 | `publication_unknown` | `input`、`withdraw` | 已提交，发布未确认；恢复后 `lookup` 或 `history` | true |
@@ -481,6 +481,7 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现，`sess
 | 6 | `launch` 在一个比调用活得更久的任务中创建并登记 Session；该任务开始后，回复等待它而不是索引重载 | 被放弃的调用不能留下一个已装载、客户端却看不到的 Session；`reloading` 回复不能招致重复启动 |
 | 7 | 代码放在子模块 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs) | `agents.rs` 只保留目录与索引 |
 | 8 | 流程测试从一个 Session 部分取得 `sessions` | `serve` 不接受额外的进程行；该部分像进程插件一样按名称注入服务 |
+| 9 | `history` 拒绝超过 256（即缺省值）的 `limit` | #98 的评审：D11 分页是为了限制跨桥接的回复大小，而不设上限的 `limit` 会一页返回整个分支。Collaboration 的 `agent` 读取同样拒绝超过其缺省值的 `limit` |
 
 ## 附录 A. Rust 绑定
 

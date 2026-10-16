@@ -129,10 +129,13 @@ pub struct HistoryRequest {
     #[serde(default)]
     pub at_least: Option<u64>,
     /// Events per page before the page runs to the end of its batch;
-    /// absent: 256.
+    /// 1 to 256, absent: 256.
     #[serde(default)]
     pub limit: Option<usize>,
 }
+/// The default and largest `history` page: paging bounds each reply that
+/// crosses the bridge (sessions service D11).
+const HISTORY_PAGE_LIMIT: usize = 256;
 /// The branch's own events in `(after, through]`, ending on a batch boundary.
 #[derive(Debug, Serialize)]
 pub struct HistoryPage {
@@ -252,7 +255,9 @@ pub(crate) enum Lookup {
 }
 /// Finds the `input/message` with `submission_id` on a branch: first waits
 /// until nothing committed is unpublished, so `Unknown` is final for every
-/// write that returned before the call, then scans the published pages.
+/// write that returned before the call, then scans the published pages. On
+/// a branch that keeps committing, the wait lasts until its commits pause
+/// (sessions service §6.3).
 /// `sessions.lookup` and Rpc's `session.input_lookup` share it.
 pub(crate) async fn find_input(
     session: &Session,
@@ -528,9 +533,11 @@ impl AgentIndex {
     /// `through`.
     pub async fn history(&self, request: HistoryRequest) -> Result<HistoryPage, SessionsError> {
         self.until_unloaded(async {
-            let limit = request.limit.unwrap_or(256);
-            if limit == 0 {
-                return Err(SessionsError::rejected("limit must be positive"));
+            let limit = request.limit.unwrap_or(HISTORY_PAGE_LIMIT);
+            if !(1..=HISTORY_PAGE_LIMIT).contains(&limit) {
+                return Err(SessionsError::rejected(format!(
+                    "limit must be between 1 and {HISTORY_PAGE_LIMIT}; read more pages by passing the last sequence as after"
+                )));
             }
             if request.at_least.is_some() && request.through.is_some() {
                 return Err(SessionsError::rejected(

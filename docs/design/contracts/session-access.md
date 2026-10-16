@@ -254,7 +254,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
   "after?": 0,                        // exclusive lower bound; absent: from the start of the branch
   "through?": 0,                      // read up to this sequence
   "atLeast?": 0,                      // fixed-prefix read (A.5); not together with through
-  "limit?": 256 }                     // page size; absent: 256
+  "limit?": 256 }                     // page size, 1 to 256; absent: 256
 // HistoryPage: the branch's own events in (after, through], ending on a batch boundary,
 // as AgentEvent records in the form session.history returns them
 { "through": 0, "events": [ { "id": "string", "sequence": 0, "type": "turn/end", "data": {} } ] }

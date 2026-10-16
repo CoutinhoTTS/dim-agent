@@ -847,6 +847,7 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
         (at(json!({"after":inside})), "rejected"),
         (at(json!({"after":first,"through":first - 1})), "rejected"),
         (at(json!({"limit":0})), "rejected"),
+        (at(json!({"limit":257})), "rejected"),
         (at(json!({"atLeast":first,"through":first})), "rejected"),
         (at(json!({"atLeast":head + 1})), "future_sequence"),
         (at(json!({"through":head + 1})), "future_sequence"),

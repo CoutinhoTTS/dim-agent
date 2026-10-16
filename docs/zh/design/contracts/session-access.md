@@ -254,7 +254,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
   "after?": 0,                        // 不含的下界；缺省：从分支开头
   "through?": 0,                      // 读取到此序号
   "atLeast?": 0,                      // 固定前缀读取（A.5）；不与 through 同时使用
-  "limit?": 256 }                     // 每页条数；缺省：256
+  "limit?": 256 }                     // 每页条数，1 到 256；缺省：256
 // HistoryPage：该分支自己在 (after, through] 内的事件，止于批次边界，
 // 为 AgentEvent 记录，形式与 session.history 返回的相同
 { "through": 0, "events": [ { "id": "string", "sequence": 0, "type": "turn/end", "data": {} } ] }
