@@ -39,10 +39,20 @@ enum DaemonProfile {
 pub struct RpcError {
     pub code: i32,
     pub message: String,
+    pub data: Option<Value>,
 }
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (RPC {})", self.message, self.code)
+        write!(f, "{} (RPC {}", self.message, self.code)?;
+        if let Some(code) = self
+            .data
+            .as_ref()
+            .and_then(|data| data.get("appError"))
+            .and_then(Value::as_str)
+        {
+            write!(f, ", {code}")?;
+        }
+        write!(f, ")")
     }
 }
 impl std::error::Error for RpcError {}
