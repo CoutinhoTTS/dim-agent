@@ -124,6 +124,9 @@ impl TypedPlugin for NotesOwner {
                 scope: self.scope,
                 notes: self.notes.clone(),
             }));
+            (&view).await.map_err(|error| {
+                rutis::CordisError::PluginFailed(format!("Notes provider failed: {error}").into())
+            })?;
             self.notes.0.views.lock().unwrap().push(view);
             Ok(rutis::Effect::Done)
         })

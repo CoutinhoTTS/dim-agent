@@ -5,6 +5,9 @@
 The [CLI commands and exports design](../../docs/design/cli-commands.md) defines
 F6 command, conversation-export and JSONL behavior for implementation.
 
+Proposed model commands and atomic Agent configuration adoption are specified in
+[model configuration](../../docs/design/model-configuration.md); they are not implemented.
+
 Build both native programs from the repository root:
 
 ```bash
