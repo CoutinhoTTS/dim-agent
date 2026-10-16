@@ -1,7 +1,7 @@
 use super::{
     SqliteStorage,
     codec::{self, ContentCache, WireEvent},
-    files::SessionFiles,
+    files::{self, SessionFiles},
     sqlite::error,
 };
 use dim_agent_capabilities::host::SessionFilesHost;
@@ -38,6 +38,8 @@ enum Command {
 /// One process writer batches every Session; only pending events reside here.
 pub struct SqliteTimelineStore {
     db: Arc<SqliteStorage>,
+    /// Schedules a Session-file sweep after a commit released owner rows.
+    sweep_files: Arc<tokio::sync::Notify>,
     admission: Mutex<Admission>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     closing: Mutex<Option<tokio::sync::watch::Receiver<Option<Result<()>>>>>,
@@ -52,6 +54,7 @@ impl SqliteTimelineStore {
         let (sender, receiver) = mpsc::channel();
         let store = Arc::new(Self {
             db,
+            sweep_files: Arc::new(tokio::sync::Notify::new()),
             admission: Mutex::new(Admission {
                 sender,
                 failures: BTreeMap::new(),
@@ -173,14 +176,14 @@ impl SqliteTimelineStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
-        // Session-file owner rows go before the Session they reference.
+        // Owner rows go before the Session record they reference.
+        let released = files::release(&tx, session_id).map_err(error)?;
         for table in [
             "timeline_snapshots",
             "timeline_events",
             "timeline_branches",
             "timeline_content",
             "session_owners",
-            "session_file_owners",
             "agent_sessions",
         ] {
             tx.execute(
@@ -190,6 +193,9 @@ impl SqliteTimelineStore {
             .map_err(error)?;
         }
         tx.commit().map_err(error)?;
+        if released > 0 {
+            self.sweep_files.notify_one();
+        }
         self.admission.lock().unwrap().failures.remove(session_id);
         Ok(())
     }
@@ -474,7 +480,12 @@ impl TypedPlugin for SessionStorePlugin {
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let store = Arc::new(SessionStore::new(db.clone()));
-            let files = SessionFiles::new(db, ctx.clone(), self.files_root);
+            let files = SessionFiles::new(
+                db,
+                ctx.clone(),
+                self.files_root,
+                store.timeline.sweep_files.clone(),
+            );
             let (timeline, owned_files) = (store.timeline.clone(), files.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
@@ -485,6 +496,7 @@ impl TypedPlugin for SessionStorePlugin {
                     })
                 }))
             })?;
+            files.start();
             ctx.provide_as(TypeKey::of::<SessionStore>(), store)?;
             ctx.provide_as(
                 TypeKey::of::<SessionFilesHost>(),

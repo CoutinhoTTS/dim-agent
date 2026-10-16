@@ -260,6 +260,83 @@ async fn a_put_stores_an_immutable_file_its_session_owns() {
     store.root.shutdown().await.unwrap();
 }
 
+/// Polls until `done`, for the background sweep.
+async fn eventually(done: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the sweep did not finish");
+}
+
+/// §16 item 4, and the release trigger: the first put of a generation sweeps
+/// what crashed generations left, a release sweeps what it unowned, and a
+/// second database's Session files in the same directory are never touched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweeps_remove_only_what_no_row_of_this_database_owns() {
+    let home = Home::new();
+    let store = Store::mount(&home, true).await;
+    store.session("s1").await;
+    let kept = store.put("s1", "kept.txt", b"kept").await.unwrap();
+    store.root.shutdown().await.unwrap();
+
+    // What a crashed generation and stray writers leave: a pending row of a
+    // dead generation with its directory, a directory and a file without a
+    // row, and another database's Session files beside this one's.
+    let dead = uuid::Uuid::new_v4().to_string();
+    Connection::open(home.database())
+        .unwrap()
+        .execute(
+            "INSERT INTO session_files VALUES (?1, NULL, 'dead-generation')",
+            [&dead],
+        )
+        .unwrap();
+    let orphan = uuid::Uuid::new_v4().to_string();
+    for directory in [&dead, &orphan] {
+        std::fs::create_dir(home.files().join(directory)).unwrap();
+        std::fs::write(home.files().join(directory).join("paste.txt"), b"left").unwrap();
+    }
+    std::fs::write(home.files().join("stray"), b"stray").unwrap();
+    let other = home
+        .0
+        .join("other.sqlite.session-files")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("paste.txt"), b"other database").unwrap();
+
+    let store = Store::mount(&home, true).await;
+    let fresh = store.put("s1", "fresh.txt", b"fresh").await.unwrap();
+    let mut owned = vec![kept.file_id.clone(), fresh.file_id.clone()];
+    owned.sort();
+    eventually(|| home.entries() == owned).await;
+    assert_eq!(
+        home.rows("SELECT file_id FROM session_files"),
+        owned
+            .iter()
+            .map(|id| format!("Text(\"{id}\")"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(std::fs::read(&kept.path).unwrap(), b"kept");
+    assert_eq!(
+        std::fs::read(other.join("paste.txt")).unwrap(),
+        b"other database"
+    );
+
+    // Releasing the last owner, here by a creation rollback, sweeps its files.
+    store
+        .sessions
+        .timeline_store()
+        .rollback_session("s1")
+        .await
+        .unwrap();
+    eventually(|| home.entries().is_empty()).await;
+    assert!(home.rows("SELECT file_id FROM session_files").is_empty());
+    assert!(other.join("paste.txt").exists());
+    store.root.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_put_without_active_file_storage_reports_node_unavailable() {
     let home = Home::new();

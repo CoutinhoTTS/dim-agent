@@ -7,6 +7,11 @@
 //! owned only while the Session exists and the row is still pending under
 //! `G`. SQLite orders both against S5c's fork and delete, so no in-memory
 //! lock is needed.
+//!
+//! A background sweep removes what no row owns: rows pending under a dead
+//! generation, which it claims first, unowned rows, and directory entries
+//! with no row at all, such as a directory a power loss restored after its
+//! row was deleted.
 use super::{SqliteStorage, sqlite::error};
 use dim_agent_capabilities::{
     file_storage::{FileStorage, FileStorageError},
@@ -18,10 +23,15 @@ use std::{
     ffi::OsString,
     fs::Permissions,
     future::Future,
+    ops::ControlFlow,
     path::Path,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+use tokio::sync::Notify;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// One file's limit: a put is one message, and storage holds it in memory.
@@ -41,6 +51,12 @@ struct Files {
     directory: OsString,
     /// This generation's writer id.
     generation: String,
+    /// Schedules a sweep; a request during a sweep schedules one more pass.
+    sweep: Arc<Notify>,
+    /// A sweep of this generation reached every row and entry. Until then
+    /// every put schedules one, so a sweep stopped by an unavailable node is
+    /// retried by the next put.
+    swept: AtomicBool,
     admission: Mutex<()>,
     stopping: CancellationToken,
     tasks: TaskTracker,
@@ -120,8 +136,32 @@ enum Commit {
     Superseded,
 }
 
+/// S5c's fork step, run inside the fork's own transaction: the fork owns
+/// every file its source owns. No file is touched, so a fork succeeds while
+/// the node is offline.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "S5c's fork transaction is its first caller")
+)]
+pub(super) fn share(connection: &Connection, source: &str, fork: &str) -> rusqlite::Result<usize> {
+    connection.execute(
+        "INSERT INTO session_file_owners (session_id, file_id) SELECT ?2, file_id FROM session_file_owners WHERE session_id = ?1",
+        params![source, fork],
+    )
+}
+/// The delete and creation-rollback step, run inside their transaction
+/// before the Session's own rows: the Session stops owning its files. After
+/// the commit, a file whose last owner it was is unowned and the caller
+/// schedules a sweep. Returns the number of released files.
+pub(super) fn release(connection: &Connection, session_id: &str) -> rusqlite::Result<usize> {
+    connection.execute(
+        "DELETE FROM session_file_owners WHERE session_id = ?1",
+        [session_id],
+    )
+}
+
 impl SessionFiles {
-    pub(super) fn new(db: Arc<SqliteStorage>, ctx: Ctx, root: usize) -> Self {
+    pub(super) fn new(db: Arc<SqliteStorage>, ctx: Ctx, root: usize, sweep: Arc<Notify>) -> Self {
         let mut directory = db
             .path
             .file_name()
@@ -134,14 +174,34 @@ impl SessionFiles {
             root,
             directory,
             generation: uuid::Uuid::new_v4().to_string(),
+            sweep,
+            swept: AtomicBool::new(false),
             admission: Mutex::new(()),
             stopping: CancellationToken::new(),
             tasks: TaskTracker::new(),
         }))
     }
 
-    /// Cancels admitted puts and waits until each has committed or abandoned
-    /// its file.
+    /// Starts this generation's sweeper, which sweeps the control node
+    /// whenever a sweep is scheduled. At most one sweep runs at a time.
+    pub(super) fn start(&self) {
+        let files = self.0.clone();
+        self.0.tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    () = files.stopping.cancelled() => return,
+                    () = files.sweep.notified() => {}
+                }
+                if files.sweep().await {
+                    files.swept.store(true, Ordering::Release);
+                }
+            }
+        });
+    }
+
+    /// Cancels admitted puts and the sweep, and waits until each put has
+    /// committed or abandoned its file. Removal is retry-safe, so a sweep
+    /// cut short is resumed by a later one.
     pub(super) async fn close(&self) {
         {
             let _admission = self.0.admission.lock().unwrap();
@@ -177,8 +237,8 @@ impl PutSessionFile for SessionFiles {
             // The put runs as SessionStore's own task, so a caller that stops
             // waiting still leaves its file committed or abandoned, never
             // pending under a live generation. Dropping the call cancels it.
-            let call = self.0.stopping.child_token();
-            let mut task = {
+            let call = cancel.child_token();
+            let task = {
                 let _admission = self.0.admission.lock().unwrap();
                 if self.0.stopping.is_cancelled() {
                     return Err(cancelled());
@@ -189,15 +249,9 @@ impl PutSessionFile for SessionFiles {
                     .tasks
                     .spawn(async move { files.put(session_id, name, content, call).await })
             };
-            let _dropped = call.clone().drop_guard();
-            let result = tokio::select! {
-                result = &mut task => result,
-                () = cancel.cancelled() => {
-                    call.cancel();
-                    task.await
-                }
-            };
-            result.unwrap_or_else(|join| Err(file_error(SessionFileErrorCode::Storage, join)))
+            let _dropped = call.drop_guard();
+            task.await
+                .unwrap_or_else(|join| Err(file_error(SessionFileErrorCode::Storage, join)))
         })
     }
 }
@@ -210,8 +264,15 @@ impl Files {
         content: Vec<u8>,
         cancel: CancellationToken,
     ) -> Result<StoredSessionFile, SessionFileError> {
-        if cancel.is_cancelled() {
+        // The caller's cancellation, or SessionStore unloading.
+        let stopped = || cancel.is_cancelled() || self.stopping.is_cancelled();
+        if stopped() {
             return Err(cancelled());
+        }
+        // Leftovers of crashed or reloaded generations go on the node's first
+        // put of each generation.
+        if !self.swept.load(Ordering::Acquire) {
+            self.sweep.notify_one();
         }
         let storage = self.ctx.get::<FileStorage>().ok_or_else(node_unavailable)?;
         let file_id = uuid::Uuid::new_v4().to_string();
@@ -274,7 +335,9 @@ impl Files {
             self.abandon(&file_id).await;
             return Err(storage_failure(failure));
         }
-        if cancel.is_cancelled() {
+        #[cfg(test)]
+        tests::before_commit(&session_id);
+        if stopped() {
             self.abandon(&file_id).await;
             return Err(cancelled());
         }
@@ -342,8 +405,175 @@ impl Files {
                     .map_err(error)
             })
             .await;
-        if let Err(failure) = abandoned {
-            tracing::warn!(file_id, error = %failure, "Session file left pending for the next generation");
+        match abandoned {
+            Ok(_) => self.sweep.notify_one(),
+            Err(failure) => {
+                tracing::warn!(file_id, error = %failure, "Session file left pending for the next generation");
+            }
+        }
+    }
+
+    /// One sweep of the control node, whose rows have a NULL node. False if
+    /// it stopped early because the node's storage is unavailable or the
+    /// generation is unloading; the next sweep resumes. Rows and entries it
+    /// cannot remove now are kept for the next sweep.
+    async fn sweep(&self) -> bool {
+        let Some(storage) = self.ctx.get::<FileStorage>() else {
+            return false;
+        };
+        let cancel = &self.stopping;
+        let rows = |sql: &'static str| {
+            self.db.run(move |connection| {
+                connection
+                    .prepare(sql)
+                    .and_then(|mut query| {
+                        query
+                            .query_map([], |row| row.get(0))?
+                            .collect::<rusqlite::Result<Vec<String>>>()
+                    })
+                    .map_err(error)
+            })
+        };
+
+        // 1. Claim the pending rows of dead generations: their puts can no
+        // longer commit, because txn 2 needs the row still pending under
+        // their own generation.
+        let generation = self.generation.clone();
+        let claimed = self
+            .db
+            .run(move |connection| {
+                connection
+                    .execute(
+                        "UPDATE session_files SET writer = NULL WHERE node IS NULL AND writer IS NOT NULL AND writer <> ?1",
+                        [generation],
+                    )
+                    .map_err(error)
+            })
+            .await;
+        if let Err(failure) = claimed {
+            tracing::warn!(error = %failure, "Session file sweep could not claim pending files");
+            return false;
+        }
+
+        // 2. Remove unowned files, then their rows. Unowned is terminal: no
+        // fork can share a file that has no owner.
+        let unowned = match rows(
+            "SELECT file_id FROM session_files f WHERE node IS NULL AND writer IS NULL AND NOT EXISTS (SELECT 1 FROM session_file_owners o WHERE o.file_id = f.file_id)",
+        )
+        .await
+        {
+            Ok(unowned) => unowned,
+            Err(failure) => {
+                tracing::warn!(error = %failure, "Session file sweep could not read unowned files");
+                return false;
+            }
+        };
+        for file_id in unowned {
+            if self
+                .remove(&storage, Path::new(&file_id), cancel)
+                .await
+                .is_break()
+            {
+                return false;
+            }
+            let id = file_id.clone();
+            let deleted = self
+                .db
+                .run(move |connection| {
+                    connection
+                        .execute(
+                            "DELETE FROM session_files WHERE file_id = ?1 AND writer IS NULL AND NOT EXISTS (SELECT 1 FROM session_file_owners WHERE file_id = ?1)",
+                            [id],
+                        )
+                        .map_err(error)
+                })
+                .await;
+            if let Err(failure) = deleted {
+                tracing::warn!(file_id, error = %failure, "Session file row kept for the next sweep");
+            }
+        }
+
+        // 3. Remove entries no row records. A put commits its row before it
+        // creates its directory, so reading the rows after listing finds the
+        // row of every entry a put made; the directory belongs to this
+        // database alone.
+        let directory = match storage.path(self.root, &self.directory) {
+            Ok(directory) => directory,
+            Err(_) => return false,
+        };
+        let entries = match storage.list(&directory, cancel).await {
+            Ok(entries) => entries,
+            Err(FileStorageError::Io(failure))
+                if failure.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return true;
+            }
+            Err(failure) => {
+                tracing::warn!(error = %failure, "Session file sweep could not list its directory");
+                return false;
+            }
+        };
+        let names: Vec<OsString> = entries.into_iter().map(|entry| entry.name).collect();
+        let listed = names.clone();
+        let recorded = self
+            .db
+            .run(move |connection| {
+                let mut query = connection
+                    .prepare("SELECT EXISTS(SELECT 1 FROM session_files WHERE file_id = ?1)")
+                    .map_err(error)?;
+                listed
+                    .iter()
+                    .map(|name| match name.to_str() {
+                        Some(name) => query.query_row([name], |row| row.get(0)).map_err(error),
+                        None => Ok(false),
+                    })
+                    .collect::<dim_agent_runtime::Result<Vec<bool>>>()
+            })
+            .await;
+        let recorded = match recorded {
+            Ok(recorded) => recorded,
+            Err(failure) => {
+                tracing::warn!(error = %failure, "Session file sweep could not read its rows");
+                return false;
+            }
+        };
+        for (name, recorded) in names.into_iter().zip(recorded) {
+            if !recorded
+                && self
+                    .remove(&storage, Path::new(&name), cancel)
+                    .await
+                    .is_break()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Removes `<db>.session-files/<name>`; an absent entry counts as
+    /// removed. Breaks when the sweep must stop: the node's storage closed or
+    /// the generation is unloading. Other failures, such as `Locked`, keep the
+    /// entry for the next sweep.
+    async fn remove(
+        &self,
+        storage: &Arc<FileStorage>,
+        name: &Path,
+        cancel: &CancellationToken,
+    ) -> ControlFlow<()> {
+        let removed = match storage.path(self.root, Path::new(&self.directory).join(name)) {
+            Ok(path) => storage.remove(&path, cancel).await,
+            Err(failure) => Err(failure),
+        };
+        match removed {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(FileStorageError::Closed | FileStorageError::Cancelled) => ControlFlow::Break(()),
+            Err(failure) => {
+                tracing::warn!(entry = %name.display(), error = %failure, "Session file kept for the next sweep");
+                ControlFlow::Continue(())
+            }
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
