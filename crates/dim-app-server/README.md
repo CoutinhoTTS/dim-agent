@@ -215,13 +215,60 @@ interface FileScope {
 interface PluginFiles { open(): Promise<FileScope> }
 ```
 
-`withLock` holds the native FileStorage lease through the complete callback, including asynchronous work. Reads require UTF-8; a missing file returns null. Replacement is atomic and flushed, with Unix mode 0600 and native Windows DACL handling. `backup` creates a flushed, exclusive sibling copy with an alphanumeric/hyphen suffix. A failed partial backup is retained; an existing backup is never overwritten. Storage errors expose only fixed codes, never file contents or exception text. An error after replacement does not imply rollback or authorize replaying remote side effects.
+`withLock` holds the native FileStorage lease through the complete callback, including asynchronous work. Reads validate the storage record below and return its UTF-8 text; a missing file returns null. Replacement is atomic and flushed, with Unix mode 0600 and native Windows DACL handling. `backup` creates a flushed, exclusive sibling copy with an alphanumeric/hyphen suffix. A failed partial backup is retained; an existing backup is never overwritten. Storage errors expose only fixed codes, never file contents or exception text. An error after replacement does not imply rollback or authorize replaying remote side effects.
 
 Use a fresh suffix for each backup attempt, such as `before-reset-<UUID>`. An `exists` result does not prove the earlier backup completed. After a failed backup, stop the destructive operation, address the storage failure, and create a successful backup with a new suffix before proceeding. Retained partial backups require explicit operator inspection and cleanup; the lease has no deletion API. Host worker failures return `internal`, distinct from invalid arguments or paths. Callback exceptions retain Rutis rejection semantics and still revoke the lease.
 
 Quiesce rejects new transactions and cancels acquisition, but permits an acquired transaction to persist before close joins it. The optional Promise cancels acquisition when it settles; Node must settle it on ordinary completion too so a pending exported Promise cannot hold runtime drain open. Rutis 0.10 does not encode Node AbortSignal arguments; do not pass one. Escaped file callbacks are revoked before releasing the lease. Abandoning the caller does not abandon issued I/O. Runtime loss revokes the lease after admitted native I/O settles; it cannot guarantee persistence of an external side effect whose result died with the runtime.
 
-Credential bytes, including refresh tokens, may pass through this trusted local bridge. They must never be forwarded to terminal RPC, model requests, history, diagnostics or logs. OAuth policy and file schema remain in the private package. Startup follows current loader row identities: Rutis may replace an offline JS row when it discovers its declared injections, so a disposed provisional fiber is not itself a startup failure. A row that remains disposed consumes the remaining startup deadline before reporting its terminal state; an explicit failed state still fails immediately.
+Credential bytes, including refresh tokens, may pass through this trusted local bridge. They must never be forwarded to terminal RPC, model requests, history, diagnostics or logs. OAuth policy and payload schema remain in the private package. Startup follows current loader row identities: Rutis may replace an offline JS row when it discovers its declared injections, so a disposed provisional fiber is not itself a startup failure. A row that remains disposed consumes the remaining startup deadline before reporting its terminal state; an explicit failed state still fails immediately.
+
+#### Storage record format
+
+PluginFiles owns a UTF-8 JSON storage envelope, independent of the plugin's
+payload schema:
+
+```json
+{"version":1,"text":"opaque plugin-owned UTF-8 text"}
+```
+
+Both fields are required; `version` is the integer `1`, `text` is a string,
+and additional fields are invalid. The host does not parse or validate `text`.
+`replace(text)` atomically writes this envelope through the existing FileStorage
+lease, preserving the existing permissions, durability and cancellation rules.
+`read()` decodes and validates the envelope at this external storage boundary
+and returns only `text`; a missing file still returns `null`. The named service,
+method arguments and successful reply shapes do not change.
+
+An unversioned file, malformed record, unknown version or invalid UTF-8 returns
+the existing fixed `invalid_data` error, without file contents or parser details.
+Read failure never rewrites or deletes the original. There is no automatic
+migration, fallback to empty state or interpretation of an unknown format.
+Existing unversioned plugin files therefore require an explicit owner-approved
+migration before the affected plugin can read them with this format. This is
+separate from native SQLite storage and changes no database format.
+
+`backup(suffix)` remains a byte-for-byte copy of the stored file, including its
+envelope or any rejected legacy bytes. A backup must not decode, re-encode or
+upgrade its source. An explicit `replace` writes version 1; the caller still owns
+the decision to replace existing data and to make a successful backup first.
+Binary payload support is outside S10 and remains P3 work.
+
+##### Rule check
+
+§1 and ADR 002 D1–D3 keep storage in the existing process plugin and
+FileStorage dependency, without a wiring layer or new lock. §4 rules 1–6 and 9
+are unchanged: there are no Timeline events, handovers, before callbacks or
+context changes. §4 rule 7 keeps storage validation at its owner. ADR 002 D4
+leaves plugin business settings and payload schemas with their owners; D5 keeps
+the existing language-neutral service and error data unchanged.
+
+##### Requirements raised to mechanism owners
+
+None (§4 rule 8). Existing atomic
+replacement and backup primitives cover the format. Acceptance uses disposable
+plugin roots to verify round-trip text, stored version, reopen, version rejection
+with byte preservation, and unchanged transaction/backup/lifecycle behavior.
 
 ## Service contract
 
