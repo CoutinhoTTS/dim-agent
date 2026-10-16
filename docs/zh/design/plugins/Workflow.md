@@ -16,7 +16,7 @@ flowchart LR
     WF["Workflow：定义、运行引擎、阶段执行器"]
     MM["managementMethods key workflow"]
     Agents["Agents：sessions"]
-    Prov["Provider：purpose workflow.stage"]
+    Prov["Provider：模型选择"]
     Set["Settings：来源 workflow；FileStorage：项目文件"]
     PC["PluginContents：类型 workflows"]
     Store["进程存储：pluginFiles（扩展）"]
@@ -48,7 +48,7 @@ flowchart LR
 | `Workflow` | 进程（控制节点） | `sessions`（Agents；`launch` 带 `policy`）、Provider 模型选择、Settings 来源 `workflow`、FileStorage（项目文件，按调用查找）、`PluginContents`（可选，类型 `workflows`）、`pluginFiles`（扩展） | 运行引擎；`workflowRuns`（工具访问运行的服务，A.2）；`managementMethods` key `workflow` |
 | `WorkflowSession` | Session，Workflow 启用时安装 | `workflowRuns`（`Workflow`）、Session 配置 | `toolContribution` key `workflow`，在每个 Session 中声明；除非 Session 为 `interactive`，处理函数拒绝调用 |
 
-**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段、带来源 raw 块的 `input`、`history`、`idle`、`stop`、`withdraw`；`agent` 可省略）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（存运行记录；TypeScript 部分直接使用）；以及现有的类型化服务：Provider purpose 策略和 Settings 来源（业务来源 `workflow` 属于 Settings 补充，[overview 附录 B](../overview.md#附录-b-现有插件的补充)），待 [#4](https://github.com/arcships/dim/issues/4) 暴露后 TypeScript 部分可按名称访问（[session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）。**此处定义的契约**：定义格式 `dim.workflow/v1`、`workflow` 工具、`workflowRuns` 服务、`workflow.*` 方法、来源名 `workflow`（标记类型 `stage` 和 `report`）、purpose key `workflow.stage`、内容类型 key `workflows`、运行记录。
+**依赖的契约**：`sessions`（[session-access](../contracts/session-access.md)：带启动方上限 `policy` 的 `launch`、Session 配置字段、带来源 raw 块的 `input`、`history`、`idle`、`stop`、`withdraw`；`agent` 可省略）、`toolContribution`（ToolRegistry 接受命名工具服务，属于补充；[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）、由 Rpc 收集的 `managementMethods`（[session-boundary](../contracts/session-boundary.md)）、[`pluginFiles`（扩展）](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)（存运行记录；TypeScript 部分直接使用）；以及现有的类型化服务：Provider 模型选择和 Settings 来源（业务来源 `workflow` 属于 Settings 补充，[overview 附录 B](../overview.md#附录-b-现有插件的补充)），待 [#4](https://github.com/arcships/dim/issues/4) 暴露后 TypeScript 部分可按名称访问（[session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）。**此处定义的契约**：定义格式 `dim.workflow/v1`、`workflow` 工具、`workflowRuns` 服务、`workflow.*` 方法、来源名 `workflow`（标记类型 `stage` 和 `report`）、内容类型 key `workflows`、运行记录。
 
 ## 2. 数据与状态
 
@@ -262,7 +262,7 @@ steps:
 | `steps` | 按顺序 1–32 步；一步是一个 `stage` 或一个含 2–8 个阶段的 `parallel` 组（A4） |
 | `stage.id` | `[a-z0-9-]{1,32}`，在定义内唯一 |
 | `stage.agent` | 可选的 Agent id（原生或外部 profile）；省略时启动请求不带 `agent`，Agents 使用默认 profile |
-| `stage.model` | 可选；否则取 profile 的模型；再否则取 Provider 对 purpose `workflow.stage` 的选择（A5） |
+| `stage.model` | 可选；否则取 profile 的模型；再否则取 Provider 的默认选择（A5） |
 | `stage.prompt` | 渲染后 ≤ 32 KiB 的模板（A6）；占位符 `{{params.<name>}}`、`{{stages.<id>.result}}` |
 | `policy` | `read_only` \| `workspace_write` \| `full_access`；受上限约束（3.3） |
 | 引用 | `stages.<id>` 必须指向更早一步的阶段；只做纯替换（A7） |
@@ -399,7 +399,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | A2 | YAML，带 `schema: dim.workflow/v1` | 判断 | 其他语法 |
 | A3 | 用户保存的定义是 Settings 来源 `workflow` 中的一个文档，把名称映射到定义；项目定义按工作区和名称的启用状态也存于该文档 | 用户决定（第二轮 R7）；[ADR 003](../../adr/003-approval-scope.md) D3 | 存为 dim home 下的文件 |
 | A4 | 阶段或并行组（≤ 32 步，每组 ≤ 8）；快速失败 | 功能清单（“stages”）；限制为判断 | 每阶段的失败策略 |
-| A5 | 模型优先级：阶段 > profile > purpose `workflow.stage` | [Overview §4](../overview.md#4-插件目录)；优先级为判断 | 其他优先级 |
+| A5 | 模型优先级：阶段 > profile > Provider 的默认选择 | [Overview §4](../overview.md#4-插件目录)；优先级为判断 | 其他优先级 |
 | A6 | 渲染后提示词 ≤ 32 KiB；存储结果 ≤ 64 KiB | 判断 | 其他上限 |
 | A7 | 纯替换模板 | 判断 | 表达式需要沙箱 |
 | A8 | 工具只在交互 Session 中可用；在其他 Session 中处理函数拒绝 | 防止嵌套 | 需要深度限制 |

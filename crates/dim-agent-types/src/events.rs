@@ -304,12 +304,51 @@ pub struct ContextPrepareData {
     pub recovery: Option<ProviderOutputBudgetFacts>,
 }
 
+/// A client asks the Loop to compact its branch; the Loop serves it as a
+/// compaction step at its next step boundary, or at once with no turn.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCompactData {}
+
+/// A compaction strategy is called; exactly one `context/compaction` with
+/// `start` set to this event's sequence follows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextCompactionStartData {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub turn_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub request_id: Option<String>,
+    /// Sequence of the `context/compact` a manual step serves.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::optional_safe_integer"
+    )]
+    pub command: Option<u64>,
+    #[serde(with = "crate::safe_integer")]
+    pub through: u64,
+    pub trigger: CompactionTrigger,
+    pub strategy: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextCompactionResult {
+    /// Everything before the Timeline event `retain_from` is replaced by
+    /// `replacement`, stored exactly as the strategy produced it.
     Completed {
-        cursor: String,
-        summary: String,
+        retain_from: String,
+        replacement: Vec<Message>,
+        strategy: String,
         diagnostics: Box<CompactionDiagnosticsRecord>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context_baseline: Vec<ContextBaselineEntry>,
@@ -327,12 +366,40 @@ pub enum ContextCompactionResult {
         )]
         diagnostics: Option<Box<CompactionDiagnosticsRecord>>,
     },
+    Cancelled {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextCompactionData {
-    pub turn_id: String,
-    pub request_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub turn_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub request_id: Option<String>,
+    /// Sequence of the `context/compact` a manual step served.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::optional_safe_integer"
+    )]
+    pub command: Option<u64>,
+    /// Sequence of the `context/compaction-start` this result ends; absent
+    /// only for a manual command that ended before any strategy call.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::optional_safe_integer"
+    )]
+    pub start: Option<u64>,
     #[serde(with = "crate::safe_integer")]
     pub through: u64,
     #[serde(flatten)]
@@ -856,6 +923,8 @@ pub enum EventKind {
     ContextConfigured(ContextConfiguredData),
     ContextScope(ContextScopeData),
     ContextPrepare(ContextPrepareData),
+    ContextCompact(ContextCompactData),
+    ContextCompactionStart(ContextCompactionStartData),
     ContextCompaction(ContextCompactionData),
     ContextBudget(ContextBudgetData),
     ModelCall(ModelCallData),
@@ -906,6 +975,8 @@ impl EventKind {
             Self::ContextConfigured(_) => "context/configured",
             Self::ContextScope(_) => "context/scope",
             Self::ContextPrepare(_) => "context/prepare",
+            Self::ContextCompact(_) => "context/compact",
+            Self::ContextCompactionStart(_) => "context/compaction-start",
             Self::ContextCompaction(_) => "context/compaction",
             Self::ContextBudget(_) => "context/budget",
             Self::ModelCall(_) => "model/call",
@@ -1034,6 +1105,10 @@ pub enum ContextEvent {
     Scope(ContextScopeData),
     #[serde(rename = "prepare")]
     Prepare(ContextPrepareData),
+    #[serde(rename = "compact")]
+    Compact(ContextCompactData),
+    #[serde(rename = "compaction-start")]
+    CompactionStart(ContextCompactionStartData),
     #[serde(rename = "compaction")]
     Compaction(ContextCompactionData),
     #[serde(rename = "budget")]
@@ -1146,6 +1221,10 @@ impl<'de> Deserialize<'de> for EventKind {
             TaggedEvent::Context(ContextEvent::Configured(data)) => Self::ContextConfigured(data),
             TaggedEvent::Context(ContextEvent::Scope(data)) => Self::ContextScope(data),
             TaggedEvent::Context(ContextEvent::Prepare(data)) => Self::ContextPrepare(data),
+            TaggedEvent::Context(ContextEvent::Compact(data)) => Self::ContextCompact(data),
+            TaggedEvent::Context(ContextEvent::CompactionStart(data)) => {
+                Self::ContextCompactionStart(data)
+            }
             TaggedEvent::Context(ContextEvent::Compaction(data)) => Self::ContextCompaction(data),
             TaggedEvent::Context(ContextEvent::Budget(data)) => Self::ContextBudget(data),
             TaggedEvent::Model(ModelEvent::ModelCall(data)) => Self::ModelCall(data),
@@ -1290,6 +1369,16 @@ impl Serialize for EventKind {
             Self::ContextPrepare(data) => {
                 state.serialize_field("type", "context")?;
                 state.serialize_field("name", "prepare")?;
+                state.serialize_field("data", data)?;
+            }
+            Self::ContextCompact(data) => {
+                state.serialize_field("type", "context")?;
+                state.serialize_field("name", "compact")?;
+                state.serialize_field("data", data)?;
+            }
+            Self::ContextCompactionStart(data) => {
+                state.serialize_field("type", "context")?;
+                state.serialize_field("name", "compaction-start")?;
                 state.serialize_field("data", data)?;
             }
             Self::ContextCompaction(data) => {

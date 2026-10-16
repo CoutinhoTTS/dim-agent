@@ -218,6 +218,26 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::context_methods",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/context_methods.rs",
+      "unexpandedMacros": [
+        "json",
+        "matches",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::context_model",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/context_model.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::context_policy",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -383,7 +403,6 @@
       "file": "crates/dim-agent-capabilities/src/model_provider.rs",
       "unexpandedMacros": [
         "matches",
-        "tokio::select",
         "unreachable"
       ]
     },
@@ -399,7 +418,9 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::model_provider",
       "file": "crates/dim-agent-capabilities/src/model_provider/recovery.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "tokio::select"
+      ]
     },
     {
       "id": "dim_agent_capabilities::output",
@@ -568,6 +589,18 @@
       "file": "crates/dim-agent-capabilities/src/steer.rs",
       "unexpandedMacros": [
         "matches"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::summary_strategy",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/summary_strategy.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json",
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -924,7 +957,6 @@
       "file": "crates/dim-agent-runtime/src/memory_timeline_store.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
         "vec"
       ]
     },
@@ -1454,6 +1486,15 @@
       ]
     },
     {
+      "id": "dim_app_server::provider::auxiliary",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/auxiliary.rs",
+      "unexpandedMacros": [
+        "tracing::info"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::drivers",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -1530,7 +1571,8 @@
       "file": "crates/dim-app-server/src/settings.rs",
       "unexpandedMacros": [
         "format",
-        "tokio::select"
+        "tokio::select",
+        "tracing::warn"
       ]
     },
     {
@@ -2410,6 +2452,20 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::context_methods",
+      "references": [
+        "mod context_methods"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "mod context_model"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::context_policy",
       "references": [
         "mod context_policy"
@@ -2459,6 +2515,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "mod host",
+        "path host::CompactionStrategyHost",
         "path host::ContextModelHost",
         "path host::ModelHost",
         "path host::PrepareContextHost",
@@ -2593,6 +2650,13 @@
       "to": "dim_agent_capabilities::steer",
       "references": [
         "mod steer"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::summary_strategy",
+      "references": [
+        "mod summary_strategy"
       ]
     },
     {
@@ -2793,6 +2857,19 @@
     },
     {
       "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_capabilities::context_policy",
+      "references": [
+        "path CompactionStep",
+        "path ContextPolicy",
+        "path ContextPolicy::bind",
+        "path configured_request",
+        "use crate::context_policy::CompactionStep",
+        "use crate::context_policy::ContextPolicy",
+        "use crate::context_policy::configured_request"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_capabilities::history",
       "references": [
         "path HistoryRenderer",
@@ -2808,10 +2885,14 @@
       "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CompactionStrategyHost",
         "path ContextModelHost",
+        "path HostError::Cancelled",
         "path PrepareModelHost",
         "path crate::host::ModelSettings",
+        "use crate::host::CompactionStrategyHost",
         "use crate::host::ContextModelHost",
+        "use crate::host::HostError",
         "use crate::host::PrepareModelHost"
       ]
     },
@@ -2897,6 +2978,7 @@
       "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::Cancelled",
         "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path Result",
@@ -2932,11 +3014,27 @@
     },
     {
       "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_types",
+      "references": [
+        "path JsonObject::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path ContextCompactData",
+        "path ContextCompactionData",
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionResult::Failed",
+        "path ContextCompactionResult::Skipped",
+        "path ContextCompactionStartData",
         "path ContextPrepareData",
         "path EventDraft",
+        "path EventKind::ContextCompact",
+        "path EventKind::ContextCompaction",
+        "path EventKind::ContextCompactionStart",
         "path EventKind::ContextPrepare",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
@@ -2973,6 +3071,17 @@
         "path TurnOutcome::Failed",
         "path TurnStartData",
         "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path CompactionDiagnosticsRecord",
+        "path CompactionReason::Manual",
+        "path CompactionStrategyRecord",
+        "path CompactionTrigger::Manual",
+        "path model"
       ]
     },
     {
@@ -3133,19 +3242,134 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_capabilities::agent_loop",
+      "references": [
+        "path AgentLoop",
+        "use crate::agent_loop::AgentLoop"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_capabilities::context_preparation",
+      "references": [
+        "path ContextOpError::Model",
+        "path ContextOpError::NotConfigured",
+        "path ContextOpError::Read",
+        "path ContextPreparation",
+        "use crate::context_preparation::ContextOpError",
+        "use crate::context_preparation::ContextPreparation"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path SessionMethods::provide",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::RpcError",
+        "use crate::methods::SessionMethods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use crate::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_runtime::branch",
+      "references": [
+        "path Branch",
+        "use dim_agent_runtime::Branch"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_methods",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionResult::Completed",
+        "path ContextCompactionResult::Failed",
+        "path ContextCompactionResult::Skipped",
+        "path EventKind::ContextCompaction"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_model",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ContextModel",
+        "path HostError::classified",
+        "path HostErrorKind::InvalidRequest",
+        "path HostFuture",
+        "path ResolveContextModel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_model",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path MessageContent::Parts",
+        "path MessageContent::Text",
+        "path MessagePart::Image"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_model",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_capabilities::history",
       "references": [
         "path HistoryEntry",
         "path HistoryRenderer",
         "path context_compaction",
+        "path context_configuration",
         "path context_messages",
-        "path summary_message",
+        "path retained_entry",
         "use crate::history::HistoryEntry",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_compaction",
+        "use crate::history::context_configuration",
         "use crate::history::context_messages",
-        "use crate::history::summary_message"
+        "use crate::history::retained_entry"
       ]
     },
     {
@@ -3153,13 +3377,21 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path CompactionCheckpoint",
+        "path CompactionCut",
         "path CompactionInput",
+        "path CompactionStrategy",
+        "path CompactionStrategyHost",
         "path ContextModel",
+        "path ContextModelHost",
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::Failed",
         "path HostError::failed",
+        "path ModelSettings",
         "path ResolveContextModel",
+        "path StrategyDiagnostics",
+        "path StrategyOutcome::Completed",
+        "path StrategyOutcome::Skipped",
         "path crate::host::HostErrorKind::Other"
       ]
     },
@@ -3175,18 +3407,11 @@
     },
     {
       "from": "dim_agent_capabilities::context_policy",
-      "to": "dim_agent_types::checkpoint",
-      "references": [
-        "path checkpoint"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::content",
       "references": [
+        "path Message",
         "path MessageContent::Parts",
         "path MessageContent::Text",
-        "path MessagePart::ToolResult",
         "path MessagePart::ToolUse"
       ]
     },
@@ -3197,12 +3422,15 @@
         "path AgentEvent",
         "path ContextBudgetData",
         "path ContextCompactionData",
+        "path ContextCompactionResult::Cancelled",
         "path ContextCompactionResult::Completed",
         "path ContextCompactionResult::Failed",
         "path ContextCompactionResult::Skipped",
+        "path ContextCompactionStartData",
         "path ContextPrepareData",
         "path EventKind::ContextBudget",
         "path EventKind::ContextCompaction",
+        "path EventKind::ContextCompactionStart",
         "path EventKind::ModelCall",
         "path EventKind::ModelUsage",
         "path ModelUsageData",
@@ -3216,6 +3444,13 @@
         "path BaselineSource",
         "path BaselineSource::FullEstimate",
         "path BaselineSource::ProviderBaseline",
+        "path CompactionDiagnosticsRecord",
+        "path CompactionReason::Auto",
+        "path CompactionReason::Manual",
+        "path CompactionTrigger",
+        "path CompactionTrigger::Manual",
+        "path CompactionTrigger::ProviderOutputBudgetExhausted",
+        "path CompactionTrigger::Threshold",
         "path ModelRequest",
         "path ModelRequest::new",
         "path ProviderOutputBudgetFacts",
@@ -3234,8 +3469,11 @@
       "to": "dim_agent_capabilities::context_policy",
       "references": [
         "path ContextPolicy",
+        "path ContextPolicy::bind",
+        "path configured_request",
         "path crate::context_policy::check_cancel",
-        "use crate::context_policy::ContextPolicy"
+        "use crate::context_policy::ContextPolicy",
+        "use crate::context_policy::configured_request"
       ]
     },
     {
@@ -3257,6 +3495,7 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CompactionStrategyHost",
         "path ContextModelHost",
         "path ContextSource",
         "path HostError",
@@ -3373,8 +3612,13 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path ContextCompactionData",
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionStartData",
         "path ContextPrepareData",
         "path EventDraft",
+        "path EventKind::ContextCompaction",
+        "path EventKind::ContextCompactionStart",
         "path EventKind::ContextConfigured",
         "path EventKind::ContextPrepare",
         "path EventKind::InputMessage",
@@ -3398,6 +3642,7 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_types::model",
       "references": [
+        "path BaselineSource",
         "path ModelRequest",
         "path SystemPrompt::Text",
         "path model"
@@ -3473,6 +3718,7 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CompactionStrategyHost",
         "path ContextModelHost",
         "path EmptyPromptHost",
         "path IdentityContext",
@@ -3968,7 +4214,6 @@
       "from": "dim_agent_capabilities::host",
       "to": "dim_agent_types::events",
       "references": [
-        "path ContextCompactionResult",
         "path ProviderPresentation"
       ]
     },
@@ -3977,6 +4222,8 @@
       "to": "dim_agent_types::model",
       "references": [
         "path BaselineSource",
+        "path CompactionStrategyRecord",
+        "path CompactionTrigger",
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelRequest",
@@ -4253,8 +4500,6 @@
       "from": "dim_agent_capabilities::model_provider",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path CredentialRecoveryPhase::Recovered",
-        "path CredentialRejection::Unrelated",
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::Failed",
@@ -4278,14 +4523,9 @@
       "to": "dim_agent_capabilities::model_provider::recovery",
       "references": [
         "mod recovery",
-        "path FailureAction::RecoverCredentials",
-        "path FailureAction::Retry",
-        "path FailureAction::SettleCredentials",
-        "path FailureAction::Stop",
-        "path RecoveryState::default",
-        "path recovery",
-        "use recovery::FailureAction",
-        "use recovery::RecoveryState"
+        "path recovery::invoke",
+        "use recovery::Consume",
+        "use recovery::invoke"
       ]
     },
     {
@@ -4425,13 +4665,6 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::model_provider",
-      "to": "dim_agent_types::model",
-      "references": [
-        "path model"
-      ]
-    },
-    {
       "from": "dim_agent_capabilities::model_provider::images",
       "to": "dim_agent_types::content",
       "references": [
@@ -4452,6 +4685,14 @@
     },
     {
       "from": "dim_agent_capabilities::model_provider::recovery",
+      "to": "dim_agent_capabilities::context_policy",
+      "references": [
+        "path check_cancel",
+        "use crate::context_policy::check_cancel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::recovery",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path CredentialRecoveryPhase",
@@ -4459,10 +4700,22 @@
         "path CredentialRejection",
         "path CredentialRejection::Recoverable",
         "path CredentialRejection::Terminal",
+        "path CredentialRejection::Unrelated",
+        "path HostError",
+        "path HostError::Failed",
         "path ModelFailureFacts",
-        "use crate::host::CredentialRecoveryPhase",
-        "use crate::host::CredentialRejection",
-        "use crate::host::ModelFailureFacts"
+        "path ModelHost",
+        "path ModelStream",
+        "path ResolvedModelConnection"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::recovery",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest",
+        "path model",
+        "use dim_agent_types::ModelRequest"
       ]
     },
     {
@@ -5803,6 +6056,101 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path summary_message",
+        "use crate::history::summary_message"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path CompactionInput",
+        "path CompactionStrategy",
+        "path CompactionStrategyHost",
+        "path HostError",
+        "path HostError::failed",
+        "path HostFuture",
+        "path ModelChunk::MessageStop",
+        "path ModelChunk::Text",
+        "path ModelHost",
+        "path ModelStopReason::ToolUse",
+        "path ModelStream",
+        "path ProviderConnectionResolver",
+        "path StrategyDiagnostics",
+        "path StrategyOutcome",
+        "path StrategyOutcome::Completed",
+        "path StrategyOutcome::Skipped"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::model_provider::recovery",
+      "references": [
+        "path invoke_with_recovery",
+        "use crate::model_provider::invoke_with_recovery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path checkpoint"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
+        "path Message",
+        "path MessageContent::Parts",
+        "path MessageContent::Text",
+        "path MessagePart::Image",
+        "path MessagePart::Text",
+        "path MessagePart::Thinking",
+        "path MessagePart::ToolResult",
+        "path MessagePart::ToolUse",
+        "path Role::Assistant",
+        "path Role::ToolResult",
+        "path Role::User",
+        "path ToolContent::Blocks",
+        "path ToolContent::Text",
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path CompactionStrategyRecord",
+        "path ModelRequest",
+        "path ModelRequest::new",
+        "path SystemPrompt::Text"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::context_policy",
       "references": [
@@ -6423,6 +6771,7 @@
         "path EventKind::BranchStart",
         "path EventKind::ContextBudget",
         "path EventKind::ContextCompaction",
+        "path EventKind::ContextCompactionStart",
         "path EventKind::ContextConfigured",
         "path EventKind::ContextPrepare",
         "path EventKind::ContextScope",
@@ -8205,11 +8554,8 @@
       "references": [
         "path AgentEvent",
         "path EventDraft",
-        "path EventKind::ContextCompaction",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::ContextCompactionResult",
-        "use dim_agent_types::EventDraft",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventDraft"
       ]
     },
     {
@@ -8308,7 +8654,6 @@
         "path BranchCreateAt::Sequence",
         "path EventKind::BranchCreate",
         "use dim_agent_types::BranchCreateAt",
-        "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind"
       ]
     },
@@ -8715,6 +9060,7 @@
       "to": "dim_agent_types::content",
       "references": [
         "path ContentBlock",
+        "path Message",
         "path MessagePart"
       ]
     },
@@ -8724,6 +9070,7 @@
       "references": [
         "path BaselineSource",
         "path CompactionDiagnosticsRecord",
+        "path CompactionTrigger",
         "path ModelRequest",
         "path ProviderOutputBudgetFacts",
         "path Usage"
@@ -8876,13 +9223,9 @@
         "path crate::AgentEvent",
         "path crate::BranchSource::Tool",
         "path crate::ContextBudgetData",
-        "path crate::ContextCompactionResult::Completed",
-        "path crate::ContextCompactionResult::Failed",
-        "path crate::ContextCompactionResult::Skipped",
         "path crate::EventKind",
         "path crate::EventKind::BranchCreate",
         "path crate::EventKind::BranchStart",
-        "path crate::EventKind::ContextCompaction",
         "path crate::EventKind::ContextPrepare",
         "path crate::EventKind::InputMessage",
         "path crate::EventKind::ModelCall",
@@ -8905,10 +9248,15 @@
       "from": "dim_agent_types::v1",
       "to": "dim_agent_types::model",
       "references": [
-        "path CompactionDiagnosticsRecord",
+        "path BaselineSource",
+        "path BudgetEstimateSource",
+        "path CompactionCoverage",
+        "path CompactionFallbackReason",
+        "path CompactionReason",
+        "path CompactionTrigger",
+        "path CompactionUsage",
         "path ModelRequest",
         "path ProviderOutputBudgetFacts",
-        "path crate::CompactionDiagnosticsRecord",
         "path crate::ModelRequest",
         "path crate::ProviderOutputBudgetFacts"
       ]
@@ -9279,6 +9627,24 @@
     },
     {
       "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_agent_capabilities::context_methods",
+      "references": [
+        "path ContextMethodsPlugin::new",
+        "path context_methods::NAMESPACE",
+        "use dim_agent_capabilities::context_methods",
+        "use dim_agent_capabilities::context_methods::ContextMethodsPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path ProductContextModel",
+        "use dim_agent_capabilities::context_model::ProductContextModel"
+      ]
+    },
+    {
+      "from": "dim_app_server::@bin:dim-app-server",
       "to": "dim_agent_capabilities::defaults",
       "references": [
         "path defaults::install",
@@ -9300,9 +9666,11 @@
       "from": "dim_app_server::@bin:dim-app-server",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CompactionStrategyHost",
         "path ContextModelHost",
         "path IdentityContext",
         "path PrepareContextHost",
+        "use dim_agent_capabilities::host::CompactionStrategyHost",
         "use dim_agent_capabilities::host::ContextModelHost",
         "use dim_agent_capabilities::host::IdentityContext",
         "use dim_agent_capabilities::host::PrepareContextHost"
@@ -9314,6 +9682,14 @@
       "references": [
         "path ModelProviderPlugin::process",
         "use dim_agent_capabilities::model_provider::ModelProviderPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_agent_capabilities::summary_strategy",
+      "references": [
+        "path ProductSummaryStrategyPlugin::new",
+        "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyPlugin"
       ]
     },
     {
@@ -10989,6 +11365,9 @@
         "path SettingsScope",
         "path SettingsScope::Project",
         "path SettingsService",
+        "path crate::settings::Wake::new",
+        "path crate::settings::project_authorizations",
+        "path crate::settings::settings_changes",
         "use crate::settings::BusinessDocument",
         "use crate::settings::Result",
         "use crate::settings::SettingsError",
@@ -11160,6 +11539,7 @@
         "path McpSettings",
         "path config",
         "path config::effective",
+        "path config::settings_changes",
         "path config::workspace",
         "use super::config",
         "use super::config::McpProjectEnablement",
@@ -11517,6 +11897,13 @@
     },
     {
       "from": "dim_app_server::mcp::session",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path super::config::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::session",
       "to": "dim_app_server::mcp::publication",
       "references": [
         "path super::McpApplication",
@@ -11812,6 +12199,7 @@
       "from": "dim_app_server::provider",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path AuxiliaryModelHost",
         "path AwsCredentials",
         "path BedrockAuth::Bearer",
         "path BedrockAuth::SigV4",
@@ -11833,6 +12221,7 @@
         "path HttpModelConnection",
         "path ModelConnection::Bedrock",
         "path ModelConnection::Http",
+        "path ModelHost",
         "path ModelNetwork",
         "path ModelNetwork::default",
         "path ModelProtocol",
@@ -11972,6 +12361,14 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::auxiliary",
+      "references": [
+        "mod auxiliary",
+        "path auxiliary::AuxiliaryModel"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::drivers",
       "references": [
         "mod drivers",
@@ -12045,6 +12442,77 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::auxiliary",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path AuxiliaryError",
+        "path AuxiliaryErrorCode::Cancelled",
+        "path AuxiliaryErrorCode::Failed",
+        "path AuxiliaryErrorCode::InvalidRequest",
+        "path AuxiliaryErrorCode::ModelUnavailable",
+        "path AuxiliaryReply",
+        "path AuxiliaryRequest",
+        "path CompleteAuxiliary",
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostError::Failed",
+        "path HostError::failed",
+        "path HostErrorKind::OwnerClosed",
+        "path ModelChunk::MessageStop",
+        "path ModelChunk::Text",
+        "path ModelChunk::Usage",
+        "path ModelHost",
+        "path ModelStopReason::ToolUse",
+        "path ModelStream",
+        "path ResolveModelConnection::resolve"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::auxiliary",
+      "to": "dim_agent_capabilities::model_provider::recovery",
+      "references": [
+        "path invoke_with_recovery",
+        "use dim_agent_capabilities::model_provider::invoke_with_recovery"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::auxiliary",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest::new",
+        "path SystemPrompt::Text",
+        "path model",
+        "use dim_agent_types::ModelRequest",
+        "use dim_agent_types::SystemPrompt"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::auxiliary",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::auxiliary",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path ProductResolver",
+        "path ProviderService",
+        "use super::ProductResolver",
+        "use super::ProviderService"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::auxiliary",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path ModelPreferences::default",
+        "use super::ModelPreferences"
       ]
     },
     {
@@ -12421,15 +12889,6 @@
     },
     {
       "from": "dim_app_server::settings",
-      "to": "dim_agent_runtime::state",
-      "references": [
-        "path StateCell",
-        "path StateCell::new",
-        "use dim_agent_runtime::StateCell"
-      ]
-    },
-    {
-      "from": "dim_app_server::settings",
       "to": "dim_app_server::settings::native",
       "references": [
         "mod native"
@@ -12586,11 +13045,16 @@
         "path SettingsError::Invalid",
         "path SettingsScope::User",
         "path SettingsService",
+        "path Wake",
+        "path Wake::new",
         "path crate::settings::Result",
+        "path settings_changes",
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsScope",
-        "use crate::settings::SettingsService"
+        "use crate::settings::SettingsService",
+        "use crate::settings::Wake",
+        "use crate::settings::settings_changes"
       ]
     },
     {
@@ -13188,7 +13652,9 @@
         "path EventKind::CollaborationRequest",
         "path EventKind::CollaborationResult",
         "path EventKind::ContextBudget",
+        "path EventKind::ContextCompact",
         "path EventKind::ContextCompaction",
+        "path EventKind::ContextCompactionStart",
         "path EventKind::ContextConfigured",
         "path EventKind::ContextPrepare",
         "path EventKind::ContextScope",
@@ -13615,18 +14081,6 @@
     {
       "module": "dim_agent_types::safe_integer",
       "path": "S::Ok"
-    },
-    {
-      "module": "dim_agent_types::v1",
-      "path": "Compaction::Completed"
-    },
-    {
-      "module": "dim_agent_types::v1",
-      "path": "Compaction::Failed"
-    },
-    {
-      "module": "dim_agent_types::v1",
-      "path": "Compaction::Skipped"
     },
     {
       "module": "dim_agent_types::v1",
