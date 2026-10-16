@@ -589,6 +589,7 @@ impl Daemon {
                 output_root: native.join("outputs"),
             },
         );
+        dim_app_server::permission_rules::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
         let server = serve(
             builder,

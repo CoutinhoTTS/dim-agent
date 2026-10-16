@@ -3,13 +3,14 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p24["Transport"]
-    p23["Rpc"]
-    p22["Connection"]
-    p21["Collaboration"]
-    p20["Agents"]
-    p19["CollaborationDirectory"]
-    p18["AgentDirectory"]
+    p25["Transport"]
+    p24["Rpc"]
+    p23["Connection"]
+    p22["Collaboration"]
+    p21["Agents"]
+    p20["CollaborationDirectory"]
+    p19["AgentDirectory"]
+    p18["PermissionRules"]
     p17["SkillsCatalog"]
     p16["HostPlatform"]
     p15["Mcp"]
@@ -26,22 +27,23 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
-  p22 -->|"dim_app_server::connection::ConnectionHub"| p24
+  p23 -->|"dim_app_server::connection::ConnectionHub"| p25
+  p3 -->|"dim_app_server::control::ServerControl"| p25
+  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p25
+  p21 -->|"dim_app_server::agents::AgentIndex"| p24
+  p22 -->|"dim_app_server::collaboration::Collaboration"| p24
+  p23 -->|"dim_app_server::connection::ConnectionHub"| p24
   p3 -->|"dim_app_server::control::ServerControl"| p24
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p24
-  p20 -->|"dim_app_server::agents::AgentIndex"| p23
-  p21 -->|"dim_app_server::collaboration::Collaboration"| p23
-  p22 -->|"dim_app_server::connection::ConnectionHub"| p23
+  p2 -->|"rutis_loader::loader::Loader"| p24
   p3 -->|"dim_app_server::control::ServerControl"| p23
-  p2 -->|"rutis_loader::loader::Loader"| p23
-  p3 -->|"dim_app_server::control::ServerControl"| p22
-  p20 -->|"dim_app_server::agents::AgentIndex"| p21
-  p19 -->|"dim_app_server::collaboration::CollaborationDirectory"| p21
-  p18 -->|"dim_app_server::agents::AgentDirectory"| p20
-  p13 -->|"dim_app_server::settings::SettingsService"| p20
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p20
-  p8 -->|"dim_app_server::storage::timeline::SessionStore"| p20
-  p2 -->|"rutis_loader::loader::Loader"| p20
+  p21 -->|"dim_app_server::agents::AgentIndex"| p22
+  p20 -->|"dim_app_server::collaboration::CollaborationDirectory"| p22
+  p19 -->|"dim_app_server::agents::AgentDirectory"| p21
+  p13 -->|"dim_app_server::settings::SettingsService"| p21
+  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p21
+  p8 -->|"dim_app_server::storage::timeline::SessionStore"| p21
+  p2 -->|"rutis_loader::loader::Loader"| p21
+  p13 -->|"dim_app_server::settings::SettingsService"| p18
   p16 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p17
   p13 -->|"dim_app_server::settings::SettingsService"| p17
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p16
@@ -51,6 +53,7 @@ flowchart LR
   p13 -->|"dim_app_server::settings::SettingsService"| p14
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p13
   p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p13
+  p6 -->|"dim_agent_capabilities::host::ModelHost"| p12
   p10 -->|"dim_app_server::codex_oauth::OpenAICodexOAuthService"| p12
   p11 -->|"dim_app_server::grok_oauth::GrokOAuthService"| p12
   p9 -->|"dim_app_server::managed_provider::ManagedProviders"| p12

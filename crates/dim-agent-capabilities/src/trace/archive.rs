@@ -383,7 +383,8 @@ fn summary(event: &EventKind) -> Value {
             (Some(&d.turn_id), Some(&d.request_id), None)
         }
         EventKind::ContextPrepare(d) => (Some(&d.turn_id), Some(&d.request_id), None),
-        EventKind::ContextCompaction(d) => (Some(&d.turn_id), Some(&d.request_id), None),
+        EventKind::ContextCompactionStart(d) => (d.turn_id.as_ref(), d.request_id.as_ref(), None),
+        EventKind::ContextCompaction(d) => (d.turn_id.as_ref(), d.request_id.as_ref(), None),
         EventKind::ContextBudget(d) => (Some(&d.turn_id), Some(&d.request_id), None),
         EventKind::ModelCall(d) => (Some(&d.turn_id), Some(&d.request_id), None),
         EventKind::ModelUsage(d) => (Some(&d.turn_id), Some(&d.request_id), None),

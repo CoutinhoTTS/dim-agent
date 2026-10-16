@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod methods;
 pub mod model_catalog;
 mod outbound;
+pub mod permission_rules;
 pub mod plugin_files;
 pub mod protocol;
 pub mod provider;
@@ -588,6 +589,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(owner(
             "skills",
             register_capability(&mut builtins, || skills_management::SkillsCatalogPlugin),
+        ));
+        rows.push(owner(
+            "permission",
+            register_capability(&mut builtins, || permission_rules::PermissionRulesPlugin),
         ));
     }
     agents::register(&mut builtins);

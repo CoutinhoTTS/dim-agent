@@ -30,10 +30,13 @@ pub struct HistoryEntry {
     pub tool_context: bool,
     /// Deterministic state immediately after this entry's source event.
     pub baseline: Arc<[ContextBaselineEntry]>,
+    /// Id of the Timeline event that placed this entry; compaction cuts are
+    /// event ids, so they do not depend on the entry id scheme.
+    pub source: String,
 }
 
 /// A stateless transformation of a fixed event prefix. Implementations must be
-/// deterministic and keep entry identifiers stable for compaction cursors.
+/// deterministic and keep each entry's `source` event.
 pub type RenderHistory = fn(&ContextHistory) -> Result<Vec<HistoryEntry>, String>;
 pub type BuildProjectionCheckpoint =
     fn(&ContextHistory, &str) -> Result<ProjectionCheckpoint, String>;
@@ -49,8 +52,13 @@ pub struct HistoryRenderer {
     /// Builders are trusted to produce replay-equivalent state. Integrity checks
     /// detect persisted corruption, not incorrect or malicious trusted producers.
     pub encode_checkpoint: EncodeProjectionCheckpoint,
-    pub decode_checkpoint: fn(&RecoverySnapshot) -> Option<ProjectionCheckpoint>,
+    /// Decodes a snapshot given its anchor event, which Timeline has matched
+    /// structurally; the interpreter decides whether the anchor carries the
+    /// state. `None` is a cache miss.
+    pub decode_checkpoint: DecodeProjectionCheckpoint,
 }
+pub type DecodeProjectionCheckpoint =
+    fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>;
 
 #[derive(Serialize, Deserialize)]
 struct CheckpointEnvelope {
@@ -81,12 +89,27 @@ fn encode_checkpoint(
     .map_err(|error| error.to_string())
 }
 
-fn decode_checkpoint(snapshot: &RecoverySnapshot) -> Option<ProjectionCheckpoint> {
+/// Accepts only state anchored at its own completed compaction, cut where
+/// the state says, from a preparation boundary before the anchor.
+fn decode_checkpoint(
+    snapshot: &RecoverySnapshot,
+    anchor: &AgentEvent,
+) -> Option<ProjectionCheckpoint> {
     let envelope: CheckpointEnvelope = serde_json::from_str(&snapshot.state).ok()?;
     if envelope.sha256 != checkpoint_digest(snapshot, &envelope.payload) {
         return None;
     }
-    serde_json::from_str(&envelope.payload).ok()
+    let checkpoint: ProjectionCheckpoint = serde_json::from_str(&envelope.payload).ok()?;
+    match &anchor.kind {
+        EventKind::ContextCompaction(data)
+            if data.through < snapshot.sequence
+                && matches!(&data.outcome, ContextCompactionResult::Completed { retain_from, .. }
+                    if *retain_from == checkpoint.state.retain_from) =>
+        {
+            Some(checkpoint)
+        }
+        _ => None,
+    }
 }
 
 impl Default for HistoryRenderer {
@@ -94,7 +117,7 @@ impl Default for HistoryRenderer {
         Self {
             render: project_context_history,
             checkpoint: projection_checkpoint,
-            checkpoint_interpreter: "dim/context-projection/v2",
+            checkpoint_interpreter: "dim/context-projection/v3",
             encode_checkpoint,
             decode_checkpoint,
         }
@@ -106,10 +129,10 @@ impl HistoryRenderer {
     pub fn snapshot(
         &self,
         context: &ContextHistory,
-        cursor: &str,
+        retain_from: &str,
         anchor: &AgentEvent,
     ) -> Result<RecoverySnapshot, String> {
-        let checkpoint = (self.checkpoint)(context, cursor)?;
+        let checkpoint = (self.checkpoint)(context, retain_from)?;
         let mut snapshot = RecoverySnapshot {
             sequence: anchor.sequence,
             event_id: anchor.id.clone(),
@@ -412,6 +435,9 @@ fn replay(
             }
             _ => {}
         }
+        for entry in &mut history[previous_length..] {
+            entry.source.clone_from(&event.id);
+        }
         origins.extend(std::iter::repeat_n(
             event_index,
             history.len() - previous_length,
@@ -421,8 +447,7 @@ fn replay(
         history,
         origins,
         state: ProjectionCheckpointState {
-            compacted_through: initial
-                .map_or_else(String::new, |state| state.compacted_through.clone()),
+            retain_from: initial.map_or_else(String::new, |state| state.retain_from.clone()),
             prompts: prompts.checkpoint(),
             delivered: delivered_state,
             inputs: {
@@ -463,35 +488,69 @@ pub(crate) fn context_compaction(context: &ContextHistory) -> Option<&ContextCom
         })
 }
 
+/// Position of the first entry a cut keeps: the first entry placed by
+/// `retain_from` or a later event of the fixed context. A cut before the
+/// replayed suffix keeps every entry when the resumed state records it.
+pub(crate) fn retained_entry(
+    context: &ContextHistory,
+    history: &[HistoryEntry],
+    retain_from: &str,
+) -> Result<usize, String> {
+    let Some(cut) = context
+        .events
+        .iter()
+        .position(|event| event.id == retain_from)
+    else {
+        return if initial_state(context).is_some_and(|state| state.retain_from == retain_from) {
+            Ok(0)
+        } else {
+            Err("Compaction cut is outside the fixed context history.".into())
+        };
+    };
+    let order: HashMap<&str, usize> = context
+        .events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| (event.id.as_str(), index))
+        .collect();
+    Ok(history
+        .iter()
+        .position(|entry| {
+            order
+                .get(entry.source.as_str())
+                .is_some_and(|index| *index >= cut)
+        })
+        .unwrap_or(history.len()))
+}
+
 pub fn project_context_history(context: &ContextHistory) -> Result<Vec<HistoryEntry>, String> {
     let mut history = replay(&context.events, initial_state(context))?.history;
     if let Some(ContextCompactionData {
-        outcome: ContextCompactionResult::Completed { cursor, .. },
+        outcome: ContextCompactionResult::Completed { retain_from, .. },
         ..
     }) = context_compaction(context)
     {
-        if let Some(index) = history.iter().position(|entry| &entry.id == cursor) {
-            history.drain(..=index);
-        } else if !initial_state(context).is_some_and(|state| state.compacted_through == *cursor) {
-            return Err("Compaction cursor is outside the fixed context history.".into());
-        }
+        let kept = retained_entry(context, &history, retain_from)?;
+        history.drain(..kept);
     }
     Ok(history)
 }
 
+/// The replay rule of every strategy: the stored replacement, the keyed
+/// baseline, then the entries the cut keeps.
 pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<Message> {
     let mut messages = Vec::new();
     if let Some(ContextCompactionData {
         outcome:
             ContextCompactionResult::Completed {
-                summary,
+                replacement,
                 context_baseline,
                 ..
             },
         ..
     }) = context_compaction(context)
     {
-        messages.push(summary_message(summary));
+        messages.extend(replacement.iter().cloned());
         messages.extend(context_baseline.iter().map(|entry| entry.message.clone()));
     }
     messages.extend(history.iter().map(|entry| entry.message.clone()));
@@ -512,17 +571,13 @@ pub fn context_configuration(context: &ContextHistory) -> Option<ContextConfigur
 
 pub fn projection_checkpoint(
     context: &ContextHistory,
-    cursor: &str,
+    retain_from: &str,
 ) -> Result<ProjectionCheckpoint, String> {
     let projection = replay(&context.events, initial_state(context))?;
-    let cut = projection
-        .history
-        .iter()
-        .position(|entry| entry.id == cursor)
-        .ok_or_else(|| "Compaction cursor is outside the request history.".to_owned())?;
+    let kept = retained_entry(context, &projection.history, retain_from)?;
     let resume = projection
         .origins
-        .get(cut + 1)
+        .get(kept)
         .copied()
         .unwrap_or_else(|| context.events.len().saturating_sub(1));
     let position = context
@@ -531,7 +586,7 @@ pub fn projection_checkpoint(
         .cloned()
         .ok_or_else(|| "Compaction checkpoint has no resume event.".to_owned())?;
     let mut state = replay(&context.events[..resume], initial_state(context))?.state;
-    state.compacted_through = cursor.to_owned();
+    state.retain_from = retain_from.to_owned();
     Ok(ProjectionCheckpoint {
         resume: position,
         state,
@@ -583,6 +638,7 @@ fn entry(
         message,
         tool_context,
         baseline,
+        source: String::new(),
     }
 }
 

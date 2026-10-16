@@ -41,7 +41,7 @@ CAS. Business owners define and validate their payloads: MCP types live in
 Settings owns source persistence, not approvals or business management methods.
 There is no `configuration.*` RPC namespace.
 
-Native v13 retains `settings_documents` with `user/mcp`, `user/skills` and `user/mcp-projects` keys,
+Native v13 retains `settings_documents` with `user/mcp`, `user/skills`, `user/mcp-projects` and `user/permission` keys,
 plain payload JSON (not `{kind, document}`), source-local versions and opaque
 `native:<source>:<version>` revision tokens. Import provenance is preserved on
 edits. Successful writes notify consumers after persistence; failed persistence
@@ -155,6 +155,21 @@ explicit `McpOwner::new(ctx, loader)` when acquiring connections. Agent hosts
 instead use `mcp::install` and the declared Session loader. Its typed port is a
 dependency of `McpPlugin`; connection leases never become a second lifecycle engine. No second
 loader, editable-layer target or SQLite dependency is required by this port.
+
+### Permission command rules
+
+With local execution, `permission.rules({})` returns `{revision, commandRules}` and
+`permission.set_rules({expectedRevision, commandRules})` replaces the whole list and returns the new
+`revision` (`permission_rules_conflict` for a stale revision, invalid params for a rule that is
+empty, contains a shell separator or has an unknown field). Each rule is
+`{command, match: "exact" | "prefix", decision: "allow" | "deny"}`, compared word by word. The
+list is the user source `permission` (`user/permission` in native storage, `permission.json` in a
+standalone home); there is no project source, so a workspace file grants nothing. Permission reads
+it on each `exec`/`execute` decision through the Session part that `permission_rules::install`
+adds to the product profile: a deny rule denies under every preset, an allow rule only answers an
+approval question, and an unreadable source denies command calls. Rules never enter the Timeline
+and paired devices cannot read or write them. See
+[permission command rules](../../docs/design/appserver/permission-command-rules.md).
 
 `--mock-model` selects the explicit deterministic test profile. It uses mock model/tool hosts. Product, configured and mock daemons identify themselves in `hello.daemonProfile`:
 

@@ -720,6 +720,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             output_root: native.join("outputs"),
         },
     );
+    dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     let server = serve(
         builder,
@@ -1305,7 +1306,7 @@ async fn model_progress_follows_a_reloaded_provider() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, PrepareContextHost},
+        host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
     };
     let cells = ProgressCells::default();
     let captured = cells.clone();
@@ -1317,6 +1318,7 @@ async fn model_progress_follows_a_reloaded_provider() {
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new)
         .session_plugin(move |scope| ModelHostOwner {
             scope: *scope,

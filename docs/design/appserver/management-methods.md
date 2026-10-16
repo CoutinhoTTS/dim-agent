@@ -21,7 +21,7 @@ Each process owner provides `ManagementMethods` under its namespace during
 Rpc does not depend on any owner ([methods contract §3.2](../contracts/session-boundary.md#32-management-method)).
 Assembly passes Rpc its profile's namespaces, each with the loader row of the
 owner that provides it (`account`, `account.codex`, `account.grok` and `provider`
-with a product home; `mcp` and `skills` with local execution). Adding an owner
+with a product home; `mcp`, `skills` and `permission` with local execution). Adding an owner
 adds its pair where its row is registered, and Rpc refuses to load when a pair
 names no row. On each call Rpc makes a keyed read of the namespace that owns the
 name and dispatches to its active provider; it reads that owner row's status
