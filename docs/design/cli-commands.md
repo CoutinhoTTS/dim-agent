@@ -7,6 +7,9 @@ client of the existing daemon. This document defines the CLI interface for
 the implementation; the [native CLI contract](../../crates/dim-cli/README.md)
 describes the current executable.
 
+The proposed [attachment input contract](cli-attachment-input.md) defines the idle draft editor,
+local image sources, paste handling and exec image arguments.
+
 ## Commands
 
 | Entry | Behavior |
