@@ -25,7 +25,8 @@ can prevent execution. Approval does not sandbox an admitted tool.
 
 [permission_flow.rs](../../../../crates/dim-agent-capabilities/tests/permission_flow.rs):
 `an_allowed_approval_is_rechecked_against_the_current_policy`,
-`a_response_that_finds_its_batch_stopped_ends_as_an_interrupt`;
+`a_response_that_finds_its_batch_stopped_ends_as_an_interrupt`,
+`a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call`;
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
 
 <!-- generated:plugin Approval — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
