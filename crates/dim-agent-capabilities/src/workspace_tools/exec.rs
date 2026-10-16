@@ -569,7 +569,7 @@ pub fn sanitize(text: &str) -> String {
 }
 
 /// The tail of `text` within `max` UTF-8 bytes, on a character boundary.
-fn tail_bytes(text: &str, max: usize) -> &str {
+pub fn tail_bytes(text: &str, max: usize) -> &str {
     if text.len() <= max {
         return text;
     }
@@ -694,14 +694,6 @@ impl Capture {
         }
         Ok(())
     }
-    fn capture_preview(&mut self, text: &str) {
-        self.preview.push_str(text);
-        if self.preview.len() > PREVIEW_BUFFER_HEADROOM_BYTES {
-            let keep = tail_bytes(&self.preview, PREVIEW_BUFFER_HEADROOM_BYTES);
-            let keep = keep.find('\n').map_or(keep, |index| &keep[index + 1..]);
-            self.preview = keep.to_owned();
-        }
-    }
     fn output_path(&self) -> Option<String> {
         self.file
             .as_ref()
@@ -709,18 +701,34 @@ impl Capture {
     }
 }
 
+/// Appends `text` to the bounded output tail that [`truncate_preview`] reads:
+/// past twice the preview budget, only the last part from a line start stays.
+pub fn capture_preview(preview: &mut String, text: &str) {
+    preview.push_str(text);
+    if preview.len() > PREVIEW_BUFFER_HEADROOM_BYTES {
+        let keep = tail_bytes(preview, PREVIEW_BUFFER_HEADROOM_BYTES);
+        let keep = keep.find('\n').map_or(keep, |index| &keep[index + 1..]);
+        *preview = keep.to_owned();
+    }
+}
+
+/// Where [`pump`] delivers the decoded text of a pipe, in read order.
+pub trait OutputSink: Send + Sync {
+    fn push(&self, text: &str) -> impl Future<Output = ()> + Send;
+}
+
 struct Output {
     capture: Mutex<Capture>,
     /// Cancelled when the capture failed; the command is then terminated.
     failed: CancellationToken,
 }
-impl Output {
+impl OutputSink for Output {
     async fn push(&self, text: &str) {
         if text.is_empty() {
             return;
         }
         let mut capture = self.capture.lock().await;
-        capture.capture_preview(text);
+        capture_preview(&mut capture.preview, text);
         if capture.failure.is_some() {
             return;
         }
@@ -731,9 +739,11 @@ impl Output {
     }
 }
 
-async fn pump(
+/// Reads one pipe through its own [`Decoder`] until EOF, a read error, or
+/// [`EXIT_STDIO_GRACE`] of reading after `stop` (the root exited) fires.
+pub async fn pump(
     mut pipe: impl tokio::io::AsyncRead + Unpin,
-    output: Arc<Output>,
+    output: Arc<impl OutputSink>,
     stop: CancellationToken,
 ) {
     let mut decoder = Decoder::default();
@@ -975,8 +985,9 @@ fn insert_exit(structured: &mut JsonObject, exit: Option<ExitStatus>) {
     }
 }
 
+/// The name of the signal that ended a process, as `exec` reports it.
 #[cfg(unix)]
-fn signal_name(status: ExitStatus) -> Option<String> {
+pub fn signal_name(status: ExitStatus) -> Option<String> {
     use std::os::unix::process::ExitStatusExt;
     let signal = status.signal()?;
     let name = match signal {
@@ -1000,7 +1011,7 @@ fn signal_name(status: ExitStatus) -> Option<String> {
     Some(name.into())
 }
 #[cfg(windows)]
-fn signal_name(_: ExitStatus) -> Option<String> {
+pub fn signal_name(_: ExitStatus) -> Option<String> {
     None
 }
 
