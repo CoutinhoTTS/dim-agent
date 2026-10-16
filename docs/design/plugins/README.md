@@ -15,7 +15,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:objective` and `goal:status` blocks, continuation | P2 |
 | [Pursuit](Pursuit.md) (deferred, alternative to Goal) | — | `session.pursuit.*` | pursuit facts `pursuit/*`, evaluator branches, continuation | Deferred |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2 |
-| [ContextCompaction](ContextCompaction.md) (supplements to Loop and ContextPreparation) | — | production `ContextModelHost`, `session.context.*` | `context/compact` command and compaction-only turn in Loop; K-turn cut and usage query in ContextPreparation | P2 |
+| [ContextCompaction](ContextCompaction.md) (supplements to Loop and ContextPreparation) | — | production `ContextModelHost`, `session.context.*` | `context/compact` command and compaction step in Loop; K-turn cut and usage query in ContextPreparation | P2 |
 | [Hooks](Hooks.md) | — | rules, Session-start hooks | before callbacks, post-tool and turn-end hooks | To be designed |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
