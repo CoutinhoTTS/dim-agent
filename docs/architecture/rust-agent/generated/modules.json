@@ -1451,6 +1451,15 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::permission_rules",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/permission_rules.rs",
+      "unexpandedMacros": [
+        "unreachable"
+      ]
+    },
+    {
       "id": "dim_app_server::plugin_files",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -2568,6 +2577,7 @@
       "to": "dim_agent_capabilities::permission",
       "references": [
         "mod permission",
+        "path permission::CommandRulesHost",
         "path permission::Permission"
       ]
     },
@@ -3755,7 +3765,11 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::permission",
       "references": [
+        "path CommandRulesHost",
+        "path NoCommandRules",
         "path PermissionPlugin::new",
+        "use crate::permission::CommandRulesHost",
+        "use crate::permission::NoCommandRules",
         "use crate::permission::PermissionPlugin"
       ]
     },
@@ -4837,6 +4851,17 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostFuture",
+        "use crate::host::HostError",
+        "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
@@ -4907,8 +4932,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path ApprovalCallData",
         "path EventKind::PermissionChanged",
         "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::EventKind"
       ]
     },
@@ -4916,11 +4943,21 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_types::permission",
       "references": [
+        "path COMMAND_SEPARATORS",
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRule",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
         "path PermissionChangedData",
         "path PermissionPolicy",
         "path PermissionPreset::FullAccess",
         "path PermissionPreset::ReadOnly",
         "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::COMMAND_SEPARATORS",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRule",
+        "use dim_agent_types::CommandRuleDecision",
         "use dim_agent_types::PermissionChangedData",
         "use dim_agent_types::PermissionPolicy",
         "use dim_agent_types::PermissionPreset"
@@ -9501,6 +9538,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::permission_rules",
+      "references": [
+        "mod permission_rules",
+        "path permission_rules::PermissionRulesPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::plugin_files",
       "references": [
         "mod plugin_files",
@@ -9762,6 +9807,14 @@
       "to": "dim_app_server::managed_provider",
       "references": [
         "path dim_app_server::managed_provider::ManagedPluginConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_app_server::permission_rules",
+      "references": [
+        "path permission_rules::install",
+        "use dim_app_server::permission_rules"
       ]
     },
     {
@@ -12059,6 +12112,119 @@
       "references": [
         "path Outbound",
         "use crate::protocol::Outbound"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError::Cancelled",
+        "path HostError::failed",
+        "path HostFuture",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Interruption::Report",
+        "path MethodDecl::new",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path CommandRulesHost",
+        "path ReadCommandRules",
+        "use dim_agent_capabilities::permission::CommandRulesHost",
+        "use dim_agent_capabilities::permission::ReadCommandRules"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path COMMAND_SEPARATORS",
+        "path CommandRule",
+        "use dim_agent_types::COMMAND_SEPARATORS",
+        "use dim_agent_types::CommandRule"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods::provide",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path Empty",
+        "use crate::protocol::Empty"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path BusinessDocument",
+        "path SettingsError",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
+        "path SettingsScope::User",
+        "path SettingsService",
+        "path crate::settings::Result",
+        "use crate::settings::BusinessDocument",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsScope",
+        "use crate::settings::SettingsService"
       ]
     },
     {
