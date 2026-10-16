@@ -78,30 +78,52 @@ impl Sessions {
 fn host_policy() -> Value {
     json!({"preset":"workspace-write","allowedTools":["confirm"],"disallowedTools":["blocked"]})
 }
-async fn serve_sessions(
-    database: Option<std::path::PathBuf>,
-) -> (RunningServer, Agent, Sessions, Client) {
+struct Served {
+    server: RunningServer,
+    agent: Agent,
+    sessions: Sessions,
+    client: Client,
+    /// Executions of the `confirm` tool, which asks for approval.
+    calls: Arc<AtomicUsize>,
+}
+/// Without Collaboration, whose Session parts reload with the Agents index,
+/// so a pending approval outlives an index reload.
+async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     let sessions = Sessions::default();
     let consumer = sessions.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
     let mut config = ServerConfig {
         database_path: database,
+        unix_path: Some(
+            std::path::PathBuf::from("/tmp")
+                .join(format!("dim-sessions-{}/server.sock", uuid::Uuid::new_v4())),
+        ),
         ..Default::default()
     };
     config.session_defaults.tools = vec!["confirm".into()];
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
-    let (server, agent) = launch_with(
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(
+        &mut builder,
         Arc::new(ConfirmTool {
-            calls: Arc::new(AtomicUsize::new(0)),
+            calls: calls.clone(),
             seen: Arc::new(Mutex::new(vec![])),
         }),
-        config,
-        move |builder| {
-            builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
-        },
-    )
-    .await;
+    );
+    builder.session_plugin(move |_| SessionsConsumer(consumer.clone()));
+    let server = serve(builder, config).await.unwrap();
+    let agent = server.agent().unwrap();
     let client = Client::new_version(&server, false, 3).await;
-    (server, agent, sessions, client)
+    Served {
+        server,
+        agent,
+        sessions,
+        client,
+        calls,
+    }
 }
 /// A client Session; creating it also gives the test its consumer part.
 async fn client_session(client: &mut Client, agent: &Agent, policy: Value) -> Session {
@@ -148,7 +170,13 @@ async fn assert_launched(client: &mut Client, agent: &Agent, reply: &Value, expe
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defaults() {
-    let (server, agent, sessions, mut client) = serve_sessions(None).await;
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(None).await;
     let cwd = std::env::temp_dir();
     // Created with full access, then narrowed: the bound is the dispatched
     // policy, not the creation-time config.
@@ -265,9 +293,12 @@ impl Drop for Store {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-async fn launched(sessions: &Sessions, agent: &Agent) -> Session {
+async fn launched(sessions: &Sessions, agent: &Agent, policy: Value) -> Session {
     let reply = sessions
-        .ok("launch", json!({"cwd":std::env::temp_dir()}))
+        .ok(
+            "launch",
+            json!({"cwd":std::env::temp_dir(),"policy":policy}),
+        )
         .await;
     agent
         .get_session(reply["sessionId"].as_str().unwrap())
@@ -281,9 +312,15 @@ fn input(session: &Session, submission: &str, content: Value) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs() {
     let store = Store::new();
-    let (server, agent, sessions, mut client) = serve_sessions(Some(store.database())).await;
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(Some(store.database())).await;
     client_session(&mut client, &agent, host_policy()).await;
-    let session = launched(&sessions, &agent).await;
+    let session = launched(&sessions, &agent, json!({})).await;
     let submission = format!("test:{}", uuid::Uuid::new_v4());
     let mut request = input(
         &session,
@@ -419,6 +456,174 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
         found.await.unwrap()["value"],
         json!({"status":"accepted","inputId":receipt["value"]["inputId"],"sequence":receipt["value"]["sequence"]})
     );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Waits until the branch holds an event of `key`.
+async fn event_written(session: &Session, key: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !session
+            .history("main", None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind.key() == key)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("event was written");
+}
+/// A `confirm` call waits for approval: workspace-write asks for it, and the
+/// host bound allows it unconditionally only where the request does too.
+async fn awaiting_approval(sessions: &Sessions, agent: &Agent) -> Session {
+    let session = launched(sessions, agent, json!({"preset":"workspace-write"})).await;
+    sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:confirm",
+                json!([{"type":"text","text":"tool:confirm {}"}]),
+            ),
+        )
+        .await;
+    event_written(&session, "approval/request").await;
+    session
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop() {
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        calls,
+    } = serve_sessions(None).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = launched(&sessions, &agent, json!({})).await;
+    let at = json!({"sessionId":session.id(),"branchId":"main"});
+    let receipt = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:hello",
+                json!([{"type":"text","text":"hello"}]),
+            ),
+        )
+        .await;
+    let cutoff = sessions.ok("idle", at.clone()).await["sequence"]
+        .as_u64()
+        .unwrap();
+    let history = session.local("main", ..=cutoff).await.unwrap();
+    let consumed = history
+        .iter()
+        .position(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == receipt["inputId"]))
+        .expect("the input was consumed by the cutoff");
+    assert!(
+        history[consumed..]
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnEnd(_))),
+        "its turn ended by the cutoff"
+    );
+    // An idle branch answers at once with the same cutoff.
+    assert_eq!(sessions.ok("idle", at.clone()).await["sequence"], cutoff);
+
+    let session = awaiting_approval(&sessions, &agent).await;
+    let at = json!({"sessionId":session.id(),"branchId":"main"});
+    let idle = tokio::spawn({
+        let sessions = sessions.clone();
+        let at = at.clone();
+        async move { sessions.call("idle", at).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !idle.is_finished(),
+        "a pending approval keeps the turn open"
+    );
+    let stopped = sessions.ok("stop", at.clone()).await["sequence"]
+        .as_u64()
+        .unwrap();
+    let idle = idle.await.unwrap();
+    assert_eq!(idle["ok"], true, "{idle}");
+    let cutoff = idle["value"]["sequence"].as_u64().unwrap();
+    assert!(cutoff >= stopped);
+    let history = session.local("main", ..=cutoff).await.unwrap();
+    let interrupt = history
+        .iter()
+        .position(|event| matches!(&event.kind, EventKind::StopInterrupt(data) if data.reason == "Stopped by automation"))
+        .expect("stop wrote its interrupt");
+    assert!(
+        history[interrupt..]
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the asked tool never ran");
+
+    for (method, request, code) in [
+        (
+            "idle",
+            json!({"sessionId":session.id(),"branchId":"missing"}),
+            "branch_missing",
+        ),
+        (
+            "stop",
+            json!({"sessionId":"missing","branchId":"main"}),
+            "session_closed",
+        ),
+        (
+            "idle",
+            json!({"sessionId":session.id(),"branchId":"main","timeoutMs":10}),
+            "rejected",
+        ),
+    ] {
+        assert_eq!(sessions.error(method, request).await, code);
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_ends_reloading_on_an_index_reload_and_session_closed_on_close() {
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(None).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    let at = json!({"sessionId":session.id(),"branchId":"main"});
+    let waiting = || {
+        let sessions = sessions.clone();
+        let at = at.clone();
+        tokio::spawn(async move { sessions.call("idle", at).await })
+    };
+
+    let applied = sessions.applied.load(Ordering::SeqCst);
+    let idle = waiting();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!idle.is_finished());
+    server.restart("Agents").await.unwrap();
+    let ended = idle.await.unwrap();
+    assert_eq!(ended["error"]["code"], "reloading", "{ended}");
+    assert_eq!(ended["error"]["retryable"], true);
+    // The consumer stayed loaded, and its next call reaches the new index.
+    assert_eq!(sessions.applied.load(Ordering::SeqCst), applied);
+    let idle = waiting();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!idle.is_finished(), "the approval is still pending");
+
+    // A close settles the turn; the wait must not report that as idle.
+    session.close().await.unwrap();
+    let ended = idle.await.unwrap();
+    assert_eq!(ended["error"]["code"], "session_closed", "{ended}");
+    assert_eq!(sessions.error("idle", at.clone()).await, "session_closed");
     server.shutdown();
     server.join().await.unwrap();
 }

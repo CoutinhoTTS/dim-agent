@@ -110,6 +110,16 @@ pub enum LookupReply {
     Unknown,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StopRequest {
+    pub session_id: String,
+    pub branch_id: String,
+    /// Default: "Stopped by automation".
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionsErrorCode {
@@ -177,6 +187,18 @@ async fn published(publication: &Publication, sequence: u64) -> Result<(), Sessi
         ));
     }
     Ok(())
+}
+
+/// A failed wait for a branch to settle (`stop`, `idle`): apart from a closed
+/// Session, an unknown branch or a reloading capability, it is the branch's
+/// dispatch failure.
+fn settlement(error: AgentError) -> SessionsError {
+    match error {
+        AgentError::Closed(_) | AgentError::UnknownBranch(_) | AgentError::Reloading(_) => {
+            error.into()
+        }
+        error => SessionsError::new(SessionsErrorCode::Failed, error.to_string()),
+    }
 }
 
 /// What a branch holds for one `submission_id`.
@@ -454,6 +476,56 @@ impl AgentIndex {
         })
         .await
     }
+
+    /// Interrupts the branch's turn and replies once it has settled, with
+    /// the dispatched sequence.
+    pub async fn stop(&self, request: StopRequest) -> Result<u64, SessionsError> {
+        self.until_unloaded(async {
+            let lease = self.acquire(&request.session_id).await?;
+            lease
+                .session
+                .stop(
+                    &request.branch_id,
+                    request
+                        .reason
+                        .unwrap_or_else(|| "Stopped by automation".into()),
+                )
+                .await
+                .map_err(settlement)
+        })
+        .await
+    }
+
+    /// Waits for the branch's first idle point after the call starts and
+    /// returns its dispatched sequence. A pending approval or question keeps
+    /// the turn open, so the wait lasts until it is answered or `stop` ends
+    /// the turn; there is no timeout.
+    pub async fn idle(&self, at: SessionRef) -> Result<u64, SessionsError> {
+        self.until_unloaded(async {
+            let lease = self.acquire(&at.session_id).await?;
+            let session = &lease.session;
+            let idle = tokio::select! {
+                idle = session.idle(&at.branch_id) => idle,
+                _ = session.closed() => Err(AgentError::Closed(session.id().into())),
+            };
+            if let Some(fault) = session.failure() {
+                return Err(SessionsError::new(
+                    SessionsErrorCode::Failed,
+                    fault.to_string(),
+                ));
+            }
+            // A close settles the turn, so the facade could report the
+            // close's cutoff as an idle point.
+            if session.is_closing() {
+                return Err(SessionsError::new(
+                    SessionsErrorCode::SessionClosed,
+                    format!("{} is closed", session.id()),
+                ));
+            }
+            idle.map_err(settlement)
+        })
+        .await
+    }
 }
 
 /// `sessions` by name for every language: each call decodes one request
@@ -462,7 +534,10 @@ impl AgentIndex {
 pub(crate) struct SessionsService(pub(crate) Ctx);
 impl HostDispatch for SessionsService {
     fn methods(&self) -> Option<serde_json::Value> {
-        Some(json!({"launch": "async", "input": "async", "lookup": "async"}))
+        Some(json!({
+            "launch": "async", "input": "async", "lookup": "async",
+            "stop": "async", "idle": "async",
+        }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
         // Looked up per call, so an index reload never reloads a caller.
@@ -510,6 +585,8 @@ async fn call(
         "launch" => reply(index.launch(request(args)?).await?),
         "input" => reply(index.input(request(args)?).await?),
         "lookup" => reply(index.lookup(request(args)?).await?),
+        "stop" => reply(json!({"sequence": index.stop(request(args)?).await?})),
+        "idle" => reply(json!({"sequence": index.idle(request(args)?).await?})),
         _ => Err(SessionsError::rejected(format!(
             "unknown sessions method {method}"
         ))),
