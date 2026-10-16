@@ -49,8 +49,13 @@ pub struct HistoryRenderer {
     /// Builders are trusted to produce replay-equivalent state. Integrity checks
     /// detect persisted corruption, not incorrect or malicious trusted producers.
     pub encode_checkpoint: EncodeProjectionCheckpoint,
-    pub decode_checkpoint: fn(&RecoverySnapshot) -> Option<ProjectionCheckpoint>,
+    /// Decodes a snapshot given its anchor event, which Timeline has matched
+    /// structurally; the interpreter decides whether the anchor carries the
+    /// state. `None` is a cache miss.
+    pub decode_checkpoint: DecodeProjectionCheckpoint,
 }
+pub type DecodeProjectionCheckpoint =
+    fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>;
 
 #[derive(Serialize, Deserialize)]
 struct CheckpointEnvelope {
@@ -81,12 +86,27 @@ fn encode_checkpoint(
     .map_err(|error| error.to_string())
 }
 
-fn decode_checkpoint(snapshot: &RecoverySnapshot) -> Option<ProjectionCheckpoint> {
+/// Accepts only state anchored at its own completed compaction, cut where
+/// the state says, from a preparation boundary before the anchor.
+fn decode_checkpoint(
+    snapshot: &RecoverySnapshot,
+    anchor: &AgentEvent,
+) -> Option<ProjectionCheckpoint> {
     let envelope: CheckpointEnvelope = serde_json::from_str(&snapshot.state).ok()?;
     if envelope.sha256 != checkpoint_digest(snapshot, &envelope.payload) {
         return None;
     }
-    serde_json::from_str(&envelope.payload).ok()
+    let checkpoint: ProjectionCheckpoint = serde_json::from_str(&envelope.payload).ok()?;
+    match &anchor.kind {
+        EventKind::ContextCompaction(data)
+            if data.through < snapshot.sequence
+                && matches!(&data.outcome, ContextCompactionResult::Completed { cursor, .. }
+                    if *cursor == checkpoint.state.compacted_through) =>
+        {
+            Some(checkpoint)
+        }
+        _ => None,
+    }
 }
 
 impl Default for HistoryRenderer {

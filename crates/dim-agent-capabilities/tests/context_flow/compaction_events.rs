@@ -20,8 +20,9 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
                         .map(|payload| format!("custom:{payload}"))
                         .map_err(|error| error.to_string())
                 };
-                renderer.decode_checkpoint =
-                    |snapshot| serde_json::from_str(snapshot.state.strip_prefix("custom:")?).ok();
+                renderer.decode_checkpoint = |snapshot, _| {
+                    serde_json::from_str(snapshot.state.strip_prefix("custom:")?).ok()
+                };
             }
             _ => unreachable!(),
         }

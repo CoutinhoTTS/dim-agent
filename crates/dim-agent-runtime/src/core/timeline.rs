@@ -4,8 +4,7 @@ use crate::{
     TimelineKey, TimelineStore,
 };
 use dim_agent_types::{
-    AgentEvent, ContextCompactionResult, EventDraft, EventKind, ProjectionCheckpoint,
-    RecoverySnapshot, TimelinePosition,
+    AgentEvent, EventDraft, ProjectionCheckpoint, RecoverySnapshot, TimelinePosition,
 };
 use rutis::{CordisError, Ctx, Disposer, Event, EventKey, InstanceId, SyncEvent, SyncNext};
 use serde::{Deserialize, Serialize};
@@ -484,7 +483,7 @@ impl Timeline {
         &self,
         through: u64,
         interpreter: &str,
-        decode: fn(&RecoverySnapshot) -> Option<ProjectionCheckpoint>,
+        decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>,
     ) -> Result<ContextHistory> {
         let through = self.through(Some(through))?;
         let segments: Vec<_> = self
@@ -516,7 +515,20 @@ impl Timeline {
             {
                 continue;
             }
-            let Some(checkpoint) = decode(&snapshot) else {
+            // The anchor is a fact, not copied cache metadata. Reading to the
+            // legal branch cut also supports an anchor inside an atomic batch.
+            // Only structure is checked here; whether the anchor can carry
+            // the state is the interpreter's decision.
+            let anchor = self
+                .records(branch, snapshot.sequence, *cut)
+                .await?
+                .into_iter()
+                .next();
+            let Some(anchor) = anchor else { continue };
+            if anchor.event.id != snapshot.event_id || anchor.event.sequence != snapshot.sequence {
+                continue;
+            }
+            let Some(checkpoint) = decode(&snapshot, &anchor.event) else {
                 continue;
             };
             let Some(resume_index) = segments[..=index]
@@ -527,25 +539,7 @@ impl Timeline {
             };
             if checkpoint.resume.sequence == 0
                 || checkpoint.resume.sequence > segments[resume_index].1
-            {
-                continue;
-            }
-            // The anchor is a fact, not copied cache metadata. Reading to the
-            // legal branch cut also supports an anchor inside an atomic batch.
-            let anchor = self
-                .records(branch, snapshot.sequence, *cut)
-                .await?
-                .into_iter()
-                .next();
-            let Some(anchor) = anchor else { continue };
-            let EventKind::ContextCompaction(data) = &anchor.event.kind else {
-                continue;
-            };
-            if anchor.event.id != snapshot.event_id
-                || data.through >= snapshot.sequence
-                || (resume_index == index && checkpoint.resume.sequence > data.through)
-                || !matches!(&data.outcome, ContextCompactionResult::Completed { cursor, .. }
-                    if *cursor == checkpoint.state.compacted_through)
+                || (resume_index == index && checkpoint.resume.sequence >= snapshot.sequence)
             {
                 continue;
             }

@@ -192,7 +192,7 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     let renderer = HistoryRenderer {
         render: external_history,
         checkpoint_interpreter: "custom/v1",
-        decode_checkpoint: |_| panic!("must not decode an incompatible interpreter"),
+        decode_checkpoint: |_, _| panic!("must not decode an incompatible interpreter"),
         ..HistoryRenderer::default()
     };
     let replay = renderer.context(&timeline, fact.sequence).await.unwrap();
@@ -216,7 +216,7 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
                 .map(|payload| format!("custom:{payload}"))
                 .map_err(|error| error.to_string())
         },
-        decode_checkpoint: |snapshot| {
+        decode_checkpoint: |snapshot, _| {
             assert_eq!(snapshot.interpreter, "custom/v1");
             serde_json::from_str(snapshot.state.strip_prefix("custom:")?).ok()
         },
@@ -255,7 +255,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
             &fact,
         )
         .unwrap();
-    assert_eq!((renderer.decode_checkpoint)(&saved), Some(checkpoint));
+    assert_eq!(
+        (renderer.decode_checkpoint)(&saved, &fact),
+        Some(checkpoint.clone())
+    );
     for field in [
         "sequence",
         "event_id",
@@ -284,8 +287,41 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
             _ => unreachable!(),
         }
         damaged.state = envelope.to_string();
-        assert!((renderer.decode_checkpoint)(&damaged).is_none(), "{field}");
+        assert!(
+            (renderer.decode_checkpoint)(&damaged, &fact).is_none(),
+            "{field}"
+        );
     }
+    // Anchor validity belongs to the owner (#130): the store keeps a snapshot
+    // anchored at any existing event, and the owner's decode ignores one whose
+    // anchor is not its completed compaction, or whose cut differs from the
+    // fact; the context then falls back to fact replay with the same result.
+    let at = fact.sequence;
+    let fallback = |snapshot: RecoverySnapshot| {
+        let (timeline, renderer, replay) = (&timeline, &renderer, &replay);
+        async move {
+            timeline.save_snapshot(snapshot).await.unwrap();
+            let context = renderer.context(timeline, at).await.unwrap();
+            assert!(context.checkpoint.is_none());
+            assert_eq!(context.events, replay.events);
+        }
+    };
+    fallback(
+        renderer
+            .snapshot(
+                &timeline.context(through).await.unwrap(),
+                &consumed.id,
+                &consumed,
+            )
+            .unwrap(),
+    )
+    .await;
+    let mut moved = checkpoint.clone();
+    moved.state.compacted_through = input.id.clone();
+    let mut mismatched = saved.clone();
+    mismatched.state = (renderer.encode_checkpoint)(&mismatched, &moved).unwrap();
+    assert!((renderer.decode_checkpoint)(&mismatched, &fact).is_none());
+    fallback(mismatched).await;
     timeline.close().await.unwrap();
 }
 
@@ -788,7 +824,7 @@ fn assert_checkpoints_match(context: &ContextHistory) {
     for (cut, entry) in whole.iter().enumerate() {
         let mut resumed = resume(context, &entry.id);
         let renderer = HistoryRenderer::default();
-        let anchor = resumed.events.last().unwrap();
+        let anchor = resumed.events.last().unwrap().clone();
         let mut snapshot = RecoverySnapshot {
             sequence: anchor.sequence,
             event_id: anchor.id.clone(),
@@ -797,7 +833,7 @@ fn assert_checkpoints_match(context: &ContextHistory) {
         };
         snapshot.state =
             (renderer.encode_checkpoint)(&snapshot, resumed.checkpoint.as_ref().unwrap()).unwrap();
-        resumed.checkpoint = Some((renderer.decode_checkpoint)(&snapshot).unwrap());
+        resumed.checkpoint = Some((renderer.decode_checkpoint)(&snapshot, &anchor).unwrap());
         assert_eq!(
             project_context_history(&resumed).unwrap(),
             whole[cut + 1..],

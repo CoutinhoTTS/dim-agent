@@ -672,7 +672,7 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
                 let snapshot = snapshot.unwrap();
                 assert_eq!(snapshot.event_id, compaction.id);
                 let renderer = HistoryRenderer::default();
-                let checkpoint = (renderer.decode_checkpoint)(&snapshot).unwrap();
+                let checkpoint = (renderer.decode_checkpoint)(&snapshot, compaction).unwrap();
                 assert!(checkpoint.resume.sequence > 1);
                 let timeline = Timeline::restore(
                     Ctx::root().unwrap(),

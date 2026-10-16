@@ -1611,7 +1611,7 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             .unwrap()
             .is_none()
     );
-    for (sequence, event_id) in [(1, "event-1"), (3, "wrong"), (4, "event-4")] {
+    for (sequence, event_id) in [(3, "wrong"), (4, "event-4")] {
         assert!(
             store
                 .save_snapshot(
@@ -1657,6 +1657,25 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
             .await
             .unwrap()
             .is_none()
+    );
+    // Anchoring is structural (#130): any existing event with its id and
+    // sequence anchors a snapshot; its owner decides whether it is usable.
+    let input_anchored = RecoverySnapshot {
+        sequence: 1,
+        event_id: "event-1".into(),
+        interpreter: INTERPRETER.into(),
+        state: "opaque".into(),
+    };
+    store
+        .save_snapshot(&key("session", "main"), input_anchored.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_snapshot(&key("session", "main"), 2, INTERPRETER)
+            .await
+            .unwrap(),
+        Some(input_anchored)
     );
     store.close().await.unwrap();
     db.close().await.unwrap();
@@ -1810,11 +1829,9 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
     connection
         .pragma_update(None, "foreign_keys", false)
         .unwrap();
-    for (branch, sequence, event_id) in [
-        ("main", 3, "wrong"),
-        ("main", 1, "event-1"),
-        ("orphan", 99, "missing"),
-    ] {
+    // An anchor of another kind is structurally valid (#130) and is left to
+    // the owner's decode, so only identity mismatches are injected here.
+    for (branch, sequence, event_id) in [("main", 3, "wrong"), ("orphan", 99, "missing")] {
         connection
             .execute(
                 "INSERT INTO timeline_snapshots VALUES ('session',?1,?2,?3,?4,'not json')",
@@ -2655,7 +2672,22 @@ async fn native_continuation_survives_sqlite_checkpoint_request_and_child_restor
             .await
             .unwrap()
             .unwrap();
-        let checkpoint = (HistoryRenderer::default().decode_checkpoint)(&saved).unwrap();
+        let timeline = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            key("native", "main"),
+            vec![],
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let anchor = timeline
+            .local(saved.sequence..=saved.sequence)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        timeline.close().await.unwrap();
+        let checkpoint = (HistoryRenderer::default().decode_checkpoint)(&saved, &anchor).unwrap();
         assert_eq!(checkpoint.state.output, content);
         store.close().await.unwrap();
         db.close().await.unwrap();
