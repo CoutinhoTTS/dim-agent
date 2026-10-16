@@ -465,7 +465,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | Extensions | `/skills`, `/reload-skills`, Skill sources | Existing: SkillsCatalog, Skills; installation by PluginManager |
 | Extensions | `plan` Skill | Not planned |
 | Extensions | `AGENTS.md` | Existing: PromptSources |
-| Extensions | `/mcp`, MCP connections | Existing: Mcp, Settings; Extension: HTTP/SSE OAuth |
+| Extensions | `/mcp`, MCP connections | Existing: Mcp, Settings; Extension: HTTP/SSE OAuth ([MCP OAuth](appserver/mcp-oauth.md)) |
 | Extensions | `/workflow`, `/workflow:save` | New: Workflow |
 | Extensions | `/external-agents` | New: ExternalAgent, delegated through Collaboration |
 | Extensions | Parallel sub-agents | Existing: Collaboration; Extension: Provider model selection |
@@ -521,7 +521,7 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | `pluginFiles` (`PluginFilesPlugin`) | Supplement | Binary read and write and a format version ([trusted plugin storage](../../crates/dim-app-server/README.md#trusted-plugin-storage)); code location unchanged | Scheduler, Workflow, ExternalAgent, Modality, RemoteGateway, PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth plugins | Change | Provide their existing management methods as `managementMethods` (wire-compatible); Mcp's `mcp.approve`/`mcp.revoke` are removed, servers run when enabled, and project entries start disabled until the user's local configuration enables them (§6.4 Approval scope) | Rpc migration |
 | ManagedProviders | Supplement | Plan usage query | `/usage` |
-| Mcp | Supplement | HTTP/SSE OAuth; receives package MCP configuration from PluginManager through its typed operations (#36) | MCP; PluginManager |
+| Mcp | Supplement | HTTP/SSE OAuth ([MCP OAuth](appserver/mcp-oauth.md)); receives package MCP configuration from PluginManager through its typed operations (#36) | MCP; PluginManager |
 | SkillsCatalog | Supplement | Receives package Skill roots from PluginManager through its typed operations (#36) | PluginManager |
 | Trace | Supplement | Model request snapshot export | Snapshot export |
 
