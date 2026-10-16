@@ -213,6 +213,7 @@ impl Collaboration {
         if !config.tools.iter().any(|tool| tool == AGENT_TOOL) {
             config.tools.push(AGENT_TOOL.into());
         }
+        // Clients of the leader's protocol view and address its members.
         let version = self
             .index
             .version_of(leader_id)
@@ -231,11 +232,6 @@ impl Collaboration {
                 return Err(member_create_failed(error.to_string()));
             }
         };
-        // Clients of the leader's protocol view and address its members.
-        if let Some(version) = self.index.version_of(leader_id) {
-            self.index
-                .insert_version(session.id(), &host.agent_id, version);
-        }
         self.directory.relations.lock().unwrap().insert(
             session.id().to_owned(),
             Relation {

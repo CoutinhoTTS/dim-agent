@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::RangeInclusive,
-    path::{Component, Path},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
@@ -447,25 +446,20 @@ impl SessionStore {
     /// Every database in the directory shares `command-output/`, so the
     /// directory is removed only while this database has rows of the id
     /// (§4): a directory of an id without rows here belongs to another
-    /// database, or to none.
-    pub async fn delete_session(&self, id: &str) -> Result<()> {
-        // The id names a directory below the output root; only a single
-        // path component can be a Session's.
-        if !matches!(Path::new(id).components().collect::<Vec<_>>()[..],
-            [Component::Normal(name)] if name == id)
-        {
-            return Err(AgentError::InvalidInput(format!("invalid Session id {id}")));
-        }
+    /// database, or to none. `id` is one path component, as Agents checked
+    /// (D3). Returns whether this database had rows of the id.
+    pub async fn delete_session(&self, id: &str) -> Result<bool> {
         // Rows outlive their directory: once a commit removed the rows, the
         // directory was already durably gone, so a retry needs no removal.
-        if self.has_records(id).await? {
+        let stored = self.has_records(id).await?;
+        if stored {
             self.files.remove_command_output(id).await?;
         }
         self.timeline.rollback_session(id).await?;
         // Also on a retry that released nothing: an earlier attempt may have
         // committed and stopped before its sweep.
         self.timeline.sweep_files.notify_one();
-        Ok(())
+        Ok(stored)
     }
     /// The prepare step of `session.fork` ([S5c §6.3](../../../../docs/design/appserver/session-deletion-and-fork.md#63-what-a-fork-copies)),
     /// after Agents checked the cut: in one transaction `fork` gets the

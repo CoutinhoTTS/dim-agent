@@ -3,6 +3,7 @@
 use super::*;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 /// Tables that hold rows of a Session, in the order a delete clears them.
 const SESSION_TABLES: [&str; 7] = [
@@ -217,12 +218,21 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
             .await["error"]["code"],
         -32602
     );
-    assert_eq!(
-        other
-            .rpc("session.delete", json!({"sessionId":"a/b"}))
-            .await["error"]["data"]["appError"],
-        "session_invalid_input"
-    );
+    // An id that is not one path component names no Session's output.
+    std::fs::create_dir_all(store.output(&kept).join("inner")).unwrap();
+    for id in [
+        format!("{kept}/inner"),
+        format!("{kept}/."),
+        "..".into(),
+        String::new(),
+    ] {
+        assert_eq!(
+            other.rpc("session.delete", json!({"sessionId":id})).await["error"]["data"]["appError"],
+            "session_invalid_input",
+            "{id}"
+        );
+    }
+    assert!(exists(&store.output(&kept).join("inner")));
     let mut v2 = Client::new_version(&server, false, 2).await;
     assert_eq!(
         v2.rpc("session.delete", json!({"sessionId":kept})).await["error"]["data"]["appError"],
@@ -445,6 +455,116 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
     assert!(store.rows(&lead).is_empty(), "{:?}", store.rows(&lead));
     assert!(!exists(&store.output(&lead)));
     assert!(!store.rows(&member).is_empty(), "a delete does not cascade");
+    drop((client, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Holds the next Session build in its apply once armed: the Session's rows
+/// are committed and listed while its runtime entry is still building.
+#[derive(Clone, Default)]
+struct HeldBuild {
+    armed: Arc<AtomicBool>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+impl TypedPlugin for HeldBuild {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "HeldBuild"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        (): (),
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for HeldBuild {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+/// §7: a creation holds the new id's admission gate until the Session is
+/// published. A delete of a Session still building, its rows committed and
+/// listed, waits for the build and closes what it published, for a
+/// `session.create` and a `session.fork`; it never leaves a loaded Session
+/// without rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_waits_for_a_building_session() {
+    let store = Store::new();
+    let held = HeldBuild::default();
+    let plugin = held.clone();
+    let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
+        builder.session_plugin(move |_| plugin.clone());
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let source = session(&mut client).await;
+    turn(&mut client, &source, "source").await;
+    let at = agent
+        .get_session(&source)
+        .unwrap()
+        .sequence("main")
+        .unwrap();
+    for (method, params) in [
+        ("session.create", create(json!(["wait"]))),
+        ("session.fork", json!({"sessionId":source,"at":at})),
+    ] {
+        held.armed.store(true, Ordering::SeqCst);
+        let mut creator = Client::new_version(&server, false, 3).await;
+        let request = creator.send(method, params).await;
+        held.entered.notified().await;
+        let list = client.rpc("session.list", json!({})).await;
+        let building = list["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|info| info["sessionId"].as_str())
+            .find(|id| *id != source)
+            .unwrap_or_else(|| panic!("{method}: the building Session is listed: {list}"))
+            .to_owned();
+        assert!(agent.get_session(&building).is_none(), "still building");
+
+        let mut deleter = Client::new_version(&server, false, 3).await;
+        let delete = deleter
+            .send("session.delete", json!({"sessionId":building}))
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), deleter.response(delete))
+                .await
+                .is_err(),
+            "{method}: the delete waits for the build"
+        );
+        held.release.notify_one();
+        let created = creator.response(request).await;
+        assert_eq!(
+            created["result"]["sessionId"],
+            building.as_str(),
+            "{created}"
+        );
+        assert_eq!(deleter.response(delete).await["result"], json!({}));
+        assert!(agent.get_session(&building).is_none(), "{method}");
+        assert!(
+            store.rows(&building).is_empty(),
+            "{:?}",
+            store.rows(&building)
+        );
+        assert_eq!(
+            client
+                .rpc("session.attach", json!({"sessionId":building}))
+                .await["error"]["data"]["appError"],
+            "session_closed",
+            "{method}"
+        );
+    }
+    assert!(!store.rows(&source).is_empty());
     drop((client, agent));
     server.shutdown();
     server.join().await.unwrap();

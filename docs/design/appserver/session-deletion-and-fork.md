@@ -97,9 +97,10 @@ are Rust methods over the native store, not services: only Agents calls them.
   |<---- {} ----|                              |                     |                          |
 ```
 
-1. **Admission.** Agents takes S's admission gate, the `SessionSlot` gate that `acquire` holds while it restores, so
-   no request, subscription or fork can load S while the delete runs. A request that already holds a use of S keeps
-   it, and the close in step 2 ends its work.
+1. **Admission.** Agents checks the id (D3) and takes S's admission gate, the `SessionSlot` gate that `acquire` holds
+   while it restores and a creation holds until the Session it builds is published (§7), so no request,
+   subscription or fork can load S while the delete runs, and a delete of a Session still building waits for it. A
+   request that already holds a use of S keeps it, and the close in step 2 ends its work.
 2. **Close.** If S is loaded, Agents closes it as `session.close` does: a business close, not an unload. Its
    capabilities settle their accepted work, write their terminal facts and release processes, FileStorage leases and
    member requests, and the delete waits for the trace archive as `session.close` does. A close that reports cleanup
@@ -469,6 +470,7 @@ delete against loading.
 | The delete's close during the fork's cut check | The check fails `session_closed` |
 | Put against delete or fork | Session files §6 |
 | Two deletes | The second waits for the gate, then finds no rows: `{}` |
+| Delete of a Session still building: a `session.create`, a member's creation or a fork whose rows are committed and listed | The creation holds the new id's gate from before its rows commit until the Session is published and its protocol version recorded (D6). The delete waits, then closes the published Session and removes its rows. A creation that fails rolls its rows back, and the delete finds nothing |
 | Delete against attach, submit or a Session method | They wait for the gate, then fail `session_closed`; requests that already hold a use end with the close |
 | Delete against the Session's own appends | The close settles them; the row transaction follows every queued append on the Timeline writer |
 | Fork against appends to the source | Rows through `at` never change, and the fork copies no row after them: child directories come without events |
@@ -612,6 +614,9 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 10. A delete that fails after it closed a loaded leader, because its command output cannot be removed, replies
     -32603 and keeps the leader's rows; the leader is neither listed nor loaded again in this process, and its member
     stays a Session. After a restart the leader loads, and a retry deletes it (D5).
+11. A delete of a Session still building, a `session.create` and a `session.fork` held in a capability's apply after
+    their rows commit and are listed, waits for the build, then replies `{}`; no row and no loaded Session of the id
+    remain (D6). An id that is not one path component is refused and removes nothing (D3).
 
 Tests: 1 and 2 are `delete_closes_a_running_session_and_removes_what_it_stored` and
 `unloaded_and_damaged_sessions_are_deleted_by_id` in
@@ -628,7 +633,8 @@ the store, including content that only a before trace references. 9 is
 [files/tests.rs](../../../crates/dim-app-server/src/storage/files/tests.rs), which stops a delete between its output
 removal and its commit, together with the Session without output in `unloaded_and_damaged_sessions_are_deleted_by_id`.
 `a_delete_leaves_another_databases_command_output` in deletion.rs checks §4's shared directory with two daemons, and
-`a_failed_delete_leaves_the_session_closed_until_a_retry` there is 10.
+`a_failed_delete_leaves_the_session_closed_until_a_retry` there is 10, and `a_delete_waits_for_a_building_session` is
+11, with the refused ids in `delete_closes_a_running_session_and_removes_what_it_stored`.
 
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and
 `cargo test --workspace --locked`. No Capability, assembly or crate dependency changes, so `xtask` is not needed
@@ -643,9 +649,10 @@ S5c's own owners.
 | --- | --- | --- |
 | D1 | The rest-point check is `rest_point` in Agents, a read-only fold over the public facts of Loop, InputQueue and BackgroundExec on the prefix Agents already reads for `validate_context_boundary`, instead of a check next to `validate_context_boundary` in the capabilities crate. Its input rule follows Loop's: a Queue or Steer input applied before the last `stop/interrupt` and not consumed is allowed, because a reload does not run it (it joins the next request, as an Append input does); an input InputQueue deleted on a withdrawal (`input/deleted`, S1) is never applied and does not count; any other input not yet applied is refused. A task's wake is required when the task ended outside a branch close of its own generation, as the live wake is posted | Every fact it needs is a public event, so it needs no API from those capabilities and no change to them. Requiring every such input to be consumed would refuse the cut right after a stopped turn, where nothing would run |
 | D2 | `session.fork` needs the native store. A daemon without one (the mock profile without `--database`) does not list it in `hello.features` and answers `unknown_method` ("Method requires native storage"). `session.delete` is listed with `session.create` there too; without a store it closes the Session and forgets it | A fork copies stored rows; in-memory Timelines have no SessionStore to copy from |
-| D3 | `session.delete` refuses a `sessionId` that is not a single path component with `session_invalid_input`, before anything is closed or removed | The id names `command-output/<id>`. Session ids are UUIDs; an id such as `<S>/.` would otherwise remove S's command output while deleting no row |
+| D3 | `session.delete` refuses a `sessionId` that is not a single path component with `session_invalid_input`. Agents checks it before it takes any admission state, and a delete that found nothing loaded or stored under the id keeps no slot for it; `session.close` of an id Agents does not know keeps none either | The id names `command-output/<id>`. Session ids are UUIDs; an id such as `<S>/.` would otherwise remove S's command output while deleting no row. Without the last two rules, deleting or closing arbitrary absent ids would add a slot each, without bound |
 | D4 | The fork transaction does not check the cut again: it copies `main`'s rows through `at`, and the runtime validates the fork's rows when it builds it. A copy that fails validation rolls back like any failed creation | Agents has checked the cut on the source (published head, batch end, context boundary, rest point), and rows through the cut never change, so a second check inside the transaction would repeat the validation every build already runs |
 | D5 | A delete that fails after its close leaves S closed in this process, as `session.close` does, instead of releasing S's slot so that S loads on its next use (step 6, §3.5) | The close is a business close: S's capabilities settled its work and Collaboration ended the relations that name S, as it does for every closed Session. Loading S again would run a leader that cannot reach its members and, after #127, stops none of them on reload ([#97 review](https://github.com/arcships/dim/pull/97)). With a closed slot the failure leaves the state `session.close` already produces, which every owner handles; telling a delete's close apart from other closes would add delete state in Agents and a notice for one failure path. A retry needs no load, and a restart loads S as it loads any closed Session |
+| D6 | A prepared creation (`session.create`, a member's creation, `session.fork`) holds the new id's admission gate from before its prepare step commits the rows until the Session is published and its protocol version recorded (`AgentIndex::admit`); a failed creation keeps no slot | A Session's rows are listed from their commit, while the runtime still builds it. A delete that skipped the building Session could commit after the build read its branches, and the build would publish a loaded Session without rows, whose appends violate the foreign keys; a fork would also record the deleted id's protocol version again. A creation is a load, so it takes the gate a restore takes, and the delete orders after it ([#97 review](https://github.com/arcships/dim/pull/97)) |
 
 ## Appendix A. Rust binding
 
@@ -653,8 +660,16 @@ In dim-app-server:
 
 ```rust
 impl AgentIndex {
-    /// `session.delete`: gate, close if loaded, `SessionStore::delete_session`, forget (§3.2).
+    /// `session.delete`: id check, gate, close if loaded, `SessionStore::delete_session`, forget (§3.2).
     pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()>;
+    /// A prepared creation under the new id's admission gate until it is published (§7, D6).
+    pub(crate) async fn admit(
+        &self,
+        id: &str,
+        agent_id: &str,
+        version: u32,
+        creation: impl Future<Output = dim_agent_runtime::Result<Session>>,
+    ) -> dim_agent_runtime::Result<Session>;
     /// `session.fork`: acquire the source, check the cut, prepared creation (§6.5).
     pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session>;
 }
@@ -666,8 +681,8 @@ impl SessionStore {
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self;
     /// Removes `command-output/<id>` (synced) while this database has rows of
     /// the id, then every row in one transaction; schedules the Session-file
-    /// sweep.
-    pub async fn delete_session(&self, id: &str) -> Result<()>;
+    /// sweep. Returns whether this database had rows of the id.
+    pub async fn delete_session(&self, id: &str) -> Result<bool>;
     /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;
 }

@@ -79,7 +79,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
   |<---- {} ----|                              |                     |                          |
 ```
 
-1. **准入。** Agents 取得 S 的准入门，即 `acquire` 恢复 Session 时持有的 `SessionSlot` 门，删除进行期间没有请求、订阅或分叉能加载 S。已经持有 S 使用权的请求继续持有，由第 2 步的关闭结束其工作。
+1. **准入。** Agents 检查 id（D3），并取得 S 的准入门，即 `acquire` 恢复 Session 时持有、创建在其构建的 Session 发布之前一直持有的 `SessionSlot` 门（§7）。删除进行期间没有请求、订阅或分叉能加载 S，删除仍在构建的 Session 时会等构建结束。已经持有 S 使用权的请求继续持有，由第 2 步的关闭结束其工作。
 2. **关闭。** 若 S 已加载，Agents 像 `session.close` 那样关闭它：业务关闭，不是卸载。各能力结算已接受的工作，写出终态事实，释放进程、FileStorage 租约和成员请求；删除也像 `session.close` 那样等待 trace 归档结束。关闭报告清理错误时记日志并继续删除：未能写出的事实会随其余部分一起删除。从关闭起 S 的槽位即关闭：无论行最终是否删除，S 在本进程内都不再加载（第 6 步）。
 3. **命令输出。** SessionStore 通过 S 的资源节点上的 FileStorage（与 S5a 一样每次调用时查找）移除 `<数据库目录>/command-output/<S>/`，WorkspaceTools 在这里保存 exec 输出和过大的 `read` 结果（[read.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs) 的 `offload`）。目录不存在视为已移除。移除必须在第 4 步之前落盘（§4），因此 FileStorage 的 `remove` 要同步被移除条目的父目录（§14）。失败时删除在改动任何行之前结束（§3.5）。只有本数据库有 S 的行时，SessionStore 才移除这个目录：`command-output/` 由同一目录下的所有数据库共用，本库没有行的 id，其目录可能属于另一个数据库的 Session（§4）。
 4. **行。** 一个 `IMMEDIATE` 事务删除 S 的全部行：`session_file_owners`、`timeline_snapshots`、`timeline_events`、`timeline_branches`、`timeline_content`、`session_owners` 和 `agent_sessions`，因外键按此顺序，另加 S5b 的标题元数据（§14）。这就是如今创建回滚执行的操作（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的 `rollback_creation`），S5a 为它加上所有者行；删除与回滚共用它。它像回滚一样在 Timeline 写线程上执行，因此排在已为 S 排队的所有追加之后，并清除 S 记下的写入失败。
@@ -340,6 +340,7 @@ S5c 中被否决：在 S 的分叉都删除之前保留 S 的命令输出。删�
 | 删除的关闭发生在分叉检查切点期间 | 检查失败于 `session_closed` |
 | 写入与删除或分叉 | Session 文件 §6 |
 | 两次删除 | 第二次等准入门，然后发现没有行：`{}` |
+| 删除仍在构建的 Session：行已提交并已列出的 `session.create`、成员创建或分叉 | 创建从其行提交之前起持有新 id 的准入门，直到 Session 发布、协议版本记下为止（D6）。删除等待，然后关闭已发布的 Session 并删除其行。创建失败时回滚它的行，删除什么也找不到 |
 | 删除与 attach、submit 或 Session 方法 | 它们等准入门，然后失败于 `session_closed`；已持有使用权的请求随关闭结束 |
 | 删除与该 Session 自己的追加 | 关闭结算它们；行事务在 Timeline 写线程上排在所有已排队的追加之后 |
 | 分叉与对源的追加 | `at` 及之前的行不变，分叉也不复制其后的任何行：子分支目录不带事件 |
@@ -445,8 +446,9 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 8. 分叉后删除源：F 能加载并读取它的 Session 文件；删除 F 后文件被移除。对同一源的删除与分叉竞争：要么 F 带着文件存在，要么分叉失败于 `session_closed`；绝不会出现没有文件的分叉。
 9. 在一次性存储上：命令输出目录已不在但行还在的 Session 能加载，随后删除能完成；删除提交后留下的无所有者文件行在下一代的第一次写入时被清扫。
 10. 关闭了一个已加载 leader 之后、因其命令输出无法移除而失败的删除，回复 -32603，leader 的行都在；本进程内不再列出、不再加载 leader，它的成员仍是一个 Session。重启后 leader 照常加载，重试即可删除（D5）。
+11. 删除仍在构建的 Session（一次 `session.create` 和一次 `session.fork`，在行提交并被列出之后停在某个能力的 apply 中）时等构建结束，然后回复 `{}`；该 id 既没有行，也没有已加载的 Session（D6）。不是单一路径分量的 id 被拒绝，什么都不移除（D3）。
 
-测试：第 1、2 条是 [deletion.rs](../../../../crates/dim-app-server/tests/transport_flow/deletion.rs) 中的 `delete_closes_a_running_session_and_removes_what_it_stored` 和 `unloaded_and_damaged_sessions_are_deleted_by_id`。第 3 到 8 条在 [fork.rs](../../../../crates/dim-app-server/tests/transport_flow/fork.rs) 中：`a_fork_copies_main_through_a_rest_point_and_starts_nothing`（第 3、4 条和第 5 条的 `interactive`），`a_fork_waits_for_background_work_and_keeps_preset_and_model`（第 4 条的后台任务、第 5 条的预设和模型、第 6 条的后台任务与批次切点，使用真实的 BackgroundExec），`a_fork_is_refused_unless_the_cut_is_a_rest_point`（第 6 条），`a_fork_of_a_leader_does_not_stop_the_source_member`（第 7 条），`a_fork_shares_session_files_and_outlives_its_source`（第 8 条）。[storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_fork_copies_main_through_the_cut_with_its_content_and_snapshots` 在存储层检查第 3 条的内容行和快照，包括只被 before 记录引用的内容。第 9 条是 [files/tests.rs](../../../../crates/dim-app-server/src/storage/files/tests.rs) 中的 `an_interrupted_delete_converges_on_retry_and_the_next_sweep`，它让删除停在移除输出与提交之间，另加 `unloaded_and_damaged_sessions_are_deleted_by_id` 中没有输出目录的 Session。deletion.rs 中的 `a_delete_leaves_another_databases_command_output` 用两个守护进程检查 §4 的共用目录，其中的 `a_failed_delete_leaves_the_session_closed_until_a_retry` 是第 10 条。
+测试：第 1、2 条是 [deletion.rs](../../../../crates/dim-app-server/tests/transport_flow/deletion.rs) 中的 `delete_closes_a_running_session_and_removes_what_it_stored` 和 `unloaded_and_damaged_sessions_are_deleted_by_id`。第 3 到 8 条在 [fork.rs](../../../../crates/dim-app-server/tests/transport_flow/fork.rs) 中：`a_fork_copies_main_through_a_rest_point_and_starts_nothing`（第 3、4 条和第 5 条的 `interactive`），`a_fork_waits_for_background_work_and_keeps_preset_and_model`（第 4 条的后台任务、第 5 条的预设和模型、第 6 条的后台任务与批次切点，使用真实的 BackgroundExec），`a_fork_is_refused_unless_the_cut_is_a_rest_point`（第 6 条），`a_fork_of_a_leader_does_not_stop_the_source_member`（第 7 条），`a_fork_shares_session_files_and_outlives_its_source`（第 8 条）。[storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_fork_copies_main_through_the_cut_with_its_content_and_snapshots` 在存储层检查第 3 条的内容行和快照，包括只被 before 记录引用的内容。第 9 条是 [files/tests.rs](../../../../crates/dim-app-server/src/storage/files/tests.rs) 中的 `an_interrupted_delete_converges_on_retry_and_the_next_sweep`，它让删除停在移除输出与提交之间，另加 `unloaded_and_damaged_sessions_are_deleted_by_id` 中没有输出目录的 Session。deletion.rs 中的 `a_delete_leaves_another_databases_command_output` 用两个守护进程检查 §4 的共用目录，其中的 `a_failed_delete_leaves_the_session_closed_until_a_retry` 是第 10 条，`a_delete_waits_for_a_building_session` 是第 11 条，被拒绝的 id 在 `delete_closes_a_running_session_and_removes_what_it_stored` 中。
 
 验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo test --workspace --locked`。不改 Capability、装配或 crate 依赖，`xtask` 只需按常规在 CI 中运行。
 
@@ -458,9 +460,10 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 | --- | --- | --- |
 | D1 | 静止点检查是 Agents 中的 `rest_point`：在 Agents 为 `validate_context_boundary` 已经读取的前缀上，只读地折叠 Loop、InputQueue 和 BackgroundExec 的公开事实，而不是放在能力 crate 中 `validate_context_boundary` 旁边的检查。其中的输入规则与 Loop 一致：在最后一次 `stop/interrupt` 之前已采纳、尚未消费的 Queue 或 Steer 输入允许留下，因为重载不会执行它（它会像 Append 输入一样并入下一次请求）；InputQueue 因撤回而删除的输入（`input/deleted`，S1）永远不会被采纳，不计入；其他尚未采纳的输入则被拒绝。任务若不是在本代的分支关闭之后结束，就必须有唤醒，与实时唤醒的发出条件一致 | 它需要的事实都是公开事件，因此不需要这些能力提供 API，也不改动它们。要求所有这类输入都已消费，会拒绝刚停止一轮之后的切点，而那里并不会执行任何东西 |
 | D2 | `session.fork` 需要原生存储。没有原生存储的守护进程（不带 `--database` 的 mock 配置）不在 `hello.features` 中列出它，并回复 `unknown_method`（"Method requires native storage"）。`session.delete` 在那里同样与 `session.create` 一起列出；没有存储时它关闭 Session 并将其遗忘 | 分叉复制的是存储的行；内存中的 Timeline 没有可供复制的 SessionStore |
-| D3 | `session.delete` 对不是单一路径分量的 `sessionId` 回复 `session_invalid_input`，在关闭或移除任何东西之前 | 这个 id 构成 `command-output/<id>`。Session id 是 UUID；否则像 `<S>/.` 这样的 id 会移除 S 的命令输出，却不删除任何行 |
+| D3 | `session.delete` 对不是单一路径分量的 `sessionId` 回复 `session_invalid_input`。Agents 在取得任何准入状态之前检查它；删除若在该 id 下既没有找到已加载的 Session 也没有找到存储的行，就不为它保留槽位；对 Agents 不认识的 id 执行 `session.close` 也不保留 | 这个 id 构成 `command-output/<id>`。Session id 是 UUID；否则像 `<S>/.` 这样的 id 会移除 S 的命令输出，却不删除任何行。没有后两条规则，删除或关闭任意不存在的 id 都会各留下一个槽位，没有上限 |
 | D4 | 分叉事务不再检查切点：它复制 `main` 截至 `at` 的行，运行时在构建分叉时校验这些行。校验失败的副本和任何失败的创建一样被回滚 | Agents 已在源上检查过切点（已发布的头部、批次末尾、上下文边界、静止点），而切点及之前的行不会改变；在事务中再检查一次，只会重复每次构建都会执行的校验 |
 | D5 | 关闭之后失败的删除让 S 在本进程内保持关闭，与 `session.close` 相同；而不是释放 S 的槽位、让 S 在下次使用时加载（第 6 步、§3.5） | 这次关闭是业务关闭：S 的各能力已结算其工作，Collaboration 也已结束指向 S 的关系，它对每个关闭的 Session 都这样做。再加载 S，会运行一个联系不到成员的 leader，而按 #127 它重载时也不停止任何成员（[#97 评审](https://github.com/arcships/dim/pull/97)）。槽位保持关闭时，失败留下的就是 `session.close` 本来就会产生、各所有者都已处理的状态；要让 Collaboration 区分删除的关闭与其他关闭，就得在 Agents 中加删除状态，并为一条失败路径加一个通知。重试不需要加载，重启后 S 照常加载，与任何已关闭的 Session 一样 |
+| D6 | 预备创建（`session.create`、成员创建、`session.fork`）从其准备步骤提交行之前起持有新 id 的准入门，直到 Session 发布、协议版本记下为止（`AgentIndex::admit`）；失败的创建不保留槽位 | Session 的行从提交起就会被列出，而运行时仍在构建它。跳过构建中 Session 的删除可能在构建读取分支之后提交，构建随后会发布一个没有行的已加载 Session，其追加违反外键；分叉还会把已删除 id 的协议版本重新记下。创建就是一次加载，因此取得恢复所取得的同一个门，删除排在它之后（[#97 评审](https://github.com/arcships/dim/pull/97)） |
 
 ## 附录 A. Rust 绑定
 
@@ -468,8 +471,16 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 ```rust
 impl AgentIndex {
-    /// `session.delete`: gate, close if loaded, `SessionStore::delete_session`, forget (§3.2).
+    /// `session.delete`: id check, gate, close if loaded, `SessionStore::delete_session`, forget (§3.2).
     pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()>;
+    /// A prepared creation under the new id's admission gate until it is published (§7, D6).
+    pub(crate) async fn admit(
+        &self,
+        id: &str,
+        agent_id: &str,
+        version: u32,
+        creation: impl Future<Output = dim_agent_runtime::Result<Session>>,
+    ) -> dim_agent_runtime::Result<Session>;
     /// `session.fork`: acquire the source, check the cut, prepared creation (§6.5).
     pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session>;
 }
@@ -481,8 +492,8 @@ impl SessionStore {
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self;
     /// Removes `command-output/<id>` (synced) while this database has rows of
     /// the id, then every row in one transaction; schedules the Session-file
-    /// sweep.
-    pub async fn delete_session(&self, id: &str) -> Result<()>;
+    /// sweep. Returns whether this database had rows of the id.
+    pub async fn delete_session(&self, id: &str) -> Result<bool>;
     /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;
 }

@@ -20,6 +20,7 @@ use rutis::{
 use rutis_loader::{Builtins, InstanceResult, Loader};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -139,6 +140,20 @@ struct Inner {
     /// They outlive the index's entries: an unloading scope forgets its
     /// entry, and the index closes the instance when it unloads.
     instances: HashMap<String, FiberView>,
+}
+
+impl Inner {
+    /// Drops `id`'s admission slot while it is still `slot`: an id with
+    /// nothing loaded or stored keeps no admission state.
+    fn drop_slot(&mut self, id: &str, slot: &Arc<SessionSlot>) {
+        if self
+            .sessions
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+        {
+            self.sessions.remove(id);
+        }
+    }
 }
 
 /// Process service routing every Agent: creation, addressing and close.
@@ -349,6 +364,11 @@ impl AgentIndex {
             .insert(session_id.to_owned(), (agent_id.to_owned(), version));
     }
     pub fn remove_version(&self, session_id: &str) {
+        // Only a Session this index knows keeps a closed slot: closing an
+        // unknown id leaves no admission state.
+        if self.session_store.is_some() && self.host_by_session(session_id).is_none() {
+            return;
+        }
         self.slot(session_id).closed.store(true, Ordering::Release);
         if self.session_store.is_none() {
             let mut inner = self.directory.inner.lock().unwrap();
@@ -758,6 +778,7 @@ impl AgentIndex {
         )
     }
 
+    /// A new Session of `host` under protocol `version`, recorded for it.
     pub(crate) async fn create_session(
         &self,
         host: &AgentHost,
@@ -766,31 +787,73 @@ impl AgentIndex {
     ) -> dim_agent_runtime::Result<Session> {
         match self.prepare_session(host, &config, version).await {
             Some((id, prepare)) => {
-                host.agent
-                    .create_prepared_session(id, config, prepare)
-                    .await
+                let creation = host
+                    .agent
+                    .create_prepared_session(id.clone(), config, prepare);
+                self.admit(&id, &host.agent_id, version, creation).await
             }
-            None => host.agent.create_session(config).await,
+            None => {
+                let session = host.agent.create_session(config).await?;
+                self.insert_version(session.id(), &host.agent_id, version);
+                Ok(session)
+            }
         }
     }
-    /// `session.delete` ([S5c §3.2](../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)):
-    /// holds S's admission gate, so nothing loads S meanwhile, closes S if
-    /// it is loaded, has SessionStore remove what it stores of S, then
-    /// forgets S and keeps its slot closed. An unknown id has nothing to
-    /// remove. A delete that fails before the rows go leaves a Session it
-    /// closed as `session.close` does, closed in this process with its rows
-    /// kept (D5); one it did not close loads again on its next use.
-    pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()> {
+    /// A prepared creation loads its new id ([S5c §7](../../../docs/design/appserver/session-deletion-and-fork.md#7-serialization-and-races)):
+    /// it holds the id's admission gate from before its prepare step commits
+    /// the rows, which `session.list` then shows, until the Session is
+    /// published and its protocol version recorded. A delete of the id waits
+    /// for the build and closes what it published. A failed creation keeps
+    /// no slot.
+    pub(crate) async fn admit(
+        &self,
+        id: &str,
+        agent_id: &str,
+        version: u32,
+        creation: impl Future<Output = dim_agent_runtime::Result<Session>>,
+    ) -> dim_agent_runtime::Result<Session> {
         let slot = self.slot(id);
+        let _gate = slot.gate.lock().await;
+        let created = creation.await;
+        match &created {
+            Ok(_) => self.insert_version(id, agent_id, version),
+            Err(_) => self
+                .directory
+                .inner
+                .lock()
+                .expect("agent index")
+                .drop_slot(id, &slot),
+        }
+        created
+    }
+    /// `session.delete` ([S5c §3.2](../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)):
+    /// holds S's admission gate, so nothing loads or builds S meanwhile,
+    /// closes S if it is loaded, has SessionStore remove what it stores of
+    /// S, then forgets S and keeps its slot closed. An unknown id has
+    /// nothing to remove and keeps no slot. A delete that fails before the
+    /// rows go leaves a Session it closed as `session.close` does, closed in
+    /// this process with its rows kept (D5); one it did not close loads
+    /// again on its next use.
+    pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()> {
+        // The id names `command-output/<id>`, so only a single path component
+        // can be a Session's (D3); refused before any admission state exists.
+        if !matches!(Path::new(id).components().collect::<Vec<_>>()[..],
+            [Component::Normal(name)] if name == id)
+        {
+            return Err(AgentError::InvalidInput(format!("invalid Session id {id}")));
+        }
+        let slot = self.slot(id);
+        // A creation of S holds the gate until S is published (`admit`).
         let _gate = slot.gate.lock().await;
         // A business close, as `session.close`: capabilities settle accepted
         // work and release processes, leases and member requests. Owners of
         // process state, such as Collaboration's relations, treat it as the
         // Session's end, so from here on S does not load again in this
         // process, whether or not its rows go.
-        if let Some(host) = self.host_by_session(id)
-            && let Some(session) = host.agent.get_session(id)
-        {
+        let loaded = self
+            .host_by_session(id)
+            .and_then(|host| Some((host.agent.get_session(id)?, host)));
+        if let Some((session, host)) = &loaded {
             slot.closed.store(true, Ordering::Release);
             if let Err(error) = session.close().await {
                 // The facts the close could not write go with the rest.
@@ -798,13 +861,18 @@ impl AgentIndex {
             }
             host.traces.wait_session(id).await;
         }
-        if let Some(store) = &self.session_store {
-            store.delete_session(id).await?;
-        }
-        slot.closed.store(true, Ordering::Release);
+        let stored = match &self.session_store {
+            Some(store) => store.delete_session(id).await?,
+            None => false,
+        };
         let mut inner = self.directory.inner.lock().expect("agent index");
         inner.versions.remove(id);
         inner.unavailable_sessions.remove(id);
+        if loaded.is_some() || stored {
+            slot.closed.store(true, Ordering::Release);
+        } else {
+            inner.drop_slot(id, &slot);
+        }
         Ok(())
     }
     /// `session.fork` ([S5c §6](../../../docs/design/appserver/session-deletion-and-fork.md#6-fork)):
@@ -834,13 +902,12 @@ impl AgentIndex {
         let (id, prepare) = self.prepared(config.cwd.clone(), move |fork| {
             Box::pin(async move { store.fork_session(&source, &fork, at).await })
         });
-        let fork = usage
+        let creation = usage
             .host
             .agent
-            .create_prepared_session(id, config, prepare)
-            .await?;
-        self.insert_version(fork.id(), &usage.host.agent_id, version);
-        Ok(fork)
+            .create_prepared_session(id.clone(), config, prepare);
+        self.admit(&id, &usage.host.agent_id, version, creation)
+            .await
     }
     /// `agent.create`: one more Agent, a peer of every other. A requested
     /// profile comes from outside the process and may only select provided

@@ -1132,8 +1132,6 @@ impl Connection {
             )
         };
         rpc.index.retain_versions();
-        rpc.index
-            .insert_version(session.id(), &host.agent_id, self.protocol_version());
         Ok(Reply::Create(CreateResult {
             session_id: session.id().to_owned(),
             model: dim_agent_types::ModelId {

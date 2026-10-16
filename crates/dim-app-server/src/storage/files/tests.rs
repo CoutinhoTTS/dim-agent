@@ -303,23 +303,14 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
         .expect("the Session still loads without its output");
 
     // The retry removes every row; the released file waits for a sweep.
-    store.delete_session("deleted").await.unwrap();
+    assert!(store.delete_session("deleted").await.unwrap());
     assert_eq!(sessions(), ["kept", "kept"]);
     assert_eq!(fixture.rows(), [format!("{}|-|0", stored.file_id)]);
     assert_eq!(fixture.entries(), std::slice::from_ref(&stored.file_id));
     assert!(output("kept").exists());
     // Deleting it again, or an unknown id, finds nothing to remove.
-    store.delete_session("deleted").await.unwrap();
-    store.delete_session("unknown").await.unwrap();
-    // An id that is not one path component names no Session's output.
-    std::fs::create_dir_all(output("kept").join("inner")).unwrap();
-    for invalid in ["kept/inner", "kept/.", "..", ""] {
-        assert!(matches!(
-            store.delete_session(invalid).await,
-            Err(dim_agent_runtime::AgentError::InvalidInput(_))
-        ));
-    }
-    assert!(output("kept").join("inner").exists());
+    assert!(!store.delete_session("deleted").await.unwrap());
+    assert!(!store.delete_session("unknown").await.unwrap());
     assert_eq!(sessions(), ["kept", "kept"]);
 
     // The next generation's first put sweeps what the delete released.
