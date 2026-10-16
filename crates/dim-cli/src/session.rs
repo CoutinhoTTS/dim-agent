@@ -231,8 +231,14 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
             }
             match text.split_whitespace().next() {
                 Some("/mcp") => {
-                    if let Err(error) = mcp::command(client, options, reader, &session_id, &text).await
-                    {
+                    // MCP owns interrupts until its command finishes draining.
+                    drop(interrupts);
+                    let result = mcp::command(client, options, reader, &session_id, &text).await;
+                    #[cfg(unix)]
+                    { interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?; }
+                    #[cfg(windows)]
+                    { interrupts = tokio::signal::windows::ctrl_c()?; }
+                    if let Err(error) = result {
                         display.record(&format!("Error: {}", mcp::error(error)))?;
                     }
                     continue;
