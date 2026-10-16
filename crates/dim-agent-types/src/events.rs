@@ -189,6 +189,45 @@ impl InputMessageData {
     }
 }
 
+/// A command to withdraw an input InputQueue still holds unapplied. It is
+/// never a fact about the input by itself: only `input/deleted` is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputWithdrawData {
+    pub input_id: String,
+    /// Text for clients to show with the deleted input; no decision reads it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub reason: Option<String>,
+}
+impl InputWithdrawData {
+    pub const MAX_REASON_BYTES: usize = 2048;
+    /// Checks a command arriving from outside.
+    pub fn validate_external(&self) -> Result<(), &'static str> {
+        if self.input_id.is_empty() {
+            return Err("input_id must not be empty");
+        }
+        if self
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > Self::MAX_REASON_BYTES)
+        {
+            return Err("reason exceeds 2 KiB");
+        }
+        Ok(())
+    }
+}
+
+/// InputQueue's result for a withdrawn input: it is never applied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputDeletedData {
+    pub input_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputAppliedData {
@@ -867,6 +906,8 @@ pub enum EventKind {
     InputMessage(InputMessageData),
     InputApplied(InputAppliedData),
     InputConsumed(InputConsumedData),
+    InputWithdraw(InputWithdrawData),
+    InputDeleted(InputDeletedData),
     StopInterrupt(StopInterruptData),
     ApprovalRequest(ApprovalRequestData),
     ApprovalRespond(ApprovalRespondData),
@@ -916,6 +957,8 @@ impl EventKind {
         match self {
             Self::InputMessage(_) => "input/message",
             Self::InputApplied(_) => "input/applied",
+            Self::InputWithdraw(_) => "input/withdraw",
+            Self::InputDeleted(_) => "input/deleted",
             Self::InputConsumed(_) => "input/consumed",
             Self::StopInterrupt(_) => "stop/interrupt",
             Self::ApprovalRequest(_) => "approval/request",
@@ -1004,6 +1047,10 @@ pub enum InputEvent {
     InputApplied(InputAppliedData),
     #[serde(rename = "consumed")]
     InputConsumed(InputConsumedData),
+    #[serde(rename = "withdraw")]
+    InputWithdraw(InputWithdrawData),
+    #[serde(rename = "deleted")]
+    InputDeleted(InputDeletedData),
 }
 
 #[derive(Deserialize)]
@@ -1150,6 +1197,8 @@ impl<'de> Deserialize<'de> for EventKind {
         Ok(match TaggedEvent::deserialize(deserializer)? {
             TaggedEvent::Input(InputEvent::InputMessage(data)) => Self::InputMessage(data),
             TaggedEvent::Input(InputEvent::InputApplied(data)) => Self::InputApplied(data),
+            TaggedEvent::Input(InputEvent::InputWithdraw(data)) => Self::InputWithdraw(data),
+            TaggedEvent::Input(InputEvent::InputDeleted(data)) => Self::InputDeleted(data),
             TaggedEvent::Input(InputEvent::InputConsumed(data)) => Self::InputConsumed(data),
             TaggedEvent::Stop(StopEvent::Interrupt(data)) => Self::StopInterrupt(data),
             TaggedEvent::Approval(ApprovalEvent::Request(data)) => Self::ApprovalRequest(data),
@@ -1235,6 +1284,16 @@ impl Serialize for EventKind {
             Self::InputConsumed(data) => {
                 state.serialize_field("type", "input")?;
                 state.serialize_field("name", "consumed")?;
+                state.serialize_field("data", data)?;
+            }
+            Self::InputWithdraw(data) => {
+                state.serialize_field("type", "input")?;
+                state.serialize_field("name", "withdraw")?;
+                state.serialize_field("data", data)?;
+            }
+            Self::InputDeleted(data) => {
+                state.serialize_field("type", "input")?;
+                state.serialize_field("name", "deleted")?;
                 state.serialize_field("data", data)?;
             }
             Self::StopInterrupt(data) => {

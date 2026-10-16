@@ -482,6 +482,8 @@ fn summary(event: &EventKind) -> Value {
         EventKind::ApprovalRequest(d) => value["source"] = json!(d.source),
         EventKind::InputApplied(d) => value["input_id"] = json!(d.input_id),
         EventKind::InputConsumed(d) => value["input_id"] = json!(d.input_id),
+        EventKind::InputWithdraw(d) => value["input_id"] = json!(d.input_id),
+        EventKind::InputDeleted(d) => value["input_id"] = json!(d.input_id),
         EventKind::StopInterrupt(d) => value["scope"] = json!(d.scope),
         _ => {}
     }

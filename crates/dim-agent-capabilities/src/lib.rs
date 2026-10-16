@@ -72,6 +72,7 @@ impl BranchService for wait::Wait {}
 // Business ports safe to obtain from a Session handle: RPC calls them by
 // request branch, tool handlers by call branch.
 impl PublicService for approval::Approval {}
+impl PublicService for input_queue::InputQueue {}
 impl PublicService for permission::Permission {}
 impl PublicService for workspace_tools::background::BackgroundExec {}
 impl PublicService for shell_session::ShellSession {}

@@ -224,6 +224,7 @@
       "file": "crates/dim-agent-capabilities/src/context_methods.rs",
       "unexpandedMacros": [
         "json",
+        "matches",
         "tokio::select",
         "unreachable",
         "vec"
@@ -378,6 +379,9 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/input_queue.rs",
       "unexpandedMacros": [
+        "matches",
+        "serde_json::json",
+        "tokio::select",
         "vec"
       ]
     },
@@ -401,6 +405,13 @@
         "matches",
         "unreachable"
       ]
+    },
+    {
+      "id": "dim_agent_capabilities::model_provider::images",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::model_provider",
+      "file": "crates/dim-agent-capabilities/src/model_provider/images.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_agent_capabilities::model_provider::recovery",
@@ -3003,6 +3014,13 @@
     },
     {
       "from": "dim_agent_capabilities::agent_loop",
+      "to": "dim_agent_types",
+      "references": [
+        "path JsonObject::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -3010,6 +3028,7 @@
         "path ContextCompactionData",
         "path ContextCompactionResult::Cancelled",
         "path ContextCompactionResult::Failed",
+        "path ContextCompactionResult::Skipped",
         "path ContextCompactionStartData",
         "path ContextPrepareData",
         "path EventDraft",
@@ -3058,6 +3077,9 @@
       "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_types::model",
       "references": [
+        "path CompactionDiagnosticsRecord",
+        "path CompactionReason::Manual",
+        "path CompactionStrategyRecord",
         "path CompactionTrigger::Manual",
         "path model"
       ]
@@ -3302,8 +3324,7 @@
         "path ContextCompactionResult::Completed",
         "path ContextCompactionResult::Failed",
         "path ContextCompactionResult::Skipped",
-        "path EventKind::ContextCompaction",
-        "path EventKind::ContextCompactionStart"
+        "path EventKind::ContextCompaction"
       ]
     },
     {
@@ -3714,6 +3735,8 @@
       "to": "dim_agent_capabilities::input_queue",
       "references": [
         "path InputQueuePlugin::new",
+        "path crate::input_queue::INPUT_METHODS",
+        "path crate::input_queue::InputMethodsPlugin::new",
         "use crate::input_queue::InputQueuePlugin"
       ]
     },
@@ -4322,14 +4345,38 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path SessionMethods::provide",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::SessionMethods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use crate::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
         "path InBranch",
+        "path InSession",
         "path KeysOf",
         "path scoped",
         "use dim_agent_runtime::Capability",
         "use dim_agent_runtime::InBranch",
+        "use dim_agent_runtime::InSession",
         "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::scoped"
       ]
@@ -4363,7 +4410,9 @@
       "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::InvalidInput",
         "path Result",
+        "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result"
       ]
     },
@@ -4372,7 +4421,9 @@
       "to": "dim_agent_runtime::scope",
       "references": [
         "path BranchScope",
-        "use dim_agent_runtime::BranchScope"
+        "path SessionScope",
+        "use dim_agent_runtime::BranchScope",
+        "use dim_agent_runtime::SessionScope"
       ]
     },
     {
@@ -4391,14 +4442,21 @@
         "path AgentEvent",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
+        "path EventKind::InputWithdraw",
         "path EventKind::StopInterrupt",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
         "path InputAppliedData",
+        "path InputDeletedData",
+        "path InputMessageData",
         "path InputMode",
         "path InputMode::Append",
         "path InputMode::Queue",
+        "path InputMode::Steer",
+        "path InputWithdrawData",
+        "path UserInput",
         "path events"
       ]
     },
@@ -4450,6 +4508,14 @@
         "path ModelHost",
         "path ProviderConnectionResolver",
         "path ResolvedModelConnection"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider",
+      "to": "dim_agent_capabilities::model_provider::images",
+      "references": [
+        "mod images",
+        "path images::adapt"
       ]
     },
     {
@@ -4596,6 +4662,25 @@
         "path ModelOutputOutcome::Completed",
         "path ModelOutputOutcome::Failed",
         "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ImageSource",
+        "path ImageSourceType::Base64",
+        "path Message",
+        "path MessageContent::Parts",
+        "path MessagePart::Image",
+        "path MessagePart::Text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest"
       ]
     },
     {
@@ -6688,6 +6773,8 @@
         "path EventKind::ContextScope",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputWithdraw",
         "path EventKind::ModelCall",
         "path EventKind::ModelOutputEnd",
         "path EventKind::ModelStart",
@@ -13572,7 +13659,9 @@
         "path EventKind::ExecStarted",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
+        "path EventKind::InputWithdraw",
         "path EventKind::ModelCall",
         "path EventKind::ModelContent",
         "path EventKind::ModelOutputEnd",
