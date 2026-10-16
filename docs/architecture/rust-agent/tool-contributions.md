@@ -2,6 +2,26 @@
 
 状态：Implemented；`branch`、`agent` 以贡献提供；没有通用的 `task` 工具，脱离工作的查询、等待与停止由所属能力各自的工具提供。基线为[单树装配](single-tree.md)与[能力重载协议](single-tree.md#能力重载协议)。
 
+## 首次工具表与分支初始化
+
+固定表由 ToolRegistry 在第一次实际读取时同步构建并缓存。当前调用路径中，Session 级 PrepareModelHost 只保存注册表句柄；首次读取发生在分支 ToolBinding 的初始化/打开处理中。此时 Session 服务已经完成装配，ToolRegistry 自身已 Active，可按现有作用域键查找已 Active 的贡献；分支随后沿已有 Prompt / BranchOpening 完成采用，Session 才发布。
+
+```text
+Session services Active
+    -> ToolBinding reads ToolRegistry
+    -> build the complete fixed table once
+    -> existing Prompt adoption and BranchOpening finish
+    -> Session publication and first input
+```
+
+没有初始模型配置时，ToolBinding 仍在初始化中读取注册表，固定本次装载的提供方；请求可以沿既有 PrepareModelHost / `bind_current` 路径声明并绑定工具。有已采用配置时，ToolBinding 在初始化与既有 BranchOpening 中完成匹配和必要的 Prompt 采用，Session 接受输入前工具表已经确定。
+
+固定表使用标准库 `LazyLock` 一次性同步初始化，没有宿主表与完整表之间的后台切换。取样发生在分支首次读取注册表时，而非 Session 发布时；该读取之后才 Active 的提供方，包括发布前才 Active 的提供方，都留到下次注册表或 Session 重载。每代注册表只取样一次，新分支复用同一固定表。装配等待规则保持不变，取样不等待 Pending 提供方。
+
+已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。C3 移除的是 ToolRegistry 对可选固定贡献的硬依赖，不跳过装配中的 Pending 插件。
+
+影响面限于 ToolRegistry 的固定表与 ToolBinding 的初始化读取；不增加 core 阶段、门面等待、公开服务或事件。动态来源继续沿已有刷新、采用和请求快照路径工作；名称冲突按配置与已登记名称判定，不为检查名称而提前触发固定表收集。
+
 ## 1. 范围
 
 Session 能力向本 Session 的 `ToolRegistry` 贡献模型可调用的工具。宿主工具仍经 `ToolHost` 提供，不在本文范围。
@@ -28,7 +48,7 @@ flowchart LR
     A["ApprovalPlugin"]
   end
   B -->|装配时登记名称| R
-  R -->|injects| C
+  R -->|first branch read: named lookup| C
   R -->|injects| H
   TB -->|injects| R
   L -->|injects| TB
@@ -52,14 +72,16 @@ impl SessionService for ToolContribution {}
 | 登记 | `AgentBuilder::session_tool(name)` 在装配时登记贡献名称；同一名称只登记一次 |
 | 提供 | 贡献方能力在自身状态就绪后，于 `apply` 中以上述键提供；`definition` 可按本 Session 配置生成，`definition.name` 等于登记名称 |
 | 宿主工具名 | 宿主工具名经 `AgentBuilder::host_tools` 登记：产品根由 `workspace_tools::install` 登记，测试与开发宿主由 `defaults::tool_host` 登记；其他提供 `ToolHost` 的装配须自行登记，否则显式 profile 不能列出这些工具 |
-| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称，作为 `Contributions<ToolContribution>` 的键；`apply` 中按 `SessionConfig.tools` 注册：名称已登记则注册对应贡献，否则按宿主工具注册 |
-| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；已登记而未列出的贡献仍被注入，不注册 |
+| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置，分支首次读取工具表时同步按名称读取本 Session 已 Active 的贡献，不建立对可选贡献方的硬依赖 |
+| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 诊断；稍后才 Active 的贡献在下次注册表重载时接入 |
+
+固定表按 `SessionConfig.tools` 顺序一次性构建并缓存，首次读取返回完整结果，后续读取复用不可变表。`LazyLock` 只协调一次性初始化；固定工具查找不获取每次读取的 `Mutex`。动态来源继续使用自己的既有同步机制。
 
 ## 3. 依赖方向
 
 | 方向 | 规定 |
 | --- | --- |
-| `ToolRegistry` → 贡献方 | `Deps` 中的 `Contributions<ToolContribution>` |
+| `ToolRegistry` → 贡献方 | 分支初始化首次读取时按登记名取样一次，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`Diagnostics` 和既有动态来源的真实依赖 |
 | 贡献方 → `ToolRegistry` | 不注入；贡献方不读取、不修改注册表 |
 | 贡献方状态 | 不因 `ToolRegistry` 或其上游重载而卸载 |
 
@@ -67,15 +89,17 @@ impl SessionService for ToolContribution {}
 
 | 情况 | 结果 |
 | --- | --- |
-| 贡献方重载 | `ToolRegistry` 及其下游按[能力重载协议](single-tree.md#能力重载协议)重载；旧代处理器上的在途调用由 `ToolExecutor` 以重载结算 |
+| 固定贡献方重载或退出 | 不重载 ToolRegistry；旧 handler 的停止与在途工作归贡献方结算。新一代在下次注册表重载时接入，不把已绑定请求改绑到新 handler |
 | `ToolHost` 重载 | `ToolRegistry` 重载并重新收集全部贡献；贡献方不受影响 |
 | 旧代处理器 | 被继续持有时调用返回明确的停止错误 |
+
+`agent` 处理器持有贡献方当前代的取消令牌；贡献方卸载后，包括 `list` 在内的调用都返回 `capability reloading`，不再读取旧代状态。`Agents` 重载不会使固定工具自动换代；需要重载注册表或重新装载 Session 后才能使用新处理器。
 
 ## 5. 错误
 
 | 情况 | 结果 |
 | --- | --- |
-| 登记名称无提供方 | 缺失依赖，Session 构建失败 |
+| 已登记的可选贡献无 Active 提供方 | 该工具不进入声明；记录诊断，ToolRegistry 与 Loop 正常工作 |
 | 贡献名称与宿主工具重名 | 注册时重复，Session 构建失败 |
 | `SessionConfig.tools` 含未登记且宿主未提供的名称 | 沿用现有错误：`tool <name> is not provided by the host` |
 
@@ -84,8 +108,9 @@ impl SessionService for ToolContribution {}
 1. 贡献方提供的工具出现在模型工具声明中，调用经 `ToolExecutor` 到达其处理器。
 2. `branch`、`agent` 以贡献提供，分支与协作流程测试经贡献路径通过。
 3. `ToolHost` 重载后贡献方状态保持，工具表恢复一致。
-4. 贡献方重载时在途调用以重载结算，新一代处理器接管后续调用。
+4. 可选贡献方 Pending、缺失或退出时不传播硬依赖失效；来源所有者仍负责旧 handler 的停止，新一代只在下次注册表重载后接入。
 5. 未启用的贡献不出现在工具声明中。
+6. Session 返回后立即提交的首个请求声明并绑定初始化时已接入的固定工具；没有初始模型配置时也在分支初始化取样，之后才 Active 的提供方不被首个请求临时接入。恢复流程在首个请求前采用本次装载的工具表，已绑定请求保持原工具快照。
 
 ## 7. 动态工具来源
 
@@ -253,7 +278,7 @@ Loop 释放:
 | 情况 | 结果 |
 | --- | --- |
 | 来源版本变化 | 不是重载：替换、采用；在途调用按旧快照结算 |
-| 来源方、`ToolHost` 或 ToolRegistry 重载 | 下游重载，ToolExecutor 以重载结算在途批次；新注册表只含当前版本，前缀版本不可取得的分支在 `apply` 重新采用，一致的直接 pin、不写新事实 |
+| 动态来源方、`ToolHost` 或 ToolRegistry 重载 | 下游重载，ToolExecutor 以重载结算在途批次；新注册表只含当前版本，前缀版本不可取得的分支在 `apply` 重新采用，一致的直接 pin、不写新事实。固定贡献按第 4 节处理 |
 | Prompt 重载 | ToolBinding 及下游重载，快照随旧 ToolBinding 释放 |
 | Loop 单独重载 | ToolBinding 与快照保留；新 Loop 重建后 `retain_only` |
 | ToolBinding 重载后预算恢复 | `transfer` 因无快照失败，turn Failed |
