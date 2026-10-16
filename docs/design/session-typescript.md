@@ -260,6 +260,22 @@ receives the next emission once. The candidate must not independently forward th
 Session name through every row's link into that shared context. Native projection and event
 scoping remain contract choices; consumer-side deduplication is not the solution.
 
+A separate native calibration projects each typed source directly through its existing peer's
+`events.forward`, using an event name derived from that peer's actual identity. Two rows on one
+synthetic Session source each receive one copy, a third row receives only its second Session's
+records, and the other rows continue after one unloads. It needs no separate event-name field,
+generation counter, intermediate `NodeEvent` emission or deduplication state. These are transport
+observations, not a selected product contract or actual BoundRow/Session acceptance.
+
+The existing broadcaster's `emit` returns immediately; rutis dispatches the channel in an
+existing ordered task and awaits its listeners there. Awaiting the native call can delay that
+Session notification chain, but does not make the branch Dispatcher await Node I/O. Creating an
+async future or spawning one task per fact does not prove ordered enqueueing: the public native
+connection has no synchronous send-only ticket API. Unsubscribing removes future registration
+lookup, not a callback snapshot already being dispatched; cancellation cannot revoke a record
+already consumed by TS. The actual row's ownership and in-flight settlement remain acceptance
+work rather than reasons to add a queue, cursor or lifecycle phase.
+
 This route is a **candidate requiring review**, with these costs and implementation conditions:
 
 - The measured composition has one shared loopback listener, one native peer/link and one Node
@@ -272,6 +288,10 @@ This route is a **candidate requiring review**, with these costs and implementat
   The existing row's Config is captured when its runtime plugin is constructed; there is no
   separate host-parameter bag. Generated transport fields need an explicit original-module
   Config contract and must pass that module's existing schema validation.
+  Neither RowSchema nor the runtime module description supplies a standard event opt-in or
+  peer-parameter slot. Tool-only rows cannot silently receive new fields. The minimal unresolved
+  input contract is an original-module Config field that explicitly requests fact reception and
+  admits its Link parameters; its location and shape remain unselected.
 - Establish the native link and event subscription as part of that row's apply before publishing
   its services; dispose subscriptions and settle the row's work on unload. Its real required
   dependencies retain their normal audit and reload behavior.
