@@ -1,9 +1,9 @@
 # ContextCompaction
 
-Status: Draft (for review). Roadmap item F1 ([#72](https://github.com/arcships/dim/issues/72)).
+Status: Implemented on the F1 branch (approved design; implementation notes in §12). Roadmap item F1 ([#72](https://github.com/arcships/dim/issues/72)).
 Overview: [Appendix B.1 ContextPreparation row](../overview.md#b1-session-and-branch-capabilities).
 Scope: [ADR 002](../../adr/002-plugin-scope.md): Session parts plus supplements to the existing
-branch capabilities Loop and ContextPreparation. Nothing in this document is implemented.
+branch capabilities Loop and ContextPreparation. §12 records where the implementation refines this text.
 The trigger and retention values are provisional and are studied in
 [#128](https://github.com/arcships/dim/issues/128).
 
@@ -210,7 +210,7 @@ ContextPreparation reports when it loads.
 | Event | Writer | Consumer | Data |
 | --- | --- | --- | --- |
 | `context/compact` (new) | Loop, through its public write operation `AgentLoop::compact` | Loop, in sequence order | `{}` |
-| `context/compaction-start` (new) | ContextPolicy in `compact_step`, for its caller (Loop step or ContextPreparation) | Loop and ContextPreparation (rebuild), clients | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "recovery", strategy}` |
+| `context/compaction-start` (new) | ContextPolicy in `compact_step`, for its caller (Loop step or ContextPreparation) | Loop and ContextPreparation (rebuild), clients | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "provider_output_budget_exhausted", strategy}` |
 | `context/compaction` (changed) | ContextPolicy, for its caller; on reload, the settling owner | Loop (manual step terminal), ContextPolicy (retry reuse), projection, ContextMethods, clients | `{turn_id?, request_id?, command?, start?, through, outcome}` |
 
 `outcome` is one of:
@@ -312,9 +312,9 @@ Readers update with the struct:
 - ContextPolicy's retry filter compares `turn_id` with `Some(turn)`.
 - Trace reads optional ids.
 - Native storage indexes completions by `through` only.
-- The frozen v1 samples are not changed. The v1-to-native conversion maps `summary` to
-  `replacement: [summary_message(summary)]` with `strategy: "summary"`, and maps their ids to
-  `Some`.
+- The frozen v1 samples are not changed. They decode only as v1 events; the native record does
+  not accept the old `cursor`/`summary` form, and v1 connections no longer receive
+  `context/compaction` (§12).
 
 **Dynamic events (decision A).** `context/compact` and `context/compaction-start` are added as
 `EventKind` variants now. When #2 lands (plugins register their own event types; Timeline checks
@@ -336,8 +336,8 @@ summary-oriented required fields move into a strategy-owned object:
 ```
 
 ContextPolicy fills the common fields; the strategy returns its own object. The old flat record
-is removed, not kept beside the new one. The frozen v1 samples are not changed; the v1-to-native
-conversion maps their flat fields into the common part and a `summary` object.
+is removed, not kept beside the new one. The frozen v1 samples are not changed and keep their
+own flat record type in the v1 module (§12).
 
 **Client visibility.** SessionBroadcast forwards every branch event unfiltered
 ([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)), but
@@ -804,3 +804,20 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
    - Across every test above (success, skip, failure, interrupt, reload, crash), each
      `context/compaction-start` has exactly one `context/compaction` with its `start`, and no
      result carries a `start` that does not exist.
+
+## 12. Implementation notes
+
+The implementation follows this design. Where the code needed a detail the text did not
+fix, the smallest choice was made and is recorded here.
+
+| Item | Implementation |
+| --- | --- |
+| Start trigger values | `trigger` uses the existing `CompactionTrigger`: `manual`, `threshold`, `provider_output_budget_exhausted` (§4.3 said `recovery`; §4.2 and acceptance 2 already used the latter). |
+| Legal cuts | `CompactionInput` also carries `cuts`: every legal cut in order (`retain_from`, the first kept entry, and whether it is within `retain_limit`), computed by ContextPolicy from the event-based validity rule. Candidates are turn starts, events that place entries, and the boundary's last event (which replaces everything). `CompactionInput::cut()` returns the latest cut within the limit or, under `fallback`, the latest cut. A strategy may return any `retain_from`; the policy still validates it. |
+| Adoption | `compact_step` validates the strategy's result before it appends the fact, then adopts the committed fact as Timeline middleware left it: the projection, the reduction check and the snapshot use the committed `retain_from`, `replacement` and baseline. A committed cut that cannot be projected fails the preparation, as a committed cursor did before. |
+| Diagnostics | `retainFrom` is absent when the strategy found no cut (`skipped`), and `estimatedOutputTokens` is absent when nothing was replaced. |
+| v1 | There is no v1-to-native conversion in production code: the frozen samples decode as v1 events only, and `v1::EventRef` has no form for `context/compact`, `context/compaction-start` or the changed `context/compaction`, so v1 connections no longer receive compaction facts. The old flat diagnostics type moved into the v1 module. |
+| Loop subscription | The Loop subscribes to `context/compact` and `context/compaction`; starts are folded only at rebuild, where they tell a running step from a pending command. |
+| Snapshot anchor | Timeline keeps the structural checks of §4.3. The old `resume ≤ through` check needed the anchor's content; it is replaced by the structural "resume precedes the anchor on the anchor's branch", and the owner's decode checks `through` before the anchor. |
+| Native storage example | The record example in [native-storage-format](../appserver/native-storage-format.md) uses the changed record and the v3 interpreter. |
+| Acceptance | Acceptance 1, 3, 6 (crash and restart) and 8 run in the binary flow test `transport_flow/compaction.rs`. Acceptance 2, 4, 5 and the reload, interrupt and failure cases of 6 run in `dim-agent-capabilities/tests/context_flow` (`manual_compaction.rs` and the existing compaction tests). The crash between fact and snapshot is covered by the snapshot-failure test in `compaction_events.rs`. |

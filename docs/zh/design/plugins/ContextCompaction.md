@@ -1,8 +1,8 @@
 # ContextCompaction
 
-状态：草案（待评审）。路线图项 F1（[#72](https://github.com/arcships/dim/issues/72)）。
+状态：已在 F1 分支实现（设计已批准；实现说明见 §12）。路线图项 F1（[#72](https://github.com/arcships/dim/issues/72)）。
 总体设计：[附录 B.1 ContextPreparation 行](../overview.md#b1-session-与分支-capability)。
-作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。本文内容均未实现。触发点和保留量是暂定值，在 [#128](https://github.com/arcships/dim/issues/128) 研究。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
+作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。§12 记录实现对本文的细化。触发点和保留量是暂定值，在 [#128](https://github.com/arcships/dim/issues/128) 研究。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
 
 ## 1. 概要
 
@@ -150,7 +150,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 | 事件 | 写入方 | 消费方 | 数据 |
 | --- | --- | --- | --- |
 | `context/compact`（新） | Loop，经其公开写操作 `AgentLoop::compact` | Loop，按序号 | `{}` |
-| `context/compaction-start`（新） | ContextPolicy 在 `compact_step` 中代其调用方（Loop 的步骤或 ContextPreparation）写入 | Loop 与 ContextPreparation（重建）、客户端 | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "recovery", strategy}` |
+| `context/compaction-start`（新） | ContextPolicy 在 `compact_step` 中代其调用方（Loop 的步骤或 ContextPreparation）写入 | Loop 与 ContextPreparation（重建）、客户端 | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "provider_output_budget_exhausted", strategy}` |
 | `context/compaction`（有改动） | ContextPolicy，代其调用方；重载时由负责结算的所有者写入 | Loop（手动步骤的终态）、ContextPolicy（重试复用）、投影、ContextMethods、客户端 | `{turn_id?, request_id?, command?, start?, through, outcome}` |
 
 `outcome` 为以下之一：
@@ -216,7 +216,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - ContextPolicy 的重试过滤改为把 `turn_id` 与 `Some(turn)` 比较。
 - Trace 读取可选 id。
 - 原生存储只按 `through` 索引已完成的压缩。
-- 冻结的 v1 样本不改。v1 到原生的转换把 `summary` 映射为 `replacement: [summary_message(summary)]`、`strategy: "summary"`，并把其中的 id 映射为 `Some`。
+- 冻结的 v1 样本不改。它们只按 v1 事件解码；原生记录不接受旧的 `cursor`/`summary` 形式，v1 连接也不再收到 `context/compaction`（§12）。
 
 **动态事件（决定 A）。** 现在先把 `context/compact` 和 `context/compaction-start` 作为 `EventKind` 变体加入。#2 落地后（插件注册自己的事件类型；Timeline 检查结构与类型范围，不检查内容），它们迁移为动态注册事件：`context/compact` 由 Loop 拥有，`context/compaction-start` 由压缩事实的所有者拥有。F1 是 #2 的第一个真实使用者。
 
@@ -232,7 +232,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 //             chunkCount, compactedToolPayloadCount, droppedMessageCount }
 ```
 
-公共字段由 ContextPolicy 填写，策略返回自己的对象。旧的扁平记录直接删除，不与新记录并存。冻结的 v1 样本不改；v1 到原生的转换把其中的扁平字段映射到公共部分和一个 `summary` 对象。
+公共字段由 ContextPolicy 填写，策略返回自己的对象。旧的扁平记录直接删除，不与新记录并存。冻结的 v1 样本不改，在 v1 模块中保留它们自己的扁平记录类型（§12）。
 
 **客户端可见性。** SessionBroadcast 不加过滤地转发每个分支事件（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)），但 Rpc 的 wire 过滤器——[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs) 中的 `ProductEvent::new`——目前会丢掉 `context/compaction`。F1 经 `ProductEvent::new` 让协议 v3 连接能看到 `context/compact`、`context/compaction-start` 和 `context/compaction`，客户端由此可以从实时事件或历史中看到每一种状态。`context/budget` 和 `context/prepare` 仍然隐藏。
 
@@ -592,3 +592,19 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
    - 在摘要请求被挂住时才接入的客户端，从分支历史（一条没有结果的开始）看到“运行中”。
    - 自动压缩显示 `trigger: threshold` 和请求 id。
    - 在以上所有测试中（成功、跳过、失败、中断、重载、崩溃），每条 `context/compaction-start` 都恰好有一条带其 `start` 的 `context/compaction`，也没有结果引用不存在的 `start`。
+
+## 12. 实现说明
+
+实现遵循本设计。代码需要而正文未定的细节，取最小的选择，记录如下。
+
+| 项 | 实现 |
+| --- | --- |
+| 开始事实的触发值 | `trigger` 使用现有的 `CompactionTrigger`：`manual`、`threshold`、`provider_output_budget_exhausted`（§4.3 原写 `recovery`；§4.2 与验收 2 已用后者）。 |
+| 合法切点 | `CompactionInput` 另带 `cuts`：按顺序列出每个合法切点（`retain_from`、第一个保留条目、是否在 `retain_limit` 之内），由 ContextPolicy 按基于事件的有效性规则算出。候选为轮次开始、放置条目的事件，以及边界的最后一个事件（替换全部）。`CompactionInput::cut()` 返回限制内最晚的切点，在 `fallback` 下返回最晚的切点。策略可以返回任意 `retain_from`，策略层仍会校验。 |
+| 采纳 | `compact_step` 在追加事实前校验策略结果，再采纳 Timeline 中间件处理后的已提交事实：投影、缩减检查和快照都使用已提交的 `retain_from`、`replacement` 与基线。已提交的切点无法投影时，本次准备失败，与此前已提交游标的行为一致。 |
+| 诊断 | 策略找不到切点（`skipped`）时省略 `retainFrom`；没有替换任何内容时省略 `estimatedOutputTokens`。 |
+| v1 | 生产代码中没有 v1 到原生的转换：冻结样本只按 v1 事件解码；`v1::EventRef` 对 `context/compact`、`context/compaction-start` 和变更后的 `context/compaction` 没有形式，因此 v1 连接不再收到压缩事实。旧的扁平诊断类型移入 v1 模块。 |
+| Loop 订阅 | Loop 订阅 `context/compact` 与 `context/compaction`；开始事实只在重建时折叠，用来区分运行中的步骤和待处理的命令。 |
+| 快照锚点 | Timeline 保留 §4.3 的结构检查。原先的 `resume ≤ through` 需要读取锚点内容，改为结构性的“resume 在锚点所在分支上早于锚点”，`through` 早于锚点由所有者的解码回调检查。 |
+| 原生存储示例 | [native-storage-format](../../../design/appserver/native-storage-format.md) 中的记录示例改用新记录和 v3 解释器。 |
+| 验收 | 验收 1、3、6（崩溃与重启）和 8 在二进制流程测试 `transport_flow/compaction.rs` 中运行。验收 2、4、5 以及 6 中的重载、中断和失败情形在 `dim-agent-capabilities/tests/context_flow`（`manual_compaction.rs` 和既有压缩测试）中运行。事实与快照之间的崩溃由 `compaction_events.rs` 的快照失败测试覆盖。 |
