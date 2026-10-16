@@ -852,6 +852,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dim-agent-aimux",
+ "dim-agent-attachments",
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
