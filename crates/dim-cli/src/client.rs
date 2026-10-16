@@ -39,6 +39,12 @@ enum DaemonProfile {
 pub struct RpcError {
     pub code: i32,
     pub message: String,
+    pub data: Option<ErrorData>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorData {
+    pub app_error: String,
 }
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

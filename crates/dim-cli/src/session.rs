@@ -4,6 +4,7 @@ use crate::{
     client::{Client, Message},
     display::{self, Display, Event, Progress},
     input::Input,
+    mcp,
 };
 use dim_agent_types::{ApprovalCallData, ModelId};
 use serde::Deserialize;
@@ -114,6 +115,13 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                 break;
             };
             if text.trim().is_empty() {
+                continue;
+            }
+            if text.split_whitespace().next() == Some("/mcp") {
+                if let Err(error) = mcp::command(client, options, reader, &session_id, &text).await
+                {
+                    display.record(&format!("Error: {}", mcp::error(error)))?;
+                }
                 continue;
             }
             display.failed = false;
@@ -378,6 +386,21 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             let notice: Progress = decode(params, &method)?;
             if notice.session_id == session_id && notice.branch_id == "main" {
                 display.progress(notice)?;
+            }
+        }
+        "session.mcp.state" => {
+            let state: mcp::State = decode(params, &method)?;
+            if state.session_id == session_id {
+                for server in state
+                    .servers
+                    .iter()
+                    .filter(|server| server.state == "auth_required")
+                {
+                    display.record(&format!(
+                        "MCP {:?}: sign-in required. Run mcp login {:?} or /mcp login {:?}.",
+                        server.id, server.id, server.id
+                    ))?;
+                }
             }
         }
         "session.closed" => return Err("Session closed while attached".into()),

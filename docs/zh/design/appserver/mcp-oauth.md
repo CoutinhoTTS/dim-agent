@@ -1,6 +1,6 @@
 # MCP OAuth
 
-状态：守护进程侧已实现（维护者在 [#111](https://github.com/arcships/dim/pull/111) 评审通过）；CLI 部分（§13）归 CLI 负责人。路线图项 F4
+状态：守护进程侧（维护者在 [#111](https://github.com/arcships/dim/pull/111) 评审通过）和原生 CLI（§13）已实现。路线图项 F4
 （[#75](https://github.com/arcships/dim/issues/75)）。总体设计：
 [附录 B.2 Mcp 行](../overview.md#b2-app-server-进程插件)。阶段：P2。语言：Rust。
 作用域：放在现有的 Mcp 进程插件内（[ADR 002](../../adr/002-plugin-scope.md)）。依据：
@@ -537,6 +537,17 @@ Mcp 自己检查 `error` 参数，因为 rmcp 把任何带该请求头的 `403` 
    并显示 `missingScopes`。Session 视图显示 `auth_required` 并给出登录提示。
 6. **非交互。** 没有终端时（`exec`、管道）CLI 从不发起登录，只打印应运行的命令。
 7. **错误。** 把 §9.3 的错误码映射到所列动作，绝不把回调 URL 回显出来。
+
+原生 CLI 提供 `mcp login ID [--no-browser] [--client-secret]`、`mcp logout ID`，以及空闲时的
+`/mcp`、`/mcp login [--no-browser] [--client-secret] ID`、`/mcp logout ID`。目标来源取自公开目录，
+保留项目条目遮蔽用户条目的语义。`--client-secret` 只开启隐藏输入，不接受参数值。回环监听同时绑定
+`127.0.0.1` 和 `::1`，只接收一个请求，将其路径和查询与已知重定向来源组成完整回调，等待 `complete`
+结算后回复静态页面。请求头大小有上限；重定向、state、issuer 和授权结果仍只由守护进程校验。
+
+Ctrl-C 或到期会释放监听和隐藏输入状态。已经提交的 RPC 在返回交互提示前读完回复，保留现有响应身份
+约束，不增加尝试取消方法、令牌状态、后台轮询或守护进程入口。当前 CLI 配置操作是启用和禁用条目；
+通过配置 API 删除条目时仍需遵守上述先提示登出的要求。
+[CLI README](../../../../crates/dim-cli/README.md#mcp-servers) 提供交互示意。
 
 其他后续事项，不是需求：
 

@@ -9,6 +9,9 @@ Commands:\n\
   logout PROVIDER                  Sign out of an account provider\n\
   models PROVIDER [--refresh]       List model IDs and availability\n\
   mcp list                         List MCP servers and their enablement\n\
+  mcp login ID [--no-browser] [--client-secret]\n\
+                                   Sign in; secrets use hidden terminal input\n\
+  mcp logout ID                    Sign out and report token revocation\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
@@ -26,6 +29,7 @@ Options:\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
 Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
+Idle MCP commands: /mcp, /mcp login [--no-browser] [--client-secret] ID, /mcp logout ID.\n\
 Approval accepts only y/yes; empty input denies. Noninteractive approval exits 3.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval required, 130 interrupted.\n";
@@ -38,6 +42,8 @@ pub enum Action {
     Logout(String),
     Models(String),
     McpList,
+    McpLogin(String),
+    McpLogout(String),
     McpEnable { id: String, enabled: bool },
     DaemonStop,
     Help,
@@ -61,6 +67,8 @@ pub struct Options {
     pub device: bool,
     pub refresh: bool,
     pub redirect_uri: String,
+    pub no_browser: bool,
+    pub client_secret: bool,
 }
 
 impl Options {
@@ -88,6 +96,8 @@ impl Options {
             device: false,
             refresh: false,
             redirect_uri: "http://localhost:1455/auth/callback".into(),
+            no_browser: false,
+            client_secret: false,
         };
         let mut args = args;
         while let Some(arg) = args.next() {
@@ -119,14 +129,22 @@ impl Options {
                 "--redirect-uri" => options.redirect_uri = value(&mut args)?,
                 "--device" => options.device = true,
                 "--refresh" => options.refresh = true,
+                "--no-browser" => options.no_browser = true,
+                "--client-secret" => options.client_secret = true,
+                value if value.starts_with("--client-secret=") => return Err(
+                    "Use --client-secret without a value; enter the secret at the hidden prompt"
+                        .into(),
+                ),
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
+                        "login" => Action::McpLogin(value(&mut args)?),
+                        "logout" => Action::McpLogout(value(&mut args)?),
                         command @ ("enable" | "disable") => Action::McpEnable {
                             id: value(&mut args)?,
                             enabled: command == "enable",
                         },
-                        _ => return Err("Use mcp list, mcp enable ID or mcp disable ID".into()),
+                        _ => return Err("Use mcp list, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into()),
                     };
                 }
                 "daemon" if matches!(options.action, Action::Chat) => {
@@ -146,6 +164,10 @@ impl Options {
                         _ => Action::Models(provider),
                     };
                 }
+                _ if options.client_secret => return Err(
+                    "Use --client-secret without a value; enter the secret at the hidden prompt"
+                        .into(),
+                ),
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
             }
         }
@@ -181,6 +203,11 @@ impl Options {
         }
         if options.refresh && !matches!(options.action, Action::Models(_)) {
             return Err("--refresh requires the models command".into());
+        }
+        if (options.no_browser || options.client_secret)
+            && !matches!(options.action, Action::McpLogin(_))
+        {
+            return Err("--no-browser and --client-secret require mcp login ID".into());
         }
         if matches!(options.action, Action::Login(_)) && options.directory.is_none() {
             return Err("login requires --directory URL".into());

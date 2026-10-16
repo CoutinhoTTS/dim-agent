@@ -1840,6 +1840,21 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::mcp",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/mcp.rs",
+      "unexpandedMacros": [
+        "eprintln",
+        "format",
+        "json",
+        "matches",
+        "println",
+        "tokio::pin",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::session",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -14323,6 +14338,8 @@
         "path Action::Logout",
         "path Action::McpEnable",
         "path Action::McpList",
+        "path Action::McpLogin",
+        "path Action::McpLogout",
         "path Action::Models",
         "path Action::Version",
         "path Options",
@@ -14353,7 +14370,9 @@
       "from": "dim_cli::@bin:dimcode",
       "to": "dim_cli::@bin:dimcode::input",
       "references": [
-        "mod input"
+        "mod input",
+        "path input",
+        "path input::Input::new"
       ]
     },
     {
@@ -14362,6 +14381,17 @@
       "references": [
         "mod login",
         "path login::login"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::mcp",
+      "references": [
+        "mod mcp",
+        "path mcp::Catalog",
+        "path mcp::list",
+        "path mcp::sign_in",
+        "path mcp::sign_out"
       ]
     },
     {
@@ -14484,6 +14514,55 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::mcp",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "path crate::Error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::mcp",
+      "to": "dim_cli::@bin:dimcode::args",
+      "references": [
+        "path Options",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::mcp",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "path crate::client::RpcError",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::mcp",
+      "to": "dim_cli::@bin:dimcode::display",
+      "references": [
+        "use crate::display::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::mcp",
+      "to": "dim_cli::@bin:dimcode::input",
+      "references": [
+        "path Input",
+        "use crate::input::Input"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::mcp",
+      "to": "dim_cli::@bin:dimcode::login",
+      "references": [
+        "path open_browser",
+        "use crate::login::open_browser"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::session",
       "to": "dim_agent_types::events",
       "references": [
@@ -14549,6 +14628,15 @@
         "path Input",
         "path Input::new",
         "use crate::input::Input"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::mcp",
+      "references": [
+        "path mcp::State",
+        "path mcp::command",
+        "use crate::mcp"
       ]
     }
   ],
@@ -14908,6 +14996,10 @@
     {
       "module": "dim_cli::@bin:dimcode::input",
       "path": "INPUT_RECORD::default"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::mcp",
+      "path": "char::is_whitespace"
     }
   ]
 }

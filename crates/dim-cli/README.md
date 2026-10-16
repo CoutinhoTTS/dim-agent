@@ -53,7 +53,9 @@ The configuration references credentials by environment-variable name. The share
 
 ## MCP servers
 
-`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport and enablement.
+`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement and
+authorization (`sign-in required`, `signed in`, `sign-in expired`, or `—` when absent).
+Missing scopes appear below the entry.
 It does not print commands, environment values, headers or credentials. `mcp enable ID` and
 `mcp disable ID` change the entry that `mcp list` shows for the workspace.
 
@@ -64,11 +66,11 @@ dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/p
 ```
 
 ```text
-"docs"  project  stdio  disabled
+"docs"  project  stdio  disabled  -
                   |
              mcp enable docs
                   v
-"docs"  project  stdio  enabled
+"docs"  project  stdio  enabled   -
 ```
 
 A configured MCP server runs when it is enabled; there is no separate approval
@@ -84,6 +86,38 @@ stderr. A project entry still shadows a same-name user entry. Pass the ID's actu
 value, not its displayed escape spelling, and use the same `--home` and model profile as the daemon
 serving your workspace. See the
 [MCP configuration contract](../dim-app-server/README.md#mcp-configuration-management).
+
+For an enabled HTTP/SSE entry, run `mcp login ID` or idle `/mcp login ID`. The CLI shows the
+resource and authorization server host before opening the browser. It captures one callback
+on both loopback families when the configured port is free; busy ports, SSH and `--no-browser`
+use hidden pasted input. `--client-secret` prompts with echo disabled; it never accepts the
+secret as an argument. The daemon owns validation, token exchange and credential storage.
+
+```text
+> /mcp
+"docs"  project  http  enabled  sign-in required
+  Missing scopes: files:read
+> /mcp login --no-browser --client-secret docs
+Client secret (hidden):
+Resource: https://resource.example/mcp
+Authorization server: issuer.example
+Callback URL:
+Signed in to "docs".
+> /mcp logout docs
+Signed out of "docs". Revoked: true.
+```
+
+Use `mcp login ID --no-browser --client-secret` for the standalone command. Slash-command
+flags precede the ID; its remaining text is the literal ID, including spaces. `/mcp` also
+shows the attached Session's server states and a sign-in hint for `auth_required`.
+Invalid callbacks can be pasted again. Ctrl+C, EOF or expiry stops waiting and prints the
+restart command. Once an RPC has been submitted, its reply is drained before another
+interactive command can run. A submitted exchange may complete successfully during that wait.
+Noninteractive input never starts sign-in; slash text in a headless prompt remains model input.
+`mcp logout ID` reports the daemon's `revoked` result. Credentials can be signed out before
+removing their entry through the existing configuration API; the CLI has no entry-removal command.
+
+See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-requirements-raised-to-mechanism-owners).
 
 ## Scrollback and session recovery
 
