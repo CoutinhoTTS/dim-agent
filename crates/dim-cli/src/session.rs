@@ -222,7 +222,7 @@ pub async fn chat(
             return Ok(code);
         }
         if options.prompt.is_some() || !images.is_empty() {
-            let content = options.prompt.iter().map(|text| ContentBlock::Text { text: text.clone() })
+            let content = options.prompt.iter().filter(|text| !text.trim().is_empty()).map(|text| ContentBlock::Text { text: text.clone() })
                 .chain(images).collect();
             return wait_turn(client, &session_id, Some(Submission::Message(UserInput { content })), &mut display, &mut input, &mut interrupts, None).await;
         }
@@ -571,7 +571,12 @@ async fn wait_turn(
                 }
             }
             Message::Response { id, result } if Some(id) == submit => {
-                result.map_err(|error| format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again"))?;
+                if let Err(error) = result {
+                    match error.data.as_ref().and_then(|data| data.get("appError")).and_then(Value::as_str) {
+                        Some("invalid_params" | "session_invalid_input" | "session_closed" | "session_build_failed" | "service_reloading" | "unknown_method") => return Err(error.into()),
+                        _ => return Err(format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again").into()),
+                    }
+                }
                 if let Some(draft) = draft.take() {
                     draft.clear();
                 }

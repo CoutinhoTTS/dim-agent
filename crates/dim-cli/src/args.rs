@@ -20,7 +20,7 @@ Commands:\n\
   daemon stop                      Gracefully stop an existing daemon\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
-  --image PATH                    Add a local image to exec (repeatable)\n\
+  --image PATH                     Add a local image to exec (repeatable)\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
@@ -34,6 +34,7 @@ Options:\n\
 Enter sends an idle draft; Ctrl+J inserts a newline; bracketed paste does not submit.\n\
 Ctrl+C clears a nonempty idle draft; an empty draft or EOF exits.\n\
 During execution, Ctrl+C requests stop and waits for settlement.\n\
+Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 Approval accepts only y/yes; empty input denies. Noninteractive approval exits 3.\n\
