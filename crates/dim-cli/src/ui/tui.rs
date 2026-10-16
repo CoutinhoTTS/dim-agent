@@ -2328,13 +2328,14 @@ impl App {
         };
         self.composer.clear();
         // Fullscreen holds the transcript itself: another session starts on
-        // a clean view under the banner. Scrollback keeps what the terminal
-        // already shows.
+        // a clean view under the banner, which the next frame commits (the
+        // session may attach before the first frame). Scrollback keeps what
+        // the terminal already shows.
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
             self.stream_block = None;
-            self.record(Block::Banner);
+            self.banner_committed = false;
             self.jump = Some(Jump::Bottom);
         }
     }

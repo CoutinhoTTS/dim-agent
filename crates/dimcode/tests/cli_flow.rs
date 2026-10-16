@@ -2275,6 +2275,41 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
 }
 
 #[test]
+fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
+    let home = Home::new();
+    // The pty never answers the startup probe, so the first frame waits for
+    // its timeout while this daemon attaches the session at once.
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        // Hold the connection until the client goes away.
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let (mut terminal, mut child) = Terminal::launch(command);
+    terminal.until("test / model");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(
+        terminal.transcript.matches("Welcome to DIM").count(),
+        1,
+        "{}",
+        terminal.transcript
+    );
+}
+
+#[test]
 fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
