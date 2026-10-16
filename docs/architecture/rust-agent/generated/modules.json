@@ -9450,6 +9450,8 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_types::events",
       "references": [
+        "path EventKind::BranchResume",
+        "path EventKind::BranchStart",
         "path EventKind::ExecEnded",
         "path EventKind::ExecStarted",
         "path EventKind::InputApplied",
