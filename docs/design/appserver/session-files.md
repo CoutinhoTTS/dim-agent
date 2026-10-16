@@ -422,8 +422,8 @@ Attachments ([A.2](../plugins/Attachments.md#a2-attachmentput)) declares `S:Sess
 the process service `sessionFiles` in its `Deps`: an enclosing-scope dependency on a core part
 (D3). A SessionStore reload reloads Attachments, which its rule check already accepts. For
 `attachment.put` it calls `put(sessionId = its own Session, name, content = the text's UTF-8
-bytes)`. It replies `{attachmentId: fileId, path, bytes}` plus the `lines` it counts itself.
-Attachments names no SessionStore type; the Rust binding is Appendix A.
+bytes)`. It replies `{attachmentId: fileId, path, bytes}`. Attachments names no SessionStore
+type; the Rust binding is Appendix A.
 
 | `sessionFiles` error | `attachment.put` result |
 | --- | --- |
@@ -431,8 +431,8 @@ Attachments names no SessionStore type; the Rust binding is Appendix A.
 | `invalid` | `attachment_invalid` |
 | `too_large` | `attachment_too_large` (Attachments' 10 MiB limit is below SessionStore's, so this does not occur) |
 | `node_unavailable` | `node_unavailable` |
-| `cancelled` | `operation_interrupted`, the `report` interruption of the call |
-| `storage` | `storage_failed`; Attachments adds the code in P2's design review (§15) |
+| `cancelled` | `service_reloading`: nothing was stored, and the call is `drain`, so it replies with this result |
+| `storage` | `storage_failed`, as SessionTitle maps the same failure (§15) |
 
 ## 10. Errors, limits and immutability
 
