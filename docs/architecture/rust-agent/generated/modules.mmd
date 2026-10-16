@@ -176,13 +176,16 @@ flowchart LR
   m172["dim_cli::@bin:dimcode"]
   m173["dim_cli::@bin:dimcode::args"]
   m174["dim_cli::@bin:dimcode::client"]
-  m175["dim_cli::@bin:dimcode::composer"]
-  m176["dim_cli::@bin:dimcode::display"]
-  m177["dim_cli::@bin:dimcode::export"]
-  m178["dim_cli::@bin:dimcode::images"]
-  m179["dim_cli::@bin:dimcode::input"]
-  m180["dim_cli::@bin:dimcode::login"]
-  m181["dim_cli::@bin:dimcode::session"]
+  m175["dim_cli::@bin:dimcode::clipboard"]
+  m176["dim_cli::@bin:dimcode::clipboard::native_flow"]
+  m177["dim_cli::@bin:dimcode::clipboard::windows_flow"]
+  m178["dim_cli::@bin:dimcode::composer"]
+  m179["dim_cli::@bin:dimcode::display"]
+  m180["dim_cli::@bin:dimcode::export"]
+  m181["dim_cli::@bin:dimcode::images"]
+  m182["dim_cli::@bin:dimcode::input"]
+  m183["dim_cli::@bin:dimcode::login"]
+  m184["dim_cli::@bin:dimcode::session"]
   m0 -.-> m1
   m0 -.-> m2
   m0 --> m3
@@ -1384,48 +1387,57 @@ flowchart LR
   m172 --> m173
   m172 --> m174
   m172 -.-> m175
-  m172 -.-> m176
-  m172 --> m177
-  m172 --> m178
+  m172 -.-> m178
   m172 -.-> m179
   m172 --> m180
   m172 --> m181
+  m172 -.-> m182
+  m172 --> m183
+  m172 --> m184
   m173 --> m172
-  m173 --> m177
+  m173 --> m180
   m174 --> m172
   m174 --> m173
   m175 --> m99
-  m175 --> m101
   m175 --> m172
-  m175 --> m174
-  m175 --> m176
-  m175 --> m179
-  m176 --> m97
-  m176 --> m99
-  m176 --> m101
-  m176 --> m172
-  m177 --> m99
-  m177 --> m101
-  m177 --> m172
-  m177 --> m174
-  m177 --> m176
-  m177 --> m181
+  m175 -.-> m176
+  m175 -.-> m177
+  m175 --> m181
+  m176 --> m175
+  m177 --> m175
   m178 --> m99
+  m178 --> m101
   m178 --> m172
+  m178 --> m174
+  m178 --> m175
+  m178 --> m181
+  m178 --> m182
+  m179 --> m97
+  m179 --> m99
+  m179 --> m101
   m179 --> m172
+  m180 --> m99
+  m180 --> m101
   m180 --> m172
-  m180 --> m173
   m180 --> m174
-  m180 --> m176
   m180 --> m179
-  m181 --> m97
+  m180 --> m184
   m181 --> m99
-  m181 --> m101
-  m181 --> m106
   m181 --> m172
-  m181 --> m173
-  m181 --> m174
-  m181 --> m175
-  m181 --> m176
-  m181 --> m177
-  m181 --> m179
+  m182 --> m172
+  m183 --> m172
+  m183 --> m173
+  m183 --> m174
+  m183 --> m179
+  m183 --> m182
+  m184 --> m97
+  m184 --> m99
+  m184 --> m101
+  m184 --> m106
+  m184 --> m172
+  m184 --> m173
+  m184 --> m174
+  m184 --> m178
+  m184 --> m179
+  m184 --> m180
+  m184 --> m182

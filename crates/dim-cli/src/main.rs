@@ -1,5 +1,6 @@
 mod args;
 mod client;
+mod clipboard;
 mod composer;
 mod display;
 mod export;

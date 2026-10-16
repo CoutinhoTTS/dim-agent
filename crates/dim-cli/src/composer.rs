@@ -1,13 +1,18 @@
 use crate::{
     Result,
     client::{Client, RequestTooLarge, RpcError},
-    display,
+    clipboard::{self, Source},
+    images,
     input::Input,
 };
 use dim_agent_types::{ContentBlock, UserInput};
 use serde::Deserialize;
 use serde_json::json;
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    ops::Range,
+    path::{Path, PathBuf},
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -23,12 +28,16 @@ enum Part {
         lines: usize,
         path: Option<String>,
     },
+    File {
+        label: String,
+        content: ContentBlock,
+    },
 }
 impl Part {
     fn len(&self) -> usize {
         match self {
             Self::Text(text) => text.len(),
-            Self::Paste { .. } => 1,
+            Self::Paste { .. } | Self::File { .. } => 1,
         }
     }
 }
@@ -67,7 +76,7 @@ impl Draft {
     fn empty(&self) -> bool {
         self.parts.iter().all(|part| match part {
             Part::Text(text) => text.trim().is_empty(),
-            Part::Paste { .. } => false,
+            Part::Paste { .. } | Part::File { .. } => false,
         })
     }
 
@@ -91,7 +100,7 @@ impl Draft {
                 self.parts
                     .splice(index + 1..index + 1, [part, Part::Text(tail)]);
             }
-            Some(Part::Paste { .. }) => self.parts.insert(index + offset, part),
+            Some(Part::Paste { .. } | Part::File { .. }) => self.parts.insert(index + offset, part),
             None => self.parts.push(part),
         }
         self.cursor += inserted;
@@ -146,7 +155,7 @@ impl Draft {
                     text.grapheme_indices(true)
                         .map(|(offset, grapheme)| start + offset + grapheme.len()),
                 ),
-                Part::Paste { .. } => positions.push(start + 1),
+                Part::Paste { .. } | Part::File { .. } => positions.push(start + 1),
             }
             start += part.len();
         }
@@ -163,10 +172,10 @@ impl Draft {
                     let to = end.saturating_sub(base).min(length);
                     text.replace_range(from..to, "");
                 }
-                Part::Paste { .. } if start <= base && end > base => {
+                Part::Paste { .. } | Part::File { .. } if start <= base && end > base => {
                     *part = Part::Text(String::new());
                 }
-                Part::Paste { .. } => {}
+                Part::Paste { .. } | Part::File { .. } => {}
             }
             base += length;
         }
@@ -195,7 +204,7 @@ impl Draft {
         let columns = width.saturating_sub(1).max(3);
         let mut lines = vec!["> ".to_owned()];
         let mut positions = vec![(0, 0, 2)];
-        let (mut offset, mut column, mut pastes) = (0, 2, 0);
+        let (mut offset, mut column, mut pastes, mut images) = (0, 2, 0, 0);
         for part in &self.parts {
             let pieces: Vec<(String, usize)> = match part {
                 Part::Text(text) => text
@@ -206,23 +215,24 @@ impl Draft {
                     pastes += 1;
                     vec![(format!("[Paste {pastes}: {lines} lines]"), 1)]
                 }
+                Part::File { label, content } => {
+                    let text = match content {
+                        ContentBlock::Image { .. } => {
+                            images += 1;
+                            format!("[Image {images}: {label}]")
+                        }
+                        _ => format!("[File: {label}]"),
+                    };
+                    vec![(text, 1)]
+                }
             };
             for (piece, length) in pieces {
                 if matches!(piece.as_str(), "\n" | "\r\n") {
                     lines.push("  ".into());
                     column = 2;
                 } else {
-                    let mut shown = String::new();
-                    for ch in piece.chars() {
-                        if ch.is_control()
-                            || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-                        {
-                            shown.extend(ch.escape_debug());
-                        } else {
-                            shown.push(ch);
-                        }
-                    }
-                    if matches!(part, Part::Paste { .. }) {
+                    let mut shown = escaped(&piece);
+                    if !matches!(part, Part::Text(_)) {
                         shown = truncate(&shown, columns.saturating_sub(2));
                     }
                     let cells = shown.width();
@@ -276,6 +286,140 @@ impl Draft {
             base += part.len();
         }
         self.cursor = if end { base } else { start };
+    }
+
+    fn files(&mut self, paths: &[PathBuf], replace: Range<usize>) -> Result<()> {
+        let mut count = self
+            .parts
+            .iter()
+            .filter(|part| {
+                matches!(
+                    part,
+                    Part::File {
+                        content: ContentBlock::Image { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        let mut parts = Vec::new();
+        for path in paths {
+            let label = path
+                .file_name()
+                .ok_or("Expected a local ordinary file")?
+                .to_str()
+                .ok_or("File paths must be UTF-8")?
+                .to_owned();
+            path.to_str().ok_or("File paths must be UTF-8")?;
+            let content = images::file(path)
+                .map_err(|error| format!("{}: {error}", truncate(&escaped(&label), 24)))?;
+            if matches!(content, ContentBlock::Image { .. }) {
+                count += 1;
+                if count > 20 {
+                    return Err("A submission accepts at most 20 images".into());
+                }
+            }
+            parts.push(Part::File { label, content });
+        }
+        // Commit the group only after every local source has been accepted.
+        self.erase(replace.start, replace.end);
+        for part in parts {
+            self.insert(part);
+        }
+        Ok(())
+    }
+
+    fn paste(&mut self, text: String, base: &Path) -> Result<()> {
+        if let Some(paths) = pasted_paths(&text, base) {
+            self.files(&paths, self.cursor..self.cursor)
+        } else {
+            if text.len() > INLINE_PASTE || text.contains(['\r', '\n']) {
+                let lines = text.lines().count();
+                self.insert(Part::Paste {
+                    text,
+                    lines,
+                    path: None,
+                });
+            } else if !text.is_empty() {
+                self.insert(Part::Text(text));
+            }
+            Ok(())
+        }
+    }
+
+    fn clipboard(&mut self, source: Source, base: &Path) -> Result<()> {
+        match source {
+            Source::Text(text) => self.paste(text, base),
+            Source::Files(paths) => self.files(&paths, self.cursor..self.cursor),
+            Source::Image(source) => {
+                if self
+                    .parts
+                    .iter()
+                    .filter(|part| {
+                        matches!(
+                            part,
+                            Part::File {
+                                content: ContentBlock::Image { .. },
+                                ..
+                            }
+                        )
+                    })
+                    .count()
+                    >= 20
+                {
+                    return Err("A submission accepts at most 20 images".into());
+                }
+                self.insert(Part::File {
+                    label: "clipboard".into(),
+                    content: ContentBlock::Image { source },
+                });
+                Ok(())
+            }
+        }
+    }
+
+    fn completion(&self, base: &Path) -> Result<Option<Completion>> {
+        let (index, offset) = self.locate(self.cursor);
+        let Some(Part::Text(text)) = self.parts.get(index) else {
+            return Ok(None);
+        };
+        let Some(start) = text[..offset]
+            .rfind('@')
+            .filter(|&pos| pos == 0 || text[..pos].ends_with(char::is_whitespace))
+        else {
+            return Ok(None);
+        };
+        let query = &text[start + 1..offset];
+        if query.contains(['\n', '\r']) {
+            return Ok(None);
+        }
+        let boundary = query
+            .rfind(std::path::is_separator)
+            .map_or(0, |position| position + 1);
+        let directory = base.join(&query[..boundary]);
+        let prefix = &query[boundary..];
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name.starts_with(prefix) {
+                let path = entry.path();
+                let directory = path.is_dir();
+                entries.push(CompletionEntry {
+                    path,
+                    name,
+                    directory,
+                });
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Some(Completion {
+            range: self.cursor - (offset - start)..self.cursor,
+            entries,
+            selected: 0,
+        }))
     }
 
     pub async fn prepare(
@@ -341,17 +485,32 @@ impl Draft {
                 return Ok(None);
             }
         }
-        let text = self
-            .parts
-            .iter()
-            .map(|part| match part {
-                Part::Text(text) => text.clone(),
-                Part::Paste { text, lines, path } => match path {
-                    Some(path) => format!("[Pasted text: {path} ({lines} lines)]"),
-                    None => text.clone(),
+        let mut content = Vec::new();
+        let mut text = String::new();
+        for part in &self.parts {
+            match part {
+                Part::Text(value) => text.push_str(value),
+                Part::Paste {
+                    text: value,
+                    lines,
+                    path,
+                } => match path {
+                    Some(path) => text.push_str(&format!("[Pasted text: {path} ({lines} lines)]")),
+                    None => text.push_str(value),
                 },
-            })
-            .collect::<String>();
+                Part::File { content: value, .. } => {
+                    if !text.is_empty() {
+                        content.push(ContentBlock::Text {
+                            text: std::mem::take(&mut text),
+                        });
+                    }
+                    content.push(value.clone());
+                }
+            }
+        }
+        if !text.is_empty() {
+            content.push(ContentBlock::Text { text });
+        }
         tokio::select! {
             biased;
             _ = interrupts.recv() => {
@@ -360,10 +519,75 @@ impl Draft {
             },
             _ = std::future::ready(()) => {}
         }
-        Ok(Some(UserInput {
-            content: vec![ContentBlock::Text { text }],
-        }))
+        Ok(Some(UserInput { content }))
     }
+}
+
+fn local_path(value: &str, base: &Path) -> Option<PathBuf> {
+    if value.starts_with("file:") {
+        clipboard::file_url(value)
+    } else if value.starts_with("http://") || value.starts_with("https://") {
+        None
+    } else {
+        Some(base.join(value))
+    }
+}
+
+fn pasted_paths(text: &str, base: &Path) -> Option<Vec<PathBuf>> {
+    let value = text.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(path) = local_path(value, base).filter(|path| path.is_file()) {
+        return Some(vec![path]);
+    }
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if chars
+                .peek()
+                .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '\'' | '"')) =>
+            {
+                token.push(chars.next()?)
+            }
+            '\'' | '"' if quote == Some(ch) => quote = None,
+            '\'' | '"' if quote.is_none() => quote = Some(ch),
+            ch if ch.is_whitespace() && quote.is_none() => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            ch => token.push(ch),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+    tokens
+        .iter()
+        .map(|token| local_path(token, base).filter(|path| path.is_file()))
+        .collect()
+}
+
+struct Completion {
+    range: Range<usize>,
+    entries: Vec<CompletionEntry>,
+    selected: usize,
+}
+
+struct CompletionEntry {
+    path: PathBuf,
+    name: String,
+    directory: bool,
 }
 
 enum Key {
@@ -382,6 +606,9 @@ enum Key {
     End,
     Backspace,
     Delete,
+    Tab,
+    Escape,
+    Clipboard,
 }
 
 #[derive(Default)]
@@ -435,8 +662,10 @@ impl Decoder {
                 3 => Key::Interrupt,
                 4 | 26 => Key::Eof,
                 8 | 127 => Key::Backspace,
+                9 => Key::Tab,
                 10 => Key::Newline,
                 13 => Key::Enter,
+                22 => Key::Clipboard,
                 27 => {
                     if self.bytes.starts_with(PASTE_START) {
                         self.bytes.drain(..PASTE_START.len());
@@ -448,7 +677,7 @@ impl Decoder {
                     }
                     if !matches!(self.bytes[1], b'[' | b'O') {
                         self.bytes.remove(0);
-                        continue;
+                        return Some(Key::Escape);
                     }
                     let end = self.bytes[2..]
                         .iter()
@@ -518,6 +747,18 @@ fn truncate(text: &str, columns: usize) -> String {
     shown
 }
 
+fn escaped(text: &str) -> String {
+    let mut shown = String::new();
+    for ch in text.chars() {
+        if ch.is_control() || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            shown.extend(ch.escape_debug());
+        } else {
+            shown.push(ch);
+        }
+    }
+    shown
+}
+
 #[derive(Default)]
 struct Screen {
     widths: Vec<usize>,
@@ -541,17 +782,60 @@ impl Screen {
         (rows, cursor)
     }
 
-    fn draw(&mut self, draft: &Draft, size: (usize, usize), notice: Option<&str>) -> Result<()> {
+    fn draw(
+        &mut self,
+        draft: &Draft,
+        size: (usize, usize),
+        notice: Option<&str>,
+        completion: Option<&Completion>,
+    ) -> Result<()> {
         let (mut lines, positions) = draft.layout(size.0);
         let &(_, row, column) = positions
             .iter()
             .rfind(|&&(pos, _, _)| pos == draft.cursor)
             .expect("draft cursor");
-        let top = row.saturating_sub(size.1.saturating_sub(2));
-        let end = (top + size.1.saturating_sub(1).max(1)).min(lines.len());
+        let suggestions = completion
+            .map(|value| {
+                value
+                    .entries
+                    .len()
+                    .clamp(1, 5)
+                    .min(size.1.saturating_sub(2))
+            })
+            .unwrap_or(0);
+        let available = size.1.saturating_sub(suggestions + 1).max(1);
+        let top = row.saturating_sub(available - 1);
+        let end = (top + available).min(lines.len());
         lines = lines[top..end].to_vec();
+        if let Some(value) = completion {
+            if value.entries.is_empty() && suggestions > 0 {
+                lines.push("  No matching files".into());
+            }
+            let start = value.selected.saturating_sub(suggestions.saturating_sub(1));
+            for (index, entry) in value
+                .entries
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(suggestions)
+            {
+                lines.push(truncate(
+                    &escaped(&format!(
+                        "{} {}{}",
+                        if index == value.selected { "*" } else { " " },
+                        entry.name,
+                        if entry.directory { "/" } else { "" }
+                    )),
+                    size.0.saturating_sub(1),
+                ));
+            }
+        }
         lines.push(truncate(
-            &display::safe(notice.unwrap_or("Enter: send   Ctrl+J: newline   Ctrl+C: clear")),
+            &escaped(notice.unwrap_or(if completion.is_some() {
+                "Tab: select or enter directory   Esc: close suggestions"
+            } else {
+                "Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear"
+            })),
             size.0.saturating_sub(1),
         ));
         let mut output = io::stdout().lock();
@@ -606,16 +890,22 @@ pub async fn edit(
     input: &mut Input,
     draft: &mut Draft,
     mut notice: Option<String>,
+    base: &Path,
     #[cfg(unix)] interrupts: &mut tokio::signal::unix::Signal,
     #[cfg(windows)] interrupts: &mut tokio::signal::windows::CtrlC,
 ) -> Result<bool> {
     let _mode = input.editor()?;
     let mut screen = Screen::default();
     let mut decoder = Decoder::default();
+    let mut completion = None;
+    let mut dismissed = false;
+    let mut clipboard_read: Option<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Source>>>>,
+    > = None;
     #[cfg(unix)]
     let mut resize = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut size = input.size()?;
-    screen.draw(draft, size, notice.as_deref())?;
+    screen.draw(draft, size, notice.as_deref(), None)?;
     loop {
         let bytes = tokio::select! {
             _ = interrupts.recv() => {
@@ -623,6 +913,7 @@ pub async fn edit(
                     return Ok(false);
                 }
                 draft.clear();
+                clipboard_read = None;
                 if let Some(paste) = &mut decoder.paste {
                     paste.bytes.clear();
                     paste.rejected = Some("Paste cancelled; draft cleared");
@@ -630,7 +921,16 @@ pub async fn edit(
                     decoder = Decoder::default();
                 }
                 notice = None;
-                screen.draw(draft, size, None)?;
+                completion = None;
+                dismissed = false;
+                screen.draw(draft, size, None, None)?;
+                continue;
+            },
+            source = async { clipboard_read.as_mut().expect("pending clipboard read").as_mut().await }, if clipboard_read.is_some() => {
+                clipboard_read = None;
+                notice = source.and_then(|source| draft.clipboard(source, base)).err().map(|error| format!("Clipboard: {error}"));
+                completion = None;
+                screen.draw(draft, size, notice.as_deref(), None)?;
                 continue;
             },
             _ = async {
@@ -640,7 +940,14 @@ pub async fn edit(
                 { std::future::pending::<()>().await; }
             } => {
                 size = input.size()?;
-                screen.draw(draft, size, notice.as_deref())?;
+                screen.draw(draft, size, notice.as_deref(), completion.as_ref())?;
+                continue;
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)), if completion.is_some() && decoder.bytes == b"\x1b" && decoder.paste.is_none() => {
+                // Keep a delayed CSI or paste prefix intact after closing suggestions.
+                completion = None;
+                dismissed = true;
+                screen.draw(draft, size, notice.as_deref(), None)?;
                 continue;
             },
             bytes = input.read_bytes() => bytes?,
@@ -651,9 +958,57 @@ pub async fn edit(
         while let Some(key) = decoder.next() {
             changed = true;
             notice = None;
+            match (&key, &mut completion) {
+                (Key::Up | Key::Down, Some(value)) => {
+                    if !value.entries.is_empty() {
+                        value.selected = if matches!(key, Key::Up) {
+                            value.selected.saturating_sub(1)
+                        } else {
+                            (value.selected + 1).min(value.entries.len() - 1)
+                        };
+                    }
+                    continue;
+                }
+                (Key::Tab, Some(value)) => {
+                    if let Some(entry) = value.entries.get(value.selected) {
+                        let result = if entry.directory {
+                            entry
+                                .path
+                                .strip_prefix(base)
+                                .unwrap_or(&entry.path)
+                                .to_str()
+                                .ok_or_else(|| "File paths must be UTF-8".into())
+                                .map(|path| {
+                                    draft.erase(value.range.start, value.range.end);
+                                    draft.insert(Part::Text(format!(
+                                        "@{path}{}",
+                                        std::path::MAIN_SEPARATOR
+                                    )));
+                                })
+                        } else {
+                            draft.files(std::slice::from_ref(&entry.path), value.range.clone())
+                        };
+                        if let Err(error) = result {
+                            notice = Some(error.to_string());
+                        }
+                    }
+                }
+                (Key::Escape, _) => {
+                    completion = None;
+                    dismissed = true;
+                    continue;
+                }
+                _ => {}
+            }
+            if !matches!(key, Key::Up | Key::Down | Key::Tab) {
+                dismissed = false;
+            }
             match key {
+                Key::Enter if clipboard_read.is_some() => {
+                    notice = Some("Wait for clipboard insertion before sending".into());
+                }
                 Key::Enter if !draft.empty() => {
-                    screen.draw(draft, size, None)?;
+                    screen.draw(draft, size, None, None)?;
                     return Ok(true);
                 }
                 Key::Enter => {}
@@ -661,19 +1016,19 @@ pub async fn edit(
                 Key::Interrupt if draft.parts.is_empty() => return Ok(false),
                 Key::Interrupt => {
                     draft.clear();
+                    clipboard_read = None;
                 }
                 Key::Text(text) => draft.insert(Part::Text(text)),
                 Key::Newline => draft.insert(Part::Text("\n".into())),
-                Key::Paste(text) if text.is_empty() => {}
-                Key::Paste(text) if text.len() > INLINE_PASTE || text.contains(['\r', '\n']) => {
-                    let lines = text.lines().count();
-                    draft.insert(Part::Paste {
-                        text,
-                        lines,
-                        path: None,
-                    });
+                Key::Paste(text) => {
+                    if let Err(error) = draft.paste(text, base) {
+                        notice = Some(error.to_string());
+                    }
                 }
-                Key::Paste(text) => draft.insert(Part::Text(text)),
+                Key::Clipboard => {
+                    clipboard_read = Some(Box::pin(clipboard::read()));
+                    notice = Some("Reading clipboard... Ctrl+C: clear".into());
+                }
                 Key::Rejected(reason) => notice = Some(reason.into()),
                 Key::Left => draft.horizontal(false, false),
                 Key::Right => draft.horizontal(true, false),
@@ -683,11 +1038,23 @@ pub async fn edit(
                 Key::Down => draft.vertical(size.0, 1),
                 Key::Home => draft.line_edge(false),
                 Key::End => draft.line_edge(true),
+                Key::Tab | Key::Escape => {}
             }
+            completion = if dismissed {
+                None
+            } else {
+                match draft.completion(base) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        notice = Some(error.to_string());
+                        None
+                    }
+                }
+            };
         }
         if changed {
             size = input.size()?;
-            screen.draw(draft, size, notice.as_deref())?;
+            screen.draw(draft, size, notice.as_deref(), completion.as_ref())?;
         }
     }
 }

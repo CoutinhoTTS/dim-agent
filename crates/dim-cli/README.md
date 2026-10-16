@@ -44,7 +44,7 @@ Multiline pastes and pastes over 16 KiB appear as atomic markers:
 ```text
 > Explain [Paste 1: 120 lines]
   and compare with the current file.
-Enter: send   Ctrl+J: newline   Ctrl+C: clear
+Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear
 ```
 
 Arrows move by grapheme or display row; Home/End select the logical line's ends.
@@ -63,8 +63,37 @@ Connection loss or an uncertain submission reply exits without retrying.
 Recognized commands require plain single-line input; attached command drafts are
 retained before any put or execution.
 
-Clipboard images/files, @ completion and dropped-path insertion are the remaining
-native sources in the [attachment input contract](../../docs/design/cli-attachment-input.md).
+Type `@` and a local path to see matching entries. Up/Down selects a suggestion;
+Tab enters a directory or inserts a file, and Esc closes suggestions without changing
+the draft. The displayed `local files` directory is the CLI's selected `--cwd`, including
+after resume. Paths outside that directory remain usable as explicit selections.
+
+```text
+local files: /work/project
+> Compare @docs/
+* guide.md
+  reference/
+Tab: select or enter directory   Esc: close suggestions
+
+> Compare [Image 1: screen.png] with [File: guide.md]
+Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear
+```
+
+A paste containing only existing file paths inserts files. Quotes, escaped spaces and
+local file URLs work; prose and HTTP links remain text. Supported image bytes produce
+image markers even with another filename extension. Other ordinary files produce path
+references, which the model can read with its existing tool. Image data is captured at
+insertion; removing a marker never deletes the original file. A rejected file group
+leaves the draft unchanged. File references retain separate ordered text content blocks.
+
+Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
+macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
+X11. Missing or failed clipboard access reports an inline error and retains the draft.
+The CLI reads only on that action and never changes the clipboard. A terminal that
+intercepts Ctrl+V uses its ordinary paste event instead. During a pending read, editing
+continues; Enter asks you to wait for insertion, and Ctrl+C clears the draft and cancels the reader.
+See the [attachment input contract](../../docs/design/cli-attachment-input.md) for native
+acceptance evidence; cross-compilation alone does not establish platform behavior.
 
 Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
 for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.

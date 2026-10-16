@@ -203,7 +203,12 @@ pub async fn chat(
     };
     // Print the handle even in headless mode so an uncertain submission can be resumed.
     display.record(&format!(
-        "workspace: {}\nsession: {}",
+        "{}: {}\nsession: {}",
+        if interactive {
+            "local files"
+        } else {
+            "workspace"
+        },
         options.cwd.display(),
         session_id
     ))?;
@@ -230,7 +235,7 @@ pub async fn chat(
         let mut notice = None;
         loop {
             let reader = input.as_mut().expect("interactive input");
-            if !composer::edit(reader, &mut draft, notice.take(), &mut interrupts).await? {
+            if !composer::edit(reader, &mut draft, notice.take(), &options.cwd, &mut interrupts).await? {
                 break;
             }
             let text = draft.plain().map(str::to_owned);
