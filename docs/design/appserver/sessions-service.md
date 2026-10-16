@@ -674,6 +674,20 @@ does) and the test calls it, exercising the neutral path. The plan's cases map t
    and a request with an extra field are `rejected`. With the native writer held, an Agents index reload during a
    delete does not end it: it replies `{}` once the writer is free, and the rows are gone. A delete that cannot remove
    the Session's command output replies `failed`; the Session stays closed with its rows, and the retry deletes it.
+8. **Review follow-ups of #98.**
+   - `a_launch_fails_reloading_while_the_starters_permission_reloads` (D5): the test binds Permission's command rules
+     through a Session part that reloads with the Agents index and holds its reload. While the starter's
+     `PermissionState` is absent, a launch with that starter fails `reloading` instead of using the host bound; once
+     Permission is back, the same launch succeeds.
+   - `a_launch_resolves_its_model_through_the_model_selection_host` (§6.1, `model`): with configured models, the
+     request's model, else the catalog default, is resolved through the host and carries the catalog's model defaults;
+     a model the host cannot resolve fails `failed` and creates nothing. The host's `reloading` case is not reachable
+     from a flow test: `serve` restarts neither model-selection provider.
+   - `a_dropped_launch_still_registers_its_session` (§17 #6): a launch dropped while its creation waits on the held
+     native writer still creates the Session, and Rpc attaches it, which needs its registered protocol version.
+   - `input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_write` (§17 #1): the native store fails the
+     write of an input, then of a withdraw's `input/deleted`. Both reply `publication_unknown`, so neither replies
+     before its event is published.
 
 ## 17. Design changes during implementation
 

@@ -466,6 +466,11 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现，`sess
 5. **重载与关闭**（`idle_ends_reloading_on_an_index_reload_and_session_closed_on_close`）。`idle` 期间 Agents 索引重载，以 `reloading` 结束它；测试部分保持装载，下一次调用成功。`idle` 期间关闭 Session，以 `session_closed` 结束它。`launch` 等待被锁住的原生存储时重载（`launch_admitted_before_an_index_reload_replies_the_created_session`），回复已创建的 Session。
 6. **历史**（`history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries`）。`limit` 为 1 的各页连起来到达固定的 head，与分支事件一致；一页会读完两个事件的批次；批次中间的游标、`future_sequence` 及其他边界错误都有检查。
 7. **删除**（`a_consumer_deletes_its_launched_session_and_retries_a_failed_delete`，使用一次性原生存储）。`idle` 正等待某个已装载的启动 Session 上待处理的审批时，插件删除该 Session：等待以 `session_closed` 结束，Session 及其行都已删除，之后对它的调用（包括以它为启动方的启动）以 `session_closed` 失败。再删除一次，或删除从未创建的 id，都回复 `{}`；不是单个路径分量的 id 和带多余字段的请求为 `rejected`。原生写入方被占住时，删除期间的 Agents 索引重载不会结束它：写入方释放后它回复 `{}`，行已删除。无法删除该 Session 命令输出的删除回复 `failed`；Session 保持关闭，行仍保留，重试后删除成功。
+8. **#98 评审的后续项。**
+   - `a_launch_fails_reloading_while_the_starters_permission_reloads`（D5）：测试经一个随 Agents 索引重载的 Session 部分绑定 Permission 的命令规则，并让它的重载停住。启动方的 `PermissionState` 缺失期间，以它为启动方的启动以 `reloading` 失败，而不是使用宿主上限；Permission 恢复后，同样的启动成功。
+   - `a_launch_resolves_its_model_through_the_model_selection_host`（§6.1，`model`）：使用配置的模型时，请求的模型（否则为目录默认模型）经宿主解析，并带上目录中该模型的默认配置；宿主无法解析的模型以 `failed` 失败，不创建任何东西。宿主的 `reloading` 情况无法从流程测试触发：`serve` 不会重启任何一个模型选择提供方。
+   - `a_dropped_launch_still_registers_its_session`（§17 第 6 条）：在创建等待被占住的原生写入方时放弃的启动，仍会创建 Session，Rpc 也能 attach 它，而这需要它的协议版本已登记。
+   - `input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_write`（§17 第 1 条）：原生存储让一条输入的写入失败，再让一次撤回的 `input/deleted` 写入失败。两者都回复 `publication_unknown`，因此都不会在其事件发布前回复。
 
 ## 17. 实现过程中的设计变更
 
