@@ -4,7 +4,7 @@ Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integ
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by the Session's resource node, which P3 adds to `SessionConfig` ([A.3](#a3-sessionconfig-fields)). In P1/P2 every Session uses the control node.
 
-Process plugins reach Sessions the way Collaboration already does: through Agents and the public Session interface. This document defines that access as the language-neutral process service `sessions` (ADR 002 D5), provided by Agents, so a TypeScript or Python process plugin (Scheduler, Workflow) uses it by name. Its methods are `launch`, `input`, `lookup`, `history`, `withdraw`, `stop` and `idle`, with request and reply as data ([A.1](#a1-the-sessions-service)). In Rust it is `AgentIndex` plus the `Session` facade ([Appendix E](#appendix-e-rust-binding)). It adds no host or facade plugin, and a caller that depends on Agents reloads with it (D3).
+Process plugins reach Sessions the way Collaboration already does: through Agents and the public Session interface. This document defines that access as the language-neutral process service `sessions` (ADR 002 D5), provided by Agents, so a TypeScript or Python process plugin (Scheduler, Workflow) uses it by name. Its methods are `launch`, `input`, `lookup`, `history`, `withdraw`, `stop` and `idle`, with request and reply as data ([A.1](#a1-the-sessions-service)). In Rust it is `AgentIndex` plus the `Session` facade ([Appendix E](#appendix-e-rust-binding)). It adds no host or facade plugin. Agents provides it from its directory part, which does not reload, so an Agents reload fails only the calls in flight and never reloads a caller (D3, #35); the binding, the lifecycle and the spike behind them are in the [sessions service](../appserver/sessions-service.md) design.
 
 | Supplement | Owner | Used by |
 | --- | --- | --- |
@@ -12,7 +12,7 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | `launch` with a policy capped by the starter | Agents | Scheduler, Workflow |
 | `SessionConfig` field `interactive` | Agents | Plugins that read it from the Session's `SessionConfig` (Questions, SessionTitle) |
 | Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal branch parts write the same form, and Hooks branch parts (to be designed) would too |
-| Fixed-prefix read | Runtime facade (existing `sequence` and `history`, A.5) | Process callers and branch parts deciding from Timeline facts |
+| Fixed-prefix read | Runtime facade (existing `sequence`, `local_page` and `history`, A.5) | Process callers and branch parts deciding from Timeline facts |
 | Withdrawal (command `input/withdraw` with optional `reason`, proposed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), result `input/deleted`, `session.input.withdraw` through InputQueue's `sessionMethods`) | InputQueue | Clients, Hooks (to be designed), AcpGateway, Scheduler, Workflow |
 
 Session-scoped and branch-scoped plugins do not use this interface to reach their own Session. They use their Session's and branch's services, the branch Dispatcher and the Session broadcast directly.
@@ -79,9 +79,9 @@ sequenceDiagram
   participant S as Session (non-interactive)
   participant TL as Branch Timeline
   participant L as InputQueue, Loop
-  C->>AI: launch {source scheduler, policy, starter}
+  C->>AI: launch {policy, starter}
   AI->>AI: cap policy by the starter's current policy
-  AI-->>C: {sessionId}
+  AI-->>C: {sessionId, policy}
   C->>AI: input {sessionId, main, queue, marker dim-scheduler, submissionId}
   AI->>S: input
   S->>TL: input/message
@@ -124,7 +124,7 @@ sequenceDiagram
 | Input after `stop/interrupt` | interrupt < input | Queue/Steer start a turn, Append waits | InputQueue, Loop |
 | Withdraw while the input is held | input < `input/withdraw`, no `input/applied` | `input/deleted`; never applied or consumed; not pending | InputQueue |
 | Withdraw after the input is applied | `input/applied` < `input/withdraw` | No effect, nothing written; reply `notHeld`; the input is consumed normally | InputQueue |
-| Agents reload during a `sessions` call | — | Caller reloads with Agents (D3); committed inputs stay; caller calls `lookup` before rewriting | rutis lifecycle, caller |
+| Agents reload during a `sessions` call | — | The call fails `reloading`; the caller does not reload (#35); committed inputs stay; the caller calls `lookup` before rewriting | Agents, caller |
 | Session's resource node offline | — | Input committed; tool calls on that node fail `node_unavailable`; nothing goes Pending | rutis link (#5) |
 | Launch with a policy wider than the starter's | — | Capped to the starter's current policy | Agents |
 
@@ -147,20 +147,20 @@ Queue inputs are consumed when Loop starts the turn they drive. Steer inputs are
 
 | Interface | Mode | Purpose |
 | --- | --- | --- |
-| `sessions.launch(LaunchRequest) -> {sessionId}` | async | Create a non-interactive Session for automation with a capped policy |
+| `sessions.launch(LaunchRequest) -> {sessionId, policy}` | async | Create a non-interactive Session for automation with a capped policy |
 | `sessions.input(InputWrite) -> {inputId, sequence}` | async | Write input with source raw blocks |
 | `sessions.lookup({sessionId, branchId, submissionId}) -> LookupReply` | async | Find a committed input after an uncertain outcome |
 | `sessions.history(HistoryRequest) -> HistoryPage` | async | Read history, optionally as a fixed prefix bounded by the published head |
 | `session.input.withdraw {sessionId, branchId, inputId, reason?}` | RPC | Client withdrawal; InputQueue's `sessionMethods` (namespace `session.input`) |
 | `sessions.withdraw(WithdrawRequest) -> WithdrawReply` | async | Write `input/withdraw` for an input the caller wrote, by its `input_id`, and return InputQueue's decision |
-| `sessions.stop({sessionId, branchId}) -> {sequence}` | async | Interrupt the branch's turn |
+| `sessions.stop({sessionId, branchId, reason?}) -> {sequence}` | async | Interrupt the branch's turn |
 | `sessions.idle({sessionId, branchId}) -> {sequence}` | async | Wait until the branch is idle; the returned sequence is the last committed one, a whole-batch boundary |
 | `SessionConfig.interactive` | data | Creation-time configuration |
 | `session.create {interactive}` | RPC | Non-interactive creation |
 
 ## 7. Security
 
-Only plugins in the control node's process hold `sessions`, and it is never exported over RPC entries or rutis links. Process callers withdraw an input by the `input_id` they received when writing it, and clients withdraw through Rpc's Session authorization. Markers are model-facing text: shared components (InputQueue, Agents, the runtime) never parse them; the plugin that wrote a marker may interpret its own content. Writing input confers no authority, because the resulting tool calls are admitted by Approval and Permission under the Session's policy. Inputs are replayed into model context, so callers must not put credentials or host security settings into them.
+Only plugins in the control node's process hold `sessions`, and it is never exported over RPC entries or rutis links. Process callers withdraw an input by the `input_id` they received when writing it, and clients withdraw through Rpc's Session authorization. Markers are model-facing text: shared components (InputQueue, Agents, the runtime) never parse them; the plugin that wrote a marker may interpret its own content. Writing input confers no authority, because the resulting tool calls are admitted by Approval and Permission under the Session's policy. The policy cap of `launch` is a convention for well-behaved callers, not a security boundary: the caller supplies `starter` itself, and without one the cap is the host's Session defaults ([sessions service §11](../appserver/sessions-service.md#11-security-and-authority)). Inputs are replayed into model context, so callers must not put credentials or host security settings into them.
 
 ## 8. Rule check
 
@@ -178,7 +178,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | §1 (Capability and App Server boundary) | Agents only exposes access; callers keep their business logic in their own plugins. |
 | ADR 002 D1 | `sessions` is a process service of Agents; InputQueue's withdrawal stays in its branch part, served to clients by its Session part. |
 | ADR 002 D2 | No access host or facade plugin; callers use Agents as Collaboration does. |
-| ADR 002 D3 | A caller depending on Agents reloads with it, and resolves uncertain writes with `lookup`. |
+| ADR 002 D3 | An Agents reload fails the calls in flight with `reloading` and never reloads a caller (#35); callers resolve uncertain writes with `lookup`. |
 | ADR 002 D4 | `SessionConfig.interactive` is creation data of the Session record, not plugin configuration. |
 | ADR 002 D5 | `sessions` is named with data-only methods and errors; Rust types appear only in Appendix E. |
 
@@ -196,7 +196,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 
 ### 9.2 Fixed-prefix read
 
-Withdrawn ([#50](https://github.com/arcships/dim/issues/50)): the existing Session facade composes it, so no runtime change is needed. `Session::sequence(branch)` returns the published head; if it is below `atLeast` the read fails `future_sequence`, otherwise `Session::history(branch, Some(head))` reads through that head. Both read only published events and the head only grows, so the prefix is fixed (A.5).
+Withdrawn ([#50](https://github.com/arcships/dim/issues/50)): the existing Session facade composes it, so no runtime change is needed. `Session::sequence(branch)` returns the published head; if it is below `atLeast` the read fails `future_sequence`, otherwise `Session::history(branch, Some(head))` reads through that head. Both read only published events and the head only grows, so the prefix is fixed (A.5). Process callers page the same prefix with `Session::local_page` (A.5).
 
 ### 9.3 Caller source fixed from plugin identity
 
@@ -218,23 +218,23 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 
 ### A.1 The sessions service
 
-`sessions` is a process service provided by Agents, without an instance key. Shapes are JSON with camelCase fields; a `?` after a field name marks it optional and `|` separates alternatives. Each call acquires the Session (restoring it if needed) and holds it loaded until the reply. A caller's `source` is fixed by Agents from the calling plugin's declared source name.
+`sessions` is a process service provided by Agents, without an instance key. Shapes are JSON with camelCase fields; a `?` after a field name marks it optional and `|` separates alternatives. Each call acquires the Session (restoring it if needed) and holds it loaded until the reply. The calls carry no caller identity. The [sessions service](../appserver/sessions-service.md) design gives each method's steps, the policy cap and the lifecycle.
 
 | Method | Mode | Request | Reply | Errors |
 | --- | --- | --- | --- | --- |
-| `launch` | async | `LaunchRequest` | `{sessionId}` | `rejected`, `reloading`, `failed` |
+| `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`, `agent_unknown`, `session_closed`, `branch_missing` (the starter), `reloading`, `failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown`, `failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing`, `reloading` |
-| `history` | async | `HistoryRequest` | `HistoryPage` | `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
-| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`, `session_closed`, `branch_missing`, `reloading` |
-| `stop` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing`, `reloading` |
+| `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`, `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
+| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown` |
+| `stop` | async | `{sessionId, branchId, reason?}` | `{sequence}` | `session_closed`, `branch_missing`, `reloading` |
 | `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing`, `reloading` |
 
 ```text
 // LaunchRequest
 { "agent?": "string",                // Agent profile id; absent: Agents' default profile
   "cwd": "string",
-  "model?": "string",                // model id; takes precedence over the profile's model
+  "model?": { "providerId": "string", "modelId": "string" },  // takes precedence over the profile's model
   "policy?": { /* PermissionPolicy data */ },  // narrowed request; absent: starter's or read-only default
   "starter?": { "sessionId": "string", "branchId": "string" } } // upper bound; absent: host configuration bound
 // InputWrite
@@ -251,9 +251,11 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 { "sessionId": "string", "branchId": "string",
   "after?": 0,                        // exclusive lower bound; absent: from the start of the branch
   "through?": 0,                      // read up to this sequence
-  "atLeast?": 0 }                     // fixed-prefix read (A.5)
-// HistoryPage
-{ "through": 0, "events": [ { "sequence": 0, "branchId": "string", "type": "turn/end", "data": {} } ] }
+  "atLeast?": 0,                      // fixed-prefix read (A.5); not together with through
+  "limit?": 256 }                     // page size; absent: 256
+// HistoryPage: the branch's own events in (after, through], ending on a batch boundary,
+// as AgentEvent records in the form session.history returns them
+{ "through": 0, "events": [ { "id": "string", "sequence": 0, "type": "turn/end", "data": {} } ] }
 // WithdrawRequest
 { "sessionId": "string", "branchId": "string", "inputId": "string",
   "reason?": "string" }                 // copied into input/withdraw; shown by clients
@@ -264,9 +266,11 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 { "code": "rejected" | ..., "message": "string", "retryable": false }
 ```
 
-Cancellation: the caller dropping an `idle` or `history` call ends it with no effect. Dropping an `input` before the reply leaves the outcome uncertain; the caller resolves it with `lookup`.
+Every method can also fail `failed` (A.6). Cancellation: the caller dropping an `idle` or `history` call ends it with no effect. Dropping an `input` before the reply leaves the outcome uncertain; the caller resolves it with `lookup`.
 
 `launch` creates a Session with `interactive = false`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the request declares a policy, and it is always capped by host configuration.
+
+Implemented (S2, [#98](https://github.com/arcships/dim/pull/98)): every method above, served by Agents' directory part. `input` and a `withdraw` that deletes reply once their event is published. `sessions.delete` is added after S5c ([sessions service §8.7](../appserver/sessions-service.md#87-target-deleting-run-sessions-follow-up)).
 
 ### A.2 Source input conventions
 
@@ -317,20 +321,21 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 
 ### A.5 Fixed-prefix read
 
-`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the history through that head, including ancestors. It is composed from the existing facade: read the head with `Session::sequence(branch)`, then `Session::history(branch, Some(head))` (§9.2). Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
+`sessions.history` with `atLeast` fixes `through` as the published head at call time. It fails with `future_sequence` if that head is below `atLeast`, and otherwise returns the branch's own events through that head, paged by `after` and `limit`. It is composed from the existing facade: read the head with `Session::sequence(branch)`, then page with `Session::local_page(branch, after, limit, head)`. Branch parts that need the ancestor prefix read `Session::history(branch, Some(head))` (§9.2). Every event delivered by the branch Dispatcher or the Session broadcast is published, so `atLeast = event.sequence` succeeds while the branch exists.
 
 ### A.6 Errors
 
 | Code | Meaning |
 | --- | --- |
-| `session_closed`, `branch_missing` | Nothing written |
-| `reloading` | Agents or the Session's capabilities are reloading; retryable after `lookup` |
-| `rejected` | Param shape (external-boundary checks only); nothing written |
+| `session_closed`, `branch_missing` | Nothing written (for `launch`, the starter is closed or missing) |
+| `agent_unknown` | `launch` names no loaded Agent |
+| `reloading` | The Agents index, the model-selection host or the Session's capabilities are not active or are reloading; retryable after `lookup` |
+| `rejected` | Param shape and the method's boundary checks (input validation, a history cursor inside a batch, the withdrawal service's checks); nothing written |
 | `future_sequence` | Fixed-prefix read beyond the published head |
 | `ambiguous` | `lookup` matched more than one input |
-| `publication_unknown` | Committed, publication failed; `lookup` after recovery |
+| `publication_unknown` | Committed (an `input`, or the `input/deleted` of a `withdraw`), publication failed; `lookup` or `history` after recovery |
 | `node_unavailable` | Not returned by `sessions`: calls on an offline resource node fail inside the Session's tools |
-| `failed` | Session fault |
+| `failed` | Session fault, storage, model resolution, project authorization or Session build |
 
 ## Appendix B. Full conflict table
 
@@ -351,7 +356,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | Child branch cut between write and consumption | input < cut < consumed | Child does not adopt it | InputQueue (child) |
 | Two writers, same key | Timeline order | Later supersedes; owner prefixes avoid collisions by convention | History projection |
 | Decision read, newer fact, then write | through < fact < write | Write ordered after the fact | Input owners |
-| Agents reload | — | Callers reload with it (D3); committed inputs stay | rutis lifecycle |
+| Agents reload | — | Calls in flight fail `reloading`; callers do not reload (#35); committed inputs stay | Agents |
 | Restart after commit, reply lost | — | `lookup` returns `accepted`; no duplicate | Caller |
 | Session not loaded | — | Agents restores it before the call | Agents |
 | Resource node offline | — | Input committed; the turn runs and calls on that node fail `node_unavailable`; no dependent reloads or goes Pending (requirement on #5) | rutis link |
@@ -378,28 +383,28 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 
 | Neutral | Rust |
 | --- | --- |
-| `sessions` | `AgentIndex` (Agents) plus the `Session` facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)); a generated binding exposes it by name |
-| `launch` | `AgentIndex::launch(LaunchRequest) -> Result<SessionUse, AgentError>` |
-| per-call acquire | `AgentIndex::acquire(id)` (existing) returning a `SessionUse` lease |
-| `input` | `Session::input(InputMessageData, branch)` (existing), keys as `KeyUse::Live(name)` / `Retire(name)` |
-| `lookup` | `session.input_lookup` semantics on the facade |
-| `history` with `atLeast` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `Session::history(branch, Some(head))`; otherwise `Session::history`, or `Session::local_page(branch, after, limit, through)` when `after` is set |
-| `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`: appends `input/withdraw`, awaits InputQueue's decision for it; `WithdrawOutcome::Deleted { sequence }` or `WithdrawOutcome::NotHeld` |
+| `sessions` | Typed `AgentIndex` methods (Agents) over the `Session` facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)); Agents' directory part exposes them by name ([sessions service, Appendix A](../appserver/sessions-service.md#appendix-a-rust-binding)) |
+| `launch` | `AgentIndex::launch(LaunchRequest) -> Result<LaunchReply, SessionsError>` |
+| per-call acquire | `AgentIndex::acquire(id)` (existing, crate-internal) returning a `SessionUse` lease |
+| `input` | `Session::input(InputMessageData, branch)` (existing); a key is `InputBlock::Raw { key: Some(name), retire }` |
+| `lookup` | One Agents lookup shared with `session.input_lookup`: wait for pending publication, then scan the published pages |
+| `history` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `Session::local_page(branch, after, limit, through)` |
+| `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>` (S1): appends `input/withdraw` and replies with InputQueue's decision once it is written; `Withdrawal::Deleted { sequence }` or `Withdrawal::NotHeld`. Agents replies `deleted` once that `input/deleted` is published |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
 | `SessionConfig` | Rust struct below |
-| Errors | `AgentError`: `SessionClosed`, `BranchMissing`, `Reloading`, `Rejected(reason)` (including `FutureSequence`), `PublicationUnknown`, `Failed` |
+| Errors | `SessionsError` with the codes of A.6, mapped from `AgentError`: `Closed` → `session_closed`, `UnknownBranch` → `branch_missing`, `Reloading` → `reloading`, `InvalidInput` → `rejected`, others → `failed` |
 
 ```rust
 pub struct LaunchRequest {
     pub agent: Option<String>,            // absent: Agents' default profile
-    pub cwd: PathBuf,
-    pub model: Option<String>,            // takes precedence over the profile's model
-    // no source field: Agents fixes it from the calling plugin's identity (§9.3)
+    pub cwd: String,
+    pub model: Option<ModelId>,           // takes precedence over the profile's model
+    // no source field: callers withdraw by input id (§9.3)
     pub policy: Option<PermissionPolicy>,
     pub starter: Option<SessionRef>,
 }
 impl AgentIndex {
-    pub async fn launch(&self, request: LaunchRequest) -> Result<SessionUse, AgentError>;
+    pub async fn launch(&self, request: LaunchRequest) -> Result<LaunchReply, SessionsError>;
 }
 pub struct SessionConfig {
     // existing: permission_policy, cwd, model, system_prompt, tools, collaboration_role
@@ -407,7 +412,7 @@ pub struct SessionConfig {
     #[serde(default = "default_interactive", skip_serializing_if = "is_interactive")]
     pub interactive: bool,
 }
-pub enum WithdrawOutcome {
+pub enum Withdrawal {                     // dim_agent_capabilities::input_queue (S1)
     Deleted { sequence: u64 },            // sequence of input/deleted
     NotHeld,                              // unknown, applied or already deleted
 }

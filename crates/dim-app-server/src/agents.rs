@@ -17,6 +17,7 @@ use rutis::{
     BoxFuture, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberView, TypeKey,
     TypedFactory, TypedPlugin, TypedPluginFactory,
 };
+use rutis_bridge::session::{HostDispatch, host_key};
 use rutis_loader::{Builtins, InstanceResult, Loader};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -32,6 +33,9 @@ use tokio_util::sync::CancellationToken;
 mod configuration;
 pub(crate) use configuration::AgentsSessionPlugin;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
+
+mod sessions;
+pub(crate) use sessions::{Lookup, find_input};
 
 /// The process default profile carries the process Session defaults.
 fn process_default(defaults: &SessionConfig) -> AgentProfile {
@@ -199,7 +203,8 @@ impl AgentDirectory {
         inner.versions.retain(|_, (owner, _)| owner != agent_id);
     }
 }
-/// Provides the [`AgentDirectory`].
+/// Provides the [`AgentDirectory`] and the `sessions` service. Neither
+/// reloads, so consumers of `sessions` never reload with the index.
 pub(crate) struct AgentDirectoryPlugin;
 impl TypedPlugin for AgentDirectoryPlugin {
     type Deps = ();
@@ -219,6 +224,10 @@ impl TypedPlugin for AgentDirectoryPlugin {
                     default_agent_id: OnceLock::new(),
                     server_instance_id: uuid::Uuid::new_v4().to_string(),
                 }),
+            )?;
+            ctx.provide_as::<dyn HostDispatch>(
+                host_key("sessions"),
+                Arc::new(sessions::SessionsService(ctx.clone())),
             )?;
             Ok(Effect::Done)
         })

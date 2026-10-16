@@ -20,7 +20,7 @@ use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, RwLock, Weak,
         atomic::{AtomicU64, Ordering},
@@ -1048,10 +1048,7 @@ impl Connection {
         })
     }
     async fn create(&self, rpc: &RpcService, params: Create) -> Result<Reply, RpcError> {
-        if params.cwd.is_empty() || !Path::new(&params.cwd).is_absolute() {
-            return Err(RpcError::invalid("cwd must be an absolute directory"));
-        }
-        let cwd = canonical_cwd(&params.cwd).await?;
+        let cwd = session_cwd(&params.cwd).await?;
         if params
             .tools
             .as_ref()
@@ -1077,10 +1074,7 @@ impl Connection {
             }
         })?;
         let mut config = crate::agents::session_config(&host.profile, &rpc.config.session_defaults);
-        config.cwd = cwd
-            .to_str()
-            .ok_or_else(|| RpcError::invalid("cwd must be UTF-8"))?
-            .into();
+        config.cwd = cwd.clone();
         if !rpc.index.selects_models() && params.model_preferences != Default::default() {
             return Err(RpcError::invalid(
                 "Model preferences require the product provider",
@@ -1114,7 +1108,7 @@ impl Connection {
                                 })
                         })
                         .or_else(|| host.profile.model.clone()),
-                    Some(cwd.clone()),
+                    Some(cwd.into()),
                     params.model_preferences,
                 )
                 .await?;
