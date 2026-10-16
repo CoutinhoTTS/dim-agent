@@ -81,7 +81,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 1. **准入。** Agents 取得 S 的准入门，即 `acquire` 恢复 Session 时持有的 `SessionSlot` 门，删除进行期间没有请求、订阅或分叉能加载 S。已经持有 S 使用权的请求继续持有，由第 2 步的关闭结束其工作。
 2. **关闭。** 若 S 已加载，Agents 像 `session.close` 那样关闭它：业务关闭，不是卸载。各能力结算已接受的工作，写出终态事实，释放进程、FileStorage 租约和成员请求；删除也像 `session.close` 那样等待 trace 归档结束。关闭报告清理错误时记日志并继续删除：未能写出的事实会随其余部分一起删除。
-3. **命令输出。** SessionStore 通过 S 的资源节点上的 FileStorage（与 S5a 一样每次调用时查找）移除 `<数据库目录>/command-output/<S>/`，WorkspaceTools 在这里保存 exec 输出和过大的 `read` 结果（[read.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs) 的 `offload`）。目录不存在视为已移除。移除必须在第 4 步之前落盘（§4），因此 FileStorage 的 `remove` 要同步被移除条目的父目录（§14）。失败时删除在改动任何行之前结束（§3.5）。
+3. **命令输出。** SessionStore 通过 S 的资源节点上的 FileStorage（与 S5a 一样每次调用时查找）移除 `<数据库目录>/command-output/<S>/`，WorkspaceTools 在这里保存 exec 输出和过大的 `read` 结果（[read.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs) 的 `offload`）。目录不存在视为已移除。移除必须在第 4 步之前落盘（§4），因此 FileStorage 的 `remove` 要同步被移除条目的父目录（§14）。失败时删除在改动任何行之前结束（§3.5）。只有本数据库有 S 的行时，SessionStore 才移除这个目录：`command-output/` 由同一目录下的所有数据库共用，本库没有行的 id，其目录可能属于另一个数据库的 Session（§4）。
 4. **行。** 一个 `IMMEDIATE` 事务删除 S 的全部行：`session_file_owners`、`timeline_snapshots`、`timeline_events`、`timeline_branches`、`timeline_content`、`session_owners` 和 `agent_sessions`，因外键按此顺序，另加 S5b 的标题元数据（§14）。这就是如今创建回滚执行的操作（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的 `rollback_creation`），S5a 为它加上所有者行；删除与回滚共用它。它像回滚一样在 Timeline 写线程上执行，因此排在已为 S 排队的所有追加之后，并清除 S 记下的写入失败。
 5. **清扫。** SessionStore 安排 S5a 的清扫（[Session 文件 §5.4](session-files.md#54-清扫)）。最后一个所有者是 S 的文件在清扫中移除；仍有分叉拥有的文件保留。
 6. **忘记。** Agents 删除 S 的协议版本和不可用 Session 条目，并保持 S 的槽位关闭，`acquire` 因此回答 `session_closed`。在第 4 步之前失败的删除则释放准入门，S 在下次使用时照常加载。
@@ -143,10 +143,12 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | 关闭之前或期间 | 行都在 | 目录在 | 没有损失；S 下次使用时加载；重试 |
 | 移除期间 | 行都在 | 目录部分移除 | 重试：继续移除，不存在的条目视为已移除 |
 | 移除之后、提交之前 | 行都在 | 目录已无，已落盘 | 重试。期间 S 可以加载，只是没有命令输出文件 |
-| 提交之后、回复之前 | 无行 | 目录已无；S 的文件无所有者 | 客户端重试得到 `{}` 并再次安排清扫；否则由 S5a 的下一次触发（另一次删除，或之后某一代的第一次写入）移除文件 |
+| 提交之后、回复之前 | 无行 | 目录已无；S 的文件无所有者 | 客户端重试时本库已无行，不移除目录，得到 `{}` 并再次安排清扫；否则由 S5a 的下一次触发（另一次删除，或之后某一代的第一次写入）移除文件 |
 | 清扫期间 | S5a 的状态 | — | [Session 文件 §6](session-files.md) 的崩溃恢复表 |
 
 **为什么目录在提交之前移除。** 没有任何行记录命令输出目录。行删除之后，孤立的目录只能靠列出 `command-output/` 找到，而这个目录由同一数据库目录下的所有数据库共用（一个目录下两个 `--database` 文件），列目录无法区分已删除 Session 的目录和另一个存储的目录。先移除目录，任何已提交的删除都不会留下它。S5a 的文件采用相反的顺序，因为有行记录它们，清扫能找到。FileStorage 的移除原本不同步（[S6](https://github.com/arcships/dim/pull/87)）：断电后，被移除的目录可能重新出现，而之后以 `synchronous=FULL` 提交的事务仍然有效。现在 `remove` 在返回前同步父目录（§14），消除了这个窗口。
+
+**只移除本库有行的 id。** 出于同样的原因，只有本数据库有该 id 的行时，删除才移除它的目录。同一目录下 `a.sqlite` 和 `b.sqlite` 两个守护进程共用 `command-output/`；把 `session.delete {S_b}` 发给前者（例如 CLI 用错了 `--database`）时，它回复 `{}`，不能移除仍在后者中运行的 S_b 的输出。这个检查不影响收敛：目录在行之前移除，所以本库没有 S 的行时，也已没有 S 的目录可移除；Agents 的准入门保证同一 id 的两次删除不会交错。因此提交之后的重试什么都不移除，也不需要移除。
 
 被否决的方案：
 
@@ -443,7 +445,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 8. 分叉后删除源：F 能加载并读取它的 Session 文件；删除 F 后文件被移除。对同一源的删除与分叉竞争：要么 F 带着文件存在，要么分叉失败于 `session_closed`；绝不会出现没有文件的分叉。
 9. 在一次性存储上：命令输出目录已不在但行还在的 Session 能加载，随后删除能完成；删除提交后留下的无所有者文件行在下一代的第一次写入时被清扫。
 
-测试：第 1、2 条是 [deletion.rs](../../../../crates/dim-app-server/tests/transport_flow/deletion.rs) 中的 `delete_closes_a_running_session_and_removes_what_it_stored` 和 `unloaded_and_damaged_sessions_are_deleted_by_id`。第 3 到 8 条在 [fork.rs](../../../../crates/dim-app-server/tests/transport_flow/fork.rs) 中：`a_fork_copies_main_through_a_rest_point_and_starts_nothing`（第 3、4 条和第 5 条的 `interactive`），`a_fork_waits_for_background_work_and_keeps_preset_and_model`（第 4 条的后台任务、第 5 条的预设和模型、第 6 条的后台任务与批次切点，使用真实的 BackgroundExec），`a_fork_is_refused_unless_the_cut_is_a_rest_point`（第 6 条），`a_fork_of_a_leader_does_not_stop_the_source_member`（第 7 条），`a_fork_shares_session_files_and_outlives_its_source`（第 8 条）。[storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_fork_copies_main_through_the_cut_with_its_content_and_snapshots` 在存储层检查第 3 条的内容行和快照，包括只被 before 记录引用的内容。第 9 条是 [files/tests.rs](../../../../crates/dim-app-server/src/storage/files/tests.rs) 中的 `an_interrupted_delete_converges_on_retry_and_the_next_sweep`，它让删除停在移除输出与提交之间，另加 `unloaded_and_damaged_sessions_are_deleted_by_id` 中没有输出目录的 Session。
+测试：第 1、2 条是 [deletion.rs](../../../../crates/dim-app-server/tests/transport_flow/deletion.rs) 中的 `delete_closes_a_running_session_and_removes_what_it_stored` 和 `unloaded_and_damaged_sessions_are_deleted_by_id`。第 3 到 8 条在 [fork.rs](../../../../crates/dim-app-server/tests/transport_flow/fork.rs) 中：`a_fork_copies_main_through_a_rest_point_and_starts_nothing`（第 3、4 条和第 5 条的 `interactive`），`a_fork_waits_for_background_work_and_keeps_preset_and_model`（第 4 条的后台任务、第 5 条的预设和模型、第 6 条的后台任务与批次切点，使用真实的 BackgroundExec），`a_fork_is_refused_unless_the_cut_is_a_rest_point`（第 6 条），`a_fork_of_a_leader_does_not_stop_the_source_member`（第 7 条），`a_fork_shares_session_files_and_outlives_its_source`（第 8 条）。[storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_fork_copies_main_through_the_cut_with_its_content_and_snapshots` 在存储层检查第 3 条的内容行和快照，包括只被 before 记录引用的内容。第 9 条是 [files/tests.rs](../../../../crates/dim-app-server/src/storage/files/tests.rs) 中的 `an_interrupted_delete_converges_on_retry_and_the_next_sweep`，它让删除停在移除输出与提交之间，另加 `unloaded_and_damaged_sessions_are_deleted_by_id` 中没有输出目录的 Session。deletion.rs 中的 `a_delete_leaves_another_databases_command_output` 用两个守护进程检查 §4 的共用目录。
 
 验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 与 `cargo test --workspace --locked`。不改 Capability、装配或 crate 依赖，`xtask` 只需按常规在 CI 中运行。
 
@@ -475,8 +477,9 @@ impl SessionStore {
     /// `ctx` gives each file step the node's FileStorage; `files_root` is the
     /// database directory's root.
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self;
-    /// Removes `command-output/<id>` (synced), then every row in one transaction;
-    /// schedules the Session-file sweep.
+    /// Removes `command-output/<id>` (synced) while this database has rows of
+    /// the id, then every row in one transaction; schedules the Session-file
+    /// sweep.
     pub async fn delete_session(&self, id: &str) -> Result<()>;
     /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;

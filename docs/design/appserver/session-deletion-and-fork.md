@@ -108,7 +108,9 @@ are Rust methods over the native store, not services: only Agents calls them.
    exec output and oversized `read` results ([read.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs)
    `offload`), through the FileStorage of S's resource node, looked up per call as in S5a. An absent directory counts
    as removed. The removal must be durable before step 4 (§4), so FileStorage's `remove` syncs the parent of the
-   removed entry (§14). A failure ends the delete before any row changes (§3.5).
+   removed entry (§14). A failure ends the delete before any row changes (§3.5). SessionStore removes the directory
+   only while its database has rows of S: `command-output/` is shared by every database in the directory, so the
+   directory of an id without rows here may belong to another database's Session (§4).
 4. **Rows.** One `IMMEDIATE` transaction removes every row of S: `session_file_owners`, `timeline_snapshots`,
    `timeline_events`, `timeline_branches`, `timeline_content`, `session_owners` and `agent_sessions`, in this order
    because of the foreign keys, plus S5b's title metadata (§14). This is the operation a creation rollback runs
@@ -187,7 +189,7 @@ gone.
 | Before or during the close | All rows | The directory | Nothing lost; S loads on its next use; retry |
 | During the removal | All rows | Part of the directory | Retry: removal continues and absent entries count as removed |
 | After the removal, before the commit | All rows | No directory, durably | Retry. Meanwhile S loads, without its command output files |
-| After the commit, before the reply | No rows | No directory; S's files unowned | The client's retry replies `{}` and schedules the sweep again; otherwise S5a's next trigger (another delete, or the first put of a later generation) removes the files |
+| After the commit, before the reply | No rows | No directory; S's files unowned | The client's retry finds no rows, so it removes no directory, replies `{}` and schedules the sweep again; otherwise S5a's next trigger (another delete, or the first put of a later generation) removes the files |
 | During the sweep | S5a's states | — | [Session files §6](session-files.md#6-deletion-crash-recovery-and-serialization) |
 
 **Why the directory goes before the commit.** No row records the command output directory. Once the rows are gone,
@@ -198,6 +200,13 @@ files follow the opposite order because their rows record them and the sweep can
 not synced ([S6](https://github.com/arcships/dim/pull/87)): after a power loss a removed directory could reappear while
 the later commit, made with `synchronous=FULL`, stays. `remove` now syncs the parent before it returns (§14), which
 closes that gap.
+
+**Only an id with rows here.** For the same reason a delete removes the directory only while its own database has
+rows of the id. Two daemons on `a.sqlite` and `b.sqlite` in one directory share `command-output/`; a
+`session.delete {S_b}` sent to the first, for example by a CLI given the wrong `--database`, replies `{}` and must not
+remove the output of S_b, which is alive in the second. The check costs no convergence: the directory goes before the
+rows, so a database with no rows of S has no directory of S left to remove, and Agents' admission gate keeps two
+deletes of one id from interleaving. A retry after a commit therefore removes nothing, as it needs nothing removed.
 
 Rejected alternatives:
 
@@ -612,6 +621,7 @@ the store, including content that only a before trace references. 9 is
 `an_interrupted_delete_converges_on_retry_and_the_next_sweep` in
 [files/tests.rs](../../../crates/dim-app-server/src/storage/files/tests.rs), which stops a delete between its output
 removal and its commit, together with the Session without output in `unloaded_and_damaged_sessions_are_deleted_by_id`.
+`a_delete_leaves_another_databases_command_output` in deletion.rs checks §4's shared directory with two daemons.
 
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and
 `cargo test --workspace --locked`. No Capability, assembly or crate dependency changes, so `xtask` is not needed
@@ -646,8 +656,9 @@ impl SessionStore {
     /// `ctx` gives each file step the node's FileStorage; `files_root` is the
     /// database directory's root.
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self;
-    /// Removes `command-output/<id>` (synced), then every row in one transaction;
-    /// schedules the Session-file sweep.
+    /// Removes `command-output/<id>` (synced) while this database has rows of
+    /// the id, then every row in one transaction; schedules the Session-file
+    /// sweep.
     pub async fn delete_session(&self, id: &str) -> Result<()>;
     /// Prepare step of a fork: copies the rows of §6.3 in one transaction.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()>;

@@ -306,3 +306,40 @@ async fn unloaded_and_damaged_sessions_are_deleted_by_id() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// §4: every database in a directory shares `command-output/`. A delete
+/// sent to a daemon whose database has no rows of the id replies `{}` and
+/// leaves the directory to the database that has them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_leaves_another_databases_command_output() {
+    let store = Store::new();
+    let config = |name: &str| ServerConfig {
+        database_path: Some(store.0.join(name)),
+        ..Default::default()
+    };
+    let (a, _) = launch_with_agent(Arc::new(MockTools), config("a.sqlite")).await;
+    let (b, agent) = launch_with_agent(Arc::new(MockTools), config("b.sqlite")).await;
+    let mut to_a = Client::new_version(&a, false, 3).await;
+    let mut to_b = Client::new_version(&b, false, 3).await;
+    let sid = session(&mut to_b).await;
+    turn(&mut to_b, &sid, "in b").await;
+    std::fs::create_dir_all(store.output(&sid)).unwrap();
+    std::fs::write(store.output(&sid).join("exec.log"), b"output").unwrap();
+
+    assert_eq!(
+        to_a.rpc("session.delete", json!({"sessionId":sid})).await["result"],
+        json!({})
+    );
+    assert!(exists(&store.output(&sid)), "b's output stays");
+    assert!(agent.get_session(&sid).is_some());
+    turn(&mut to_b, &sid, "still in b").await;
+
+    assert_ok(&to_b.rpc("session.delete", json!({"sessionId":sid})).await);
+    assert!(!exists(&store.output(&sid)));
+    assert!(agent.get_session(&sid).is_none());
+    drop((to_a, to_b, agent));
+    for server in [a, b] {
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
