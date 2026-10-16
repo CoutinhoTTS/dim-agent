@@ -79,9 +79,9 @@ exports an empty event list or a Markdown heading without fabricated messages.
 `exec` uses the existing create/attach/history/submit/idle/detach sequence and
 stop settlement. A resumed running turn settles before the new prompt is
 submitted. As the attached interaction client, `exec` actively sends the ordinary
-denial response to an approval request, waits for settlement, and exits with
-code 3. It does not change `SessionConfig.interactive`. Sessions created as
-noninteractive retain Approval's existing owner-side policy (#98 D10).
+denial response to an approval request, stops the turn, waits for stop
+settlement, and exits with code 3. It does not change
+`SessionConfig.interactive`. Sessions created as noninteractive retain Approval's existing owner-side policy (#98 D10).
 Other exit codes retain the native CLI contract, including 2 for turn failure
 and 130 for interruption. A transport failure does not retry a submission.
 
@@ -117,7 +117,11 @@ or implement a server-side exporter.
 The exported branch is always `main`; child branch histories are not fetched or
 included. Markdown renders each `branch/create` fact with its child id as
 `Child branch <id> (contents not exported).` JSON preserves that main-branch
-event unchanged. A reader can distinguish delegation from missing content.
+event unchanged. `branch/create` records a request before the child is built.
+For `branch/create-failed`, Markdown uses the event's `branch` field to render
+`Child branch <id> was not created.` for both failed and cancelled creation.
+JSON retains the failure fact unchanged. No child history is fetched to determine
+the outcome. A reader can distinguish failed creation from omitted child content.
 
 JSON output contains `{sessionId, branchId, through, events}`. Each event is the
 public history event without dropping unknown fields or event kinds. This is
@@ -150,6 +154,7 @@ resume, stdout/stderr separation, public JSON notification preservation,
 turn/approval failure and stop settlement, fixed-watermark multi-page export,
 both formats, existing-file rejection, and interactive command interception.
 Cover relative paths when the CLI and Session directories differ, literal `~`
-usage, child-branch omission/markers, and Unix file privacy.
+usage, child-branch omission/markers, failed or cancelled child creation, and
+Unix file privacy.
 Use isolated homes only. Implementation requires the focused CLI flows and
 affected Clippy.
