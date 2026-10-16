@@ -96,6 +96,9 @@ projection updates it from adopted `context/configured` facts, and initializes i
 from the existing context/checkpoint reconstruction when a branch opens or
 restores. `Branch::get::<PromptSnapshot>()` supplies the latest published value;
 a missing or reloading state follows the existing unavailable/error behavior.
+An available snapshot without adopted model configuration rejects an absent-target
+request with the existing `invalid_params` error; the caller can supply an explicit
+provider/model target. This is not a service reload.
 Preference commands do not call `Branch::context`, replay history or fill missing
 configuration with defaults. This adds no service key, runtime state, persisted
 field or second configuration type.

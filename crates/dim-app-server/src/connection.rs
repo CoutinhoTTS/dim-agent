@@ -940,12 +940,16 @@ impl Connection {
                             ));
                         }
                         // shortcut: concurrent clients may replace an older base; revisit with configuration patch semantics.
-                        let current = session
+                        let state = session
                             .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(
                                 &p.branch_id,
                             )?
-                            .and_then(|state| state.configuration)
                             .ok_or_else(RpcError::reloading)?;
+                        let current = state.configuration.ok_or_else(|| {
+                            RpcError::invalid(
+                                "No model configuration is adopted; supply providerId and modelId",
+                            )
+                        })?;
                         let provider = rpc
                             .ctx
                             .get::<crate::provider::ProviderService>()
