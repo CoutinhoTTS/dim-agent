@@ -41,6 +41,8 @@ pub enum McpServerSettings {
         #[serde(skip_serializing_if = "Option::is_none")]
         auth: Option<BearerAuth>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        oauth: Option<Box<McpOAuthSettings>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
         #[serde(flatten)]
         extra: BTreeMap<String, serde_json::Value>,
@@ -64,6 +66,67 @@ pub enum BearerAuth {
     Bearer { token: String },
 }
 
+/// A remote entry's OAuth settings, with the field names and types of
+/// Claude Code's `.mcp.json`. They carry no secret.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthSettings {
+    /// A pre-registered client (registration priority 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Port of the redirect `http://localhost:{port}/callback`; default 1456.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    /// Authorization server metadata used only when the server publishes no
+    /// valid Protected Resource Metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_server_metadata_url: Option<String>,
+    /// Space-separated scopes requested as they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+impl McpOAuthSettings {
+    fn validate(&self) -> Result<()> {
+        let metadata_url = self
+            .auth_server_metadata_url
+            .as_deref()
+            .map(url::Url::parse);
+        if self.client_id.as_ref().is_some_and(|id| id.trim().is_empty())
+            || self.callback_port == Some(0)
+            || metadata_url.is_some_and(|url| {
+                !url.is_ok_and(|url| {
+                    url.username().is_empty()
+                        && url.password().is_none()
+                        && url.fragment().is_none()
+                        && (url.scheme() == "https"
+                            || (url.scheme() == "http"
+                                && matches!(url.host(), Some(host) if loopback(&host))))
+                })
+            })
+            // RFC 6749 §3.3 scope tokens, separated by spaces.
+            || self.scopes.as_ref().is_some_and(|scopes| {
+                scopes.trim().is_empty()
+                    || !scopes
+                        .bytes()
+                        .all(|b| b == b' ' || (b.is_ascii_graphic() && b != b'"' && b != b'\\'))
+            })
+        {
+            return Err(SettingsError::Invalid("invalid MCP OAuth configuration"));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn loopback(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
 impl BusinessDocument for McpSettings {
     const NAMESPACE: &'static str = "mcp";
     const USER_FILE: &'static str = "mcp.json";
@@ -80,12 +143,30 @@ impl BusinessDocument for McpSettings {
             let (target, extra) = match server {
                 McpServerSettings::Stdio { command, extra, .. } => (command, extra),
                 McpServerSettings::Remote {
-                    url, auth, extra, ..
+                    url,
+                    headers,
+                    auth,
+                    oauth,
+                    extra,
+                    ..
                 } => {
                     if let Some(BearerAuth::Bearer { token }) = auth
                         && token.trim().is_empty()
                     {
                         return Err(SettingsError::Invalid("empty MCP bearer token"));
+                    }
+                    if let Some(oauth) = oauth {
+                        // Static credentials exclude OAuth (design D15).
+                        if auth.is_some()
+                            || headers
+                                .keys()
+                                .any(|name| name.eq_ignore_ascii_case("authorization"))
+                        {
+                            return Err(SettingsError::Invalid(
+                                "MCP OAuth excludes static credentials",
+                            ));
+                        }
+                        oauth.validate()?;
                     }
                     (url, extra)
                 }

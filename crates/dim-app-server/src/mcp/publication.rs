@@ -77,6 +77,7 @@ impl McpOwner {
 /// Private immutable instance value. Never encoded in loader options.
 #[derive(Clone)]
 pub(super) struct ConnectionConfig {
+    id: String,
     configuration: McpServerSettings,
     key: TypeKey,
 }
@@ -97,8 +98,9 @@ impl TypedPlugin for ConnectionPlugin {
         deps: Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let plugin = McpServerPlugin::new(self.0.configuration.clone(), self.0.key.clone())
-                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+            let plugin =
+                McpServerPlugin::new(&self.0.id, self.0.configuration.clone(), self.0.key.clone())
+                    .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
             plugin.apply(ctx, deps).await
         })
     }
@@ -515,10 +517,14 @@ impl Projection {
             .sources
             .iter()
             .map(|(source, intent)| {
-                let inactive = intent.current.values().any(|configuration| {
+                let inactive = intent.current.iter().any(|(id, configuration)| {
                     enabled(configuration)
-                        && McpServerPlugin::new(configuration.clone(), TypeKey::of::<McpServer>())
-                            .is_err()
+                        && McpServerPlugin::new(
+                            id,
+                            configuration.clone(),
+                            TypeKey::of::<McpServer>(),
+                        )
+                        .is_err()
                 }) || self.application_failed.keys().any(
                     |(_, failed_source, id)| {
                         failed_source == source && intent.current.get(id).is_some_and(enabled)
@@ -621,11 +627,12 @@ impl Projection {
         let key = TypeKey::keyed_dynamic::<McpServer>(reference.clone()).with_instance(owner.scope);
         // Validate before creation so typed errors, never secret-bearing loader diagnostics,
         // reach the public boundary. Resource acquisition remains in plugin apply.
-        McpServerPlugin::new(configuration.clone(), key.clone())?;
+        McpServerPlugin::new(&id, configuration.clone(), key.clone())?;
         let created = owner
             .loader
             .create_instance(&owner.ctx, GROUP)
             .with(ConnectionConfig {
+                id: id.clone(),
                 configuration: configuration.clone(),
                 key: key.clone(),
             })
@@ -881,7 +888,7 @@ mod tests {
                     0,
                     vec![0],
                 ))),
-                root.plugin(capability_plugin(McpPlugin)),
+                root.plugin(capability_plugin(McpPlugin::new(0))),
             ];
             wait_active(&root, &views, Duration::from_secs(5), &stop)
                 .await

@@ -78,7 +78,7 @@ impl Fixture {
         let root = Ctx::root().unwrap();
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
-        let plugin = root.plugin(dim_agent_runtime::capability_plugin(McpPlugin));
+        let plugin = root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0)));
         let mut roots = vec![home.clone(), home.join("project")];
         if reversed {
             roots.reverse();

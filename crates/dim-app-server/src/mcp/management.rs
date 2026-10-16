@@ -1,4 +1,5 @@
 //! MCP management wire boundary over the MCP and Settings owners.
+use super::auth::{AuthState, McpAuth, McpAuthError, credential_key};
 use super::config::{McpServerSettings, RemoteTransport};
 use super::{McpChange, McpError, McpService};
 use crate::{
@@ -63,6 +64,13 @@ pub struct RemoveMcp {
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpAuthStatus {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_scopes: Option<Vec<String>>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpCatalogResult {
     pub user_revision: String,
     pub project_revision: Option<String>,
@@ -77,6 +85,10 @@ pub struct McpCatalogEntry {
     pub source: McpScope,
     pub enabled: bool,
     pub transport: &'static str,
+    /// Absent for stdio and static-credential entries, and while Dim has
+    /// neither a credential nor a challenge for the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<McpAuthStatus>,
 }
 
 pub(crate) fn error(error: McpError) -> RpcError {
@@ -91,6 +103,8 @@ pub(crate) fn error(error: McpError) -> RpcError {
             "operation_interrupted"
         }
         McpError::Settings(_) => "mcp_settings_read",
+        McpError::Auth(McpAuthError::Closed) => return RpcError::reloading(),
+        McpError::Auth(error) => error.code(),
         _ => "mcp_unavailable",
     };
     RpcError::app(
@@ -132,6 +146,7 @@ pub(super) fn provide(
     ctx: &Ctx,
     directory: Arc<McpService>,
     settings: Arc<SettingsService>,
+    auth: Arc<McpAuth>,
 ) -> Result<(), CordisError> {
     ManagementMethods::provide(
         ctx,
@@ -149,12 +164,14 @@ pub(super) fn provide(
         Arc::new(move |method, value, stopping, _| {
             let directory = directory.clone();
             let settings = settings.clone();
+            let auth = auth.clone();
             Box::pin(async move {
                 match method.as_str() {
                     "mcp.catalog" => {
                         let p: SelectionScope = params(value)?;
                         let project = project(&settings, p.cwd, &stopping).await?;
                         let catalog = directory.catalog(project, &stopping).await.map_err(error)?;
+                        let states = auth.states(&stopping).await;
                         return reply(McpCatalogResult {
                             user_revision: catalog.user_revision,
                             project_revision: catalog.project_revision,
@@ -165,6 +182,25 @@ pub(super) fn provide(
                                 .servers
                                 .into_iter()
                                 .map(|(id, entry)| McpCatalogEntry {
+                                    auth: credential_key(&id, &entry.configuration)
+                                        .and_then(|(key, _)| states.get(&key))
+                                        .map(|state| match state {
+                                            AuthState::Required => McpAuthStatus {
+                                                status: "required",
+                                                missing_scopes: None,
+                                            },
+                                            AuthState::Expired => McpAuthStatus {
+                                                status: "expired",
+                                                missing_scopes: None,
+                                            },
+                                            AuthState::Authorized { missing_scopes } => {
+                                                McpAuthStatus {
+                                                    status: "authorized",
+                                                    missing_scopes: (!missing_scopes.is_empty())
+                                                        .then_some(missing_scopes),
+                                                }
+                                            }
+                                        }),
                                     id,
                                     source: match entry.source {
                                         SettingsScope::User => McpScope::User,

@@ -268,7 +268,7 @@ impl Env {
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
             )),
             root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin)),
+            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0))),
         ];
         wait_active(
             &root,
