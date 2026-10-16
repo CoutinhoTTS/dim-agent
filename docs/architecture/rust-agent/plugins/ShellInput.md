@@ -14,7 +14,7 @@ working directory, through the Session methods `shell.run`, `shell.stop` and
 | `S:SessionConfig` | The Session working directory. |
 | `S:TreeCommands` | Check `branchId` at start; write a recorded run's input on that branch. |
 | `S:SessionLifecycle` | `closing()` ends a run without writing. |
-| `S:Diagnostics` | One `shell.run` span per run. |
+| `S:Diagnostics` | One `shell.run` span per started run. |
 
 ## Methods
 
@@ -26,13 +26,16 @@ generation is not active.
 | Method | Result |
 | --- | --- |
 | `shell.run {sessionId, branchId?, runId, command, mode}` | After the run: `{runId, status, exitCode?, signal?, reason?, output, truncated, durationMs, recorded?}`; progress items `{text, skipped?}` |
-| `shell.stop {sessionId, runId}` | `{stopped: true}` once that run has ended, `{stopped: false}` when it is not running |
+| `shell.stop {sessionId, runId}` | `{stopped: true}` once that run has ended, `{stopped: false}` when it is not running; a stop for an unused `runId` is remembered, and that run then starts nothing and replies `stopped` |
 | `shell.list {sessionId}` | `{runs: [{runId, branchId, mode, command, startedAt}]}` |
 
-Refusals: `invalid_params`, `shell_busy` (a run is registered), `duplicate_run`
-(the `runId` started a run in this generation; a refused start does not use it),
-`shell_unavailable` (`ProcessSpecError` code and reason), `spawn_failed`, and the
-facade's `AgentError` codes for an unknown branch or closed Session. A rejected
+Refusals: `invalid_params`, `operation_interrupted` (the call's token fired
+before the spawn), `service_reloading` (the generation is unloading),
+`session_closed` (the Session is closing), `shell_busy` (a run is registered),
+`duplicate_run` (the `runId` started a run in this generation, or a stop ended it
+first; a refused start does not use it), `shell_unavailable` (`ProcessSpecError`
+code and reason), `spawn_failed`, and the facade's `AgentError` codes for an
+unknown branch or closed Session. A rejected
 write of a recorded run is `recorded.error {appError, message}`; `appError` is
 absent only for a facade failure that has no application code on the wire either.
 
@@ -45,8 +48,8 @@ block `<dim-shell-input kind="command" status exit? truncated>` holding
 written once and never retried. InputQueue applies it at once and Loop consumes
 it with the next model request; it starts no turn.
 
-The run registry (the running run and the run ids started in this generation)
-is generation memory, never rebuilt. A run task belongs to the generation's
+The run registry (the running run, the run ids used in this generation and the
+run ids a stop reached before their run) is generation memory, never rebuilt. A run task belongs to the generation's
 `TaskTracker`, not to the call that started it:
 
 ```text
@@ -59,9 +62,16 @@ unload) or Session closing()   the pipe readers and writes nothing; the
                                generation's disposer waits for the task.
 ```
 
-The generation token is read under the registry lock right before a process
-spawns, and the disposer closes the tracker under the same lock, so no run
-starts after the tracker closed. `SessionMethods::provide` is called after the
+A run is admitted before its command is built and again, under the registry
+lock, in one step with its spawn and registration. The build is raced against
+the call's token, and the second admission reads that token, the generation
+token, the Session phase and the remembered stops, so a call interrupted before
+the spawn starts nothing and leaves its `runId` unused. The disposer closes the
+tracker under the same lock, so no run starts after the tracker closed. The
+spawn holds that std mutex, which no await holds, so `shell.list` and
+`shell.stop` wait at most for one fork and exec. The write's ending check is
+followed by no await: a run the Session part ended never writes, and the branch
+refuses a write once its own close has started. `SessionMethods::provide` is called after the
 disposer is registered, so the provider's unload, which settles the calls, runs
 first.
 
@@ -113,8 +123,12 @@ the command builder.
 `a_recorded_run_is_one_append_input_for_the_next_request`,
 `a_disconnected_caller_does_not_stop_its_run`,
 `a_session_reload_terminates_the_run_without_writing`,
+`an_rpc_reload_before_the_spawn_starts_nothing`,
+`a_run_is_admitted_again_with_its_spawn`,
 `the_caller_receives_progress_before_the_reply`,
-`progress_items_are_capped_and_count_what_they_leave_out`.
+`progress_items_are_capped_and_count_what_they_leave_out`. Feature `testing`
+adds `shell_input::testing::hold_start`, which holds a run's command build open
+for the race flows; production builds have no hook.
 
 <!-- generated:plugin ShellInput — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

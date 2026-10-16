@@ -527,6 +527,13 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::shell_input::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::shell_input",
+      "file": "crates/dim-agent-capabilities/src/shell_input.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::shell_session",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -5674,6 +5681,7 @@
         "path Progress",
         "path RpcError",
         "path RpcError::app",
+        "path RpcError::closed",
         "path RpcError::from",
         "path RpcError::interrupted",
         "path RpcError::invalid",
@@ -5688,6 +5696,14 @@
         "use crate::methods::SessionMethods",
         "use crate::methods::params",
         "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::shell_input::testing",
+      "references": [
+        "mod testing",
+        "path testing::pause"
       ]
     },
     {

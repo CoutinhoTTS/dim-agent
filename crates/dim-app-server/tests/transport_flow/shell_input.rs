@@ -1,7 +1,8 @@
 //! ShellInput through the public RPC interface (design Appendix D).
 use super::*;
 use dim_agent_capabilities::{
-    model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
+    model_provider::ModelProviderPlugin, shell_input::testing::hold_start,
+    workspace_tools::WorkspaceToolsConfig,
 };
 use std::{
     os::unix::fs::DirBuilderExt,
@@ -293,6 +294,7 @@ async fn shell_methods_need_the_assembly_and_check_their_requests() {
             json!({"sessionId": sid, "command": "true", "mode": "private"}),
         ),
         ("shell.stop", json!({"sessionId": sid})),
+        ("shell.stop", json!({"sessionId": sid, "runId": "a_b"})),
         ("shell.list", json!({"sessionId": sid, "runId": "r1"})),
     ] {
         let reply = shell.client.rpc(method, params).await;
@@ -501,6 +503,105 @@ async fn an_rpc_reload_ends_the_wait_but_not_the_run() {
             && text.ends_with("\nstarted\nfinished\n\n</dim-shell-input>"),
         "{text}"
     );
+    shell.shutdown().await;
+}
+
+/// Design D12: an Rpc reload while a run's command is still being prepared
+/// ends the call at once and starts nothing; the runId stays unused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_rpc_reload_before_the_spawn_starts_nothing() {
+    let mut shell = Shell::launch().await;
+    let before = shell.through().await;
+    let mut held = hold_start(&shell.work);
+    let call = shell.send_run("early", "echo ran > ran", "record").await;
+    held.arrived().await;
+    tokio::time::timeout(Duration::from_secs(5), shell.server.restart("Rpc"))
+        .await
+        .expect("the reload does not wait for the preparation")
+        .unwrap();
+    let reply = shell.client.response(call).await;
+    assert_eq!(app_error(&reply), "operation_interrupted", "{reply}");
+    drop(held);
+    assert_eq!(shell.list().await, json!([]));
+    let reply = shell.run("early", "true", "record").await;
+    assert_eq!(reply["result"]["status"], "completed", "{reply}");
+    assert!(!shell.work.join("ran").exists());
+    let recorded = shell.recorded(before).await;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0]["sequence"],
+        reply["result"]["recorded"]["sequence"]
+    );
+    shell.shutdown().await;
+}
+
+/// Design D13: a run is admitted again, with its spawn, once its command is
+/// built. A `shell.stop` that came first means it starts nothing and replies
+/// `stopped`, using its runId; a run started meanwhile makes it `shell_busy`;
+/// one that used its runId meanwhile makes it `duplicate_run`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_is_admitted_again_with_its_spawn() {
+    let mut shell = Shell::launch().await;
+    let before = shell.through().await;
+    let stopped = |run_id: &str| json!({"runId": run_id, "status": "stopped", "output": "", "truncated": false, "durationMs": 0});
+
+    // Stopped while its command is being built, and before it was sent.
+    let mut held = hold_start(&shell.work);
+    let call = shell.send_run("building", "echo ran > ran", "record").await;
+    held.arrived().await;
+    assert_eq!(
+        shell.stop("building").await["result"],
+        json!({"stopped": false})
+    );
+    drop(held);
+    assert_eq!(
+        shell.client.response(call).await["result"],
+        stopped("building")
+    );
+    assert_eq!(
+        app_error(&shell.run("building", "true", "private").await),
+        "duplicate_run"
+    );
+    assert_eq!(
+        shell.stop("ahead").await["result"],
+        json!({"stopped": false})
+    );
+    assert_eq!(
+        shell.run("ahead", "echo ran > ran", "record").await["result"],
+        stopped("ahead")
+    );
+
+    // Another run started while this one was being built.
+    let mut held = hold_start(&shell.work);
+    let late = shell.send_run("late", "echo ran > ran", "record").await;
+    held.arrived().await;
+    let other = shell.send_run("other", WAITING, "private").await;
+    let pid = written(&shell.work, "pid").await;
+    drop(held);
+    assert_eq!(app_error(&shell.client.response(late).await), "shell_busy");
+    std::fs::write(shell.work.join("go"), "").unwrap();
+    assert_eq!(
+        shell.client.response(other).await["result"]["status"],
+        "completed"
+    );
+    gone(&[&pid]).await;
+
+    // Its runId used while it was being built.
+    let mut held = hold_start(&shell.work);
+    let twice = shell.send_run("twice", "echo ran > ran", "record").await;
+    held.arrived().await;
+    assert_eq!(
+        shell.run("twice", "true", "private").await["result"]["status"],
+        "completed"
+    );
+    drop(held);
+    assert_eq!(
+        app_error(&shell.client.response(twice).await),
+        "duplicate_run"
+    );
+
+    assert!(!shell.work.join("ran").exists());
+    assert!(shell.recorded(before).await.is_empty());
     shell.shutdown().await;
 }
 

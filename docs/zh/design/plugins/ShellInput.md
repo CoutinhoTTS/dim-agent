@@ -50,22 +50,22 @@ flowchart LR
 ```mermaid
 flowchart LR
   subgraph MEM["Session 插件内存"]
-    RR["运行注册表：runId 到分支、模式、命令、startedAt、进程树、停止信号；本代已用过的 run id"]:::new
+    RR["运行注册表：runId 到分支、模式、命令、startedAt、进程树、停止信号；本代已用过的 run id；在运行之前就被停止的 run id"]:::new
   end
   subgraph TL["分支 Timeline"]
     IM["input/message（Append，标记 dim-shell-input）"]
     IA["input/applied、input/consumed（InputQueue、Loop）"]
   end
-  DG["诊断：每次运行一个 shell.run span"]
+  DG["诊断：每次已启动的运行一个 shell.run span"]
   RR -- "record 模式：进程结束后写入一次" --> IM
   IM --> IA
   RR -- "runId 与结果" --> DG
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-运行注册表是插件代的内存，从不重建：Session 部分结束时，正在运行的命令被终止。它还记录本代已用过的 run id，因此重复的 `runId` 会被拒绝（`duplicate_run`），发出一次的命令绝不会运行两次。唯一持久的结果是记录运行的 `input/message`，随 Session 一起恢复。
+运行注册表是插件代的内存，从不重建：Session 部分结束时，正在运行的命令被终止。它还记录本代已用过的 run id，因此重复的 `runId` 会被拒绝（`duplicate_run`），发出一次的命令绝不会运行两次；并记录 `shell.stop` 先于其运行到达的 run id，这样那次运行什么都不启动（A.4）。唯一持久的结果是记录运行的 `input/message`，随 Session 一起恢复。
 
-事件：无。运行由用户而非轮次启动，因此轮次或分支中断不会结束它。`!command` 唯一与后续相关的结果是该输入；`!!command` 不影响任何后续内容。诊断中每次运行一个 `shell.run` span，带 `runId` 和结果（状态与退出），从不包含命令文本或输出（A11）。
+事件：无。运行由用户而非轮次启动，因此轮次或分支中断不会结束它。`!command` 唯一与后续相关的结果是该输入；`!!command` 不影响任何后续内容。诊断中每次已启动的运行一个 `shell.run` span，带 `runId` 和结果（状态与退出），从不包含命令文本或输出（A11）。
 
 ## 3. 流程
 
@@ -124,6 +124,7 @@ InputQueue 立即应用 X；Loop 在运行中轮次的下一次模型请求时�
      the sequence or the write error
 ```
 
+- 一次运行准入两次：构造命令之前一次，`spawn` 时再一次（A.4 准入）。在第二次准入之前什么都还没启动：在它之前被中断的调用什么都不启动，`runId` 保持未使用；先到达该 `runId` 的 `shell.stop` 让这次运行什么都不启动，回复 `stopped`。
 - 轮次的 `stop/interrupt` 不会到达运行：CLI 的第一次 `Ctrl+C` 发送 `shell.stop`，第二次才落到轮次停止。
 - 客户端分离或断开不会停止运行。它的进度被丢弃、回复被舍弃；记录模式的运行仍会写入（A10）。
 - 若接纳该调用的 Rpc 装载被卸载（结构性重载），调用的取消令牌触发：调用按契约对 `report` 调用的要求回复 `operation_interrupted`，处理函数立即返回、不再等待命令，因此重载不会被命令拖住。运行像断开后一样在 ShellInput 这一代中继续（A10；A.4 两种取消）。
@@ -151,6 +152,8 @@ sequenceDiagram
 | 场景 | 结果 |
 | --- | --- |
 | 一个运行进行中时同一 Session 的第二个 `!` | `shell_busy` |
+| 运行被准入之前到达的 `shell.stop` | 运行什么都不启动，回复 `stopped`；不写任何内容 |
+| 构造命令期间 Rpc 重载 | 什么都不启动；`runId` 保持未使用；`operation_interrupted` |
 | 运行期间分支关闭 | 写入失败；返回输出并带 `recorded.error` |
 | InputQueue 持有 X 时对其 `input/withdraw`（S1） | `input/deleted`；从未被应用或消费；不重新写入 |
 | 运行期间 Session 关闭、重载或卸载 | 进程树终止；不写任何内容；调用方得到 `operation_interrupted`（A8） |
@@ -215,13 +218,13 @@ sequenceDiagram
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `shell.run` | `{sessionId, branchId?: "main", runId, command, mode: "record" \| "private"}` | 进程结束后：`{runId, status: "completed" \| "stopped" \| "failed", exitCode?, signal?, reason?, output, truncated, durationMs, recorded?}`。`recorded`（模式 `record`）：写入时为 `{sequence}`，写入被拒绝时为 `{error: {appError, message}}`（只有门面失败本身没有应用错误码时才省略 `appError`）。进度项：`{text, skipped?}` |
-| `shell.stop` | `{sessionId, runId}` | 运行结束后为 `{stopped: true}`；没有该 `runId` 的运行中运行时为 `{stopped: false}` |
+| `shell.run` | `{sessionId, branchId?: "main", runId, command, mode: "record" \| "private"}` | 进程结束后：`{runId, status: "completed" \| "stopped" \| "failed", exitCode?, signal?, reason?, output, truncated, durationMs, recorded?}`。`recorded`（模式 `record`）：写入时为 `{sequence}`，写入被拒绝时为 `{error: {appError, message}}`（只有门面失败本身没有应用错误码时才省略 `appError`）；因为 stop 先到、什么都没运行时不出现。进度项：`{text, skipped?}` |
+| `shell.stop` | `{sessionId, runId}` | 运行结束后为 `{stopped: true}`；没有该 `runId` 的运行中运行时为 `{stopped: false}`。对本代尚未使用的 `runId` 的 stop 会被记住：之后带该 `runId` 的 `shell.run` 什么都不启动，回复 `stopped`（A.4） |
 | `shell.list` | `{sessionId}` | `{runs: [{runId, branchId, mode, command, startedAt}]}` |
 
 | 字段 | 规则 |
 | --- | --- |
-| `runId` | 由客户端生成，因此 `shell.stop` 可以在 `run` 回复之前发送；`[A-Za-z0-9-]{1,64}`（UUID 符合）。本代已用过的 `runId` 返回 `duplicate_run`。客户端从不自行重试 `shell.run`，因为命令不是幂等的（A9） |
+| `runId` | 由客户端生成，因此 `shell.stop` 可以在 `run` 回复之前、甚至在运行被准入之前发送；`[A-Za-z0-9-]{1,64}`（UUID 符合），`shell.run` 和 `shell.stop` 都按此校验。本代已用过的 `runId` 返回 `duplicate_run`。客户端从不自行重试 `shell.run`，因为命令不是幂等的（A9） |
 | `command` | 非空，最多 64 KiB |
 | `sessionId`、`branchId` | Rpc 读取 `sessionId` 以授权并解析 Session。`branchId` 指定接收记录输入的分支，在启动时检查 |
 | `exitCode`、`signal`、`reason` | 进程以退出码退出时为 `exitCode`，被信号结束时为 `signal`（信号名），`failed` 时带 `reason` |
@@ -293,11 +296,12 @@ setsid  o--------------------------------------> own session (POSIX): not reache
 
 | 步骤 | 机制 |
 | --- | --- |
-| 启动 | 解析参数（`invalid_params`）；已有登记的运行时拒绝 `shell_busy`，`runId` 已用过时拒绝 `duplicate_run`；通过 `S:TreeCommands` 解析分支；构造 `ProcessSpec`（S7；`shell_unavailable`）；`spawn`（`spawn_failed`）；登记运行，并在本代的任务跟踪器中启动它的任务，而不是在调用中运行。`spawn` 之前在登记表的锁内再检查一次本代的取消、占用和 `runId`；`runId` 在其进程启动后才算用过，被拒绝的启动不占用它 |
+| 启动 | 解析参数（`invalid_params`）；准入（见下）；通过 `S:TreeCommands` 解析分支；构造 `ProcessSpec`（S7；`shell_unavailable`），直到调用的取消令牌触发为止；然后在登记表的锁内一步完成：再次准入、`spawn`（`spawn_failed`）、登记运行，并在本代的任务跟踪器中启动它的任务，而不是在调用中运行。`runId` 在其进程启动后、或被先到的 stop 结束后才算用过，被拒绝的启动不占用它 |
+| 准入 | 依次拒绝：调用已被中断（`operation_interrupted`）、本代正在卸载（`service_reloading`）、Session 正在关闭（`session_closed`）、已有登记的运行（`shell_busy`）、`runId` 已用过（`duplicate_run`）。第二次准入随后取走为该 `runId` 记住的 stop：什么都不启动，回复 `{runId, status: "stopped", output: "", truncated: false, durationMs: 0}`，不记录，也没有 span |
 | 运行 | 任务持有进程树。它读取两个管道，发送有上限的进度（A.1），保留有界尾部，并等待退出、`shell.stop`、`SessionLifecycle::closing()` 或本代的取消 |
 | 调用 | `shell.run` 的处理函数等待运行的结果或调用的取消令牌，先到者为准。令牌触发时它立即返回，运行不受影响（见下文两种取消） |
-| 停止 | `terminate` 进程树，然后状态 `stopped`，带已读到的输出 |
-| 写入（`record`） | 进程结束且输出读完后写入一次，除非 Session 部分正在结束：`Branch::input` 在边界校验并追加。已提交的序号即 `recorded.sequence`；被拒绝时为 `recorded.error`。从不重试；命令从不重新运行 |
+| 停止 | `terminate` 进程树，然后状态 `stopped`，带已读到的输出。既找不到该 `runId` 的运行中运行、它也没被用过时，stop 在本代被记住，留给那次运行的第二次准入 |
+| 写入（`record`） | 进程结束且输出读完后写入一次，除非 Session 部分正在结束：`Branch::input` 在边界校验并追加。已提交的序号即 `recorded.sequence`；被拒绝时为 `recorded.error`。从不重试；命令从不重新运行。是否写入在“正在结束”的检查处决定，检查之后到写入之前没有 await：被 Session 部分结束的运行从不写入；检查之后才开始关闭的 Session 会像收到关闭前发来的任何输入一样收到它，分支自己的关闭开始后则拒绝它（`recorded.error`） |
 | 消费 | InputQueue `input/applied {mode: append}`；Loop 随下一次模型请求写 `input/consumed` |
 | Session 部分结束 | 终止进程树，不写任何内容，回复 `operation_interrupted`；`ctx.effect` 卸载清理函数等待运行任务 |
 
@@ -305,7 +309,7 @@ setsid  o--------------------------------------> own session (POSIX): not reache
 
 | 取消 | 何时触发 | 效果 |
 | --- | --- | --- |
-| 调用的取消令牌 | 接纳该调用的 Rpc 装载卸载（Rpc 重载）；本提供方这一代卸载时也会触发 | 处理函数不再等待，立即返回；C1 的调用准入已回复 `operation_interrupted`。运行不受影响：Rpc 重载之后它继续在 ShellInput 这一代中运行，记录模式的运行结束后照常写入，与断开后相同（A10）。回复之后发送的进度被丢弃 |
+| 调用的取消令牌 | 接纳该调用的 Rpc 装载卸载（Rpc 重载）；本提供方这一代卸载时也会触发 | 处理函数不再等待，立即返回；C1 的调用准入已回复 `operation_interrupted`。在第二次准入之前，什么都不启动，`runId` 保持未使用，处理函数也不再等待命令构造。在它之后，运行不受影响：Rpc 重载之后它继续在 ShellInput 这一代中运行，记录模式的运行结束后照常写入，与断开后相同（A10）。回复之后发送的进度被丢弃 |
 | `ctx.cancelled()` 或 `SessionLifecycle::closing()` | 本 ShellInput 代卸载，或 Session 开始关闭 | 运行任务终止进程树，不写任何内容 |
 
 令牌触发后，处理函数不能再等待命令。C1 对被中断的 `report` 调用先回复 `operation_interrupted`，再等待处理函数结束，而正在卸载的 Rpc 装载会等它接纳的每个调用都了结，所以等待 `!npm run dev` 的处理函数会让 Rpc 重载一直卡到命令结束。令牌也不能结束运行，因为 Rpc 重载同样会触发它；本代卸载时，由本代自己的取消结束运行。
@@ -324,6 +328,20 @@ setsid  o--------------------------------------> own session (POSIX): not reache
    call       o-- handler ----x  replies operation_interrupted
                                  the generation's disposer waits for the run task
 ```
+
+**准入。** 命令构造器可能要等待（HostPlatform 的 shell 锁和 shell 解析），所以处理函数构造 `ProcessSpec` 只到调用的取消令牌触发为止。算数的是第二次准入：它在登记表的锁内读取调用的取消令牌、本代的取消、Session 阶段、登记表和记住的 stop，并与 `spawn` 和登记在同一步完成：
+
+```text
+shell.run    admit --- build the ProcessSpec (may wait) --- [registry lock: admit, spawn, register] --- run task
+                          ^                                     ^
+call token   fires here: the build is abandoned, the    fires after the lock: the run stays with the
+             call returns; nothing starts, the runId     generation and is recorded when it ends (A10)
+             stays unused
+shell.stop   reaches the runId before the lock: remembered; the second admission consumes it, nothing
+             starts and the run replies stopped
+```
+
+`spawn` 持有登记表的 std 互斥锁，因此 `shell.list` 从不显示尚未启动的运行，`shell.stop` 也不会错过已启动的运行；卸载清理函数在同一把锁内关闭任务跟踪器，因此跟踪器关闭后不会再有运行启动。持锁期间没有 await：并发的 `shell.list` 或 `shell.stop` 最多等一次 fork 和 exec。构造命令期间开始关闭的 Session 在第二次准入时被拒绝（`session_closed`），不会启动一个马上就会被 `closing()` 终止的命令。
 
 ### A.5 对其他插件的改动
 
@@ -376,6 +394,10 @@ H1 到 H3 阻塞 ShellInput。S7 的另一半，即每次 spawn 时读取 exec s
 | 启动时 Session 已卸载 | — | Rpc 在分发前恢复它（C1） | Rpc、AgentIndex |
 | 启动时 shell 不可用 | — | `shell_unavailable`；不启动任何内容 | ShellInput |
 | 重复或迟到的 `stop` | — | `{stopped: false}` | ShellInput |
+| 运行被准入之前的 `stop` | — | `{stopped: false}`；stop 被记住，运行什么都不启动，回复 `stopped`；不写任何内容；`runId` 算作用过 | ShellInput |
+| 构造命令期间 Rpc 重载或 ShellInput 卸载 | — | 处理函数立即返回，卸载不被卡住；`operation_interrupted`；什么都不启动；`runId` 保持未使用 | ShellInput |
+| 构造命令期间 Session 开始关闭 | — | 第二次准入时回复 `session_closed`；什么都不启动 | ShellInput |
+| 运行自行结束后 Session 紧接着开始关闭 | — | 像关闭前发来的任何输入一样写入；分支的关闭开始后被拒绝（`recorded.error`） | ShellInput、运行时门面 |
 | 客户端分离或断开 | — | 运行继续，并被记录或丢弃；进度被丢弃（A10） | ShellInput |
 | 客户端读取慢于进度到达 | — | Rpc 丢弃进度项；连接保持打开，回复照常到达（A.1） | Rpc |
 | 运行中途 exec shell 改变 | — | 运行保留其 shell；下一次运行使用构造器读到的值 | HostPlatform |
@@ -391,7 +413,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 | `duplicate_run` | `runId` 已在本代中使用 |
 | `shell_unavailable` | HostPlatform 拒绝构造命令（H2）：`EXEC_SHELL_CONFIG_INVALID`、`EXEC_SHELL_UNAVAILABLE`、`cwd_not_found`、`EXEC_SHELL_CWD_UNSUPPORTED` 或 `EXEC_SHELL_PATH_MAPPING_FAILED`；消息中带其代码和原因 |
 | `spawn_failed` | 无法启动进程；消息中带原因 |
-| `session_closed`、`session_invalid_input` | 启动时运行时门面拒绝（Session 或分支已关闭、未知分支），使用 `AgentError` 现有的 wire 映射 |
+| `session_closed`、`session_invalid_input` | 启动时运行时门面拒绝（Session 或分支已关闭、未知分支），使用 `AgentError` 现有的 wire 映射；任一次准入时 Session 正在关闭，也回复 `session_closed` |
 
 分发错误（进程未装配 ShellInput 时 `unknown_method`、缺少 `sessionId` 时 `-32602`、已装配但该 Session 的 ShellInput 部件未激活时 `service_reloading`）以及被中断的 `report` 调用的 `operation_interrupted` 属于契约（[session-boundary 附录 C](../contracts/session-boundary.md#附录-c-错误与恢复)）。ShellInput 不依赖 Rpc 检查它们的顺序。
 
@@ -416,6 +438,10 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 9. 运行期间客户端断开：运行继续，其输入被记录。
 10. `!` 命令运行期间 Rpc 重载：重载立即完成，调用回复 `operation_interrupted`；命令继续运行，结束时其输入被记录。
 11. 没有装配 ShellInput 的进程对 `shell.run` 回复 `unknown_method`；装配了 ShellInput 时，该 Session 的 ShellInput 部件未激活期间 `shell.run` 回复 `service_reloading`。
+12. 运行的命令正在构造时 Rpc 重载：重载立即完成，调用回复 `operation_interrupted`，什么都不启动，`runId` 保持未使用。
+13. 运行在 `spawn` 时再次准入：先到达该 `runId` 的 `shell.stop` 让它什么都不启动、回复 `stopped`；其间已启动的另一次运行让它回复 `shell_busy`，其间用掉了它的 `runId` 则回复 `duplicate_run`。
+
+第 12、13 条通过 `testing` feature 的钩子（`shell_input::testing::hold_start`）让命令构造停住，因为 HostPlatform 的命令构造无法从外部暂停。
 
 ## 附录 E. 假设
 
@@ -453,15 +479,21 @@ ShellInput 用 Rust 实现，为 dim-agent-capabilities 的 `shell_input` 模块
 | `sessionMethods` key `shell` | `dim_agent_capabilities::methods` 的 `SessionMethods::provide(ctx, &scope, "shell", declarations, handler)`（C1，[#83](https://github.com/arcships/dim/pull/83)），在 `apply` 中于 ShellInput 自己的 effect 之后调用，因此它的卸载 effect 先运行。`declarations` 为 `MethodDecl { progress: true, ..MethodDecl::new("shell.run", true, Interruption::Report) }`、`MethodDecl::new("shell.stop", true, Interruption::Report)` 和 `MethodDecl::new("shell.list", false, Interruption::Report)`。装配用 `AgentBuilder::session_methods("shell")` 登记命名空间 |
 | 处理函数 | 一个 `Handler`，以方法名、参数、调用的 `CancellationToken`（A.4 两种取消）和它的 `Progress` 调用，返回 `Result<Value, RpcError>` 的 future。自己的错误用 `RpcError::app(-32000, "shell_busy", ..)` 等，`invalid_params` 用 `RpcError::invalid`；运行时门面的错误用 `?` 转换（`From<AgentError> for RpcError`） |
 | 进度 | 处理函数的 `Progress` 参数：`progress.send(json!({"text": text}))`，有略去的字节时加上 `"skipped"`。运行任务持有它的克隆；回复之后的发送被丢弃 |
-| 命令构造 | `HostPlatform::build_process_spec(command, cwd).await` 返回 `(ProcessSpec, ExecShellRuntime)` 或 `ProcessSpecError { code, reason }`；内部读取当前 shell |
+| 命令构造 | `HostPlatform::build_process_spec(command, cwd).await` 返回 `(ProcessSpec, ExecShellRuntime)` 或 `ProcessSpecError { code, reason }`；内部读取当前 shell。处理函数用 `select!` 让它与调用的取消令牌竞争 |
 | 进程 | `HostPlatform::spawn(ProcessSpec)` 返回带 `stdout`、`stderr`、`wait` 和 `terminate` 的 `ProcessTree` |
-| 运行任务 | ShellInput 自己的 `TaskTracker`，与 `SessionMethods` 跟踪的调用分开；每个任务持有自己的 `ProcessTree`，观察 `ctx.cancelled()` 和 `SessionLifecycle::closing()`；`ctx.effect` 登记等待该跟踪器的卸载清理函数。`spawn` 之前在登记表的锁内读取本代的取消令牌，卸载清理函数在同一把锁内关闭跟踪器 |
+| 运行任务 | ShellInput 自己的 `TaskTracker`，与 `SessionMethods` 跟踪的调用分开；每个任务持有自己的 `ProcessTree`，观察 `ctx.cancelled()` 和 `SessionLifecycle::closing()`；`ctx.effect` 登记等待该跟踪器的卸载清理函数。`spawn` 之前在登记表的锁内读取调用的取消令牌、本代的取消令牌和 Session 阶段，卸载清理函数在同一把锁内关闭跟踪器 |
 | 记录的输入（A.3） | `TreeCommands::get(branch_id)?.input(..)` |
 | 诊断 | `Diagnostics::span("shell.run", None, None, Some(run_id.as_str()))`，运行结束时记录 `outcome` |
 
 ```rust
-// shell.run, once the run task has started in ShellInput's tracker: the call
-// waits for the run's reply and stops waiting when its token fires.
+// shell.run before the spawn: the build ends when the call's token fires.
+let (spec, _) = tokio::select! {
+    biased;
+    _ = token.cancelled() => return Err(RpcError::interrupted()),
+    built = platform.build_process_spec(&command, &cwd) => built.map_err(unavailable)?,
+};
+// Once the run task has started in ShellInput's tracker: the call waits for
+// the run's reply and stops waiting when its token fires.
 tokio::select! {
     // operation_interrupted when the Session part ended the run
     reply = run_reply => reply,

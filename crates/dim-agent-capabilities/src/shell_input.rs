@@ -115,8 +115,12 @@ struct Running {
 #[derive(Default)]
 struct Registry {
     running: Option<Running>,
-    /// Run ids started in this generation: a command never runs twice.
+    /// Run ids started in this generation, or stopped before their start: a
+    /// command never runs twice.
     used: HashSet<String>,
+    /// Run ids a `shell.stop` reached before their run did: that run then
+    /// starts nothing.
+    stopped: HashSet<String>,
 }
 
 struct ShellInput {
@@ -144,11 +148,38 @@ enum End {
     Interrupted,
 }
 
+/// `runId` is `[A-Za-z0-9-]{1,64}` (design A.1).
+fn check_run_id(run_id: &str) -> Result<(), RpcError> {
+    if run_id.is_empty()
+        || run_id.len() > 64
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(RpcError::invalid("runId must match [A-Za-z0-9-]{1,64}"));
+    }
+    Ok(())
+}
+
 impl ShellInput {
-    /// Refuses a run that cannot start now.
-    fn admit(&self, registry: &Registry, run_id: &str) -> Result<(), RpcError> {
+    /// Refuses a run that cannot start now: its call was interrupted, the
+    /// Session part is ending, another run is registered or the runId was
+    /// used.
+    fn admit(
+        &self,
+        registry: &Registry,
+        run_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<(), RpcError> {
+        if cancel.is_cancelled() {
+            return Err(RpcError::interrupted());
+        }
+        // A reload's next generation serves a retry; a closing Session none.
         if self.generation.is_cancelled() {
             return Err(RpcError::reloading());
+        }
+        if self.lifecycle.phase() >= SessionPhase::Closing {
+            return Err(RpcError::closed());
         }
         if registry.running.is_some() {
             return Err(refused(
@@ -182,34 +213,50 @@ impl ShellInput {
                 "command must be non-empty and at most 64 KiB",
             ));
         }
-        if p.run_id.is_empty()
-            || p.run_id.len() > 64
-            || !p
-                .run_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err(RpcError::invalid("runId must match [A-Za-z0-9-]{1,64}"));
-        }
-        self.admit(&self.registry.lock().unwrap(), &p.run_id)?;
+        check_run_id(&p.run_id)?;
+        self.admit(&self.registry.lock().unwrap(), &p.run_id, &cancel)?;
         self.tree.get(&p.branch_id)?;
-        let (spec, _) = self
-            .platform
-            .build_process_spec(&p.command, &self.cwd)
-            .await
-            .map_err(|error| {
+        // The builder may wait for HostPlatform's shell lock and resolution;
+        // the call's token ends that wait, so no unload waits for it.
+        let built = async {
+            #[cfg(feature = "testing")]
+            testing::pause(&self.cwd).await;
+            self.platform
+                .build_process_spec(&p.command, &self.cwd)
+                .await
+        };
+        let (spec, _) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(RpcError::interrupted()),
+            built = built => built.map_err(|error| {
                 refused(
                     "shell_unavailable",
                     format!("{}: {}", error.code, error.reason),
                 )
-            })?;
+            })?,
+        };
         let (send, reply) = oneshot::channel();
         {
             let mut registry = self.registry.lock().unwrap();
-            // The disposer closes `runs` under this lock after the generation
-            // token fired: every run admitted here is tracked, and no run
-            // starts once the generation is unloading.
-            self.admit(&registry, &p.run_id)?;
+            // The admission that counts: one step with the spawn and the
+            // registration. A call interrupted before it starts nothing and
+            // leaves its runId unused; after it, the run belongs to this
+            // generation (A.4). The disposer closes `runs` under this lock
+            // after the generation token fired, so every admitted run is
+            // tracked. The spawn (fork and exec) runs under this std mutex,
+            // which no await holds, so `shell.list` and `shell.stop` wait for
+            // that alone.
+            self.admit(&registry, &p.run_id, &cancel)?;
+            if registry.stopped.remove(&p.run_id) {
+                registry.used.insert(p.run_id.clone());
+                return Ok(json!({
+                    "runId": p.run_id,
+                    "status": "stopped",
+                    "output": "",
+                    "truncated": false,
+                    "durationMs": 0,
+                }));
+            }
             let tree = self.platform.spawn(spec).map_err(|error| {
                 refused("spawn_failed", format!("Failed to spawn process: {error}"))
             })?;
@@ -305,6 +352,12 @@ impl ShellInput {
             }
             progress.send(item);
         }
+        // Whether to write is decided here, and no await follows before
+        // `record`. A run the Session part ended never writes, since
+        // `ending()` stays true. A Session that starts closing after this
+        // check gets the input like any input sent just before its close,
+        // and once its branch's close has started `Branch::input` refuses it
+        // (`recorded.error`).
         let (result, outcome) = if self.ending() {
             (Err(RpcError::interrupted()), "interrupted".to_owned())
         } else {
@@ -400,12 +453,23 @@ impl ShellInput {
 
     async fn stop(&self, value: Value, cancel: CancellationToken) -> Result<Value, RpcError> {
         let p: StopParams = params(value)?;
-        let ended = match &self.registry.lock().unwrap().running {
-            Some(running) if running.info.run_id == p.run_id => {
-                running.stop.cancel();
-                running.ended.clone()
+        check_run_id(&p.run_id)?;
+        let ended = {
+            let mut guard = self.registry.lock().unwrap();
+            let registry = &mut *guard;
+            match &registry.running {
+                Some(running) if running.info.run_id == p.run_id => {
+                    running.stop.cancel();
+                    running.ended.clone()
+                }
+                _ => {
+                    // Ahead of its run (A.4 Stop): that run then starts nothing.
+                    if !registry.used.contains(&p.run_id) {
+                        registry.stopped.insert(p.run_id);
+                    }
+                    return reply(json!({"stopped": false}));
+                }
             }
-            _ => return reply(json!({"stopped": false})),
         };
         tokio::select! {
             _ = ended.cancelled() => reply(json!({"stopped": true})),
@@ -566,5 +630,55 @@ impl TypedPlugin for ShellInputPlugin {
 impl Capability for ShellInputPlugin {
     fn keys(&self) -> KeysOf<Self> {
         scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
+/// Holds a run's command preparation open for race flow tests. Feature
+/// `testing` only; production builds have no hook.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+    use tokio::sync::oneshot;
+
+    type Hold = (PathBuf, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
+
+    /// Holds the preparation of the next `shell.run` in a Session working in
+    /// `cwd`, before its command is built, until this is dropped.
+    pub struct HeldStart {
+        arrived: oneshot::Receiver<()>,
+        _release: oneshot::Sender<()>,
+    }
+    impl HeldStart {
+        /// Resolves once the held run is being prepared.
+        pub async fn arrived(&mut self) {
+            let _ = (&mut self.arrived).await;
+        }
+    }
+
+    pub fn hold_start(cwd: &Path) -> HeldStart {
+        let (arrive, arrived) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let cwd = cwd.canonicalize().expect("an existing working directory");
+        HOLDS.lock().unwrap().push((cwd, arrive, released));
+        HeldStart {
+            arrived,
+            _release: release,
+        }
+    }
+
+    pub(super) async fn pause(cwd: &Path) {
+        let hold = {
+            let mut holds = HOLDS.lock().unwrap();
+            let index = holds.iter().position(|(held, ..)| held == cwd);
+            index.map(|index| holds.swap_remove(index))
+        };
+        if let Some((_, arrive, released)) = hold {
+            let _ = arrive.send(());
+            let _ = released.await;
+        }
     }
 }
