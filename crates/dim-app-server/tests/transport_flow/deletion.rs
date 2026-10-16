@@ -343,3 +343,109 @@ async fn a_delete_leaves_another_databases_command_output() {
         server.join().await.unwrap();
     }
 }
+
+/// §3.5 and D5: a delete that fails after it closed a loaded leader replies
+/// -32603 and leaves the leader as `session.close` does: its rows stay, and
+/// it is neither listed nor loaded again in this process, so it never runs
+/// without the relations its close ended. Its member stays a Session.
+/// After a restart the leader loads, and a retry deletes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd": std::env::temp_dir(), "tools": ["echo", "wait", "agent"],
+                "permissionPolicy": {"allowedTools": ["echo", "wait", "agent"]}}),
+        )
+        .await;
+    assert_ok(&created);
+    let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let agent_id = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let request =
+        json!({"action":"request","agentId":agent_id,"prompt":"tool:wait {\"millis\":60000}"});
+    turn(&mut client, &lead, &format!("tool:agent {request}")).await;
+    let member = agent
+        .get_session(&lead)
+        .unwrap()
+        .history("main", None)
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::CollaborationDelivered(data) => match &data.delivery {
+                dim_agent_types::CollaborationDelivery::Ok { session_id, .. } => {
+                    Some(session_id.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the request was delivered");
+
+    // An entry of the leader's output the daemon cannot remove.
+    let locked = store.output(&lead).join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("exec.log"), b"output").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(
+        std::fs::write(locked.join("probe"), b"")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "file permissions must bind the test's user"
+    );
+    let failed = client
+        .rpc("session.delete", json!({"sessionId":lead}))
+        .await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(failed["error"]["code"], -32603, "{failed}");
+
+    assert!(!store.rows(&lead).is_empty(), "no row was removed");
+    assert!(agent.get_session(&lead).is_none());
+    for (method, params) in [
+        ("session.attach", json!({"sessionId":lead})),
+        ("session.fork", json!({"sessionId":lead,"at":0})),
+    ] {
+        assert_eq!(
+            client.rpc(method, params).await["error"]["data"]["appError"],
+            "session_closed",
+            "{method}"
+        );
+    }
+    let list = client.rpc("session.list", json!({})).await;
+    assert!(!listed(&list, &lead) && listed(&list, &member), "{list}");
+    // The leader's close stopped its request; the member stays a Session.
+    let member_session = agent.get_session(&member).unwrap();
+    assert!(!member_session.state("main").unwrap().running);
+
+    drop((client, member_session, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
+    assert!(agent.get_session(&lead).is_some());
+    assert_eq!(
+        client
+            .rpc("session.delete", json!({"sessionId":lead}))
+            .await["result"],
+        json!({})
+    );
+    assert!(store.rows(&lead).is_empty(), "{:?}", store.rows(&lead));
+    assert!(!exists(&store.output(&lead)));
+    assert!(!store.rows(&member).is_empty(), "a delete does not cascade");
+    drop((client, agent));
+    server.shutdown();
+    server.join().await.unwrap();
+}

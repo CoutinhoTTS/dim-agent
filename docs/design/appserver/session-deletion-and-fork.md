@@ -103,7 +103,8 @@ are Rust methods over the native store, not services: only Agents calls them.
 2. **Close.** If S is loaded, Agents closes it as `session.close` does: a business close, not an unload. Its
    capabilities settle their accepted work, write their terminal facts and release processes, FileStorage leases and
    member requests, and the delete waits for the trace archive as `session.close` does. A close that reports cleanup
-   errors is logged and the delete continues: the facts it could not write are removed with the rest.
+   errors is logged and the delete continues: the facts it could not write are removed with the rest. From the close
+   on, S's slot is closed: S does not load again in this process, whether or not its rows go (step 6).
 3. **Command output.** SessionStore removes `<database directory>/command-output/<S>/`, where WorkspaceTools keeps
    exec output and oversized `read` results ([read.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs)
    `offload`), through the FileStorage of S's resource node, looked up per call as in S5a. An absent directory counts
@@ -120,8 +121,10 @@ are Rust methods over the native store, not services: only Agents calls them.
 5. **Sweep.** SessionStore schedules S5a's sweep ([Session files §5.4](session-files.md#54-sweep)). Files whose last
    owner was S are removed there; files a fork still owns stay.
 6. **Forget.** Agents removes S's protocol version and unavailable-Session entry and keeps S's slot closed, so
-   `acquire` answers `session_closed`. A delete that failed before step 4 releases the gate instead, and S loads again
-   on its next use.
+   `acquire` answers `session_closed`. A delete that fails before step 4 releases the gate instead. A Session it
+   closed stays as `session.close` leaves it: its rows remain, `session.list` omits it, it does not load again in
+   this process, and a retry deletes it; after a restart it loads. A Session it did not close loads on its next use
+   (§16 D5).
 
 ### 3.3 What a delete removes
 
@@ -133,7 +136,7 @@ are Rust methods over the native store, not services: only Agents calls them.
 | Exec output and offloaded `read` results | `<database directory>/command-output/<S>/` | Step 3 |
 | Loaded instance, leases, subscriptions, in-flight uses | Process memory | Step 2 |
 | Protocol version, admission slot, unavailable-Session entry | Agents, in memory | Step 6 |
-| Collaboration relations that name S | Collaboration, in memory | Its existing close watcher, which already treats a closed Session as deleted ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `session_closed`) |
+| Collaboration relations that name S | Collaboration, in memory | Its existing close watcher, which treats a business close as the Session's end ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `session_closed`). That holds when the delete then fails too: the closed Session does not load again in this process (step 6) |
 
 A delete does not remove:
 
@@ -166,7 +169,7 @@ Every step tolerates an absent target, so a delete can be retried after any fail
 | `invalid_params` (-32602) | `sessionId` missing or not a string | Unchanged |
 | `session_protocol_version` | S belongs to another protocol version | Unchanged |
 | `product_integration_pending` | The profile does not serve Session execution | Unchanged |
-| `-32603` "Session operation failed" | Step 3 failed (`Locked`, `DirectoryNotEmpty`, `Unsynced`, I/O, node unavailable) or step 4 failed (SQLite) | S is closed but not deleted: its rows remain and it loads on its next use, possibly with part of its command output gone. Retry |
+| `-32603` "Session operation failed" | Step 3 failed (`Locked`, `DirectoryNotEmpty`, `Unsynced`, I/O, node unavailable) or step 4 failed (SQLite) | If step 2 closed S, S is closed but not deleted, as after `session.close`: its rows remain, it is neither listed nor loaded again in this process, and the relations its close ended stay ended. After a restart it loads, possibly with part of its command output gone. A Session that was not loaded is unchanged. Retry |
 | No reply | The connection or Rpc ended before the reply | Either state. Retry |
 
 `Locked` and `DirectoryNotEmpty` in step 3 come only from writers outside the closed Session, such as a PowerShell
@@ -606,6 +609,9 @@ None to the runtime or rutis. Supplements and requirements to other owners:
    files.
 9. On disposable stores: a Session whose command output directory is gone but whose rows remain loads, and a delete
    then completes; unowned file rows left by a delete commit are swept on the next generation's first put.
+10. A delete that fails after it closed a loaded leader, because its command output cannot be removed, replies
+    -32603 and keeps the leader's rows; the leader is neither listed nor loaded again in this process, and its member
+    stays a Session. After a restart the leader loads, and a retry deletes it (D5).
 
 Tests: 1 and 2 are `delete_closes_a_running_session_and_removes_what_it_stored` and
 `unloaded_and_damaged_sessions_are_deleted_by_id` in
@@ -621,7 +627,8 @@ the store, including content that only a before trace references. 9 is
 `an_interrupted_delete_converges_on_retry_and_the_next_sweep` in
 [files/tests.rs](../../../crates/dim-app-server/src/storage/files/tests.rs), which stops a delete between its output
 removal and its commit, together with the Session without output in `unloaded_and_damaged_sessions_are_deleted_by_id`.
-`a_delete_leaves_another_databases_command_output` in deletion.rs checks §4's shared directory with two daemons.
+`a_delete_leaves_another_databases_command_output` in deletion.rs checks §4's shared directory with two daemons, and
+`a_failed_delete_leaves_the_session_closed_until_a_retry` there is 10.
 
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and
 `cargo test --workspace --locked`. No Capability, assembly or crate dependency changes, so `xtask` is not needed
@@ -638,6 +645,7 @@ S5c's own owners.
 | D2 | `session.fork` needs the native store. A daemon without one (the mock profile without `--database`) does not list it in `hello.features` and answers `unknown_method` ("Method requires native storage"). `session.delete` is listed with `session.create` there too; without a store it closes the Session and forgets it | A fork copies stored rows; in-memory Timelines have no SessionStore to copy from |
 | D3 | `session.delete` refuses a `sessionId` that is not a single path component with `session_invalid_input`, before anything is closed or removed | The id names `command-output/<id>`. Session ids are UUIDs; an id such as `<S>/.` would otherwise remove S's command output while deleting no row |
 | D4 | The fork transaction does not check the cut again: it copies `main`'s rows through `at`, and the runtime validates the fork's rows when it builds it. A copy that fails validation rolls back like any failed creation | Agents has checked the cut on the source (published head, batch end, context boundary, rest point), and rows through the cut never change, so a second check inside the transaction would repeat the validation every build already runs |
+| D5 | A delete that fails after its close leaves S closed in this process, as `session.close` does, instead of releasing S's slot so that S loads on its next use (step 6, §3.5) | The close is a business close: S's capabilities settled its work and Collaboration ended the relations that name S, as it does for every closed Session. Loading S again would run a leader that cannot reach its members and, after #127, stops none of them on reload ([#97 review](https://github.com/arcships/dim/pull/97)). With a closed slot the failure leaves the state `session.close` already produces, which every owner handles; telling a delete's close apart from other closes would add delete state in Agents and a notice for one failure path. A retry needs no load, and a restart loads S as it loads any closed Session |
 
 ## Appendix A. Rust binding
 

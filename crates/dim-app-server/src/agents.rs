@@ -777,16 +777,21 @@ impl AgentIndex {
     /// holds S's admission gate, so nothing loads S meanwhile, closes S if
     /// it is loaded, has SessionStore remove what it stores of S, then
     /// forgets S and keeps its slot closed. An unknown id has nothing to
-    /// remove. A delete that fails before the rows go releases the gate
-    /// with the slot open, and S loads again on its next use.
+    /// remove. A delete that fails before the rows go leaves a Session it
+    /// closed as `session.close` does, closed in this process with its rows
+    /// kept (D5); one it did not close loads again on its next use.
     pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()> {
         let slot = self.slot(id);
         let _gate = slot.gate.lock().await;
         // A business close, as `session.close`: capabilities settle accepted
-        // work and release processes, leases and member requests.
+        // work and release processes, leases and member requests. Owners of
+        // process state, such as Collaboration's relations, treat it as the
+        // Session's end, so from here on S does not load again in this
+        // process, whether or not its rows go.
         if let Some(host) = self.host_by_session(id)
             && let Some(session) = host.agent.get_session(id)
         {
+            slot.closed.store(true, Ordering::Release);
             if let Err(error) = session.close().await {
                 // The facts the close could not write go with the rest.
                 tracing::error!(%error, session_id = id, "Session cleanup failed before its delete");

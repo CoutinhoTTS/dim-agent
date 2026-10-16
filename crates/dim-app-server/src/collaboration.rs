@@ -293,7 +293,10 @@ impl Collaboration {
             }
         });
     }
-    /// Without a Session store, a closed Session counts as deleted.
+    /// A business close ends the Session's relations: Agents loads a Session
+    /// that `session.close` or `session.delete` closed no more in this
+    /// process, whether or not a delete removed its rows, and relations are
+    /// process memory. An unloaded Session keeps them.
     async fn session_closed(self: &Arc<Self>, watched: Arc<WatchedSession>) {
         let id = watched.session.id();
         {
