@@ -34,8 +34,9 @@ F1 separates three layers (§2.2) and adds:
    `ProductSummaryStrategy` is the only strategy F1 implements: it summarizes with the request's
    own model, reaching it through the existing `ProviderConnectionResolver` and `ModelHost`.
 3. **A general record.** A completed `context/compaction` carries
-   `{cursor, replacement: Message[], strategy, …}`. There is one replay rule for every strategy:
-   the history up to the cursor is replaced by `replacement`.
+   `{retain_from, replacement: Message[], strategy, …}`, where `retain_from` is the id of the first
+   Timeline event kept verbatim. There is one replay rule for every strategy: everything before
+   `retain_from` is replaced by `replacement`.
 4. **One compaction path.** ContextPolicy's compaction step is one function. Automatic
    compaction calls it during preparation, and the Loop's manual step calls it too.
 5. **Manual compaction as a Loop step.** `session.context.compact` writes the command
@@ -92,8 +93,8 @@ unreleased.
  |    in preparation: ContextPolicy::prepare -> compact_step         |
  |  ContextPolicy::compact_step: retention rule, strategy.compact,   |
  |    validate, append context/compaction, snapshot                  |
- |  Projection (history.rs): replacement + baseline + entries after  |
- |    the cursor                                                     |
+ |  Projection (history.rs): replacement + baseline + entries from   |
+ |    retain_from                                                    |
  +-------------------------------------------------------------------+
 ```
 
@@ -124,7 +125,7 @@ The Loop runs the manual compaction step itself, in a tracked task, by calling
 | Layer | What it fixes | Where | Changes when a new strategy is added |
 | --- | --- | --- | --- |
 | Mechanism | When compaction runs, and that the Loop holds while it runs: the automatic trigger in preparation, the manual Loop step, the retention rule, validation, commit | Loop, ContextPolicy | No |
-| Contract | The record and its replay: `context/compaction {cursor, replacement, strategy, context_baseline}`; replay puts `replacement`, then the keyed baseline, then the entries after the cursor. It is deterministic, so fork, reload and prompt-cache prefixes see the same messages | `dim-agent-types`, `history.rs` projection | No |
+| Contract | The record and its replay: `context/compaction {retain_from, replacement, strategy, context_baseline}`, where `retain_from` is a Timeline event id; replay puts `replacement`, then the keyed baseline, then the entries placed by `retain_from` and later events. The record references Timeline events, not rendering details, so another `HistoryRenderer` or strategy still finds the cut. Replay is deterministic, so fork, reload and prompt-cache prefixes see the same messages | `dim-agent-types`, `history.rs` projection | No |
 | Strategy | What the replacement is, and the cut within the retention rule | `CompactionStrategyHost` Session value | It is replaced |
 
 **Installing another strategy.** A strategy is installed by replacing the
@@ -186,7 +187,7 @@ The existing `ContextModel` port is split in two. Each comes from its own Sessio
 | Port | Session value | Methods | F1 implementation |
 | --- | --- | --- | --- |
 | `ContextModel` (narrowed) | `ContextModelHost(Option<Arc<dyn ResolveContextModel>>)` (existing) | `context_window`, `output_tokens`, `threshold_tokens`, `count_tokens`; `compact` moves out | `ProductContextModel` (§5.1) |
-| `CompactionStrategy` (new) | `CompactionStrategyHost(Option<Arc<dyn CompactionStrategy>>)` | `compact(input, cancel) -> Completed {cursor, replacement, strategy, diagnostics} \| Skipped {reason, diagnostics} \| Err(HostError)` | `ProductSummaryStrategy` (§5.2) |
+| `CompactionStrategy` (new) | `CompactionStrategyHost(Option<Arc<dyn CompactionStrategy>>)` | `compact(input, cancel) -> Completed {retain_from, replacement, strategy, diagnostics} \| Skipped {reason, diagnostics} \| Err(HostError)` | `ProductSummaryStrategy` (§5.2) |
 
 Both values are bound explicitly in every profile, as `ContextModelHost` is today. The policy
 exists when both are `Some`. One `Some` without the other is an assembly defect that
@@ -196,11 +197,11 @@ ContextPreparation reports when it loads.
 
 | Field | Meaning |
 | --- | --- |
-| `history` | The projected entries after the previous cursor (existing) |
-| `checkpoint` | The previous `{cursor, replacement, context_baseline}` (changed from `summary`) |
+| `history` | The projected entries from the previous `retain_from` on (existing) |
+| `checkpoint` | The previous `{retain_from, replacement, context_baseline}` (changed from `cursor` and `summary`) |
 | `request`, `model` | The request whose context is compacted, and its `ContextModel` window facts (new) |
-| `retain_from` | First entry of the oldest retained turn; the cut must lie before it (new; §5.3) |
-| `fallback` | `true` under budget recovery: any legal cut is allowed when none lies before `retain_from` (new) |
+| `retain_limit` | Event id of the first event of the oldest of the last K turns; the strategy's `retain_from` must be at or before it (new; §5.3) |
+| `fallback` | `true` under budget recovery: a later legal `retain_from` is allowed when none lies at or before `retain_limit` (new) |
 | `trigger` | `Threshold`, `ProviderOutputBudgetExhausted` or `Manual` (new) |
 | estimates, `provider_budget` | Existing |
 
@@ -214,9 +215,9 @@ ContextPreparation reports when it loads.
 
 `outcome` is one of:
 
-- `completed {cursor, replacement: Message[], strategy: string, diagnostics, context_baseline}`.
-  `replacement` replaces `summary: String`, and `strategy` names the producer, for example
-  `"summary"`.
+- `completed {retain_from, replacement: Message[], strategy: string, diagnostics, context_baseline}`.
+  `retain_from` (a Timeline event id) replaces the renderer-level `cursor`, `replacement`
+  replaces `summary: String`, and `strategy` names the producer, for example `"summary"`.
 - `skipped {reason, diagnostics}`.
 - `failed {error, diagnostics?}`.
 - `cancelled {reason}` (new), so every manual step ends with exactly one fact.
@@ -244,16 +245,41 @@ ContextPreparation reports when it loads.
   `cancelled` result (§5.8). Automatic compaction now also writes a `cancelled` result when it is
   cancelled after its start (interrupt or steer), instead of writing no fact.
 
+**The cut: `retain_from`.** A completed result names the first Timeline event kept verbatim.
+Cuts fall only on event boundaries.
+
+- **Replaced range.** The events from the previous completed compaction's `retain_from`
+  (inclusive; or from the branch start) up to this `retain_from` (exclusive), together with the
+  previous `replacement`. A reader derives it from the two records alone.
+- **Validity.** No tool call started before `retain_from` may have its result at or after it.
+  The keyed baseline is the authoritative in-effect state just before `retain_from`, as today.
+- **Why an event id and not the old cursor.**
+  - The old `cursor` was a `HistoryEntry` id such as `<event id>:block:<i>`, which depends on
+    the injectable `HistoryRenderer`'s id scheme. A different renderer would break old records.
+  - The record is content that users and other state machines read from history, so it must
+    reference Timeline events, not rendering details. Event ids are also stable across a fork's
+    inherited prefix.
+  - With K-turn retention, the cut is naturally the first event of the earliest retained turn,
+    which is an event boundary.
+- **Mapping at projection time.** ContextPolicy and `history.rs` map `retain_from` to a position
+  in the current rendering: the first rendered entry whose source event is at or after
+  `retain_from` in sequence order. For this, `HistoryEntry` carries the id of the event that
+  placed it (`source`), so the id scheme of entries no longer matters.
+
 **Replay rule (every strategy):**
 
-- The projected messages are `replacement`, then the cursor's keyed `context_baseline` blocks,
-  then the history entries after `cursor`.
+- The projected messages are `replacement`, then the keyed `context_baseline` blocks, then the
+  history entries placed by `retain_from` and later events.
 - `replacement` is stored exactly as produced, so replay never calls a strategy and never
   re-renders a wrapper.
 - This changes `context_messages` and ContextPolicy's `project` (which today push
   `summary_message(summary)`) and `CompactionCheckpoint` (`replacement` instead of `summary`).
-- The history snapshot state is unchanged: it stores `compacted_through`, and the replacement is
-  read from the anchoring fact.
+- The history snapshot state stores `retain_from` instead of the entry-id `compacted_through`,
+  and the replacement is read from the anchoring fact. The snapshot interpreter version is
+  bumped. Older snapshots are bypassed, which is harmless because snapshots are only a cache.
+- History-side cut checks (`validate_cut`, the projection's cursor lookup, and the
+  snapshot-anchor match in `Timeline::context_with_checkpoint`) compare event ids instead of
+  entry ids.
 
 Readers update with the struct:
 
@@ -275,7 +301,7 @@ summary-oriented required fields move into a strategy-owned object:
 
 ```text
 { reason: "auto" | "manual", trigger,           // common
-  cut: string, retainFrom?: string,
+  retainFrom: string, retainLimit?: string,    // Timeline event ids
   estimatedInputTokens, estimatedOutputTokens,  // before and after, from count_tokens
   entriesReplaced, modelCallCount, durationMs,
   strategy: { kind: string, ... } }             // owned by the strategy
@@ -309,7 +335,7 @@ pub struct ContextCompactionData {
     pub command: Option<u64>, pub start: Option<u64>, pub through: u64,
     pub outcome: ContextCompactionResult }
 pub enum ContextCompactionResult {
-    Completed { cursor: String, replacement: Vec<Message>, strategy: String,
+    Completed { retain_from: String, replacement: Vec<Message>, strategy: String,
                 diagnostics: Box<CompactionDiagnosticsRecord>,
                 context_baseline: Vec<ContextBaselineEntry> },
     Skipped { .. }, Failed { .. }, Cancelled { reason: String } }
@@ -318,12 +344,13 @@ pub enum ContextCompactionResult {
 pub trait ContextModel { fn context_window(&self) -> f64; fn output_tokens(&self) -> f64;
                          fn threshold_tokens(&self) -> f64;
                          fn count_tokens(&self, r: &ModelRequest) -> f64; }   // compact removed
+pub struct HistoryEntry { /* existing */ pub source: String }   // id of the placing event
 pub trait CompactionStrategy: Send + Sync + 'static {
     fn name(&self) -> &str;                            // written into the start, e.g. "summary"
     fn compact(&self, input: CompactionInput, cancel: CancellationToken)
         -> HostFuture<'_, StrategyOutcome>; }          // Completed | Skipped
 pub struct CompactionStrategyHost(pub Option<Arc<dyn CompactionStrategy>>);
-pub struct CompactionCheckpoint { pub cursor: String, pub replacement: Arc<[Message]>,
+pub struct CompactionCheckpoint { pub retain_from: String, pub replacement: Arc<[Message]>,
                                   pub context_baseline: Arc<[ContextBaselineEntry]> }
 
 // dim-agent-capabilities/src/context_policy.rs (crate-internal)
@@ -375,12 +402,13 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 `compact(input, cancel)`:
 
-1. **Cut.** The latest legal cut before `input.retain_from`. With `input.fallback`, if no such
-   cut exists, the latest legal cut. If there is still none: `Skipped {reason:
+1. **Cut.** `retain_from` is the latest valid event boundary at or before `input.retain_limit`,
+   normally `retain_limit` itself. With `input.fallback`, if none exists, it is the latest valid
+   boundary. If there is still none, or nothing lies before it: `Skipped {reason:
    "nothing_to_compact"}`, with no model call.
 2. **Summary.** It summarizes the previous replacement (from `input.checkpoint`) plus the entries
-   up to and including the cut.
-3. **Result.** It returns `Completed {cursor: cut, replacement: [summary_message(summary)],
+   placed by events before `retain_from`.
+3. **Result.** It returns `Completed {retain_from, replacement: [summary_message(summary)],
    strategy: "summary", diagnostics}`. The existing `summary_message` wrapper, which marks the
    text as data and escapes it, is applied once here and stored in the record.
 
@@ -406,20 +434,18 @@ How the summary is produced:
 
 `compact_step` is the existing compaction section of `ContextPolicy::prepare`, extracted:
 
-1. **Retention boundary.** `retain_from` is the first entry of the oldest of the last K turns
-   on the branch (provisional K = 2, #128), the running turn included. A turn runs from
-   `turn/start` to `turn/end`.
-   - An entry belongs to a turn by the sequence of its source event in the fixed context.
-   - Entries restored from a snapshot's state predate that snapshot's compaction and count as
-     older than any retained turn.
+1. **Retention limit.** `retain_limit` is the id of the `turn/start` of the oldest of the last K
+   turns on the branch (provisional K = 2, #128), the running turn included. If fewer than K
+   turns exist, there is no limit before which to compact, and only `fallback` allows a cut.
 2. **Start.** It appends `context/compaction-start` with the caller's ids, `command`,
    `through`, `trigger` and `strategy.name()`.
-3. **Strategy.** It calls `strategy.compact` with `retain_from`, `fallback` (under recovery)
+3. **Strategy.** It calls `strategy.compact` with `retain_limit`, `fallback` (under recovery)
    and `trigger`. If it is cancelled before the strategy returns, it appends the `cancelled`
    result for the start and returns `Cancelled`.
 4. **Validation.** For any strategy, it checks that:
-   - the cursor passes the existing legal-cut check;
-   - the cursor lies before `retain_from`, unless `fallback` applies;
+   - `retain_from` is an event of the fixed context and passes the event-based validity rule
+     (§4.3);
+   - `retain_from` is at or before `retain_limit`, unless `fallback` applies;
    - the projected request is smaller than before and below the window.
 
    A failed check turns the outcome into `failed`.
@@ -586,7 +612,7 @@ time:
 | `session_closed` | both | Session or branch closing | No |
 | `context_not_configured` | usage | No `context/configured` in the branch's history | After a model is adopted |
 | `context_model_failed` | usage | `resolve` failed (no capability snapshot) | After selecting the model again |
-| `compaction_failed` | compact | Fact `failed`: strategy error after the shared failure policy, empty summary, a cursor that fails validation, no reduction, no `context/configured`, or no snapshot | User's choice |
+| `compaction_failed` | compact | Fact `failed`: strategy error after the shared failure policy, empty summary, a `retain_from` that fails validation, no reduction, no `context/configured`, or no snapshot | User's choice |
 | `compaction_cancelled` | compact | Fact `cancelled`: `stop/interrupt` or reload | User's choice |
 | `operation_interrupted` | compact | ContextMethods unloads while waiting; the command is still served or settled | User's choice |
 
@@ -613,7 +639,7 @@ request continues uncompacted; under recovery it fails the request.
 | --- | --- |
 | Loop | Supplement (§5.5). Budget recovery becomes active in the product profile |
 | ContextPreparation, ContextPolicy | Supplement (§5.3, §5.6): `compact_step`, retention rule, validation of any strategy, `usage` |
-| Projection (`history.rs`), snapshots | One replay rule using `replacement`; snapshot state unchanged |
+| Projection (`history.rs`), snapshots | One replay rule using `replacement` and `retain_from`; `HistoryEntry.source`; cut validation and the snapshot state become event-based (interpreter version bump) |
 | `HistoryRenderer` | Render-time projections that run on every request without a record are not compaction. An example is truncating old tool output by a fixed rule. They belong to the existing injectable `HistoryRenderer`, not to a strategy |
 | ModelProvider | Unchanged code. `validate` now enforces the window estimate in the product profile |
 | Provider, ProductResolver, Aimux | Unchanged; the summary strategy uses `ProviderConnectionResolver` and `ModelHost` |
@@ -641,7 +667,7 @@ request continues uncompacted; under recovery it fails the request.
 | §4 rule 5 (atomic batch) | Each new write is one event. |
 | §4 rule 6 (context only from handed-off events) | The replacement reaches the model only through the projection of a completed fact. Pending inputs are not consumed by a step (AGENTS rule 10). |
 | §4 rule 7 (public events and services) | `TreeCommands`, `Branch::service` on `PublicService`s, `ProviderConnectionResolver`, `ModelHost`, `sessionMethods`. |
-| §4 rule 8 (infrastructure unchanged) | Timeline, Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. The new event kind moves to #2's dynamic registration later. |
+| §4 rule 8 (infrastructure unchanged) | Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. In Timeline, the existing snapshot-anchor check in `context_with_checkpoint` already reads the completed compaction fact; it follows the record's field change (`retain_from` instead of `cursor`) with the same logic and no new behaviour. The new event kinds move to #2's dynamic registration later. |
 | §4 rule 9 (only needed facts) | `context/compact` is read by the Loop's later decisions and on reload. `context/compaction` is used by projection. `context/compaction-start` and the visible result are facts by the maintainer's decision, for two reasons. First, they do not only drive a state machine: they are content that users and other state machines need in order to read the history (a UI connecting at any time must see that a compaction is running or how it ended). Second, reload settlement uses them: an unmatched start means a compaction was in flight. The Loop and ContextPreparation rebuild from start/result pairs, which is more precise than commands alone because it tells a running compaction from a pending one and covers automatic compaction. Usage writes nothing. |
 | ADR 002 D1 (scope) | Window facts, strategy and methods: Session. Command, step and slot: branch, in the Loop. |
 | ADR 002 D2 (no wiring modules) | ContextMethods exposes owners' operations through `sessionMethods`. |
@@ -653,8 +679,9 @@ request continues uncompacted; under recovery it fails the request.
 
 - The `session.context` namespace.
 - The command `context/compact`.
-- The changed `context/compaction` (optional ids, `command`, `cancelled`, `replacement` and
-  `strategy` instead of `summary`, strategy-neutral diagnostics).
+- The changed `context/compaction` (optional ids, `command`, `start`, `cancelled`,
+  `retain_from` instead of `cursor`, `replacement` and `strategy` instead of `summary`,
+  strategy-neutral diagnostics).
 - The fact `context/compaction-start` and the `start` reference on results.
 - `context/compact`, `context/compaction-start` and `context/compaction` become visible to v3
   clients.
@@ -663,7 +690,10 @@ Internal Rust changes:
 
 - The split ports and `CompactionStrategyHost`.
 - `CompactionInput` fields.
-- `CompactionCheckpoint.replacement`.
+- `CompactionCheckpoint {retain_from, replacement}` and `HistoryEntry.source`.
+- `history.rs` cut validation and the cursor lookup become event-based. The snapshot state stores
+  `retain_from` (interpreter version bump), and Timeline's snapshot-anchor match compares
+  `retain_from`.
 - `PublicService` on `AgentLoop` and `ContextPreparation`.
 
 **Requirements raised to mechanism owners:** none. The already planned #2 will host
@@ -677,7 +707,7 @@ Internal Rust changes:
 | Trigger and retention | `0.8 × (window − output)`, K = 2 turns, `bytes / 4`, 1,600 tokens per image: provisional, #128 |
 | Manual compaction | A Loop step scheduled by `context/compact`, inside or outside a turn, never creating a turn |
 | Where the step runs | In the Loop, calling the one ContextPolicy compaction function (§2.1) |
-| Record | `replacement` and `strategy` with one replay rule; optional ids, `command`, `cancelled`; changed directly (unreleased) |
+| Record | `retain_from` (Timeline event id), `replacement` and `strategy` with one replay rule; optional ids, `command`, `cancelled`; changed directly (unreleased) |
 | Ports | `ContextModel` (window facts) and `CompactionStrategy` (replacement), each from its own Session value |
 | Other strategies, composition | Not done in F1 |
 | New event kinds | `context/compact` and `context/compaction-start` as `EventKind` variants now, dynamic registration after #2 |
@@ -697,8 +727,8 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
 
 1. **Automatic.** Past the threshold, the next preparation writes `context/budget`, then
    `context/compaction-start {trigger: threshold}`, and sends one summarizer request. It commits
-   `context/compaction` `completed` with the request's ids, `start`, no `command`, `strategy: "summary"`, a one-message `replacement`, and the cut before the last
-   2 turns. The model request starts with that message and keeps the last 2 turns verbatim.
+   `context/compaction` `completed` with the request's ids, `start`, no `command`, `strategy: "summary"`, a one-message `replacement`, and `retain_from` = the
+   `turn/start` of the second-to-last turn. The model request starts with that message and keeps the last 2 turns verbatim.
 2. **Budget recovery.** The retry compacts with `trigger: provider_output_budget_exhausted`.
 3. **Manual, no turn.** `session.context.compact` writes exactly `context/compact`,
    `context/compaction-start {command}` and `context/compaction {command, start}`, with no
@@ -712,7 +742,11 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
      as before.
    - A test strategy bound in place of the summary strategy, returning a two-message
      `replacement`, is committed and replayed by the same rule, with no Loop or policy change.
-   - The policy rejects a test strategy whose cursor lies inside the retained turns.
+   - The policy rejects a test strategy whose `retain_from` lies inside the retained turns, or
+     splits a tool call from its result.
+   - A Session compacted with the default `HistoryRenderer` and replayed with a different
+     renderer (another entry id scheme) still finds the cut from `retain_from` and projects the
+     same retained events.
 6. **Interrupt, reload and restart.**
    - `session.stop` during a step writes `cancelled` (or `completed` if the strategy had
      returned).

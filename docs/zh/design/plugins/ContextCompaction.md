@@ -16,7 +16,7 @@ F1 把压缩分成三层（§2.2），并新增：
 
 1. **模型窗口事实。** `ContextModel` 现在只携带窗口事实：上下文窗口、输出预算、阈值和 token 计数。`ProductContextModel` 从请求上已采用的能力快照中取得这些事实，token 计数用本地估算。
 2. **策略端口。** 新端口 `CompactionStrategy` 负责产出替换内容。`ProductSummaryStrategy` 是 F1 唯一实现的策略：它用请求自己的模型做摘要，经现有的 `ProviderConnectionResolver` 和 `ModelHost` 调用模型。
-3. **通用记录。** 已完成的 `context/compaction` 携带 `{cursor, replacement: Message[], strategy, …}`。所有策略共用一条重放规则：游标及之前的历史由 `replacement` 取代。
+3. **通用记录。** 已完成的 `context/compaction` 携带 `{retain_from, replacement: Message[], strategy, …}`，其中 `retain_from` 是第一条原样保留的 Timeline 事件的 id。所有策略共用一条重放规则：`retain_from` 之前的全部内容由 `replacement` 取代。
 4. **一条压缩路径。** ContextPolicy 的压缩步骤是一个函数。自动压缩在准备中调用它，Loop 的手动步骤也调用它。
 5. **手动压缩是 Loop 的一个步骤。** `session.context.compact` 写指令 `context/compact`，由 Loop 安排一个压缩步骤：
    - 在 turn 内，步骤在下一个步骤边界运行，即准备下一个请求之前。
@@ -60,7 +60,7 @@ F1 把压缩分成三层（§2.2），并新增：
  |    准备中: ContextPolicy::prepare -> compact_step                 |
  |  ContextPolicy::compact_step: 保留规则、strategy.compact、验收、  |
  |    追加 context/compaction、快照                                  |
- |  投影（history.rs）：replacement + 基线 + 游标之后的条目          |
+ |  投影（history.rs）：replacement + 基线 + 从 retain_from 起的条目  |
  +-------------------------------------------------------------------+
 ```
 
@@ -79,7 +79,7 @@ Loop 在一个受跟踪的任务中，调用 `ContextPolicy::compact_step` 自�
 | 层 | 固定什么 | 在哪里 | 新增策略时是否改动 |
 | --- | --- | --- | --- |
 | 机制 | 压缩何时运行，以及运行期间 Loop 停住：准备中的自动触发、Loop 的手动步骤、保留规则、验收、提交 | Loop、ContextPolicy | 否 |
-| 合同 | 记录及其重放：`context/compaction {cursor, replacement, strategy, context_baseline}`；重放依次放 `replacement`、按键的基线、游标之后的条目。重放是确定的，所以 fork、重载和提示缓存前缀看到的消息相同 | `dim-agent-types`、`history.rs` 投影 | 否 |
+| 合同 | 记录及其重放：`context/compaction {retain_from, replacement, strategy, context_baseline}`，`retain_from` 是 Timeline 事件 id；重放依次放 `replacement`、按键的基线、由 `retain_from` 及其后事件放置的条目。记录引用的是 Timeline 事件而不是渲染细节，所以换一个 `HistoryRenderer` 或策略仍能找到切点。重放是确定的，所以 fork、重载和提示缓存前缀看到的消息相同 | `dim-agent-types`、`history.rs` 投影 | 否 |
 | 策略 | 替换内容是什么，以及在保留规则之内选哪个切点 | Session 值 `CompactionStrategyHost` | 被替换 |
 
 **安装另一种策略。** 替换 `CompactionStrategyHost` 这个 Session 值即可：装配注册另一个值，或注册另一个提供它的 Session 部件，代替 `ProductSummaryStrategy`。
@@ -129,7 +129,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 | 端口 | Session 值 | 方法 | F1 实现 |
 | --- | --- | --- | --- |
 | `ContextModel`（收窄） | `ContextModelHost(Option<Arc<dyn ResolveContextModel>>)`（现有） | `context_window`、`output_tokens`、`threshold_tokens`、`count_tokens`；`compact` 移出 | `ProductContextModel`（§5.1） |
-| `CompactionStrategy`（新） | `CompactionStrategyHost(Option<Arc<dyn CompactionStrategy>>)` | `compact(input, cancel) -> Completed {cursor, replacement, strategy, diagnostics} \| Skipped {reason, diagnostics} \| Err(HostError)` | `ProductSummaryStrategy`（§5.2） |
+| `CompactionStrategy`（新） | `CompactionStrategyHost(Option<Arc<dyn CompactionStrategy>>)` | `compact(input, cancel) -> Completed {retain_from, replacement, strategy, diagnostics} \| Skipped {reason, diagnostics} \| Err(HostError)` | `ProductSummaryStrategy`（§5.2） |
 
 两个值在每种配置中都显式绑定，与现在的 `ContextModelHost` 一样。两者都是 `Some` 时策略存在。只有一个是 `Some` 属于装配缺陷，ContextPreparation 装载时报告。
 
@@ -137,11 +137,11 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 | 字段 | 含义 |
 | --- | --- |
-| `history` | 上一个游标之后的投影条目（现有） |
-| `checkpoint` | 上一次的 `{cursor, replacement, context_baseline}`（由 `summary` 改来） |
+| `history` | 从上一个 `retain_from` 起的投影条目（现有） |
+| `checkpoint` | 上一次的 `{retain_from, replacement, context_baseline}`（由 `cursor` 与 `summary` 改来） |
 | `request`、`model` | 被压缩上下文所属的请求，及其 `ContextModel` 窗口事实（新） |
-| `retain_from` | 最老保留轮的第一条；切点必须在它之前（新；§5.3） |
-| `fallback` | 预算恢复时为 `true`：`retain_from` 之前没有合法切点时，允许任何合法切点（新） |
+| `retain_limit` | 最后 K 轮中最老那一轮第一个事件的 id；策略的 `retain_from` 必须在它或它之前（新；§5.3） |
+| `fallback` | 预算恢复时为 `true`：`retain_limit` 或之前没有合法的 `retain_from` 时，允许更晚的合法位置（新） |
 | `trigger` | `Threshold`、`ProviderOutputBudgetExhausted` 或 `Manual`（新） |
 | 各估算值、`provider_budget` | 现有 |
 
@@ -155,7 +155,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 `outcome` 为以下之一：
 
-- `completed {cursor, replacement: Message[], strategy: string, diagnostics, context_baseline}`。`replacement` 取代 `summary: String`，`strategy` 标明产出方，例如 `"summary"`。
+- `completed {retain_from, replacement: Message[], strategy: string, diagnostics, context_baseline}`。`retain_from`（Timeline 事件 id）取代渲染层的 `cursor`，`replacement` 取代 `summary: String`，`strategy` 标明产出方，例如 `"summary"`。
 - `skipped {reason, diagnostics}`。
 - `failed {error, diagnostics?}`。
 - `cancelled {reason}`（新），因此每个手动步骤都恰好以一条事实结束。
@@ -177,12 +177,23 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - 每个分支任何时候最多只有一条开始没有结果：Loop 不在有在途请求时运行手动步骤，ContextPreparation 一次只运行一个准备。
 - 重载时，没有结果的开始意味着当时有压缩在途，由它的所有者写 `cancelled` 结果（§5.8）。自动压缩在开始之后被取消（中断或 steer）时，现在也写 `cancelled` 结果，而不再不写事实。
 
+**切点：`retain_from`。** 已完成的结果指明第一条原样保留的 Timeline 事件。切点只落在事件边界上。
+
+- **被替换的范围。** 从上一次已完成压缩的 `retain_from`（含；或从分支开头）到本次 `retain_from`（不含）之间的事件，再加上上一份 `replacement`。读者只凭两条记录就能推出这个范围。
+- **合法性。** 在 `retain_from` 之前开始的工具调用，其结果不能在 `retain_from` 或之后。按键的基线照旧是 `retain_from` 之前那一刻的权威有效状态。
+- **为什么用事件 id 而不是原来的游标。**
+  - 原来的 `cursor` 是 `HistoryEntry` 的 id，例如 `<event id>:block:<i>`，依赖可注入的 `HistoryRenderer` 的 id 方案。换一个渲染器，旧记录就会失效。
+  - 记录是用户和其他状态机从历史中读取的内容，所以必须引用 Timeline 事件，而不是渲染细节。事件 id 在 fork 继承前缀时也保持稳定。
+  - 有了 K 轮保留，切点自然就是最早保留轮的第一个事件，本身就是事件边界。
+- **投影时的映射。** ContextPolicy 和 `history.rs` 把 `retain_from` 映射到当前渲染中的位置：按序号，第一条来源事件在 `retain_from` 或之后的渲染条目。为此 `HistoryEntry` 携带放置它的事件的 id（`source`），条目自身的 id 方案因此不再重要。
+
 **重放规则（所有策略）：**
 
-- 投影出的消息依次是 `replacement`、游标处按键的 `context_baseline` 块、游标之后的历史条目。
+- 投影出的消息依次是 `replacement`、按键的 `context_baseline` 块、由 `retain_from` 及其后事件放置的历史条目。
 - `replacement` 按产出时的原样保存，所以重放从不调用策略，也不会重新渲染包装文本。
 - 这会改动 `context_messages` 和 ContextPolicy 的 `project`（两者现在都放入 `summary_message(summary)`），以及 `CompactionCheckpoint`（用 `replacement` 代替 `summary`）。
-- 历史快照的状态不变：它保存 `compacted_through`，替换内容从锚定它的事实中读取。
+- 历史快照的状态保存 `retain_from`，代替原来以条目 id 表示的 `compacted_through`；替换内容从锚定它的事实中读取。快照解释器版本随之升级。旧快照被绕过，这没有问题，因为快照只是缓存。
+- 历史一侧的切点检查（`validate_cut`、投影中的游标查找，以及 `Timeline::context_with_checkpoint` 中的快照锚定匹配）改为比较事件 id，而不是条目 id。
 
 读取方随结构体更新：
 
@@ -197,7 +208,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 ```text
 { reason: "auto" | "manual", trigger,           // 公共部分
-  cut: string, retainFrom?: string,
+  retainFrom: string, retainLimit?: string,    // Timeline 事件 id
   estimatedInputTokens, estimatedOutputTokens,  // 压缩前后，由 count_tokens 算出
   entriesReplaced, modelCallCount, durationMs,
   strategy: { kind: string, ... } }             // 由策略拥有
@@ -222,7 +233,7 @@ pub struct ContextCompactionData {
     pub command: Option<u64>, pub start: Option<u64>, pub through: u64,
     pub outcome: ContextCompactionResult }
 pub enum ContextCompactionResult {
-    Completed { cursor: String, replacement: Vec<Message>, strategy: String,
+    Completed { retain_from: String, replacement: Vec<Message>, strategy: String,
                 diagnostics: Box<CompactionDiagnosticsRecord>,
                 context_baseline: Vec<ContextBaselineEntry> },
     Skipped { .. }, Failed { .. }, Cancelled { reason: String } }
@@ -231,12 +242,13 @@ pub enum ContextCompactionResult {
 pub trait ContextModel { fn context_window(&self) -> f64; fn output_tokens(&self) -> f64;
                          fn threshold_tokens(&self) -> f64;
                          fn count_tokens(&self, r: &ModelRequest) -> f64; }   // 移除 compact
+pub struct HistoryEntry { /* 现有 */ pub source: String }   // 放置它的事件的 id
 pub trait CompactionStrategy: Send + Sync + 'static {
     fn name(&self) -> &str;                            // 写入开始事实，例如 "summary"
     fn compact(&self, input: CompactionInput, cancel: CancellationToken)
         -> HostFuture<'_, StrategyOutcome>; }          // Completed | Skipped
 pub struct CompactionStrategyHost(pub Option<Arc<dyn CompactionStrategy>>);
-pub struct CompactionCheckpoint { pub cursor: String, pub replacement: Arc<[Message]>,
+pub struct CompactionCheckpoint { pub retain_from: String, pub replacement: Arc<[Message]>,
                                   pub context_baseline: Arc<[ContextBaselineEntry]> }
 
 // dim-agent-capabilities/src/context_policy.rs（crate 内部）
@@ -286,9 +298,9 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 `compact(input, cancel)`：
 
-1. **切点。** `input.retain_from` 之前最晚的合法切点。有 `input.fallback` 而这样的切点不存在时，取最晚的合法切点。仍然没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。
-2. **摘要。** 对上一份替换内容（取自 `input.checkpoint`）加上直到并包括切点的条目做摘要。
-3. **结果。** 返回 `Completed {cursor: 切点, replacement: [summary_message(summary)], strategy: "summary", diagnostics}`。现有的 `summary_message` 包装会把文本标为数据并转义；它只在这里施加一次，随记录保存。
+1. **切点。** `retain_from` 是 `input.retain_limit` 或之前最晚的合法事件边界，通常就是 `retain_limit` 本身。有 `input.fallback` 而这样的边界不存在时，取最晚的合法边界。仍然没有，或它之前什么都没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。
+2. **摘要。** 对上一份替换内容（取自 `input.checkpoint`）加上由 `retain_from` 之前的事件放置的条目做摘要。
+3. **结果。** 返回 `Completed {retain_from, replacement: [summary_message(summary)], strategy: "summary", diagnostics}`。现有的 `summary_message` 包装会把文本标为数据并转义；它只在这里施加一次，随记录保存。
 
 摘要的产出方式：
 
@@ -303,14 +315,12 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 `compact_step` 就是把 `ContextPolicy::prepare` 中现有的压缩部分抽出来：
 
-1. **保留边界。** `retain_from` 是分支上最后 K 轮中最老那一轮的第一条（暂定 K = 2，#128），含正在进行的那一轮。一轮从 `turn/start` 到 `turn/end`。
-   - 条目按其来源事件在固定上下文中的序号归属到某一轮。
-   - 从快照状态恢复的条目早于该快照的压缩，算作比任何保留轮都早。
+1. **保留界限。** `retain_limit` 是分支上最后 K 轮中最老那一轮的 `turn/start` 的 id（暂定 K = 2，#128），含正在进行的那一轮。不足 K 轮时没有可以在其之前压缩的界限，只有 `fallback` 允许切点。
 2. **开始。** 追加 `context/compaction-start`，带调用方的 id、`command`、`through`、`trigger` 和 `strategy.name()`。
-3. **策略。** 调用 `strategy.compact`，传入 `retain_from`、`fallback`（恢复时）和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`。
+3. **策略。** 调用 `strategy.compact`，传入 `retain_limit`、`fallback`（恢复时）和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`。
 4. **验收。** 对任何策略都检查：
-   - 游标通过现有的合法切点检查；
-   - 游标在 `retain_from` 之前，除非适用 `fallback`；
+   - `retain_from` 是固定上下文中的一个事件，并通过基于事件的合法性规则（§4.3）；
+   - `retain_from` 在 `retain_limit` 或之前，除非适用 `fallback`；
    - 投影后的请求比之前小，且低于窗口。
 
    任何一项不通过，结果变为 `failed`。
@@ -445,7 +455,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | `session_closed` | 两者 | Session 或分支正在关闭 | 否 |
 | `context_not_configured` | usage | 分支历史中没有 `context/configured` | 采用模型之后 |
 | `context_model_failed` | usage | `resolve` 失败（没有能力快照） | 重新选择模型之后 |
-| `compaction_failed` | compact | 事实为 `failed`：共享失败策略之后的策略错误、空摘要、未通过验收的游标、没有减少输入、没有 `context/configured`，或没有能力快照 | 由用户决定 |
+| `compaction_failed` | compact | 事实为 `failed`：共享失败策略之后的策略错误、空摘要、未通过验收的 `retain_from`、没有减少输入、没有 `context/configured`，或没有能力快照 | 由用户决定 |
 | `compaction_cancelled` | compact | 事实为 `cancelled`：`stop/interrupt` 或重载 | 由用户决定 |
 | `operation_interrupted` | compact | 等待期间 ContextMethods 卸载；指令照样会被服务或结算 | 由用户决定 |
 
@@ -465,7 +475,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | --- | --- |
 | Loop | 补充（§5.5）。产品配置下预算恢复生效 |
 | ContextPreparation、ContextPolicy | 补充（§5.3、§5.6）：`compact_step`、保留规则、对任何策略的验收、`usage` |
-| 投影（`history.rs`）、快照 | 用 `replacement` 的一条重放规则；快照状态不变 |
+| 投影（`history.rs`）、快照 | 用 `replacement` 和 `retain_from` 的一条重放规则；`HistoryEntry.source`；切点验收与快照状态改为基于事件（解释器版本升级） |
 | `HistoryRenderer` | 每次请求都执行、不留记录的渲染期投影不是压缩，例如按固定规则截断旧的工具输出。它们属于现有可注入的 `HistoryRenderer`，不属于策略 |
 | ModelProvider | 代码不变。产品配置下 `validate` 开始按估算检查窗口 |
 | Provider、ProductResolver、Aimux | 不变；摘要策略经 `ProviderConnectionResolver` 和 `ModelHost` 使用它们 |
@@ -493,7 +503,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | §4 规则 5（原子批次） | 每次新写入都是一个事件。 |
 | §4 规则 6（上下文只来自交接后的事件） | 替换内容只经已完成事实的投影到达模型。待处理输入不被步骤消费（AGENTS 规则 10）。 |
 | §4 规则 7（公开事件与服务） | `TreeCommands`、`PublicService` 上的 `Branch::service`、`ProviderConnectionResolver`、`ModelHost`、`sessionMethods`。 |
-| §4 规则 8（基础设施不变） | Timeline、Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。新事件类型以后迁移到 #2 的动态注册。 |
+| §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。Timeline 中 `context_with_checkpoint` 现有的快照锚定检查本来就读取已完成的压缩事实；它随记录字段的改动（以 `retain_from` 代替 `cursor`）调整，逻辑相同，没有新行为。新事件类型以后迁移到 #2 的动态注册。 |
 | §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。按维护者的决定，`context/compaction-start` 和可见的结果都是事实，理由有两条。第一，它们不只是驱动某个状态机：用户和其他状态机读取历史时需要这些内容（任何时候接入的 UI 都必须看到压缩正在进行，或者它是怎样结束的）。第二，重载结算要用它们：没有结果的开始意味着当时有压缩在途。Loop 和 ContextPreparation 由开始与结果的配对重建，这比只靠指令更精确：它能区分运行中和待处理，也覆盖自动压缩。用量查询不写任何东西。 |
 | ADR 002 D1（作用域） | 窗口事实、策略和方法：Session。指令、步骤和压缩槽：分支，在 Loop 中。 |
 | ADR 002 D2（无接线模块） | ContextMethods 经 `sessionMethods` 暴露所有者的操作。 |
@@ -505,7 +515,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 - `session.context` 命名空间。
 - 指令 `context/compact`。
-- 改动后的 `context/compaction`（可选 id、`command`、`cancelled`，以 `replacement` 和 `strategy` 代替 `summary`，与策略无关的诊断）。
+- 改动后的 `context/compaction`（可选 id、`command`、`start`、`cancelled`，以 `retain_from` 代替 `cursor`，以 `replacement` 和 `strategy` 代替 `summary`，与策略无关的诊断）。
 - 事实 `context/compaction-start` 及结果上的 `start` 引用。
 - `context/compact`、`context/compaction-start` 和 `context/compaction` 对 v3 客户端可见。
 
@@ -513,7 +523,8 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 - 拆分后的端口与 `CompactionStrategyHost`。
 - `CompactionInput` 的字段。
-- `CompactionCheckpoint.replacement`。
+- `CompactionCheckpoint {retain_from, replacement}` 与 `HistoryEntry.source`。
+- `history.rs` 的切点验收与游标查找改为基于事件；快照状态保存 `retain_from`（解释器版本升级）；Timeline 的快照锚定匹配比较 `retain_from`。
 - `AgentLoop` 与 `ContextPreparation` 上的 `PublicService`。
 
 **向机制所有者提出的需求：** 无。已在计划中的 #2 将承载 `context/compact` 和 `context/compaction-start`。
@@ -526,7 +537,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 触发点与保留量 | `0.8 × (窗口 − 输出)`、K = 2 轮、`字节数 / 4`、每张图片 1,600 token：暂定，#128 |
 | 手动压缩 | 由 `context/compact` 安排的 Loop 步骤，在 turn 内外都可以，永远不创建 turn |
 | 步骤在哪里运行 | 在 Loop 中，调用 ContextPolicy 唯一的压缩函数（§2.1） |
-| 记录 | `replacement` 与 `strategy`，一条重放规则；可选 id、`command`、`cancelled`；直接修改（尚未发布） |
+| 记录 | `retain_from`（Timeline 事件 id）、`replacement` 与 `strategy`，一条重放规则；可选 id、`command`、`cancelled`；直接修改（尚未发布） |
 | 端口 | `ContextModel`（窗口事实）与 `CompactionStrategy`（替换内容），各来自自己的 Session 值 |
 | 其他策略、组合 | F1 不做 |
 | 新事件类型 | `context/compact` 与 `context/compaction-start` 现在作为 `EventKind` 变体，#2 之后改为动态注册 |
@@ -542,14 +553,15 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 测试用产品配置的 App Server 连接一个上下文窗口很小的 mock HTTP 提供方（`crates/dim-app-server/tests`），另加 `crates/dim-agent-capabilities/tests` 中的 Loop 与策略流程测试。
 
-1. **自动。** 超过阈值后，下一次准备依次写 `context/budget`、`context/compaction-start {trigger: threshold}`，并发出一个摘要请求。它提交 `completed` 的 `context/compaction`：带该请求的 id 和 `start`，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，切点在最后 2 轮之前。模型请求以这条消息开头，原样保留最后 2 轮。
+1. **自动。** 超过阈值后，下一次准备依次写 `context/budget`、`context/compaction-start {trigger: threshold}`，并发出一个摘要请求。它提交 `completed` 的 `context/compaction`：带该请求的 id 和 `start`，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，`retain_from` 为倒数第二轮的 `turn/start`。模型请求以这条消息开头，原样保留最后 2 轮。
 2. **预算恢复。** 重试时以 `trigger: provider_output_budget_exhausted` 压缩。
 3. **手动，没有 turn。** `session.context.compact` 只写 `context/compact`、`context/compaction-start {command}` 和 `context/compaction {command, start}`；没有 `turn/*`、`step/*` 或 `model/call`。回复为 `completed`。
 4. **手动，turn 内。** 序列为 `step/tool-result` → `context/compaction-start {turn_id, command}` → `context/compaction {turn_id, command, start}` → 下一个请求的 `step/model-start`，该请求基于压缩后的上下文准备。
 5. **重放与替换策略。**
    - 压缩之后重载的 Session、以及压缩之后 fork 出的分支，投影出的消息与之前相同。
    - 把摘要策略换成一个返回两条 `replacement` 消息的测试策略：其结果按同一条规则提交和重放，Loop 和策略层代码都不用改。
-   - 游标落在保留轮之内的测试策略会被策略层拒绝。
+   - `retain_from` 落在保留轮之内、或把工具调用与其结果分开的测试策略，会被策略层拒绝。
+   - 用默认 `HistoryRenderer` 压缩的 Session，换一个渲染器（另一种条目 id 方案）重放时，仍能凭 `retain_from` 找到切点，投影出相同的保留事件。
 6. **中断、重载与重启。**
    - 步骤期间 `session.stop` 写 `cancelled`（策略已经返回时为 `completed`）。
    - 步骤期间插件重载写 `cancelled: capability reloading`，不发第二次策略调用。
