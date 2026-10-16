@@ -153,8 +153,6 @@ impl SessionService for SessionToolSource {}
 pub trait ToolProvider: Send + Sync + 'static {
     /// Every complete set this provider currently offers, one per key.
     fn sets(&self) -> Vec<Arc<ToolSourceSet>>;
-    /// Signals that `sets()` changed; carries no data and may coalesce.
-    fn changed(&self) -> tokio::sync::watch::Receiver<()>;
 }
 
 pub struct ToolSourceSet {
@@ -164,7 +162,7 @@ pub struct ToolSourceSet {
 }
 ```
 
-来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；`changed()` 可合并，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
+来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；替换集合后用自身上下文向 `EventKey::<ToolProviderChanged>::of().instance(session_scope.instance)` 发出通知，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
 
 ### 7.3 状态
 
@@ -181,7 +179,7 @@ pub struct ToolSourceSet {
 
 ### 7.4 事件
 
-不引入专用事件类型。
+不引入新的 Timeline 事件。来源与注册表的内存变更通知使用现有 rutis 总线（[#122](https://github.com/arcships/dim/issues/122)）。
 
 | 事件 | 写入方 | 规定 |
 | --- | --- | --- |
@@ -189,7 +187,18 @@ pub struct ToolSourceSet {
 
 模型选择与工具集合是同一配置的两部分，分别更新：公开的 `ConfigureUpdate.model: Option<ModelSelection { provider_id, model_id, config, metadata }>` 不含工具，外部调用方无法给出 handler。`SessionConfig.model` 使用同一类型，创建时固定完整模型参数；`AgentConfig` 与 Agent profile 的默认身份仍为 `ModelId`。旧 Session 中只含模型身份的记录可读取，缺失参数表示没有显式参数，不沿用另一模型的默认值。Prompt 在其串行采用队列中以前缀里最后一个已采用配置为基础合成：模型更新只替换模型字段，工具采用只替换 `tools/tool_sources`，二者互不淘汰。前缀尚无模型部分时工具采用返回 `InvalidInput("tool set adoption requires a model configuration")`，该分支走 `PrepareModelHost` 路径。只更新模型或工具部分时，`context/configured.system` 沿用上一次已采用的值。
 
-ToolRegistry 的来源变化是 Session 内状态，不写事件；它以 `watch` 通知各分支 ToolBinding，只有分支上的采用事实影响请求。任一来源方通知变化时重读全部来源方，因此另一来源让出工具名后，被拒来源能自动恢复。
+ToolRegistry 的来源变化是 Session 内状态，不写 Timeline。以下 rutis 通知均以 Session 的实例键隔离，不携带工具集合；消费者读取所有者的现态。
+
+| 通知 | 生产者 → 消费者 | 内容与顺序 |
+| --- | --- | --- |
+| `tools.provider_changed` | 来源方 → ToolRegistry | 空通知；来源方完成状态替换后发出，注册表只读取本 Session 已登记的来源 |
+| `tools.changed` | ToolRegistry → 各分支 ToolBinding | 空通知；注册表完成集合替换/撤销及状态更新后发出 |
+
+注册表先订阅再初读来源；来源通知变化时重读全部已登记来源，因此另一来源让出工具名后，被拒来源能自动恢复。
+注册表用自身上下文发出 `tools.changed`，不借用来源通知携带的发送方上下文；来源方与注册表均记录发送失败。
+ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任务；发布前的唤醒保留到原有 BranchLifecycle 激活后处理，关闭时退出。
+每个分支继续通过 Prompt 串行采用工具集合，只有该采用事实影响后续请求；现有请求的 handler 快照不变。
+`ToolSourcesView::subscribe` 仍提供只读状态，不用作部件间的空变更信号。
 
 ### 7.5 服务接口
 
@@ -202,9 +211,8 @@ ToolRegistry 的来源变化是 Session 内状态，不写事件；它以 `watch
 | `sources()` | → 当前集合，按键排序 | — |
 | `source(key, version)` | → `Option<Arc<ToolSourceSet>>`，当前或仍被引用的旧版本 | — |
 | `fixed(name)` | → `Option<Arc<ToolContribution>>` | — |
-| `changed()` | → `watch::Receiver<()>`，来源替换或撤销后通知 | — |
 
-内部替换 `replace_source(key, expected, set: Option<Arc<ToolSourceSet>>)` 不对外开放。消费任务在 `apply` 读全部来源，之后每次 `changed()` 重读，对版本与已持有不同的键执行：
+内部替换 `replace_source(key, expected, set: Option<Arc<ToolSourceSet>>)` 不对外开放。注册表在 `apply` 读全部来源，之后每次来源通知重读，对版本与已持有不同的键执行：
 
 | 步骤 | 规定 |
 | --- | --- |

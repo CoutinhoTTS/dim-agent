@@ -657,7 +657,6 @@
       "file": "crates/dim-agent-capabilities/src/tool_registry.rs",
       "unexpandedMacros": [
         "format",
-        "tokio::select",
         "tracing::warn"
       ]
     },
@@ -1407,7 +1406,8 @@
         "format",
         "matches",
         "tokio::pin",
-        "tokio::select"
+        "tokio::select",
+        "tracing::warn"
       ]
     },
     {
@@ -6449,9 +6449,11 @@
         "path ToolContribution",
         "path ToolRegistry",
         "path ToolSourceSet",
+        "path ToolsChanged",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolRegistry",
-        "use crate::tool_registry::ToolSourceSet"
+        "use crate::tool_registry::ToolSourceSet",
+        "use crate::tool_registry::ToolsChanged"
       ]
     },
     {
@@ -11917,11 +11919,13 @@
         "path ToolContribution",
         "path ToolHandler",
         "path ToolProvider",
+        "path ToolProviderChanged",
         "path ToolSourceSet",
         "use dim_agent_capabilities::tool_registry::SessionToolSource",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolProvider",
+        "use dim_agent_capabilities::tool_registry::ToolProviderChanged",
         "use dim_agent_capabilities::tool_registry::ToolSourceSet"
       ]
     },
