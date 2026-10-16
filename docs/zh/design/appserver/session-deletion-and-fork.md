@@ -453,7 +453,7 @@ S5c 与 S5a 一样只实现控制节点。在控制节点上，FileStorage 正�
 
 | # | 变更 | 理由 |
 | --- | --- | --- |
-| D1 | 静止点检查是 Agents 中的 `rest_point`：在 Agents 为 `validate_context_boundary` 已经读取的前缀上，只读地折叠 Loop、InputQueue 和 BackgroundExec 的公开事实，而不是放在能力 crate 中 `validate_context_boundary` 旁边的检查。其中的输入规则与 Loop 一致：在最后一次 `stop/interrupt` 之前已采纳、尚未消费的 Queue 或 Steer 输入允许留下，因为重载不会执行它（它会像 Append 输入一样并入下一次请求）；尚未采纳的输入则被拒绝。任务若不是在本代的分支关闭之后结束，就必须有唤醒，与实时唤醒的发出条件一致 | 它需要的事实都是公开事件，因此不需要这些能力提供 API，也不改动它们。要求所有这类输入都已消费，会拒绝刚停止一轮之后的切点，而那里并不会执行任何东西 |
+| D1 | 静止点检查是 Agents 中的 `rest_point`：在 Agents 为 `validate_context_boundary` 已经读取的前缀上，只读地折叠 Loop、InputQueue 和 BackgroundExec 的公开事实，而不是放在能力 crate 中 `validate_context_boundary` 旁边的检查。其中的输入规则与 Loop 一致：在最后一次 `stop/interrupt` 之前已采纳、尚未消费的 Queue 或 Steer 输入允许留下，因为重载不会执行它（它会像 Append 输入一样并入下一次请求）；InputQueue 因撤回而删除的输入（`input/deleted`，S1）永远不会被采纳，不计入；其他尚未采纳的输入则被拒绝。任务若不是在本代的分支关闭之后结束，就必须有唤醒，与实时唤醒的发出条件一致 | 它需要的事实都是公开事件，因此不需要这些能力提供 API，也不改动它们。要求所有这类输入都已消费，会拒绝刚停止一轮之后的切点，而那里并不会执行任何东西 |
 | D2 | `session.fork` 需要原生存储。没有原生存储的守护进程（不带 `--database` 的 mock 配置）不在 `hello.features` 中列出它，并回复 `unknown_method`（"Method requires native storage"）。`session.delete` 在那里同样与 `session.create` 一起列出；没有存储时它关闭 Session 并将其遗忘 | 分叉复制的是存储的行；内存中的 Timeline 没有可供复制的 SessionStore |
 | D3 | `session.delete` 对不是单一路径分量的 `sessionId` 回复 `session_invalid_input`，在关闭或移除任何东西之前 | 这个 id 构成 `command-output/<id>`。Session id 是 UUID；否则像 `<S>/.` 这样的 id 会移除 S 的命令输出，却不删除任何行 |
 | D4 | 分叉事务不再检查切点：它复制 `main` 截至 `at` 的行，运行时在构建分叉时校验这些行。校验失败的副本和任何失败的创建一样被回滚 | Agents 已在源上检查过切点（已发布的头部、批次末尾、上下文边界、静止点），而切点及之前的行不会改变；在事务中再检查一次，只会重复每次构建都会执行的校验 |

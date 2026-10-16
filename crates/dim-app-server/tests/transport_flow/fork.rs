@@ -351,6 +351,40 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
     );
     assert_eq!(sessions(), before, "a refused fork creates nothing");
 
+    // A Queue input withdrawn while it waited behind a turn is never
+    // applied, so it does not keep the Session from resting.
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":sid,"branchId":"main","text":"tool:wait {\"millis\":2000}"}),
+            )
+            .await,
+    );
+    let held = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":sid,"branchId":"main","text":"held","mode":"queue"}),
+        )
+        .await;
+    let held = held["result"]["event"]["id"].as_str().unwrap().to_owned();
+    let withdrawn = client
+        .rpc(
+            "session.input.withdraw",
+            json!({"sessionId":sid,"branchId":"main","inputId":held}),
+        )
+        .await;
+    assert_eq!(withdrawn["result"]["status"], "deleted", "{withdrawn}");
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+            .await,
+    );
+    let at = source.sequence("main").unwrap();
+    assert!(keys(&history(&source, "main").await).contains(&"input/deleted"));
+    let rested = forked(&fork(&mut client, &sid, at).await);
+    assert!(agent.get_session(&rested).is_some());
+
     // 0 inherits no event: the fork starts like a new Session.
     let fid = forked(&fork(&mut client, &sid, 0).await);
     let empty = history(&agent.get_session(&fid).unwrap(), "main").await;

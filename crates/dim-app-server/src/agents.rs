@@ -1068,7 +1068,8 @@ impl AgentIndex {
 /// ([S5c §6.2](../../../docs/design/appserver/session-deletion-and-fork.md#62-the-cut)).
 /// The reload rules that start work read these facts: Loop and InputQueue
 /// start a turn for an open turn's work or for a Queue or Steer input not
-/// yet consumed, unless it was applied before the last interrupt;
+/// yet consumed, unless it was applied before the last interrupt or
+/// InputQueue deleted it on a withdrawal;
 /// BackgroundExec fails a task it finds open, and a task that ended while
 /// its generation was not closing posts a wake input that belongs before
 /// the cut. This reads only their public facts;
@@ -1115,6 +1116,10 @@ fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String>
                 }
             }
             EventKind::InputConsumed(data) => {
+                inputs.remove(data.input_id.as_str());
+            }
+            // A withdrawn input InputQueue deleted is never applied.
+            EventKind::InputDeleted(data) => {
                 inputs.remove(data.input_id.as_str());
             }
             EventKind::ExecStarted(data) => {
