@@ -69,23 +69,35 @@ impl Capability for ContextMethodsPlugin {
     }
 }
 
-/// Writes `context/compact` and waits for the first result that serves it.
+/// Writes `context/compact` and waits for the result that covers it: the
+/// first result with this command, or, while no step started for this
+/// command, the first result with a later one. A command is started only
+/// under its own sequence; one still pending when a later command arrives is
+/// coalesced into it and answered by the step that serves the later one.
 async fn compact(branch: &Branch, cancel: &CancellationToken) -> Result<Value, RpcError> {
     let command = branch.service::<AgentLoop>()?.compact()?;
     let publication = branch.publication();
     let mut watch = publication.watch();
     let mut after = command;
+    let mut started = false;
     loop {
         let head = watch.borrow_and_update().0;
         if head > after {
-            let result = branch
-                .local(after + 1..=head)
-                .await?
-                .into_iter()
-                .find(|event| {
-                    matches!(&event.kind, EventKind::ContextCompaction(data)
-                        if data.command.is_some_and(|served| served >= command))
-                });
+            let result =
+                branch
+                    .local(after + 1..=head)
+                    .await?
+                    .into_iter()
+                    .find(|event| match &event.kind {
+                        EventKind::ContextCompactionStart(data) => {
+                            started |= data.command == Some(command);
+                            false
+                        }
+                        EventKind::ContextCompaction(data) => data.command.is_some_and(|served| {
+                            served == command || (served > command && !started)
+                        }),
+                        _ => false,
+                    });
             if let Some(event) = result {
                 let EventKind::ContextCompaction(data) = &event.kind else {
                     unreachable!("matched a compaction")

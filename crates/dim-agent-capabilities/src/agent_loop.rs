@@ -70,12 +70,16 @@ impl Applied {
     }
 }
 /// The manual compaction step, folded from `context/compact` and the
-/// results that serve it.
+/// results that serve it. The active and the pending command are separate:
+/// a command consumed while a step runs waits as the next step.
 #[derive(Default)]
 struct CompactionSlot {
-    /// A step waits for the next boundary; the latest merged command.
+    /// The latest command not yet started; a command consumed while one is
+    /// pending replaces it (coalesces), and the step serves the latest.
     pending: Option<u64>,
-    /// The running step's command and cancellation.
+    /// The running step's own command and cancellation; its result retires
+    /// only this command, and a pending one then runs before the Loop
+    /// advances.
     running: Option<(u64, CancellationToken)>,
     /// Why an interrupt cancelled the running step.
     stop_reason: Option<String>,
@@ -256,6 +260,10 @@ impl AgentLoop {
         turn_id: Option<String>,
         through: u64,
     ) {
+        // An unloading Loop starts nothing; the next load settles the command.
+        if self.lifecycle.is_cancelled() {
+            return;
+        }
         let command = compaction.pending.take().expect("a pending step");
         let cancel = self.lifecycle.child_token();
         compaction.running = Some((command, cancel.clone()));

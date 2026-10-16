@@ -97,7 +97,7 @@ Loop 在一个受跟踪的任务中，调用 `ContextPolicy::compact_step` 自�
 | `context/compact {}` | Loop | 新指令事件（§4.3） |
 | `context/compaction-start` | 由 ContextPolicy 代其调用方写入 | 新事实（§4.3） |
 | `context/compaction` | 由 ContextPolicy 代其调用方写入；重载时由负责结算的所有者写入 | 现有事实，有改动（§4.3） |
-| 压缩槽：`{command, start?, running: Option<CancellationToken>}` | Loop | 私有。由指令、开始与结果折叠，装载时重建（§5.5） |
+| 压缩槽：`{pending: Option<command>, running: Option<(command, CancellationToken)>}` | Loop | 私有。当前运行的指令与最新的待处理指令分开保存。由指令、开始与结果折叠，装载时重建（§5.5） |
 
 Session 值不持有状态。解析出的连接只存在于一次策略调用内。
 
@@ -115,7 +115,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 `session.context.compact`：
 
 - 经 `AgentLoop::compact` 写 `context/compact`，该调用返回指令的序号 `c`。
-- 然后在分支 Timeline 上等待第一条 `command ≥ c` 的 `context/compaction`。
+- 然后在分支 Timeline 上等待**覆盖** `c` 的结果：第一条 `command = c` 的 `context/compaction`；或者，只要还没有写过 `command = c` 的 `context/compaction-start`，第一条 `command > c` 的结果。步骤只以它所服务的指令启动，所以第二种情况是被合并进后来待处理指令的指令（§5.4），由服务后来那条指令的步骤结果回复。已经启动过的指令只由它自己的结果回复，绝不由后来指令的结果回复。
 - 结果映射：`completed` → `{status: "completed", sequence}`；`skipped` → `{status: "skipped", reason}`；`failed` → `compaction_failed`；`cancelled` → `compaction_cancelled`。
 
 `session.context.usage` 返回在已提交头部 `through` 处做一次准备时会写进 `context/budget` 的值，外加 `thresholdTokens`。
@@ -396,7 +396,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
   - turn 结束而不是继续时，步骤在 `turn/end` 之后运行，不属于任何 turn。
   - 预算重试属于它的请求，不算边界。
 - **through。** `through` 是触发步骤启动的那个被消费事件的序号。
-- **合并。** 步骤处于待处理时消费到的指令合并进它，事实引用最后合并的那条指令。步骤运行期间消费到的指令，在它之后再安排一个步骤。
+- **运行中与待处理的指令。** 压缩槽把运行中步骤的指令（当前指令）和最新的尚未启动的指令（待处理指令）分开保存。
+  - 步骤处于待处理或正在运行时消费到的指令，成为待处理指令，并取代更早的待处理指令（合并）。下一个步骤服务最新的指令，其开始与结果都带这条指令。
+  - 一个步骤的结果只结束它自己的指令。若有待处理指令，它立即作为下一个步骤运行，然后 Loop 才推进（turn 内 `next_model`，否则 `try_start`）。
+  - 例：`compact(c1) → start(c1) → compact(c2) → compact(c3) → result(c1) → start(c3) → result(c3)`。`c2` 合并进 `c3`，其等待方由 `result(c3)` 回复（§4.1）。
 - **不推进。** 步骤运行期间，`next_model` 和 `try_start` 等待它的事实。输入照常排队，不被步骤消费。
 
 **steer。** 步骤期间应用的驱动输入不取消步骤。它加入下一个请求，或在步骤结束后启动一个 turn。中断、失败、重载与重启见 §5.8。
@@ -412,11 +415,11 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
    - `next_model`（带预算重试 source 时除外）和 `turn/end` 有待处理步骤时先启动步骤，而不是推进。
    - 步骤运行期间，`next_model` 和 `try_start` 什么都不做。
 5. **步骤任务。** 与准备任务一样受跟踪；按 `start_preparation` 的方式构造请求，调用 `ContextPolicy::compact_step`。
-6. **步骤终态。** 消费到带 `command` 的 `context/compaction` 时，Loop 清空压缩槽并继续：在 turn 内调用 `next_model`，否则调用 `try_start`。
-7. **中断。** `stop/interrupt` 取消正在运行的步骤，并为待处理的步骤写 `cancelled`。
+6. **步骤终态。** 消费到运行中步骤那条指令的 `context/compaction` 时，Loop 只清除当前指令。若有待处理指令，它作为下一个步骤启动；否则 Loop 继续：在 turn 内调用 `next_model`，否则调用 `try_start`。其他指令的结果（结算）不会让 Loop 继续。
+7. **中断。** `stop/interrupt` 取消正在运行的步骤，其结果为带 `start` 的 `cancelled`；并为待处理指令写不带 `start` 的 `cancelled`。两者同时存在时都被结算。
 8. **重建。** 压缩槽由指令、开始与结果的配对折叠：
    - 有手动开始而没有结果：步骤当时在运行。Loop 写带该 `start` 和 `command` 的 `cancelled` 结果。
-   - 有指令而既没有开始也没有覆盖它的结果：指令当时处于待处理。Loop 写带该 `command`、不带 `start` 的 `cancelled` 结果。
+   - 有指令而既没有开始也没有覆盖它的结果：指令当时处于待处理。Loop 写带该 `command`、不带 `start` 的 `cancelled` 结果。运行中与待处理的指令同时存在时都被结算。正在卸载的 Loop 不再启动步骤。
 
 不变的部分：turn 与请求的生命周期、输入消费、工具批次、对模型请求的 steer、预算恢复、`LoopSnapshot` 和 `context/prepare`。
 
@@ -587,6 +590,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
    - 在摘要请求被挂住时杀掉 App Server 进程，再在同一个 home 上启动：留下一条没有结果的开始，没有半截结果；下次装载写带该 `start` 的 `cancelled: capability reloading`，自动压缩同理；Session 投影出的历史与压缩前相同；新的 `/compact` 正常压缩。
    - 在事实之后、快照保存之前崩溃：从事实投影出压缩后的历史。
    - turn 内的手动压缩失败后 turn 继续；下一个请求超过窗口时由预算恢复压缩。
+7. **两条指令与运行中的步骤。**
+   - 正常路径：`compact(c1) → start(c1) → compact(c2) → compact(c3) → result(c1)`，随后 `c3` 的步骤在 Loop 推进前运行，有自己的开始与结果。`c2` 没有开始；方法对 `c1` 回复 `result(c1)`，对 `c2` 和 `c3` 回复 `result(c3)`。
+   - `c1` 运行中、`c2` 待处理时的 `stop/interrupt`：为 `c1` 写带开始的 `cancelled`，为 `c2` 写不带开始的 `cancelled`；不再启动步骤。
+   - `c1` 运行中、`c2` 待处理时的插件重载：两者都结算为 `cancelled: capability reloading`，不再调用策略。
 8. **客户端看到的压缩状态。**
    - 接入该 Session 的 v3 客户端实时收到 `context/compact`、`context/compaction-start`（`trigger: manual`）和 `context/compaction`。
    - 在摘要请求被挂住时才接入的客户端，从分支历史（一条没有结果的开始）看到“运行中”。
@@ -605,6 +612,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 诊断 | 策略找不到切点（`skipped`）时省略 `retainFrom`；没有替换任何内容时省略 `estimatedOutputTokens`。 |
 | v1 | 生产代码中没有 v1 到原生的转换：冻结样本只按 v1 事件解码；`v1::EventRef` 对 `context/compact`、`context/compaction-start` 和变更后的 `context/compaction` 没有形式，因此 v1 连接不再收到压缩事实。旧的扁平诊断类型移入 v1 模块。 |
 | Loop 订阅 | Loop 订阅 `context/compact` 与 `context/compaction`；开始事实只在重建时折叠，用来区分运行中的步骤和待处理的命令。 |
+| 两条指令 | 评审修正：压缩槽分开保存当前指令与待处理指令，结果只结束它自己的指令，待处理指令在 Loop 推进前作为下一个步骤运行，中断或重载结算两者。方法的等待方使用 §4.1 的覆盖规则（验收 7）。 |
 | 快照锚点 | Timeline 保留 §4.3 的结构检查。原先的 `resume ≤ through` 需要读取锚点内容，改为结构性的“resume 在锚点所在分支上早于锚点”，`through` 早于锚点由所有者的解码回调检查。 |
 | 原生存储示例 | [native-storage-format](../../../design/appserver/native-storage-format.md) 中的记录示例改用新记录和 v3 解释器。 |
 | 验收 | 验收 1、3、6（崩溃与重启）和 8 在二进制流程测试 `transport_flow/compaction.rs` 中运行。验收 2、4、5 以及 6 中的重载、中断和失败情形在 `dim-agent-capabilities/tests/context_flow`（`manual_compaction.rs` 和既有压缩测试）中运行。事实与快照之间的崩溃由 `compaction_events.rs` 的快照失败测试覆盖。 |
