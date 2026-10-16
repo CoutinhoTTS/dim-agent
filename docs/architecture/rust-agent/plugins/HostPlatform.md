@@ -31,6 +31,10 @@ plugin. An unavailable shell does not prevent publishing HostPlatform; exec
 fails explicitly. Environment filtering/tree termination are execution mechanics,
 not an OS sandbox or permission policy.
 
+The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exercises
+Seatbelt argv through these existing process and PTY APIs. It does not install
+product isolation; Linux verification and the host-local policy remain open.
+
 ## Rule check
 
 - §1 and ADR 002 D1–D3: process facts and the preference source remain owned by
