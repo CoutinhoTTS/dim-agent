@@ -156,6 +156,8 @@ remove(d), once d's other entries are gone:
   or without a key if key t would be temps itself
   rmdir temps, rmdir .dim-file-storage-locks, rmdir d
                     an entry or key created meanwhile -> DirectoryNotEmpty
+remove(p), once p is absent (also when it already was):
+  fsync p's parent                                     fails -> Unsynced
 ```
 
 A link or special file is unlinked only while it still is one. If a key or
@@ -169,9 +171,14 @@ temporary file, makes `lock` or `replace` fail with an I/O error, without
 following or writing through it, until the directory is removed.
 
 Removal therefore never unlinks a key or temporary file that a holder has
-locked. An absent entry counts as removed. Removal is neither atomic nor
-synced: an error or cancellation can leave part of a tree, retrying is safe,
-and an owner that must not leak files after a crash reconciles by listing. The
+locked. An absent entry counts as removed. Removal is not atomic: an error or
+cancellation can leave part of a tree, retrying is safe, and an owner that must
+not leak files after a crash reconciles by listing. Once the entry is absent,
+removal syncs its parent before it returns, also when the entry was already
+absent, so a completed removal survives a crash and a retry after `Unsynced`
+confirms durability; an owner can order a commit after it, as SessionStore's
+Session delete does ([S5c](../../../design/appserver/session-deletion-and-fork.md#4-crash-convergence)).
+Windows has no directory sync, as for replacement. The
 owner orders removal after the directory's writers; entries or leases created
 meanwhile make it fail. A replacement racing the removal of its directory still
 commits: if removal deleted the empty temporary directory first, the

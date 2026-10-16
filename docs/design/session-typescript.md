@@ -315,6 +315,8 @@ remain acceptance requirements for the pending broadcast binding.
 Gate each observed transition on an actual service/event/fence, not a sleep. Boundary cases cover
 declaration mismatch, invalid tool/method reply, name collisions and cancellation without leaking
 a Promise lease. Reuse C3/C1 tests for their unchanged native semantics.
+Native-store fork creates fresh Session-scoped providers from the copied configuration, and
+delete drains the fork's admitted method before unloading it while its source remains usable.
 
 The existing CI Node step executes the product Node/Rpc flows alongside the managed-provider
 flow. The Active-at-first-read fixture explicitly hard-depends on the TS method provider; it is

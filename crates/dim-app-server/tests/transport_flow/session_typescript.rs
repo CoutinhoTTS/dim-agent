@@ -413,7 +413,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_typescript_restore_and_disabled_parts() {
+async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     let home = std::env::temp_dir().join(format!(
         "dm-ts-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -447,6 +447,75 @@ async fn node_session_typescript_restore_and_disabled_parts() {
     )
     .await;
     assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
+    assert_eq!(
+        client
+            .rpc("session.typescript.status", json!({"sessionId":session_id}))
+            .await["result"]["calls"],
+        1
+    );
+    let source = server.agent().unwrap().get_session(&session_id).unwrap();
+    let forked = client
+        .rpc(
+            "session.fork",
+            json!({"sessionId":session_id,"at":source.sequence("main").unwrap()}),
+        )
+        .await;
+    assert_ok(&forked);
+    let fork_id = forked["result"]["sessionId"].as_str().unwrap();
+    let source_status = client
+        .rpc("session.typescript.status", json!({"sessionId":session_id}))
+        .await;
+    let fork_status = client
+        .rpc("session.typescript.status", json!({"sessionId":fork_id}))
+        .await;
+    assert_ok(&fork_status);
+    assert_eq!(source_status["result"]["pid"], fork_status["result"]["pid"]);
+    assert_ne!(
+        source_status["result"]["generation"],
+        fork_status["result"]["generation"]
+    );
+    assert_eq!(fork_status["result"]["calls"], 0);
+    submit(&mut client, fork_id, r#"tool:ts_echo {"text":"forked"}"#).await;
+    assert_eq!(
+        client
+            .rpc("session.typescript.status", json!({"sessionId":fork_id}))
+            .await["result"]["calls"],
+        1
+    );
+    let fork = server.agent().unwrap().get_session(fork_id).unwrap();
+    let history = fork.history("main", None).await.unwrap();
+    let result = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(batch) => batch.results.first(),
+            _ => None,
+        })
+        .unwrap();
+    let dim_agent_types::ToolContent::Text(text) = &result.result.content else {
+        panic!("text result")
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap()["sessionId"],
+        fork_id
+    );
+    let drain = client
+        .send("session.typescript.drain", json!({"sessionId":fork_id}))
+        .await;
+    started(&mut client, drain).await;
+    let mut deleter = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &deleter
+            .rpc("session.delete", json!({"sessionId":fork_id}))
+            .await,
+    );
+    assert_eq!(client.response(drain).await["result"]["alive"], true);
+    assert_eq!(
+        client
+            .rpc("session.typescript.status", json!({"sessionId":fork_id}))
+            .await["error"]["data"]["appError"],
+        "session_closed"
+    );
     assert_eq!(
         client
             .rpc("session.typescript.status", json!({"sessionId":session_id}))
@@ -722,6 +791,14 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         ),
         (
             json!({"sessionMethods:session.create":{"describe":"async","call":"async"}}),
+            "invalid Session namespace",
+        ),
+        (
+            json!({"sessionMethods:session.delete":{"describe":"async","call":"async"}}),
+            "invalid Session namespace",
+        ),
+        (
+            json!({"sessionMethods:session.fork":{"describe":"async","call":"async"}}),
             "invalid Session namespace",
         ),
         (

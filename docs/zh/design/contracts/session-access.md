@@ -292,7 +292,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 
 格式决定：原生存储保持版本 13。`interactive` 是存储的配置 JSON 中一个增量的可选字段，缺少它的已存储记录表示 `true`，因为在该字段出现之前创建的每个 Session 都是客户端 Session。旧版守护进程忽略该字段，把非交互记录读成交互式；这一点可以接受。不升级到版本 14。
 
-已实现（C2）：`session.create` 设置该字段，原生存储只在它为 `false` 时写入，因此交互式记录保持该字段出现之前的记录格式。这一省略规则属于 `SessionConfig` 的 serde 形式，目前只有原生存储序列化它；在其他地方（例如协议响应）暴露 `SessionConfig` 会沿用这一规则，须另行决定。它的读取方（Questions、SessionTitle）尚未实现。Session fork 尚未实现（S5c）。
+已实现（C2）：`session.create` 设置该字段，原生存储只在它为 `false` 时写入，因此交互式记录保持该字段出现之前的记录格式。这一省略规则属于 `SessionConfig` 的 serde 形式，目前只有原生存储序列化它；在其他地方（例如协议响应）暴露 `SessionConfig` 会沿用这一规则，须另行决定。它的读取方（Questions、SessionTitle）尚未实现。Session fork（S5c）按字节复制存储的 `config` 文本，这一省略规则随之带到分叉中。
 
 | 已存储的 `config` | 含 C2 的守护进程 | 旧版守护进程 |
 | --- | --- | --- |

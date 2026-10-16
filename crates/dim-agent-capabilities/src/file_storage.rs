@@ -60,9 +60,10 @@ pub enum FileStorageError {
     },
     #[error("file lock cleanup: {0:?}")]
     Release(Vec<io::Error>),
-    /// The replacement or directory is in place and visible, but syncing it
-    /// failed, so it may not survive a crash. It is not an unchanged entry.
-    #[error("file or directory written, but its durability could not be confirmed: {0}")]
+    /// The replacement, directory or removal is in place and visible, but
+    /// syncing it failed, so it may not survive a crash. It is not an
+    /// unchanged entry.
+    #[error("file or directory changed, but its durability could not be confirmed: {0}")]
     Unsynced(#[source] io::Error),
 }
 
@@ -440,7 +441,9 @@ impl FileStorage {
     /// An absent entry counts as removed, so retrying is safe. Removal is not
     /// atomic: an error or cancellation can leave part of a tree removed. The
     /// directory's owner orders removal after its writers; entries or leases
-    /// created beneath it meanwhile make removal fail.
+    /// created beneath it meanwhile make removal fail. Once the entry is
+    /// absent its parent is synced, also when it already was, so a retry
+    /// after `Unsynced` confirms durability.
     pub async fn remove(
         self: &Arc<Self>,
         path: &FilePath,
@@ -455,13 +458,14 @@ impl FileStorage {
             };
             match native::entry_kind(&parent, &name)? {
                 Some(EntryKind::Directory) => {
-                    remove_tree(&parent, &name, Tree::Business, &owner, &cancel)
+                    remove_tree(&parent, &name, Tree::Business, &owner, &cancel)?
                 }
                 Some(kind) => {
-                    absent_is_removed(remove_entry(&parent, &name, kind, &owner, &cancel))
+                    absent_is_removed(remove_entry(&parent, &name, kind, &owner, &cancel))?
                 }
-                None => Ok(()),
+                None => {}
             }
+            native::sync_directory(&parent).map_err(FileStorageError::Unsynced)
         })
         .await
     }
