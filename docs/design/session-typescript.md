@@ -252,6 +252,14 @@ not instantiate actual Dim Sessions or verify their typed broadcast binding. Pro
 event effects must belong to the original row. A retained remote object must reject calls after
 the part's effect begins unloading; a stale handle is not evidence of a live generation.
 
+That result covers distinct channels, not several rows sharing one Session channel. A same-channel
+calibration with two real native peers in one Node process delivers one Rust emission twice to
+each row. Each link re-emits that name through Cordis `parallel`, whose listeners are shared;
+service-isolation labels do not filter those events. After unloading one row, the remaining row
+receives the next emission once. The candidate must not independently forward the canonical
+Session name through every row's link into that shared context. Native projection and event
+scoping remain contract choices; consumer-side deduplication is not the solution.
+
 This route is a **candidate requiring review**, with these costs and implementation conditions:
 
 - The measured composition has one shared loopback listener, one native peer/link and one Node
@@ -261,6 +269,9 @@ This route is a **candidate requiring review**, with these costs and implementat
 - Connection settings, peer identities and channel names must be derived by assembly from the
   Session instance, passed as structural runtime data, and cleaned up by that same row. They
   cannot be user-maintained Session-id lists or a mutable central subscription manager.
+  The existing row's Config is captured when its runtime plugin is constructed; there is no
+  separate host-parameter bag. Generated transport fields need an explicit original-module
+  Config contract and must pass that module's existing schema validation.
 - Establish the native link and event subscription as part of that row's apply before publishing
   its services; dispose subscriptions and settle the row's work on unload. Its real required
   dependencies retain their normal audit and reload behavior.
