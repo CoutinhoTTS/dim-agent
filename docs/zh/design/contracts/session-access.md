@@ -281,10 +281,10 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ```text
 // SessionConfig（新字段；已有：permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole）
-{ "interactive": true }             // false：exec、ACP、自动化；缺省：true
+{ "interactive": true }             // false：exec、自动化；缺省：true
 ```
 
-`interactive` 表示 Session 有可交互的对象，能回答它的提问和审批：可以是通过客户端操作的用户，也可以是另一个 Session 或分支的 agent（例如 Collaboration 的 leader），不要求必须是人。`interactive` 在创建时固定。装配从不读取它（ADR 002 D3，#30），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache。关心它的插件直接从 Session 的配置读取：Questions（`ask_user` 照常声明，并回答当前没有可以回答的对象）和 SessionTitle（只为交互式的 leader Session 起标题）。
+`interactive` 表示 Session 有可交互的对象，能回答它的提问和审批：可以是通过客户端操作的用户，也可以是另一个 Session 或分支的 agent（例如 Collaboration 的 leader），不要求必须是人。ACP Session 是交互的：编辑器回答它的审批。`interactive` 在创建时固定。装配从不读取它（ADR 002 D3，#30），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache。关心它的插件直接从 Session 的配置读取：Questions（`ask_user` 照常声明，并回答当前没有可以回答的对象）和 SessionTitle（只为交互式的 leader Session 起标题）。
 
 `session.create` 增加 `interactive?: bool`（默认 `true`），只在边界检查。`session.create` 拒绝未知字段，旧版守护进程会以 invalid params 拒绝带 `interactive` 的请求；因此客户端只在它为 `false` 时发送。
 

@@ -213,6 +213,26 @@ fn directory(parent: &File, name: &OsStr) -> io::Result<File> {
         null_mut(),
     )
 }
+/// Creates the directory `name`, inheriting the parent's DACL; an existing
+/// entry is left as it is for the caller to check.
+pub(super) fn create_directory(parent: &File, name: &OsStr) -> io::Result<()> {
+    match open(
+        Some(parent),
+        name,
+        DIRECTORY_ACCESS,
+        FILE_CREATE,
+        FILE_DIRECTORY_FILE,
+        null_mut(),
+    ) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        result => result.map(drop),
+    }
+}
+/// Windows cannot provide the Unix directory-fsync durability contract; as
+/// for `replace`, durability rests on NTFS metadata journaling.
+pub(super) fn sync_directory(_: &File) -> io::Result<()> {
+    Ok(())
+}
 /// Opens or creates the reserved directory and the temporary directory in it.
 pub(super) fn directories(parent: &File) -> io::Result<(File, File)> {
     let locks = directory(parent, OsStr::new(LOCK_DIRECTORY))?;

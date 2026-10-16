@@ -843,6 +843,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::host::SessionFilesHost",
+        "provider": 8,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::host_platform::HostPlatform",
         "provider": 16,
         "generation": 1,

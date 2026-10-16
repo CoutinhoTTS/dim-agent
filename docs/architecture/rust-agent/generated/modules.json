@@ -1594,11 +1594,37 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::files",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/files.rs",
+      "unexpandedMacros": [
+        "matches",
+        "params",
+        "tokio::select",
+        "tracing::warn"
+      ]
+    },
+    {
+      "id": "dim_app_server::storage::files::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::files",
+      "file": "crates/dim-app-server/src/storage/files/tests.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "env",
+        "format",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::sqlite",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
       "file": "crates/dim-app-server/src/storage/sqlite.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "tokio::pin"
       ]
@@ -3656,6 +3682,7 @@
         "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
+        "path native::create_directory",
         "path native::create_key",
         "path native::create_temp",
         "path native::directories",
@@ -3679,6 +3706,7 @@
         "path native::reserved_directory",
         "path native::same_identity",
         "path native::subdirectory",
+        "path native::sync_directory",
         "path native::sync_replacement",
         "path native::target_name"
       ]
@@ -3691,6 +3719,7 @@
         "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
+        "path native::create_directory",
         "path native::create_key",
         "path native::create_temp",
         "path native::directories",
@@ -3714,6 +3743,7 @@
         "path native::reserved_directory",
         "path native::same_identity",
         "path native::subdirectory",
+        "path native::sync_directory",
         "path native::sync_replacement",
         "path native::target_name",
         "use unsupported"
@@ -3727,6 +3757,7 @@
         "path native::Ancestors::default",
         "path native::Identity",
         "path native::create_account_file",
+        "path native::create_directory",
         "path native::create_key",
         "path native::create_temp",
         "path native::directories",
@@ -3750,6 +3781,7 @@
         "path native::reserved_directory",
         "path native::same_identity",
         "path native::subdirectory",
+        "path native::sync_directory",
         "path native::sync_replacement",
         "path native::target_name",
         "path native::validate_component",
@@ -9136,7 +9168,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::storage::timeline",
       "references": [
-        "path storage::SessionStorePlugin"
+        "path storage::SessionStorePlugin::new"
       ]
     },
     {
@@ -12730,6 +12762,13 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::files",
+      "references": [
+        "mod files"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
@@ -12823,6 +12862,130 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::files",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Closed",
+        "path FileStorageError::Io",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path PutSessionFile",
+        "path SessionFileError",
+        "path SessionFileErrorCode",
+        "path SessionFileErrorCode::Cancelled",
+        "path SessionFileErrorCode::Invalid",
+        "path SessionFileErrorCode::NodeUnavailable",
+        "path SessionFileErrorCode::NotFound",
+        "path SessionFileErrorCode::Storage",
+        "path SessionFileErrorCode::TooLarge",
+        "path StoredSessionFile",
+        "use dim_agent_capabilities::host::PutSessionFile",
+        "use dim_agent_capabilities::host::SessionFileError",
+        "use dim_agent_capabilities::host::SessionFileErrorCode",
+        "use dim_agent_capabilities::host::StoredSessionFile"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
+      "to": "dim_app_server::storage::files::tests",
+      "references": [
+        "mod tests",
+        "path tests::before_commit"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path SqliteStorage",
+        "path error",
+        "use super::SqliteStorage",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStoragePlugin::new",
+        "use dim_agent_capabilities::file_storage::FileStoragePlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path SessionFileErrorCode",
+        "path StoredSessionFile"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path capability_plugin",
+        "use dim_agent_runtime::capability_plugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig::default",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "use dim_agent_runtime::TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_app_server::storage::files",
+      "references": [
+        "path SessionFiles",
+        "path SessionFiles::new",
+        "path share"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path SqliteStorage",
+        "path SqliteStorage::open",
+        "path error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SqliteTimelineStore",
+        "path SqliteTimelineStore::new",
+        "use crate::storage::SqliteTimelineStore"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::sqlite",
       "to": "dim_agent_runtime::capability",
       "references": [
@@ -12841,6 +13004,14 @@
         "path Result",
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path SessionFilesHost",
+        "use dim_agent_capabilities::host::SessionFilesHost"
       ]
     },
     {
@@ -12955,6 +13126,17 @@
         "use super::codec",
         "use super::codec::ContentCache",
         "use super::codec::WireEvent"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::files",
+      "references": [
+        "path SessionFiles::new",
+        "path files",
+        "path files::release",
+        "use super::files",
+        "use super::files::SessionFiles"
       ]
     },
     {
