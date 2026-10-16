@@ -749,6 +749,38 @@ fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
         assert_eq!(output.status.code(), Some(2));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("credential should not print"));
     }
+    for explicit_exec in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.start(false);
+            // Rejection leaves the connection usable for ordinary cleanup.
+            wire.detach();
+        });
+        let mut command = home.command();
+        if explicit_exec {
+            command.arg("exec");
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&vec![b'"'; 8 * 1024 * 1024])
+            .unwrap();
+        let output = wait(child);
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("App Server request exceeds 16 MiB after JSON encoding")
+        );
+    }
 }
 
 struct Terminal {

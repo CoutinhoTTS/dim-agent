@@ -199,6 +199,10 @@ On Unix, the native directory must be private (`0700`), and the socket must be p
 
 Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
 
+Requests are limited to 16 MiB of encoded JSON, excluding the NDJSON newline.
+The CLI checks the complete request before writing any bytes to the daemon;
+JSON escaping can make a prompt exceed this limit even when its original text fits.
+
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Completed, or normal interactive exit |
