@@ -190,6 +190,8 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
         return;
     };
     let home = PathBuf::from(home);
+    let shell = home.join("bin/bash");
+    std::fs::remove_file(&shell).unwrap();
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
     let storage = root.plugin(dim_agent_runtime::capability_plugin(
         dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
@@ -202,9 +204,17 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     ));
     (&platform).await.unwrap();
     let platform = root.get::<HostPlatform>().unwrap();
+    assert!(matches!(
+        platform.exec_shell().await,
+        ShellStatus::Unavailable {
+            code: EXEC_SHELL_UNAVAILABLE,
+            ..
+        }
+    ));
+    // Startup detection can recover without changing the preference.
+    std::os::unix::fs::symlink("/bin/bash", &shell).unwrap();
     let selected = platform.exec_shell().await;
     assert!(matches!(selected, ShellStatus::Available(_)));
-    let shell = home.join("bin/bash");
     std::fs::remove_file(&shell).unwrap();
     let cloned = (*platform).clone();
     for status in futures_util::future::join_all([platform.exec_shell(), cloned.exec_shell()]).await
@@ -222,7 +232,7 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
         }
     ));
     std::os::unix::fs::symlink("/bin/bash", &shell).unwrap();
-    std::fs::write(&config, changed + "\n").unwrap();
+    // A failed refresh also retries with unchanged preference bytes.
     assert_eq!(platform.exec_shell().await, selected);
     std::fs::write(&config, "invalid").unwrap();
     assert!(matches!(

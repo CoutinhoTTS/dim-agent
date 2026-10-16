@@ -200,7 +200,15 @@ impl HostPlatform {
         let mut resolved = self.shell.lock().await;
         if let Some((storage, root, relative)) = &self.shell_file {
             let config = read_config(storage, *root, relative).await;
-            if config != resolved.config {
+            if config != resolved.config
+                || matches!(
+                    resolved.status,
+                    ShellStatus::Unavailable {
+                        code: EXEC_SHELL_UNAVAILABLE,
+                        ..
+                    }
+                )
+            {
                 let status = resolve_shell(config.clone(), &self.env).await;
                 *resolved = ResolvedShell { config, status };
             }

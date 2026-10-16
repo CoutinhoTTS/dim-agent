@@ -285,7 +285,7 @@ No Agents change. The Session activity handle this section requested, so that id
 
 | Error (`appError`) | Condition |
 | --- | --- |
-| `shell_unavailable` | `HostPlatform::exec_shell()` unavailable on the node (reason forwarded) |
+| `shell_unavailable` | HostPlatform command construction refuses the command: `EXEC_SHELL_CONFIG_INVALID`, `EXEC_SHELL_UNAVAILABLE`, `cwd_not_found`, `EXEC_SHELL_CWD_UNSUPPORTED` or `EXEC_SHELL_PATH_MAPPING_FAILED` (reason forwarded) |
 | `shell_busy` | Another run of the Session is running |
 | `duplicate_run` | `runId` already used in this generation |
 | `invalid_params` | Empty command, command over 64 KiB, `runId` not `[A-Za-z0-9-]{1,64}` |

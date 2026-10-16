@@ -14,13 +14,15 @@ and tree-supervision primitives to local tools.
 
 No Timeline events or plugin background tasks. `apply` captures the process
 environment, reads the initial shell snapshot and retains the configured
-FileStorage source. `exec_shell()` rereads that source on every invocation,
-but reuses its last resolution while the read result is unchanged. One async
-mutex serializes reads and resolution across callers and cloned handles, so
-unchanged preferences never repeat Windows shell probes. Unix shell discovery
-runs on a blocking worker. Edits, invalid configuration and recovery take effect
-without reloading the plugin or Session. Shell inventory changes are observed
-on a preference edit or HostPlatform reload. Missing files select automatically;
+FileStorage source. `exec_shell()` rereads that source on every invocation.
+Available resolutions and `EXEC_SHELL_CONFIG_INVALID` errors are reused while
+the read result is unchanged; `EXEC_SHELL_UNAVAILABLE` is resolved again on the
+next call, so transient detection failures and newly available shells recover
+without editing the preference or reloading. One async mutex serializes reads
+and resolution across callers and cloned handles. Unchanged available selections
+do not repeat Windows shell probes. Unix shell discovery runs on a blocking
+worker. Changing an available selection requires a preference edit or
+HostPlatform reload. Missing files select automatically;
 malformed or unreadable files return `EXEC_SHELL_CONFIG_INVALID`; an unavailable explicit
 shell returns `EXEC_SHELL_UNAVAILABLE` without fallback. Resolution uses the
 captured service environment, never a caller's environment.
