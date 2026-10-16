@@ -115,6 +115,33 @@ pub enum LookupReply {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryRequest {
+    pub session_id: String,
+    pub branch_id: String,
+    /// Exclusive lower bound that ends a batch; absent: the branch start.
+    #[serde(default)]
+    pub after: Option<u64>,
+    /// At most the published head; absent: the head.
+    #[serde(default)]
+    pub through: Option<u64>,
+    /// A fixed-prefix read: `through` is the published head, which must
+    /// reach this sequence.
+    #[serde(default)]
+    pub at_least: Option<u64>,
+    /// Events per page before the page runs to the end of its batch;
+    /// absent: 256.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+/// The branch's own events in `(after, through]`, ending on a batch boundary.
+#[derive(Debug, Serialize)]
+pub struct HistoryPage {
+    pub through: u64,
+    pub events: Vec<Arc<AgentEvent>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WithdrawRequest {
     pub session_id: String,
     pub branch_id: String,
@@ -143,6 +170,7 @@ pub enum SessionsErrorCode {
     SessionClosed,
     BranchMissing,
     Reloading,
+    FutureSequence,
     Ambiguous,
     PublicationUnknown,
     Failed,
@@ -492,6 +520,45 @@ impl AgentIndex {
         .await
     }
 
+    /// Pages the branch's own events through a fixed sequence. A caller pages
+    /// with `after` set to the last returned sequence until it reaches
+    /// `through`.
+    pub async fn history(&self, request: HistoryRequest) -> Result<HistoryPage, SessionsError> {
+        self.until_unloaded(async {
+            let limit = request.limit.unwrap_or(256);
+            if limit == 0 {
+                return Err(SessionsError::rejected("limit must be positive"));
+            }
+            if request.at_least.is_some() && request.through.is_some() {
+                return Err(SessionsError::rejected(
+                    "atLeast and through are mutually exclusive",
+                ));
+            }
+            let lease = self.acquire(&request.session_id).await?;
+            let head = lease.session.sequence(&request.branch_id)?;
+            let through = match (request.at_least, request.through) {
+                (Some(bound), _) | (_, Some(bound)) if bound > head => {
+                    return Err(SessionsError::new(
+                        SessionsErrorCode::FutureSequence,
+                        format!("sequence {bound} is beyond the published head {head}"),
+                    ));
+                }
+                (None, Some(through)) => through,
+                _ => head,
+            };
+            let after = request.after.unwrap_or(0);
+            if after > through {
+                return Err(SessionsError::rejected("after exceeds through"));
+            }
+            let events = lease
+                .session
+                .local_page(&request.branch_id, after, limit, through)
+                .await?;
+            Ok(HistoryPage { through, events })
+        })
+        .await
+    }
+
     /// Withdraws an input the caller wrote, by its `inputId`, through the
     /// branch's InputQueue, and returns InputQueue's decision. A deletion
     /// replies once `input/deleted` is published.
@@ -577,7 +644,7 @@ impl HostDispatch for SessionsService {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({
             "launch": "async", "input": "async", "lookup": "async",
-            "withdraw": "async", "stop": "async", "idle": "async",
+            "history": "async", "withdraw": "async", "stop": "async", "idle": "async",
         }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
@@ -626,6 +693,7 @@ async fn call(
         "launch" => reply(index.launch(request(args)?).await?),
         "input" => reply(index.input(request(args)?).await?),
         "lookup" => reply(index.lookup(request(args)?).await?),
+        "history" => reply(index.history(request(args)?).await?),
         "withdraw" => reply(match index.withdraw(request(args)?).await? {
             Withdrawal::Deleted { sequence } => json!({"status": "deleted", "sequence": sequence}),
             Withdrawal::NotHeld => json!({"status": "notHeld"}),

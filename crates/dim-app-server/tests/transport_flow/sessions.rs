@@ -720,3 +720,106 @@ async fn a_consumer_launches_writes_waits_and_withdraws_by_input_id() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries() {
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(None).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = launched(&sessions, &agent, json!({})).await;
+    let at = |extra: Value| {
+        let mut request = json!({"sessionId":session.id(),"branchId":"main"});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        request
+    };
+    let receipt = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:hello",
+                json!([{"type":"text","text":"hello"}]),
+            ),
+        )
+        .await;
+    // Readable right after the reply (fixed-prefix read).
+    let page = sessions
+        .ok("history", at(json!({"atLeast":receipt["sequence"]})))
+        .await;
+    assert!(page["through"].as_u64().unwrap() >= receipt["sequence"].as_u64().unwrap());
+    let first = sessions.ok("idle", at(json!({}))).await["sequence"]
+        .as_u64()
+        .unwrap();
+    // A two-event batch: a withdrawal and its Steer replacement.
+    let batch = client
+        .rpc(
+            "session.input.withdraw",
+            json!({"sessionId":session.id(),"branchId":"main","inputId":"unknown",
+                "steer":{"content":[{"type":"text","text":"steer"}]}}),
+        )
+        .await;
+    assert_eq!(batch["result"]["status"], "notHeld", "{batch}");
+    let inside = batch["result"]["steer"]["sequence"].as_u64().unwrap() - 1;
+    let head = sessions.ok("idle", at(json!({}))).await["sequence"]
+        .as_u64()
+        .unwrap();
+
+    // Pages of the whole branch through a fixed head, each on a batch
+    // boundary; one may run past `limit` to finish its batch.
+    let mut after = 0;
+    let mut events = vec![];
+    let mut through = None;
+    while through != Some(after) {
+        let mut request = at(json!({"after":after,"limit":1}));
+        if let Some(through) = through {
+            request["through"] = json!(through);
+        }
+        let page = sessions.ok("history", request).await;
+        through = Some(page["through"].as_u64().unwrap());
+        let page = page["events"].as_array().unwrap().clone();
+        assert!(!page.is_empty());
+        after = page.last().unwrap()["sequence"].as_u64().unwrap();
+        events.extend(page);
+    }
+    assert_eq!(through, Some(head));
+    assert_eq!(
+        Value::Array(events),
+        serde_json::to_value(session.local("main", ..=head).await.unwrap()).unwrap()
+    );
+    // An earlier fixed sequence bounds the page.
+    let page = sessions.ok("history", at(json!({"through":first}))).await;
+    assert_eq!(page["through"], first);
+    assert_eq!(
+        page["events"].as_array().unwrap().last().unwrap()["sequence"],
+        first
+    );
+
+    for (request, code) in [
+        (at(json!({"after":inside})), "rejected"),
+        (at(json!({"after":first,"through":first - 1})), "rejected"),
+        (at(json!({"limit":0})), "rejected"),
+        (at(json!({"atLeast":first,"through":first})), "rejected"),
+        (at(json!({"atLeast":head + 1})), "future_sequence"),
+        (at(json!({"through":head + 1})), "future_sequence"),
+        (
+            json!({"sessionId":session.id(),"branchId":"missing"}),
+            "branch_missing",
+        ),
+    ] {
+        assert_eq!(
+            sessions.error("history", request.clone()).await,
+            code,
+            "{request}"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
