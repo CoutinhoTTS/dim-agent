@@ -1,7 +1,7 @@
 # CLI attachment input
 
-Status: headless image input implemented; interactive attachment input pending. The native
-interactive CLI currently accepts one line per turn. The server interfaces are implemented:
+Status: multiline/paste draft and headless image input implemented. Native clipboard/file
+insertion, completion and dropped paths remain pending. The server interfaces are implemented:
 `attachment.put` (#102), image content blocks in
 `session.submit`, and ModelProvider's image handling (#92). This document defines the remaining
 CLI attachment work assigned in [roadmap #114](https://github.com/arcships/dim/issues/114).
@@ -10,8 +10,8 @@ The [Attachments client contract](plugins/Attachments.md#a3-cli-contract) and
 [feature list](../feature-list.md#input-references-and-attachments) define the required sources:
 clipboard images/files, `@` file selection, pasted/dropped paths, multiline and large text,
 mixed attachments, marker removal and headless images. All enter through existing public RPC.
-The [native CLI contract](../../crates/dim-cli/README.md) describes the executable; this proposal
-does not establish an implemented editor or clipboard binding.
+The [native CLI contract](../../crates/dim-cli/README.md) describes the executable. The current
+editor holds text and paste items; file-reference and image insertion are the remaining sources.
 
 ## Ownership and entry points
 
@@ -74,7 +74,7 @@ display, while the submitted text and file bytes retain their original values.
 | --- | --- |
 | Enter while idle | Validate and submit the complete draft, including an image-only draft. An empty draft does nothing. |
 | `Ctrl+J`, or supported `Shift+Enter` | Insert a newline. |
-| Arrows, Home/End, Backspace/Delete | Edit text; a marker is one indivisible item and is removed as a whole. |
+| Arrows, Home/End, Backspace/Delete | Edit text; Home/End use logical line boundaries. A marker is one indivisible item and is removed as a whole. |
 | `@` followed by a path query | Show local file suggestions at the cursor. Esc closes suggestions before acting on the draft. |
 | Terminal paste | Insert at the cursor as one paste action when the terminal reports its boundaries. Embedded newlines do not submit. |
 | `Ctrl+V` reaching the CLI | Read clipboard file entries, image data or text and insert them at the cursor. |
@@ -252,9 +252,19 @@ uses an isolated desktop session with fixture clipboard contents.
 Headless image flows cover supported formats, byte/order preservation, boundaries, local path
 resolution, combined encoded frames and uncertain error replies without resubmission. The
 existing actual CLI/App Server model flow checks the image in the model HTTP request and stored
-history after resume. The interactive editor and native clipboard remain unimplemented and
-unverified. No App Server, core, protocol, assembly, persisted format or capability change is
-required. No mechanism requirement is raised.
+history after resume. The paste flows cover literal CRLF, Unicode grapheme editing, atomic
+removal, command rejection before storage, UTF-8 and size limits, put rejection, interruption
+and drain, confirmed-path reuse and local encoded-frame rejection. The actual App Server/model
+flow stores a paste and reads its exact file through the real read tool.
+
+Native tmux calibration on macOS covers wrapped/multiline input, bracketed paste and viewport
+changes at 80x24, 40x10 and 15x6. The renderer accounts for previously painted lines reflowing
+when terminal width changes. Unix input owns a separately opened descriptor for the inherited
+terminal, so nonblocking reads cannot change stdout's status flags. The CLI flow also verifies
+complete model output while a terminal reader pauses. Windows input uses virtual-terminal mode with the existing console
+record reader; native Windows acceptance remains unverified. Clipboard and file-source
+calibration remains pending. No App Server, core, protocol, assembly, persisted format or
+capability change is required. No mechanism requirement is raised.
 
 ## Rule check and ablation
 

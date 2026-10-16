@@ -35,9 +35,36 @@ request must fit 16 MiB; several valid files can still exceed that limit.
 
 An error reply to `session.submit` can follow an already queued input. The CLI
 reports uncertainty and exits without resending, even while the connection stays
-open. Resume the printed Session handle to inspect its state. Interactive paste,
-draft editing, clipboard, path completion and drop insertion remain pending in
-the [attachment input contract](../../docs/design/cli-attachment-input.md).
+open. Resume the printed Session handle to inspect its state.
+
+The idle prompt edits a multiline draft. Enter sends; Ctrl+J inserts a newline.
+Terminal bracketed paste inserts one group without submitting embedded newlines.
+Multiline pastes and pastes over 16 KiB appear as atomic markers:
+
+```text
+> Explain [Paste 1: 120 lines]
+  and compare with the current file.
+Enter: send   Ctrl+J: newline   Ctrl+C: clear
+```
+
+Arrows move by grapheme or display row; Home/End select the logical line's ends.
+Backspace/Delete remove an entire marker. Ctrl+C clears a nonempty idle draft;
+with an empty draft it exits. EOF exits without submitting the draft. Text wraps
+and scrolls with the terminal size, and draft control characters are escaped for
+display while the original text is retained. A terminal reporting zero geometry
+uses 80 columns and 24 rows for the missing dimensions.
+
+Pastes up to 16 KiB expand unchanged into input. Larger pastes, up to 10 MiB of
+UTF-8 each, call the existing attachment.put only on Enter. Confirmed paths are
+reused with the unchanged item after another put or local request encoding fails.
+Those errors keep the draft editable. Ctrl+C during a sent put waits for its
+reply, retains a confirmed path and sends no further put or model input.
+Connection loss or an uncertain submission reply exits without retrying.
+Recognized commands require plain single-line input; attached command drafts are
+retained before any put or execution.
+
+Clipboard images/files, @ completion and dropped-path insertion are the remaining
+native sources in the [attachment input contract](../../docs/design/cli-attachment-input.md).
 
 Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
 for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.
@@ -161,14 +188,19 @@ Allow once? [y/N]
 > _
 ```
 
-Input is one line per turn. Only `y` or `yes` permits a pending tool operation once; empty input or any other answer denies it. Tool status records and approval reasons are displayed without dumping arbitrary tool arguments or tool result bodies. Model and external text are filtered at the terminal boundary to remove control sequences.
+Only `y` or `yes` permits a pending tool operation once; empty input or any other answer denies it. Approval and account prompts retain their existing line input and echo behavior. Tool status records and approval reasons are displayed without dumping arbitrary tool arguments or tool result bodies. Model and external text are filtered at the terminal boundary to remove control sequences.
 
-The terminal keeps the scrollback. There is no alternate-screen interface, terminal UI dependency, multiline editor or client-side input queue. Ordinary text typed during execution is discarded with a message to wait for the prompt; pending typeahead is cleared before an approval prompt so it cannot accidentally approve an operation.
+The terminal keeps the scrollback. The draft editor uses the existing terminal
+input owner and restores terminal modes and bracketed-paste settings when it
+yields. It does not create an alternate screen or a client-side input queue.
+Ordinary text typed during execution is discarded with a message to wait for
+the prompt; pending typeahead is cleared before an approval prompt so it cannot
+accidentally approve an operation.
 
 Interactive `!command` runs in the Session's working directory through `shell.run` and records the command and bounded output for the next model request, without starting a turn. `!!command` keeps its output private to this caller. Both also work during model execution. The prefix must be the first character; leading whitespace
 keeps the line ordinary model input. An approval prompt owns its answer line. Commands use the daemon's shell/environment and null stdin. Progress streams under one header per run without adding newlines to partial chunks; the final bounded output is displayed again, including truncation and recording failures. Commands are never retried after an RPC or transport error. Piped or `--prompt` text keeps its literal meaning.
 
-While a turn is running, `Ctrl+C` requests stop and waits for the server's resource and output delivery barrier. A second interrupt does not skip settlement. Once the prompt returns, `Ctrl+C` or EOF exits. The client detaches; it does not delete the session or shut down a shared daemon.
+While a turn is running, `Ctrl+C` requests stop and waits for the server's resource and output delivery barrier. A second interrupt does not skip settlement. Once the prompt returns, Ctrl+C clears a nonempty draft or exits an empty one; EOF exits. The client detaches; it does not delete the session or shut down a shared daemon.
 
 During a shell run, the first `Ctrl+C` stops that run; a second stops the model turn. At an approval
 prompt, Ctrl+C stops the turn. If only command settlement remains, another interrupt prints its

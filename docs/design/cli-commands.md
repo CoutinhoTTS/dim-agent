@@ -8,8 +8,8 @@ the implementation; the [native CLI contract](../../crates/dim-cli/README.md)
 describes the current executable.
 
 The [attachment input contract](cli-attachment-input.md) defines the idle draft editor,
-local image sources and paste handling. Its headless exec image arguments are implemented;
-the interactive editor and native insertion sources remain pending.
+local image sources and paste handling. The multiline/paste editor and headless exec image
+arguments are implemented; native clipboard/file insertion, completion and dropped paths remain pending.
 
 ## Commands
 

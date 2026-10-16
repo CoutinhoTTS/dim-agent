@@ -1,5 +1,6 @@
 mod args;
 mod client;
+mod composer;
 mod display;
 mod export;
 mod images;

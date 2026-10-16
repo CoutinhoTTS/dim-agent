@@ -31,7 +31,9 @@ Options:\n\
   --provider ID --model ID         Model selection for a new session\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
-Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
+Enter sends an idle draft; Ctrl+J inserts a newline; bracketed paste does not submit.\n\
+Ctrl+C clears a nonempty idle draft; an empty draft or EOF exits.\n\
+During execution, Ctrl+C requests stop and waits for settlement.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\
 PATH is relative to the CLI current directory; ~ is literal.\n\
 Approval accepts only y/yes; empty input denies. Noninteractive approval exits 3.\n\
