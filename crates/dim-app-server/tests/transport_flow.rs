@@ -67,6 +67,9 @@ mod management;
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;
 
+#[path = "transport_flow/sessions.rs"]
+mod sessions;
+
 enum Transport {
     Unix(BufReader<UnixStream>),
     Ws(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),

@@ -25,6 +25,16 @@ pub(crate) async fn canonical_cwd(cwd: &str) -> Result<std::path::PathBuf, RpcEr
     Ok(path)
 }
 
+/// The working directory of a new Session: an accessible absolute directory,
+/// canonicalized and UTF-8. `session.create` and `sessions.launch` share it.
+pub(crate) async fn session_cwd(cwd: &str) -> Result<String, RpcError> {
+    canonical_cwd(cwd)
+        .await?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| RpcError::invalid("cwd must be UTF-8"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
