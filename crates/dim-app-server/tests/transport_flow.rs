@@ -52,6 +52,9 @@ mod collaboration;
 #[path = "transport_flow/native_storage.rs"]
 mod native_storage;
 
+#[path = "transport_flow/compaction.rs"]
+mod compaction;
+
 #[path = "transport_flow/barrier.rs"]
 mod barrier;
 

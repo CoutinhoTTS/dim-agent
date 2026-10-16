@@ -79,6 +79,7 @@ flowchart LR
   p25 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p32
   p25 -->|"dim_agent_runtime::diagnostics::Diagnostics@main"| p32
   p10 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p31
+  p10 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p31
   p10 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p31
   p12 -->|"dim_agent_capabilities::host::PrepareModelHost@session"| p31
   p35 -->|"dim_agent_capabilities::tool_binding::ToolBinding@main"| p31
@@ -97,6 +98,7 @@ flowchart LR
   p10 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p29
   p25 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p29
   p10 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p28
+  p10 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p28
   p10 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p28
   p10 -->|"dim_agent_capabilities::host::PrepareContextHost@session"| p28
   p25 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p28
