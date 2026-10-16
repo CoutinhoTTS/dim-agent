@@ -514,6 +514,26 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::shell_input",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/shell_input.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::pin",
+        "tokio::select",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::shell_input::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::shell_input",
+      "file": "crates/dim-agent-capabilities/src/shell_input.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::shell_session",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -1179,6 +1199,18 @@
       ]
     },
     {
+      "id": "dim_app_server::agents::sessions",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::agents",
+      "file": "crates/dim-app-server/src/agents/sessions.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_app_server::approval",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1256,7 +1288,6 @@
       "parent": "dim_app_server::connection",
       "file": "crates/dim-app-server/src/connection/tree.rs",
       "unexpandedMacros": [
-        "matches",
         "tokio::select",
         "vec"
       ]
@@ -2772,6 +2803,13 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::shell_input",
+      "references": [
+        "mod shell_input"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::shell_session",
       "references": [
         "mod shell_session",
@@ -3949,6 +3987,13 @@
         "path SessionBroadcastPlugin::new",
         "use crate::session_broadcast::SessionBroadcastEndPlugin",
         "use crate::session_broadcast::SessionBroadcastPlugin"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::shell_input",
+      "references": [
+        "path crate::shell_input::install"
       ]
     },
     {
@@ -5630,6 +5675,155 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path element",
+        "path text",
+        "use crate::context_block::element",
+        "use crate::context_block::raw",
+        "use crate::context_block::text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::host_platform",
+      "references": [
+        "path HostPlatform",
+        "path ProcessTree",
+        "use crate::host_platform::HostPlatform",
+        "use crate::host_platform::ProcessTree"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Progress",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::closed",
+        "path RpcError::from",
+        "path RpcError::interrupted",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path SessionMethods::provide",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::Progress",
+        "use crate::methods::RpcError",
+        "use crate::methods::SessionMethods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::shell_input::testing",
+      "references": [
+        "mod testing",
+        "path testing::pause"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use crate::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_capabilities::workspace_tools::exec",
+      "references": [
+        "path OutputSink",
+        "path capture_preview",
+        "path pump",
+        "path sanitize",
+        "path signal_name",
+        "path tail_bytes",
+        "path truncate_preview",
+        "use crate::workspace_tools::exec::OutputSink",
+        "use crate::workspace_tools::exec::capture_preview",
+        "use crate::workspace_tools::exec::pump",
+        "use crate::workspace_tools::exec::sanitize",
+        "use crate::workspace_tools::exec::signal_name",
+        "use crate::workspace_tools::exec::tail_bytes",
+        "use crate::workspace_tools::exec::truncate_preview"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "path SessionLifecycle",
+        "path SessionPhase::Closing",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionLifecycle",
+        "use dim_agent_runtime::SessionPhase"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_runtime::diagnostics",
+      "references": [
+        "path Diagnostics",
+        "use dim_agent_runtime::Diagnostics"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::shell_input",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMessageData",
+        "path InputMessageData::default",
+        "path InputMode::Append",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::InputMode"
       ]
     },
     {
@@ -10179,6 +10373,17 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "mod sessions",
+        "path sessions",
+        "path sessions::SessionsService",
+        "use sessions::Lookup",
+        "use sessions::find_input"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_app_server::protocol",
       "references": [
         "path AgentInfo",
@@ -10217,6 +10422,132 @@
         "path Traces",
         "path Traces::new",
         "use crate::trace::Traces"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_capabilities::input_queue",
+      "references": [
+        "path InputQueue",
+        "path Withdrawal",
+        "path Withdrawal::Deleted",
+        "path Withdrawal::NotHeld",
+        "use dim_agent_capabilities::input_queue::InputQueue",
+        "use dim_agent_capabilities::input_queue::Withdrawal"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path PermissionState",
+        "use dim_agent_capabilities::permission::PermissionState"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path Session",
+        "use dim_agent_runtime::Session"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_runtime::branch",
+      "references": [
+        "path Publication",
+        "use dim_agent_runtime::Publication"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::Closed",
+        "path AgentError::InvalidInput",
+        "path AgentError::Reloading",
+        "path AgentError::Storage",
+        "path AgentError::UnknownBranch",
+        "path dim_agent_runtime::Result",
+        "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock",
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path InputBlock::Raw",
+        "path InputMessageData",
+        "path InputMode",
+        "path InputWithdrawData",
+        "path UserInput",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::InputMode",
+        "use dim_agent_types::InputWithdrawData",
+        "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "path PermissionPolicy::default",
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path ModelSelection",
+        "use dim_agent_types::ModelSelection"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_app_server::agents",
+      "references": [
+        "path AgentIndex",
+        "path super::session_config",
+        "use super::AgentIndex"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path PROTOCOL_VERSION",
+        "path session_cwd",
+        "use crate::protocol::PROTOCOL_VERSION",
+        "use crate::protocol::session_cwd"
       ]
     },
     {
@@ -10952,7 +11283,7 @@
         "path SessionSkillsResult",
         "path SessionSummary",
         "path agent_unknown",
-        "path canonical_cwd"
+        "path session_cwd"
       ]
     },
     {
@@ -11203,7 +11534,6 @@
         "path RpcError::app",
         "path RpcError::from",
         "path RpcError::invalid",
-        "path RpcError::wire",
         "path params"
       ]
     },
@@ -11230,8 +11560,18 @@
         "path InputMessageData",
         "path InputMessageData::default",
         "path UserInput",
-        "use dim_agent_types::BranchSource",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::BranchSource"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "path Lookup::Accepted",
+        "path Lookup::Ambiguous",
+        "path Lookup::Unknown",
+        "path crate::agents::find_input",
+        "use crate::agents::Lookup"
       ]
     },
     {
