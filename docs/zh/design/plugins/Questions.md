@@ -397,7 +397,7 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 通过 RPC、工具调用和事件进行的流程测试：
 
 1. 单选、多选、多问题和自定义回答产生规定的 `content`；无效回答在 `respond` 时被拒绝，不产生事实。
-2. 以 `interactive: false` 创建的 Session（包括 `exec` 和 ACP）：`ask_user` 被声明，并回答当前没有可以回答的对象，不产生 `question/*` 事件；省略 `interactive` 时照常提问。两种情况下工具集合相同。
+2. 以 `interactive: false` 创建的 Session（包括 `exec` 和自动化）：`ask_user` 被声明，并回答当前没有可以回答的对象，不产生 `question/*` 事件；省略 `interactive` 时照常提问。两种情况下工具集合相同。
 3. 先回答后停止：结果包含回答。先停止后回答：`Cancelled`、`question/cancelled`、已取消结果。两种顺序都通过在 Dispatcher 被挂起时先提交 `I` 再提交 `A` 来强制产生。`I` 在 `Q` 之前提交、在其之后被消费：问题被取消；`I` 被消费之后的 `ask` 不写任何内容。
 4. 两个并发 `respond`：恰好接受一个。
 5. 一个批次中两个 `ask_user` 加一个慢工具：回答保留到唯一的 `step/tool-result`。
@@ -410,7 +410,7 @@ CLI 处理所附着 Session 中每个分支的 `question/*` 通知（A9），与
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
-| A1 | 每个 Session 都声明 `ask_user`，`interactive` 为 `false` 时回答当前没有可以回答的对象 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30）；决定 §3（ACP/自动化为非交互） | 各 Session 工具集合不同；fork 丢失提示词前缀 |
+| A1 | 每个 Session 都声明 `ask_user`，`interactive` 为 `false` 时回答当前没有可以回答的对象 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30）；决定 §3（exec/自动化为非交互） | 各 Session 工具集合不同；fork 丢失提示词前缀 |
 | A2 | `session.create` 省略 `interactive`，或已存储记录缺少该字段，表示交互 | [Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段) 的格式决定 | 现有 Session 不再提问 |
 | A3 | 载荷增加 `turn_id`、`request_id`、`declined` | 判断 | 通过 `step/tool-call` 关联；拒绝回答建模为一种回答 |
 | A4 | 1..=4 个问题，2..=6 个选项 | 边界情况参考；判断 | schema 限制改变 |

@@ -15,6 +15,7 @@
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
+- [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)

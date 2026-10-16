@@ -1,6 +1,7 @@
 # SessionStore Session files
 
-Status: Draft (for review). Roadmap item S5a ([#59](https://github.com/arcships/dim/issues/59)), after S6 ([#51](https://github.com/arcships/dim/issues/51)).
+Status: Implemented. Roadmap item S5a ([#59](https://github.com/arcships/dim/issues/59), [#95](https://github.com/arcships/dim/pull/95)), after S6 ([#51](https://github.com/arcships/dim/issues/51)). The fork and delete
+methods that use it are S5c's (§13); §17 lists what the implementation changed.
 Overview: [Appendix B.2](../overview.md#b2-app-server-process-plugins), SessionStore and FileStorage rows. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) process scope, inside the existing SessionStore plugin.
 Consumers: [Attachments](../plugins/Attachments.md) (P2) and Session fork and deletion (S5c).
@@ -23,6 +24,8 @@ history quotes it and history never changes.
 - **Format.** The native store moves to version 15, with two new tables. A v13 store is upgraded
   in place at startup.
 - **Interface.** Attachments reaches the store through the process service `sessionFiles`.
+- **Reading.** The model reads a file with `read`, like any file: no prompt, no grant, and no
+  authority added (§11).
 
 No Timeline event, no new plugin, no change to the runtime, rutis or the Session facade.
 
@@ -198,6 +201,11 @@ txn 2 finding the Session gone or its row no longer pending under G. SessionStor
 unowned and a sweep is scheduled. If that update fails too, the row stays pending under G, and
 the next generation sweeps it.
 
+The put runs as SessionStore's own task: a caller that stops waiting cancels it, and the task
+still ends by committing or abandoning, so no row stays pending under a live generation. Until
+P3 adds `resourceNode`, the put reads no node: it looks up the control node's FileStorage, and
+txn 1 answers `not_found` (D2).
+
 ### 5.2 Fork (S5c)
 
 ```
@@ -247,7 +255,7 @@ files wait as unowned rows until a sweep reaches the node.
 | --- | --- |
 | A put abandons a file | Its directory may exist |
 | A commit removes owner rows (S5c delete, creation rollback) | Files may have lost their last owner |
-| The first put on a node in each SessionStore generation | Pending rows of a crashed or reloaded generation, unowned rows a failed removal left, and directories whose removal a power loss undid |
+| Every put on a node until a sweep of the current SessionStore generation has completed there (D3) | Pending rows of a crashed or reloaded generation, unowned rows a failed removal left, and directories whose removal a power loss undid |
 | S5c cleanup | Explicit reclamation |
 
 Step 3 is safe because the directory belongs to one database (§3.1), and a put
@@ -310,7 +318,7 @@ business directory.
 | --- | --- |
 | Parent | Every component but the last is opened as `open_directory` opens it: an existing directory reached without following links, never the reserved directory. A missing parent fails `Io` `NotFound`; there is no recursive creation, and callers create each level in order |
 | Reserved names | `path` already rejects the reserved prefix `.dim-file-storage-` and `auth.json.lock` by name (`InvalidPath`) |
-| Aliases | Aliases are checked the way `lock` checks them, before anything is created. The parent's reserved directory is ensured first, so any spelling the filesystem equates with it already exists. Then the lock keys for the last component and for `auth.json.lock` are opened in that reserved directory; if they are the same file, the name is an alias of the account marker and the call fails `InvalidPath` |
+| Aliases | Aliases are checked the way `lock` checks them, before anything is created. The parent's reserved directory is ensured first, so any spelling the filesystem equates with it already exists. Then the key for `auth.json.lock` is ensured in that reserved directory and the key for the last component is opened if it exists; if they are the same file, the name is an alias of the account marker and the call fails `InvalidPath` |
 | Create | An absent last component is created relative to the held parent handle: Unix `mkdirat` with mode `0700`; Windows `NtCreateFile` with `FILE_CREATE` and `FILE_DIRECTORY_FILE`, inheriting the parent's DACL |
 | Present | An existing directory is opened as `open_directory` opens it, so an alias of the reserved directory fails `InvalidPath`. An existing business directory counts as created, just as S6's `remove` counts an absent entry as removed. Any other existing entry (file, link, reparse point, special file) fails `Io` and is left untouched; links are never followed |
 | Durability | In both the created and the present case the parent is synced before the call returns, so a retry after `Unsynced` confirms durability. A sync failure returns `Unsynced` (the directory exists and is visible, durability unconfirmed); its message is generalized from "file replaced" to cover directories. Windows has no directory sync, as for `replace` |
@@ -318,10 +326,10 @@ business directory.
 | Cancellation | Checked up to the creation, which is the commit boundary. Once created, the sync result is reported |
 | Errors | `InvalidPath`, `Io` (`NotFound` parent, an existing non-directory entry, other I/O), `Unsynced`, `Closed`, `Cancelled`, `Worker` |
 
-The lock keys the alias check opens stay in the reserved directory, as keys for file names do;
-`remove` deletes them with the directory. The operation lives inside FileStorage's own module,
-beside `list` and `remove`, and holds the same generation admission. FileStorage's plugin page
-documents it when it is implemented.
+The alias check never creates a key for the new directory's name, so a put leaves no key behind
+in `<db>.session-files/.dim-file-storage-locks`, which is never removed (Design changes, D1). The
+operation lives inside FileStorage's own module, beside `list` and `remove`, and holds the same
+generation admission. FileStorage's plugin page documents it.
 
 ## 8. Storage format
 
@@ -375,6 +383,20 @@ alternative, refusing every v13 store, loses users' Sessions. Later formats appe
 from their predecessor. Tests build disposable v13 stores from a frozen copy of the v13 schema and
 never open a user's store (AGENTS.md).
 
+**Upgrade log line.** Opening the store tells its caller that it upgraded, and the daemon then
+writes one line to stderr: `Upgraded native store <path> from format v13 to v15; earlier dimcode
+versions cannot open it.` The line is written after the upgrade commits, so it never claims an
+upgrade that rolled back, and only by the start that upgrades. It goes to stderr directly, not
+as a `tracing` event, because the daemon's default log filter keeps only errors
+([main.rs](../../../crates/dim-app-server/src/main.rs)). A CLI-started daemon's stderr is the
+private `daemon.log` in the database directory, so a user who rolls back finds the reason next
+to the old daemon's refusal.
+
+**S5c needs no further format change for Session files.** Its fork step only inserts
+`session_file_owners` rows (§4), its delete step only removes them (§5.3), and the sweep reads
+`session_files`; v15 already holds everything those steps read and write. A v16 could only come
+from a change to S5c's own Session records, not from Session files.
+
 ## 9. Interface
 
 ### 9.1 Language-neutral (ADR 002 D5)
@@ -420,7 +442,7 @@ type; the Rust binding is Appendix A.
 | `invalid` | `name` breaks the rule below | Nothing |
 | `too_large` | Content over 16 MiB | Nothing |
 | `node_unavailable` | The FileStorage of the Session's resource node is not reachable. On the control node this means FileStorage is reloading or closed. Retryable | Nothing owned; an abandoned directory is swept |
-| `cancelled` | Cancelled before txn 2, including SessionStore unloading | Nothing owned; swept |
+| `cancelled` | Cancelled before txn 2, including SessionStore unloading and a later generation's sweep claiming the pending row | Nothing owned; swept |
 | `storage` | SQLite or FileStorage failure, including `Unsynced` (durability unconfirmed) | Nothing owned; swept |
 
 Limits, and who owns them:
@@ -447,12 +469,115 @@ history, as moving a workspace breaks paths into it.
 - Files are written only under `<db>.session-files/<fileId>/`, never at a caller-chosen
   location; `name` is one validated component. Directories are `0700` and files `0400` on Unix;
   Windows inherits the parent's DACL.
-- A path confers no authority. `read` already reads absolute paths under the Session's
-  permission policy, and the rows grant nothing.
 - The directory belongs to one database, so one store's sweep never removes another store's
   files, even when two databases share a directory.
 - Contents are user data. They appear in no diagnostic, row or event; diagnostics carry the
   file id, node and error only.
+
+### 11.1 Reading a Session file
+
+**Decision: the model reads a Session file the way it reads any file. The read never asks,
+records no grant, and S5a adds no authority, rule or exception.** Permission, Approval and
+WorkspaceTools stay unchanged.
+
+```
+ model: read {path: "<database directory>/<db>.session-files/<fileId>/paste.txt"}
+   |
+   v
+ ToolExecutor -> Approval.admit -> Permission.decide(tool "read", risk "read_filesystem")
+                                   (no path input)
+   "read" in disallowedTools --------------------------> Deny, for every path
+   "read" in allowedTools -----------------------------> Allow
+   preset read-only, workspace-write or full-access ---> Allow, no approval/request
+   |
+   v
+ WorkspaceTools read: resolve the path (~, join with cwd, realpath), refuse binary files
+```
+
+What happens today, from [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)
+`decide` and [approval.rs](../../../crates/dim-agent-capabilities/src/approval.rs) `admit`:
+
+- **No prompt.** Permission decides by tool name and risk category and never sees the path, so
+  a path outside the working directory is decided like one inside it. `read` declares
+  `read_filesystem`, which every preset allows; the product profile's default preset is
+  `workspace-write` ([main.rs](../../../crates/dim-app-server/src/main.rs)). The model therefore
+  reads a pasted file without an approval prompt, as Attachments needs. A policy that lists
+  `read` in `disallowedTools` denies it, like every other `read`.
+- **No grant to widen.** An approval answer is `allow` or `deny` for one call, and Dim records
+  no "always allow" ([AcpGateway](../plugins/AcpGateway.md) never offers `allow_always`). A policy
+  change (`session.permission.update`, written as `permission/changed`) holds a preset and tool
+  names, never a path. Remembered decisions (`/approvals`) are planned but not designed; none
+  can come from a `read` that never asks, and §11.2 keeps it that way. A Session file read is allowed without an approval request, so it leaves nothing
+  behind that could cover `dimcode.sqlite`, the database directory or `~/.dimcode`.
+- **The FileStorage root confers nothing.** Registering the database directory as a FileStorage
+  root (§3.1) lets SessionStore write there through FileStorage. `read` never consults
+  FileStorage roots, and file-root authorization confers nothing beyond that
+  ([ADR 003](../../adr/003-approval-scope.md) D5).
+- **Not new.** WorkspaceTools already writes oversized `read` results and `exec` output to
+  `<database directory>/command-output/<sessionId>/` and gives the model that path
+  ([read.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs)
+  `offload`). In the product profile both directories sit next to `dimcode.sqlite`.
+
+```
+ ~/.dimcode/                            product home: auth.json and others
+   rust/                                database directory, a FileStorage root
+     dimcode.sqlite                     native store; read refuses .sqlite as binary
+     command-output/<sessionId>/        WorkspaceTools output, already read by path
+     dimcode.sqlite.session-files/
+       <fileId S owns>/paste.txt        path returned by a put for S
+       <fileId T owns>/notes.md         Session T's file
+```
+
+**What Permission does not do.** Permission admits by tool and risk; it is not isolation
+([Permission](../../architecture/rust-agent/plugins/Permission.md), ADR 001 "Trust and
+cross-language calls"). Under every preset, `read`, `glob` and `grep` reach any text file the
+daemon's user can read: T's file above, other Sessions' command output, `~/.dimcode/auth.json`.
+`read` refuses `dimcode.sqlite` only because its binary guard rejects the `.sqlite` extension.
+S5a does not widen this boundary. It does not narrow it with an exception for its own directory
+either, since that would guard one App Server directory and leave the rest of the product home
+as it is. What S5a guarantees by construction:
+
+- Every path `put` returns is `<db>.session-files/<fileId>/<name>`, with `fileId` a random UUID
+  v4 and `name` one validated component. No returned path names the database, its companions
+  or any other entry of the database directory.
+- SessionStore returns a path only to a `put` for the Session that then owns the file, and a
+  fork owns every file its source owned, so the paths its inherited history got from `put` stay
+  owned (§4).
+
+Confining a Session's reads to the files it owns needs path-scoped file access, which §11.2
+leaves to its owner.
+
+### 11.2 Requirement for path-scoped file access
+
+No item scopes in-process file reads by path today: F2
+([#73](https://github.com/arcships/dim/issues/73)) covers command rules, and F5
+([#76](https://github.com/arcships/dim/issues/76)) isolates processes at start. Whichever item
+first confines file access by path, for tools or for processes, must keep the two properties
+below. They are a generic file-access need, not a Session-files exception: WorkspaceTools'
+command output has the same shape, data a Session's own capabilities hand to its model by path,
+outside the workspace.
+
+1. **Owned files are read without asking.** A Session reads the Session files it owns with no
+   approval and no recorded decision, so Attachments never prompts. No grant is derived from
+   such a read.
+2. **Ownership, not location, decides.** Session S may read `<db>.session-files/<fileId>/` for
+   each file S owns in SessionStore's rows when access is decided, or when an isolated process
+   starts. The set never covers `<db>.session-files/` as a whole, the database directory or the
+   product home, and it includes another Session's file only if S owns it (a fork owns its
+   source's files).
+
+SessionStore answers "which files does S own" from `session_file_owners`, whose primary key
+`(session_id, file_id)` serves that lookup, so v15 needs no change for it. The query is added
+with that item's design; nothing calls it before then.
+
+Rejected alternatives:
+
+| Alternative | Why not |
+| --- | --- |
+| Register the Session-files directory as a read-only root that `read` accepts | `read` consults no roots, so nothing would change today, and file-root authorization may confer no tool authority (ADR 003 D5, AGENTS.md rule 11). A root also covers the whole directory, every Session's files |
+| Attachments puts the text in context, or a dedicated tool reads by `fileId` | Inlining puts up to 10 MiB into context at submit, which Attachments exists to avoid. A second read tool duplicates `read` (offsets, encodings, offload) while the path stays readable by `read` |
+| A Permission rule "a Session may read its own files" now | Permission has no path input, so the rule would exempt nothing; it would be a Session-files case inside a path-agnostic Permission. Its generic form is §11.2 |
+| `read` refuses the database directory except Session files | An exception in WorkspaceTools for one App Server directory. It covers `dimcode.sqlite`, already refused as binary, but not `auth.json` or the rest of the product home |
 
 ## 12. Timing and conflicts
 
@@ -474,7 +599,7 @@ history, as moving a workspace breaks paths into it.
 
 | Document | Change in this PR |
 | --- | --- |
-| [Attachments](../plugins/Attachments.md) | Layout `<db>.session-files/<fileId>/<name>` with `attachmentId = fileId`; A1 refined to a directory no single Session owns; fork and delete ordering rows point here; the offline rows no longer depend on the withdrawn #5, because SessionStore looks FileStorage up per call (#38). The client contract of `attachment.put` is unchanged here; its `storage_failed` code lands in P2's design review (§15) |
+| [Attachments](../plugins/Attachments.md) | Layout `<db>.session-files/<fileId>/<name>` with `attachmentId = fileId`; A1 refined to a directory no single Session owns; fork and delete ordering rows point here; the offline rows no longer depend on the withdrawn #5, because SessionStore looks FileStorage up per call (#38). The client contract of `attachment.put` is unchanged here; its `storage_failed` code lands in P2's design review (§15). §7 points to §11 for how reads are admitted, instead of saying a fork reads only the files its history references |
 | [Overview B.2](../overview.md#b2-app-server-process-plugins) | FileStorage row gains directory creation |
 | [Native storage format](native-storage-format.md) | Planned v15 decision |
 
@@ -492,7 +617,7 @@ RPC. S5a implements those steps and tests them at SessionStore's Rust API.
 | Principles §4 rule 5 (batch) | Not applicable: no event. |
 | Principles §4 rule 6 (context from handed-over events) | The model sees a path only in adopted user input, and file content only in a `read` result. |
 | Principles §4 rule 7 (public events and services only) | Attachments uses `sessionFiles`; SessionStore uses FileStorage's public operations and reads no plugin's internals. |
-| Principles §4 rule 8 (requirements to mechanism owners) | No change to the Timeline, Dispatcher, event format, rutis, assembly or the Session facade, and nothing raised to rutis. The format change belongs to SessionStore's own store and is recorded as a format decision. `create_directory` is a FileStorage supplement inside its own module, agreed in the S6 review. |
+| Principles §4 rule 8 (requirements to mechanism owners) | No change to the Timeline, Dispatcher, event format, rutis, assembly or the Session facade, and nothing raised to rutis. The format change belongs to SessionStore's own store and is recorded as a format decision. `create_directory` is a FileStorage supplement inside its own module, agreed in the S6 review. Permission, Approval and WorkspaceTools are unchanged (§11.1); §11.2 is a generic requirement for the item that makes file access path-scoped, not a Session-files exception. |
 | Principles §4 rule 9 (only facts later decisions use) | No Timeline event. Ownership is process-level state in SessionStore's rows. |
 | Principles §1 (Capability and App Server boundary) | Session files are SessionStore data (overview B.2); no new plugin. The paste feature stays in Attachments' own crate. |
 | ADR 002 D1 (scope follows state) | Process scope: a file outlives the Session that put it and is shared across Sessions. |
@@ -500,6 +625,7 @@ RPC. S5a implements those steps and tests them at SessionStore's Rust API.
 | ADR 002 D3 (dependencies follow scope) | Attachments (optional, Session) depends on SessionStore (core, process); SessionStore depends on no optional plugin and looks FileStorage up per call by resource node, so a FileStorage reload reloads nothing. |
 | ADR 002 D4 (structural vs business configuration) | No configuration: the location and limits are fixed. |
 | ADR 002 D5 (language-neutral contracts) | §9.1 is the contract; Appendix A is one binding. |
+| ADR 003 (approval scope) | Reading a Session file is a tool call, admitted by Approval and Permission like any `read` (§11.1). The FileStorage root SessionStore registers confers no authority (D5). |
 
 ## 15. Requirements raised to mechanism owners
 
@@ -511,6 +637,7 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 | App Server assembly (`serve` in lib.rs) | Register the database directory as a FileStorage root when it is not one, and pass its index to `SessionStorePlugin` (§3.1) | A few lines in S5a's implementation, appended after the assembly lane's work like other registrations |
 | Attachments (P2 design refinement) | Map `sessionFiles` `storage` to an `attachment.put` code. Attachments lists none today; SessionTitle maps SessionStore `storage` to `storage_failed` | Decided: `storage_failed`, recorded in [#66](https://github.com/arcships/dim/issues/66); applied in P2's design review |
 | S5c | Delete owner rows inside the delete transaction, after closing the Session and before `agent_sessions`; copy owner rows inside the fork transaction; schedule a sweep after a delete | Contract for S5c (§5.2, §5.3) |
+| The item that first scopes file access by path (F5 [#76](https://github.com/arcships/dim/issues/76) for processes; no item yet for in-process tools) | §11.2: a Session reads the files it owns without asking, and ownership decides, never the Session-files directory as a whole, the database directory or the product home | Not needed by S5a, since Permission has no path input. Applies when that item is designed; SessionStore then adds the ownership query |
 
 ## 16. Acceptance (flow tests)
 
@@ -528,17 +655,44 @@ None to the runtime or rutis. Supplements and requirements to other owners:
 6. Cancellation before txn 2: nothing owned; the directory is swept. An invalid name (including
    `AUTH.JSON`) or content over 16 MiB: `invalid` or `too_large`; nothing written.
 7. An empty store is created at v15. A disposable v13 store upgrades in place to the exact v15
-   schema with every business row unchanged, then reopens as v15. The branch-only v14 and
-   unknown schemas are refused and preserved.
+   schema with every business row unchanged, then reopens as v15. The upgrading open reports
+   the upgrade, which the §8 log line comes from; the reopen does not. The branch-only v14 and unknown
+   schemas are refused and preserved.
 8. FileStorage flow: `create_directory` creates `0700` and syncs the parent; an existing
    directory succeeds; a missing parent fails `NotFound`. Reserved names, a case alias of the
    reserved directory, and a case alias of `auth.json.lock` (on a case-insensitive filesystem)
    fail `InvalidPath` and create nothing. An existing file or link is refused and untouched.
    Cancellation before creation creates nothing.
+9. Read admission, through a Session's tool path: after `put`, the Session's `read` of the
+   returned path, under the product default `workspace-write` and under `read-only`, returns
+   the content; the branch writes no `approval/request`, and its permission state (version and
+   policy) is unchanged. Denying another Session's file or the database directory is acceptance
+   of the item in §11.2, because `read` is not path-scoped (§11.1).
+
+Tests: items 1, 3 (unknown Session), 5, 6 (names, size, a cancelled call), 4 and 9 are flow
+tests through `sessionFiles` in
+[session_files_flow.rs](../../../crates/dim-app-server/tests/session_files_flow.rs); 2, and 3 and
+6 between the write and txn 2, run S5c's fork step and a hook at that point in
+[files/tests.rs](../../../crates/dim-app-server/src/storage/files/tests.rs); 7 is
+`a_v13_store_upgrades_in_place_once`, `the_daemon_reports_a_v13_upgrade_on_stderr_once` and the
+refusal cases in [storage_flow.rs](../../../crates/dim-app-server/tests/storage_flow.rs); 8 is
+`directory_creation_stays_inside_the_authorized_root` in
+[file_storage_flow.rs](../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs).
 
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
 `cargo test --workspace --locked`, and `cargo run --locked -p xtask -- graph` then `check`,
 because SessionStore provides a new service.
+
+## 17. Design changes in implementation
+
+Changes the implementation made to this design ([roadmap §5.3](../roadmap.md#53-实现中发现的变更)). Each affects
+only S5a.
+
+| # | Change | Why |
+| --- | --- | --- |
+| D1 | `create_directory` ensures the key for `auth.json.lock` and only opens the key for the new name, instead of opening both keys with creation (§7) | Opening a key with creation leaves a key file named after the directory, and FileStorage unlinks keys only when it removes their parent. `<db>.session-files` is never removed, so every put would have left one key there for good. An existing alias of the marker still resolves to the marker's key, so the check gives the same answer |
+| D2 | Before P3, a put reads no resource node. The Session's existence is decided by txn 1, after the FileStorage lookup, so an unknown Session gets `node_unavailable` while FileStorage is not active (§5.1) | `SessionConfig.resourceNode` does not exist yet, so a read before txn 1 would only repeat txn 1's check. P3 adds the node read before the lookup |
+| D3 | Every put schedules a sweep until one sweep of the generation has completed on its node, instead of only the first put (§5.4) | A first sweep stopped by an unavailable node would otherwise wait for an abandon or a release to retry; a completed sweep ends the extra requests |
 
 ## Appendix A. Rust binding
 

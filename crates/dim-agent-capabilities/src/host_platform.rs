@@ -2,8 +2,8 @@
 //! `docs/architecture/rust-agent/plugins/HostPlatform.md`.
 //!
 //! Shell resolution copies ADR 020 and TS `packages/agent/src/exec-shell.ts`.
-//! Facts are resolved once when the process root applies the plugin and stay
-//! unchanged for the process; the shell problem is recorded, never raised.
+//! Process facts are captured at apply; exec shell preferences are read at use
+//! time. Shell problems are returned as data, never raised during assembly.
 use crate::file_storage::{FileStorage, FileStorageError};
 use dim_agent_runtime::{Capability, KeysOf, When};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
@@ -114,8 +114,8 @@ pub enum ShellStatus {
     Unavailable { code: &'static str, reason: String },
 }
 
-/// Immutable facts of this process.
-#[derive(Debug, Clone)]
+/// Process facts and the source of the exec shell preference.
+#[derive(Clone)]
 pub struct HostPlatform {
     pub home: PathBuf,
     pub os: Os,
@@ -126,7 +126,22 @@ pub struct HostPlatform {
     pub timezone: Option<String>,
     /// Environment of the service process at start; never a client's.
     pub env: Vec<(OsString, OsString)>,
+    /// Initial shell snapshot, also used by explicitly constructed platforms.
     pub shell: ShellStatus,
+    shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
+}
+
+impl std::fmt::Debug for HostPlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostPlatform")
+            .field("home", &self.home)
+            .field("os", &self.os)
+            .field("arch", &self.arch)
+            .field("timezone", &self.timezone)
+            .field("env", &self.env)
+            .field("shell", &self.shell)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A child process started by [`HostPlatform::spawn`].
@@ -156,7 +171,18 @@ impl HostPlatform {
             timezone: iana_time_zone::get_timezone().ok(),
             env,
             shell,
+            shell_file: None,
         })
+    }
+    /// Reads the configured exec shell for this invocation without reloading
+    /// the plugin. Explicitly constructed platforms keep their supplied shell.
+    pub async fn exec_shell(&self) -> ShellStatus {
+        match &self.shell_file {
+            Some((storage, root, relative)) => {
+                resolve_shell(read_config(storage, *root, relative).await, &self.env).await
+            }
+            None => self.shell.clone(),
+        }
     }
     /// Starts `spec` as the root of its own process tree.
     pub fn spawn(&self, spec: ProcessSpec) -> io::Result<ProcessTree> {
@@ -282,16 +308,27 @@ impl TypedPlugin for HostPlatformPlugin {
         (When(storage),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let config = match (&self.config.exec_shell_file, storage) {
+            let config = match (&self.config.exec_shell_file, &storage) {
                 (Some((root, relative)), Some(storage)) => {
-                    read_config(&storage, *root, relative).await
+                    read_config(storage, *root, relative).await
                 }
                 _ => Ok(None),
             };
             let env: Vec<_> = std::env::vars_os().collect();
             let shell = resolve_shell(config, &env).await;
-            let platform = HostPlatform::current(shell)
+            let mut platform = HostPlatform::current(shell)
                 .map_err(|error| CordisError::PluginFailed(error.into()))?;
+            platform.shell_file = self
+                .config
+                .exec_shell_file
+                .as_ref()
+                .map(|(root, relative)| {
+                    (
+                        storage.expect("FileStorage is a declared dependency"),
+                        *root,
+                        relative.clone(),
+                    )
+                });
             ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
             Ok(Effect::Done)
         })

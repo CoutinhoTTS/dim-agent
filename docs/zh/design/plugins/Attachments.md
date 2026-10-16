@@ -181,7 +181,7 @@ Client      Rpc        Branch Timeline                      Model           Work
 
 ## 7. 安全
 
-CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请求的适配器能否接收而解码；Rpc 不检查图片。文本附件由 SessionStore 写在它的 Session 文件目录下，从不写到客户端选择的路径：`name` 是一个文件名，由 SessionStore 校验。路径不授予任何权限：`read` 本来就在 Session 的权限策略下读取绝对路径，风险类别 `read_filesystem` 在每个预设下都被允许。`attachment.put` 是用户的操作，不是 agent 的决定，因此不涉及 Approval（[ADR 003](../../adr/003-approval-scope.md) D1）。分叉共享其源 Session 拥有的每个文件（[Session 文件 §4](../appserver/session-files.md#4-分叉时共享)）；它的模型只从继承的历史中得知路径。内容是重放给模型的用户数据；CLI 不得隐式附加机密。错误消息和诊断不含内容。
+CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请求的适配器能否接收而解码；Rpc 不检查图片。文本附件由 SessionStore 写在它的 Session 文件目录下，从不写到客户端选择的路径：`name` 是一个文件名，由 SessionStore 校验。路径不授予任何权限：`read` 本来就在 Session 的权限策略下读取绝对路径，风险类别 `read_filesystem` 在每个预设下都被允许，因此读取文件从不弹出审批，也不记录任何授权（读取如何准入、以及按路径限定的文件访问必须保持什么，见 [Session 文件 §11](../appserver/session-files.md#11-安全)）。`attachment.put` 是用户的操作，不是 agent 的决定，因此不涉及 Approval（[ADR 003](../../adr/003-approval-scope.md) D1）。分叉共享其源 Session 拥有的每个文件（[Session 文件 §4](../appserver/session-files.md#4-分叉时共享)）；它的模型只从继承的历史中得知路径。内容是重放给模型的用户数据；CLI 不得隐式附加机密。错误消息和诊断不含内容。
 
 ## 8. 规则检查
 
