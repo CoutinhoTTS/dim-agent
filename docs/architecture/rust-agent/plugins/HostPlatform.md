@@ -41,7 +41,8 @@ not an OS sandbox or permission policy.
 
 The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exercises
 Seatbelt and Landlock wrappers through these existing process and PTY APIs. It
-does not install product isolation; the host-local policy remains open.
+does not install product isolation. The proposed host-local policy, consumer
+integration and platform acceptance are in the [F5 product design](../../../design/host-platform-isolation.md).
 
 ## Command construction
 

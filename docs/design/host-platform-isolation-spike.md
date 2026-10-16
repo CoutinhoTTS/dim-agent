@@ -127,9 +127,10 @@ request. This spike does not install that policy or change which calls execute w
   existing syscall contract without a new crate. Bubblewrap is not measured or selected.
 - **Windows:** isolation is unavailable in this spike; both examples refuse to run.
 
-Next, specify the host-local filesystem/network policy and its unavailable behavior using the
-existing HostPlatform contract. Implement the selected policy at process startup after that
-decision. F5 remains open until product isolated exec on both macOS and Linux passes its acceptance.
+The proposed [product policy](host-platform-isolation.md) specifies host-local filesystem,
+environment and network boundaries and unavailable behavior. It requires design review before
+implementation. F5 remains open until product isolated exec on both macOS and Linux passes its
+acceptance; this spike does not establish the narrower proposed policy or select its backend.
 
 Unmeasured boundaries include inherited file descriptors, hard links, filesystem mutation during
 startup and non-TCP sockets. Their effect on the selected policy needs evaluation; this spike
