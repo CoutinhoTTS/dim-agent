@@ -470,7 +470,10 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
                 client.hello(profile.as_ref()).await?;
                 return Ok(Some(client));
             }
-            Err(error) if missing(&error) => {}
+            // Binding makes the Unix path visible before the server makes it private.
+            Err(error)
+                if missing(&error)
+                    || cfg!(unix) && error.kind() == io::ErrorKind::PermissionDenied => {}
             Err(error) => return Err(error.into()),
         }
         if let Some(status) = child.try_wait()? {

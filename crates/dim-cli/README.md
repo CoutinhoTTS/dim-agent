@@ -197,6 +197,8 @@ The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overri
 
 On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dim-app-server --connect-pipe` bridge, which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
+While waiting for a daemon it has just started, the CLI waits for the Unix socket to become private before connecting. An existing insecure endpoint is rejected without starting a daemon.
+
 Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
 
 | Exit code | Meaning |
