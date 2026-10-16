@@ -397,7 +397,7 @@ The CLI handles `question/*` notices of every branch of the attached Session (A9
 Flow tests through RPC, tool calls and events:
 
 1. Single, multiple, multi-question and custom answers produce the specified `content`; invalid answers are rejected at `respond` without facts.
-2. Session created with `interactive: false` (incl. `exec` and ACP): `ask_user` is declared and answers that no one is available to answer, with no `question/*` event; when `interactive` is omitted, questions are asked as usual. The tool set is the same in both.
+2. Session created with `interactive: false` (incl. `exec` and automation): `ask_user` is declared and answers that no one is available to answer, with no `question/*` event; when `interactive` is omitted, questions are asked as usual. The tool set is the same in both.
 3. Answer then stop: result has the answer. Stop then answer: `Cancelled`, `question/cancelled`, cancelled result. Both orders forced by committing `I` before `A` with a held Dispatcher. `I` committed before `Q` but consumed after it: the question is cancelled; an `ask` after `I` is consumed writes nothing.
 4. Two concurrent `respond`: exactly one accepted.
 5. Two `ask_user` plus a slow tool in one batch: answers held until the single `step/tool-result`.
@@ -410,7 +410,7 @@ Flow tests through RPC, tool calls and events:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | `ask_user` is declared in every Session and answers that no one is available to answer when `interactive` is `false` | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30); decisions §3 (ACP/automation non-interactive) | Tool set differs between Sessions; a fork loses the prompt prefix |
+| A1 | `ask_user` is declared in every Session and answers that no one is available to answer when `interactive` is `false` | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30); decisions §3 (exec/automation non-interactive) | Tool set differs between Sessions; a fork loses the prompt prefix |
 | A2 | `interactive` omitted on `session.create`, or missing in a stored record, means interactive | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) format decision | Existing Sessions stop asking questions |
 | A3 | Payload adds `turn_id`, `request_id`, `declined` | Judgment | Correlation through `step/tool-call`; decline modeled as an answer |
 | A4 | 1..=4 questions, 2..=6 options | Edge-case reference; judgment | Schema limits change |

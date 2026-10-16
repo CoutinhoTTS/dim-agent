@@ -202,7 +202,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 
 ## 7. Security
 
-`schedule` is admitted by Approval and Permission as `persistent_configuration`; FullAccess allows it (E1), other presets ask or deny. A run only writes input; its tools are admitted under the run Session's policy, capped as in 3.3, and approvals are not pre-granted. Tool-created jobs record `created_by` and are visible for review. The tool changes only job entries, through Scheduler's typed write on behalf of the tool; `max_concurrent_runs` is a user-only field, so such a write that changes it is rejected, and the user sets it through the client method `settings.update` (S8b, not implemented). Jobs store no credentials. The run Session uses only its own resource node's services; Scheduler touches none. Anyone with management access can read job prompts.
+`schedule` declares the risk `persistent_configuration`, which Permission treats as unclassified: FullAccess allows it (E1), WorkspaceWrite asks and ReadOnly denies. No Permission change is needed (#45). A run only writes input; its tools are admitted under the run Session's policy, capped as in 3.3, and approvals are not pre-granted. Tool-created jobs record `created_by` and are visible for review. The tool changes only job entries, through Scheduler's typed write on behalf of the tool; `max_concurrent_runs` is a user-only field, so such a write that changes it is rejected, and the user sets it through the client method `settings.update` (S8b, not implemented). Jobs store no credentials. The run Session uses only its own resource node's services; Scheduler touches none. Anyone with management access can read job prompts.
 
 ## 8. Rule check
 

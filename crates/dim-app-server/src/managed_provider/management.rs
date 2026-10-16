@@ -1,10 +1,11 @@
 //! Managed provider account wire boundary.
 use super::{AccountSnapshot, ManagedProviders};
 use crate::{
-    methods::{Interruption, ManagementMethods, MethodDecl, params, reply},
-    protocol::{Empty, RpcError, optional_non_null},
+    methods::ManagementMethods,
+    protocol::{Empty, optional_non_null},
     provider::management::ProviderTarget,
 };
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use rutis::{CordisError, Ctx};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -110,7 +111,7 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), Cor
         ]
         .into_iter()
         .map(|name| {
-            MethodDecl::management(
+            MethodDecl::new(
                 name,
                 !matches!(
                     name,
@@ -120,7 +121,7 @@ pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), Cor
             )
         })
         .collect(),
-        Arc::new(move |method, value, stopping| {
+        Arc::new(move |method, value, stopping, _| {
             let oauth = oauth.clone();
             Box::pin(async move {
                 let cancel = &stopping;
