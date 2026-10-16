@@ -9,7 +9,8 @@ use std::{
 };
 
 /// A local-execution server, ShellInput included, with an isolated home whose
-/// exec shell is `/bin/sh`, and one Session working in `work`.
+/// exec shell is `/bin/sh`, and one Session working in `work`. A fixed model
+/// catalog selects the mock model, so no product provider state is seeded.
 struct Shell {
     server: RunningServer,
     client: Client,
@@ -27,44 +28,58 @@ impl Shell {
             .unwrap();
         let work = home.join("work");
         std::fs::create_dir_all(&work).unwrap();
-        set_shell(&home, "/bin/sh");
+        let target = home.join("rust");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&target)
+            .unwrap();
+        set_shell(&target, "/bin/sh");
+        let models = Arc::new(
+            dim_agent_aimux::AimuxModels::from_config(
+                serde_json::from_value::<dim_agent_aimux::config::ModelConfigFile>(json!({
+                    "defaultModel": {"providerId": "local", "modelId": "mock"},
+                    "providers": [{"id": "local", "kind": "openai-compatible",
+                        "baseUrl": "https://model.example/v1", "models": [{"id": "mock", "config": {"maxTokens": 64}}]}],
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        );
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install_local_execution(
             &mut builder,
             ModelProviderPlugin::new,
             WorkspaceToolsConfig {
-                output_root: home.join("rust/outputs"),
+                output_root: target.join("outputs"),
             },
         );
         defaults::mock_model_hosts(&mut builder);
+        let model = models.default_model().clone();
         let server = serve(
             builder,
             ServerConfig {
-                product_home: Some(home.clone()),
-                target_home: Some(home.join("rust")),
-                unix_path: Some(home.join("rust/daemon.sock")),
+                target_home: Some(target.clone()),
+                model_catalog: Some(models),
+                unix_path: Some(target.join("daemon.sock")),
+                session_defaults: dim_agent_runtime::SessionConfig {
+                    model: dim_agent_types::ModelSelection {
+                        provider_id: model.provider_id,
+                        model_id: model.model_id,
+                        capability_snapshot: None,
+                        config: None,
+                        metadata: None,
+                    },
+                    tools: vec![],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
         .await
         .unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
-        // A Session needs a model selection; the mock model host answers it.
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 32_000,
-            max_output_tokens: 2048,
-            ..Default::default()
-        };
-        let model = json!({"modelId": "fixture", "displayName": "Fixture", "status": "active", "capabilities": capabilities});
-        assert_ok(&client.rpc("provider.save", json!({"provider": {
-            "providerId": "fixture", "displayName": "Fixture", "driverKind": "openai-compatible",
-            "baseUrl": "https://model.example/v1", "auth": {"type": "bearer"},
-            "credential": {"action": "set", "value": "fixture-access"},
-            "models": [model], "enabled": true,
-        }})).await);
-        let created = client
-            .rpc("session.create", json!({"cwd": work, "tools": []}))
-            .await;
+        let created = client.rpc("session.create", json!({"cwd": work})).await;
         let sid = created["result"]["sessionId"]
             .as_str()
             .unwrap_or_else(|| panic!("{created}"))
@@ -292,7 +307,7 @@ async fn shell_methods_need_the_assembly_and_check_their_requests() {
     let reply = shell.client.rpc("shell.run", params).await;
     assert_eq!(app_error(&reply), "session_invalid_input", "{reply}");
 
-    set_shell(&shell.home, "/missing/shell");
+    set_shell(&shell.home.join("rust"), "/missing/shell");
     let reply = shell.run("r3", "true", "private").await;
     assert_eq!(app_error(&reply), "shell_unavailable", "{reply}");
     assert!(
@@ -304,7 +319,7 @@ async fn shell_methods_need_the_assembly_and_check_their_requests() {
     );
     // The builder reads the configuration for every run; nothing ran, so the
     // runId is still free.
-    set_shell(&shell.home, "/bin/sh");
+    set_shell(&shell.home.join("rust"), "/bin/sh");
     assert_eq!(
         shell.run("r3", "true", "private").await["result"]["status"],
         "completed"
