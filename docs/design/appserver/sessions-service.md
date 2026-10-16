@@ -1,8 +1,10 @@
 # Agents `sessions` service
 
-Status: Draft (for review), informed by a spike (§2). Roadmap item S2
+Status: Ready ([#98](https://github.com/arcships/dim/pull/98)) and implemented in S2, except `sessions.delete` (§8.7),
+which follows S5c. Informed by a spike (§2); the changes made during implementation are in §17. Roadmap item S2
 ([#62](https://github.com/arcships/dim/issues/62)), after C2 ([#48](https://github.com/arcships/dim/issues/48),
-merged) and S1 ([#58](https://github.com/arcships/dim/issues/58), not started). Contract:
+merged) and S1 ([#58](https://github.com/arcships/dim/issues/58), merged in
+[#94](https://github.com/arcships/dim/pull/94)). Contract:
 [session access A.1](../contracts/session-access.md#a1-the-sessions-service). Overview:
 [Appendix B.2](../overview.md#b2-app-server-process-plugins), Agents row. Scope: [ADR 002](../../adr/002-plugin-scope.md)
 process scope, inside the existing Agents plugin. Consumers: [Scheduler](../plugins/Scheduler.md) (P6) and
@@ -13,7 +15,7 @@ process scope, inside the existing Agents plugin. Consumers: [Scheduler](../plug
 Agents exposes the process service `sessions`, so a process plugin in any language can start and drive Sessions as
 Collaboration does. Its methods are `launch`, `input`, `lookup`, `history`, `withdraw`, `stop` and `idle`. Each one
 maps onto Agents' existing Session creation and admission (`AgentIndex`) and the public Session facade. `withdraw`
-forwards to the InputQueue withdrawal service that S1 adds.
+forwards to the InputQueue withdrawal service that S1 added.
 
 - **Shape.** One named process service, `sessions`, with no instance key. It is a `dyn HostDispatch` at
   `host_key("sessions")`, shared across languages through the service catalog like `pluginFiles`. Agents' directory
@@ -28,7 +30,8 @@ forwards to the InputQueue withdrawal service that S1 adds.
 - **Idle.** `idle` is the facade's `Session::idle`: Loop has no open turn, nothing waits for publication, and
   dispatch has reached the tail. A pending approval or question keeps a turn open, so a caller bounds its wait with
   `stop`.
-- **Withdraw.** `withdraw` forwards to S1's branch withdrawal service. S1 owns the semantics.
+- **Withdraw.** `withdraw` forwards to S1's branch withdrawal service. S1 owns the semantics; a deletion replies once
+  `input/deleted` is published, as `input` does.
 - **Lifecycle.** Agents owns launched Sessions like any other Session; `sessions` neither closes nor unloads them.
   Loaded Sessions accumulate (§2, finding 6), so idle unload is raised as a follow-up
   ([#126](https://github.com/arcships/dim/issues/126)) that comes before Scheduler's create-mode jobs ship (§8.6).
@@ -104,8 +107,9 @@ The call path from a consumer to a Session (a call path, not an assembly graph):
 | Part | Scope | Change |
 | --- | --- | --- |
 | `AgentDirectoryPlugin` ([agents.rs](../../../crates/dim-app-server/src/agents.rs)) | Process; no dependencies, never reloads | Provides `sessions` |
-| `AgentIndex` (same file) | Process; reloads with SessionStore, Settings and storage | Implements the seven methods (Appendix A) |
+| `AgentIndex` ([agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs)) | Process; reloads with SessionStore, Settings and storage | Implements the seven methods (Appendix A) and the input lookup Rpc shares |
 | Service catalog (App Server [lib.rs](../../../crates/dim-app-server/src/lib.rs)) | Process | `register_shared("sessions")` beside `pluginFiles`; one line in the assembly lane |
+| Rpc ([connection.rs](../../../crates/dim-app-server/src/connection.rs), [connection/tree.rs](../../../crates/dim-app-server/src/connection/tree.rs)) | Process | `session.create` shares the cwd rule with `launch`; `session.input_lookup` calls the Agents lookup |
 | Session facade, Permission, Loop | Session, branch | Unchanged; read through public calls |
 | InputQueue withdrawal service | Branch | Added by S1 |
 
@@ -115,9 +119,9 @@ The call path from a consumer to a Session (a call path, not an assembly graph):
 | --- | --- |
 | Identity | Name `sessions`, process scope, control node only, no instance key |
 | Provider | Agents' directory part. Each call looks up the current `AgentIndex`; while there is none, the call fails `reloading`. A reload of the index fails only the calls in flight and never reloads a consumer (D1) |
-| Calls | All methods are async. Each takes one request object, carried as `[request]` by rutis, and returns one envelope: `{ok: true, value}` or `{ok: false, error: SessionsError}`. The envelope follows the managedProvider [service contract](../../../crates/dim-app-server/README.md#service-contract), with `retryable` added to the error |
+| Calls | All methods are async. Each takes one request object, carried as `[request]` by rutis, and returns one envelope: `{ok: true, value}` or `{ok: false, error: SessionsError}`. The envelope follows the managedProvider [service contract](../../../crates/dim-app-server/README.md#service-contract), with `retryable` added to the error. An unknown method, a missing or extra argument, an unknown field or a wrong type replies `rejected` |
 | Errors | `SessionsError {code, message, retryable}` (§9) |
-| Cancellation | The consumer drops the call. In Rust, dropping the future ends the call with no effect and releases its lease. A JavaScript caller cannot drop a call in rutis 0.10, so its waits end as in §8.4 |
+| Cancellation | The consumer drops the call. In Rust, dropping the future ends the call and releases its lease; a dropped `launch` still finishes creating and registering its Session (§6.1), like a lost reply. A JavaScript caller cannot drop a call in rutis 0.10, so its waits end as in §8.4 |
 | Rust consumers | Look up `AgentIndex` on each use, as Rpc looks up Provider, and call the typed methods in Appendix A. They may also use the named service |
 | Core independence | Agents, Rpc and Session assembly never depend on a consumer of `sessions`. Rpc does not use `sessions` |
 | Exposure | Only plugins in the control node's process. `sessions` is not an Rpc method and is never served to a client or exported over a rutis link |
@@ -175,7 +179,7 @@ side's preset.
 | `permissionPolicy` | The effective policy |
 | `interactive` | `false` |
 | `collaborationRole` | The default (leader) |
-| Protocol version | `PROTOCOL_VERSION` (3): written to the record, and registered with `insert_version` after creation, as `session.create` and Collaboration do. Rpc serves a loaded Session only once its version is registered, and current clients list it |
+| Protocol version | `PROTOCOL_VERSION` (3): written to the record, and registered with `insert_version` after creation, as `session.create` and Collaboration do. Rpc serves a loaded Session only once its version is registered, and current clients list it. Creation and registration run in one task, so they finish together even if the caller stops waiting |
 | Record | Prepared creation (`AgentIndex::create_session`): project authorization, then the owned record, as for `session.create` |
 
 Errors: `rejected` (shape, `cwd`, empty tool names in `policy`), `agent_unknown`, `session_closed` or
@@ -270,8 +274,9 @@ The facade waits on the Dispatcher, publication and Loop watch channels; `sessio
 lease. Agents races the facade wait against the Session's close and the index's stopping token, because a close
 settles the turn and the facade could then return a cutoff. A wait that ends while the Session is closing (close,
 delete, Agent close) replies `session_closed`; a Session fault replies `failed`; an unknown branch, `branch_missing`;
-an index unload, `reloading`. There is no timeout: a caller that stops
-waiting drops the call, or ends the run with `stop` or `withdraw`, which also ends the wait.
+an index unload, `reloading`; any other failure of the wait is a dispatch failure of the branch and replies `failed`.
+There is no timeout: a caller that stops waiting drops the call, or ends the run with `stop` or `withdraw`, which also
+ends the wait.
 
 ### 6.5 stop
 
@@ -279,20 +284,23 @@ waiting drops the call, or ends the run with `stop` or `withdraw`, which also en
 scope and replies once the stopped turn has settled, with the dispatched sequence. The default reason is
 `"Stopped by automation"`. Inputs that were applied but not consumed stay pending for the next turn
 ([Appendix B](../contracts/session-access.md#appendix-b-full-conflict-table)). A stop joins one already running for
-the same turn. Errors: `session_closed`, `branch_missing`, `reloading`.
+the same turn. Errors: `session_closed`, `branch_missing`, `reloading`, and `failed` for a dispatch failure.
 
 ### 6.6 withdraw
 
 `{sessionId, branchId, inputId, reason?}` → `{status: "deleted", sequence}` or `{status: "notHeld"}`.
 
-Agents gets S1's branch withdrawal service with `Session::service` on that branch, calls
-`withdraw(inputId, reason)`, and returns its outcome. S2 adds no semantics: no ownership check, since a caller withdraws
-by the `input_id` it received (contract §9.3), no retry and no event of its own. S1 owns the command, the decision, the
-result fact and the format decision ([A.4](../contracts/session-access.md#a4-withdrawal)). What S2 needs from S1 is
-listed in §14.1.
+Agents gets S1's InputQueue with `Session::service::<InputQueue>` on that branch, calls
+`withdraw(InputWithdrawData { input_id, reason }, None)` and returns its decision. S1 replies once it has written
+`input/deleted`, which is then committed but not necessarily published, so for `deleted` Agents waits for that
+publication before replying, as `input` does (D8); a branch that closes or fails first replies `publication_unknown`.
+S2 adds no semantics: no ownership check, since a caller withdraws by the `input_id` it received (contract §9.3), no
+retry and no event of its own. S1 owns the command, the decision, the result fact and the format decision
+([A.4](../contracts/session-access.md#a4-withdrawal)); §14.1 records what it delivered.
 
-Errors: `rejected` (S1's validation, for example the `reason` limit), `session_closed`, `branch_missing`,
-`reloading`. A `reloading` reply after the command was written leaves the outcome to InputQueue's successor. Once
+Errors: `rejected` (S1's validation: an empty `inputId`, a `reason` over 2048 bytes), `session_closed`,
+`branch_missing`, `reloading`, `publication_unknown`. A `reloading` reply after the command was written leaves the
+outcome to InputQueue's successor. Once
 dispatch has passed the command, which every later `idle` cutoff has, history holds exactly one of `input/applied`
 and `input/deleted` for an input the caller wrote.
 
@@ -304,9 +312,9 @@ and `input/deleted` for an input the caller wrote.
 | --- | --- |
 | `through` | With `atLeast`: the published head (`Session::sequence`); below `atLeast`, `future_sequence`. Otherwise the requested `through`, which must not exceed the head (else `future_sequence`), or the head |
 | `events` | The branch's own events in `(after, through]`, read with `Session::local_page`. `after` (default 0) must end a batch. A page takes `limit` events (default 256) when that many remain, then runs to the end of that batch, so it can exceed `limit`; it never passes `through`. With a published head or an `idle` cutoff as `through`, every batch is whole. The caller pages with `after` set to the last returned sequence until it reaches `through` |
-| Form | `AgentEvent` records in the form `session.history` returns |
+| Form | Every event of the branch as an `AgentEvent` record, in the serde form `session.history` uses for the events it shows. Nothing is filtered, so the last sequence of a page always ends a batch |
 | Ancestors | Not included. Launched Sessions are read on `main`, which has none. A way to read a child branch's prefix is added when a consumer needs one |
-| Errors | `rejected` (`after` > `through`, `after` inside a batch, `limit` 0), `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
+| Errors | `rejected` (`after` > `through`, `after` inside a batch, `limit` 0, `atLeast` together with `through`), `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
 
 ## 7. Sequence
 
@@ -423,7 +431,7 @@ job every five minutes adds about 288 a day. The target (D14):
 | `reloading` | All | The Agents index, the model-selection host, the starter's Permission or S1's withdrawal service is not active, or the index unloaded during the call. For `input` and `withdraw` the outcome is uncertain: `lookup` or `history` first | true |
 | `future_sequence` | `history` | `atLeast` or `through` beyond the published head | false |
 | `ambiguous` | `lookup` | More than one input has that `submissionId` | false |
-| `publication_unknown` | `input` | Committed, publication not confirmed; `lookup` after recovery | true |
+| `publication_unknown` | `input`, `withdraw` | Committed, publication not confirmed; `lookup` or `history` after recovery | true |
 | `failed` | All | Session fault, storage, model resolution, project authorization, Session build | false |
 
 ## 10. Timing and conflicts
@@ -489,6 +497,9 @@ Elsewhere:
 - [Overview](../overview.md) (en/zh): B.2 Agents row links this page; §5.5's `launch` arrow loses `source`.
 - [Documentation index](../../INDEX.md) links this page.
 
+During implementation (§17): A.1's `withdraw` gains `publication_unknown`, `history` rejects `atLeast` together with
+`through`, A.6's `publication_unknown` covers `withdraw`, and Appendix E's `withdraw` row follows S1's merged shape.
+
 S1's withdrawal contract (A.4), the input conventions (A.2) and `interactive` (A.3) are unchanged, so no separate
 contract proposal is needed.
 
@@ -516,6 +527,12 @@ contract proposal is needed.
 ## 14. Requirements raised to mechanism owners
 
 ### 14.1 S1, InputQueue withdrawal (eric8810, [#58](https://github.com/arcships/dim/issues/58))
+
+Delivered in [#94](https://github.com/arcships/dim/pull/94) as `InputQueue::withdraw(InputWithdrawData { input_id,
+reason }, steer: Option<InputMessageData>) -> Result<(Withdrawal, Option<Arc<AgentEvent>>)>`, with
+`Withdrawal::{Deleted { sequence }, NotHeld}`. It replies once its decision is written, and fails `InvalidInput` (its own
+checks) or `Reloading` (InputQueue unloaded after the append). `sessions` passes no `steer`. The table is the request as
+it was raised; §17 lists what S2 adapted.
 
 | Item | Content |
 | --- | --- |
@@ -573,41 +590,68 @@ For the Scheduler and Workflow design reviews (zerob13); S2 does not edit those 
 - **Waiting again.** "Not consumed yet, wait again" must not loop on `idle`: on an idle branch it returns at once.
   An input with neither result at the cutoff is held (§6.4, item 2).
 
-## 16. Implementation plan and acceptance
+## 16. Implementation and acceptance
 
-The implementation starts after S1 merges, and S1 waits for C1 ([#83](https://github.com/arcships/dim/pull/83)). Nothing
-is stubbed before then (roadmap §3.6).
+Implemented on [#98](https://github.com/arcships/dim/pull/98) after S1 merged; nothing was stubbed (roadmap §3.6).
 
-1. Types and the seven `AgentIndex` methods in the Agents lane (Appendix A).
-2. The directory part provides `sessions`; App Server `lib.rs` registers `register_shared("sessions")` (one line in the
-   assembly lane).
-3. The lookup moves into Agents; Rpc's `session.input_lookup` calls it.
-4. `xtask graph` and `xtask check` for the new service.
-5. If S5c's `AgentIndex::delete` has merged by then, `sessions.delete` and its A.1 row (§8.7); otherwise it follows
-   S5c.
+1. Done. Types and the seven `AgentIndex` methods in the Agents lane (Appendix A).
+2. Done. The directory part provides `sessions`; App Server `lib.rs` registers `register_shared("sessions")` (one line
+   in the assembly lane).
+3. Done. The lookup moved into Agents (`agents::find_input`); Rpc's `session.input_lookup` calls it, so it now waits for
+   pending publication too.
+4. Done. `xtask graph` records the new module and the `sessions` binding; `xtask check` passes.
+5. Pending. S5c's `AgentIndex::delete` ([#97](https://github.com/arcships/dim/pull/97)) has not merged, so
+   `sessions.delete` and its A.1 row follow it (§8.7).
 
-Flow tests, in `crates/dim-app-server/tests/`, use a Rust test process plugin that injects `sessions` by name
-(`Keyed<dyn HostDispatch>`, as `plugin_files_flow` does), so they exercise the neutral path:
+The flow tests are in
+[transport_flow/sessions.rs](../../../crates/dim-app-server/tests/transport_flow/sessions.rs). `serve` takes no extra
+process rows, so a test Session part injects `sessions` by name (`Keyed<dyn HostDispatch>`, as `plugin_files_flow`
+does) and the test calls it, exercising the neutral path. The plan's cases map to them as follows (item 7 waits for
+S5c):
 
-1. **Issue #62's done criterion.** The plugin launches a Session, writes input, waits for idle and withdraws a held
-   input by `input_id` (`deleted`); a withdraw after `input/applied` replies `notHeld`.
-2. **Launch.** With a starter narrowed by `permission/changed`, the launched Session is non-interactive and its
+1. **Issue #62's done criterion** (`a_consumer_launches_writes_waits_and_withdraws_by_input_id`). The plugin launches a
+   Session, writes input, waits for idle and withdraws a held input by `input_id` (`deleted`); a withdraw after
+   `input/applied` replies `notHeld`.
+2. **Launch** (`launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defaults`). With a starter narrowed
+   by `permission/changed`, the launched Session is non-interactive and its
    `PermissionState` equals the cap, which the reply also returns. Without a starter: a full-access request is capped
    by the host defaults, and no policy means read-only. An unknown Agent fails `agent_unknown`, a bad `cwd` fails
    `rejected`, and a closed starter fails `session_closed`.
-3. **Input and lookup.** The marker comes first and the user content after it. `history {atLeast: sequence}` succeeds
-   right after the reply. `lookup` returns `accepted` for the written id, `unknown` for another, and `ambiguous` for a
-   duplicate.
-4. **Idle.** The cutoff covers each input's consumption and its `turn/end`. With an approval pending, `idle` stays
-   open until `stop`.
-5. **Reload.** An Agents index reload during `idle` ends it with `reloading`; the test plugin stays active and its
-   next call succeeds.
-6. **Delete (with S5c).** A delete during `idle` ends it with `session_closed`. With `sessions.delete`: the plugin
+3. **Input and lookup** (`input_replies_after_publication_and_lookup_waits_for_committed_inputs`). The marker comes
+   first and the user content after it. `history {atLeast: sequence}` succeeds right after the reply. `lookup` returns
+   `accepted` for the written id, `unknown` for another, and `ambiguous` for a duplicate. With publication held by a
+   locked native store, the `input` reply and a `lookup` started after the commit both wait, and the lookup then reads
+   `accepted`.
+4. **Idle** (`idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop`). The cutoff covers each input's
+   consumption and its `turn/end`. With an approval pending, `idle` stays open until `stop`.
+5. **Reload and close** (`idle_ends_reloading_on_an_index_reload_and_session_closed_on_close`). An Agents index reload
+   during `idle` ends it with `reloading`; the test part stays loaded and its next call succeeds. A close during `idle`
+   ends it with `session_closed`.
+6. **History** (`history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries`). Pages with `limit` 1 chain to
+   the fixed head and equal the branch's events, a page finishes a two-event batch, and a cursor inside that batch,
+   `future_sequence` and the other boundary errors are checked.
+7. **Delete (with S5c).** A delete during `idle` ends it with `session_closed`. With `sessions.delete`: the plugin
    deletes a launched Session after its run, later calls on it fail `session_closed`, and a second delete succeeds.
+
+## 17. Design changes during implementation
+
+Each change stays within S2 (roadmap §5.3); the contract's `sessions` part is updated to match.
+
+| # | Change | Why |
+| --- | --- | --- |
+| 1 | `withdraw` waits for the publication of `input/deleted` before replying `deleted`, and can reply `publication_unknown` | S1 replies once the deletion is committed, not once it is dispatched as §14.1 asked. Without the wait, `history {atLeast: sequence}` right after the reply could fail |
+| 2 | The binding uses S1's merged names: `Withdrawal` and `InputQueue::withdraw(InputWithdrawData, None)`, not `WithdrawOutcome` and `withdraw(input_id, reason)` | The shape S1 merged (§14.1) |
+| 3 | Each typed method takes the request type of its wire shape (`LookupRequest`, `WithdrawRequest`, `StopRequest`) instead of positional arguments | One type per shape; the named service only decodes and encodes |
+| 4 | `history` rejects `atLeast` together with `through`, and returns every event unfiltered | The two set `through` in conflicting ways. A filtered page could end inside a batch, and the next `after` would be rejected |
+| 5 | A failed `stop` or `idle` wait that is not a closed Session, a missing branch or a reload replies `failed` | Those failures are the branch's dispatch failures. Mapping a handler's `InvalidInput` to `rejected` would blame the caller |
+| 6 | `launch` creates and registers the Session in one task that outlives the call | A dropped call must not leave a loaded Session that clients cannot see |
+| 7 | The code is the submodule [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs) | `agents.rs` keeps the directory and the index |
+| 8 | The flow tests reach `sessions` from a Session part | `serve` takes no extra process rows; the part injects the service by name, as a process plugin does |
 
 ## Appendix A. Rust binding
 
-Types live next to `AgentIndex` in `dim-app-server`. A Rust plugin in another crate uses the named service.
+The types live next to `AgentIndex` in [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs). A Rust
+plugin in another crate uses the named service.
 
 ```rust
 pub struct SessionRef { pub session_id: String, pub branch_id: String }
@@ -627,6 +671,7 @@ pub struct InputWrite {
 pub struct RawBlock { pub text: String, pub key: Option<BlockKey> }
 pub struct BlockKey { pub r#use: KeyUse, pub name: String }   // KeyUse: Live | Retire
 pub struct InputReceipt { pub input_id: String, pub sequence: u64 }
+pub struct LookupRequest { pub session_id: String, pub branch_id: String, pub submission_id: String }
 pub enum LookupReply { Accepted { input_id: String, sequence: u64 }, Unknown }
 pub struct HistoryRequest {
     pub session_id: String, pub branch_id: String,
@@ -634,21 +679,26 @@ pub struct HistoryRequest {
     pub at_least: Option<u64>, pub limit: Option<usize>,
 }
 pub struct HistoryPage { pub through: u64, pub events: Vec<Arc<AgentEvent>> }
-pub struct SessionsError { pub code: SessionsErrorCode, pub message: String }  // retryable follows the code
+pub struct WithdrawRequest {
+    pub session_id: String, pub branch_id: String,
+    pub input_id: String, pub reason: Option<String>,
+}
+pub struct StopRequest { pub session_id: String, pub branch_id: String, pub reason: Option<String> }
+pub struct SessionsError { pub code: SessionsErrorCode, pub message: String }  // retryable() follows the code
 
 impl AgentIndex {
-    pub async fn launch(&self, request: LaunchRequest) -> Result<LaunchReply, SessionsError>;
+    pub async fn launch(self: &Arc<Self>, request: LaunchRequest) -> Result<LaunchReply, SessionsError>;
     pub async fn input(&self, write: InputWrite) -> Result<InputReceipt, SessionsError>;
-    pub async fn lookup(&self, at: SessionRef, submission_id: &str) -> Result<LookupReply, SessionsError>;
+    pub async fn lookup(&self, request: LookupRequest) -> Result<LookupReply, SessionsError>;
     pub async fn history(&self, request: HistoryRequest) -> Result<HistoryPage, SessionsError>;
-    pub async fn withdraw(&self, at: SessionRef, input_id: &str, reason: Option<String>)
-        -> Result<WithdrawOutcome, SessionsError>;                // WithdrawOutcome from S1
-    pub async fn stop(&self, at: SessionRef, reason: Option<String>) -> Result<u64, SessionsError>;
+    pub async fn withdraw(&self, request: WithdrawRequest) -> Result<Withdrawal, SessionsError>; // Withdrawal from S1
+    pub async fn stop(&self, request: StopRequest) -> Result<u64, SessionsError>;
     pub async fn idle(&self, at: SessionRef) -> Result<u64, SessionsError>;
 }
 ```
 
 Request types derive `Deserialize` with camelCase fields and `deny_unknown_fields`, and reply types derive `Serialize`.
-The named service decodes each request object (A.1) into these arguments, calls the method and encodes the envelope.
-The cap is a function of two `PermissionPolicy` values next to `launch`. Each method's lease is a private `SessionUse`
-from `acquire`.
+The named service decodes each request object (A.1) into its request type, calls the method and encodes the envelope;
+`withdraw`, `stop` and `idle` replies are encoded there as `{status, sequence?}` and `{sequence}`. The cap is a function
+of two `PermissionPolicy` values next to `launch`. Each method's lease is a private `SessionUse` from `acquire`. The
+lookup Rpc shares is `agents::find_input`.

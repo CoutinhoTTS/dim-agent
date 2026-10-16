@@ -226,7 +226,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`、`failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`、`session_closed`、`branch_missing`、`reloading` |
 | `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`、`future_sequence`、`session_closed`、`branch_missing`、`reloading` |
-| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`、`session_closed`、`branch_missing`、`reloading` |
+| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`、`session_closed`、`branch_missing`、`reloading`、`publication_unknown` |
 | `stop` | async | `{sessionId, branchId, reason?}` | `{sequence}` | `session_closed`、`branch_missing`、`reloading` |
 | `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`、`branch_missing`、`reloading` |
 
@@ -251,7 +251,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 { "sessionId": "string", "branchId": "string",
   "after?": 0,                        // 不含的下界；缺省：从分支开头
   "through?": 0,                      // 读取到此序号
-  "atLeast?": 0,                      // 固定前缀读取（A.5）
+  "atLeast?": 0,                      // 固定前缀读取（A.5）；不与 through 同时使用
   "limit?": 256 }                     // 每页条数；缺省：256
 // HistoryPage：该分支自己在 (after, through] 内的事件，止于批次边界，
 // 为 AgentEvent 记录，形式与 session.history 返回的相同
@@ -269,6 +269,8 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 每个方法也都可能以 `failed` 失败（A.6）。取消：调用方丢弃 `idle` 或 `history` 调用即结束它，没有任何效果。在回复前丢弃 `input` 会使结果不确定；调用方用 `lookup` 确认。
 
 `launch` 创建一个 `interactive = false` 的 Session。生效策略是请求的策略，并以启动方的当前策略为上限；该策略是启动时读取的 Timeline 事实。没有启动方时，由管理方法启动的运行除非请求声明了策略，否则默认只读，并始终受宿主配置约束。
+
+已实现（S2，[#98](https://github.com/arcships/dim/pull/98)）：上表全部方法，由 Agents 的目录部分提供。`input` 和删除成功的 `withdraw` 都在其事件发布后才回复。`sessions.delete` 在 S5c 之后加入（[sessions 服务 §8.7](../appserver/sessions-service.md#87-目标删除运行用的-session后续项)）。
 
 ### A.2 来源输入约定
 
@@ -331,7 +333,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | `rejected` | 参数格式以及该方法的边界检查（输入校验、位于批次中间的 history 游标、撤回服务的检查）；未写入任何内容 |
 | `future_sequence` | 固定前缀读取超出已发布 head |
 | `ambiguous` | `lookup` 匹配到多个输入 |
-| `publication_unknown` | 已提交，发布失败；恢复后 `lookup` |
+| `publication_unknown` | 已提交（一条 `input`，或 `withdraw` 写下的 `input/deleted`），发布失败；恢复后 `lookup` 或 `history` |
 | `node_unavailable` | 不由 `sessions` 返回：对离线资源节点的调用在该 Session 的工具内部失败 |
 | `failed` | Session 故障、存储、模型解析、项目授权或 Session 构建 |
 
@@ -387,7 +389,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | `input` | `Session::input(InputMessageData, branch)`（已有）；key 为 `InputBlock::Raw { key: Some(name), retire }` |
 | `lookup` | Agents 中与 `session.input_lookup` 共用的查找：先等待待发布事件，再扫描已发布的页 |
 | `history` | `Session::sequence(branch)`，低于 `at_least` 时以 `future_sequence` 失败，然后 `Session::local_page(branch, after, limit, through)` |
-| `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`：追加 `input/withdraw`，等待 InputQueue 对它的决定；`WithdrawOutcome::Deleted { sequence }` 或 `WithdrawOutcome::NotHeld` |
+| `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>`（S1）：追加 `input/withdraw`，在 InputQueue 写下决定后回复；`Withdrawal::Deleted { sequence }` 或 `Withdrawal::NotHeld`。Agents 等该 `input/deleted` 发布后才回复 `deleted` |
 | `stop`、`idle` | `Session::stop`、`Session::idle`（已有） |
 | `SessionConfig` | 下方的 Rust 结构体 |
 | 错误 | 带 A.6 错误码的 `SessionsError`，由 `AgentError` 映射：`Closed` → `session_closed`，`UnknownBranch` → `branch_missing`，`Reloading` → `reloading`，`InvalidInput` → `rejected`，其余 → `failed` |
@@ -410,7 +412,7 @@ pub struct SessionConfig {
     #[serde(default = "default_interactive", skip_serializing_if = "is_interactive")]
     pub interactive: bool,
 }
-pub enum WithdrawOutcome {
+pub enum Withdrawal {                     // dim_agent_capabilities::input_queue（S1）
     Deleted { sequence: u64 },            // input/deleted 的序号
     NotHeld,                              // 未知、已应用或已删除
 }

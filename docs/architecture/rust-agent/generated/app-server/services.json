@@ -982,6 +982,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessions",
+        "provider": 18,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "rutis_loader::loader::Loader",
         "provider": 2,
         "generation": 1,

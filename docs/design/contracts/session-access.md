@@ -226,7 +226,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown`, `failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing`, `reloading` |
 | `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`, `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
-| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`, `session_closed`, `branch_missing`, `reloading` |
+| `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown` |
 | `stop` | async | `{sessionId, branchId, reason?}` | `{sequence}` | `session_closed`, `branch_missing`, `reloading` |
 | `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing`, `reloading` |
 
@@ -251,7 +251,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 { "sessionId": "string", "branchId": "string",
   "after?": 0,                        // exclusive lower bound; absent: from the start of the branch
   "through?": 0,                      // read up to this sequence
-  "atLeast?": 0,                      // fixed-prefix read (A.5)
+  "atLeast?": 0,                      // fixed-prefix read (A.5); not together with through
   "limit?": 256 }                     // page size; absent: 256
 // HistoryPage: the branch's own events in (after, through], ending on a batch boundary,
 // as AgentEvent records in the form session.history returns them
@@ -269,6 +269,8 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 Every method can also fail `failed` (A.6). Cancellation: the caller dropping an `idle` or `history` call ends it with no effect. Dropping an `input` before the reply leaves the outcome uncertain; the caller resolves it with `lookup`.
 
 `launch` creates a Session with `interactive = false`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the request declares a policy, and it is always capped by host configuration.
+
+Implemented (S2, [#98](https://github.com/arcships/dim/pull/98)): every method above, served by Agents' directory part. `input` and a `withdraw` that deletes reply once their event is published. `sessions.delete` is added after S5c ([sessions service §8.7](../appserver/sessions-service.md#87-target-deleting-run-sessions-follow-up)).
 
 ### A.2 Source input conventions
 
@@ -331,7 +333,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | `rejected` | Param shape and the method's boundary checks (input validation, a history cursor inside a batch, the withdrawal service's checks); nothing written |
 | `future_sequence` | Fixed-prefix read beyond the published head |
 | `ambiguous` | `lookup` matched more than one input |
-| `publication_unknown` | Committed, publication failed; `lookup` after recovery |
+| `publication_unknown` | Committed (an `input`, or the `input/deleted` of a `withdraw`), publication failed; `lookup` or `history` after recovery |
 | `node_unavailable` | Not returned by `sessions`: calls on an offline resource node fail inside the Session's tools |
 | `failed` | Session fault, storage, model resolution, project authorization or Session build |
 
@@ -387,7 +389,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | `input` | `Session::input(InputMessageData, branch)` (existing); a key is `InputBlock::Raw { key: Some(name), retire }` |
 | `lookup` | One Agents lookup shared with `session.input_lookup`: wait for pending publication, then scan the published pages |
 | `history` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `Session::local_page(branch, after, limit, through)` |
-| `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`: appends `input/withdraw`, awaits InputQueue's decision for it; `WithdrawOutcome::Deleted { sequence }` or `WithdrawOutcome::NotHeld` |
+| `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>` (S1): appends `input/withdraw` and replies with InputQueue's decision once it is written; `Withdrawal::Deleted { sequence }` or `Withdrawal::NotHeld`. Agents replies `deleted` once that `input/deleted` is published |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
 | `SessionConfig` | Rust struct below |
 | Errors | `SessionsError` with the codes of A.6, mapped from `AgentError`: `Closed` → `session_closed`, `UnknownBranch` → `branch_missing`, `Reloading` → `reloading`, `InvalidInput` → `rejected`, others → `failed` |
@@ -410,7 +412,7 @@ pub struct SessionConfig {
     #[serde(default = "default_interactive", skip_serializing_if = "is_interactive")]
     pub interactive: bool,
 }
-pub enum WithdrawOutcome {
+pub enum Withdrawal {                     // dim_agent_capabilities::input_queue (S1)
     Deleted { sequence: u64 },            // sequence of input/deleted
     NotHeld,                              // unknown, applied or already deleted
 }
