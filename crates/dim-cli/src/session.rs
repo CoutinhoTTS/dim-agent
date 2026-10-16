@@ -166,6 +166,11 @@ pub async fn chat(
     options: &Options,
     images: Vec<ContentBlock>,
 ) -> Result<i32> {
+    // Keep the listener registered while prompts and RPC responses alternate.
+    #[cfg(unix)]
+    let mut interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(windows)]
+    let mut interrupts = tokio::signal::windows::ctrl_c()?;
     let interactive = options.prompt.is_none() && !matches!(options.action, Action::Exec);
     let mut input = if interactive {
         Some(Input::new()?)
@@ -206,18 +211,18 @@ pub async fn chat(
         }).await?;
         display.failed = false;
         display.muted = false;
-        let mut code = wait_turn(client, &session_id, None, Vec::new(), &mut display, &mut input).await?;
+        let mut code = wait_turn(client, &session_id, None, Vec::new(), &mut display, &mut input, &mut interrupts).await?;
         if code != 0 || interactive && input.is_none() {
             return Ok(code);
         }
         if options.prompt.is_some() || !images.is_empty() {
-            return wait_turn(client, &session_id, options.prompt.as_deref(), images, &mut display, &mut input).await;
+            return wait_turn(client, &session_id, options.prompt.as_deref(), images, &mut display, &mut input, &mut interrupts).await;
         }
         loop {
             let reader = input.as_mut().expect("interactive input");
             reader.prompt("\n> ")?;
             let text = tokio::select! {
-                signal = tokio::signal::ctrl_c() => { signal?; println!(); break; }
+                _ = interrupts.recv() => { println!(); break; }
                 line = reader.line() => line?,
             };
             let Some(text) = text else {
@@ -252,7 +257,7 @@ pub async fn chat(
                 _ => {}
             }
             display.failed = false;
-            code = wait_turn(client, &session_id, Some(&text), Vec::new(), &mut display, &mut input).await?;
+            code = wait_turn(client, &session_id, Some(&text), Vec::new(), &mut display, &mut input, &mut interrupts).await?;
             if input.is_none() {
                 break;
             }
@@ -326,6 +331,8 @@ async fn wait_turn(
     images: Vec<ContentBlock>,
     display: &mut Display,
     input: &mut Option<Input>,
+    #[cfg(unix)] interrupts: &mut tokio::signal::unix::Signal,
+    #[cfg(windows)] interrupts: &mut tokio::signal::windows::CtrlC,
 ) -> Result<i32> {
     let mut shell = None;
     let mut submit = if let Some(text) = prompt
@@ -414,8 +421,7 @@ async fn wait_turn(
             event
         } else {
             tokio::select! {
-                signal = tokio::signal::ctrl_c(), if (stop.is_none() && settled.is_none()) || shell.is_some() => {
-                    signal?;
+                _ = interrupts.recv(), if (stop.is_none() && settled.is_none()) || shell.is_some() => {
                     if !display.json { println!(); }
                     if let Some(run) = shell.as_mut().filter(|run| !prompted && !run.stopping) {
                         run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
