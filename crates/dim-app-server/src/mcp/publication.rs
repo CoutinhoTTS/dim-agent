@@ -209,6 +209,7 @@ struct Worker {
     port: Arc<Publication>,
     commands: mpsc::Receiver<Command>,
     released: watch::Receiver<()>,
+    settings_changed: watch::Receiver<()>,
 }
 impl McpPublication {
     pub fn register(builtins: &mut Builtins) -> String {
@@ -239,7 +240,7 @@ impl Worker {
             cleanup_failed: BTreeSet::new(),
             application_failed: BTreeMap::new(),
         };
-        let mut changes = settings.subscribe();
+        let mut changes = self.settings_changed.clone();
         // Accepted operations use an uncancelled token and settle before retirement.
         let operation = CancellationToken::new();
         loop {
@@ -334,6 +335,7 @@ impl TypedPlugin for McpPublication {
                 port: port.clone(),
                 commands: receiver,
                 released: releases,
+                settings_changed: config::settings_changes(ctx)?,
             };
             // LIFO: settle the owned worker before withdrawing Publication.
             // Withdrawing it first unloads Mcp and its server gates, losing

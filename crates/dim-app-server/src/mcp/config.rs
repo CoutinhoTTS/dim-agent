@@ -6,6 +6,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Wakes the returned receiver on every committed write to MCP's Settings
+/// sources and on every newly authorized project. The listeners belong to
+/// `ctx` and end with it; register before the first read of the sources.
+pub(super) fn settings_changes(
+    ctx: &rutis::Ctx,
+) -> std::result::Result<tokio::sync::watch::Receiver<()>, rutis::CordisError> {
+    let wake = crate::settings::Wake::new();
+    for source in [McpSettings::NAMESPACE, McpProjectEnablement::NAMESPACE] {
+        ctx.events().on(
+            ctx,
+            &crate::settings::settings_changes(source),
+            wake.clone(),
+        )?;
+    }
+    ctx.events().on(
+        ctx,
+        &crate::settings::project_authorizations(),
+        wake.clone(),
+    )?;
+    Ok(wake.subscribe())
+}
+
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpSettings {

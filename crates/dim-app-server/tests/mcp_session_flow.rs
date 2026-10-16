@@ -514,10 +514,29 @@ async fn project_discovery_does_not_connect_until_the_user_enables_it() {
         McpChange::SetEnabled(true),
     )
     .await;
-    ready(&session).await;
+    let enabled = ready(&session).await;
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
     // The choice is the user's, recorded outside the shared project file.
     assert_eq!(std::fs::read(&file).unwrap(), written);
+    // A project-scope edit reaches the open Session through the Settings
+    // event alone: nothing else wakes it for a change that withdraws nothing.
+    env.update(
+        SettingsScope::Project(1),
+        "docs",
+        McpChange::Put(serde_json::from_value(configuration(&env.url, "edited")).unwrap()),
+    )
+    .await;
+    let mcp = session.session_service::<McpSession>().unwrap();
+    let mut state = mcp.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(state.borrow_and_update().servers.get("docs"), Some(McpSourceState::Ready { version }) if version != &enabled) { break; }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 2);
     env.close().await;
 }
 

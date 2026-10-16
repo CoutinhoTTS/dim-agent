@@ -6817,24 +6817,14 @@
       "references": [
         "path HostPlatform",
         "path Os::Windows",
-        "path ProcessSpec",
         "path ProcessTree",
-        "path ShellEdition",
-        "path ShellEdition::GitBash",
-        "path ShellKind::Cmd",
         "path ShellKind::Posix",
-        "path ShellKind::Powershell",
-        "path ShellStatus",
-        "path ShellStatus::Available",
-        "path ShellStatus::Unavailable",
-        "path crate::host_platform::env_var",
+        "use crate::host_platform::EXEC_SHELL_CONFIG_INVALID",
+        "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
         "use crate::host_platform::HostPlatform",
         "use crate::host_platform::Os",
-        "use crate::host_platform::ProcessSpec",
         "use crate::host_platform::ProcessTree",
-        "use crate::host_platform::ShellEdition",
-        "use crate::host_platform::ShellKind",
-        "use crate::host_platform::ShellStatus"
+        "use crate::host_platform::ShellKind"
       ]
     },
     {
