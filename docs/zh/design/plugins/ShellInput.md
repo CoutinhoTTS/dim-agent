@@ -285,7 +285,7 @@ ANSI/OSC 序列从正文中移除（A8）；回复中保留它们以供终端使
 
 | 错误（`appError`） | 条件 |
 | --- | --- |
-| `shell_unavailable` | 节点上 `HostPlatform.shell` 不可用（转发原因） |
+| `shell_unavailable` | 节点上 `HostPlatform::exec_shell()` 不可用（转发原因） |
 | `shell_busy` | Session 中另一个运行正在进行 |
 | `duplicate_run` | `runId` 已在本代中使用 |
 | `invalid_params` | 命令为空、命令超过 64 KiB、`runId` 不符合 `[A-Za-z0-9-]{1,64}` |
@@ -349,6 +349,7 @@ ShellInput 用 Rust 实现。
 | `sessionMethods` key `shell` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，key `SessionScope::named_key::<SessionMethodContribution>("shell")`；`describe` = `methods()`，`call` = `call(MethodCall, CallChannel, CancellationToken)`；进度 = `CallChannel::progress` |
 | 记录的输入（A.3） | 通过 `S:TreeCommands` 调用 `Branch::input` |
 | 卸载清理函数 | `ctx.effect` |
+| Command construction | `HostPlatform::build_process_spec(command, cwd).await` returns `(ProcessSpec, ExecShellRuntime)` or `ProcessSpecError { code, reason }`; it reads the current shell itself |
 | 进程服务 | `HostPlatform::spawn(ProcessSpec)` 返回 `ProcessTree`，含 `stdout`、`stderr`、`wait`、`terminate` |
 
 ```rust
