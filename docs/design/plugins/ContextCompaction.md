@@ -277,9 +277,35 @@ Cuts fall only on event boundaries.
 - The history snapshot state stores `retain_from` instead of the entry-id `compacted_through`,
   and the replacement is read from the anchoring fact. The snapshot interpreter version is
   bumped. Older snapshots are bypassed, which is harmless because snapshots are only a cache.
-- History-side cut checks (`validate_cut`, the projection's cursor lookup, and the
-  snapshot-anchor match in `Timeline::context_with_checkpoint`) compare event ids instead of
-  entry ids.
+- History-side cut checks (`validate_cut` and the projection's cursor lookup) compare event ids
+  instead of entry ids. The snapshot anchor is checked by the snapshot's owner, not by Timeline
+  (below).
+
+**Snapshot anchoring without business content (#130).** Today, Timeline core and both stores
+read the content of `context/compaction` to anchor projection snapshots:
+
+- `Timeline::context_with_checkpoint`
+  ([timeline.rs](../../../crates/dim-agent-runtime/src/core/timeline.rs)) requires
+  `EventKind::ContextCompaction`, compares `data.through`, and matches `Completed { cursor }`
+  against `checkpoint.state.compacted_through`.
+- `MemoryTimelineStore::save_snapshot`
+  ([memory_timeline_store.rs](../../../crates/dim-agent-runtime/src/memory_timeline_store.rs))
+  rejects an anchor that is not a completed compaction.
+- The SQLite store ([storage/timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs))
+  does the same on save, and its lookup SQL filters `e.kind='context/compaction'` and
+  `status='completed'`.
+
+This contradicts the principle that Timeline checks structure and type range, not content, and it
+would make every change to the compaction record touch core code. F1 moves the check to its owner:
+
+| Part | Checks after F1 |
+| --- | --- |
+| Timeline (`context_with_checkpoint`) and both stores | Structure only: the anchor event exists at the snapshot's sequence with the snapshot's event id, the interpreter tag matches, and the sequence is within the cut (plus the existing resume-position checks on the decoded checkpoint). No `EventKind` or outcome matching, and no business kind or status in SQL |
+| Snapshot owner (`HistoryRenderer`, whose snapshots ContextPolicy saves) | Anchor validity, through the interpreter callback Timeline already calls. The callback now also receives the anchor event: `decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>`. It accepts only a completed `context/compaction` whose `retain_from` matches its state and whose `through` precedes the snapshot. `None` is a cache miss, as today |
+| Saving | The owner saves snapshots only at its own completed compaction, as it does today. The stores no longer enforce the kind |
+
+Behaviour is unchanged for valid snapshots, and an invalid snapshot is a cache miss, which falls
+back to full fact replay.
 
 Readers update with the struct:
 
@@ -639,7 +665,8 @@ request continues uncompacted; under recovery it fails the request.
 | --- | --- |
 | Loop | Supplement (§5.5). Budget recovery becomes active in the product profile |
 | ContextPreparation, ContextPolicy | Supplement (§5.3, §5.6): `compact_step`, retention rule, validation of any strategy, `usage` |
-| Projection (`history.rs`), snapshots | One replay rule using `replacement` and `retain_from`; `HistoryEntry.source`; cut validation and the snapshot state become event-based (interpreter version bump) |
+| Projection (`history.rs`), snapshots | One replay rule using `replacement` and `retain_from`; `HistoryEntry.source`; cut validation and the snapshot state become event-based (interpreter version bump); the decode callback checks the anchor event (#130) |
+| Timeline core, memory and SQLite stores | Snapshot anchoring becomes structural only (#130, §4.3) |
 | `HistoryRenderer` | Render-time projections that run on every request without a record are not compaction. An example is truncating old tool output by a fixed rule. They belong to the existing injectable `HistoryRenderer`, not to a strategy |
 | ModelProvider | Unchanged code. `validate` now enforces the window estimate in the product profile |
 | Provider, ProductResolver, Aimux | Unchanged; the summary strategy uses `ProviderConnectionResolver` and `ModelHost` |
@@ -667,7 +694,7 @@ request continues uncompacted; under recovery it fails the request.
 | §4 rule 5 (atomic batch) | Each new write is one event. |
 | §4 rule 6 (context only from handed-off events) | The replacement reaches the model only through the projection of a completed fact. Pending inputs are not consumed by a step (AGENTS rule 10). |
 | §4 rule 7 (public events and services) | `TreeCommands`, `Branch::service` on `PublicService`s, `ProviderConnectionResolver`, `ModelHost`, `sessionMethods`. |
-| §4 rule 8 (infrastructure unchanged) | Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. In Timeline, the existing snapshot-anchor check in `context_with_checkpoint` already reads the completed compaction fact; it follows the record's field change (`retain_from` instead of `cursor`) with the same logic and no new behaviour. The new event kinds move to #2's dynamic registration later. |
+| §4 rule 8 (infrastructure unchanged) | Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. There is one infrastructure change (#130): snapshot anchoring in Timeline and both stores drops its knowledge of `context/compaction` and keeps only structural checks, and the owner's decode callback receives the anchor event. The requirement comes from Timeline itself: it must not know event content (principles §4 rule 4; Timeline checks structure and type range). It closes within Timeline's own contract: a snapshot is a cache with a structural anchor. Valid snapshots behave the same, and an invalid one is a cache miss. The new event kinds move to #2's dynamic registration later. |
 | §4 rule 9 (only needed facts) | `context/compact` is read by the Loop's later decisions and on reload. `context/compaction` is used by projection. `context/compaction-start` and the visible result are facts by the maintainer's decision, for two reasons. First, they do not only drive a state machine: they are content that users and other state machines need in order to read the history (a UI connecting at any time must see that a compaction is running or how it ended). Second, reload settlement uses them: an unmatched start means a compaction was in flight. The Loop and ContextPreparation rebuild from start/result pairs, which is more precise than commands alone because it tells a running compaction from a pending one and covers automatic compaction. Usage writes nothing. |
 | ADR 002 D1 (scope) | Window facts, strategy and methods: Session. Command, step and slot: branch, in the Loop. |
 | ADR 002 D2 (no wiring modules) | ContextMethods exposes owners' operations through `sessionMethods`. |
@@ -692,8 +719,11 @@ Internal Rust changes:
 - `CompactionInput` fields.
 - `CompactionCheckpoint {retain_from, replacement}` and `HistoryEntry.source`.
 - `history.rs` cut validation and the cursor lookup become event-based. The snapshot state stores
-  `retain_from` (interpreter version bump), and Timeline's snapshot-anchor match compares
-  `retain_from`.
+  `retain_from` (interpreter version bump).
+- Snapshot anchoring (#130): `Timeline::context_with_checkpoint` keeps only structural checks,
+  and its `decode` callback becomes `fn(&RecoverySnapshot, &AgentEvent)`.
+  `MemoryTimelineStore::save_snapshot` and the SQLite store's save and lookup drop the
+  compaction kind and status checks.
 - `PublicService` on `AgentLoop` and `ContextPreparation`.
 
 **Requirements raised to mechanism owners:** none. The already planned #2 will host
@@ -747,6 +777,10 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
    - A Session compacted with the default `HistoryRenderer` and replayed with a different
      renderer (another entry id scheme) still finds the cut from `retain_from` and projects the
      same retained events.
+   - Snapshot anchoring (#130): both stores save and return a snapshot anchored at any existing
+     event with the matching id and sequence. The owner's decode callback ignores a snapshot whose
+     anchor is not a completed compaction, or whose `retain_from` does not match its state, and
+     the context falls back to fact replay with the same result.
 6. **Interrupt, reload and restart.**
    - `session.stop` during a step writes `cancelled` (or `completed` if the strategy had
      returned).

@@ -193,7 +193,23 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - `replacement` 按产出时的原样保存，所以重放从不调用策略，也不会重新渲染包装文本。
 - 这会改动 `context_messages` 和 ContextPolicy 的 `project`（两者现在都放入 `summary_message(summary)`），以及 `CompactionCheckpoint`（用 `replacement` 代替 `summary`）。
 - 历史快照的状态保存 `retain_from`，代替原来以条目 id 表示的 `compacted_through`；替换内容从锚定它的事实中读取。快照解释器版本随之升级。旧快照被绕过，这没有问题，因为快照只是缓存。
-- 历史一侧的切点检查（`validate_cut`、投影中的游标查找，以及 `Timeline::context_with_checkpoint` 中的快照锚定匹配）改为比较事件 id，而不是条目 id。
+- 历史一侧的切点检查（`validate_cut` 和投影中的游标查找）改为比较事件 id，而不是条目 id。快照锚点由快照的所有者检查，而不是由 Timeline 检查（见下）。
+
+**不含业务内容的快照锚定（#130）。** 目前 Timeline 核心和两个存储为了锚定投影快照，都会读取 `context/compaction` 的内容：
+
+- `Timeline::context_with_checkpoint`（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)）要求锚点是 `EventKind::ContextCompaction`，比较 `data.through`，并把 `Completed { cursor }` 与 `checkpoint.state.compacted_through` 比对。
+- `MemoryTimelineStore::save_snapshot`（[memory_timeline_store.rs](../../../../crates/dim-agent-runtime/src/memory_timeline_store.rs)）拒绝锚点不是已完成压缩的快照。
+- SQLite 存储（[storage/timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs)）保存时做同样的检查，查找 SQL 还按 `e.kind='context/compaction'` 和 `status='completed'` 过滤。
+
+这违反了“Timeline 只检查结构与类型范围、不检查内容”的原则，也会让压缩记录的每次改动都牵动核心代码。F1 把这项检查移交给它的所有者：
+
+| 部件 | F1 之后检查什么 |
+| --- | --- |
+| Timeline（`context_with_checkpoint`）与两个存储 | 只检查结构：锚点事件存在于快照的序号上、事件 id 与快照一致、解释器标签匹配、序号在切点之内（另有对解码后检查点的现有恢复位置检查）。不匹配 `EventKind` 或结局，SQL 中也不再出现业务类型或状态 |
+| 快照所有者（`HistoryRenderer`，由 ContextPolicy 保存其快照） | 锚点是否有效，经 Timeline 本来就会调用的解释器回调判断。回调现在还接收锚点事件：`decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>`。它只接受已完成的 `context/compaction`，且其 `retain_from` 与状态一致、`through` 早于快照。返回 `None` 就是缓存未命中，与现在相同 |
+| 保存 | 所有者只在自己已完成的压缩处保存快照，与现在相同；存储不再强制检查类型 |
+
+有效快照的行为不变；无效快照算作缓存未命中，退回完整的事实重放。
 
 读取方随结构体更新：
 
@@ -475,7 +491,8 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | --- | --- |
 | Loop | 补充（§5.5）。产品配置下预算恢复生效 |
 | ContextPreparation、ContextPolicy | 补充（§5.3、§5.6）：`compact_step`、保留规则、对任何策略的验收、`usage` |
-| 投影（`history.rs`）、快照 | 用 `replacement` 和 `retain_from` 的一条重放规则；`HistoryEntry.source`；切点验收与快照状态改为基于事件（解释器版本升级） |
+| 投影（`history.rs`）、快照 | 用 `replacement` 和 `retain_from` 的一条重放规则；`HistoryEntry.source`；切点验收与快照状态改为基于事件（解释器版本升级）；解码回调检查锚点事件（#130） |
+| Timeline 核心、内存与 SQLite 存储 | 快照锚定只做结构检查（#130，§4.3） |
 | `HistoryRenderer` | 每次请求都执行、不留记录的渲染期投影不是压缩，例如按固定规则截断旧的工具输出。它们属于现有可注入的 `HistoryRenderer`，不属于策略 |
 | ModelProvider | 代码不变。产品配置下 `validate` 开始按估算检查窗口 |
 | Provider、ProductResolver、Aimux | 不变；摘要策略经 `ProviderConnectionResolver` 和 `ModelHost` 使用它们 |
@@ -503,7 +520,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | §4 规则 5（原子批次） | 每次新写入都是一个事件。 |
 | §4 规则 6（上下文只来自交接后的事件） | 替换内容只经已完成事实的投影到达模型。待处理输入不被步骤消费（AGENTS 规则 10）。 |
 | §4 规则 7（公开事件与服务） | `TreeCommands`、`PublicService` 上的 `Branch::service`、`ProviderConnectionResolver`、`ModelHost`、`sessionMethods`。 |
-| §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。Timeline 中 `context_with_checkpoint` 现有的快照锚定检查本来就读取已完成的压缩事实；它随记录字段的改动（以 `retain_from` 代替 `cursor`）调整，逻辑相同，没有新行为。新事件类型以后迁移到 #2 的动态注册。 |
+| §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。有一处基础设施改动（#130）：Timeline 与两个存储的快照锚定不再了解 `context/compaction`，只保留结构检查，所有者的解码回调接收锚点事件。需求来自 Timeline 自身：它不能了解事件内容（原则 §4 规则 4；Timeline 只检查结构与类型范围）。它在 Timeline 自己的合同内闭环：快照是带结构锚点的缓存。有效快照的行为不变，无效快照算作缓存未命中。新事件类型以后迁移到 #2 的动态注册。 |
 | §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。按维护者的决定，`context/compaction-start` 和可见的结果都是事实，理由有两条。第一，它们不只是驱动某个状态机：用户和其他状态机读取历史时需要这些内容（任何时候接入的 UI 都必须看到压缩正在进行，或者它是怎样结束的）。第二，重载结算要用它们：没有结果的开始意味着当时有压缩在途。Loop 和 ContextPreparation 由开始与结果的配对重建，这比只靠指令更精确：它能区分运行中和待处理，也覆盖自动压缩。用量查询不写任何东西。 |
 | ADR 002 D1（作用域） | 窗口事实、策略和方法：Session。指令、步骤和压缩槽：分支，在 Loop 中。 |
 | ADR 002 D2（无接线模块） | ContextMethods 经 `sessionMethods` 暴露所有者的操作。 |
@@ -524,7 +541,8 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - 拆分后的端口与 `CompactionStrategyHost`。
 - `CompactionInput` 的字段。
 - `CompactionCheckpoint {retain_from, replacement}` 与 `HistoryEntry.source`。
-- `history.rs` 的切点验收与游标查找改为基于事件；快照状态保存 `retain_from`（解释器版本升级）；Timeline 的快照锚定匹配比较 `retain_from`。
+- `history.rs` 的切点验收与游标查找改为基于事件；快照状态保存 `retain_from`（解释器版本升级）。
+- 快照锚定（#130）：`Timeline::context_with_checkpoint` 只保留结构检查，其 `decode` 回调改为 `fn(&RecoverySnapshot, &AgentEvent)`；`MemoryTimelineStore::save_snapshot` 以及 SQLite 存储的保存与查找都去掉压缩类型与状态的检查。
 - `AgentLoop` 与 `ContextPreparation` 上的 `PublicService`。
 
 **向机制所有者提出的需求：** 无。已在计划中的 #2 将承载 `context/compact` 和 `context/compaction-start`。
@@ -562,6 +580,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
    - 把摘要策略换成一个返回两条 `replacement` 消息的测试策略：其结果按同一条规则提交和重放，Loop 和策略层代码都不用改。
    - `retain_from` 落在保留轮之内、或把工具调用与其结果分开的测试策略，会被策略层拒绝。
    - 用默认 `HistoryRenderer` 压缩的 Session，换一个渲染器（另一种条目 id 方案）重放时，仍能凭 `retain_from` 找到切点，投影出相同的保留事件。
+   - 快照锚定（#130）：两个存储对锚定在任何现有事件上、id 与序号匹配的快照都照常保存和返回。所有者的解码回调会忽略锚点不是已完成压缩、或 `retain_from` 与其状态不一致的快照，上下文随之退回事实重放，结果相同。
 6. **中断、重载与重启。**
    - 步骤期间 `session.stop` 写 `cancelled`（策略已经返回时为 `completed`）。
    - 步骤期间插件重载写 `cancelled: capability reloading`，不发第二次策略调用。
