@@ -1,6 +1,6 @@
 # ShellInput
 
-Status: Ready (pending maintainer confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Implementation starts when C1 ([#47](https://github.com/arcships/dim/issues/47), including per-call progress, [#125](https://github.com/arcships/dim/pull/125)) and S7 ([#52](https://github.com/arcships/dim/issues/52)) have landed ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
+Status: Implemented ([capability page](../../architecture/rust-agent/plugins/ShellInput.md)). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Built on C1 ([#47](https://github.com/arcships/dim/issues/47), including per-call progress, [#125](https://github.com/arcships/dim/pull/125)) and S7 ([#52](https://github.com/arcships/dim/issues/52)) ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
 Executes `!command` and `!!command` typed by the user in the Session's working directory. The result of `!command` (the command and its bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` as ordinary Session methods through a `sessionMethods` service (Session scope, key `shell`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session. A command ends on its own, on `shell.stop`, or when the Session part ends (Session close, ShellInput or Session reload, unload, App Server shutdown).
 
@@ -196,7 +196,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.7 Public events and services only | ShellInput uses `Branch::input` through `S:TreeCommands`, `SessionConfig`, `SessionLifecycle`, `Diagnostics`, HostPlatform and the `sessionMethods` contract. |
 | §4.8 Requirements to mechanism owners | Infrastructure is unchanged and nothing is raised to the runtime or rutis (§9). The changes needed from Rpc (per-call progress, in C1) and HostPlatform (command builder, S7) are listed in A.5; the Agents activity handle is dropped. |
 | §4.9 Only facts later decisions use enter the Timeline | Only the recorded `!` result enters, as an input the model reads. Progress is reply data of one call, not Session state, so it uses neither the Timeline nor a Session broadcast notice; run records go to diagnostics. |
-| §1 Capability and App Server boundary | ShellInput is a Session Capability in its own crate; Rpc only dispatches `sessionMethods`. |
+| §1 Capability and App Server boundary | ShellInput is a Session Capability in its own module of dim-agent-capabilities; Rpc only dispatches `sessionMethods`. |
 | ADR 002 D1 Scope | A run is Session work in the Session's working directory, so the plugin is Session scoped. |
 | ADR 002 D2 No wiring modules | Rpc reaches `shell.*` through the Session's `sessionMethods` by namespace; nothing names ShellInput. |
 | ADR 002 D3 Scope dependencies | ShellInput depends on Session services and the process HostPlatform; no core part depends on it. A process that did not assemble it answers `shell.*` with `unknown_method`; one that did answers `service_reloading` while a Session's ShellInput part is not active. A reload ends the running command, which is accepted. |
@@ -215,7 +215,7 @@ Service `sessionMethods`, Session scope, key `shell`. `describe()` returns one `
 
 | Method | Parameters | Result |
 | --- | --- | --- |
-| `shell.run` | `{sessionId, branchId?: "main", runId, command, mode: "record" \| "private"}` | After the process ends: `{runId, status: "completed" \| "stopped" \| "failed", exitCode?, signal?, reason?, output, truncated, durationMs, recorded?}`. `recorded` (mode `record`): `{sequence}` when written, `{error: {appError, message}}` when the write was rejected. Progress items: `{text, skipped?}` |
+| `shell.run` | `{sessionId, branchId?: "main", runId, command, mode: "record" \| "private"}` | After the process ends: `{runId, status: "completed" \| "stopped" \| "failed", exitCode?, signal?, reason?, output, truncated, durationMs, recorded?}`. `recorded` (mode `record`): `{sequence}` when written, `{error: {appError, message}}` when the write was rejected (`appError` is absent only for a facade failure that has no application code). Progress items: `{text, skipped?}` |
 | `shell.stop` | `{sessionId, runId}` | `{stopped: true}` once the run has ended; `{stopped: false}` when no running run has that `runId` |
 | `shell.list` | `{sessionId}` | `{runs: [{runId, branchId, mode, command, startedAt}]}` |
 
@@ -293,7 +293,7 @@ One input written with `Branch::input` on `branchId`:
 
 | Step | Mechanics |
 | --- | --- |
-| Start | Parse the params (`invalid_params`); refuse `shell_busy` while a run is registered and `duplicate_run` for a used `runId`; resolve the branch through `S:TreeCommands`; build the `ProcessSpec` (S7; `shell_unavailable`); `spawn` (`spawn_failed`); register the run and start its task in the generation's task tracker, not in the call |
+| Start | Parse the params (`invalid_params`); refuse `shell_busy` while a run is registered and `duplicate_run` for a used `runId`; resolve the branch through `S:TreeCommands`; build the `ProcessSpec` (S7; `shell_unavailable`); `spawn` (`spawn_failed`); register the run and start its task in the generation's task tracker, not in the call. Right before `spawn`, the generation's cancellation, busy and the run id are checked again under the registry lock; a `runId` counts as used once its process has spawned, so a refused start leaves it free |
 | Run | The task owns the process tree. It reads both pipes, sends capped progress (A.1), keeps the bounded tail, and waits for the exit, `shell.stop`, `SessionLifecycle::closing()` or the generation's cancellation |
 | Call | The `shell.run` handler waits for the run's result or the call's cancellation token, whichever comes first. On the token it returns at once and the run is left untouched (Two cancellations below) |
 | Stop | `terminate` the tree, then status `stopped` with the output read so far |
@@ -337,7 +337,7 @@ The handler must not wait for the command once the token fires. C1 replies `oper
 | H2 | Refusals returned as data with their code and reason: `EXEC_SHELL_UNAVAILABLE`, `EXEC_SHELL_CONFIG_INVALID` and the builder's other refusals | ShellInput reports `shell_unavailable` with that reason |
 | H3 | `exec`'s output rules public beside the builder: the incremental decoder of one pipe (an incomplete character at the end of a read waits for the next read; `<0xNN>` for invalid bytes), control-character removal, the last 2000 lines within 50 KiB, and the read grace after the root exits | The client and the model see the text `exec` would produce |
 
-H1 to H3 block ShellInput. The other half of S7, reading the exec shell configuration at each spawn (ADR 002 "Existing plugins"), does not: ShellInput calls the builder for every run, so it uses whatever shell the builder returns. If S7 leaves H3 out, ShellInput's implementation makes those helpers public itself, a visibility change with no change in behaviour.
+H1 to H3 block ShellInput. The other half of S7, reading the exec shell configuration at each spawn (ADR 002 "Existing plugins"), does not: ShellInput calls the builder for every run, so it uses whatever shell the builder returns. S7 exported the decoder, `sanitize`, `truncate_preview` and the read grace. ShellInput's implementation made the rest public in `workspace_tools::exec`, without changing their behaviour or copying them: `tail_bytes` and `signal_name` as they were, `capture_preview` as a function over the preview buffer, and `pump` over an `OutputSink`, which `exec`'s output (with its file offload) also implements.
 
 **Rpc and Session facade: C1** ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)). No requirement beyond the merged contract and #83's best-effort progress: key `shell` in `sessionMethods`, dispatch through the Session (restoring an unloaded one), `unknown_method` when the assembly did not record `shell` (every Session of an assembly lists every namespace it recorded), `service_reloading` while it is recorded and the Session's provider is not active, and call ownership with `report` interruption (session-boundary A.1). As #83 implements it, the call's cancellation token fires when the Rpc load that admitted it unloads, and the Rpc unload waits until the call settles; ShellInput's handler returns on that token (A.4 Two cancellations).
 
@@ -445,7 +445,7 @@ Dispatch errors (`unknown_method` when the process did not assemble ShellInput, 
 
 ## Appendix G. Rust binding
 
-ShellInput is implemented in Rust, in its own crate.
+ShellInput is implemented in Rust as the `shell_input` module of dim-agent-capabilities ([shell_input.rs](../../../crates/dim-agent-capabilities/src/shell_input.rs)); `defaults::install_local_execution` installs it with `shell_input::install`, beside the other callers of HostPlatform.
 
 | Neutral contract | Rust binding |
 | --- | --- |
@@ -455,7 +455,7 @@ ShellInput is implemented in Rust, in its own crate.
 | Progress | The handler's `Progress` argument: `progress.send(json!({"text": text}))`, with `"skipped"` added when bytes were left out. The run task holds a clone; a send after the reply is dropped |
 | Command construction | `HostPlatform::build_process_spec(command, cwd).await` returns `(ProcessSpec, ExecShellRuntime)` or `ProcessSpecError { code, reason }`; it reads the current shell itself |
 | Process | `HostPlatform::spawn(ProcessSpec)` returns a `ProcessTree` with `stdout`, `stderr`, `wait` and `terminate` |
-| Run tasks | ShellInput's own `TaskTracker`, separate from the calls `SessionMethods` tracks; each task owns its `ProcessTree` and watches `ctx.cancelled()` and `SessionLifecycle::closing()`; `ctx.effect` registers the disposer that waits for the tracker |
+| Run tasks | ShellInput's own `TaskTracker`, separate from the calls `SessionMethods` tracks; each task owns its `ProcessTree` and watches `ctx.cancelled()` and `SessionLifecycle::closing()`; `ctx.effect` registers the disposer that waits for the tracker. The generation token is read under the registry lock right before `spawn`, and the disposer closes the tracker under that lock |
 | Recorded input (A.3) | `TreeCommands::get(branch_id)?.input(..)` |
 | Diagnostics | `Diagnostics::span("shell.run", None, None, Some(run_id.as_str()))`, with `outcome` recorded when the run ends |
 
