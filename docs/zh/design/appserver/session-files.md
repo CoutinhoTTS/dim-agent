@@ -1,6 +1,6 @@
 # SessionStore Session 文件
 
-状态：草稿（待评审）。路线图工作项 S5a（[#59](https://github.com/arcships/dim/issues/59)），在 S6（[#51](https://github.com/arcships/dim/issues/51)）之后。
+状态：已实现。路线图工作项 S5a（[#59](https://github.com/arcships/dim/issues/59)、[#95](https://github.com/arcships/dim/pull/95)），在 S6（[#51](https://github.com/arcships/dim/issues/51)）之后。使用它的分叉与删除方法属于 S5c（§13）；§17 列出实现所做的变更。
 总体设计：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 FileStorage 行。作用域：
 [ADR 002](../../adr/002-plugin-scope.md) 进程作用域，位于现有的 SessionStore 插件内。
 使用方：[Attachments](../plugins/Attachments.md)（P2），以及 Session 的分叉与删除（S5c）。
@@ -144,6 +144,8 @@ SELECT :fork, file_id FROM session_file_owners WHERE session_id = :source
 
 **放弃。** txn 1 之后发生失败、取消（紧挨 txn 2 之前检查），或 txn 2 发现 Session 已不存在、自己的行已不再以 G 处于 pending 时，SessionStore 执行 `UPDATE session_files SET writer = NULL WHERE file_id = ? AND writer = G`。文件变为无主，并安排一次清扫。如果这条更新也失败，该行以 G 保持 pending，由下一个代次清扫。
 
+put 作为 SessionStore 自己的任务运行：调用方不再等待就会取消它，而任务仍以提交或放弃结束，所以不会有行以存活代次保持 pending。在 P3 加入 `resourceNode` 之前，put 不读取节点：它查找控制节点的 FileStorage，由 txn 1 回答 `not_found`（D2）。
+
 ### 5.2 分叉（S5c）
 
 ```
@@ -186,7 +188,7 @@ SELECT :fork, file_id FROM session_file_owners WHERE session_id = :source
 | --- | --- |
 | 一次写入放弃了文件 | 它的目录可能已存在 |
 | 一次提交删除了所有者行（S5c 删除、创建回滚） | 文件可能失去了最后一个所有者 |
-| 每个 SessionStore 代次在某节点上的第一次写入 | 崩溃或重载的代次留下的 pending 行、删除失败留下的无主行，以及因断电而重新出现的已删目录 |
+| 在当前 SessionStore 代次的一次清扫在某节点上完成之前，该节点上的每次写入（D3） | 崩溃或重载的代次留下的 pending 行、删除失败留下的无主行，以及因断电而重新出现的已删目录 |
 | S5c 清理 | 主动回收 |
 
 第 3 步是安全的：目录只属于一个数据库（§3.1），而写入先提交行、再创建目录。列目录返回的每个目录，到读取行的时候要么已经有行（pending 或已拥有的文件，清扫会跳过），要么从来没有行。之所以需要它，是因为 FileStorage 的删除不做同步（[S6](https://github.com/arcships/dim/pull/87)）：断电后，已删除的目录可能重新出现，而以 `synchronous=FULL` 提交的行删除不会回来。SessionStore 以外创建的条目也同样移除：这个目录归 SessionStore 所有。
@@ -315,7 +317,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 | `invalid` | `name` 违反下面的规则 | 无 |
 | `too_large` | 内容超过 16 MiB | 无 |
 | `node_unavailable` | Session 资源节点上的 FileStorage 不可达；在控制节点上即 FileStorage 正在重载或已关闭。可重试 | 不拥有任何文件；放弃的目录会被清扫 |
-| `cancelled` | 在 txn 2 之前被取消，包括 SessionStore 卸载 | 不拥有任何文件；会被清扫 |
+| `cancelled` | 在 txn 2 之前被取消，包括 SessionStore 卸载，以及后一代次的清扫认领了 pending 行 | 不拥有任何文件；会被清扫 |
 | `storage` | SQLite 或 FileStorage 失败，包括 `Unsynced`（持久性未确认） | 不拥有任何文件；会被清扫 |
 
 限制及其归属：
@@ -466,6 +468,8 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 8. FileStorage 流程：`create_directory` 以 `0700` 创建并同步父目录；已存在的目录成功；父目录缺失以 `NotFound` 失败。保留名、保留目录的大小写别名，以及（在大小写不敏感的文件系统上）`auth.json.lock` 的大小写别名，都以 `InvalidPath` 失败且不创建任何东西。已存在的文件或链接被拒绝且不改动。创建前取消则什么都不创建。
 9. 读取准入，经由 Session 的工具路径：`put` 之后，在产品默认的 `workspace-write` 和 `read-only` 下，该 Session 对返回路径的 `read` 返回内容；分支不写 `approval/request`，它的权限状态（版本和策略）不变。拒绝读取另一个 Session 的文件或数据库目录属于 §11.2 那一项的验收，因为 `read` 不按路径限定（§11.1）。
 
+测试：第 1、3（未知 Session）、5、6（名字、大小、已取消的调用）、4、9 项是经由 `sessionFiles` 的流程测试，位于 [session_files_flow.rs](../../../../crates/dim-app-server/tests/session_files_flow.rs)；第 2 项，以及写入与 txn 2 之间的第 3、6 项，在 [files/tests.rs](../../../../crates/dim-app-server/src/storage/files/tests.rs) 中运行 S5c 的分叉步骤和该处的钩子；第 7 项是 [storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_v13_store_upgrades_in_place_once`、`the_daemon_reports_a_v13_upgrade_on_stderr_once` 和拒绝用例；第 8 项是 [file_storage_flow.rs](../../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs) 中的 `directory_creation_stays_inside_the_authorized_root`。
+
 验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及先 `cargo run --locked -p xtask -- graph` 再 `check`，因为 SessionStore 提供了新服务。
 
 ## 17. 实现中的设计变更
@@ -475,6 +479,8 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 | # | 变更 | 原因 |
 | --- | --- | --- |
 | D1 | `create_directory` 确保 `auth.json.lock` 的锁键存在，对新名字的锁键只打开、不创建，不再带创建地打开两个锁键（§7） | 带创建地打开锁键会留下以目录命名的锁键文件，而 FileStorage 只在删除其父目录时才删除锁键。`<db>.session-files` 永远不会被删除，所以每次 put 都会在那里永久留下一个锁键。已存在的账户标记别名仍会解析到标记的锁键，检查结果不变 |
+| D2 | P3 之前，put 不读取资源节点。Session 是否存在由 txn 1 判定，它在 FileStorage 查找之后，所以 FileStorage 未激活时，未知 Session 得到 `node_unavailable`（§5.1） | `SessionConfig.resourceNode` 还不存在，txn 1 之前的读取只会重复 txn 1 的检查。P3 在查找之前加入节点读取 |
+| D3 | 在本代次的一次清扫在该节点上完成之前，每次 put 都安排清扫，而不只是第一次 put（§5.4） | 否则因节点不可用而中止的第一次清扫，要等到放弃或释放才会重试；完成一次清扫后便不再多发请求 |
 
 ## 附录 A. Rust 绑定
 
