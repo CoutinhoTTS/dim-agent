@@ -567,3 +567,192 @@ async fn session_facade_reads_a_named_session_service_by_name() {
     ));
     agent.close().await.unwrap();
 }
+
+struct AssemblyAnchor(tokio::sync::mpsc::UnboundedSender<rutis::Ctx>);
+impl TypedPlugin for AssemblyAnchor {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "test.assembly-anchor"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): (),
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            self.0.send(ctx.clone()).unwrap();
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for AssemblyAnchor {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+struct OptionalResource(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl TypedPlugin for OptionalResource {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "test.optional-resource"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): (),
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let closed = self.0.clone();
+            ctx.effect(move || {
+                rutis::Effect::Disposer(Box::new(move || {
+                    closed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }))
+            })?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for OptionalResource {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_close_with_the_scope()
+ {
+    use rutis_loader::{Builtins, Chain, Layer, LoaderOptions, LoaderPlugin, RuntimeResolver};
+    use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let store = Arc::new(MemoryTimelineStore::default());
+    let closed = Arc::new(AtomicUsize::new(0));
+    let rolled_back = Arc::new(AtomicUsize::new(0));
+    let mut builtins = Builtins::new();
+    // A display-name collision must not change which row the builder requires.
+    let pending = register_capability(&mut builtins, || NamedCapability {
+        name: "SessionScope",
+        bit: 0,
+        installed: Arc::default(),
+        pending: true,
+    });
+    let failed = register_capability(&mut builtins, {
+        let rolled_back = rolled_back.clone();
+        move || FailingRollback {
+            fail_apply: true,
+            cleanups: rolled_back.clone(),
+        }
+    });
+    let resource = register_capability(&mut builtins, {
+        let closed = closed.clone();
+        move || OptionalResource(closed.clone())
+    });
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let anchor = register_capability(&mut builtins, move || AssemblyAnchor(send.clone()));
+    let mut b = builder();
+    b.timeline_store(store);
+    let mut session_row = b.install(&mut builtins, &root, []).await.unwrap();
+    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let runtime = rutis_bridge::runtime::LocalRuntime::node(
+        workspace.join("runtime/node_modules/@arcships/rutis-runtime"),
+        workspace.join("runtime/package.json"),
+    );
+    let external = |prefix: &str| {
+        vec![
+            json!({"id":format!("{prefix}-pending"),"name":pending}),
+            json!({"id":format!("{prefix}-failed"),"name":failed}),
+            json!({"id":format!("{prefix}-resource"),"name":resource}),
+            json!({"id":format!("{prefix}-unresolved"),"name":"missing-optional-module"}),
+            json!({"id":format!("{prefix}-runtime"),"name":workspace.join("runtime/spikes/session-part.ts")}),
+        ]
+    };
+    let parts = session_row["config"].as_array_mut().unwrap();
+    let branch = parts
+        .iter_mut()
+        .find(|row| row["id"] == BRANCH_GROUP)
+        .unwrap();
+    branch["config"]
+        .as_array_mut()
+        .unwrap()
+        .extend(external("optional-branch"));
+    parts.extend(external("optional-session"));
+    let resolver = RuntimeResolver::node(runtime.handle());
+    let plugin = LoaderPlugin::new(
+        Chain::new().with(builtins).with(resolver),
+        LoaderOptions::default(),
+    );
+    let loader = plugin.handle();
+    (&root.plugin(plugin)).await.unwrap();
+    loader.reconcile(vec![Layer::new("fixture", serde_json::from_value(json!([{"insert":[
+        {"id":AGENT_GROUP,"group":true,"instanced":true,"config":[{"id":anchor,"name":anchor},session_row]}
+    ]}])).unwrap())],None).await.unwrap();
+    let instance = loader.create_instance(&root, AGENT_GROUP).await.unwrap();
+    let anchor_ctx = receive.recv().await.unwrap();
+    let mut saved: Option<String> = None;
+    for round in 0..2 {
+        let agent = b.build_at(loader.clone(), &anchor_ctx);
+        let session = match &saved {
+            None => agent
+                .create_session(SessionConfig::default())
+                .await
+                .unwrap(),
+            Some(id) => agent.restore_session(id.clone()).await.unwrap(),
+        };
+        saved = Some(session.id().to_owned());
+        let entries: Vec<_> = loader
+            .entries()
+            .into_iter()
+            .filter(|row| row.id.starts_with("optional-") && row.instance.is_some())
+            .collect();
+        assert_eq!(entries.len(), 10);
+        for suffix in ["pending", "runtime"] {
+            assert!(
+                entries
+                    .iter()
+                    .filter(|row| row.id.ends_with(suffix))
+                    .all(|row| row.view.as_ref().unwrap().state().state
+                        == rutis::FiberState::Pending)
+            );
+        }
+        assert!(
+            entries
+                .iter()
+                .filter(|row| row.id.ends_with("failed"))
+                .all(|row| row.view.as_ref().unwrap().state().state == rutis::FiberState::Failed)
+        );
+        assert!(
+            entries
+                .iter()
+                .filter(|row| row.id.ends_with("unresolved"))
+                .all(|row| row.view.is_none())
+        );
+        session
+            .submit("first input".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        assert!(
+            session
+                .history("main", None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event.kind, dim_agent_types::EventKind::TurnEnd(_)))
+        );
+        agent.close().await.unwrap();
+        assert!(
+            entries
+                .iter()
+                .filter_map(|row| row.view.as_ref())
+                .all(|view| view.state().state == rutis::FiberState::Disposed)
+        );
+        assert_eq!(closed.load(Ordering::SeqCst), (round + 1) * 2);
+        assert_eq!(rolled_back.load(Ordering::SeqCst), (round + 1) * 4);
+    }
+    instance.view.shutdown().await.unwrap();
+    root.shutdown().await.unwrap();
+}
