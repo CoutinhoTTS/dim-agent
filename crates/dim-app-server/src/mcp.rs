@@ -226,6 +226,44 @@ impl McpService {
         .await
     }
 
+    /// One source's entry, with its effective configuration, whether or not
+    /// another source shadows it.
+    pub async fn entry(
+        &self,
+        source: SettingsScope,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<McpServerEntry> {
+        self.run(cancel, move |settings, cancel| async move {
+            let configuration = settings
+                .read::<McpSettings>(source, &cancel)
+                .await?
+                .document
+                .mcp_servers
+                .remove(&id)
+                .ok_or(McpError::UnknownServer)?;
+            let enablement = match source {
+                SettingsScope::User => McpProjectEnablement::default(),
+                SettingsScope::Project(_) => settings
+                    .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
+                    .await
+                    .map(|snapshot| snapshot.document)
+                    .unwrap_or_default(),
+            };
+            Ok(McpServerEntry {
+                source,
+                configuration: config::effective(
+                    &settings,
+                    source,
+                    &id,
+                    configuration,
+                    &enablement,
+                )?,
+            })
+        })
+        .await
+    }
+
     /// Mutate exactly one persisted source, not the merged effective view.
     /// Concurrent edits fail CAS rather than overwriting another server.
     /// Returns the revision of `source` after the change.

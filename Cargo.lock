@@ -839,6 +839,7 @@ dependencies = [
 name = "dim-app-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "dim-agent-aimux",
@@ -846,6 +847,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "futures-util",
+ "http",
  "regex",
  "reqwest 0.12.28",
  "reqwest 0.13.5",

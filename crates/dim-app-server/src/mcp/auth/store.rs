@@ -25,6 +25,14 @@ impl Document {
     pub fn get_mut(&mut self, key: &CredentialKey) -> Option<&mut Record> {
         self.credentials.iter_mut().find(|record| record.is(key))
     }
+    pub fn put(&mut self, record: Record) {
+        self.remove(&record.key());
+        self.credentials.push(record);
+    }
+    pub fn remove(&mut self, key: &CredentialKey) -> Option<Record> {
+        let index = self.credentials.iter().position(|record| record.is(key))?;
+        Some(self.credentials.remove(index))
+    }
 }
 
 /// One credential key's record. A record without `tokens` is expired: the
@@ -52,9 +60,39 @@ pub(super) struct Record {
     extra: Map<String, Value>,
 }
 impl Record {
+    pub fn new(key: &CredentialKey, binding: Binding, client: Client, tokens: Tokens) -> Self {
+        Self {
+            server_id: key.server_id.clone(),
+            url: key.url.clone(),
+            resource: binding.resource,
+            issuer: binding.issuer,
+            token_endpoint: binding.token_endpoint,
+            revocation_endpoint: binding.revocation_endpoint,
+            client: Some(client),
+            tokens: Some(tokens),
+            requested_scopes: binding.requested_scopes,
+            extra: Map::new(),
+        }
+    }
     fn is(&self, key: &CredentialKey) -> bool {
         self.server_id == key.server_id && self.url == key.url
     }
+    fn key(&self) -> CredentialKey {
+        CredentialKey {
+            server_id: self.server_id.clone(),
+            url: self.url.clone(),
+        }
+    }
+}
+
+/// What an authorization binds a record to, besides its client and tokens.
+#[derive(Clone)]
+pub(super) struct Binding {
+    pub resource: String,
+    pub issuer: String,
+    pub token_endpoint: String,
+    pub revocation_endpoint: Option<String>,
+    pub requested_scopes: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -5,7 +5,7 @@
 mod oauth;
 mod store;
 
-use super::config::{BearerAuth, McpServerSettings};
+use super::config::{BearerAuth, McpOAuthSettings, McpServerSettings};
 use dim_agent_capabilities::file_storage::FileStorage;
 use reqwest_mcp::Url;
 use std::{
@@ -17,7 +17,10 @@ use std::{
 use store::{Document, Record, Store};
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use uuid::Uuid;
 
+const DEFAULT_CALLBACK_PORT: u16 = 1456;
+const ATTEMPT_MS: u64 = 10 * 60 * 1000;
 const FRESH_MS: u64 = 30_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -128,6 +131,25 @@ pub(crate) enum AuthState {
     Expired,
 }
 
+/// The `mcp.auth.start` reply.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Started {
+    pub attempt_id: Uuid,
+    pub authorization_url: String,
+    pub redirect_uri: String,
+    pub resource: String,
+    pub issuer: String,
+    pub expires_at: u64,
+}
+
+struct Attempt {
+    id: Uuid,
+    expires_at: u64,
+    exchanging: bool,
+    authorization: oauth::Authorization,
+}
+
 struct KeyState {
     /// Notified on every change to the key's record; the value says whether
     /// the record holds tokens.
@@ -136,6 +158,7 @@ struct KeyState {
     challenge: Option<String>,
     /// Scopes a `403 insufficient_scope` asked for.
     missing_scopes: Vec<String>,
+    attempt: Option<Attempt>,
 }
 impl Default for KeyState {
     fn default() -> Self {
@@ -143,6 +166,7 @@ impl Default for KeyState {
             usable: watch::Sender::new(false),
             challenge: None,
             missing_scopes: Vec::new(),
+            attempt: None,
         }
     }
 }
@@ -242,6 +266,222 @@ impl McpAuth {
         }
     }
 
+    pub(crate) async fn start(
+        self: &Arc<Self>,
+        key: &CredentialKey,
+        server: &Url,
+        settings: Option<&McpOAuthSettings>,
+        client_secret: Option<String>,
+        cancel: &CancellationToken,
+    ) -> Result<Started, McpAuthError> {
+        let started = Instant::now();
+        let result = async {
+            if self.stopping.is_cancelled() {
+                return Err(McpAuthError::Closed);
+            }
+            let previous = self.store.read(cancel).await?.get(key).cloned();
+            let (challenge, missing_scopes) = self.key(key, |state| {
+                (state.challenge.clone(), state.missing_scopes.clone())
+            });
+            let port = settings
+                .and_then(|settings| settings.callback_port)
+                .unwrap_or(DEFAULT_CALLBACK_PORT);
+            let redirect_uri = format!("http://localhost:{port}/callback");
+            let request = oauth::Request {
+                server,
+                challenge: challenge.as_deref(),
+                settings,
+                redirect_uri: &redirect_uri,
+                client_secret,
+                previous: previous.as_ref(),
+                missing_scopes: &missing_scopes,
+            };
+            // Unload cancels discovery and registration; nothing is persisted.
+            let authorization = tokio::select! {
+                biased;
+                _ = self.stopping.cancelled() => return Err(McpAuthError::Closed),
+                _ = cancel.cancelled() => return Err(McpAuthError::Cancelled),
+                result = oauth::authorize(&self.http, request) => result?,
+            };
+            let id = Uuid::new_v4();
+            let expires_at = oauth::now() + ATTEMPT_MS;
+            let reply = Started {
+                attempt_id: id,
+                authorization_url: authorization.url.clone(),
+                redirect_uri,
+                resource: authorization.binding.resource.clone(),
+                issuer: authorization.binding.issuer.clone(),
+                expires_at,
+            };
+            // A new start replaces the key's pending attempt.
+            self.key(key, |state| {
+                state.attempt = Some(Attempt {
+                    id,
+                    expires_at,
+                    exchanging: false,
+                    authorization,
+                })
+            });
+            Ok(reply)
+        }
+        .await;
+        trace(
+            key,
+            result.as_ref().ok().map(|r| r.issuer.as_str()),
+            "start",
+            outcome(&result),
+            started,
+        );
+        result
+    }
+
+    pub(crate) async fn complete(
+        self: &Arc<Self>,
+        attempt_id: Uuid,
+        callback: &str,
+        cancel: &CancellationToken,
+    ) -> Result<(), McpAuthError> {
+        let started = Instant::now();
+        // Validate under the key lock; a failed check leaves the attempt
+        // pending so a wrong paste can be retried.
+        let (key, issuer, code) = {
+            let mut keys = self.keys.lock().unwrap();
+            let (key, state) = keys
+                .iter_mut()
+                .find(|(_, state)| state.attempt.as_ref().is_some_and(|a| a.id == attempt_id))
+                .ok_or(McpAuthError::AttemptClosed)?;
+            let attempt = state.attempt.as_mut().unwrap();
+            if attempt.exchanging {
+                return Err(McpAuthError::AttemptClosed);
+            }
+            if oauth::now() >= attempt.expires_at {
+                state.attempt = None;
+                return Err(McpAuthError::AttemptClosed);
+            }
+            let authorization = &attempt.authorization;
+            let issuer = authorization.binding.issuer.clone();
+            match oauth::callback(
+                callback,
+                &authorization.client.redirect_uri,
+                &authorization.state,
+                &authorization.binding.issuer,
+                authorization.iss_required,
+            )? {
+                oauth::Callback::Refused(code) => {
+                    state.attempt = None;
+                    return Err(McpAuthError::Failed(code));
+                }
+                oauth::Callback::Code(code) => {
+                    attempt.exchanging = true;
+                    (key.clone(), issuer, code)
+                }
+            }
+        };
+        let exchange_key = key.clone();
+        let result = self
+            .owned(cancel, move |auth| async move {
+                auth.exchange(exchange_key, attempt_id, code).await
+            })
+            .await;
+        trace(&key, Some(&issuer), "complete", outcome(&result), started);
+        result
+    }
+
+    async fn exchange(
+        self: Arc<Self>,
+        key: CredentialKey,
+        attempt_id: Uuid,
+        code: String,
+    ) -> Result<(), McpAuthError> {
+        let attempt = |auth: &Self| {
+            auth.key(&key, |state| {
+                state
+                    .attempt
+                    .as_ref()
+                    .filter(|attempt| attempt.id == attempt_id)
+                    .map(|attempt| {
+                        let a = &attempt.authorization;
+                        (a.verifier.clone(), a.client.clone(), a.binding.clone())
+                    })
+            })
+        };
+        let settle = |auth: &Self, pending: bool| {
+            auth.key(&key, |state| {
+                if let Some(attempt) = state.attempt.as_mut().filter(|a| a.id == attempt_id) {
+                    if pending {
+                        attempt.exchanging = false;
+                    } else {
+                        state.attempt = None;
+                    }
+                }
+            })
+        };
+        let Some((verifier, client, binding)) = attempt(&self) else {
+            return Err(McpAuthError::AttemptClosed);
+        };
+        // `pending`: the code may still be unredeemed, so the user can retry.
+        let (result, pending) = async {
+            let mut locked = match self.store.lock(&self.stopping).await {
+                Ok(locked) => locked,
+                Err(error) => return (Err(closed(error)), true),
+            };
+            let response = oauth::token(
+                &self.http,
+                &binding.token_endpoint,
+                &client,
+                &binding.resource,
+                oauth::Grant::Code {
+                    code: &code,
+                    verifier: &verifier,
+                },
+                &binding.requested_scopes,
+            )
+            .await;
+            match response {
+                Ok(tokens) => {
+                    locked
+                        .document
+                        .put(Record::new(&key, binding, client, tokens));
+                    // The code is spent whether or not the record is written.
+                    if let Err(error) = locked.write().await {
+                        return (Err(error), false);
+                    }
+                    self.key(&key, |state| {
+                        state.challenge = None;
+                        state.missing_scopes.clear();
+                    });
+                    self.changed(&key, true);
+                    (Ok(()), false)
+                }
+                Err(oauth::TokenError::Unavailable) => (Err(McpAuthError::Unavailable), true),
+                Err(oauth::TokenError::InvalidClient) => {
+                    // That registration is gone: clear it, and its tokens, if
+                    // the record holds the same client.
+                    if let Some(record) = locked.document.get_mut(&key)
+                        && record
+                            .client
+                            .as_ref()
+                            .is_some_and(|stored| stored.client_id == client.client_id)
+                    {
+                        record.client = None;
+                        record.tokens = None;
+                        if locked.write().await.is_ok() {
+                            self.changed(&key, false);
+                        }
+                    }
+                    (Err(McpAuthError::Failed("invalid_client")), false)
+                }
+                Err(oauth::TokenError::Rejected) => {
+                    (Err(McpAuthError::Failed("invalid_grant")), false)
+                }
+                Err(oauth::TokenError::Failed(code)) => (Err(McpAuthError::Failed(code)), false),
+            }
+        }
+        .await;
+        settle(&self, pending);
+        result
+    }
+
     /// Refreshes the key's tokens, holding the store lock from the re-read
     /// through the request to the replace, so one refresh runs per key
     /// across Sessions and daemons sharing the home (design §5.6).
@@ -311,7 +551,7 @@ impl McpAuth {
                 self.changed(&key, false);
                 Err(Refusal::Expired)
             }
-            Err(oauth::TokenError::Unavailable | oauth::TokenError::Failed) => match stale {
+            Err(oauth::TokenError::Unavailable | oauth::TokenError::Failed(_)) => match stale {
                 Stale::Expiring if still_valid => Ok(current),
                 _ => Err(Refusal::Unavailable),
             },
@@ -361,6 +601,17 @@ fn fresh(tokens: &store::Tokens) -> bool {
     tokens
         .expires_at
         .is_none_or(|at| at > oauth::now() + FRESH_MS)
+}
+
+fn closed(error: McpAuthError) -> McpAuthError {
+    match error {
+        McpAuthError::Cancelled => McpAuthError::Closed,
+        other => other,
+    }
+}
+
+fn outcome<T>(result: &Result<T, McpAuthError>) -> &'static str {
+    result.as_ref().map_or_else(McpAuthError::code, |_| "ok")
 }
 
 /// One event per auth operation, without secrets: server id, issuer host,

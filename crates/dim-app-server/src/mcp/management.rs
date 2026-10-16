@@ -62,6 +62,34 @@ pub struct RemoveMcp {
     pub source: McpScope,
     pub expected_version: String,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartMcpAuth {
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub cwd: Option<String>,
+    pub id: String,
+    pub source: McpScope,
+    /// A confidential client's secret, sent once; never returned or logged.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub client_secret: Option<String>,
+}
+impl std::fmt::Debug for StartMcpAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartMcpAuth").finish_non_exhaustive()
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompleteMcpAuth {
+    pub attempt_id: String,
+    /// Carries the authorization code; never logged.
+    pub callback_url: String,
+}
+impl std::fmt::Debug for CompleteMcpAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompleteMcpAuth").finish_non_exhaustive()
+    }
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAuthStatus {
@@ -142,6 +170,19 @@ fn source(scope: McpScope, project: Option<usize>) -> Result<SettingsScope, RpcE
     }
 }
 
+/// One source's entry, for the `mcp.auth.*` targets.
+async fn target(
+    directory: &Arc<McpService>,
+    source: SettingsScope,
+    id: String,
+    cancel: &CancellationToken,
+) -> Result<super::McpServerEntry, RpcError> {
+    if id.trim().is_empty() {
+        return Err(RpcError::invalid("id must not be empty"));
+    }
+    directory.entry(source, id, cancel).await.map_err(error)
+}
+
 pub(super) fn provide(
     ctx: &Ctx,
     directory: Arc<McpService>,
@@ -157,6 +198,8 @@ pub(super) fn provide(
             "mcp.remove",
             "mcp.set_enabled",
             "mcp.disconnect",
+            "mcp.auth.start",
+            "mcp.auth.complete",
         ]
         .into_iter()
         .map(|name| MethodDecl::new(name, name != "mcp.catalog", Interruption::Report))
@@ -274,6 +317,46 @@ pub(super) fn provide(
                             .disconnect(source, p.id, &stopping)
                             .await
                             .map_err(error)?;
+                    }
+                    "mcp.auth.start" => {
+                        let p: StartMcpAuth = params(value)?;
+                        let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
+                        let entry = target(&directory, source, p.id.clone(), &stopping).await?;
+                        // Only a remote entry without static credentials, at
+                        // HTTPS or loopback HTTP, uses OAuth.
+                        let (key, server) = credential_key(&p.id, &entry.configuration)
+                            .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
+                        // Sign-in contacts the server: only for an entry the
+                        // user enabled (ADR 003 D3).
+                        if !entry.enabled() {
+                            return Err(error(McpError::Disabled));
+                        }
+                        let McpServerSettings::Remote { oauth, .. } = &entry.configuration else {
+                            unreachable!("OAuth entries are remote");
+                        };
+                        if let Some(secret) = &p.client_secret
+                            && (secret.is_empty()
+                                || oauth
+                                    .as_deref()
+                                    .is_none_or(|oauth| oauth.client_id.is_none()))
+                        {
+                            return Err(RpcError::invalid(
+                                "clientSecret requires oauth.clientId and a value",
+                            ));
+                        }
+                        let started = auth
+                            .start(&key, &server, oauth.as_deref(), p.client_secret, &stopping)
+                            .await
+                            .map_err(|e| error(e.into()))?;
+                        return reply(started);
+                    }
+                    "mcp.auth.complete" => {
+                        let p: CompleteMcpAuth = params(value)?;
+                        let id = uuid::Uuid::parse_str(&p.attempt_id)
+                            .map_err(|_| RpcError::invalid("attemptId must be a UUID"))?;
+                        auth.complete(id, &p.callback_url, &stopping)
+                            .await
+                            .map_err(|e| error(e.into()))?;
                     }
                     _ => unreachable!("registered MCP management method"),
                 }

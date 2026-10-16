@@ -30,6 +30,8 @@ base64 = "0.22"
 serde_jcs = "0.2"
 regex = "1"
 rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "transport-async-rw", "auth"] }
+async-trait = "0.1"
+http = "1"
 reqwest-mcp = { package = "reqwest", version = "0.13.2", default-features = false, features = ["json", "stream", "rustls"] }
 
 [target.'cfg(windows)'.dependencies]
