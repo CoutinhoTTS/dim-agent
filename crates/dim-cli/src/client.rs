@@ -168,6 +168,9 @@ impl Client {
         let mut bytes = serde_json::to_vec(
             &json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params}),
         )?;
+        if bytes.len() > FRAME_LIMIT {
+            return Err("App Server request exceeds 16 MiB after JSON encoding".into());
+        }
         bytes.push(b'\n');
         self.write.write_all(&bytes).await?;
         self.write.flush().await?;
