@@ -2,7 +2,7 @@
 
 [总体设计](../overview.md)中规划的新插件的设计文档。已实现的插件及其 Capability 见 [architecture/rust-agent/plugins](../../../architecture/rust-agent/plugins/README.md)。规则：[设计规则](../../../architecture/rust-agent/principles.md) 第 1、4 节，[ADR 002](../../adr/002-plugin-scope.md)。共享合同：[session-access](../contracts/session-access.md)、[session-boundary](../contracts/session-boundary.md)。
 
-插件按状态归属拆分：进程级部分是进程插件；Session 级和分支级部分是 Capability。所有文档状态：草案；ShellInput 已实现，Questions 与 ExternalAgent 需要重新设计，Hooks 待设计，Notifications 已撤回。
+插件按状态归属拆分：进程级部分是进程插件；Session 级和分支级部分是 Capability。所有文档状态：草案；ShellInput 与 Attachments 已实现，Questions 与 ExternalAgent 需要重新设计，Hooks 待设计，Notifications 已撤回。
 
 ## 索引
 
@@ -10,7 +10,7 @@
 | --- | --- | --- | --- | --- |
 | [Questions](Questions.md) | — | `ask_user` 工具、`session.question.*` | 待答问题、`question/*` | P1（需要重新设计） |
 | [ShellInput](ShellInput.md) | — | `shell.*` 方法、命令执行 | — | P1（已实现） |
-| [Attachments](Attachments.md) | — | `attachment.put`、Session 文件 | — | P1 |
+| [Attachments](Attachments.md) | — | `attachment.put`、Session 文件 | — | P1（已实现） |
 | [SessionTitle](SessionTitle.md) | — | 观察首条用户输入的采纳、`session.rename` | — | P1 |
 | [Goal](Goal.md) | — | `goal_update` 工具、`session.goal.*` | 由 `goal:objective` 与 `goal:status` 块折叠出的目标状态、续跑 | P2 |
 | [Web](Web.md) | — | `web_search`、`web_fetch` 工具 | — | P2 |
