@@ -809,6 +809,8 @@ dependencies = [
  "dim-agent-types",
  "futures-util",
  "rutis",
+ "rutis-bridge",
+ "rutis-loader",
  "serde_json",
  "test-extension-a",
  "test-extension-b",
