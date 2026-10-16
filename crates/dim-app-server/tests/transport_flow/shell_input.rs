@@ -595,3 +595,84 @@ async fn a_session_reload_terminates_the_run_without_writing() {
     assert!(!shell.work.join("pid").exists());
     shell.shutdown().await;
 }
+
+/// Reads frames until the reply to `id`, returning the progress data of `id`
+/// received before it.
+async fn progress_until_reply(client: &mut Client, id: u64) -> (Vec<Value>, Value) {
+    let mut progress = vec![];
+    loop {
+        let frame = client.read().await;
+        if frame["id"] == id {
+            return (progress, frame);
+        }
+        if frame["method"] == "management.progress" && frame["params"]["id"] == id {
+            progress.push(frame["params"]["data"].clone());
+        }
+    }
+}
+
+/// Design D3 and A.1: the caller receives the output as progress while the
+/// command runs and before the reply, decoded and with control characters
+/// removed as in exec.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_caller_receives_progress_before_the_reply() {
+    let mut shell = Shell::launch().await;
+    let id = shell
+        .send_run(
+            "streamed",
+            "printf 'one\\033\\n'; while [ ! -f go ]; do sleep 0.02; done; printf 'two\\n'",
+            "private",
+        )
+        .await;
+    let first = loop {
+        let frame = shell.client.read().await;
+        if frame["method"] == "management.progress" {
+            break frame["params"].clone();
+        }
+    };
+    assert_eq!(
+        first,
+        json!({"id": id, "method": "shell.run", "data": {"text": "one\n"}})
+    );
+    std::fs::write(shell.work.join("go"), "").unwrap();
+    let (progress, reply) = progress_until_reply(&mut shell.client, id).await;
+    assert_eq!(progress, [json!({"text": "two\n"})]);
+    assert_eq!(reply["result"]["output"], "one\ntwo\n");
+    shell.shutdown().await;
+}
+
+/// Design D6: a command writing 10 MiB at once. Each progress item holds at
+/// most 64 KiB of text and counts the bytes it left out; the items precede
+/// the reply and the connection stays open; the reply and the recorded input
+/// keep exec's bounds and are marked truncated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_items_are_capped_and_count_what_they_leave_out() {
+    let mut shell = Shell::launch().await;
+    let before = shell.through().await;
+    let total = 10 * 1024 * 1024;
+    // 64-byte lines.
+    let line = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-";
+    let command = format!("yes {line} | head -c {total}");
+    let id = shell.send_run("flood", &command, "record").await;
+    let (progress, reply) = progress_until_reply(&mut shell.client, id).await;
+    let (mut text, mut skipped) = (0, 0);
+    for item in &progress {
+        let length = item["text"].as_str().unwrap().len();
+        assert!(length <= 64 * 1024, "{length}");
+        text += length;
+        skipped += item["skipped"].as_u64().unwrap_or_default() as usize;
+    }
+    assert!(skipped > 0, "{progress:?}");
+    assert_eq!(text + skipped, total);
+    assert_ok(&shell.client.rpc("daemon.ping", json!({})).await);
+
+    let result = &reply["result"];
+    assert_eq!(result["truncated"], true);
+    let output = result["output"].as_str().unwrap();
+    assert!(output.len() <= 50 * 1024 && output.ends_with(&format!("{line}\n")));
+    let recorded = shell.recorded(before).await;
+    let marker = recorded[0]["data"]["blocks"][0]["text"].as_str().unwrap();
+    assert!(marker.contains("truncated=\"true\""), "{marker:.200}");
+    assert!(marker.ends_with(&format!("\n{output}\n</dim-shell-input>")));
+    shell.shutdown().await;
+}

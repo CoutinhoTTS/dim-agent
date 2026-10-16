@@ -11,10 +11,10 @@
 use crate::{
     context_block::{element, raw, text},
     host_platform::{HostPlatform, ProcessTree},
-    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
+    methods::{Interruption, MethodDecl, Progress, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
     workspace_tools::exec::{
-        OutputSink, capture_preview, pump, sanitize, signal_name, truncate_preview,
+        OutputSink, capture_preview, pump, sanitize, signal_name, tail_bytes, truncate_preview,
     },
 };
 use dim_agent_runtime::{
@@ -31,14 +31,20 @@ use std::{
     path::PathBuf,
     process::ExitStatus,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::oneshot, time::Instant};
+use tokio::{
+    sync::oneshot,
+    time::{Instant, MissedTickBehavior},
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// The Session method namespace ShellInput provides.
 pub const SHELL_METHODS: &str = "shell";
 const MAX_COMMAND_BYTES: usize = 64 * 1024;
+/// At most one progress item per interval, with at most this much text.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const PROGRESS_MAX_BYTES: usize = 64 * 1024;
 
 /// Installs ShellInput in every Session and records its namespace.
 pub fn install(builder: &mut AgentBuilder) {
@@ -168,6 +174,7 @@ impl ShellInput {
         self: Arc<Self>,
         value: Value,
         cancel: CancellationToken,
+        progress: Progress,
     ) -> Result<Value, RpcError> {
         let p: RunParams = params(value)?;
         if p.command.is_empty() || p.command.len() > MAX_COMMAND_BYTES {
@@ -223,8 +230,10 @@ impl ShellInput {
                 stop: stop.clone(),
                 ended: ended.clone(),
             });
-            self.runs
-                .spawn(self.clone().supervise(info, tree, stop, ended, send));
+            self.runs.spawn(
+                self.clone()
+                    .supervise(info, tree, stop, ended, progress, send),
+            );
         }
         tokio::select! {
             reply = reply => reply.unwrap_or_else(|_| Err(RpcError::interrupted())),
@@ -241,6 +250,7 @@ impl ShellInput {
         mut tree: ProcessTree,
         stop: CancellationToken,
         ended: CancellationToken,
+        progress: Progress,
         reply: oneshot::Sender<Result<Value, RpcError>>,
     ) {
         let span = self
@@ -259,12 +269,22 @@ impl ShellInput {
                 _ = self.lifecycle.closing() => {}
             }
         };
+        tokio::pin!(ending);
+        let mut ticks = tokio::time::interval(PROGRESS_INTERVAL);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut sent = None;
         // An exit already there wins over a stop or the end of the part.
-        let end = tokio::select! {
-            biased;
-            status = tree.wait() => End::Exited(status),
-            _ = ending => End::Interrupted,
-            _ = stop.cancelled() => End::Stopped,
+        let end = loop {
+            tokio::select! {
+                biased;
+                status = tree.wait() => break End::Exited(status),
+                _ = &mut ending => break End::Interrupted,
+                _ = stop.cancelled() => break End::Stopped,
+                _ = ticks.tick() => if let Some(item) = output.take_progress() {
+                    progress.send(item);
+                    sent = Some(Instant::now());
+                },
+            }
         };
         let terminated = match end {
             End::Exited(Ok(_)) => Ok(()),
@@ -275,6 +295,16 @@ impl ShellInput {
         stop_pumps.cancel();
         futures_util::future::join_all(pumps).await;
         drop(tree);
+        // The rest of the output, still one interval after the last item;
+        // before the Session part is checked again for the write below.
+        if !self.ending()
+            && let Some(item) = output.take_progress()
+        {
+            if let Some(sent) = sent {
+                tokio::time::sleep_until(sent + PROGRESS_INTERVAL).await;
+            }
+            progress.send(item);
+        }
         let (result, outcome) = if self.ending() {
             (Err(RpcError::interrupted()), "interrupted".to_owned())
         } else {
@@ -395,7 +425,8 @@ impl ShellInput {
     }
 }
 
-/// The output of one run: exec's bounded tail of both pipes.
+/// The output of one run, both pipes in arrival order: exec's bounded tail,
+/// and the text the next progress item carries.
 #[derive(Default)]
 struct RunOutput(Mutex<Captured>);
 #[derive(Default)]
@@ -403,15 +434,38 @@ struct Captured {
     preview: String,
     /// Bytes decoded in all; more than `preview` holds means its head was cut.
     decoded: usize,
+    /// Sanitized text since the last item, within its last 64 KiB.
+    pending: String,
+    /// Bytes left out before `pending`.
+    skipped: usize,
 }
 impl OutputSink for RunOutput {
     async fn push(&self, text: &str) {
         let mut captured = self.0.lock().unwrap();
         captured.decoded += text.len();
         capture_preview(&mut captured.preview, text);
+        captured.pending.push_str(&sanitize(text));
+        if captured.pending.len() > PROGRESS_MAX_BYTES {
+            let kept = tail_bytes(&captured.pending, PROGRESS_MAX_BYTES).to_owned();
+            captured.skipped += captured.pending.len() - kept.len();
+            captured.pending = kept;
+        }
     }
 }
 impl RunOutput {
+    /// The next progress item `{text, skipped?}`, if there is new text.
+    fn take_progress(&self) -> Option<Value> {
+        let mut captured = self.0.lock().unwrap();
+        if captured.pending.is_empty() {
+            return None;
+        }
+        let mut item = json!({ "text": std::mem::take(&mut captured.pending) });
+        let skipped = std::mem::take(&mut captured.skipped);
+        if skipped > 0 {
+            item["skipped"] = skipped.into();
+        }
+        Some(item)
+    }
     /// exec's bounds (the last 2000 lines within 50 KiB), and whether they
     /// left anything out.
     fn bounded(&self) -> (String, bool) {
@@ -486,16 +540,19 @@ impl TypedPlugin for ShellInputPlugin {
                 &self.scope,
                 SHELL_METHODS,
                 vec![
-                    MethodDecl::new("shell.run", true, Interruption::Report),
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("shell.run", true, Interruption::Report)
+                    },
                     MethodDecl::new("shell.stop", true, Interruption::Report),
                     MethodDecl::new("shell.list", false, Interruption::Report),
                 ],
-                Arc::new(move |method, value, cancel, _| {
+                Arc::new(move |method, value, cancel, progress| {
                     let shell = shell.clone();
                     Box::pin(async move {
                         // The provider admits only the declared names.
                         match method.as_str() {
-                            "shell.run" => shell.run(value, cancel).await,
+                            "shell.run" => shell.run(value, cancel, progress).await,
                             "shell.stop" => shell.stop(value, cancel).await,
                             _ => shell.list(value),
                         }
