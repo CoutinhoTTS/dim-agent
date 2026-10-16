@@ -4,7 +4,7 @@
 //! [`AgentIndex`]; Agents' directory part, which never reloads, serves them by
 //! name and looks up the index on each call.
 use super::AgentIndex;
-use crate::protocol::{PROTOCOL_VERSION, session_cwd};
+use crate::protocol::{PROTOCOL_VERSION, SessionId, session_cwd};
 use dim_agent_capabilities::{
     input_queue::{InputQueue, Withdrawal},
     permission::PermissionState,
@@ -648,6 +648,7 @@ impl HostDispatch for SessionsService {
         Some(json!({
             "launch": "async", "input": "async", "lookup": "async",
             "history": "async", "withdraw": "async", "stop": "async", "idle": "async",
+            "delete": "async",
         }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
@@ -703,6 +704,14 @@ async fn call(
         }),
         "stop" => reply(json!({"sequence": index.stop(request(args)?).await?})),
         "idle" => reply(json!({"sequence": index.idle(request(args)?).await?})),
+        // S5c's delete (§6.8): admission gate, close, then the Session's rows
+        // and files. Like Rpc's `session.delete` it runs to its own outcome
+        // across an index reload, so a reload never leaves it half done.
+        "delete" => {
+            let SessionId { session_id } = request(args)?;
+            index.delete(&session_id).await?;
+            reply(json!({}))
+        }
         _ => Err(SessionsError::rejected(format!(
             "unknown sessions method {method}"
         ))),

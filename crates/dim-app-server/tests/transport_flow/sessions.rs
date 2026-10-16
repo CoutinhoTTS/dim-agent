@@ -864,3 +864,131 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// Sessions §6.8 and §8.7: a consumer deletes a Session it launched through
+/// S5c's delete. A wait on the run ends `session_closed`, so do later calls,
+/// and deleting an absent Session succeeds. An index reload does not cut a
+/// started delete short. A delete that fails after its close replies
+/// `failed` and leaves the Session closed with its rows; the consumer's retry
+/// deletes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_consumer_deletes_its_launched_session_and_retries_a_failed_delete() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Store::new();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(Some(store.database())).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let stored = |id: &str| {
+        rusqlite::Connection::open(store.database())
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM agent_sessions WHERE session_id=?1",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    };
+    let delete = |id: &str| json!({"sessionId":id});
+
+    // A loaded run whose turn waits on an approval.
+    let session = awaiting_approval(&sessions, &agent).await;
+    let id = session.id().to_owned();
+    let at = json!({"sessionId":id,"branchId":"main"});
+    let idle = tokio::spawn({
+        let sessions = sessions.clone();
+        let at = at.clone();
+        async move { sessions.call("idle", at).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!idle.is_finished());
+    assert_eq!(sessions.ok("delete", delete(&id)).await, json!({}));
+    let ended = idle.await.unwrap();
+    assert_eq!(ended["error"]["code"], "session_closed", "{ended}");
+    assert!(agent.get_session(&id).is_none() && !stored(&id));
+    for (method, request) in [
+        ("idle", at.clone()),
+        ("history", at.clone()),
+        ("input", input(&session, "test:after", json!([]))),
+        (
+            "launch",
+            json!({"cwd":std::env::temp_dir(),"starter":at.clone()}),
+        ),
+    ] {
+        assert_eq!(
+            sessions.error(method, request).await,
+            "session_closed",
+            "{method}"
+        );
+    }
+    // Already deleted, or never created.
+    for absent in [id.clone(), uuid::Uuid::new_v4().to_string()] {
+        assert_eq!(sessions.ok("delete", delete(&absent)).await, json!({}));
+    }
+    for request in [
+        delete("a/b"),
+        delete(".."),
+        json!({}),
+        json!({"sessionId":id,"force":true}),
+    ] {
+        assert_eq!(
+            sessions.error("delete", request.clone()).await,
+            "rejected",
+            "{request}"
+        );
+    }
+
+    // The writer is held, so the delete waits in its close while Agents
+    // reloads; it then replies its own outcome, not `reloading`.
+    let id = launched(&sessions, &agent, json!({})).await.id().to_owned();
+    let lock = rusqlite::Connection::open(store.database()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let deleting = tokio::spawn({
+        let sessions = sessions.clone();
+        let request = delete(&id);
+        async move { sessions.call("delete", request).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!deleting.is_finished());
+    let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        lock.execute_batch("COMMIT").unwrap();
+    });
+    restarted.unwrap();
+    assert_eq!(deleting.await.unwrap(), json!({"ok": true, "value": {}}));
+    assert!(!stored(&id));
+
+    // An entry of the run's command output the daemon cannot remove.
+    let id = launched(&sessions, &agent, json!({})).await.id().to_owned();
+    let locked = store.0.join("command-output").join(&id).join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("exec.log"), b"output").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(
+        std::fs::write(locked.join("probe"), b"")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "file permissions must bind the test's user"
+    );
+    let failed = sessions.error("delete", delete(&id)).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(failed, "failed");
+    // Closed in this process with its rows kept (S5c D5).
+    assert!(stored(&id));
+    assert_eq!(
+        sessions
+            .error("idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+        "session_closed"
+    );
+    assert_eq!(sessions.ok("delete", delete(&id)).await, json!({}));
+    assert!(!stored(&id) && !store.0.join("command-output").join(&id).exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
