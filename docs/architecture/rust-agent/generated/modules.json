@@ -1834,6 +1834,24 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::composer",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/composer.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "println",
+        "tokio::pin",
+        "tokio::select",
+        "unreachable",
+        "vec",
+        "write",
+        "writeln"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::display",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -14759,6 +14777,13 @@
     },
     {
       "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::composer",
+      "references": [
+        "mod composer"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
       "to": "dim_cli::@bin:dimcode::display",
       "references": [
         "mod display"
@@ -14836,6 +14861,57 @@
       "references": [
         "path Options",
         "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::composer",
+      "to": "dim_agent_types::content",
+      "references": [
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::composer",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path UserInput",
+        "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::composer",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::composer",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "path RequestTooLarge",
+        "path RpcError",
+        "use crate::client::Client",
+        "use crate::client::RequestTooLarge",
+        "use crate::client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::composer",
+      "to": "dim_cli::@bin:dimcode::display",
+      "references": [
+        "path display::safe",
+        "use crate::display"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::composer",
+      "to": "dim_cli::@bin:dimcode::input",
+      "references": [
+        "path Input",
+        "use crate::input::Input"
       ]
     },
     {
@@ -15029,6 +15105,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
+        "path UserInput",
         "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::UserInput"
       ]
@@ -15066,8 +15143,21 @@
         "path Message",
         "path Message::Notice",
         "path Message::Response",
+        "path RequestTooLarge",
         "use crate::client::Client",
-        "use crate::client::Message"
+        "use crate::client::Message",
+        "use crate::client::RequestTooLarge"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::composer",
+      "references": [
+        "path Draft",
+        "path Draft::default",
+        "path composer::edit",
+        "use crate::composer",
+        "use crate::composer::Draft"
       ]
     },
     {
@@ -15467,6 +15557,10 @@
     {
       "module": "dim_cli::@bin:dimcode::display",
       "path": "Wire::deserialize"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::input",
+      "path": "CONSOLE_SCREEN_BUFFER_INFO::default"
     },
     {
       "module": "dim_cli::@bin:dimcode::input",
