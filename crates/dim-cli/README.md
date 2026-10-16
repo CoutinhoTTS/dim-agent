@@ -2,6 +2,9 @@
 
 `dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`.
 
+The [CLI commands and exports design](../../docs/design/cli-commands.md) defines
+F6 command, conversation-export and JSONL behavior for implementation.
+
 Proposed model commands and atomic Agent configuration adoption are specified in
 [model configuration](../../docs/design/model-configuration.md); they are not implemented.
 
