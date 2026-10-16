@@ -759,6 +759,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-agent-attachments"
+version = "0.1.0"
+dependencies = [
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "rutis",
+ "serde",
+]
+
+[[package]]
 name = "dim-agent-capabilities"
 version = "0.1.0"
 dependencies = [
