@@ -320,54 +320,40 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             assert_eq!(live["params"]["branchId"], "main");
         }
 
-        // Two commands interleaved with a running step: the second waits as
-        // the next step, and each reply comes from the step that served it.
+        // A repeated request while a compaction is in flight joins it: the
+        // Timeline holds one command and both callers get the same result.
         turn(&mut client, &sid, "small extra").await;
+        let before = history(&mut client, &sid).await.len();
         provider.hold.store(true, Ordering::SeqCst);
         let first = client
             .send("session.context.compact", json!({"sessionId":sid,"branchId":"main"}))
             .await;
         provider.entered.notified().await;
-        let second = client
+        let mut repeated = connect(&server).await;
+        let second = repeated
             .send("session.context.compact", json!({"sessionId":sid,"branchId":"main"}))
             .await;
-        let mut observer = connect(&server).await;
-        let (c1, c2) = loop {
-            let commands: Vec<_> = history(&mut observer, &sid)
-                .await
-                .into_iter()
-                .filter(|event| is(event, "context/compact"))
-                .map(|event| event["sequence"].as_u64().unwrap())
-                .collect();
-            if let [.., c1, c2] = commands[..]
-                && commands.len() >= 3
-            {
-                break (c1, c2);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-        drop(observer);
         provider.release.notify_one();
         let first = client.response(first).await;
-        let second = client.response(second).await;
+        let second = repeated.response(second).await;
+        drop(repeated);
         assert_ok(&first);
-        assert_ok(&second);
         assert_eq!(first["result"]["status"], "completed");
+        assert_eq!(second["result"], first["result"]);
         let events = history(&mut client, &sid).await;
-        let result_of = |command: u64| {
-            events
+        let joined: Vec<_> = events[before..].iter().collect();
+        assert_eq!(
+            joined.iter().filter(|event| is(event, "context/compact")).count(),
+            1,
+            "{joined:?}"
+        );
+        assert_eq!(
+            joined
                 .iter()
-                .find(|event| is(event, "context/compaction") && event["data"]["command"] == command)
-                .unwrap()
-        };
-        assert_eq!(first["result"]["sequence"], result_of(c1)["sequence"]);
-        let served = result_of(c2);
-        assert!(served["data"]["start"].is_u64(), "{served}");
-        assert!(served["sequence"].as_u64() > result_of(c1)["sequence"].as_u64());
-        match second["result"]["status"].as_str().unwrap() {
-            "completed" => assert_eq!(second["result"]["sequence"], served["sequence"]),
-            status => assert_eq!((status, &second["result"]["reason"]), ("skipped", &served["data"]["reason"])),
-        }
+                .filter(|event| is(event, "context/compaction-start"))
+                .count(),
+            1
+        );
 
         // Acceptance 6 and 8: a client that connects while the summarizer is
         // held sees a running compaction from history; a crash leaves it

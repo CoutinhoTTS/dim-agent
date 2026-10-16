@@ -274,25 +274,23 @@ async fn until(
     .expect("the expected facts are committed")
 }
 
-/// The result covering `command`, as the method's waiter reads it: the
-/// first result with this command or, while no step started for it, the
-/// first result with a later one.
+/// The result of `command`: the one that carries its command id.
 fn result_for(events: &[Arc<AgentEvent>], command: u64) -> Option<&ContextCompactionData> {
-    let mut started = false;
     events.iter().find_map(|event| match &event.kind {
-        EventKind::ContextCompactionStart(data) => {
-            started |= data.command == Some(command);
-            None
-        }
-        EventKind::ContextCompaction(data)
-            if data
-                .command
-                .is_some_and(|c| c == command || (c > command && !started)) =>
-        {
-            Some(data)
-        }
+        EventKind::ContextCompaction(data) if data.command == Some(command) => Some(data),
         _ => None,
     })
+}
+
+/// How many results carry `command`.
+fn results_of(events: &[Arc<AgentEvent>], command: u64) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(&event.kind,
+            EventKind::ContextCompaction(data) if data.command == Some(command))
+        })
+        .count()
 }
 
 /// Waits until the Loop has consumed the event at `sequence`.
@@ -699,7 +697,13 @@ async fn an_interrupt_cancels_a_running_step_and_a_pending_command() {
     assert!(matches!(&result.outcome,
         ContextCompactionResult::Cancelled { reason } if reason == "user stop"));
     assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
-    // Pending inside a turn: the interrupt settles it without a start and
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        results_of(&session.history("main", None).await.unwrap(), command),
+        1,
+        "settled once"
+    );
+    // Waiting inside a turn: the interrupt settles it without a start and
     // the turn ends as interrupted turns do.
     model.hold.store(true, Ordering::SeqCst);
     session
@@ -760,6 +764,12 @@ async fn a_reload_during_a_step_settles_it_without_another_strategy_call() {
     assert!(matches!(&result.outcome,
         ContextCompactionResult::Cancelled { reason } if reason == CAPABILITY_RELOADING));
     assert_eq!(projected(&session, "main").await, before);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        results_of(&session.history("main", None).await.unwrap(), command),
+        1,
+        "settled once"
+    );
     // The reloaded Loop does not resume the step; a new command compacts.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
@@ -851,156 +861,147 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
     agent.close().await.unwrap();
 }
 
-/// Two commands interleaved with a running step (§5.4): commands consumed
-/// while the step runs coalesce into one pending command, the running
-/// step's result retires only its own command, and the pending one runs
-/// next under its own sequence before the Loop advances. The coalesced
-/// command is answered by that next step's result.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commands_consumed_during_a_step_run_as_the_next_step() {
-    let strategy = Scripted::new(Mode::Cut);
-    let agent = builder_with_strategy(
-        Arc::new(EchoModel),
-        HistoryRenderer::default(),
-        strategy.clone(),
-        None,
-    )
-    .build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    turns(&session, &[first().as_str(), "second", "third"]).await;
-    let loop_service = session.service::<AgentLoop>("main").unwrap();
-    strategy.hold.store(true, Ordering::SeqCst);
-    let c1 = loop_service.compact().unwrap();
-    strategy.entered.notified().await;
-    let c2 = loop_service.compact().unwrap();
-    let c3 = loop_service.compact().unwrap();
-    consumed(&session, c3).await;
-    strategy.release.notify_one();
-    let events = until(&session, |events| result_for(events, c3).is_some()).await;
-    // One step per active command: c1, then c3 with c2 coalesced into it.
-    assert_eq!(starts_of(&events), [Some(c1), Some(c3)]);
-    let first_result = result_for(&events, c1).unwrap();
-    assert_eq!(first_result.command, Some(c1));
-    assert!(matches!(
-        first_result.outcome,
-        ContextCompactionResult::Completed { .. }
-    ));
-    let next = result_for(&events, c3).unwrap();
-    assert_eq!(next.command, Some(c3));
-    assert!(next.start.is_some());
-    // The coalesced command is answered by the step that served c3.
-    assert_eq!(result_for(&events, c2), Some(next));
-    assert_eq!(strategy.calls.load(Ordering::SeqCst), 2);
-    // Normal advancement resumes after the pending step.
-    turns(&session, &["fourth"]).await;
-    let events = session.history("main", None).await.unwrap();
-    assert!(matches!(
-        &events.last().unwrap().kind,
-        EventKind::TurnEnd(TurnEndData {
-            outcome: TurnOutcome::Completed { .. },
-            ..
-        })
-    ));
-    assert_paired(&events);
-    agent.close().await.unwrap();
-}
-
-/// An interrupt with both an active and a pending command settles both as
-/// `cancelled`: the active one with its start, the pending one without.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_interrupt_settles_the_active_and_the_pending_command() {
-    let strategy = Scripted::new(Mode::Cut);
-    let agent = builder_with_strategy(
-        Arc::new(EchoModel),
-        HistoryRenderer::default(),
-        strategy.clone(),
-        None,
-    )
-    .build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    turns(&session, &[first().as_str(), "second", "third"]).await;
-    let loop_service = session.service::<AgentLoop>("main").unwrap();
-    strategy.hold.store(true, Ordering::SeqCst);
-    let c1 = loop_service.compact().unwrap();
-    strategy.entered.notified().await;
-    let c2 = loop_service.compact().unwrap();
-    consumed(&session, c2).await;
-    session.interrupt("main", "user stop".into()).unwrap();
-    let events = until(&session, |events| {
-        result_for(events, c1).is_some() && result_for(events, c2).is_some()
-    })
-    .await;
-    let active = result_for(&events, c1).unwrap();
-    assert_eq!((active.command, active.start.is_some()), (Some(c1), true));
-    assert!(matches!(&active.outcome,
-        ContextCompactionResult::Cancelled { reason } if reason == "user stop"));
-    let pending = result_for(&events, c2).unwrap();
-    assert_eq!((pending.command, pending.start), (Some(c2), None));
-    assert!(matches!(&pending.outcome,
-        ContextCompactionResult::Cancelled { reason } if reason == "user stop"));
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let events = session.history("main", None).await.unwrap();
-    assert_eq!(starts_of(&events), [Some(c1)]);
-    assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
-    assert_paired(&events);
-    agent.close().await.unwrap();
-}
-
-/// A plugin reload with both an active and a pending command settles both as
-/// `cancelled: capability reloading`, with no further strategy call.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reload_settles_the_active_and_the_pending_command() {
-    let strategy = Scripted::new(Mode::Cut);
-    let reload = StrategyReload::default();
-    let agent = builder_with_strategy(
-        Arc::new(EchoModel),
-        HistoryRenderer::default(),
-        strategy.clone(),
-        Some(&reload),
-    )
-    .build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    turns(&session, &[first().as_str(), "second", "third"]).await;
-    let loop_service = session.service::<AgentLoop>("main").unwrap();
-    strategy.hold.store(true, Ordering::SeqCst);
-    let c1 = loop_service.compact().unwrap();
-    strategy.entered.notified().await;
-    let c2 = loop_service.compact().unwrap();
-    consumed(&session, c2).await;
-    let view = reload.0.lock().unwrap().last().cloned().unwrap();
-    view.restart().await.unwrap();
-    let events = until(&session, |events| {
-        result_for(events, c1).is_some() && result_for(events, c2).is_some()
-    })
-    .await;
-    let active = result_for(&events, c1).unwrap();
-    assert_eq!((active.command, active.start.is_some()), (Some(c1), true));
-    let pending = result_for(&events, c2).unwrap();
-    assert_eq!((pending.command, pending.start), (Some(c2), None));
-    for result in [active, pending] {
-        assert!(matches!(&result.outcome,
-            ContextCompactionResult::Cancelled { reason } if reason == CAPABILITY_RELOADING));
+/// Captures the branch Timeline so a test can write a `context/compact`
+/// that does not come through `AgentLoop::compact`.
+struct RawTimeline(BranchScope, Arc<std::sync::OnceLock<Arc<Timeline>>>);
+impl TypedPlugin for RawTimeline {
+    type Deps = (InBranch<Timeline>,);
+    fn name(&self) -> &str {
+        "test.raw-timeline"
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let events = session.history("main", None).await.unwrap();
-    assert_eq!(starts_of(&events), [Some(c1)]);
+    fn apply<'a>(
+        &'a self,
+        _: &'a Ctx,
+        (InBranch(timeline),): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let _ = self.1.set(timeline);
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for RawTimeline {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
+/// §5.4: repeated and concurrent requests while a command is outstanding
+/// join it. The Timeline holds one command and every caller waits for the
+/// same result; once that result is consumed, a new request writes a new
+/// command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_and_concurrent_requests_join_the_outstanding_command() {
+    let strategy = Scripted::new(Mode::Cut);
+    let agent = builder_with_strategy(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        strategy.clone(),
+        None,
+    )
+    .build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    turns(&session, &[first().as_str(), "second", "third"]).await;
+    let before = session.sequence("main").unwrap();
+    let loop_service = session.service::<AgentLoop>("main").unwrap();
+    strategy.hold.store(true, Ordering::SeqCst);
+    let concurrent: Vec<_> = (0..4)
+        .map(|_| {
+            let loop_service = loop_service.clone();
+            tokio::spawn(async move { loop_service.compact().unwrap() })
+        })
+        .collect();
+    let mut commands = Vec::new();
+    for call in concurrent {
+        commands.push(call.await.unwrap());
+    }
+    let command = commands[0];
+    assert!(commands.iter().all(|joined| *joined == command));
+    strategy.entered.notified().await;
+    // A repeated request while the step runs joins it as well.
+    assert_eq!(loop_service.compact().unwrap(), command);
+    strategy.release.notify_one();
+    let events = until(&session, |events| result_for(events, command).is_some()).await;
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(&event.kind,
-                EventKind::ContextCompaction(data) if data.command == Some(c2)))
+            .filter(|event| event.sequence > before
+                && matches!(event.kind, EventKind::ContextCompact(_)))
             .count(),
         1
     );
+    assert_eq!(starts_of(&events), [Some(command)]);
+    assert_eq!(results_of(&events, command), 1);
+    assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
+    // Once the result is consumed, the next request is a new command.
+    let result = events
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+            EventKind::ContextCompaction(data) if data.command == Some(command))
+        })
+        .unwrap()
+        .sequence;
+    consumed(&session, result).await;
+    assert!(loop_service.compact().unwrap() > result);
+    assert_paired(&session.history("main", None).await.unwrap());
+    agent.close().await.unwrap();
+}
+
+/// §5.4 defensive rule: a `context/compact` consumed while another command
+/// is outstanding (one not written through `AgentLoop::compact`, or old
+/// data) is skipped at once with a result that references it; it is not
+/// queued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_command_consumed_while_one_is_outstanding_is_skipped() {
+    let strategy = Scripted::new(Mode::Cut);
+    let timeline = Arc::new(std::sync::OnceLock::new());
+    let mut builder = builder_with_strategy(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        strategy.clone(),
+        None,
+    );
+    let captured = timeline.clone();
+    builder.timeline_plugin(move |scope| RawTimeline(*scope, captured.clone()));
+    let agent = builder.build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    turns(&session, &[first().as_str(), "second", "third"]).await;
+    strategy.hold.store(true, Ordering::SeqCst);
+    let command = session
+        .service::<AgentLoop>("main")
+        .unwrap()
+        .compact()
+        .unwrap();
+    strategy.entered.notified().await;
+    let raw = timeline
+        .get()
+        .unwrap()
+        .append(EventKind::ContextCompact(ContextCompactData {}).into())
+        .unwrap()
+        .sequence;
+    let events = until(&session, |events| result_for(events, raw).is_some()).await;
+    let skipped = result_for(&events, raw).unwrap();
+    assert_eq!((skipped.start, skipped.through), (None, raw));
+    assert!(matches!(&skipped.outcome,
+        ContextCompactionResult::Skipped { reason, .. }
+            if reason == dim_agent_capabilities::agent_loop::ALREADY_IN_PROGRESS));
+    strategy.release.notify_one();
+    let events = until(&session, |events| result_for(events, command).is_some()).await;
+    assert!(matches!(
+        result_for(&events, command).unwrap().outcome,
+        ContextCompactionResult::Completed { .. }
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let events = session.history("main", None).await.unwrap();
+    assert_eq!(starts_of(&events), [Some(command)]);
+    assert_eq!(results_of(&events, raw), 1);
     assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
     assert_paired(&events);
     agent.close().await.unwrap();

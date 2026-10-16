@@ -69,21 +69,38 @@ impl Applied {
         }
     }
 }
-/// The manual compaction step, folded from `context/compact` and the
-/// results that serve it. The active and the pending command are separate:
-/// a command consumed while a step runs waits as the next step.
+/// The one outstanding manual compaction command: written and without a
+/// result. Repeated requests join it (`AgentLoop::compact`); deduplication
+/// belongs to the interaction boundary, not to a queue of commands.
+struct Command {
+    sequence: u64,
+    /// The Loop has consumed the command; it starts at the next boundary.
+    consumed: bool,
+    /// The running step's cancellation.
+    running: Option<CancellationToken>,
+}
 #[derive(Default)]
 struct CompactionSlot {
-    /// The latest command not yet started; a command consumed while one is
-    /// pending replaces it (coalesces), and the step serves the latest.
-    pending: Option<u64>,
-    /// The running step's own command and cancellation; its result retires
-    /// only this command, and a pending one then runs before the Loop
-    /// advances.
-    running: Option<(u64, CancellationToken)>,
+    command: Option<Command>,
     /// Why an interrupt cancelled the running step.
     stop_reason: Option<String>,
 }
+impl CompactionSlot {
+    fn running(&self) -> bool {
+        self.command
+            .as_ref()
+            .is_some_and(|command| command.running.is_some())
+    }
+    /// Consumed and waiting for a boundary.
+    fn waiting(&self) -> bool {
+        self.command
+            .as_ref()
+            .is_some_and(|command| command.consumed && command.running.is_none())
+    }
+}
+/// The reason a `context/compact` consumed while another command is
+/// outstanding is skipped.
+pub const ALREADY_IN_PROGRESS: &str = "a compaction is already in progress";
 pub struct AgentLoop {
     turn: Mutex<Option<Turn>>,
     /// Locked after `turn`.
@@ -139,17 +156,30 @@ impl AgentLoop {
                 && !claimed.contains(&input.id)
         })
     }
-    /// Appends `context/compact`; the Loop serves it as a compaction step.
+    /// The only writer of `context/compact`. With a command outstanding
+    /// (written and without a result) it writes nothing and returns that
+    /// command's sequence, so every caller waits for the same result;
+    /// otherwise it appends the command and returns its sequence.
     pub fn compact(&self) -> Result<u64> {
-        Ok(self
+        let mut compaction = self.compaction.lock().unwrap();
+        if let Some(command) = &compaction.command {
+            return Ok(command.sequence);
+        }
+        let sequence = self
             .timeline
             .append(EventKind::ContextCompact(ContextCompactData {}).into())?
-            .sequence)
+            .sequence;
+        compaction.command = Some(Command {
+            sequence,
+            consumed: false,
+            running: None,
+        });
+        Ok(sequence)
     }
     /// Starts a turn when idle and an applied input drives one; nothing
     /// starts while a compaction step runs.
     fn try_start(&self, slot: &mut Option<Turn>) -> Result<()> {
-        if slot.is_some() || self.compaction.lock().unwrap().running.is_some() {
+        if slot.is_some() || self.compaction.lock().unwrap().running() {
             return Ok(());
         }
         // With no open turn every consumption was dispatched: nothing is claimed.
@@ -241,11 +271,11 @@ impl AgentLoop {
         }
         if source.is_none() {
             let mut compaction = self.compaction.lock().unwrap();
-            if compaction.running.is_some() {
+            if compaction.running() {
                 turn.request = None;
                 return Ok(());
             }
-            if compaction.pending.is_some() {
+            if compaction.waiting() {
                 turn.request = None;
                 self.start_step(&mut compaction, Some(turn.id.clone()), at);
                 return Ok(());
@@ -253,7 +283,7 @@ impl AgentLoop {
         }
         self.start_request(turn, source)
     }
-    /// Starts the pending step in a tracked task; its result resumes the Loop.
+    /// Starts the waiting step in a tracked task; its result resumes the Loop.
     fn start_step(
         self: &Arc<Self>,
         compaction: &mut CompactionSlot,
@@ -264,9 +294,10 @@ impl AgentLoop {
         if self.lifecycle.is_cancelled() {
             return;
         }
-        let command = compaction.pending.take().expect("a pending step");
         let cancel = self.lifecycle.child_token();
-        compaction.running = Some((command, cancel.clone()));
+        let command = compaction.command.as_mut().expect("a waiting step");
+        command.running = Some(cancel.clone());
+        let command = command.sequence;
         compaction.stop_reason = None;
         let owner = self.clone();
         self.tasks.spawn(async move {
@@ -455,8 +486,8 @@ impl AgentLoop {
     }
     /// Rebuilds the current turn from this branch's committed local events.
     /// An unfinished turn is marked failed; with nothing outstanding it ends now.
-    /// A manual step that was running, or a command that was pending, is
-    /// settled `cancelled`; neither is resumed.
+    /// A command without a result (its step running, or waiting) is settled
+    /// `cancelled` once, with its start if it had one; it is not resumed.
     fn rebuild(&self, slot: &mut Option<Turn>, events: &[Arc<AgentEvent>]) -> Result<()> {
         let mut commands: Vec<u64> = Vec::new();
         let mut starts: Vec<(u64, ContextCompactionStartData)> = Vec::new();
@@ -467,9 +498,8 @@ impl AgentLoop {
                     starts.push((event.sequence, data.clone()))
                 }
                 EventKind::ContextCompaction(data) => {
-                    if let Some(command) = data.command {
-                        commands.retain(|pending| *pending > command);
-                    }
+                    // A result answers only its own command.
+                    commands.retain(|command| Some(*command) != data.command);
                     starts.retain(|(sequence, _)| Some(*sequence) != data.start);
                 }
                 EventKind::InputApplied(data) => {
@@ -555,7 +585,7 @@ impl AgentLoop {
         }
         for (start, data) in starts {
             let command = data.command.expect("a manual start");
-            commands.retain(|pending| *pending > command);
+            commands.retain(|unsettled| *unsettled != command);
             self.timeline.append(
                 EventKind::ContextCompaction(ContextCompactionData {
                     turn_id: data.turn_id,
@@ -570,14 +600,14 @@ impl AgentLoop {
                 .into(),
             )?;
         }
-        if let Some(command) = commands.last() {
+        for command in commands {
             self.timeline.append(
                 EventKind::ContextCompaction(ContextCompactionData {
                     turn_id: None,
                     request_id: None,
-                    command: Some(*command),
+                    command: Some(command),
                     start: None,
-                    through: *command,
+                    through: command,
                     outcome: ContextCompactionResult::Cancelled {
                         reason: CAPABILITY_RELOADING.into(),
                     },
@@ -812,26 +842,37 @@ impl AgentLoop {
             EventKind::StopInterrupt(data) => {
                 self.interrupted_at.store(event.sequence, Ordering::Release);
                 {
-                    // The running step is cancelled; a pending one ends now.
+                    // The running step is cancelled; a waiting one ends now.
                     let mut compaction = self.compaction.lock().unwrap();
-                    if let Some((_, cancel)) = &compaction.running {
-                        cancel.cancel();
-                        compaction.stop_reason = Some(data.reason.clone());
-                    }
-                    if let Some(command) = compaction.pending.take() {
-                        self.timeline.append(
-                            EventKind::ContextCompaction(ContextCompactionData {
-                                turn_id: slot.as_ref().map(|turn| turn.id.clone()),
-                                request_id: None,
-                                command: Some(command),
-                                start: None,
-                                through: event.sequence,
-                                outcome: ContextCompactionResult::Cancelled {
-                                    reason: data.reason.clone(),
-                                },
-                            })
-                            .into(),
-                        )?;
+                    match compaction.command.as_ref() {
+                        Some(Command {
+                            running: Some(cancel),
+                            ..
+                        }) => {
+                            cancel.cancel();
+                            compaction.stop_reason = Some(data.reason.clone());
+                        }
+                        Some(Command {
+                            sequence,
+                            consumed: true,
+                            ..
+                        }) => {
+                            self.timeline.append(
+                                EventKind::ContextCompaction(ContextCompactionData {
+                                    turn_id: slot.as_ref().map(|turn| turn.id.clone()),
+                                    request_id: None,
+                                    command: Some(*sequence),
+                                    start: None,
+                                    through: event.sequence,
+                                    outcome: ContextCompactionResult::Cancelled {
+                                        reason: data.reason.clone(),
+                                    },
+                                })
+                                .into(),
+                            )?;
+                            compaction.command = None;
+                        }
+                        _ => {}
                     }
                 }
                 if let Some(turn) = slot.as_mut() {
@@ -873,9 +914,9 @@ impl AgentLoop {
                 // Whatever request the turn ended with is settled.
                 self.binding.retain_only(None);
                 self.publish(&slot);
-                // A step still pending at the turn's end runs now, with no turn.
+                // A step still waiting at the turn's end runs now, with no turn.
                 let mut compaction = self.compaction.lock().unwrap();
-                if compaction.pending.is_some() && compaction.running.is_none() {
+                if compaction.waiting() {
                     self.start_step(&mut compaction, None, event.sequence);
                     return Ok(());
                 }
@@ -883,14 +924,59 @@ impl AgentLoop {
                 return self.try_start(&mut slot);
             }
             EventKind::ContextCompact(_) => {
-                // Merged into a pending step; one more step after a running
-                // one; at once when no request is in flight.
                 let mut compaction = self.compaction.lock().unwrap();
-                compaction.pending = Some(event.sequence);
-                if compaction.running.is_none()
-                    && slot
-                        .as_ref()
-                        .is_none_or(|turn| turn.request.is_none() && !turn.ending)
+                match compaction.command.as_mut() {
+                    // The outstanding command, written by `compact`.
+                    Some(command) if command.sequence == event.sequence => command.consumed = true,
+                    // Another command is outstanding: this one is not queued.
+                    Some(_) => {
+                        self.timeline.append(
+                            EventKind::ContextCompaction(ContextCompactionData {
+                                turn_id: slot.as_ref().map(|turn| turn.id.clone()),
+                                request_id: None,
+                                command: Some(event.sequence),
+                                start: None,
+                                through: event.sequence,
+                                outcome: ContextCompactionResult::Skipped {
+                                    reason: ALREADY_IN_PROGRESS.into(),
+                                    diagnostics: Box::new(CompactionDiagnosticsRecord {
+                                        reason: CompactionReason::Manual,
+                                        trigger: CompactionTrigger::Manual,
+                                        retain_from: None,
+                                        retain_limit: None,
+                                        estimated_input_tokens: 0.,
+                                        estimated_output_tokens: None,
+                                        entries_replaced: 0,
+                                        model_call_count: 0,
+                                        duration_ms: 0,
+                                        strategy: CompactionStrategyRecord {
+                                            kind: self.policy.as_ref().map_or_else(
+                                                || "none".to_owned(),
+                                                |policy| policy.strategy.name().to_owned(),
+                                            ),
+                                            details: JsonObject::new(),
+                                        },
+                                    }),
+                                },
+                            })
+                            .into(),
+                        )?;
+                        return Ok(());
+                    }
+                    // Written outside `compact`, or by an earlier Loop.
+                    None => {
+                        compaction.command = Some(Command {
+                            sequence: event.sequence,
+                            consumed: true,
+                            running: None,
+                        })
+                    }
+                }
+                // At once when no request is in flight; otherwise at the next
+                // step boundary.
+                if slot
+                    .as_ref()
+                    .is_none_or(|turn| turn.request.is_none() && !turn.ending)
                 {
                     let turn_id = slot.as_ref().map(|turn| turn.id.clone());
                     self.start_step(&mut compaction, turn_id, event.sequence);
@@ -898,30 +984,26 @@ impl AgentLoop {
                 return Ok(());
             }
             EventKind::ContextCompaction(data) => {
-                // Only the terminal of this Loop's running step resumes it;
-                // settlements of pending commands do not.
+                // The result of the outstanding command clears the slot; only
+                // a step that ran resumes the Loop. Other results (skips and
+                // settlements) change nothing.
                 let mut compaction = self.compaction.lock().unwrap();
-                if data.command.is_none()
-                    || compaction.running.as_ref().map(|(command, _)| *command) != data.command
-                {
+                let Some(command) = compaction
+                    .command
+                    .take_if(|command| Some(command.sequence) == data.command)
+                else {
+                    return Ok(());
+                };
+                drop(compaction);
+                if command.running.is_none() {
                     return Ok(());
                 }
-                compaction.running = None;
-                drop(compaction);
                 return match slot.as_mut() {
                     Some(turn) if turn.open && !turn.ending => {
                         self.next_model(turn, None, event.sequence)
                     }
                     Some(_) => Ok(()),
-                    None => {
-                        let mut compaction = self.compaction.lock().unwrap();
-                        if compaction.pending.is_some() {
-                            self.start_step(&mut compaction, None, event.sequence);
-                            return Ok(());
-                        }
-                        drop(compaction);
-                        self.try_start(&mut slot)
-                    }
+                    None => self.try_start(&mut slot),
                 };
             }
             // Results closing calls that were never dispatched settle no batch

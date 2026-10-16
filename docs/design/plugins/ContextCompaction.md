@@ -147,7 +147,7 @@ part that provides it, instead of `ProductSummaryStrategy`.
 | `context/compact {}` | Loop | New command event (§4.3) |
 | `context/compaction-start` | Written by ContextPolicy for its caller | New fact (§4.3) |
 | `context/compaction` | Written by ContextPolicy for its caller, or by the settling owner on reload | Existing fact, changed (§4.3) |
-| Compaction slot: `{pending: Option<command>, running: Option<(command, CancellationToken)>}` | Loop | Private. The active command and the latest pending command are kept apart. Folded from commands, starts and results, rebuilt on load (§5.5) |
+| Compaction slot: at most one outstanding command `{sequence, consumed, running: Option<CancellationToken>}` | Loop | Private. Set by `AgentLoop::compact` or by consuming a command; cleared by that command's result. Settled on load (§5.5) |
 
 The Session values hold no state. A resolved connection lives only inside one strategy call.
 
@@ -167,14 +167,11 @@ methods are declared with `interruption: report`, `progress: false`, `notificati
 
 `session.context.compact`:
 
-- It writes `context/compact` through `AgentLoop::compact`, which returns the command's
-  sequence `c`.
-- It then waits on the branch Timeline for the result that **covers** `c`: the first
-  `context/compaction` whose `command = c`, or, as long as no `context/compaction-start` with
-  `command = c` has been written, the first one whose `command > c`. A step starts only under the
-  command it serves, so the second case is a command coalesced into a later pending command
-  (§5.4); it is answered by the result of the step that served the later command. A command that
-  was started is answered only by its own result, never by a later command's.
+- It calls `AgentLoop::compact`, which returns a command sequence `c`: a newly written
+  `context/compact`, or the command already outstanding on the branch (§5.4). Concurrent or
+  repeated calls therefore join one in-flight compaction.
+- It then waits on the branch Timeline for the result that carries its command:
+  the first `context/compaction` with `command = c`.
 - It maps the outcome: `completed` → `{status: "completed", sequence}`;
   `skipped` → `{status: "skipped", reason}`; `failed` → `compaction_failed`;
   `cancelled` → `compaction_cancelled`.
@@ -542,15 +539,18 @@ Callers:
   - If the turn ends instead, the step runs right after `turn/end`, with no turn.
   - A budget retry belongs to its request and is not a boundary.
 - **Through.** `through` is the sequence of the event whose consumption started the step.
-- **Active and pending commands.** The slot keeps the running step's command (active) apart from
-  the latest command not yet started (pending).
-  - A command consumed while a step is pending, or while a step runs, becomes the pending command
-    and replaces an earlier pending one (coalescing). The next step serves the latest command; its
-    start and result carry that command.
-  - A step's result retires only its own command. If a command is pending, it runs as the next
-    step at once, before the Loop advances (`next_model` inside a turn, `try_start` otherwise).
-  - Example: `compact(c1) → start(c1) → compact(c2) → compact(c3) → result(c1) → start(c3) →
-    result(c3)`. `c2` is coalesced into `c3`; its waiter is answered by `result(c3)` (§4.1).
+- **One outstanding command.** By the maintainer's decision, repeated requests are an interaction
+  concern: deduplication belongs to the interaction boundary, not to the Loop's state machine or
+  the Timeline.
+  - `AgentLoop::compact` is the only writer of `context/compact`. Under the Loop's lock it checks
+    whether a command is outstanding on the branch (written and without a result). If one is, it
+    writes nothing and returns that command's sequence, and the caller waits for that command's
+    result. Otherwise it writes the command.
+  - The Loop's slot holds at most one outstanding command. Its result clears the slot.
+  - **Defensive rule.** A `context/compact` the Loop consumes while another command is outstanding
+    (one not written through `AgentLoop::compact`, or old data) is settled at once with
+    `context/compaction {command: <its sequence>, outcome: skipped {reason: "a compaction is
+    already in progress"}}`, without a start. It is not queued.
 - **No advance.** While a step runs, `next_model` and `try_start` wait for its fact. Inputs queue
   as usual and are not consumed by the step.
 
@@ -564,29 +564,29 @@ All in `crates/dim-agent-capabilities/src/agent_loop.rs`:
 1. **Subscription.** `context/compact`, `context/compaction-start` and `context/compaction` are
    added. `CompactionStrategyHost`
    is added to `Deps`.
-2. **Public write.** `AgentLoop::compact()` appends `context/compact` and returns its sequence.
-   `AgentLoop` gets the `PublicService` marker.
-3. **Compaction slot**, folded from consumed events. On consuming `context/compact`, the Loop
-   marks the step pending, and starts it at once if no request is in flight.
+2. **Public write.** `AgentLoop::compact()` returns the outstanding command's sequence, or appends
+   `context/compact` and returns its sequence (§5.4). `AgentLoop` gets the `PublicService` marker.
+3. **Compaction slot**, at most one outstanding command. On consuming that command, the Loop marks
+   the step waiting, and starts it at once if no request is in flight. Another command consumed
+   while one is outstanding is skipped (§5.4).
 4. **Boundaries.**
    - `next_model` (except with a budget-retry source) and `turn/end` start a pending step instead
      of advancing.
    - `next_model` and `try_start` do nothing while a step runs.
 5. **The step task.** It is tracked like the preparation task, builds the request as
    `start_preparation` does, and calls `ContextPolicy::compact_step`.
-6. **Step terminal.** On consuming the `context/compaction` of the running step's command, the
-   Loop clears only the active command. A pending command then starts as the next step;
-   otherwise the Loop resumes: `next_model` inside a turn, `try_start` otherwise. Results of
-   other commands (settlements) do not resume the Loop.
+6. **Step terminal.** On consuming the result of the outstanding command, the Loop clears the
+   slot. If its step ran, the Loop resumes: `next_model` inside a turn, `try_start` otherwise.
+   Results of other commands (skips, settlements) change nothing.
 7. **Interrupt.** A `stop/interrupt` cancels the running step, whose result is `cancelled` with
-   its `start`, and writes `cancelled` without `start` for a pending command. When both exist,
-   both are settled.
+   its `start`, or writes `cancelled` without `start` for a waiting command. The command is
+   settled once.
 8. **Rebuild.** The slot is folded from command, start and result pairs:
    - A manual start without a result: the step was running. The Loop writes the `cancelled`
      result with that `start` and `command`.
-   - A command with neither a start nor a covering result: it was pending. The Loop writes a
-     `cancelled` result with that `command` and no `start`. When a running and a pending command
-     both exist, both are settled. An unloading Loop starts no further step.
+   - A command with neither a start nor a result: it was waiting. The Loop writes a `cancelled`
+     result with that `command` and no `start`. Each command is settled once. An unloading Loop
+     starts no further step.
 
 Unchanged: turn and request lifecycles, input consumption, tool batches, steer of model
 requests, budget recovery, `LoopSnapshot` and `context/prepare`.
@@ -810,14 +810,14 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
      fact.
    - A manual compaction failing inside a turn lets the turn continue. When the next request
      exceeds the window, budget recovery compacts.
-7. **Two commands and a running step.**
-   - Normal path: `compact(c1) → start(c1) → compact(c2) → compact(c3) → result(c1)`, then the
-     step for `c3` runs before the Loop advances, with its own start and result. There is no start
-     for `c2`; the method replies to `c1` with `result(c1)` and to `c2` and `c3` with `result(c3)`.
-   - `stop/interrupt` with `c1` running and `c2` pending writes `cancelled` with the start for
-     `c1` and `cancelled` without a start for `c2`; no further step starts.
-   - A plugin reload with `c1` running and `c2` pending settles both as
-     `cancelled: capability reloading`, with no further strategy call.
+7. **One outstanding command.**
+   - Repeated or concurrent `session.context.compact` calls while a command is outstanding: the
+     Timeline holds exactly one `context/compact`, one start and one result, and every caller
+     receives the same reply.
+   - A `context/compact` consumed while another is outstanding (written without
+     `AgentLoop::compact`) gets `skipped: "a compaction is already in progress"` at once, with no
+     start, and the outstanding compaction completes normally.
+   - `stop/interrupt` or a plugin reload with one outstanding command settles it `cancelled` once.
 8. **Compaction state for clients.**
    - A v3 client attached to the Session receives `context/compact`, `context/compaction-start`
      (`trigger: manual`) and `context/compaction` live.
@@ -841,7 +841,7 @@ fix, the smallest choice was made and is recorded here.
 | Diagnostics | `retainFrom` is absent when the strategy found no cut (`skipped`), and `estimatedOutputTokens` is absent when nothing was replaced. |
 | v1 | There is no v1-to-native conversion in production code: the frozen samples decode as v1 events only, and `v1::EventRef` has no form for `context/compact`, `context/compaction-start` or the changed `context/compaction`, so v1 connections no longer receive compaction facts. The old flat diagnostics type moved into the v1 module. |
 | Loop subscription | The Loop subscribes to `context/compact` and `context/compaction`; starts are folded only at rebuild, where they tell a running step from a pending command. |
-| Two commands | Review fix: the slot keeps the active and the pending command apart, a result retires only its own command, a pending command runs as the next step before the Loop advances, and interrupt or reload settle both. The method's waiter uses the covering rule of §4.1 (acceptance 7). |
+| One outstanding command | Maintainer's decision during review: repeated requests are deduplicated at the interaction boundary. `AgentLoop::compact` joins an outstanding command instead of writing another, the slot holds at most one command, a command consumed while another is outstanding is skipped, and the waiter matches its own command id (§4.1, §5.4, acceptance 7). This replaces an earlier active/pending split, so commands can no longer interleave with a running step. |
 | Snapshot anchor | Timeline keeps the structural checks of §4.3. The old `resume ≤ through` check needed the anchor's content; it is replaced by the structural "resume precedes the anchor on the anchor's branch", and the owner's decode checks `through` before the anchor. |
 | Native storage example | The record example in [native-storage-format](../appserver/native-storage-format.md) uses the changed record and the v3 interpreter. |
 | Acceptance | Acceptance 1, 3, 6 (crash and restart) and 8 run in the binary flow test `transport_flow/compaction.rs`. Acceptance 2, 4, 5 and the reload, interrupt and failure cases of 6 run in `dim-agent-capabilities/tests/context_flow` (`manual_compaction.rs` and the existing compaction tests). The crash between fact and snapshot is covered by the snapshot-failure test in `compaction_events.rs`. |
