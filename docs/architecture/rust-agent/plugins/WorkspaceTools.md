@@ -31,24 +31,11 @@ re-reading before retry.
 
 ## Shared command construction and output
 
-`workspace_tools::exec::build_process_spec(platform, shell, command, cwd)` is
-the public builder used by exec and available to ShellInput. The caller reads
-`platform.exec_shell().await` once per invocation and passes that `ShellStatus`
-to the builder; exec also uses it for its shell-specific policies. `cwd` is the
-resolved working directory. The builder returns `ProcessSpec` with the selected
-executable, shell flags, one command argument, the captured environment with
-forced overrides, and POSIX runtime PATH prefixes (including Git Bash mapping).
-It neither starts the command nor applies exec's tool policies.
-
-Refusals are `(reason: String, code: &'static str)` data:
-
-| Code | Meaning |
-| --- | --- |
-| `EXEC_SHELL_CONFIG_INVALID` | Malformed or unreadable shell preference. |
-| `EXEC_SHELL_UNAVAILABLE` | Selected shell is unavailable. |
-| `EXEC_SHELL_CWD_UNSUPPORTED` | Command Prompt cannot use a network-share cwd. |
-| `cwd_not_found` | cwd is absent or not a directory. |
-| `EXEC_SHELL_PATH_MAPPING_FAILED` | Git Bash runtime PATH mapping failed. |
+Exec uses [`HostPlatform::build_process_spec(command, cwd).await`](HostPlatform.md#command-construction).
+HostPlatform owns the shell read, argv, environment and runtime PATH construction;
+exec uses the returned shell for its own policies. Refusals carry named `code`
+and `reason` fields. `cwd` is the resolved working directory, and missing-directory
+errors retain the builder's resolved path without rewriting its message.
 
 Exec retains its `cwd` argument resolution, POSIX `&` refusal, heavy-search
 refusal, timeouts and background ownership. Its existing `exec_shell_unavailable`
@@ -64,7 +51,7 @@ are the existing output rules, exposed without changing their behavior.
 
 ## Rule check
 
-- §1 and ADR 002 D1–D3: command construction remains in WorkspaceTools; no new
+- §1 and ADR 002 D1–D3: command construction belongs to HostPlatform; no new
   plugin, wiring layer, state owner or dependency is added.
 - §4 rules 1–6 and 9: existing ToolExecutor results and BackgroundExec handover
   are unchanged; no new events, before callbacks or context path are introduced.
