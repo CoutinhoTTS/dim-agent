@@ -1827,6 +1827,17 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::export",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/export.rs",
+      "unexpandedMacros": [
+        "eprintln",
+        "format",
+        "json"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::input",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -1858,9 +1869,11 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "println",
         "tokio::select",
-        "unreachable"
+        "unreachable",
+        "writeln"
       ]
     }
   ],
@@ -10000,6 +10013,13 @@
       ]
     },
     {
+      "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_app_server::storage",
+      "references": [
+        "path dim_app_server::storage::COMMAND_OUTPUT_DIRECTORY"
+      ]
+    },
+    {
       "from": "dim_app_server::agent_records",
       "to": "dim_agent_runtime::error",
       "references": [
@@ -10024,6 +10044,13 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path dim_agent_capabilities::history::validate_context_boundary"
       ]
     },
     {
@@ -10115,7 +10142,17 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_types::events",
       "references": [
+        "path EventKind::BranchResume",
+        "path EventKind::BranchStart",
+        "path EventKind::ExecEnded",
+        "path EventKind::ExecStarted",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
+        "path EventKind::StopInterrupt",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::EventKind"
       ]
@@ -11004,8 +11041,10 @@
         "path Call::Close",
         "path Call::Contributed",
         "path Call::Create",
+        "path Call::Delete",
         "path Call::Detach",
         "path Call::ExecStop",
+        "path Call::Fork",
         "path Call::Hello",
         "path Call::History",
         "path Call::Idle",
@@ -11027,6 +11066,7 @@
         "path ConfigurationResult",
         "path Create",
         "path CreateResult",
+        "path ForkResult",
         "path ModelUpdateResult",
         "path Notification::Progress",
         "path Outbound::notice",
@@ -11042,6 +11082,7 @@
         "path Reply::Contributed",
         "path Reply::Create",
         "path Reply::ExecEnded",
+        "path Reply::Fork",
         "path Reply::List",
         "path Reply::McpState",
         "path Reply::ModelUpdate",
@@ -13983,9 +14024,17 @@
     },
     {
       "from": "dim_app_server::storage::files",
+      "to": "dim_app_server::storage",
+      "references": [
+        "path super::COMMAND_OUTPUT_DIRECTORY"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
       "to": "dim_app_server::storage::files::tests",
       "references": [
         "mod tests",
+        "path tests::after_output_removal",
         "path tests::before_commit"
       ]
     },
@@ -14033,6 +14082,13 @@
     },
     {
       "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "use dim_agent_runtime::TimelineStore"
@@ -14060,8 +14116,10 @@
       "from": "dim_app_server::storage::files::tests",
       "to": "dim_app_server::storage::timeline",
       "references": [
+        "path SessionStore::new",
         "path SqliteTimelineStore",
         "path SqliteTimelineStore::new",
+        "use crate::storage::SessionStore",
         "use crate::storage::SqliteTimelineStore"
       ]
     },
@@ -14135,6 +14193,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path Result",
         "use dim_agent_runtime::AgentError",
@@ -14212,9 +14271,11 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::files",
       "references": [
+        "path SessionFiles",
         "path SessionFiles::new",
         "path files",
         "path files::release",
+        "path files::share",
         "use super::files",
         "use super::files::SessionFiles"
       ]
@@ -14475,12 +14536,15 @@
         "path Action::Account",
         "path Action::Chat",
         "path Action::DaemonStop",
+        "path Action::Exec",
+        "path Action::Export",
         "path Action::Help",
         "path Action::Login",
         "path Action::Logout",
         "path Action::McpEnable",
         "path Action::McpList",
         "path Action::Models",
+        "path Action::Tui",
         "path Action::Version",
         "path Options",
         "path Options::parse",
@@ -14504,6 +14568,14 @@
       "to": "dim_cli::@bin:dimcode::display",
       "references": [
         "mod display"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::export",
+      "references": [
+        "mod export",
+        "path export::write"
       ]
     },
     {
@@ -14535,6 +14607,15 @@
       "references": [
         "path Result",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::args",
+      "to": "dim_cli::@bin:dimcode::export",
+      "references": [
+        "path Format",
+        "path Format::Markdown",
+        "use crate::export::Format"
       ]
     },
     {
@@ -14594,6 +14675,69 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path BranchCreateData::deserialize",
+        "path BranchCreateFailedData::Cancelled",
+        "path BranchCreateFailedData::Failed",
+        "path BranchCreateFailedData::deserialize",
+        "path InputBlock::Raw",
+        "path InputMessageData::deserialize",
+        "path TextData::deserialize",
+        "path ToolResultData::deserialize",
+        "path ToolUseData::deserialize",
+        "use dim_agent_types::BranchCreateData",
+        "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::TextData",
+        "use dim_agent_types::ToolResultData",
+        "use dim_agent_types::ToolUseData"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "path crate::Error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode::display",
+      "references": [
+        "use crate::display"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode::session",
+      "references": [
+        "path session::read_history",
+        "use crate::session"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::input",
       "to": "dim_cli::@bin:dimcode",
       "references": [
@@ -14642,6 +14786,13 @@
     },
     {
       "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
@@ -14669,6 +14820,7 @@
       "to": "dim_cli::@bin:dimcode::args",
       "references": [
         "path Options",
+        "use crate::args::Action",
         "use crate::args::Options"
       ]
     },
@@ -14697,6 +14849,14 @@
         "use crate::display::Display",
         "use crate::display::Event",
         "use crate::display::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::export",
+      "references": [
+        "path export::write",
+        "use crate::export"
       ]
     },
     {
@@ -14873,6 +15033,18 @@
     {
       "module": "dim_app_server::@bin:dim-app-server::pipe_client",
       "path": "OwnedHandle::from_raw_handle"
+    },
+    {
+      "module": "dim_app_server::agents",
+      "path": "ExecStatus::Cancelled"
+    },
+    {
+      "module": "dim_app_server::agents",
+      "path": "InputMode::Append"
+    },
+    {
+      "module": "dim_app_server::agents",
+      "path": "InterruptScope::Branch"
     },
     {
       "module": "dim_app_server::managed_oauth",
@@ -15065,6 +15237,10 @@
     {
       "module": "dim_cli::@bin:dimcode::input",
       "path": "INPUT_RECORD::default"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::session",
+      "path": "char::is_whitespace"
     }
   ]
 }

@@ -233,8 +233,10 @@ The owner rows go before `agent_sessions`, because `session_file_owners` referen
 Session creation rollback (`rollback_creation`) deletes owner rows the same way. When a fork's
 creation is rolled back, its files keep the source as owner, unless the source was deleted
 meanwhile; they are then unowned and swept. After the commit, files whose last owner was S are
-unowned, and the sweep removes them. A delete while the node is offline still commits. The
-files wait as unowned rows until a sweep reaches the node.
+unowned, and the sweep removes them. This step needs no node: its rows commit while the node is
+offline, and the files wait as unowned rows until a sweep reaches the node. The delete as a whole
+also removes the Session's command output on the node first
+([deletion and fork §11](session-deletion-and-fork.md#11-resource-nodes-p3)).
 
 ### 5.4 Sweep
 
@@ -261,9 +263,10 @@ files wait as unowned rows until a sweep reaches the node.
 Step 3 is safe because the directory belongs to one database (§3.1), and a put
 commits its row before it creates its directory. Any directory the listing returns either has
 a row by the time the rows are read (a pending or owned file, which the pass skips) or never
-had one. It is needed because FileStorage removal is not synced
-([S6](https://github.com/arcships/dim/pull/87)): after a power loss a removed directory can
-reappear while its row deletion, committed with `synchronous=FULL`, stays deleted. Entries
+had one. It is needed because a directory can lack a row: after a power loss a removed directory
+can reappear while its row deletion, committed with `synchronous=FULL`, stays deleted. FileStorage
+removal was not synced before S5c ([S6](https://github.com/arcships/dim/pull/87)); it now syncs
+the parent before it returns, which closes that window on hosts that can sync a directory. Entries
 created outside SessionStore are removed the same way: the directory is SessionStore's.
 
 At most one sweep runs per node. A trigger during a sweep schedules one more pass. Sweeps are
@@ -588,7 +591,7 @@ Rejected alternatives:
 | Two puts on one Session | Two independent files | — |
 | Node offline at put | `node_unavailable`; nothing stored; nothing reloads | SessionStore |
 | Node offline at fork | Unaffected: no file is touched | Native store |
-| Node offline at delete | Delete commits; unowned rows wait for a sweep | Sweep |
+| Node offline at delete | The Session-file step commits without the node; unowned rows wait for a sweep. The delete as a whole: [deletion and fork §11](session-deletion-and-fork.md#11-resource-nodes-p3) | Sweep |
 | FileStorage reloads during a put | `node_unavailable` or `storage`; abandoned and swept | SessionStore |
 | SessionStore reloads during a put | Cancelled before txn 2 (abandoned), or already committed; Attachments reloads with it | SessionStore unload |
 | Process restart | Leftovers are swept on the first put or after the next delete | Sweep |

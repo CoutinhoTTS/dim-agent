@@ -296,7 +296,7 @@ A fork copies the source Session's whole `SessionConfig`; the permission preset 
 
 Format decision: the native store stays on version 13. `interactive` is an additive optional field of the stored config JSON, and a stored record without it means `true`, because every Session created before the field existed was a client Session. An older daemon ignores the field and reads a non-interactive record as interactive; this is accepted. No version 14.
 
-Implemented (C2): `session.create` sets the field, and the native store writes it only when it is `false`, so an interactive record keeps the form records had before the field existed. The omission is part of `SessionConfig`'s serde form, which only the native store serializes; exposing `SessionConfig` anywhere else (for example in a protocol reply) inherits it and needs its own decision. Its readers (Questions, SessionTitle) are not implemented yet. Session fork is not implemented yet (S5c).
+Implemented (C2): `session.create` sets the field, and the native store writes it only when it is `false`, so an interactive record keeps the form records had before the field existed. The omission is part of `SessionConfig`'s serde form, which only the native store serializes; exposing `SessionConfig` anywhere else (for example in a protocol reply) inherits it and needs its own decision. Its readers (Questions, SessionTitle) are not implemented yet. Session fork (S5c) copies the stored `config` text byte for byte, so the omission carries over to the fork.
 
 | Stored `config` | Daemon with C2 | Older daemon |
 | --- | --- | --- |
