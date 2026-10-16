@@ -4,7 +4,7 @@ F6 (#77) covers the command entry points, conversation export and JSONL
 execution listed in [overview Appendix D](overview.md#appendix-d-cli-layer) and
 the [feature list](../feature-list.md#cli-commands). The native CLI remains a
 client of the existing daemon. This document defines the CLI interface for
-implementation; the [native CLI contract](../../crates/dim-cli/README.md)
+the implementation; the [native CLI contract](../../crates/dim-cli/README.md)
 describes the current executable.
 
 ## Commands
@@ -144,8 +144,9 @@ return to the input prompt and never become model input.
 ## Implementation and verification
 
 Changes stay in `crates/dim-cli`: `args.rs`/`main.rs` select commands,
-`session.rs` reuses Session execution and paged history, and `display.rs` keeps
-human rendering separate from JSON output. Conversation formatting belongs to
+`session.rs` reuses Session execution and its shared paged-history reader,
+`display.rs` keeps human rendering separate from JSON output, and `export.rs`
+formats conversations and writes new files. Conversation formatting belongs to
 the CLI. No App Server, Capability, core lifecycle, protocol, storage migration,
 dependency or runtime registration changes are required.
 
