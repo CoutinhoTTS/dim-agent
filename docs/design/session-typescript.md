@@ -202,13 +202,24 @@ does not make another optional row required or change Session publication.
 
 ## Native Session broadcast
 
+C4's broadcast acceptance requires TS to receive existing Session facts. It does not require
+arbitrary TS publication or C6's additional Notice record. Fact reception can be designed and
+verified independently of C6's notice/Rpc forwarding work.
+
 Use rutis' existing node `Events` / Cordis `Link` path. Do not invoke a `notice` service to
 deliver broadcasts. Subscriptions are registered during row apply. Business consumption must
 wait for the existing `SessionLifecycle::activated()`, not merely the row becoming Active:
 row publication and Session publication are different. A subscriber does not delay Session
 publication. It does not replay missed events; the owning service's query supplies current state
-when its feature requires it. Order is the existing channel's order, not a total order between
-parallel branches; each event retains its branch sequence.
+when its feature requires it. Records retain the Session channel's emit order, including emission
+order across branches, and each event's branch sequence. No shared cross-branch Timeline position
+is introduced.
+
+Row-owned work ends through the existing `SessionLifecycle::closing()` and row disposal.
+`Closed` is emitted during Session-capability unload, after closing has begun; a row inside
+that Session is not guaranteed to receive it. The [broadcast contract](../architecture/rust-agent/event-driven-flows.md#6-session-广播)
+requires a listener that must receive the end record to use a context that outlives the Session.
+No additional closing phase or delivery guarantee is introduced here.
 
 Session broadcast owns the single serialization of its public record at the language boundary:
 an event carries `{branchId, event}` with the existing `AgentEvent` serde value, and the Session
@@ -234,17 +245,19 @@ at startup, and it does not offer `events.forward`. A direct `Process::emit` or 
 aimed at that endpoint cannot subscribe to a Session channel allocated later. This is a limit
 of that composition, not a missing rutis event feature or a request to change rutis.
 
-The measured existing route mounts a full native peer in the same Node process for each foreign
-row, binds that peer's `Events` input to only `session/<this Session id>`, and owns the Rust peer
-and event effects with the original row. Native delivery, dynamic names, independent unload and
-continued delivery to another row are proven. A retained remote object must reject calls after
+The separate native-peer transport experiment uses the same Node process for its foreign rows
+and binds each peer's `Events` input to one dynamic `session/<id>` channel. Native delivery,
+dynamic names, independent unload and continued delivery to another row are proven. It does
+not instantiate actual Dim Sessions or verify their typed broadcast binding. Product peer and
+event effects must belong to the original row. A retained remote object must reject calls after
 the part's effect begins unloading; a stale handle is not evidence of a live generation.
 
 This route is a **candidate requiring review**, with these costs and implementation conditions:
 
-- An additional loopback transport listener/link and a Node I/O worker per foreign row, in
-  addition to the shared raw runtime channel. No RSS, maximum Session count or throughput claim
-  follows from the measured transport success.
+- The measured composition has one shared loopback listener, one native peer/link and one Node
+  I/O worker per foreign row, in addition to the shared raw runtime channel. A listener per row
+  is an unselected composition, not the measured cost. No RSS, maximum Session count or throughput
+  claim follows from the transport success; product resource ownership remains unselected.
 - Connection settings, peer identities and channel names must be derived by assembly from the
   Session instance, passed as structural runtime data, and cleaned up by that same row. They
   cannot be user-maintained Session-id lists or a mutable central subscription manager.
@@ -261,8 +274,8 @@ This route is a **candidate requiring review**, with these costs and implementat
 
 The tool and method bindings above do not depend on selecting a new event transport. C4's full
 acceptance does depend on native broadcast, so it cannot be reported complete while this choice
-or C6 integration requirements remain unresolved. No speculative core/transport capability is
-proposed as a workaround.
+and its fact-reception binding remain unresolved. C6's additional Notice record and Rpc forwarding
+are separate work. No speculative core/transport capability is proposed as a workaround.
 
 ## Lifetime and failure
 
