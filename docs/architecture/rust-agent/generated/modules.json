@@ -1572,7 +1572,8 @@
       "file": "crates/dim-app-server/src/settings.rs",
       "unexpandedMacros": [
         "format",
-        "tokio::select"
+        "tokio::select",
+        "tracing::warn"
       ]
     },
     {
@@ -7209,24 +7210,14 @@
       "references": [
         "path HostPlatform",
         "path Os::Windows",
-        "path ProcessSpec",
         "path ProcessTree",
-        "path ShellEdition",
-        "path ShellEdition::GitBash",
-        "path ShellKind::Cmd",
         "path ShellKind::Posix",
-        "path ShellKind::Powershell",
-        "path ShellStatus",
-        "path ShellStatus::Available",
-        "path ShellStatus::Unavailable",
-        "path crate::host_platform::env_var",
+        "use crate::host_platform::EXEC_SHELL_CONFIG_INVALID",
+        "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
         "use crate::host_platform::HostPlatform",
         "use crate::host_platform::Os",
-        "use crate::host_platform::ProcessSpec",
         "use crate::host_platform::ProcessTree",
-        "use crate::host_platform::ShellEdition",
-        "use crate::host_platform::ShellKind",
-        "use crate::host_platform::ShellStatus"
+        "use crate::host_platform::ShellKind"
       ]
     },
     {
@@ -11373,6 +11364,9 @@
         "path SettingsScope",
         "path SettingsScope::Project",
         "path SettingsService",
+        "path crate::settings::Wake::new",
+        "path crate::settings::project_authorizations",
+        "path crate::settings::settings_changes",
         "use crate::settings::BusinessDocument",
         "use crate::settings::Result",
         "use crate::settings::SettingsError",
@@ -11544,6 +11538,7 @@
         "path McpSettings",
         "path config",
         "path config::effective",
+        "path config::settings_changes",
         "path config::workspace",
         "use super::config",
         "use super::config::McpProjectEnablement",
@@ -11895,6 +11890,13 @@
         "use super::McpError",
         "use super::McpServerEntry",
         "use super::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::session",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path super::config::settings_changes"
       ]
     },
     {
@@ -12884,15 +12886,6 @@
     },
     {
       "from": "dim_app_server::settings",
-      "to": "dim_agent_runtime::state",
-      "references": [
-        "path StateCell",
-        "path StateCell::new",
-        "use dim_agent_runtime::StateCell"
-      ]
-    },
-    {
-      "from": "dim_app_server::settings",
       "to": "dim_app_server::settings::native",
       "references": [
         "mod native"
@@ -13049,11 +13042,16 @@
         "path SettingsError::Invalid",
         "path SettingsScope::User",
         "path SettingsService",
+        "path Wake",
+        "path Wake::new",
         "path crate::settings::Result",
+        "path settings_changes",
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsScope",
-        "use crate::settings::SettingsService"
+        "use crate::settings::SettingsService",
+        "use crate::settings::Wake",
+        "use crate::settings::settings_changes"
       ]
     },
     {

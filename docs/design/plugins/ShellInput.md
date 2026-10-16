@@ -285,7 +285,7 @@ No Agents change. The Session activity handle this section requested, so that id
 
 | Error (`appError`) | Condition |
 | --- | --- |
-| `shell_unavailable` | `HostPlatform.shell` unavailable on the node (reason forwarded) |
+| `shell_unavailable` | HostPlatform command construction refuses the command: `EXEC_SHELL_CONFIG_INVALID`, `EXEC_SHELL_UNAVAILABLE`, `cwd_not_found`, `EXEC_SHELL_CWD_UNSUPPORTED` or `EXEC_SHELL_PATH_MAPPING_FAILED` (reason forwarded) |
 | `shell_busy` | Another run of the Session is running |
 | `duplicate_run` | `runId` already used in this generation |
 | `invalid_params` | Empty command, command over 64 KiB, `runId` not `[A-Za-z0-9-]{1,64}` |
@@ -349,6 +349,7 @@ ShellInput is implemented in Rust.
 | `sessionMethods` key `shell` | `SessionMethodContribution(Arc<dyn MethodProvider>)`, key `SessionScope::named_key::<SessionMethodContribution>("shell")`; `describe` = `methods()`, `call` = `call(MethodCall, CallChannel, CancellationToken)`; progress = `CallChannel::progress` |
 | Recorded input (A.3) | `Branch::input` through `S:TreeCommands` |
 | Unload disposer | `ctx.effect` |
+| Command construction | `HostPlatform::build_process_spec(command, cwd).await` returns `(ProcessSpec, ExecShellRuntime)` or `ProcessSpecError { code, reason }`; it reads the current shell itself |
 | Process service | `HostPlatform::spawn(ProcessSpec)` returning `ProcessTree` with `stdout`, `stderr`, `wait`, `terminate` |
 
 ```rust

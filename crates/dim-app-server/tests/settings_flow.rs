@@ -1,14 +1,17 @@
-use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
+use dim_agent_capabilities::file_storage::{
+    FileLease, FilePath, FileStorage, FileStorageError, FileStoragePlugin,
+};
 use dim_agent_runtime::{capability_plugin, wait_active};
 use dim_app_server::{
     settings::{
-        BusinessDocument, Result, SettingsError, SettingsPlugin, SettingsScope, SettingsService,
+        BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
+        SettingsPlugin, SettingsScope, SettingsService, project_authorizations, settings_changes,
     },
     storage::SqliteStoragePlugin,
 };
 use rutis::Ctx;
 use serde::{Deserialize, Serialize};
-use std::{fs, time::Duration};
+use std::{fs, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 struct ProcessSettings(
@@ -42,6 +45,69 @@ impl dim_agent_runtime::Capability for ProcessSettings {
     fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
         ((), ())
     }
+}
+
+/// Records every event of one rutis channel, in delivery order.
+struct Log<E>(std::sync::Arc<tokio::sync::watch::Sender<Vec<E>>>);
+impl<E> Clone for Log<E> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<E: rutis::Event<Value = ()> + Clone> rutis::Listener<E> for Log<E> {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        event: &'a E,
+    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
+        self.0.send_modify(|log| log.push(event.clone()));
+        Box::pin(async { Ok(None) })
+    }
+}
+fn listen<E: rutis::Event<Value = ()> + Clone>(
+    root: &Ctx,
+    key: &rutis::EventKey<E>,
+) -> tokio::sync::watch::Receiver<Vec<E>> {
+    let log = Log(std::sync::Arc::new(tokio::sync::watch::Sender::new(
+        Vec::new(),
+    )));
+    root.events().on(root, key, log.clone()).unwrap();
+    log.0.subscribe()
+}
+/// Waits until the channel has delivered an event matching `seen`.
+async fn saw<E: Clone>(
+    changes: &mut tokio::sync::watch::Receiver<Vec<E>>,
+    seen: impl Fn(&E) -> bool,
+) {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|log| log.iter().any(&seen)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+/// Takes the lease once its holder releases it; retry policy belongs to the consumer.
+async fn lock_when_free(
+    files: &Arc<FileStorage>,
+    path: &FilePath,
+    cancel: &CancellationToken,
+) -> FileLease {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match files.lock(path, cancel).await {
+                Err(FileStorageError::Locked) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                lease => return lease.unwrap(),
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+fn change(scope: SettingsScope, revision: &str) -> impl Fn(&SettingsChanged) -> bool + '_ {
+    move |c| c.source == "example" && c.scope == scope && c.revision == revision
 }
 
 #[tokio::test]
@@ -164,12 +230,29 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let project = home.join("later");
     fs::create_dir(&project).unwrap();
     assert_eq!(settings.project_root(&project), None);
+    let mut authorized = listen(&root, &project_authorizations());
     let (first, same) = tokio::join!(
         settings.authorize_project(project.clone(), &cancel),
         settings.authorize_project(project.clone(), &cancel)
     );
     let project_root = first.unwrap();
     assert_eq!(project_root, same.unwrap());
+    // Authorizing the same directory twice announces it once. Events of one
+    // channel arrive in emit order, so a later authorization is a barrier.
+    let barrier = home.join("barrier");
+    fs::create_dir(&barrier).unwrap();
+    settings
+        .authorize_project(barrier.clone(), &cancel)
+        .await
+        .unwrap();
+    saw(&mut authorized, |a: &ProjectAuthorized| a.cwd == barrier).await;
+    let announced: Vec<_> = authorized
+        .borrow()
+        .iter()
+        .filter(|a| a.cwd == project)
+        .map(|a| a.root)
+        .collect();
+    assert_eq!(announced, [project_root]);
     let scope = SettingsScope::Project(project_root);
     let snapshot = settings.read::<McpSettings>(scope, &cancel).await.unwrap();
     let document = serde_json::from_value::<McpSettings>(serde_json::json!({"mcpServers":{"late":{"command":"node","enabled":false}},"future":{"keep":7}})).unwrap();
@@ -266,8 +349,8 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
             .await
             .unwrap();
         let settings = root.get::<SettingsService>().unwrap();
-        let mut changes = settings.subscribe_document::<Document>();
-        assert_eq!(*changes.borrow_and_update(), "unread");
+        let mut changes = listen(&root, &settings_changes("example"));
+        assert!(changes.borrow_and_update().is_empty());
         let current = settings
             .read::<Document>(SettingsScope::User, &cancel)
             .await
@@ -353,7 +436,7 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
                 | (Err(SettingsError::Conflict), Ok(value)) => value,
                 result => panic!("unexpected CAS: {result:?}"),
             };
-            assert_eq!(*changes.borrow_and_update(), winner.revision);
+            saw(&mut changes, change(SettingsScope::User, &winner.revision)).await;
             assert_eq!(winner.revision, "native:user/example:2");
             saved = Some(winner);
             fs::write(home.join("example.json"), b"ignored malformed legacy data").unwrap();
@@ -409,8 +492,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .unwrap();
     let settings = root.get::<SettingsService>().unwrap();
     let files = root.get::<FileStorage>().unwrap();
-    let mut changes = settings.subscribe_document::<Document>();
-    let mut all = settings.subscribe();
+    let mut changes = listen(&root, &settings_changes("example"));
     let empty = settings
         .read::<Document>(SettingsScope::User, &cancel)
         .await
@@ -439,8 +521,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         }
         result => panic!("unexpected file CAS: {result:?}"),
     };
-    assert_eq!(*changes.borrow_and_update(), saved.revision);
-    assert_eq!(*all.borrow_and_update(), 1);
+    saw(&mut changes, change(SettingsScope::User, &saved.revision)).await;
     assert_eq!(settings.project_path(1).unwrap(), project);
     assert_eq!(settings.project_sources().len(), 2);
     assert!(matches!(
@@ -457,7 +538,9 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .read::<Document>(SettingsScope::Project(2), &cancel)
         .await
         .unwrap();
-    settings
+    // The user write above; counted below, behind a barrier.
+    let before = 1;
+    let project_saved = settings
         .update(
             SettingsScope::Project(1),
             &a.revision,
@@ -466,12 +549,45 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         )
         .await
         .unwrap();
+    // Each write is announced once, with its own scope and revision.
+    saw(
+        &mut changes,
+        change(SettingsScope::Project(1), &project_saved.revision),
+    )
+    .await;
     assert_eq!(
         settings
             .read::<Document>(SettingsScope::Project(2), &cancel)
             .await
             .unwrap(),
         b
+    );
+    let other_saved = settings
+        .update(
+            SettingsScope::Project(2),
+            &b.revision,
+            Document {
+                value: "other project".into(),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    saw(
+        &mut changes,
+        change(SettingsScope::Project(2), &other_saved.revision),
+    )
+    .await;
+    // One source's events arrive in emit order, so the last write is a
+    // barrier: one event per write, none from the conflicting writer.
+    assert_eq!(changes.borrow().len(), before + 2);
+    assert_eq!(
+        settings
+            .read::<Document>(SettingsScope::Project(1), &cancel)
+            .await
+            .unwrap()
+            .revision,
+        project_saved.revision
     );
     assert!(!changes.has_changed().unwrap());
     fs::write(project.join(".example.json"), b"corrupt").unwrap();
@@ -532,16 +648,24 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         tokio::pin!(update);
         tokio::select! { result = &mut update => panic!("unexpected {result:?}"), _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
     }
+    // Nothing can commit while the test holds the lease.
+    let before = changes.borrow().len();
     drop(lock);
-    tokio::time::timeout(Duration::from_secs(3), changes.changed())
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|log| log.len() > before),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let saved = settings
         .read::<Document>(SettingsScope::User, &cancel)
         .await
         .unwrap();
-    assert_eq!(*changes.borrow_and_update(), saved.revision);
+    assert_eq!(
+        changes.borrow().last().map(|c| c.revision.as_str()),
+        Some(saved.revision.as_str())
+    );
     assert_eq!(saved.document, document);
     #[cfg(unix)]
     {
@@ -556,7 +680,8 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         );
     }
     // Unload cancels lease waiters and drains them before releasing ownership.
-    let lock = files.lock(&path, &cancel).await.unwrap();
+    // The event is published under the writer's lease, so it may still be held.
+    let lock = lock_when_free(&files, &path, &cancel).await;
     {
         let update = settings.update(
             SettingsScope::User,
@@ -586,7 +711,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .await
         .unwrap();
     let fresh = root.get::<SettingsService>().unwrap();
-    assert_eq!(*fresh.subscribe_document::<Document>().borrow(), "unread");
     assert_eq!(
         fresh
             .read::<Document>(SettingsScope::User, &cancel)
