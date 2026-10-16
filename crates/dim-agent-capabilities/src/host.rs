@@ -357,6 +357,45 @@ pub trait ResolveModelSelection: Send + Sync + 'static {
 }
 pub struct ModelSelectionHost(pub Arc<dyn ResolveModelSelection>);
 
+/// One non-streaming request outside any Session: no tools, no Timeline.
+#[derive(Debug, Clone)]
+pub struct AuxiliaryRequest {
+    pub system: Option<String>,
+    pub messages: Vec<Message>,
+    pub max_output_tokens: Option<u32>,
+}
+#[derive(Debug, Clone)]
+pub struct AuxiliaryReply {
+    /// The text blocks only; thinking output is dropped.
+    pub text: String,
+    pub stop_reason: ModelStopReason,
+    pub usage: Option<Usage>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxiliaryErrorCode {
+    InvalidRequest,
+    ModelUnavailable,
+    Failed,
+    Cancelled,
+}
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct AuxiliaryError {
+    pub code: AuxiliaryErrorCode,
+    pub message: String,
+}
+/// The caller chooses the model; the owner of credentials never falls back
+/// to another one and never returns the connection.
+pub trait CompleteAuxiliary: Send + Sync + 'static {
+    fn complete(
+        &self,
+        model: ModelId,
+        request: AuxiliaryRequest,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<AuxiliaryReply, AuxiliaryError>> + Send + '_>>;
+}
+pub struct AuxiliaryModelHost(pub Arc<dyn CompleteAuxiliary>);
+
 pub trait ModelDriver: Send + Sync + 'static {
     fn invoke(
         &self,

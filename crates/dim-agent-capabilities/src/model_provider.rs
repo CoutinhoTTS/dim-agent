@@ -1,6 +1,6 @@
 mod images;
 mod recovery;
-use recovery::{FailureAction, RecoveryState};
+pub use recovery::{Consume, invoke as invoke_with_recovery};
 
 use crate::{
     context_preparation::ContextPreparation,
@@ -181,89 +181,25 @@ impl ModelProvider {
                 crate::context_policy::check_cancel(&cancel)?;
                 // The committed request keeps its images; only what is sent changes.
                 let request = images::adapt(&call.request);
-                let ResolvedModelConnection {
-                    mut connection,
-                    failure_policy: policy,
-                    mut recovery,
-                } = match &self.resolver {
-                    Some(resolver) => {
-                        resolver
-                            .0
-                            .resolve(request.clone(), cancel.clone())
-                            .await?
-                    }
+                let resolved = match &self.resolver {
+                    Some(resolver) => resolver.0.resolve(request.clone(), cancel.clone()).await?,
                     None => ResolvedModelConnection {
                         connection: ModelConnection::Local,
                         failure_policy: None,
                         recovery: None,
                     },
                 };
-                let mut recovery_state = RecoveryState::default();
-                let result = loop {
-                    crate::context_policy::check_cancel(&cancel)?;
-                    recovery_state.attempts += 1;
-                    let attempt = cancel.child_token();
-                    let mut replay_safe = true;
-                    let result = match self
-                        .host
-                        .0
-                        .invoke(request.clone(), connection.clone(), attempt.clone())
-                        .await
-                    {
-                        Ok(stream) => {
-                            consume_output(stream, &mut output, attempt.clone(), &mut replay_safe)
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    attempt.cancel();
-                    let Err(error @ HostError::Failed { model, .. }) = &result else {
-                        break result;
-                    };
-                    let forbidden = policy.as_ref().is_some_and(|policy| policy.forbids_retry(error));
-                    let rejection = recovery.as_ref().map_or(
-                        CredentialRejection::Unrelated,
-                        |recovery| recovery.rejection(error, recovery_state.phase),
-                    );
-                    let action = recovery_state.decide(
-                        model.as_deref(), rejection, forbidden, replay_safe,
-                        uuid::Uuid::new_v4().as_bytes()[0],
-                    );
-                    let delay = match action {
-                        FailureAction::Stop => break result,
-                        FailureAction::SettleCredentials => {
-                            crate::context_policy::check_cancel(&cancel)?;
-                            recovery.as_ref().expect("terminal rejection has a credential owner")
-                                .finish_rejected(cancel.clone()).await?;
-                            break result;
-                        }
-                        FailureAction::Retry(delay) | FailureAction::RecoverCredentials(delay) => delay,
-                    };
-                    if !delay.is_zero() {
-                        let waiting = tokio::time::Instant::now();
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => return Err(HostError::Cancelled("Model request cancelled".into())),
-                            _ = tokio::time::sleep(delay) => {}
-                        }
-                        recovery_state.waited += waiting.elapsed();
-                    }
-                    if let FailureAction::RecoverCredentials(_) = action {
-                        crate::context_policy::check_cancel(&cancel)?;
-                        let recovered = recovery.as_ref().expect("recoverable rejection has a credential owner")
-                            .recover(cancel.clone()).await?;
-                        connection = recovered.connection;
-                        recovery = Some(recovered.recovery);
-                        recovery_state.phase = CredentialRecoveryPhase::Recovered;
-                    }
-                };
-                result.map_err(|mut error| {
-                    let display = policy.as_ref().and_then(|policy| policy.presentation(&error));
-                    if let HostError::Failed { presentation, .. } = &mut error {
-                        *presentation = display.map(Box::new);
-                    }
-                    error
-                })
+                recovery::invoke(
+                    &self.host,
+                    &request,
+                    resolved,
+                    &cancel,
+                    &mut output,
+                    |stream, output, attempt, replay_safe| {
+                        Box::pin(consume_output(stream, output, attempt, replay_safe))
+                    },
+                )
+                .await
             })
             .catch_unwind()
             .await;
