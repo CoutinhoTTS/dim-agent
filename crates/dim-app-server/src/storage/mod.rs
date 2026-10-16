@@ -1,4 +1,5 @@
 mod codec;
+mod files;
 mod sqlite;
 mod timeline;
 
