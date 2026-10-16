@@ -84,8 +84,7 @@ impl Approval {
         risk: Option<&str>,
         cancel: CancellationToken,
     ) -> Result<(), HostError> {
-        let name = call.call.name.clone();
-        let reason = match self.permission.decide(&name, risk) {
+        let reason = match self.permission.decide(&call.call, risk, &cancel).await? {
             Decision::Allow if cancel.is_cancelled() => {
                 return Err(HostError::Cancelled(CANCELLED.into()));
             }
@@ -96,6 +95,8 @@ impl Approval {
         if cancel.is_cancelled() {
             return Err(HostError::Cancelled(CANCELLED.into()));
         }
+        // The call that runs is rechecked after an allow response.
+        let checked = call.call.clone();
         let (response, received) = oneshot::channel();
         let registered = cancel.clone();
         let mut registered_id = None;
@@ -167,18 +168,25 @@ impl Approval {
             }
             // Re-check the policy that may have changed while waiting; a
             // repeated Ask counts as approved.
-            Ok(Some(ApprovalDecision::Allow)) => match self.permission.decide(&name, risk) {
-                Decision::Deny { reason } => {
-                    self.cancelled(approval_id, &reason);
-                    Err(HostError::failed(reason))
+            Ok(Some(ApprovalDecision::Allow)) => {
+                match self.permission.decide(&checked, risk, &cancel).await {
+                    Ok(Decision::Deny { reason }) => {
+                        self.cancelled(approval_id, &reason);
+                        Err(HostError::failed(reason))
+                    }
+                    // Allowed, then stopped before the tool started.
+                    Ok(_) if cancel.is_cancelled() => {
+                        self.cancelled(approval_id, CANCELLED);
+                        Err(HostError::Cancelled(CANCELLED.into()))
+                    }
+                    Ok(_) => Ok(()),
+                    // The rules read was cancelled.
+                    Err(error) => {
+                        self.cancelled(approval_id, CANCELLED);
+                        Err(error)
+                    }
                 }
-                // Allowed, then stopped before the tool started.
-                _ if cancel.is_cancelled() => {
-                    self.cancelled(approval_id, CANCELLED);
-                    Err(HostError::Cancelled(CANCELLED.into()))
-                }
-                _ => Ok(()),
-            },
+            }
         }
     }
     /// `Ok` means the decision was dispatched and accepted, not that the tool

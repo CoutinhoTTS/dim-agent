@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod methods;
 pub mod model_catalog;
 mod outbound;
+pub mod permission_rules;
 pub mod plugin_files;
 pub mod protocol;
 pub mod provider;
@@ -30,7 +31,12 @@ use dim_agent_runtime::{
     Agent, AgentBuilder, AgentError, SessionConfig, register_capability, wait_active,
 };
 use rutis::{Ctx, FiberView};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use transport::{ListenAddresses, TransportPlugin};
@@ -334,14 +340,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 "target_home and database_path are mutually exclusive".into(),
             ));
         }
-        let mut directory = std::fs::DirBuilder::new();
-        directory.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            directory.mode(0o700);
-        }
-        directory.create(home)?;
+        create_private_directory(home)?;
         let home = std::fs::canonicalize(home)?;
         config.database_path = Some(home.join("dimcode.sqlite"));
         config.file_roots.push(home.clone());
@@ -387,7 +386,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                     .map(PathBuf::from)
             })
             .ok_or_else(|| ServerError::Configuration("database must name a file".into()))?;
-        std::fs::create_dir_all(&home)?;
+        create_private_directory(&home)?;
         let home = std::fs::canonicalize(home)?;
         Some(
             match config.file_roots.iter().position(|root| root == &home) {
@@ -400,6 +399,29 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         )
     } else {
         None
+    };
+    // SessionStore keeps Session files next to the native database, below
+    // the database directory as a FileStorage root (session-files §3.1).
+    let session_files_root = match &config.database_path {
+        Some(path) => {
+            let directory = std::env::current_dir()?
+                .join(path)
+                .parent()
+                .map(PathBuf::from)
+                .ok_or_else(|| ServerError::Configuration("database must name a file".into()))?;
+            create_private_directory(&directory)?;
+            let directory = std::fs::canonicalize(directory)?;
+            Some(
+                match config.file_roots.iter().position(|root| root == &directory) {
+                    Some(index) => index,
+                    None => {
+                        config.file_roots.push(directory);
+                        config.file_roots.len() - 1
+                    }
+                },
+            )
+        }
+        None => None,
     };
     let config = Arc::new(config);
     let root = Ctx::root_with_sink(
@@ -444,13 +466,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             dim_agent_aimux::ConfiguredModelsPlugin(models.clone())
         }));
     }
-    if let Some(path) = &config.database_path {
+    if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
         let path = path.clone();
         rows.push(register_capability(&mut builtins, move || {
             storage::SqliteStoragePlugin::new(path.clone())
         }));
-        rows.push(register_capability(&mut builtins, || {
-            storage::SessionStorePlugin
+        rows.push(register_capability(&mut builtins, move || {
+            storage::SessionStorePlugin::new(files_root)
         }));
     }
     // Each management namespace with the row of the owner that provides it;
@@ -552,10 +574,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
+        // Session files need SessionStore (native storage); `read` needs
+        // local execution.
+        if native_home.is_some() {
+            dim_agent_attachments::install(&mut builder);
+        }
         rows.push(mcp::McpPublication::register(&mut builtins));
         rows.push(owner(
             "mcp",
-            register_capability(&mut builtins, || mcp::McpPlugin),
+            register_capability(&mut builtins, move || mcp::McpPlugin::new(home_root)),
         ));
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
@@ -567,6 +594,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(owner(
             "skills",
             register_capability(&mut builtins, || skills_management::SkillsCatalogPlugin),
+        ));
+        rows.push(owner(
+            "permission",
+            register_capability(&mut builtins, || permission_rules::PermissionRulesPlugin),
         ));
     }
     agents::register(&mut builtins);
@@ -757,6 +788,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle,
         task: Some(task),
     })
+}
+
+/// Creates a directory that holds the native store, and any missing parents,
+/// owner-only (0700) on Unix. On Windows they inherit the parent's DACL.
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    let mut directory = std::fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory.create(path)
 }
 
 struct NodeRows(Arc<rutis_loader::RuntimeResolver>);

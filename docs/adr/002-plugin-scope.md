@@ -69,7 +69,7 @@ crash is an infrastructure failure, like an App Server crash, and nothing is des
 | Kind | Examples | Location | On change |
 | --- | --- | --- | --- |
 | Structural plugin configuration | enable or disable, runtime and package paths, node binding | loader rows (issue #3 editable layer) | may reload the row |
-| Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, model purpose policies, MCP server and Skill documents, external agent entries and bridges, gateway listener settings, OCR component path, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
+| Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, each consumer's auxiliary model choice, MCP server and Skill documents, external agent entries and bridges, gateway listener settings, OCR component path, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
 
 ### D5. Contracts are language-neutral
 
@@ -127,8 +127,8 @@ records (`RequiredCheck`) and the Management plugin are withdrawn.
 
 ## Existing plugins
 
-Existing plugins already follow D1. One configuration item does not follow D4: the exec shell is
-read once in HostPlatform's `apply`; it should be business configuration read at each spawn.
+Existing plugins follow D1. HostPlatform follows D4 by reading the exec shell's business
+configuration through `exec_shell()` for each command; changing it does not reload plugins.
 
 ## Consequences
 

@@ -147,3 +147,105 @@ async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
+    const CHILD_HOME: &str = "DIM_TEST_SHELL_CACHE_HOME";
+    let Some(home) = std::env::var_os(CHILD_HOME) else {
+        let home = std::env::temp_dir().join(format!("dim-shell-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let shell = bin.join("bash");
+        std::os::unix::fs::symlink("/bin/bash", &shell).unwrap();
+        std::fs::write(
+            home.join("exec-shell.json"),
+            serde_json::json!({
+                "version": 1, "executablePath": shell,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // A subprocess isolates the service environment from parallel tests.
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "unchanged_shell_preferences_reuse_detection_and_edits_recover",
+                "--nocapture",
+            ])
+            .env(CHILD_HOME, &home)
+            .env("SHELL", &shell)
+            .env("PATH", &bin)
+            .output()
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    let home = PathBuf::from(home);
+    let shell = home.join("bin/bash");
+    std::fs::remove_file(&shell).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let storage = root.plugin(dim_agent_runtime::capability_plugin(
+        dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
+    ));
+    (&storage).await.unwrap();
+    let platform = root.plugin(dim_agent_runtime::capability_plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+        }),
+    ));
+    (&platform).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    assert!(matches!(
+        platform.exec_shell().await,
+        ShellStatus::Unavailable {
+            code: EXEC_SHELL_UNAVAILABLE,
+            ..
+        }
+    ));
+    // Startup detection can recover without changing the preference.
+    std::os::unix::fs::symlink("/bin/bash", &shell).unwrap();
+    let selected = platform.exec_shell().await;
+    assert!(matches!(selected, ShellStatus::Available(_)));
+    std::fs::remove_file(&shell).unwrap();
+    let cloned = (*platform).clone();
+    for status in futures_util::future::join_all([platform.exec_shell(), cloned.exec_shell()]).await
+    {
+        assert_eq!(status, selected);
+    }
+    let config = home.join("exec-shell.json");
+    let changed = serde_json::json!({"version":1,"executablePath":shell}).to_string() + "\n";
+    std::fs::write(&config, &changed).unwrap();
+    assert!(matches!(
+        platform.exec_shell().await,
+        ShellStatus::Unavailable {
+            code: EXEC_SHELL_UNAVAILABLE,
+            ..
+        }
+    ));
+    std::os::unix::fs::symlink("/bin/bash", &shell).unwrap();
+    // A failed refresh also retries with unchanged preference bytes.
+    assert_eq!(platform.exec_shell().await, selected);
+    std::fs::write(&config, "invalid").unwrap();
+    assert!(matches!(
+        platform.exec_shell().await,
+        ShellStatus::Unavailable {
+            code: EXEC_SHELL_CONFIG_INVALID,
+            ..
+        }
+    ));
+    std::fs::remove_file(&config).unwrap();
+    assert!(matches!(
+        platform.exec_shell().await,
+        ShellStatus::Available(_)
+    ));
+    root.shutdown().await.unwrap();
+}

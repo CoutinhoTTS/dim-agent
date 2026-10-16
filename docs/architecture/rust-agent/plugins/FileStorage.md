@@ -3,7 +3,7 @@
 Owner: [file_storage.rs](../../../../crates/dim-agent-capabilities/src/file_storage.rs)
 and [windows.rs](../../../../crates/dim-agent-capabilities/src/file_storage/windows.rs).
 Provides authorized-root-relative file operations and leases with secure path
-traversal and serialized mutation, plus directory listing and removal.
+traversal and serialized mutation, plus directory creation, listing and removal.
 
 ## Dependencies
 
@@ -58,6 +58,41 @@ marker naming this process counts as live. The exception is a marker this
 process failed to release: it keeps the owner record, whose nonce only that
 marker carries, and reclaims the marker at once, so removal and locking need
 not wait for the process to exit.
+
+## Directory creation
+
+`create_directory` makes a path below an authorized root an existing business
+directory, one level at a time: its parent must exist and is reached as every
+operation reaches it, without following links. A missing directory is created
+relative to the held parent handle, with mode `0700` on Unix (`mkdirat`) and
+the parent's inherited DACL on Windows (`NtCreateFile` with `FILE_CREATE`). An
+existing business directory counts as created, so a retry is safe; any other
+existing entry (a file, link, reparse point or special file) fails with an I/O
+error and is left untouched.
+
+Aliases are checked the way `lock` checks them, before anything is created. The
+parent's reserved directory is ensured first, so a name the filesystem equates
+with it is recognized by identity. Then the key for `auth.json.lock` is ensured
+and the key for the name is opened if it exists; if they are the same file, the
+name is an alias of the account marker. Both fail `InvalidPath`. The name's key
+is never created, so making a directory leaves no key behind in a parent that
+may never be removed, such as SessionStore's Session-files directory.
+
+```text
+create_directory(d/x):
+  open d (no links, never the reserved directory)       missing -> NotFound
+  ensure d/.dim-file-storage-locks
+  x is the reserved directory under another spelling?    -> InvalidPath
+  ensure key auth.json.lock; key x exists and is it?     -> InvalidPath
+  cancelled?                                             -> Cancelled
+  mkdirat(d, x, 0700); an existing entry is kept
+  x is not a business directory?                         -> Io, untouched
+  fsync d                                                fails -> Unsynced
+```
+
+In both the created and the existing case the parent is synced before the call
+returns, so a retry after `Unsynced` confirms durability. Windows has no
+directory sync, as for replacement. Cancellation is checked up to the creation.
 
 ## Listing and removal
 
@@ -121,6 +156,8 @@ remove(d), once d's other entries are gone:
   or without a key if key t would be temps itself
   rmdir temps, rmdir .dim-file-storage-locks, rmdir d
                     an entry or key created meanwhile -> DirectoryNotEmpty
+remove(p), once p is absent (also when it already was):
+  fsync p's parent                                     fails -> Unsynced
 ```
 
 A link or special file is unlinked only while it still is one. If a key or
@@ -134,9 +171,14 @@ temporary file, makes `lock` or `replace` fail with an I/O error, without
 following or writing through it, until the directory is removed.
 
 Removal therefore never unlinks a key or temporary file that a holder has
-locked. An absent entry counts as removed. Removal is neither atomic nor
-synced: an error or cancellation can leave part of a tree, retrying is safe,
-and an owner that must not leak files after a crash reconciles by listing. The
+locked. An absent entry counts as removed. Removal is not atomic: an error or
+cancellation can leave part of a tree, retrying is safe, and an owner that must
+not leak files after a crash reconciles by listing. Once the entry is absent,
+removal syncs its parent before it returns, also when the entry was already
+absent, so a completed removal survives a crash and a retry after `Unsynced`
+confirms durability; an owner can order a commit after it, as SessionStore's
+Session delete does ([S5c](../../../design/appserver/session-deletion-and-fork.md#4-crash-convergence)).
+Windows has no directory sync, as for replacement. The
 owner orders removal after the directory's writers; entries or leases created
 meanwhile make it fail. A replacement racing the removal of its directory still
 commits: if removal deleted the empty temporary directory first, the
@@ -171,6 +213,9 @@ and starts again from its target if a directory it returns to was deleted.
 [file_storage_flow.rs](../../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs):
 `late_roots_preserve_indices_and_generation_boundaries_on_reload`,
 `file_storage_flow` (path, lock, permission and platform checks),
+`directory_creation_stays_inside_the_authorized_root` (mode, an existing
+directory, a missing parent, aliases of the reserved directory and the account
+marker, an existing file or link, cancellation),
 `directory_listing_and_removal_stay_inside_the_authorized_root` (Session-file
 layout, reserved resources and aliases, leases held during partial removal,
 links, cancellation, leftovers with reserved names or of the wrong type, a

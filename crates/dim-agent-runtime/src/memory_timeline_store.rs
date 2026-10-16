@@ -2,7 +2,7 @@ use crate::{
     AgentError, BoxFuture, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent,
     TimelineInfo, TimelineKey, TimelineStore, TimelineTrace,
 };
-use dim_agent_types::{BranchCreateAt, ContextCompactionResult, EventKind, RecoverySnapshot};
+use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Mutex};
 
 /// In-memory storage for standalone Agents, tests and development profiles.
@@ -223,14 +223,10 @@ impl TimelineStore for MemoryTimelineStore {
                 .sequence
                 .checked_sub(1)
                 .and_then(|index| branch.events.get(index as usize))
-                .is_some_and(|record| {
-                    record.event.id == snapshot.event_id
-                        && matches!(&record.event.kind, EventKind::ContextCompaction(data)
-                        if matches!(data.outcome, ContextCompactionResult::Completed { .. }))
-                });
+                .is_some_and(|record| record.event.id == snapshot.event_id);
             if !valid {
                 return Err(AgentError::InvalidInput(
-                    "snapshot anchor is not a completed compaction".into(),
+                    "snapshot anchor is not the identified event".into(),
                 ));
             }
             branch

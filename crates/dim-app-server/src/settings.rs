@@ -3,8 +3,8 @@ mod native;
 
 use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
-use dim_agent_runtime::{Capability, KeysOf, StateCell, When};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use dim_agent_runtime::{Capability, KeysOf, When};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
@@ -42,10 +42,45 @@ impl From<FileStorageError> for SettingsError {
 }
 pub type Result<T> = std::result::Result<T, SettingsError>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SettingsScope {
-    User,
-    Project(usize),
+/// Declared in the capabilities crate, so listeners in any crate share the type.
+pub use dim_agent_capabilities::settings::{SettingsChanged, SettingsScope, settings_changes};
+
+/// A project directory newly authorized for project sources.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectAuthorized {
+    pub root: usize,
+    pub cwd: PathBuf,
+}
+impl Event for ProjectAuthorized {
+    const NAME: &'static str = "settings.project_authorized";
+    type Value = ();
+}
+/// The rutis channel of project authorizations.
+pub fn project_authorizations() -> EventKey<ProjectAuthorized> {
+    EventKey::dynamic("settings/projects")
+}
+
+/// Wakes a receiver on every event it listens to, for an owner whose read
+/// loop waits on a watch receiver: it rereads the source after each wake.
+#[derive(Clone)]
+pub(crate) struct Wake(Arc<tokio::sync::watch::Sender<()>>);
+impl Wake {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(tokio::sync::watch::Sender::new(())))
+    }
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0.subscribe()
+    }
+}
+impl<E: Event<Value = ()>> rutis::Listener<E> for Wake {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: &'a E,
+    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
+        self.0.send_replace(());
+        Box::pin(async { Ok(None) })
+    }
 }
 
 pub trait BusinessDocument: Default + Serialize + DeserializeOwned + Send + Sync + 'static {
@@ -68,8 +103,8 @@ pub struct SettingsService {
     stopping: CancellationToken,
     gate: Mutex<()>,
     updates: TaskTracker,
-    changed: StateCell<u64>,
-    documents: Mutex<BTreeMap<&'static str, StateCell<String>>>,
+    /// Settings' own plugin context, which emits change events.
+    events: Ctx,
     /// The document type that first used each namespace and file; another
     /// type naming one of them would share its persisted source.
     claims: Mutex<BTreeMap<String, std::any::TypeId>>,
@@ -92,8 +127,8 @@ impl SettingsService {
                 let root = owner.files.register_root(cwd.clone(), &cancel).await?;
                 let _guard = owner.gate.lock().unwrap();
                 owner.check_open(&cancel)?;
-                if owner.projects.lock().unwrap().insert(cwd, root) != Some(root) {
-                    owner.changed.update(|version| *version += 1);
+                if owner.projects.lock().unwrap().insert(cwd.clone(), root) != Some(root) {
+                    owner.emit(&project_authorizations(), ProjectAuthorized { root, cwd });
                 }
                 Ok(root)
             })
@@ -120,29 +155,28 @@ impl SettingsService {
             .map(|(path, index)| (*index, path.clone()))
             .collect()
     }
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.changed.subscribe()
-    }
-    /// The revision of `D`'s user source after each successful write. Project
-    /// sources notify only through `subscribe`.
-    pub fn subscribe_document<D: BusinessDocument>(&self) -> tokio::sync::watch::Receiver<String> {
-        self.documents
-            .lock()
-            .unwrap()
-            .entry(D::NAMESPACE)
-            .or_insert_with(|| StateCell::new("unread".into()))
-            .subscribe()
-    }
+    /// Announces a committed write on the source's channel. Callers hold the
+    /// commit order (the gate or the native connection), so events follow it.
     fn publish<D: BusinessDocument>(&self, scope: SettingsScope, revision: &str) {
-        if scope == SettingsScope::User {
-            self.documents
-                .lock()
-                .unwrap()
-                .entry(D::NAMESPACE)
-                .or_insert_with(|| StateCell::new("unread".into()))
-                .set(revision.to_owned());
+        self.emit(
+            &settings_changes(D::NAMESPACE),
+            SettingsChanged {
+                source: D::NAMESPACE,
+                scope,
+                revision: revision.to_owned(),
+            },
+        );
+    }
+    /// The change is already committed; a refused announcement cannot undo it,
+    /// so it is recorded rather than returned to the writer.
+    fn emit<E: Event>(&self, key: &EventKey<E>, event: E) {
+        if let Err(error) = self
+            .events
+            .events()
+            .emit(&self.events, key, Arc::new(event))
+        {
+            tracing::warn!(event = E::NAME, %error, "Settings change was not announced");
         }
-        self.changed.update(|version| *version += 1);
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
         validate_namespace(D::NAMESPACE)?;
@@ -379,8 +413,7 @@ impl TypedPlugin for SettingsPlugin {
                 stopping: CancellationToken::new(),
                 gate: Mutex::new(()),
                 updates: TaskTracker::new(),
-                changed: StateCell::new(0),
-                documents: Mutex::new(BTreeMap::new()),
+                events: ctx.clone(),
                 claims: Mutex::new(BTreeMap::new()),
             });
             let owner = service.clone();

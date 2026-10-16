@@ -16,7 +16,7 @@ flowchart LR
     WF["Workflow: definitions, run engine, stage runners"]
     MM["managementMethods key workflow"]
     Agents["Agents: sessions"]
-    Prov["Provider: purpose workflow.stage"]
+    Prov["Provider: model selection"]
     Set["Settings: source workflow; FileStorage: project files"]
     PC["PluginContents: type workflows"]
     Store["Process storage: pluginFiles (extended)"]
@@ -48,7 +48,7 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | `Workflow` | Process (control node) | `sessions` (Agents; `launch` with `policy`), Provider model selection, Settings source `workflow`, FileStorage (project files, looked up per call), `PluginContents` (optional, type `workflows`), `pluginFiles` (extended) | Run engine; `workflowRuns` (the tool's access to runs, A.2); `managementMethods` key `workflow` |
 | `WorkflowSession` | Session, installed when Workflow is enabled | `workflowRuns` (`Workflow`), Session configuration | `toolContribution` key `workflow`, declared in every Session; the handler refuses unless the Session is `interactive` |
 
-**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields, `input` with source raw blocks, `history`, `idle`, `stop`, `withdraw`; `agent` optional), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)); [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (run records; a TypeScript part uses it natively); and existing typed services: Provider purpose policy and Settings sources (the `workflow` business source is a Settings supplement, [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)), which a TypeScript part reaches by name once [#4](https://github.com/arcships/dim/issues/4) exposes them ([session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflowRuns` service, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), purpose key `workflow.stage`, content type key `workflows`, the run record.
+**Contracts depended on**: `sessions` ([session-access](../contracts/session-access.md): `launch` with a starter-capped `policy`, Session configuration fields, `input` with source raw blocks, `history`, `idle`, `stop`, `withdraw`; `agent` optional), `toolContribution` (ToolRegistry accepts named tool services, a supplement; [tool contributions](../../architecture/rust-agent/tool-contributions.md)), `managementMethods` collected by Rpc ([session-boundary](../contracts/session-boundary.md)); [`pluginFiles` (extended)](../../../crates/dim-app-server/README.md#trusted-plugin-storage) (run records; a TypeScript part uses it natively); and existing typed services: Provider model selection and Settings sources (the `workflow` business source is a Settings supplement, [overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)), which a TypeScript part reaches by name once [#4](https://github.com/arcships/dim/issues/4) exposes them ([session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)). **Contracts defined here**: definition format `dim.workflow/v1`, the `workflow` tool, the `workflowRuns` service, the `workflow.*` methods, source name `workflow` (marker kinds `stage` and `report`), content type key `workflows`, the run record.
 
 ## 2. Data and state
 
@@ -262,7 +262,7 @@ steps:
 | `steps` | 1–32 steps in order; a step is one `stage` or a `parallel` group of 2–8 stages (A4) |
 | `stage.id` | `[a-z0-9-]{1,32}`, unique in the definition |
 | `stage.agent` | Optional Agent id (native or external profile); when absent the launch request omits `agent` and Agents uses its default profile |
-| `stage.model` | Optional; else the profile's model; else Provider's selection for purpose `workflow.stage` (A5) |
+| `stage.model` | Optional; else the profile's model; else Provider's default selection (A5) |
 | `stage.prompt` | Template ≤ 32 KiB after rendering (A6); placeholders `{{params.<name>}}`, `{{stages.<id>.result}}` |
 | `policy` | `read_only` \| `workspace_write` \| `full_access`; capped (3.3) |
 | References | `stages.<id>` must name a stage of an earlier step; plain substitution only (A7) |
@@ -399,7 +399,7 @@ Through the tool, management methods and Session history reads:
 | A2 | YAML with `schema: dim.workflow/v1` | Judgment | Other syntax |
 | A3 | User-saved definitions are one document in the Settings source `workflow` mapping name to definition; the same document holds the enabled state of project definitions per workspace and name | User decision (round 2 R7); [ADR 003](../../adr/003-approval-scope.md) D3 | Files under the dim home |
 | A4 | Stages or parallel groups (≤ 32 steps, ≤ 8 per group); fail-fast | Feature list ("stages"); limits judgment | Per-stage failure policies |
-| A5 | Model precedence: stage > profile > purpose `workflow.stage` | [Overview §4](../overview.md#4-plugin-catalog); precedence judgment | Other precedence |
+| A5 | Model precedence: stage > profile > Provider's default selection | [Overview §4](../overview.md#4-plugin-catalog); precedence judgment | Other precedence |
 | A6 | Rendered prompt ≤ 32 KiB; stored result ≤ 64 KiB | Judgment | Other bounds |
 | A7 | Plain substitution templates | Judgment | Expressions need a sandbox |
 | A8 | Tool usable only in interactive Sessions; the handler refuses elsewhere | Prevents nesting | Depth limit needed |

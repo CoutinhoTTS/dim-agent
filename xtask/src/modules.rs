@@ -19,6 +19,7 @@ pub(crate) const APP_SERVER_COMPOSITION_BELOW: &[&str] = &[
     "dim-agent-runtime",
     "dim-agent-capabilities",
     "dim-agent-aimux",
+    "dim-agent-attachments",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -533,15 +534,18 @@ impl SourceGraph {
                 return Err(format!("types reverse dependency: {from} -> {to}").into());
             }
             // D4: Settings is persistence infrastructure, not a business or RPC owner.
+            // Its change contract, declared in capabilities, follows the same rule.
             let within = |module: &str, root: &str| {
                 module == root || module.starts_with(&format!("{root}::"))
             };
-            if within(from, "dim_app_server::settings")
+            if (within(from, "dim_app_server::settings")
+                || within(from, "dim_agent_capabilities::settings"))
                 && ((within(to, "dim_app_server")
                     && !within(to, "dim_app_server::settings")
                     && !within(to, "dim_app_server::storage"))
                     || (within(to, "dim_agent_capabilities")
-                        && !within(to, "dim_agent_capabilities::file_storage")))
+                        && !within(to, "dim_agent_capabilities::file_storage")
+                        && !within(to, "dim_agent_capabilities::settings")))
             {
                 return Err(format!("settings business dependency: {from} -> {to}").into());
             }

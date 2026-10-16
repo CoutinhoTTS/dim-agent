@@ -5,7 +5,10 @@ use dim_app_server::{
         McpChange, McpError, McpPlugin, McpService,
         config::{McpServerSettings, McpSettings},
     },
-    settings::{SettingsError, SettingsPlugin, SettingsScope, SettingsService},
+    settings::{
+        SettingsChanged, SettingsError, SettingsPlugin, SettingsScope, SettingsService,
+        settings_changes,
+    },
 };
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Gate, TypedPlugin};
 use serde_json::{Value, json};
@@ -78,7 +81,7 @@ impl Fixture {
         let root = Ctx::root().unwrap();
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
-        let plugin = root.plugin(dim_agent_runtime::capability_plugin(McpPlugin));
+        let plugin = root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0)));
         let mut roots = vec![home.clone(), home.join("project")];
         if reversed {
             roots.reverse();
@@ -772,13 +775,35 @@ async fn framework_precancellation_closes_admission_before_dependent_cleanup_fin
     assert!(matches!(result, Err(McpError::Closed)));
 }
 
+/// Wakes the test once Settings announces a write.
+struct Ping(Arc<tokio::sync::Notify>);
+impl rutis::Listener<SettingsChanged> for Ping {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: &'a SettingsChanged,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        self.0.notify_one();
+        Box::pin(async { Ok(None) })
+    }
+}
+
 #[tokio::test]
 async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     let fixture = Fixture::new().await;
     let cancel = CancellationToken::new();
     let path = fixture.files.path(0, "mcp.json").unwrap();
     let snapshot = fixture.mcp.catalog(None, &cancel).await.unwrap();
-    let mut changes = fixture.settings.subscribe();
+    let changed = Arc::new(tokio::sync::Notify::new());
+    fixture
+        .root
+        .events()
+        .on(
+            &fixture.root,
+            &settings_changes("mcp"),
+            Ping(changed.clone()),
+        )
+        .unwrap();
     let lease = fixture.files.lock(&path, &cancel).await.unwrap();
     // Poll the operation into admission, then drop only its caller while the
     // file lease guarantees no commit has happened yet.
@@ -797,9 +822,8 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
         .is_err()
     );
     drop(lease);
-    tokio::time::timeout(Duration::from_secs(5), changes.changed())
+    tokio::time::timeout(Duration::from_secs(5), changed.notified())
         .await
-        .unwrap()
         .unwrap();
     let snapshot = fixture.mcp.catalog(None, &cancel).await.unwrap();
     assert!(!snapshot.servers["shared"].enabled());

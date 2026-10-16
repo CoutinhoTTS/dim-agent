@@ -2,6 +2,43 @@
 
 `dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`.
 
+`dimcode tui` opens the interactive client. `dimcode exec -p TEXT` runs one prompt
+and exits; redirected stdin supplies the prompt when `-p` is absent.
+`dimcode exec resume SESSION_ID -p TEXT` continues a persisted Session. Existing
+`--prompt`, piped stdin and `--resume` entries remain available.
+
+`exec --json` writes one public JSON-RPC notification per line for the selected
+Session. Session handles and diagnostics go to stderr. The stream preserves
+public fields, includes live observations after attach and does not replay stored
+history. Approval is denied, the turn is stopped and settled, and exec exits 3.
+Ctrl+C waits for settlement and exits 130.
+
+Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
+for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.
+Exports include main only; Markdown labels child branch requests and failures
+without fetching child histories. Files are created new, never overwritten, and
+use mode 0600 on Unix or the inherited ACL on Windows. A write error can leave a
+partial new file. Relative paths use the CLI process cwd; `~` is literal.
+
+At the idle interactive prompt:
+
+```text
+> /export markdown Session notes.md
+Exported Markdown: Session notes.md
+> /export json events.json
+Exported JSON: events.json
+> /exit
+$
+```
+
+`/export` reads the format and treats the remaining path literally, including
+spaces. Errors return to the prompt. `/exit` takes no arguments. Slash commands
+in exec or redirected input remain literal model input.
+See [CLI commands and exports](../../docs/design/cli-commands.md).
+
+Proposed model commands and atomic Agent configuration adoption are specified in
+[model configuration](../../docs/design/model-configuration.md); they are not implemented.
+
 Build both native programs from the repository root:
 
 ```bash

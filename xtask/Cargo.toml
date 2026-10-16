@@ -7,9 +7,11 @@ publish = false
 dim-agent-runtime.workspace = true
 dim-agent-capabilities.workspace = true
 dim-agent-aimux.workspace = true
+dim-agent-attachments.workspace = true
 dim-app-server.workspace = true
 dim-agent-types.workspace = true
 rutis.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 serde_json.workspace = true
 syn = { version = "2", features = ["full", "visit"] }

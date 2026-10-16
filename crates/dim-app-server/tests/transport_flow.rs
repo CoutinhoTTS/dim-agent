@@ -52,6 +52,9 @@ mod collaboration;
 #[path = "transport_flow/native_storage.rs"]
 mod native_storage;
 
+#[path = "transport_flow/compaction.rs"]
+mod compaction;
+
 #[path = "transport_flow/barrier.rs"]
 mod barrier;
 
@@ -64,8 +67,17 @@ mod summaries;
 #[path = "transport_flow/management.rs"]
 mod management;
 
+#[path = "transport_flow/permission_rules.rs"]
+mod permission_rules;
+
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;
+
+#[path = "transport_flow/deletion.rs"]
+mod deletion;
+
+#[path = "transport_flow/fork.rs"]
+mod fork;
 
 enum Transport {
     Unix(BufReader<UnixStream>),
@@ -1336,7 +1348,10 @@ impl dim_agent_capabilities::host::ModelDriver for LargeModel {
 async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
@@ -1347,6 +1362,7 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
         .session_value(Arc::new(ModelHost(Arc::new(LargeModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let socket =

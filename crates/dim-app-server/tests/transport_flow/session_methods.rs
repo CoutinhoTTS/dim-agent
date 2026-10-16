@@ -124,6 +124,9 @@ impl TypedPlugin for NotesOwner {
                 scope: self.scope,
                 notes: self.notes.clone(),
             }));
+            (&view).await.map_err(|error| {
+                rutis::CordisError::PluginFailed(format!("Notes provider failed: {error}").into())
+            })?;
             self.notes.0.views.lock().unwrap().push(view);
             Ok(rutis::Effect::Done)
         })
@@ -259,6 +262,7 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
             {"name": "notes.flood", "mutating": false},
             {"name": "notes.stream", "mutating": false},
             {"name": "notes.wait", "mutating": true},
+            {"name": "session.input.withdraw", "mutating": true},
         ]})
     );
     // This profile serves Session methods to every transport, as built-ins.
@@ -347,7 +351,7 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
         client
             .rpc("session.methods", json!({"sessionId": sid}))
             .await["result"],
-        json!({"methods": []})
+        json!({"methods": [{"name": "session.input.withdraw", "mutating": true}]})
     );
     gate.notify_one();
     restart.await.unwrap();
@@ -558,4 +562,83 @@ async fn progress_a_caller_cannot_take_is_dropped_and_its_reply_arrives() {
     assert_eq!(progress.len(), 3, "{progress:?}");
     server.shutdown();
     server.join().await.unwrap();
+}
+
+/// Session access A.4: InputQueue serves `session.input.withdraw` through
+/// `sessionMethods`; an applied or unknown input is `notHeld` and nothing
+/// is written, and v3 history shows the command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_withdraw_answers_through_the_session_and_writes_only_commands() {
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |_| {}).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let submitted = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": sid, "branchId": "main", "text": "hello"}),
+        )
+        .await;
+    let input_id = submitted["result"]["event"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId": sid, "branchId": "main"}),
+            )
+            .await,
+    );
+    for id in [input_id.as_str(), "unknown"] {
+        let reply = client
+            .rpc(
+                "session.input.withdraw",
+                json!({"sessionId": sid, "branchId": "main", "inputId": id, "reason": "changed my mind"}),
+            )
+            .await;
+        assert_eq!(
+            reply["result"],
+            json!({"status": "notHeld"}),
+            "{id}: {reply}"
+        );
+    }
+    for params in [
+        json!({"sessionId": sid, "branchId": "main"}),
+        json!({"sessionId": sid, "branchId": "main", "inputId": ""}),
+        json!({"sessionId": sid, "branchId": "main", "inputId": "x", "reason": "r".repeat(2049)}),
+        json!({"sessionId": sid, "branchId": "main", "inputId": "x", "extra": 1}),
+    ] {
+        let reply = client.rpc("session.input.withdraw", params).await;
+        assert!(reply.get("error").is_some(), "{reply}");
+    }
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId": sid, "branchId": "main", "after": 0, "limit": 100}),
+        )
+        .await;
+    let names: Vec<_> = history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| {
+            event["name"]
+                .as_str()
+                .map(|name| format!("{}/{name}", event["type"].as_str().unwrap_or_default()))
+        })
+        .collect();
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| *name == "input/withdraw")
+            .count(),
+        2,
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "input/deleted"),
+        "{names:?}"
+    );
 }

@@ -1,6 +1,7 @@
 # Documentation
 
 - [CLI feature list](feature-list.md)
+- [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [Development plan and priorities](design/roadmap.md)（中文）
@@ -14,10 +15,17 @@
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
+- [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
+- [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
+- [C4 Session TypeScript binding design](design/session-typescript.md)
+- [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
-- [Settings service](design/appserver/settings-service.md) (S8b draft)
+- [Settings service](design/appserver/settings-service.md) (S8b design approved; implementation pending)（[中文](zh/design/appserver/settings-service.md)）
+- [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
+- [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
+- [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

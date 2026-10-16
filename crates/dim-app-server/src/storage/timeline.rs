@@ -1,8 +1,10 @@
 use super::{
     SqliteStorage,
     codec::{self, ContentCache, WireEvent},
+    files::{self, SessionFiles},
     sqlite::error,
 };
+use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::{
     AgentError, BoxFuture, Capability, KeysOf, PublishCallback, Result, SessionConfig,
     StoredBranch, StoredEvent, TimelineInfo, TimelineKey, TimelineStore, TimelineTrace, scoped,
@@ -36,6 +38,8 @@ enum Command {
 /// One process writer batches every Session; only pending events reside here.
 pub struct SqliteTimelineStore {
     db: Arc<SqliteStorage>,
+    /// Schedules a Session-file sweep after a commit released owner rows.
+    sweep_files: Arc<tokio::sync::Notify>,
     admission: Mutex<Admission>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     closing: Mutex<Option<tokio::sync::watch::Receiver<Option<Result<()>>>>>,
@@ -50,6 +54,7 @@ impl SqliteTimelineStore {
         let (sender, receiver) = mpsc::channel();
         let store = Arc::new(Self {
             db,
+            sweep_files: Arc::new(tokio::sync::Notify::new()),
             admission: Mutex::new(Admission {
                 sender,
                 failures: BTreeMap::new(),
@@ -171,6 +176,8 @@ impl SqliteTimelineStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        // Owner rows go before the Session record they reference.
+        let released = files::release(&tx, session_id).map_err(error)?;
         for table in [
             "timeline_snapshots",
             "timeline_events",
@@ -186,6 +193,9 @@ impl SqliteTimelineStore {
             .map_err(error)?;
         }
         tx.commit().map_err(error)?;
+        if released > 0 {
+            self.sweep_files.notify_one();
+        }
         self.admission.lock().unwrap().failures.remove(session_id);
         Ok(())
     }
@@ -231,12 +241,18 @@ impl SqliteTimelineStore {
 #[derive(Clone)]
 pub struct SessionStore {
     timeline: Arc<SqliteTimelineStore>,
+    /// The file steps on the Session's resource node: Session files and the
+    /// command output a delete removes.
+    files: SessionFiles,
 }
 impl SessionStore {
-    pub fn new(db: Arc<SqliteStorage>) -> Self {
-        Self {
-            timeline: SqliteTimelineStore::new(db),
-        }
+    /// `ctx` is SessionStore's own context, from which each file step reads
+    /// the node's FileStorage; `files_root` is the FileStorage root of the
+    /// database directory.
+    pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self {
+        let timeline = SqliteTimelineStore::new(db.clone());
+        let files = SessionFiles::new(db, ctx, files_root, timeline.sweep_files.clone());
+        Self { timeline, files }
     }
     pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
         self.timeline.clone()
@@ -420,6 +436,146 @@ impl SessionStore {
             })
             .await
     }
+    /// The storage steps of `session.delete` ([S5c §3.2](../../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)),
+    /// once Agents has closed the Session: its command output directory goes
+    /// first, durably, then every row of it in one transaction on the
+    /// Timeline writer, the operation a creation rollback runs, then the
+    /// Session-file sweep is scheduled for the files it released. Nothing of
+    /// the Session is read, so a damaged one goes too, and an unknown id has
+    /// nothing to remove. A failure before the commit leaves every row.
+    /// Every database in the directory shares `command-output/`, so the
+    /// directory is removed only while this database has rows of the id
+    /// (§4): a directory of an id without rows here belongs to another
+    /// database, or to none. `id` is one path component, as Agents checked
+    /// (D3). Returns whether this database had rows of the id.
+    pub async fn delete_session(&self, id: &str) -> Result<bool> {
+        // Rows outlive their directory: once a commit removed the rows, the
+        // directory was already durably gone, so a retry needs no removal.
+        let stored = self.has_records(id).await?;
+        if stored {
+            self.files.remove_command_output(id).await?;
+        }
+        self.timeline.rollback_session(id).await?;
+        // Also on a retry that released nothing: an earlier attempt may have
+        // committed and stopped before its sweep.
+        self.timeline.sweep_files.notify_one();
+        Ok(stored)
+    }
+    /// The prepare step of `session.fork` ([S5c §6.3](../../../../docs/design/appserver/session-deletion-and-fork.md#63-what-a-fork-copies)),
+    /// after Agents checked the cut: in one transaction `fork` gets the
+    /// source's `SessionConfig` text and owner, the source's `main` through
+    /// `at` with the content rows its events reference and the snapshots
+    /// anchored on them, a directory without events for every branch `main`
+    /// created by then, and an owner row for every Session file the source
+    /// owns. Rows are copied as stored. A source whose delete committed first
+    /// is `Closed`. The runtime validates the copy when it builds the fork.
+    pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
+        let (source, fork) = (source.to_owned(), fork.to_owned());
+        self.timeline
+            .db
+            .run(move |connection| {
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(error)?;
+                let config: Option<String> = tx
+                    .query_row(
+                        "SELECT config FROM agent_sessions WHERE session_id=?1",
+                        [&source],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(error)?;
+                let Some(config) = config else {
+                    return Err(AgentError::Closed(source));
+                };
+                let cut = sql_sequence(at)?;
+                tx.execute(
+                    "INSERT INTO agent_sessions VALUES (?1, ?2, ?3)",
+                    params![
+                        fork,
+                        config,
+                        sql_sequence(dim_agent_runtime::core::unix_millis())?
+                    ],
+                )
+                .map_err(error)?;
+                tx.execute(
+                    "INSERT INTO session_owners (session_id, agent_id, protocol_version) \
+                     SELECT ?2, agent_id, protocol_version FROM session_owners WHERE session_id=?1",
+                    params![source, fork],
+                )
+                .map_err(error)?;
+                let branches = tx
+                    .prepare("SELECT branch_id, info FROM timeline_branches WHERE session_id=?1")
+                    .map_err(error)?
+                    .query_map([&source], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                    .map_err(error)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(error)?;
+                for (id, info) in branches {
+                    let parsed: TimelineInfo = serde_json::from_str(&info).map_err(error)?;
+                    // `main` through the cut; a branch `main` created by
+                    // then as a creation that never started.
+                    let head = if id == "main" {
+                        cut
+                    } else if parsed.parent.as_deref() == Some("main")
+                        && parsed.create_anchor.is_some_and(|anchor| anchor <= at)
+                    {
+                        0
+                    } else {
+                        continue;
+                    };
+                    tx.execute(
+                        "INSERT INTO timeline_branches VALUES (?1, ?2, ?3, ?4)",
+                        params![fork, id, info, head],
+                    )
+                    .map_err(error)?;
+                }
+                tx.execute(
+                    "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body, event_id) \
+                     SELECT ?2, branch_id, sequence, last_sequence, kind, body, event_id FROM timeline_events \
+                     WHERE session_id=?1 AND branch_id='main' AND sequence<=?3",
+                    params![source, fork, cut],
+                )
+                .map_err(error)?;
+                // Only the content rows the copied events reference.
+                let mut references = BTreeSet::new();
+                {
+                    let mut bodies = tx
+                        .prepare("SELECT body FROM timeline_events WHERE session_id=?1")
+                        .map_err(error)?;
+                    let bodies = bodies
+                        .query_map([&fork], |row| row.get::<_, String>(0))
+                        .map_err(error)?;
+                    for body in bodies {
+                        let row: Row = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
+                        for wire in row.wires() {
+                            references.extend(wire.references().map(str::to_owned));
+                        }
+                    }
+                }
+                {
+                    let mut copy = tx
+                        .prepare(
+                            "INSERT INTO timeline_content (session_id, hash, kind, body) \
+                             SELECT ?2, hash, kind, body FROM timeline_content WHERE session_id=?1 AND hash=?3",
+                        )
+                        .map_err(error)?;
+                    for hash in &references {
+                        copy.execute(params![source, fork, hash]).map_err(error)?;
+                    }
+                }
+                tx.execute(
+                    "INSERT INTO timeline_snapshots (session_id, branch_id, sequence, interpreter, event_id, state) \
+                     SELECT ?2, branch_id, sequence, interpreter, event_id, state FROM timeline_snapshots \
+                     WHERE session_id=?1 AND branch_id='main' AND sequence<=?3",
+                    params![source, fork, cut],
+                )
+                .map_err(error)?;
+                files::share(&tx, &source, &fork).map_err(error)?;
+                tx.commit().map_err(error)
+            })
+            .await
+    }
     pub async fn create_owned_session(
         &self,
         session_id: &str,
@@ -448,7 +604,16 @@ impl SessionStore {
     }
 }
 
-pub struct SessionStorePlugin;
+/// The Session directory and the `sessionFiles` service. Session files live
+/// below the FileStorage root `files_root`, which is the database directory.
+pub struct SessionStorePlugin {
+    files_root: usize,
+}
+impl SessionStorePlugin {
+    pub fn new(files_root: usize) -> Self {
+        Self { files_root }
+    }
+}
 impl TypedPlugin for SessionStorePlugin {
     type Deps = (Arc<SqliteStorage>,);
     fn name(&self) -> &str {
@@ -460,14 +625,24 @@ impl TypedPlugin for SessionStorePlugin {
         (db,): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let store = Arc::new(SessionStore::new(db));
-            let owned = store.timeline.clone();
+            let store = Arc::new(SessionStore::new(db, ctx.clone(), self.files_root));
+            let files = store.files.clone();
+            let (timeline, owned_files) = (store.timeline.clone(), files.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move { owned.close().await.map_err(Into::into) })
+                    Box::pin(async move {
+                        // Puts settle before the native store stops writing.
+                        owned_files.close().await;
+                        timeline.close().await.map_err(Into::into)
+                    })
                 }))
             })?;
+            files.start();
             ctx.provide_as(TypeKey::of::<SessionStore>(), store)?;
+            ctx.provide_as(
+                TypeKey::of::<SessionFilesHost>(),
+                Arc::new(SessionFilesHost(Arc::new(files))),
+            )?;
             Ok(Effect::Done)
         })
     }
@@ -548,6 +723,14 @@ enum Row {
         started_at: u64,
         records: Vec<WireEvent>,
     },
+}
+impl Row {
+    fn wires(&self) -> &[WireEvent] {
+        match self {
+            Row::Event { record } => std::slice::from_ref(record),
+            Row::Output { records, .. } => records,
+        }
+    }
 }
 fn head(connection: &Connection, key: &TimelineKey) -> Result<u64> {
     connection
@@ -1022,11 +1205,8 @@ impl TimelineStore for SqliteTimelineStore {
             self.db.run(move |connection| {
                 let anchor = read_events(connection, &key, snapshot.sequence..=snapshot.sequence, false)?
                     .pop().ok_or_else(|| error("snapshot anchor is missing"))?;
-                if anchor.event.id != snapshot.event_id
-                    || !matches!(&anchor.event.kind, EventKind::ContextCompaction(data)
-                        if matches!(data.outcome, ContextCompactionResult::Completed { .. }))
-                {
-                    return Err(error("snapshot anchor is not the identified completed compaction"));
+                if anchor.event.id != snapshot.event_id {
+                    return Err(error("snapshot anchor is not the identified event"));
                 }
                 connection.execute(
                     "INSERT OR REPLACE INTO timeline_snapshots VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1047,7 +1227,7 @@ impl TimelineStore for SqliteTimelineStore {
             let interpreter = interpreter.to_owned();
             self.db.run(move |connection| {
                 connection.query_row(
-                    "SELECT s.sequence, s.event_id, s.interpreter, s.state FROM timeline_snapshots s JOIN timeline_events e ON e.session_id=s.session_id AND e.branch_id=s.branch_id AND e.sequence=s.sequence AND e.event_id=s.event_id WHERE s.session_id=?1 AND s.branch_id=?2 AND s.sequence<=?3 AND s.interpreter=?4 AND typeof(s.sequence)='integer' AND s.sequence>0 AND typeof(s.event_id)='text' AND typeof(s.state)='text' AND e.kind='context/compaction' AND json_valid(e.body) AND json_extract(e.body, '$.record.event.data.status')='completed' AND json_extract(e.body, '$.record.event.id')=s.event_id AND json_extract(e.body, '$.record.event.sequence')=s.sequence ORDER BY s.sequence DESC LIMIT 1",
+                    "SELECT s.sequence, s.event_id, s.interpreter, s.state FROM timeline_snapshots s JOIN timeline_events e ON e.session_id=s.session_id AND e.branch_id=s.branch_id AND e.sequence=s.sequence AND e.event_id=s.event_id WHERE s.session_id=?1 AND s.branch_id=?2 AND s.sequence<=?3 AND s.interpreter=?4 AND typeof(s.sequence)='integer' AND s.sequence>0 AND typeof(s.event_id)='text' AND typeof(s.state)='text' AND json_valid(e.body) AND json_extract(e.body, '$.record.event.id')=s.event_id AND json_extract(e.body, '$.record.event.sequence')=s.sequence ORDER BY s.sequence DESC LIMIT 1",
                     params![key.session_id, key.branch_id, sql_sequence(through)?, interpreter],
                     |row| Ok(RecoverySnapshot { sequence: read_sequence(row, 0)?, event_id: row.get(1)?, interpreter: row.get(2)?, state: row.get(3)? }),
                 ).optional().map_err(error)

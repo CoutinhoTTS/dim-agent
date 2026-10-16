@@ -9,7 +9,7 @@ use dim_agent_capabilities::skills::{RefreshTarget, SkillStatus, SkillsCatalog, 
 use dim_agent_capabilities::{
     host_platform::HostPlatform,
     skill_settings::{
-        SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
+        SOURCE, SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
         SkillSettingsSnapshot,
     },
 };
@@ -27,7 +27,7 @@ struct SkillDocument {
     extra: BTreeMap<String, serde_json::Value>,
 }
 impl BusinessDocument for SkillDocument {
-    const NAMESPACE: &'static str = "skills";
+    const NAMESPACE: &'static str = SOURCE;
     const USER_FILE: &'static str = "skills.json";
     fn validate(&self) -> crate::settings::Result<()> {
         if self.extra.contains_key("disabledSkillIds") {
@@ -45,7 +45,10 @@ impl BusinessDocument for SkillDocument {
 }
 
 /// Adapts the owner's business document to the reusable Skill catalog port.
-struct SkillStorage(Arc<SettingsService>);
+/// Settings announces its writes; the catalog listens to them itself.
+struct SkillStorage {
+    settings: Arc<SettingsService>,
+}
 impl SkillSettings for SkillStorage {
     fn skills(
         &self,
@@ -53,7 +56,7 @@ impl SkillSettings for SkillStorage {
     ) -> BoxFuture<'_, Result<SkillSettingsSnapshot, SkillSettingsError>> {
         Box::pin(async move {
             let snapshot = self
-                .0
+                .settings
                 .read::<SkillDocument>(SettingsScope::User, &cancel)
                 .await?;
             Ok(SkillSettingsSnapshot {
@@ -74,7 +77,7 @@ impl SkillSettings for SkillStorage {
                 return Err(SkillSettingsError::Invalid("empty Skill id".into()));
             }
             let current = self
-                .0
+                .settings
                 .read::<SkillDocument>(SettingsScope::User, &cancel)
                 .await?;
             if current.revision != expected {
@@ -90,14 +93,11 @@ impl SkillSettings for SkillStorage {
                 document.disabled_skill_ids.push(id);
             }
             Ok(self
-                .0
+                .settings
                 .update(SettingsScope::User, &expected, document, &cancel)
                 .await?
                 .revision)
         })
-    }
-    fn changes(&self) -> tokio::sync::watch::Receiver<SettingsVersion> {
-        self.0.subscribe_document::<SkillDocument>()
     }
 }
 impl From<SettingsError> for SkillSettingsError {
@@ -196,7 +196,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
         (platform, settings): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage(settings))));
+            let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
                 ctx,
                 (platform, settings),

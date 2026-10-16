@@ -1,6 +1,6 @@
 # Settings 服务
 
-状态：草案（待评审）。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
+状态：设计已通过评审，尚未实现。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
 基于 S8a（[#54](https://github.com/arcships/dim/issues/54)，PR [#90](https://github.com/arcships/dim/pull/90)）；
 实现依赖 C4（[#63](https://github.com/arcships/dim/issues/63)）。
 总体设计：[§6.4 配置](../overview.md#64-约定)。作用域：

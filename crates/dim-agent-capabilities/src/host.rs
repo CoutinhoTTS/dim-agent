@@ -357,6 +357,45 @@ pub trait ResolveModelSelection: Send + Sync + 'static {
 }
 pub struct ModelSelectionHost(pub Arc<dyn ResolveModelSelection>);
 
+/// One non-streaming request outside any Session: no tools, no Timeline.
+#[derive(Debug, Clone)]
+pub struct AuxiliaryRequest {
+    pub system: Option<String>,
+    pub messages: Vec<Message>,
+    pub max_output_tokens: Option<u32>,
+}
+#[derive(Debug, Clone)]
+pub struct AuxiliaryReply {
+    /// The text blocks only; thinking output is dropped.
+    pub text: String,
+    pub stop_reason: ModelStopReason,
+    pub usage: Option<Usage>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuxiliaryErrorCode {
+    InvalidRequest,
+    ModelUnavailable,
+    Failed,
+    Cancelled,
+}
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct AuxiliaryError {
+    pub code: AuxiliaryErrorCode,
+    pub message: String,
+}
+/// The caller chooses the model; the owner of credentials never falls back
+/// to another one and never returns the connection.
+pub trait CompleteAuxiliary: Send + Sync + 'static {
+    fn complete(
+        &self,
+        model: ModelId,
+        request: AuxiliaryRequest,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<AuxiliaryReply, AuxiliaryError>> + Send + '_>>;
+}
+pub struct AuxiliaryModelHost(pub Arc<dyn CompleteAuxiliary>);
+
 pub trait ModelDriver: Send + Sync + 'static {
     fn invoke(
         &self,
@@ -386,33 +425,95 @@ pub trait ToolDriver: Send + Sync + 'static {
 }
 pub struct ToolHost(pub Arc<dyn ToolDriver>);
 
-#[derive(Debug, Clone)]
+/// What ContextPolicy hands a strategy: the entries from the previous cut
+/// on, the previous result, the request whose context is compacted and the
+/// cuts the retention rule allows.
+#[derive(Clone)]
 pub struct CompactionInput {
+    /// The projected entries from the previous `retain_from` on.
     pub history: Vec<HistoryEntry>,
     pub checkpoint: Option<CompactionCheckpoint>,
+    pub request: Arc<ModelRequest>,
+    pub model: Arc<dyn ContextModel>,
+    /// Event id of the first event of the oldest of the last K turns.
+    pub retain_limit: Option<String>,
+    /// Every legal cut, in order; a strategy returns one of their
+    /// `retain_from`.
+    pub cuts: Vec<CompactionCut>,
+    /// Budget recovery: a cut after `retain_limit` is allowed when none lies
+    /// at or before it.
+    pub fallback: bool,
+    pub trigger: CompactionTrigger,
     pub estimated_input_tokens: f64,
     pub baseline_source: BaselineSource,
     pub baseline_prompt_tokens: Option<f64>,
     pub delta_tokens: Option<f64>,
     pub provider_budget: Option<ProviderOutputBudgetFacts>,
 }
+/// A legal cut: `history[..entry]` is replaced, `history[entry..]` is kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionCut {
+    pub retain_from: String,
+    pub entry: usize,
+    /// At or before `retain_limit`.
+    pub within_limit: bool,
+}
+impl CompactionInput {
+    /// The latest cut within the retention limit or, under recovery, the
+    /// latest cut when none is within it.
+    pub fn cut(&self) -> Option<&CompactionCut> {
+        self.cuts
+            .iter()
+            .rev()
+            .find(|cut| cut.within_limit)
+            .or_else(|| self.cuts.last().filter(|_| self.fallback))
+    }
+}
 #[derive(Debug, Clone)]
 pub struct CompactionCheckpoint {
-    pub cursor: String,
-    pub summary: String,
+    pub retain_from: String,
+    pub replacement: Arc<[Message]>,
     pub context_baseline: Arc<[ContextBaselineEntry]>,
 }
+/// Window facts of the model whose context is prepared.
 pub trait ContextModel: Send + Sync + 'static {
     fn context_window(&self) -> f64;
     fn output_tokens(&self) -> f64;
     fn threshold_tokens(&self) -> f64;
     fn count_tokens(&self, request: &ModelRequest) -> f64;
+}
+/// A strategy's diagnostics: its model calls and its own record.
+#[derive(Debug, Clone)]
+pub struct StrategyDiagnostics {
+    pub model_call_count: u64,
+    pub record: CompactionStrategyRecord,
+}
+#[derive(Debug, Clone)]
+pub enum StrategyOutcome {
+    Completed {
+        retain_from: String,
+        replacement: Vec<Message>,
+        diagnostics: StrategyDiagnostics,
+    },
+    Skipped {
+        reason: String,
+        diagnostics: StrategyDiagnostics,
+    },
+}
+/// Produces the replacement of the history before a cut. Replay never calls
+/// it: a committed result is replayed by its record alone.
+pub trait CompactionStrategy: Send + Sync + 'static {
+    /// Written into `context/compaction-start` and the result.
+    fn name(&self) -> &str;
     fn compact(
         &self,
         input: CompactionInput,
         cancel: CancellationToken,
-    ) -> HostFuture<'_, ContextCompactionResult>;
+    ) -> HostFuture<'_, StrategyOutcome>;
 }
+/// An explicit optional binding, like `ContextModelHost`; the policy exists
+/// when both are `Some`.
+pub struct CompactionStrategyHost(pub Option<Arc<dyn CompactionStrategy>>);
 pub trait ResolveContextModel: Send + Sync + 'static {
     fn resolve(
         &self,
@@ -422,6 +523,47 @@ pub trait ResolveContextModel: Send + Sync + 'static {
 }
 /// An explicit optional policy binding keeps dependencies visible in every profile.
 pub struct ContextModelHost(pub Option<Arc<dyn ResolveContextModel>>);
+
+/// A Session file SessionStore stored. `path` is absolute on the Session's
+/// resource node and names the same bytes for the file's whole life.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSessionFile {
+    pub file_id: String,
+    pub path: std::path::PathBuf,
+    pub bytes: u64,
+}
+/// The `sessionFiles` error codes: `not_found`, `invalid`, `too_large`,
+/// `node_unavailable`, `cancelled` and `storage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFileErrorCode {
+    NotFound,
+    Invalid,
+    TooLarge,
+    NodeUnavailable,
+    Cancelled,
+    Storage,
+}
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct SessionFileError {
+    pub code: SessionFileErrorCode,
+    pub message: String,
+}
+/// `sessionFiles.put`: stores `content` once, read-only, as the file `name`
+/// owned by `session_id`. Cancellation takes effect until the file is
+/// committed; afterwards the reply stands.
+pub trait PutSessionFile: Send + Sync + 'static {
+    fn put(
+        &self,
+        session_id: String,
+        name: String,
+        content: Vec<u8>,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+}
+/// The process service `sessionFiles`, provided by SessionStore, so that its
+/// consumers name no App Server type.
+pub struct SessionFilesHost(pub Arc<dyn PutSessionFile>);
 
 pub struct IdentityContext;
 impl PrepareContext for IdentityContext {

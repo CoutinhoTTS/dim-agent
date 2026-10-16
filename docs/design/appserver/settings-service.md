@@ -1,6 +1,6 @@
 # Settings service
 
-Status: Draft (for review). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
+Status: Design approved; implementation pending. Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
 Builds on S8a ([#54](https://github.com/arcships/dim/issues/54), PR [#90](https://github.com/arcships/dim/pull/90));
 implementation depends on C4 ([#63](https://github.com/arcships/dim/issues/63)).
 Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:

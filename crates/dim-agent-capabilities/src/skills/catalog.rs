@@ -1,16 +1,18 @@
 use super::{
     CatalogEntry, CatalogVersion, CatalogView, RefreshTarget, SkillIssue, SkillStatus, SkillsError,
+    Wake,
     discovery::{RootKind, RootSnapshot, scan_root},
 };
 use crate::{
     host_platform::HostPlatform,
+    settings::settings_changes,
     skill_settings::{
-        SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
+        SOURCE, SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
         SkillSettingsSnapshot,
     },
 };
 use dim_agent_runtime::{Capability, KeysOf, scoped};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -21,10 +23,26 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const SKILLS_DIR: &str = ".agents/skills";
 
+/// The catalog advanced to `version`: a root was rescanned or the disabled set
+/// changed. It never carries the view; a listener queries the catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogChanged {
+    pub version: CatalogVersion,
+}
+impl Event for CatalogChanged {
+    const NAME: &'static str = "skills.catalog_changed";
+    type Value = ();
+}
+/// The rutis channel of catalog changes, in version order.
+pub fn catalog_changes() -> EventKey<CatalogChanged> {
+    EventKey::named("skills/catalog")
+}
+
 struct CatalogState {
     user: Option<Arc<RootSnapshot>>,
     projects: HashMap<PathBuf, Arc<RootSnapshot>>,
     settings: Result<SkillSettingsSnapshot, SkillsError>,
+    version: CatalogVersion,
 }
 
 /// Process-wide Skill discovery and global enablement.
@@ -35,7 +53,8 @@ pub struct SkillsCatalog {
     /// Serializes settings reloads so a later read is never overwritten by
     /// an earlier one.
     reloading: tokio::sync::Mutex<()>,
-    version: watch::Sender<CatalogVersion>,
+    /// The owner's context, which announces catalog changes.
+    events: Ctx,
     closed: CancellationToken,
 }
 
@@ -120,10 +139,27 @@ impl SkillsCatalog {
             }
         }
         Ok(CatalogView {
-            version: *self.version.borrow(),
+            version: state.version,
             entries,
             issues,
         })
+    }
+
+    /// Advances the version and announces it. Callers hold the state lock, so
+    /// announcements follow version order.
+    fn advance(&self, state: &mut CatalogState) -> CatalogVersion {
+        state.version += 1;
+        let changed = Arc::new(CatalogChanged {
+            version: state.version,
+        });
+        if let Err(error) = self
+            .events
+            .events()
+            .emit(&self.events, &catalog_changes(), changed)
+        {
+            tracing::warn!(%error, "Skill catalog change was not announced");
+        }
+        state.version
     }
 
     /// Reads the settings service and stores its snapshot; a changed
@@ -141,7 +177,7 @@ impl SkillsCatalog {
         let result = snapshot.as_ref().map(|_| ()).map_err(Clone::clone);
         state.settings = snapshot;
         if changed {
-            self.version.send_modify(|version| *version += 1);
+            self.advance(&mut state);
         }
         result
     }
@@ -228,13 +264,7 @@ impl SkillsCatalog {
             issues.extend(project.issues.iter().cloned());
             state.projects.insert(root, Arc::new(project));
         }
-        self.version.send_modify(|version| *version += 1);
-        Ok((*self.version.borrow(), issues))
-    }
-
-    pub fn subscribe(&self) -> Result<watch::Receiver<CatalogVersion>, SkillsError> {
-        self.check_open()?;
-        Ok(self.version.subscribe())
+        Ok((self.advance(&mut state), issues))
     }
 }
 
@@ -276,7 +306,10 @@ impl SkillsCatalogPlugin {
     ) -> Result<Arc<SkillsCatalog>, CordisError> {
         let settings = settings.0.clone();
         let lifecycle = ctx.cancellation_token();
-        let mut changes = settings.changes();
+        // Listen before the first read, so no later write goes unread.
+        let (wake, mut changes) = watch::channel(());
+        ctx.events()
+            .on(ctx, &settings_changes(SOURCE), Wake(wake))?;
         let initial = settings
             .skills(lifecycle.child_token())
             .await
@@ -288,9 +321,10 @@ impl SkillsCatalogPlugin {
                 user: None,
                 projects: HashMap::new(),
                 settings: initial,
+                version: 0,
             }),
             reloading: tokio::sync::Mutex::new(()),
-            version: watch::channel(0).0,
+            events: ctx.clone(),
             closed: lifecycle.clone(),
         });
         let tasks = TaskTracker::new();
@@ -325,10 +359,11 @@ impl Capability for SkillsCatalogPlugin {
     }
 }
 
-/// In-memory `SkillSettings` for tests and embedded hosts without storage.
+/// In-memory `SkillSettings` for tests and embedded hosts without storage. The
+/// catalog is its only writer and reads back its own writes, so it announces
+/// nothing.
 pub struct MemorySkillSettings {
     state: Mutex<SkillSettingsSnapshot>,
-    changed: watch::Sender<SettingsVersion>,
 }
 impl Default for MemorySkillSettings {
     fn default() -> Self {
@@ -337,7 +372,6 @@ impl Default for MemorySkillSettings {
                 version: "0".into(),
                 disabled: BTreeSet::new(),
             }),
-            changed: watch::channel("0".into()).0,
         }
     }
 }
@@ -357,25 +391,18 @@ impl SkillSettings for MemorySkillSettings {
         _: CancellationToken,
     ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>> {
         Box::pin(async move {
-            let version = {
-                let mut state = self.state.lock().unwrap();
-                if state.version != expected {
-                    return Err(SkillSettingsError::Conflict);
-                }
-                if enabled {
-                    state.disabled.remove(&id);
-                } else {
-                    state.disabled.insert(id);
-                }
-                let next = state.version.parse::<u64>().unwrap_or_default() + 1;
-                state.version = next.to_string();
-                state.version.clone()
-            };
-            self.changed.send_replace(version.clone());
-            Ok(version)
+            let mut state = self.state.lock().unwrap();
+            if state.version != expected {
+                return Err(SkillSettingsError::Conflict);
+            }
+            if enabled {
+                state.disabled.remove(&id);
+            } else {
+                state.disabled.insert(id);
+            }
+            let next = state.version.parse::<u64>().unwrap_or_default() + 1;
+            state.version = next.to_string();
+            Ok(state.version.clone())
         })
-    }
-    fn changes(&self) -> watch::Receiver<SettingsVersion> {
-        self.changed.subscribe()
     }
 }

@@ -1,8 +1,8 @@
 # 方法与工具贡献
 
-状态：草案。总体设计：[总览 §3 集成](../overview.md#3-基于现有机制的集成)、[附录 B Rpc 与 ToolRegistry](../overview.md#附录-b-现有插件的补充)；规则：[ADR 002](../../adr/002-plugin-scope.md) D2、D3、D5。阶段：P0。语言：语言中立合同；Rust 绑定见[附录 F](#附录-f-rust-绑定)。
+状态：草案。总体设计：[总览 §3 集成](../overview.md#3-基于现有机制的集成)、[附录 B Rpc 与 ToolRegistry](../overview.md#附录-b-现有插件的补充)；规则：[ADR 002](../../adr/002-plugin-scope.md) D2、D3、D5。阶段：P0。语言：语言中立合同；Rust 绑定见[附录 F](#附录-f-rust-绑定)。提议中的 [C4 绑定](../../../design/session-typescript.md) 定义非 Rust 装配和语言边界子集，目前尚未实现。
 
-本合同以 ADR 002 D5 的语言中立形式定义三个具名服务。每个服务由服务名、作用域和实例 key 标识；其方法接收并返回可序列化数据；错误是数据；取消是一个协议动作。任何语言的插件都可以通过在其 `provides`（loader 行）中声明来提供它们，消费方按名称和作用域收集。它们建立在运行时已有的机制之上：按作用域收集的具名服务，以及 Rpc 现有的经 Session 分发（与如今的 `approval.respond` 相同）。实现状态：`managementMethods`（#14）与 `sessionMethods`（C1）已实现，形式是附录 F 中的 Rust 子集；`callChannel` 只实现了逐次调用的 `progress`（C1）。`toolContribution` 的接入规则（C3）、`callChannel` 的其余部分以及基于 `provides` 的注册（#4）都未实现，`ConnectionEntry {name, deviceId}`、按 `deviceId` 路由和导出的 rutis 链接也未实现（提议在 P3 随 RemoteGateway 实现）。
+本合同以 ADR 002 D5 的语言中立形式定义三个具名服务。每个服务由服务名、作用域和实例 key 标识；其方法接收并返回可序列化数据；错误是数据；取消是一个协议动作。任何语言的插件都可以通过在其 `provides`（loader 行）中声明来提供它们，消费方按名称和作用域收集。它们建立在运行时已有的机制之上：按作用域收集的具名服务，以及 Rpc 现有的经 Session 分发（与如今的 `approval.respond` 相同）。实现状态：`managementMethods`（#14）、`sessionMethods`（C1）与 `toolContribution` 接入规则（C3）已通过附录 F 的 Rust 绑定实现；`callChannel` 只实现了逐次调用的 `progress`（C1）。`callChannel` 的其余部分以及基于 `provides` 的注册（#4）都未实现，`ConnectionEntry {name, deviceId}`、按 `deviceId` 路由和导出的 rutis 链接也未实现（提议在 P3 随 RemoteGateway 实现）。
 
 | 服务 | 作用域 | Key | 提供方 | 收集方 |
 | --- | --- | --- | --- | --- |
@@ -12,7 +12,7 @@
 
 **管理方法**是关于宿主而不是某个 Session 的客户端 RPC 方法：`account.*`、`provider.*`、`mcp.*`、`skills.*`，以及新进程插件的方法（设置方法是后续工作，Settings 目前不发布任何方法）。`daemon.shutdown` 仍是 Rpc 内建方法，同样从不提供给已配对设备。#14 之前，Rpc 直接注入这些服务（[connection.rs](../../../../crates/dim-app-server/src/connection.rs) 中的 `ProductServices` 与 `ExecutionServices`）；#14 删除了它们，Rpc 现在通过 `managementMethods` 按调用查找这些方法，不依赖其提供方。只有进程插件提供管理方法，已配对的远程设备从不获得它们。Session 方法没有级别；唯一的区分是 `sessionMethods`（经 Session 分发）与 `managementMethods`。
 
-提议（P3，随 RemoteGateway；未实现）：Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。目前 Rpc 按现有的传输 profile 规则（A.3）为每个连接服务。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。Rpc 在每次调用时查找 `managementMethods` 提供方，不依赖它们，因此未启用、Pending、Failed 或正在重载的提供方只影响自己的命名空间（§3.2）。ToolRegistry 同样不依赖 `toolContribution` 提供方：接入哪些提供方在 Session 发布时（`SessionLifecycle::activated()` 时）决定，之后才激活的提供方在下次 Session 重载时接入（A.5）。
+提议（P3，随 RemoteGateway；未实现）：Rpc 依据连接的 `ConnectionEntry {name, deviceId}` 决定为它服务什么：本地连接获得 Session 方法和管理方法，带 `deviceId` 的连接（经 RemoteGateway 的已配对设备）从不获得管理方法，导出的 rutis 链接只在导出时获得管理方法。目前 Rpc 按现有的传输 profile 规则（A.3）为每个连接服务。没有注册表、没有端口，也没有 Management 插件。提供方是只在启用时安装的可选插件。Rpc 在每次调用时查找 `managementMethods` 提供方，不依赖它们，因此未启用、Pending、Failed 或正在重载的提供方只影响自己的命名空间（§3.2）。ToolRegistry 同样不依赖 `toolContribution` 提供方：接入哪些提供方在分支初始化首次读取 ToolRegistry 时决定，之后才激活的提供方在下次 Session 重载时接入（A.5）。
 
 在工具调用或输入提交前对其作出处理不是本合同的服务。Approval 和 Session 输入路径不变；InputQueue 的撤回是其所有者的变更（[总览附录 B](../overview.md#附录-b-现有插件的补充)）。
 
@@ -159,7 +159,7 @@ sequenceDiagram
 | §1（Capability 与 App Server 边界） | Rpc 只收集和分发；每个方法的业务代码在其提供方插件中。 |
 | ADR 002 D1 | `sessionMethods` 与 `toolContribution` 是 Session 级，`managementMethods` 是进程级，与其所有者一致。 |
 | ADR 002 D2 | 没有注册表、端口或 Management 插件；Rpc 与 ToolRegistry 按名称收集。 |
-| ADR 002 D3 | 提供方只依赖自身或外层作用域。ToolRegistry 接入 Session 发布时已激活的 `toolContribution` 提供方，不依赖它们（A.5）；Rpc 既不依赖管理方法提供方（§3.2），也不依赖 Session 方法提供方（A.1），因此它们的重载只影响自己的命名空间。 |
+| ADR 002 D3 | 提供方只依赖自身或外层作用域。ToolRegistry 接入分支初始化首次读取注册表时已激活的 `toolContribution` 提供方，不依赖它们（A.5）；Rpc 既不依赖管理方法提供方（§3.2），也不依赖 Session 方法提供方（A.1），因此它们的重载只影响自己的命名空间。 |
 | ADR 002 D4 | 链接的管理方法导出是宿主本地的结构性配置；本文不定义业务配置。 |
 | ADR 002 D5 | 每个服务都有名称、作用域、key 和纯数据方法；Rust 类型只出现在附录 F。已实现的 `managementMethods` Rust 绑定是一个子集，尚未满足 D5（附录 F）。 |
 
@@ -321,7 +321,7 @@ reply ----------> 回复与通知额度 ----------------+
 | `account.codex.*`、`account.grok.*` | `managementMethods` | OpenAI Codex OAuth（`account.codex`）、Grok OAuth（`account.grok`） |
 | `provider.*` | `managementMethods` | Provider（`provider`） |
 | `skills.catalog/set_enabled/refresh` | `managementMethods` | SkillsCatalog（`skills`） |
-| `mcp.catalog/set_enabled/save/remove/disconnect` | `managementMethods` | Mcp（`mcp`） |
+| `mcp.catalog/set_enabled/save/remove/disconnect`、`mcp.auth.start/complete/logout` | `managementMethods` | Mcp（`mcp`） |
 | `mcp.approve/revoke` | 已删除，返回 `unknown_method`（没有宿主本地批准；启用即运行；项目条目默认关闭；[ADR 003](../../../adr/003-approval-scope.md)） | — |
 | `daemon.shutdown` | Rpc 内建方法，回复 handoff；从不提供给带 `deviceId` 的连接 | — |
 | `hello`、`daemon.ping`、`agent.*`、现有 `session.*`、`approval.respond` | Rpc 内建方法 | — |
@@ -344,7 +344,9 @@ reply ----------> 回复与通知额度 ----------------+
 
 ### A.5 工具贡献
 
-ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolRegistry 接受具名工具服务。ToolRegistry 接入哪些工具服务在 Session 发布时，即 `SessionLifecycle::activated()` 时决定：它接入此时提供方已激活的工具服务，不对它们形成硬依赖；之后才激活的提供方在下次 Session 重载时接入（ADR 002 D3，#34）。接入的工具沿动态工具源的现有路径进入分支已采纳的工具集：ToolRegistry 发出 `changed()`，各分支的 ToolBinding 把 registry 当前的工具集作为 `context/configured` 事实的工具部分采纳（`Prompt::adopt_tools`）。这一采纳在分支的后台任务中进行，因此在它之前准备的模型请求声明的是之前的工具集；所以 C3 要求接入在 Session 接受输入之前完成。`SessionConfig.tools` 中列出、但提供方缺失或未激活的工具被省略，不会使 Session 失败，省略会在诊断中报告。目前 ToolRegistry 注入 `Contributions<ToolContribution>`，属于硬依赖，并且已启用工具没有提供方时会使 Session 失败（[tool_registry.rs](../../../../crates/dim-agent-capabilities/src/tool_registry.rs)）；C3 修改这两点。在 #4 提供基于 `provides` 的注册之前，工具名来自宿主侧的 `AgentBuilder::session_tool`。名称唯一性、与宿主工具冲突以及通过 `SessionConfig.tools` 启用的其他规则不变（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。
+ToolRegistry 接受具名工具服务，不硬依赖其提供方（C3，ADR 002 D3，#34）。固定表在分支 ToolBinding 初始化首次读取时同步收集；此时必需的 Session 服务已 Active，没有初始模型配置也会读取。它取样当时已 Active 的提供方，按 `SessionConfig.tools` 顺序缓存本代注册表的完整固定表。缺失或未激活的提供方被省略并记录诊断；取样后才 Active 的提供方，包括 Session 发布前才 Active 的提供方，只在下次注册表或 Session 重载时接入。必需依赖的等待规则不变。
+
+ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采用，随后 Session 才接受输入。已有模型配置的分支在工具部分不匹配时使用 `Prompt::adopt_tools`；没有初始配置的分支经 PrepareModelHost / `bind_current` 声明并绑定同一固定表。不需要发布后的后台接入，也不新增 core 就绪阶段。动态来源变化继续沿既有注册表通知和 Prompt 采用路径传播，请求保留其前缀选定的处理器。在 #4 提供基于 `provides` 的登记之前，工具名来自宿主侧 `AgentBuilder::session_tool`。名称唯一性、与宿主工具冲突以及通过 `SessionConfig.tools` 启用的规则不变（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。
 
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
@@ -366,7 +368,7 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
   "structuredContent?": {}, "isError": false }
 ```
 
-取消：turn 中断时针对 `callId` 发送取消请求（或丢弃调用）；ToolExecutor 把该调用按中断结算。提供方错误以 `isError: true` 的 `ToolResult` 返回。声明可以取决于该 Session 的配置。ToolRegistry 在 `activated()` 接入提供方时读取一次；之后的提供方代次在下次 Session 重载时接入，届时读取其声明。
+取消：turn 中断时针对 `callId` 发送取消请求（或丢弃调用）；ToolExecutor 把该调用按中断结算。提供方错误以 `isError: true` 的 `ToolResult` 返回。声明可以取决于该 Session 的配置。ToolRegistry 在分支初始化首次读取注册表时读取一次；之后的提供方代次在下次 Session 重载时接入，届时读取其声明。
 
 ## 附录 B. 完整冲突表
 
@@ -419,13 +421,13 @@ ToolRegistry 补充（C3，未实现）：除如今已注册的工具外，ToolR
 
 ## 附录 F. Rust 绑定
 
-上述语言中立服务映射到 Rust 如下。`managementMethods`（#14）与 `sessionMethods`（C1）的绑定已实现，它们是一个子集，尚未满足 ADR 002 D5：语言中立的 `describe`/`call` 形式、`MethodCall`/`MethodReply` 以及 `progress` 之外的 `callChannel` 都未实现，也只有 Rust 插件能提供它们。#4 落地后，非 Rust 插件将通过 rutis-bridge（`TypeKey::named`、配合 `dyn HostDispatch` 的 `host_key(name)`）按名称提供服务。
+上述语言中立服务映射到 Rust 如下。`toolContribution` 绑定及其首次读取时的接入规则已实现（C3）。`managementMethods`（#14）与 `sessionMethods`（C1）的绑定已实现，它们是一个子集，尚未满足 ADR 002 D5：语言中立的 `describe`/`call` 形式、`MethodCall`/`MethodReply` 以及 `progress` 之外的 `callChannel` 都未实现，也只有 Rust 插件能提供它们。#4 落地后，非 Rust 插件将通过 rutis-bridge（`TypeKey::named`、配合 `dyn HostDispatch` 的 `host_key(name)`）按名称提供服务。
 
 | 语言中立服务 | Rust 类型与 key | Rust 装配中的注册 | 收集 | 状态 |
 | --- | --- | --- | --- | --- |
 | `managementMethods[ns]` | `ManagementMethods`，进程作用域，key 为 `TypeKey::keyed_dynamic::<ManagementMethods>(ns)` | 在所有者的 `apply` 中调用 `ManagementMethods::provide(ctx, ns, Vec<MethodDecl>, Handler)`；装配把 `(ns, row)` 对加入 `Owners` | 按调用经 `Owners`：用 `Ctx::get_as` 按 key 读取，行状态来自 `loader.get(row)`；不在 Rpc 的 `Deps` 中 | 已实现（#14） |
 | `sessionMethods[ns]` | `SessionMethods`，`ManagementMethods` 的 Session 级对应物，与共享类型一起位于 dim-agent-capabilities 的 `methods`（A.1），key 为 `SessionScope::named_key::<SessionMethods>(ns)` | `AgentBuilder::session_methods(ns)`，同时记录该 Session 的已知命名空间 | 每次调用：在 `sessionId` 指定、经 `index.acquire` 获取的 Session 上调用 `Session::session_named_service::<SessionMethods>(ns)`（§9.1）；不在 Rpc 的 `Deps` 中 | 已实现（C1） |
-| `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | 目前是 `Contributions<ToolContribution>`，属于硬依赖；已启用工具缺少提供方会使 Session 失败。C3：在 `SessionLifecycle::activated()` 时按 key 读取，缺失或未激活的提供方被省略并在诊断中报告 | 由 C3 修改 |
+| `toolContribution[tool]` | `ToolContribution {definition, handler}`，`SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)`（已有） | 分支初始化首次读取 ToolRegistry 时按 key 取样，缺失或未激活的提供方被省略并记录诊断；固定表缓存到下次重载 | C3 已实现 |
 | `callChannel` | `progress`：处理函数的 `Progress` 参数，每次调用一个 | — | Rpc 为每个已受理调用提供一个通向发起调用连接的 sink | `progress` 已实现（C1）；`notify`、`closed`、`takeFinalReply` 未实现 |
 
 ```rust

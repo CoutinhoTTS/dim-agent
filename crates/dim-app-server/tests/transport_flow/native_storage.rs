@@ -275,6 +275,7 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
         builder.session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_plugin(ConfiguredModelPlugin::new);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
@@ -829,6 +830,15 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
         ..Default::default()
     };
     let (server, original_agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    // The server creates the missing database directory owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
     let mut client = Client::new_version(&server, false, 3).await;
     let original_instance = client.instance.clone();
     let mut parameters = create(json!(["branch"]));

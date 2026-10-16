@@ -213,6 +213,7 @@ impl Collaboration {
         if !config.tools.iter().any(|tool| tool == AGENT_TOOL) {
             config.tools.push(AGENT_TOOL.into());
         }
+        // Clients of the leader's protocol view and address its members.
         let version = self
             .index
             .version_of(leader_id)
@@ -231,11 +232,6 @@ impl Collaboration {
                 return Err(member_create_failed(error.to_string()));
             }
         };
-        // Clients of the leader's protocol view and address its members.
-        if let Some(version) = self.index.version_of(leader_id) {
-            self.index
-                .insert_version(session.id(), &host.agent_id, version);
-        }
         self.directory.relations.lock().unwrap().insert(
             session.id().to_owned(),
             Relation {
@@ -293,7 +289,10 @@ impl Collaboration {
             }
         });
     }
-    /// Without a Session store, a closed Session counts as deleted.
+    /// A business close ends the Session's relations: Agents loads a Session
+    /// that `session.close` or `session.delete` closed no more in this
+    /// process, whether or not a delete removed its rows, and relations are
+    /// process memory. An unloaded Session keeps them.
     async fn session_closed(self: &Arc<Self>, watched: Arc<WatchedSession>) {
         let id = watched.session.id();
         {
@@ -1812,7 +1811,12 @@ impl CollaborationCapability {
     }
 
     /// Reload: operations of an earlier generation without `delivered` are
-    /// refused, its delivered requests without `result` fail.
+    /// refused, its delivered requests without `result` fail. Settlement
+    /// acts only on what this Session holds: a member is stopped only while
+    /// its relation names this Session as its leader. A fork's copied
+    /// request names its source's member, which keeps working for the
+    /// source (#127); after a daemon restart no relation exists, so nothing
+    /// is stopped.
     fn rebuild(
         &self,
         timeline: &Arc<Timeline>,
@@ -1870,13 +1874,21 @@ impl CollaborationCapability {
             );
         }
         // A request left by the previous generation ends once the branch is
-        // Active: its member stops first, then the result is written. A branch
-        // that never starts leaves it to the next generation.
+        // Active: a member this Session leads stops first, then the result
+        // is written. A branch that never starts leaves it to the next
+        // generation.
         for (op, (agent_id, session_id)) in open {
-            let member = self
+            let leads = self
                 .collaboration
-                .index
-                .session(&session_id)
+                .directory
+                .relations
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .is_some_and(|relation| relation.leader == self.session_id);
+            let member = leads
+                .then(|| self.collaboration.index.session(&session_id))
+                .flatten()
                 .map(|(_, member)| member);
             let (timeline, phase) = (timeline.clone(), phase.clone());
             tasks.spawn(async move {
@@ -2150,7 +2162,10 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
     )
 }
 
-struct AgentTool(Arc<CollaborationCapability>);
+struct AgentTool {
+    capability: Arc<CollaborationCapability>,
+    stopping: CancellationToken,
+}
 impl ToolHandler for AgentTool {
     fn execute(
         &self,
@@ -2158,7 +2173,12 @@ impl ToolHandler for AgentTool {
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
-        Box::pin(self.0.run(call, context, cancel))
+        Box::pin(async move {
+            if self.stopping.is_cancelled() {
+                return Err(HostError::Cancelled(RELOADING.into()));
+            }
+            self.capability.run(call, context, cancel).await
+        })
     }
 }
 
@@ -2197,7 +2217,10 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                 self.scope.named_key::<ToolContribution>(AGENT_TOOL),
                 Arc::new(ToolContribution {
                     definition: agent_definition(config.collaboration_role),
-                    handler: Arc::new(AgentTool(service.clone())),
+                    handler: Arc::new(AgentTool {
+                        capability: service.clone(),
+                        stopping: ctx.cancellation_token(),
+                    }),
                 }),
             )?;
             ctx.provide_as(self.scope.key::<CollaborationCapability>(), service)?;

@@ -534,7 +534,10 @@ async fn agent_profile_supplies_session_defaults() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     let model = Arc::new(RecordingModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -544,6 +547,7 @@ async fn agent_profile_supplies_session_defaults() {
         .session_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let config = ServerConfig {
