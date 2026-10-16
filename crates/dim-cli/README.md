@@ -247,3 +247,8 @@ DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs" \
 The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows console and named-pipe behavior still require native Windows acceptance; compiling another target is not a substitute for that check.
 
 Unix socket paths have an operating-system length limit, including the canonical home path. On macOS, `/var` resolves to `/private/var`, which adds bytes. Use a short isolated home such as `/tmp/dim-dev` for development/tests if the daemon reports `path must be shorter than SUN_LEN`; the CLI preserves that failure in `rust/daemon.log`.
+
+The daemon startup wait allows a newly spawned, current-user Unix socket to become private
+before connecting. Existing insecure endpoints are rejected immediately. Wrong ownership,
+non-socket paths and peer-credential failures remain immediate errors; startup does not retry
+arbitrary permission errors.

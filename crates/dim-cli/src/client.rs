@@ -465,14 +465,29 @@ async fn connect_inner(options: &Options, start: bool) -> Result<Option<Client>>
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        match Client::open(&endpoint, &binary).await {
-            Ok(mut client) => {
-                client.hello(profile.as_ref()).await?;
-                return Ok(Some(client));
+        #[cfg(unix)]
+        let permissions_pending = {
+            use std::os::unix::fs::{FileTypeExt, MetadataExt};
+            std::fs::symlink_metadata(&endpoint).is_ok_and(|metadata| {
+                metadata.file_type().is_socket()
+                    && metadata.uid() == unsafe { libc::geteuid() }
+                    && metadata.mode() & 0o077 != 0
+            })
+        };
+        #[cfg(not(unix))]
+        let permissions_pending = false;
+        // Only the newly spawned owner's socket may be awaiting chmod.
+        if !permissions_pending {
+            match Client::open(&endpoint, &binary).await {
+                Ok(mut client) => {
+                    client.hello(profile.as_ref()).await?;
+                    return Ok(Some(client));
+                }
+                Err(error) if missing(&error) => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if missing(&error) => {}
-            Err(error) => return Err(error.into()),
         }
+
         if let Some(status) = child.try_wait()? {
             return Err(format!("App Server exited ({status}); see {}", log_path.display()).into());
         }
