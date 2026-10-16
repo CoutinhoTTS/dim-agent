@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(group_rows(&published, 0).len(), 3);
         assert_eq!(
             drawn(&rows, Detail::Collapsed, 80),
-            ["✓ Ran 1 command, ran 1 search, read 1 file · 1 failed"]
+            ["✓ Ran 1 command, ran 1 search, read 1 file · 1 failed ▸"]
         );
     }
 
@@ -251,7 +251,7 @@ mod tests {
         )];
         assert_eq!(
             drawn(&rows, Detail::Expanded, 80),
-            ["✓ Ran 1 command", "  $ ls", "  npm test", "    PASS"]
+            ["✓ Ran 1 command ▾", "  $ ls", "  npm test ▾", "    PASS"]
         );
     }
 
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(
             drawn(&rows, Detail::Expanded, 80),
             [
-                "✓ Ran 1 command",
+                "✓ Ran 1 command ▾",
                 "  $ cat > gen.txt <<'EOF'",
                 "  row 1",
                 "  row 2",
@@ -292,11 +292,11 @@ mod tests {
         let mut edit = call("edit", json!({ "path": "a.sql" }), Some("Edited a.sql"));
         edit.diff = Some("@@ -3,2 +3,2 @@\n--- old comment\n+++new value\n same".into());
         let lines = drawn(&[edit], Detail::Expanded, 80);
-        assert_eq!(lines[0], "✓ Edited 1 file (+1 -1)");
+        assert_eq!(lines[0], "✓ Edited 1 file (+1 -1) ▾");
         assert_eq!(
             lines[1..],
             [
-                "  ✓ Edited a.sql +1 -1",
+                "  ✓ Edited a.sql +1 -1 ▾",
                 "    ...",
                 "      3 -  -- old comment",
                 "      3 +  ++new value",
@@ -329,7 +329,7 @@ mod tests {
         )];
         assert_eq!(
             drawn(&rows, Detail::Expanded, 80),
-            ["✗ Edited 1 file", "  ✗ Edit a.ts"]
+            ["✗ Edited 1 file ▾", "  ✗ Edit a.ts"]
         );
     }
 }

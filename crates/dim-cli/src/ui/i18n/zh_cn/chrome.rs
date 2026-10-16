@@ -199,8 +199,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it" => {
             "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑"
         }
-        "wheel scroll · drag select and copy · click a link to open it" => {
-            "滚轮滚动 · 拖动选择并复制 · 点击链接打开"
+        "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
+            "滚轮滚动 · 拖动选择并复制 · 点击链接打开，点击工具组展开"
         }
         "mouse off (/settings): the terminal selects and copies" => {
             "鼠标已关闭（/settings）：由终端选择和复制"

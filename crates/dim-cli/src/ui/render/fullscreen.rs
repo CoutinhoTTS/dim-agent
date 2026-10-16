@@ -92,6 +92,12 @@ pub enum MouseOutcome {
     Overlay(isize),
     /// A click landed on a link: its target, to open.
     Open(String),
+    /// A click landed elsewhere in the transcript: on row `row` of block
+    /// `block` (stable id), or on row `row` of the live tail when `None`.
+    Click {
+        block: Option<usize>,
+        row: usize,
+    },
 }
 
 /// Where a scrolled view's top row is: `offset` rows into block `block`
@@ -204,6 +210,10 @@ pub struct FullScreen {
     cache: HashMap<usize, Vec<String>>,
     /// The live tail of the last frame (streaming answer, running tools).
     tail: Vec<String>,
+    /// Where the last press landed and the row it showed: a click counts
+    /// only while that row still shows the same text at the release, so
+    /// output that moves the transcript in between cannot redirect it.
+    press: Option<(MouseOutcome, String)>,
     /// The top of the view while the reader has scrolled away from the
     /// bottom; `None` follows new output.
     pinned: Option<Anchor>,
@@ -238,6 +248,7 @@ impl FullScreen {
             starts: vec![0],
             cache: HashMap::new(),
             tail: Vec::new(),
+            press: None,
             pinned: None,
             floor: 0,
             view_rows: 0,
@@ -317,23 +328,34 @@ impl FullScreen {
         self.floor = 0;
     }
 
+    /// Holds the view where it is, even at the bottom: a group opened by a
+    /// click grows below its header instead of pushing it up.
+    pub fn hold(&mut self) {
+        self.floor = 0;
+        self.pinned = Some(self.anchor_at(self.top()));
+    }
+
     /// Holds the view with row `top` first; the bottom row follows.
     fn pin(&mut self, top: usize) {
         self.floor = 0;
-        self.pinned = (top < self.max_top()).then(|| {
-            let blocks = self.heights.len();
-            if top >= self.starts[blocks] {
-                return Anchor {
-                    block: self.base + blocks,
-                    offset: top - self.starts[blocks],
-                };
-            }
-            let index = self.starts.partition_point(|&s| s <= top) - 1;
-            Anchor {
-                block: self.base + index,
-                offset: top - self.starts[index],
-            }
-        });
+        self.pinned = (top < self.max_top()).then(|| self.anchor_at(top));
+    }
+
+    /// Row `top` as an anchor: its block (the live tail past the last one)
+    /// and the rows into it.
+    fn anchor_at(&self, top: usize) -> Anchor {
+        let blocks = self.heights.len();
+        if top >= self.starts[blocks] {
+            return Anchor {
+                block: self.base + blocks,
+                offset: top - self.starts[blocks],
+            };
+        }
+        let index = self.starts.partition_point(|&s| s <= top) - 1;
+        Anchor {
+            block: self.base + index,
+            offset: top - self.starts[index],
+        }
     }
 
     /// True while a user message is picked.
@@ -429,7 +451,11 @@ impl FullScreen {
             }
             MouseKind::Press => {
                 let had = self.selection.take().is_some();
+                self.press = None;
                 if let Some(index) = (row < self.view_rows).then(|| self.at(row)).flatten() {
+                    self.press = self
+                        .row(index)
+                        .map(|text| (self.spot(index), text.to_owned()));
                     let at = (index, column);
                     self.selection = Some(Selection {
                         anchor: at,
@@ -471,9 +497,14 @@ impl FullScreen {
                 Some(Selection {
                     anchor: (row, column),
                     ..
-                }) => match self.row(row).and_then(|text| link_at(text, column)) {
-                    Some(url) => MouseOutcome::Open(url),
-                    None => MouseOutcome::Redraw,
+                }) => match (self.press.take(), self.row(row)) {
+                    (Some((spot, pressed)), Some(text)) if pressed == text => {
+                        match link_at(text, column) {
+                            Some(url) => MouseOutcome::Open(url),
+                            None => spot,
+                        }
+                    }
+                    _ => MouseOutcome::Redraw,
                 },
                 None => MouseOutcome::Ignored,
             },
@@ -783,6 +814,22 @@ impl FullScreen {
             .get(&(self.base + block))?
             .get(index - self.starts[block])
             .map(String::as_str)
+    }
+
+    /// Where transcript row `index` is, as a click reports it.
+    fn spot(&self, index: usize) -> MouseOutcome {
+        let blocks = self.starts.last().copied().unwrap_or(0);
+        if index >= blocks {
+            return MouseOutcome::Click {
+                block: None,
+                row: index - blocks,
+            };
+        }
+        let block = self.starts.partition_point(|&s| s <= index) - 1;
+        MouseOutcome::Click {
+            block: Some(self.base + block),
+            row: index - self.starts[block],
+        }
     }
 
     /// Rows `[top border, bottom border]` of the picked message's box: its
@@ -1403,6 +1450,38 @@ mod tests {
     }
 
     #[test]
+    fn a_click_lands_where_it_was_pressed_unless_the_row_moved_meanwhile() {
+        let (mut screen, mut emu) = setup();
+        let doc = Doc::new();
+        let at = |kind| MouseEvent {
+            kind,
+            column: 1,
+            row: 0,
+        };
+        draw(&mut screen, &mut emu, &frame(&["· Running ▸"], &DOCK), &doc);
+        screen.mouse(at(MouseKind::Press), &doc);
+        assert_eq!(
+            screen.mouse(at(MouseKind::Release), &doc),
+            MouseOutcome::Click {
+                block: None,
+                row: 0
+            }
+        );
+        // New output takes the row between the press and the release.
+        screen.mouse(at(MouseKind::Press), &doc);
+        draw(
+            &mut screen,
+            &mut emu,
+            &frame(&["◆ new answer"], &DOCK),
+            &doc,
+        );
+        assert_eq!(
+            screen.mouse(at(MouseKind::Release), &doc),
+            MouseOutcome::Redraw
+        );
+    }
+
+    #[test]
     fn a_click_on_a_link_opens_its_target() {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
@@ -1419,7 +1498,13 @@ mod tests {
             click(5, 1),
             MouseOutcome::Open("https://a.example/x".into())
         );
-        assert_eq!(click(1, 1), MouseOutcome::Redraw);
+        assert_eq!(
+            click(1, 1),
+            MouseOutcome::Click {
+                block: Some(0),
+                row: 1
+            }
+        );
         assert_eq!(
             click(8, 2),
             MouseOutcome::Open("https://b.example/y".into())

@@ -404,6 +404,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | Sending a message | Follow the bottom again |
 | Mouse drag | Select transcript text; release copies it (OSC 52, plus `pbcopy` locally on macOS; inside tmux OSC 52 goes through passthrough, which needs `set -g allow-passthrough on`) |
 | Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
+| Click a tool group's header | Opens (`▾`) or closes (`▸`) that group, as in Amp; a running group keeps the form it is given when it settles. A settled group opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every group, settled ones included |
 | `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again |
 | `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the palette closes |
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |

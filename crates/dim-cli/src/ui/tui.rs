@@ -3,7 +3,7 @@
 //! unclosed tail and the composer box live at the bottom and repaint by row
 //! diff (2.3). The terminal layer (2.2) guarantees the exit contract.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -401,6 +401,15 @@ fn run_terminal(
                         app.set_notice(t("Copied to clipboard"));
                         dirty = true;
                     }
+                    MouseOutcome::Click { block, row } => {
+                        // A committed group opens in place: the view holds
+                        // still rather than following the bottom. The press
+                        // drew a selection; the frame clears it.
+                        if app.click(block, row) && block.is_some() {
+                            full.hold();
+                        }
+                        dirty = true;
+                    }
                     MouseOutcome::Open(url) => {
                         // Over SSH the opener would run on the remote host.
                         let local = std::env::var_os("SSH_CONNECTION").is_none()
@@ -583,9 +592,15 @@ struct App {
     composer: Composer,
     cwd_key: String,
     home: PathBuf,
-    /// How tool groups are drawn (`/tools`); groups already committed keep
-    /// the form they were written in.
+    /// How tool groups are drawn by default (`/tools`, which redraws every
+    /// committed group too).
     tool_detail: Detail,
+    /// Groups the user opened or closed by a click, by their first call's
+    /// row id: a running group keeps its form when it commits.
+    group_details: HashMap<String, Detail>,
+    /// The live tail's group headers of the last frame: tail row, first
+    /// call's row id.
+    tail_groups: Vec<(usize, String)>,
     notices: Vec<String>,
     /// Multi-line status blocks to commit (reports), with their tone.
     reports: Vec<(String, Tone)>,
@@ -722,6 +737,8 @@ impl App {
             } else {
                 Detail::Collapsed
             },
+            group_details: HashMap::new(),
+            tail_groups: Vec::new(),
             home,
             notices: Vec::new(),
             reports: Vec::new(),
@@ -1506,6 +1523,16 @@ impl App {
             Detail::Expanded => (Detail::Collapsed, t("collapsed")),
         };
         self.tool_detail = detail;
+        // Every group follows, as Amp's toggle redraws the transcript.
+        self.group_details.clear();
+        for block in &mut self.history {
+            match block {
+                Block::ToolGroup(group) => group.detail = detail,
+                Block::Thinking { expanded, .. } => *expanded = detail == Detail::Expanded,
+                _ => {}
+            }
+        }
+        self.request_reflow();
         let saved = crate::ui::config::write(
             &self.home,
             TOOL_DETAILS_KEY,
@@ -2109,7 +2136,13 @@ impl App {
         );
         let mut commits: Vec<String> = Vec::new();
         let mut sources: Vec<(Block, Placement)> = Vec::new();
-        let detail = self.tool_detail;
+        let (overrides, global) = (&self.group_details, self.tool_detail);
+        let detail_of = |index: usize| {
+            overrides
+                .get(&snapshot.rows[index].row_id)
+                .copied()
+                .unwrap_or(global)
+        };
         // A streamed batch: a block of its own, or more rows of the open
         // block it began (no blank row between them).
         let streamed = |batch: crate::ui::transcript::stream::Batch| {
@@ -2139,7 +2172,7 @@ impl App {
                 }
                 (RowKind::AssistantMessage, Some(batch)) => streamed(batch),
                 _ => {
-                    let block = project_row(&snapshot.rows, index, detail);
+                    let block = project_row(&snapshot.rows, index, detail_of(index));
                     let lines = render_block(&block, width, p, markdown);
                     if lines.is_empty() {
                         return (String::new(), None);
@@ -2198,6 +2231,7 @@ impl App {
         // Live rows, laid out exactly as they will commit.
         let pad = " ".repeat(MARGIN);
         let mut tail: Vec<String> = Vec::new();
+        let mut tail_groups = Vec::new();
         for item in &live_items {
             let rows: Vec<String> = match item {
                 LiveItem::Text(id) => match self.planner.pending(id) {
@@ -2247,12 +2281,16 @@ impl App {
                     _ => Vec::new(),
                 },
                 LiveItem::Thinking(text) => live_thinking(text, width, p),
-                LiveItem::Tool(index) => render_group(
-                    &project_group(&group_rows(&snapshot.rows, *index), detail),
-                    width,
-                    p,
-                    "·",
-                ),
+                LiveItem::Tool(index) => {
+                    // Under the blank row that opens it.
+                    tail_groups.push((tail.len() + 1, snapshot.rows[*index].row_id.clone()));
+                    render_group(
+                        &project_group(&group_rows(&snapshot.rows, *index), detail_of(*index)),
+                        width,
+                        p,
+                        "·",
+                    )
+                }
             };
             if rows.is_empty() {
                 continue;
@@ -2260,6 +2298,7 @@ impl App {
             tail.push(String::new());
             tail.extend(rows.into_iter().map(|r| format!("{pad}{r}")));
         }
+        self.tail_groups = tail_groups;
         (commits, sources, tail)
     }
 
@@ -2332,6 +2371,34 @@ impl App {
 
     /// Puts the whole text of the open streamed block in place of what it
     /// had: the block keeps one history entry however many batches wrote it.
+    /// A click on transcript row `row` of committed block `block` (stable
+    /// id), or of the live tail: on a tool group's header it opens or closes
+    /// that group. Whether it did.
+    fn click(&mut self, block: Option<usize>, row: usize) -> bool {
+        let Some(id) = block else {
+            if let Some((_, first)) = self.tail_groups.iter().find(|(at, _)| *at == row) {
+                let current = self
+                    .group_details
+                    .get(first)
+                    .copied()
+                    .unwrap_or(self.tool_detail);
+                self.group_details.insert(first.clone(), current.flipped());
+                return true;
+            }
+            return false;
+        };
+        // The header is the row under the blank row that opens the block.
+        let index = id.checked_sub(self.dropped);
+        if let Some(Block::ToolGroup(group)) = index.and_then(|index| self.history.get_mut(index))
+            && row == 1
+        {
+            group.detail = group.detail.flipped();
+            self.rewritten = (self.rewritten.0 + 1, id);
+            return true;
+        }
+        false
+    }
+
     fn rewrite_stream_block(&mut self, source: Block) {
         let index = self
             .stream_block

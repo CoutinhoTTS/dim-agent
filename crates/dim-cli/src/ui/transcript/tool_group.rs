@@ -14,7 +14,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::model::view::ViewRow;
 use crate::ui::i18n::{t, tf};
 use crate::ui::theme::Palette;
-use crate::ui::theme::ansi::{Paint, paint};
+use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::transcript::blocks::display_width;
 
 /// Source lines of one edit's diff before the rest is counted, not shown.
@@ -129,11 +129,32 @@ fn body_line(indent: usize, text: impl Into<String>, tone: Tone, overflow: Overf
     }
 }
 
-/// One batch of tool calls, projected for drawing.
+/// One batch of tool calls, projected for drawing. Both projections are kept,
+/// so a click flips a committed group without its rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolGroup {
     pub state: State,
-    lines: Vec<Line>,
+    pub detail: Detail,
+    collapsed: Vec<Line>,
+    expanded: Vec<Line>,
+}
+
+impl ToolGroup {
+    fn lines(&self) -> &[Line] {
+        match self.detail {
+            Detail::Collapsed => &self.collapsed,
+            Detail::Expanded => &self.expanded,
+        }
+    }
+}
+
+impl Detail {
+    pub fn flipped(self) -> Self {
+        match self {
+            Detail::Collapsed => Detail::Expanded,
+            Detail::Expanded => Detail::Collapsed,
+        }
+    }
 }
 
 /// The fields of a call row the group reads.
@@ -260,35 +281,33 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
     let state = group_state(&states);
     let mark = state_mark(state);
     let sections = ordered_sections(&items);
-    let mut header = header_spans(&items, &sections);
-    let mut lines = Vec::new();
-    match detail {
-        Detail::Collapsed => {
-            // With no rows under it nothing else would say some calls failed.
-            let failed = states.iter().filter(|s| **s == State::Failed).count();
-            if failed > 0 && failed < states.len() {
-                header.push(span(
-                    tf(" · {count} failed", &[("count", &failed.to_string())]),
-                    Tone::Danger,
-                ));
-            }
-            lines.push(header_line(0, mark, header));
-        }
-        Detail::Expanded => {
-            lines.push(header_line(0, mark, header));
-            if sections.len() == 1 {
-                let members: Vec<&Item<'_>> = items.iter().collect();
-                append_section(&mut lines, sections[0], &members, false);
-            } else {
-                // In call order: each run of same-kind calls is drawn where
-                // the batch made it.
-                for run in section_runs(&items) {
-                    append_section(&mut lines, run[0].section(), &run, true);
-                }
-            }
+    let header = header_spans(&items, &sections);
+    let mut expanded = vec![header_line(0, mark, header.clone())];
+    if sections.len() == 1 {
+        let members: Vec<&Item<'_>> = items.iter().collect();
+        append_section(&mut expanded, sections[0], &members, false);
+    } else {
+        // In call order: each run of same-kind calls is drawn where the
+        // batch made it.
+        for run in section_runs(&items) {
+            append_section(&mut expanded, run[0].section(), &run, true);
         }
     }
-    ToolGroup { state, lines }
+    // With no rows under it nothing else would say some calls failed.
+    let mut header = header;
+    let failed = states.iter().filter(|s| **s == State::Failed).count();
+    if failed > 0 && failed < states.len() {
+        header.push(span(
+            tf(" · {count} failed", &[("count", &failed.to_string())]),
+            Tone::Danger,
+        ));
+    }
+    ToolGroup {
+        state,
+        detail,
+        collapsed: vec![header_line(0, mark, header)],
+        expanded,
+    }
 }
 
 fn classify(call: Call<'_>) -> Item<'_> {
@@ -1193,19 +1212,43 @@ fn capitalize(text: &str) -> String {
 // ---- Rendering ----
 
 /// The group's rows at `width`. `spinner` is the glyph of running marks.
+///
+/// As in Amp, the header ends in `▸` (collapsed) or `▾` (expanded), and so
+/// does every expanded row with rows of its own under it (a section, a
+/// command with output, an edit with its diff). The marker survives the
+/// header's truncation.
 pub fn render_group(group: &ToolGroup, width: usize, p: &Palette, spinner: &str) -> Vec<String> {
+    let lines = group.lines();
     let mut rows = Vec::new();
-    for line in &group.lines {
+    for (at, line) in lines.iter().enumerate() {
+        let disclosure = if at == 0 {
+            Some(match group.detail {
+                Detail::Collapsed => "▸",
+                Detail::Expanded => "▾",
+            })
+        } else {
+            (line.mark.is_some()
+                && lines
+                    .get(at + 1)
+                    .is_some_and(|next| next.indent > line.indent))
+            .then_some("▾")
+        };
+        let reserve = if disclosure.is_some() { 2 } else { 0 };
         let mark = line.mark.map(|mark| mark_text(mark, spinner, p));
         let lead = line.indent + if mark.is_some() { 2 } else { 0 };
         let rest_indent = line.indent + line.hang;
         let laid = layout(
             &line.spans,
-            width.saturating_sub(lead).max(1),
-            width.saturating_sub(rest_indent).max(1),
+            width.saturating_sub(lead + reserve).max(1),
+            width.saturating_sub(rest_indent + reserve).max(1),
             line.overflow,
         );
+        let last = laid.len().saturating_sub(1);
         for (index, cells) in laid.iter().enumerate() {
+            let disclosure = match disclosure {
+                Some(glyph) if index == last => format!(" {}", fg(glyph, &p.text)),
+                _ => String::new(),
+            };
             let prefix = if index == 0 {
                 match &mark {
                     Some(mark) => format!("{}{mark} ", " ".repeat(line.indent)),
@@ -1214,7 +1257,7 @@ pub fn render_group(group: &ToolGroup, width: usize, p: &Palette, spinner: &str)
             } else {
                 " ".repeat(rest_indent)
             };
-            rows.push(format!("{prefix}{}", paint_cells(cells, p)));
+            rows.push(format!("{prefix}{}{disclosure}", paint_cells(cells, p)));
         }
     }
     rows

@@ -81,7 +81,7 @@ pub fn report(fullscreen: bool, mouse: bool) -> Vec<String> {
         rows.push(format!(
             "  {}",
             if mouse {
-                t("wheel scroll · drag select and copy · click a link to open it")
+                t("wheel scroll · drag select and copy · click a link to open it, a tool group to expand it")
             } else {
                 t("mouse off (/settings): the terminal selects and copies")
             }
