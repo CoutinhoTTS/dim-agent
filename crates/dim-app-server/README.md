@@ -361,3 +361,8 @@ DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs" \
   cargo test --locked -p dim-app-server --test transport_flow \
   node_managed_provider_recovers_credentials_and_failure_is_local -- --ignored
 ```
+
+The [C4 Session TypeScript spike](../../docs/design/session-typescript-spike.md)
+has a separate executable probe for per-Session loader rows, named service and
+broadcast isolation, cancellation, unload and cross-process call measurements.
+It installs no production capability bridge or Session RPC methods.
