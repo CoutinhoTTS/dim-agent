@@ -24,6 +24,7 @@ pub mod prompt_sources;
 pub mod prompt_state;
 pub mod session_broadcast;
 pub mod settings;
+pub mod shell_input;
 pub mod shell_session;
 pub mod shell_tools;
 pub mod skill_settings;

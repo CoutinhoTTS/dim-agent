@@ -81,6 +81,10 @@
   },
   {
     "from": "dim-app-server",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-app-server",
     "to": "dim-agent-runtime"
   },
   {
