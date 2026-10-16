@@ -109,7 +109,8 @@ pub fn error(error: crate::Error) -> crate::Error {
     let code = error
         .downcast_ref::<crate::client::RpcError>()
         .and_then(|error| error.data.as_ref())
-        .map(|data| data.app_error.as_str());
+        .and_then(|data| data.get("appError"))
+        .and_then(Value::as_str);
     let action = match code {
         Some("mcp_auth_unsupported") => {
             "OAuth is unavailable for this entry; check its transport, static credentials and store format"
@@ -316,7 +317,9 @@ pub async fn sign_in(
                 if error
                     .downcast_ref::<crate::client::RpcError>()
                     .and_then(|error| error.data.as_ref())
-                    .is_some_and(|data| data.app_error == "mcp_auth_callback_invalid")
+                    .and_then(|data| data.get("appError"))
+                    .and_then(Value::as_str)
+                    == Some("mcp_auth_callback_invalid")
                 {
                     eprintln!("Callback did not match this attempt; try again.");
                 } else {
