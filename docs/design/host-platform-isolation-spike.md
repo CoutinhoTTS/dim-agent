@@ -175,7 +175,7 @@ calibration; the product backend and configuration remain unimplemented.
 
 No event subscription is needed to launch or terminate this process: each caller owns its tree
 and already owns cancellation. Tool permission and approval stay at their existing boundaries.
-An enabled local isolation policy belongs to HostPlatform, not Timeline history or a client's
+A local isolation policy belongs to HostPlatform, not Timeline history or a client's
 request. This spike does not install that policy or change which calls execute with isolation.
 
 ## Platform evidence and remaining work
@@ -190,10 +190,14 @@ request. This spike does not install that policy or change which calls execute w
   existing syscall contract without a new crate. The bubblewrap feasibility section measures a
   separate candidate for the proposed product policy; it does not change the Landlock fixture's
   rights or evidence.
-- **Windows:** isolation is unavailable in this spike; both examples refuse to run.
+- **Windows:** isolation is unavailable in this spike; both examples refuse to run. This fixture
+  behavior is separate from the proposed product contract's explicit Windows exception, which
+  retains ordinary execution while Windows isolation is unsupported.
 
-The proposed [product policy](host-platform-isolation.md) specifies host-local filesystem,
-environment and network boundaries and unavailable behavior. It requires design review before
+The proposed [product policy](host-platform-isolation.md) requires isolation by default on macOS
+and Linux, with host-local filesystem/environment grants and an offline boundary. Missing policy
+or unavailable isolation refuses execution on those platforms; unsupported Windows retains
+ordinary execution without loading the policy. It requires design review before
 implementation. F5 remains open until product isolated exec on both macOS and Linux passes its
 acceptance; this spike does not establish the narrower proposed policy or select its backend.
 

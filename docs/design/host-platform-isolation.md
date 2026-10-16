@@ -6,13 +6,15 @@ mechanisms; it does not establish the policy below. Architecture review precedes
 
 ## Scope and policy
 
-HostPlatform applies an explicitly enabled, execution-node-local policy before a command starts.
+HostPlatform requires isolation by default on macOS and Linux, applying an execution-node-local
+policy before a command starts. Windows currently has no supported isolation backend and retains
+ordinary execution as an explicit platform exception. There is no isolation enable/disable setting.
 The initial consumers are WorkspaceTools exec, including background execution, and ShellSession
 PTY creation. Descendants inherit the boundary. The App Server, model connections, MCP servers
 and trusted in-process/TypeScript plugins are outside this change. MCP isolation remains the
 separate open question in [overview §9](overview.md#9-open-questions).
 
-The proposed enabled policy is:
+The isolation policy is:
 
 | Resource | Contract |
 | --- | --- |
@@ -44,7 +46,6 @@ The new file has an explicit format version. For example, a macOS host could aut
 ```json
 {
   "version": 1,
-  "enabled": true,
   "readOnlyPaths": ["/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc"],
   "writablePaths": ["/Users/example/project", "/Users/example/dim-command-tmp"],
   "environment": ["PATH", "HOME", "LANG", "TERM", "NO_COLOR", "TMPDIR"]
@@ -57,7 +58,7 @@ added to the grants automatically. A Linux host lists its own executable/library
 directories and toolchain caches. A command that needs an ungranted cache or dependency download
 fails within the boundary; Permission approval does not widen it.
 
-All five fields are required in a present file. Unknown fields, missing/unknown versions,
+All four fields are required. Unknown fields, missing/unknown versions,
 malformed data, unreadable files, non-absolute paths, nonexistent/non-directory roots and invalid
 environment names are configuration errors. Names must be nonempty and contain neither NUL nor `=`.
 Roots are canonicalized at this external boundary;
@@ -66,16 +67,17 @@ application home, which holds the policy and other host authority; a command can
 execution policy or enabled plugin configuration. A writable descendant inside a read-only
 directory is an explicit write grant; grants are additive, so a read-only descendant does not
 subtract a writable ancestor's authority. Each environment name selects an exact existing key;
-an absent key adds nothing. The lists may be empty. Disabled configuration still validates.
+an absent key adds nothing. The lists may be empty.
 
-A missing file, or a host profile with no configured policy location, preserves existing
-unisolated execution. An explicit `enabled: false` does the same. Reading does not create a
-default file. This compatibility default is part of the proposal: isolation is opt-in, and a
-missing file is not evidence that isolation is active. Invalid configuration never selects this
-default. Existing files and running processes are not migrated or modified.
+On macOS and Linux, a missing file or a host profile with no configured policy location is a
+configuration error: exec and PTY startup refuse before starting the payload. Reading does not
+create a default file or grant the cwd, project or host home. The host administrator supplies
+the file and its explicit grants before commands can run. Windows skips policy loading and
+preserves ordinary execution until a supported Windows isolation contract exists. Existing
+files and running processes are not migrated or modified.
 
-Read and validate once for each new process, not once per Session or loader generation. Do not
-cache policy, install a watcher, subscribe to Session events, reload plugins or restart running
+On macOS and Linux, read and validate once for each new process, not once per Session or loader
+generation. Do not cache policy, install a watcher, subscribe to Session events, reload plugins or restart running
 shells when the file changes. Read at use time satisfies ADR 002 D4 without new machinery.
 
 ## Existing call flow
@@ -84,9 +86,10 @@ shells when the file changes. Read at use time satisfies ADR 002 D4 without new 
    WorkspaceTools continues to use `build_process_spec` for the current shell and its command
    checks. ShellSession retains its existing persistent-shell selection.
 2. Both consumers pass that spec through one HostPlatform-owned asynchronous preparation
-   operation immediately before starting it. HostPlatform reads its policy, filters the existing
-   environment and constructs the selected backend's executable/argv/cwd. The original command
-   and every path remain separate argv values, never interpolated into a shell command.
+   operation immediately before starting it. On macOS and Linux, HostPlatform reads its required
+   policy, filters the existing environment and constructs the selected backend's executable/argv/cwd.
+   On Windows, it returns the original spec unchanged without reading an isolation file. The
+   original command and every path remain separate argv values, never interpolated into a shell command.
 3. The prepared spec goes to the existing synchronous `spawn` or `spawn_pty`. Backend setup
    finishes before exec of the payload. A failed setup must not run the payload.
 4. The consumer retains the existing ProcessTree/PtyProcessTree, output pumps, cancellation,
@@ -101,9 +104,9 @@ listed product consumers, not for arbitrary trusted code that starts a process b
 Other features integrate at their own documented execution boundary, without special caller tags.
 
 Crate-local operation: `HostPlatform::prepare_isolated_process(spec).await ->
-Result<ProcessSpec, ProcessSpecError>`, visible only within dim-agent-capabilities. Disabled policy
-returns the original spec unchanged. Both consumers already live in that crate, so the operation
-does not need to be a new public service API.
+Result<ProcessSpec, ProcessSpecError>`, visible only within dim-agent-capabilities. Only the Windows
+exception returns the original spec unchanged. Both consumers already live in that crate, so
+the operation does not need to be a new public service API.
 No public wire method, event or language-neutral service is introduced. ProcessSpec and the
 existing `{code, reason}` error data retain their single definitions.
 
@@ -128,7 +131,7 @@ Do not compensate for another baseline's failure with broader reads, networking 
 unisolated fallback. Report an incompatible platform explicitly.
 
 The local `sandbox-exec(1)` manual marks the interface deprecated. Support is limited to actual
-OS versions that pass the enabled-policy acceptance flows; macOS 27.0.1 fixture results are
+OS versions that pass the isolation acceptance flows; macOS 27.0.1 fixture results are
 evidence for their exercised profiles only.
 
 ### Linux
@@ -160,12 +163,15 @@ bytes/mode, an inaccessible private fixture, symlink rejection, a private networ
 and basic PTY startup. This is not Linux HostPlatform process-tree/PTY or packet-level
 acceptance. Product integration must verify those flows and whole-tree settlement on that
 baseline. A container or kernel that refuses required namespaces is unsupported
-for enabled isolation; do not silently switch to a weaker Landlock policy.
+for isolation; command execution refuses without switching to a weaker Landlock policy or
+ordinary execution.
 
 ### Windows
 
-Enabled isolation returns `HOST_ISOLATION_UNAVAILABLE` before starting the payload. Disabled or
-missing policy preserves existing execution. No Windows sandbox substitute is included in F5.
+Windows retains ordinary exec and PTY execution, with the original ProcessSpec environment and
+existing process-tree ownership. HostPlatform does not load an isolation file on this platform.
+This is the sole platform exception to mandatory isolation; it is not evidence of Windows
+isolation support. No Windows sandbox substitute or backend is included in F5.
 
 ## Errors and lifetime
 
@@ -173,8 +179,8 @@ Preparation uses existing ProcessSpecError data:
 
 | Code | Meaning |
 | --- | --- |
-| `HOST_ISOLATION_CONFIG_INVALID` | Present configuration cannot be read, parsed or validated. |
-| `HOST_ISOLATION_UNAVAILABLE` | Enabled isolation has no supported backend, including Windows or a missing backend executable. |
+| `HOST_ISOLATION_CONFIG_INVALID` | Required macOS/Linux policy location or file is missing, or the configuration cannot be read, parsed or validated. |
+| `HOST_ISOLATION_UNAVAILABLE` | macOS/Linux isolation has no usable backend, including a missing backend executable. |
 
 Runtime setup failure, including a namespace/profile refusal, is an existing spawn failure or
 backend nonzero exit with its diagnostic, according to where it occurs. It is not a successful
@@ -185,7 +191,8 @@ or the policy file body.
 
 HostPlatform remains publishable when isolation configuration is invalid or unavailable, as it
 does for shell preferences; only affected execution fails. File tools and unrelated Sessions
-remain usable. A disabled policy cannot be selected by a model argument or approval response.
+remain usable. A model argument or approval response cannot disable isolation or select the
+Windows exception on another platform.
 The chosen file contents and grants are one startup snapshot. Concurrent host policy/path changes
 do not add a new atomicity guarantee; no lock, grant lease or filesystem virtualization is added.
 Restore/fork uses the current host policy for new processes and never restores authority from
@@ -195,7 +202,7 @@ history. Detach, close and process cancellation retain their current ownership a
 
 | Location | Necessary change |
 | --- | --- |
-| HostPlatform | Own file location, boundary parsing, enabled-policy preparation and backend argv/profile construction. Reuse FileStorage and existing process/error types. |
+| HostPlatform | Own file location, boundary parsing, mandatory macOS/Linux preparation, Windows bypass and backend argv/profile construction. Reuse FileStorage and existing process/error types. |
 | WorkspaceTools exec / ShellSession | Prepare their existing ProcessSpec before their existing spawn/PTY call; preserve admission, shell checks and tree ownership. |
 | App Server assembly / xtask example assembly | Supply host-local file location through HostPlatformConfig, with the existing conditional FileStorage dependency. Regenerate architecture output only when implementation changes assembly. |
 | HostPlatform and integration flow configurations | Update existing HostPlatformConfig literals for the optional field; embeddings using an exhaustive literal need the same source update. |
@@ -210,13 +217,15 @@ writes and metadata changes; an escaping symlink; TCP and UDP to live host liste
 UNIX socket outside grants; real PTY execution and resizing; and whole-tree cancellation with
 descendants reaped. Exercise foreground and background exec, live policy edits for the next
 process, retention of running-shell policy, exact environment filtering, malformed/unavailable
-policy without a payload marker, refusal of writable roots overlapping application home, and
-disabled compatibility. Use only disposable roots/home,
-credentials-free environment and local listeners. Windows exercises explicit refusal without
-the payload marker. Do not add a separate test for every private parser/helper.
+policy without a payload marker, missing location/file refusal without implicit grants, and
+refusal of writable roots overlapping application home. Use only disposable roots/home,
+credentials-free environment and local listeners. Windows exercises ordinary exec and PTY with
+the original environment, without requiring or reading the isolation file. Do not add a separate
+test for every private parser/helper.
 
 Do not claim F5 complete from the spike, design approval or one backend. Product acceptance
-requires the enabled policy through exec and PTY on macOS and Linux, with the baseline recorded.
+requires mandatory isolation through exec and PTY on macOS and Linux and the Windows exception,
+with the supported baselines recorded.
 
 ## Rule check
 
@@ -249,5 +258,7 @@ acceptance work, not requirements on core.
 Retain one owner file, one preparation operation and the existing spawn/tree APIs. Separate
 read/write roots express the actual filesystem grant; environment names prevent implicit host
 credential inheritance. A fixed offline policy avoids a proxy, approval matrix and network
-exception state. Read at use time removes caches, change subscriptions and reload coordination.
+exception state. Platform selection removes an enable/disable flag; unsupported Windows keeps
+its existing execution path. Read at use time removes caches, change subscriptions and reload
+coordination.
 No additional abstraction is required by these consumers.

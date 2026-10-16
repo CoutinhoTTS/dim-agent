@@ -43,6 +43,9 @@ The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exerc
 Seatbelt and Landlock wrappers through these existing process and PTY APIs. It
 does not install product isolation. The proposed host-local policy, consumer
 integration and platform acceptance are in the [F5 product design](../../../design/host-platform-isolation.md).
+That proposed contract requires isolation by default on macOS/Linux and refuses command startup
+when the required policy or backend is missing. Unsupported Windows retains ordinary execution.
+It has no enable/disable setting and grants no implicit access to the cwd or host home.
 
 ## Command construction
 
