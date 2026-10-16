@@ -8,6 +8,9 @@
 use dim_agent_capabilities::{
     defaults,
     file_storage::FileStoragePlugin,
+    host::{
+        PutSessionFile, SessionFileError, SessionFileErrorCode, SessionFilesHost, StoredSessionFile,
+    },
     host_platform::{HostPlatform, HostPlatformConfig, HostPlatformPlugin, ShellStatus},
     model_provider::ModelProviderPlugin,
     permission::{CommandRulesHost, NoCommandRules},
@@ -80,6 +83,33 @@ impl Capability for GraphPlatform {
     }
 }
 
+/// Graph-only `sessionFiles`, which SessionStore provides in a host with
+/// native storage. The graph stores no files.
+struct GraphFiles;
+impl PutSessionFile for GraphFiles {
+    fn put(
+        &self,
+        _: String,
+        _: String,
+        _: Vec<u8>,
+        _: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = std::result::Result<StoredSessionFile, SessionFileError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async {
+            Err(SessionFileError {
+                code: SessionFileErrorCode::NodeUnavailable,
+                message: "Graph generation stores no files".into(),
+            })
+        })
+    }
+}
+
 fn docs_dir(root: &Path) -> PathBuf {
     root.join("docs/architecture/rust-agent/plugins")
 }
@@ -111,6 +141,10 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         TypeKey::of::<SkillSettingsHost>(),
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
     )?;
+    process.provide_as(
+        TypeKey::of::<SessionFilesHost>(),
+        Arc::new(SessionFilesHost(Arc::new(GraphFiles))),
+    )?;
     (&process.plugin(capability_plugin(SkillsCatalogPlugin::new()))).await?;
     (&process.plugin(capability_plugin(FileWriteCoordinatorPlugin::default()))).await?;
 
@@ -124,6 +158,8 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
             output_root: dir.join("outputs"),
         },
     );
+    // `serve` adds Attachments where the host has native storage.
+    dim_agent_attachments::install(&mut builder);
     let agent = builder.build_in(&process);
     let session = agent
         .create_session(SessionConfig {
