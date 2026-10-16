@@ -20,7 +20,7 @@ plugin with the same name.
 | Scope | Plugins |
 | --- | --- |
 | Process | [FileWriteCoordinator](FileWriteCoordinator.md), [SkillsCatalog](SkillsCatalog.md), [HostPlatform](HostPlatform.md), [FileStorage](FileStorage.md) |
-| Session | [Skills](Skills.md), [SkillContributions](SkillContributions.md), [SkillContentInstances](SkillContentInstances.md), [SkillContent](SkillContent.md), [PromptSources](PromptSources.md), [PromptRegistry](PromptRegistry.md), [Wait](Wait.md), [ShellInput](ShellInput.md), [WorkspaceTools](WorkspaceTools.md), [ToolRegistry](ToolRegistry.md), [TimelineTree](TimelineTree.md) |
+| Session | [Skills](Skills.md), [SkillContributions](SkillContributions.md), [SkillContentInstances](SkillContentInstances.md), [SkillContent](SkillContent.md), [PromptSources](PromptSources.md), [PromptRegistry](PromptRegistry.md), [Wait](Wait.md), [ShellInput](ShellInput.md), [WorkspaceTools](WorkspaceTools.md), [ToolRegistry](ToolRegistry.md), [TimelineTree](TimelineTree.md), [InputMethods](InputMethods.md) |
 | Branch | [SkillsBranch](SkillsBranch.md), [PromptSourcesBranch](PromptSourcesBranch.md), [WaitBranch](WaitBranch.md), [BackgroundExec](BackgroundExec.md), [FileReads](FileReads.md), [ToolExecutor](ToolExecutor.md), [ToolBinding](ToolBinding.md), [Approval](Approval.md), [Permission](Permission.md), [ModelProvider](ModelProvider.md), [Loop](Loop.md), [InputQueue](InputQueue.md), [Prompt](Prompt.md), [ContextPreparation](ContextPreparation.md), [TreeTimeline](TreeTimeline.md) |
 
 ## Reading and maintaining these pages

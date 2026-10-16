@@ -1,6 +1,7 @@
 # Documentation
 
 - [CLI feature list](feature-list.md)
+- [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [Development plan and priorities](design/roadmap.md)（中文）
@@ -14,6 +15,7 @@
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
+- [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)

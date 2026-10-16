@@ -496,6 +496,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::settings",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/settings.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::shell_input",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -661,7 +670,6 @@
       "file": "crates/dim-agent-capabilities/src/tool_registry.rs",
       "unexpandedMacros": [
         "format",
-        "tokio::select",
         "tracing::warn"
       ]
     },
@@ -1411,7 +1419,8 @@
         "format",
         "matches",
         "tokio::pin",
-        "tokio::select"
+        "tokio::select",
+        "tracing::warn"
       ]
     },
     {
@@ -2630,6 +2639,13 @@
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "mod session_broadcast"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "mod settings"
       ]
     },
     {
@@ -5905,9 +5921,11 @@
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "mod catalog",
+        "use catalog::CatalogChanged",
         "use catalog::MemorySkillSettings",
         "use catalog::SkillsCatalog",
-        "use catalog::SkillsCatalogPlugin"
+        "use catalog::SkillsCatalogPlugin",
+        "use catalog::catalog_changes"
       ]
     },
     {
@@ -5961,8 +5979,17 @@
     },
     {
       "from": "dim_agent_capabilities::skills::catalog",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path settings_changes",
+        "use crate::settings::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::catalog",
       "to": "dim_agent_capabilities::skill_settings",
       "references": [
+        "path SOURCE",
         "path SettingsVersion",
         "path SkillSettings",
         "path SkillSettingsError",
@@ -5971,6 +5998,7 @@
         "path SkillSettingsError::Conflict",
         "path SkillSettingsHost",
         "path SkillSettingsSnapshot",
+        "use crate::skill_settings::SOURCE",
         "use crate::skill_settings::SettingsVersion",
         "use crate::skill_settings::SkillSettings",
         "use crate::skill_settings::SkillSettingsError",
@@ -5998,13 +6026,15 @@
         "path SkillsError::SettingsSync",
         "path SkillsError::SettingsWrite",
         "path SkillsError::UnknownSkill",
+        "path Wake",
         "use super::CatalogEntry",
         "use super::CatalogVersion",
         "use super::CatalogView",
         "use super::RefreshTarget",
         "use super::SkillIssue",
         "use super::SkillStatus",
-        "use super::SkillsError"
+        "use super::SkillsError",
+        "use super::Wake"
       ]
     },
     {
@@ -6138,7 +6168,7 @@
         "path SkillView",
         "path SkillsError",
         "path super::INSTRUCTIONS",
-        "path super::SkillsError",
+        "path super::Wake",
         "use super::SkillSummary",
         "use super::SkillView",
         "use super::SkillsError"
@@ -6149,6 +6179,7 @@
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
         "path SkillsCatalog",
+        "path super::catalog_changes",
         "use super::SkillsCatalog"
       ]
     },
@@ -6585,9 +6616,11 @@
         "path ToolContribution",
         "path ToolRegistry",
         "path ToolSourceSet",
+        "path ToolsChanged",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolRegistry",
-        "use crate::tool_registry::ToolSourceSet"
+        "use crate::tool_registry::ToolSourceSet",
+        "use crate::tool_registry::ToolsChanged"
       ]
     },
     {
@@ -11471,6 +11504,16 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
@@ -11565,13 +11608,19 @@
       "references": [
         "path SettingsError",
         "path SettingsError::Conflict",
-        "path SettingsScope",
-        "path SettingsScope::Project",
-        "path SettingsScope::User",
         "path SettingsService",
         "use crate::settings::SettingsError",
-        "use crate::settings::SettingsScope",
         "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::config",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path crate::settings::settings_changes",
+        "use crate::settings::SettingsScope"
       ]
     },
     {
@@ -11581,16 +11630,12 @@
         "path BusinessDocument",
         "path Result",
         "path SettingsError::Invalid",
-        "path SettingsScope",
-        "path SettingsScope::Project",
         "path SettingsService",
         "path crate::settings::Wake::new",
         "path crate::settings::project_authorizations",
-        "path crate::settings::settings_changes",
         "use crate::settings::BusinessDocument",
         "use crate::settings::Result",
         "use crate::settings::SettingsError",
-        "use crate::settings::SettingsScope",
         "use crate::settings::SettingsService"
       ]
     },
@@ -11611,6 +11656,16 @@
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::params",
         "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::management",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
       ]
     },
     {
@@ -11681,13 +11736,19 @@
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
         "path SettingsError::Worker",
+        "path SettingsService",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
         "path SettingsScope",
         "path SettingsScope::Project",
         "path SettingsScope::User",
-        "path SettingsService",
-        "use crate::settings::SettingsError",
-        "use crate::settings::SettingsScope",
-        "use crate::settings::SettingsService"
+        "use crate::settings::SettingsScope"
       ]
     },
     {
@@ -11791,12 +11852,8 @@
       "from": "dim_app_server::mcp::publication",
       "to": "dim_app_server::settings",
       "references": [
-        "path SettingsScope",
-        "path SettingsScope::Project",
-        "path SettingsScope::User",
         "path SettingsService",
         "path crate::settings::SettingsError::Invalid",
-        "use crate::settings::SettingsScope",
         "use crate::settings::SettingsService"
       ]
     },
@@ -11805,6 +11862,14 @@
       "to": "dim_agent_capabilities::file_storage",
       "references": [
         "path dim_agent_capabilities::file_storage::FileStoragePlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::Project",
+        "path SettingsScope::User"
       ]
     },
     {
@@ -11871,8 +11936,6 @@
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::settings",
       "references": [
-        "path SettingsScope::Project",
-        "path SettingsScope::User",
         "path crate::settings::SettingsPlugin::new"
       ]
     },
@@ -12010,17 +12073,26 @@
     },
     {
       "from": "dim_app_server::mcp::session",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path SessionToolSource",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolProvider",
+        "path ToolProviderChanged",
         "path ToolSourceSet",
         "use dim_agent_capabilities::tool_registry::SessionToolSource",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolProvider",
+        "use dim_agent_capabilities::tool_registry::ToolProviderChanged",
         "use dim_agent_capabilities::tool_registry::ToolSourceSet"
       ]
     },
@@ -12140,13 +12212,6 @@
         "path super::server::McpServerError::Closed",
         "use super::server::McpServerState",
         "use super::server::McpTool"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::session",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path crate::settings::SettingsScope"
       ]
     },
     {
@@ -12323,6 +12388,14 @@
     },
     {
       "from": "dim_app_server::permission_rules",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::permission_rules",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
@@ -12385,12 +12458,10 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
-        "path SettingsScope::User",
         "path SettingsService",
         "path crate::settings::Result",
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
-        "use crate::settings::SettingsScope",
         "use crate::settings::SettingsService"
       ]
     },
@@ -13207,6 +13278,20 @@
     },
     {
       "from": "dim_app_server::settings",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsChanged",
+        "path SettingsScope",
+        "path SettingsScope::Project",
+        "path SettingsScope::User",
+        "path settings_changes",
+        "use dim_agent_capabilities::settings::SettingsChanged",
+        "use dim_agent_capabilities::settings::SettingsScope",
+        "use dim_agent_capabilities::settings::settings_changes"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
@@ -13241,6 +13326,13 @@
     },
     {
       "from": "dim_app_server::settings::native",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::native",
       "to": "dim_app_server::settings",
       "references": [
         "path BusinessDocument",
@@ -13250,7 +13342,6 @@
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
         "path SettingsError::Persistence",
-        "path SettingsScope::User",
         "path SettingsService",
         "path SettingsSnapshot",
         "path decode",
@@ -13286,8 +13377,17 @@
     },
     {
       "from": "dim_app_server::skills_management",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
       "to": "dim_agent_capabilities::skill_settings",
       "references": [
+        "path SOURCE",
         "path SettingsVersion",
         "path SkillSettings",
         "path SkillSettingsError",
@@ -13295,6 +13395,7 @@
         "path SkillSettingsError::Invalid",
         "path SkillSettingsHost",
         "path SkillSettingsSnapshot",
+        "use dim_agent_capabilities::skill_settings::SOURCE",
         "use dim_agent_capabilities::skill_settings::SettingsVersion",
         "use dim_agent_capabilities::skill_settings::SkillSettings",
         "use dim_agent_capabilities::skill_settings::SkillSettingsError",
@@ -13373,18 +13474,11 @@
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
-        "path SettingsScope::User",
         "path SettingsService",
-        "path Wake",
-        "path Wake::new",
         "path crate::settings::Result",
-        "path settings_changes",
         "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
-        "use crate::settings::SettingsScope",
-        "use crate::settings::SettingsService",
-        "use crate::settings::Wake",
-        "use crate::settings::settings_changes"
+        "use crate::settings::SettingsService"
       ]
     },
     {
