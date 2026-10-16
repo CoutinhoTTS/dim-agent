@@ -151,7 +151,7 @@ attachment.put for each large paste, in item order
    v
 session.submit with the ordered text/image parts
    |                |
-   |                +--> rejection: retain draft
+   |                +--> uncertain error: diagnose and exit; no resubmission
    v
 accepted reply --> release local images, clear draft, enter existing run loop
 ```
@@ -163,7 +163,8 @@ after confirmed paste paths are available; puts and submission are not one atomi
 
 For each large paste, call `attachment.put {sessionId, text}` and use the typed reply's path
 directly. Keep that confirmed path with the unchanged draft item for a later explicit attempt
-in the same Session; do not put it again merely because another item or submission was rejected.
+in the same Session; do not put it again merely because another item or final request encoding
+was rejected before submission.
 Insert `[Pasted text: <path> (<lines> lines)]` at the item's position. An ordinary file reference
 inserts its absolute path as text, and an image inserts the existing `ContentBlock::Image` with
 base64 `ImageSource`. Text, references, paste expansions and images retain their relative order.
@@ -174,7 +175,7 @@ No display marker id enters the model input. Use `UserInput.content` (`Vec<Conte
 input. Model-provider `MessagePart` is not the submission type.
 
 Errors show the offending item and a bounded reason without dumping image data or paste content.
-Local validation and server rejection keep the draft editable. `unknown_method` from
+Local validation and rejected attachment puts keep the draft editable. `unknown_method` from
 `attachment.put` means the host does not offer text attachments; retain the paste and report
 that limitation. Do not silently change a large paste to inline model text. A confirmed stored
 file whose draft item is removed remains SessionStore data and is cleaned with its owning
@@ -182,10 +183,14 @@ Sessions; no attachment deletion method or rollback protocol is added.
 
 If interrupted before any request is sent, stop preparation and retain the draft. If a put is
 already sent, drain its reply, keep any confirmed path, and send no further put or submission.
-An already sent submission retains the existing stop and settlement behavior. Connection loss
-can leave a put or submission outcome unknown: keep the existing Session-handle diagnostic and
-exit behavior, without automatic retry or a persistent local recovery store. Draft retention
-on rejection is not a promise to recover an unknown transport outcome after process exit.
+An already sent submission retains the existing stop and settlement behavior. A `session.submit`
+error reply is not proof of rejection: v3 can commit the input and then return
+`submission_unknown` or a publication failure on the same connection. Keep the existing
+Session-handle diagnostic and exit behavior for these errors instead of offering a new send.
+Connection loss can also leave a put or submission outcome unknown and uses that same exit
+behavior. No automatic retry, lookup-based recovery or persistent local recovery store is added.
+Only a proven pre-commit rejection is safely resubmittable; an RPC error code alone does not
+establish that guarantee. Draft retention does not promise recovery after process exit.
 
 Recognized CLI commands run only from a plain single-line draft. Commands are not obtained by
 expanding paste or attachment markers. A recognized command with attached items reports a usage
@@ -238,7 +243,9 @@ and a scripted model request. Verify a stored large paste is read by the model t
 `read` tool, and a rejected/removed item contributes no submitted content. Check JSON escaping
 at the frame boundary, put rejection/cancellation, a confirmed put followed by submit rejection,
 and connection loss without resubmission. Reuse existing approval, exec and stop evidence where
-their paths remain unchanged. All homes and images are disposable. Native clipboard calibration
+their paths remain unchanged. Include a committed input followed by a publication error reply
+without disconnect: the CLI reports uncertainty and exits without sending a second submission.
+All homes and images are disposable. Native clipboard calibration
 uses an isolated desktop session with fixture clipboard contents.
 
 This document changes no executable; product tests have not been run for the proposed editor.
