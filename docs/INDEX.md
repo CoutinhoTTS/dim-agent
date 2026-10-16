@@ -18,10 +18,12 @@
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
+- [C4 Session TypeScript binding design](design/session-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
+- [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
