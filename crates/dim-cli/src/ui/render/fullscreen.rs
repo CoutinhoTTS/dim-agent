@@ -567,11 +567,7 @@ impl FullScreen {
                     }
                 }
             };
-            let body = if dim {
-                fg(&strip_escapes(&body), &palette.muted)
-            } else {
-                body
-            };
+            let body = if dim { faint(&body) } else { body };
             screen.push(match &bar {
                 Some(bar) => {
                     let pad = cols.saturating_sub(1 + clip(&body, width).1);
@@ -782,9 +778,16 @@ impl FullScreen {
         self.content_rows().saturating_sub(self.view_rows)
     }
 
-    /// The transcript row shown on viewport row `y`, none below its end.
+    /// The transcript row shown on viewport row `y`, none past its ends. A
+    /// transcript shorter than the viewport sits at its bottom, against the
+    /// composer, as Amp grows its thread upwards.
     fn at(&self, y: usize) -> Option<usize> {
-        Some(self.top() + y).filter(|&row| row < self.content_rows())
+        let top = self.top();
+        let pad = match top {
+            0 => self.view_rows.saturating_sub(self.content_rows()),
+            _ => 0,
+        };
+        Some(top + y.checked_sub(pad)?).filter(|&row| row < self.content_rows())
     }
 
     fn top(&self) -> usize {
@@ -1030,6 +1033,30 @@ fn focus_row(row: &str, offset: usize, last: usize, cols: usize, p: &Palette) ->
 
 /// Where an overlay's top-left cell goes: centred across the screen, and
 /// in the transcript viewport when it fits there.
+/// `row` with the faint attribute held through every SGR it sets: behind an
+/// overlay the transcript keeps its colours, darkened, as Amp's does.
+fn faint(row: &str) -> String {
+    let mut out = String::from("\x1b[2m");
+    let mut rest = row;
+    while let Some(start) = rest.find("\x1b[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c)) else {
+            rest = &rest[start..];
+            break;
+        };
+        let params = &after[..end];
+        match &after[end..end + 1] {
+            "m" if params.is_empty() => out.push_str("\x1b[0;2m"),
+            "m" => out.push_str(&format!("\x1b[{params};2m")),
+            _ => out.push_str(&rest[start..start + 2 + end + 1]),
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn overlay_origin(
     overlay: &crate::ui::render::Overlay,
     cols: usize,
@@ -1228,13 +1255,13 @@ mod tests {
     const DOCK: [&str; 2] = ["> x", "status"];
 
     #[test]
-    fn a_short_transcript_starts_at_the_top_and_a_shrinking_tail_moves_nothing() {
+    fn a_short_transcript_sits_on_the_dock_and_a_shrinking_tail_moves_nothing() {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
         doc.say(&["a", "b"]);
         draw(&mut screen, &mut emu, &frame(&["tail"], &DOCK), &doc);
         let rows = emu.rows_text();
-        assert_eq!(&rows[..6], &["", "a", "b", "tail", "", ""]);
+        assert_eq!(&rows[..6], &["", "", "", "a", "b", "tail"]);
         assert_eq!(&rows[6..], &DOCK);
         assert_eq!((emu.cy, emu.cx), (6, 2));
         // Nothing changed: nothing is written.
@@ -1356,15 +1383,15 @@ mod tests {
         draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
         let at = |kind, column, row| MouseEvent { kind, column, row };
         assert_eq!(
-            screen.mouse(at(MouseKind::Press, 6, 1), &doc),
+            screen.mouse(at(MouseKind::Press, 6, 5), &doc),
             MouseOutcome::Redraw
         );
         assert_eq!(
-            screen.mouse(at(MouseKind::Drag, 5, 2), &doc),
+            screen.mouse(at(MouseKind::Drag, 5, 6), &doc),
             MouseOutcome::Redraw
         );
         assert_eq!(
-            screen.mouse(at(MouseKind::Release, 5, 2), &doc),
+            screen.mouse(at(MouseKind::Release, 5, 6), &doc),
             MouseOutcome::Copy("world\nsecond".to_owned())
         );
     }
@@ -1460,7 +1487,7 @@ mod tests {
         let at = |kind| MouseEvent {
             kind,
             column: 1,
-            row: 0,
+            row: 5,
         };
         draw(&mut screen, &mut emu, &frame(&["· Running ▸"], &DOCK), &doc);
         screen.mouse(at(MouseKind::Press), &doc);
@@ -1497,20 +1524,20 @@ mod tests {
             screen.mouse(at(MouseKind::Press), &doc);
             screen.mouse(at(MouseKind::Release), &doc)
         };
-        // Rows 1 and 2 hold the block under its blank row.
+        // Rows 4 and 5 hold the block under its blank row.
         assert_eq!(
-            click(5, 1),
+            click(5, 4),
             MouseOutcome::Open("https://a.example/x".into())
         );
         assert_eq!(
-            click(1, 1),
+            click(1, 4),
             MouseOutcome::Click {
                 block: Some(0),
                 row: 1
             }
         );
         assert_eq!(
-            click(8, 2),
+            click(8, 5),
             MouseOutcome::Open("https://b.example/y".into())
         );
     }

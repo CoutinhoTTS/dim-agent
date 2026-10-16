@@ -2702,14 +2702,7 @@ fn thinking_title(label: &str, width: usize, p: &Palette) -> String {
 }
 
 fn thinking_label(label: &str, p: &Palette) -> String {
-    paint(
-        label,
-        Paint {
-            fg: Some(&p.muted),
-            italic: true,
-            ..Paint::default()
-        },
-    )
+    fg(label, &p.muted)
 }
 
 /// One row of reasoning text behind the bar.

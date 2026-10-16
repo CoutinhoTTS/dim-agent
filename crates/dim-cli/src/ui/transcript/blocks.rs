@@ -124,14 +124,14 @@ pub fn render_plain(source: &str, width: usize) -> Vec<String> {
     wrap_cells(source.trim_end_matches('\n'), width)
 }
 
-/// How a user message is painted: its colour (bar and italic text) and the
+/// How a user message is painted: its colour (bar and text) and the
 /// surface tint behind both (none in Amp's structure).
 pub struct UserStyle<'a> {
     pub color: &'a str,
     pub surface: Option<&'a str>,
 }
 
-/// A user message: the bar on every row, the text italic. With a surface
+/// A user message: the bar on every row, the text in its colour. With a surface
 /// tint every row is padded to the content width so it reads as a band.
 pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<String> {
     use crate::ui::theme::ansi::{Paint, paint};
@@ -164,7 +164,6 @@ pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<Strin
                     Paint {
                         fg: Some(style.color),
                         bg: style.surface,
-                        italic: true,
                         ..Paint::default()
                     }
                 ),
