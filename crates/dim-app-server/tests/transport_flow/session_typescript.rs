@@ -805,11 +805,17 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
             json!({"sessionMethods:session.input":{"describe":"async","call":"async"}}),
             "duplicate Session method namespace",
         ),
+        (
+            json!({"sessionMethods:shell":{"describe":"async","call":"async"}}),
+            "duplicate Session method namespace",
+        ),
     ] {
         let mut parts = fixture();
         parts.rows[0]["disabled"] = json!(true);
         parts.rows[0]["provides"] = change;
-        let (builder, _, _) = setup(false);
+        let (mut builder, _, _) = setup(false);
+        // A disabled foreign row must not claim the native ShellInput owner.
+        dim_agent_capabilities::shell_input::install(&mut builder);
         let error = serve(
             builder,
             ServerConfig {
