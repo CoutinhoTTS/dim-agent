@@ -20,6 +20,7 @@ use rutis::{
 use rutis_loader::{Builtins, InstanceResult, Loader};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -143,6 +144,20 @@ struct Inner {
     /// They outlive the index's entries: an unloading scope forgets its
     /// entry, and the index closes the instance when it unloads.
     instances: HashMap<String, FiberView>,
+}
+
+impl Inner {
+    /// Drops `id`'s admission slot while it is still `slot`: an id with
+    /// nothing loaded or stored keeps no admission state.
+    fn drop_slot(&mut self, id: &str, slot: &Arc<SessionSlot>) {
+        if self
+            .sessions
+            .get(id)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+        {
+            self.sessions.remove(id);
+        }
+    }
 }
 
 /// Process service routing every Agent: creation, addressing and close.
@@ -353,6 +368,11 @@ impl AgentIndex {
             .insert(session_id.to_owned(), (agent_id.to_owned(), version));
     }
     pub fn remove_version(&self, session_id: &str) {
+        // Only a Session this index knows keeps a closed slot: closing an
+        // unknown id leaves no admission state.
+        if self.session_store.is_some() && self.host_by_session(session_id).is_none() {
+            return;
+        }
         self.slot(session_id).closed.store(true, Ordering::Release);
         if self.session_store.is_none() {
             let mut inner = self.directory.inner.lock().unwrap();
@@ -723,32 +743,46 @@ impl AgentIndex {
         config: &SessionConfig,
         version: u32,
     ) -> Option<(String, BoxFuture<'static, dim_agent_runtime::Result<()>>)> {
-        let store = self.session_store.as_ref()?;
-        let id = uuid::Uuid::new_v4().to_string();
-        let store = store.clone();
-        let prepared_id = id.clone();
-        let config = config.clone();
+        let store = self.session_store.clone()?;
+        let stored = config.clone();
         let agent_id = host.agent_id.clone();
+        Some(self.prepared(config.cwd.clone(), move |id| {
+            Box::pin(async move {
+                store
+                    .create_owned_session(&id, &stored, &agent_id, version)
+                    .await
+            })
+        }))
+    }
+    /// A new Session id and the prepare step of its prepared creation: the
+    /// project of `cwd` is authorized, then `step` writes the Session's rows.
+    /// Creation, `launch` and a fork share it (S5c §9).
+    fn prepared(
+        &self,
+        cwd: String,
+        step: impl FnOnce(String) -> BoxFuture<'static, dim_agent_runtime::Result<()>>,
+    ) -> (String, BoxFuture<'static, dim_agent_runtime::Result<()>>) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let step = step(id.clone());
         let settings = self.settings.clone();
         let stopping = self.stopping.clone();
-        Some((
+        (
             id,
             Box::pin(async move {
                 if let Some(settings) = settings {
                     settings
-                        .authorize_project(config.cwd.clone().into(), &stopping)
+                        .authorize_project(cwd.into(), &stopping)
                         .await
                         .map_err(|error| {
                             AgentError::fault("project authorization", error.to_string())
                         })?;
                 }
-                store
-                    .create_owned_session(&prepared_id, &config, &agent_id, version)
-                    .await
+                step.await
             }),
-        ))
+        )
     }
 
+    /// A new Session of `host` under protocol `version`, recorded for it.
     pub(crate) async fn create_session(
         &self,
         host: &AgentHost,
@@ -757,12 +791,127 @@ impl AgentIndex {
     ) -> dim_agent_runtime::Result<Session> {
         match self.prepare_session(host, &config, version).await {
             Some((id, prepare)) => {
-                host.agent
-                    .create_prepared_session(id, config, prepare)
-                    .await
+                let creation = host
+                    .agent
+                    .create_prepared_session(id.clone(), config, prepare);
+                self.admit(&id, &host.agent_id, version, creation).await
             }
-            None => host.agent.create_session(config).await,
+            None => {
+                let session = host.agent.create_session(config).await?;
+                self.insert_version(session.id(), &host.agent_id, version);
+                Ok(session)
+            }
         }
+    }
+    /// A prepared creation loads its new id ([S5c §7](../../../docs/design/appserver/session-deletion-and-fork.md#7-serialization-and-races)):
+    /// it holds the id's admission gate from before its prepare step commits
+    /// the rows, which `session.list` then shows, until the Session is
+    /// published and its protocol version recorded. A delete of the id waits
+    /// for the build and closes what it published. A failed creation keeps
+    /// no slot.
+    pub(crate) async fn admit(
+        &self,
+        id: &str,
+        agent_id: &str,
+        version: u32,
+        creation: impl Future<Output = dim_agent_runtime::Result<Session>>,
+    ) -> dim_agent_runtime::Result<Session> {
+        let slot = self.slot(id);
+        let _gate = slot.gate.lock().await;
+        let created = creation.await;
+        match &created {
+            Ok(_) => self.insert_version(id, agent_id, version),
+            Err(_) => self
+                .directory
+                .inner
+                .lock()
+                .expect("agent index")
+                .drop_slot(id, &slot),
+        }
+        created
+    }
+    /// `session.delete` ([S5c §3.2](../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)):
+    /// holds S's admission gate, so nothing loads or builds S meanwhile,
+    /// closes S if it is loaded, has SessionStore remove what it stores of
+    /// S, then forgets S and keeps its slot closed. An unknown id has
+    /// nothing to remove and keeps no slot. A delete that fails before the
+    /// rows go leaves a Session it closed as `session.close` does, closed in
+    /// this process with its rows kept (D5); one it did not close loads
+    /// again on its next use.
+    pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()> {
+        // The id names `command-output/<id>`, so only a single path component
+        // can be a Session's (D3); refused before any admission state exists.
+        if !matches!(Path::new(id).components().collect::<Vec<_>>()[..],
+            [Component::Normal(name)] if name == id)
+        {
+            return Err(AgentError::InvalidInput(format!("invalid Session id {id}")));
+        }
+        let slot = self.slot(id);
+        // A creation of S holds the gate until S is published (`admit`).
+        let _gate = slot.gate.lock().await;
+        // A business close, as `session.close`: capabilities settle accepted
+        // work and release processes, leases and member requests. Owners of
+        // process state, such as Collaboration's relations, treat it as the
+        // Session's end, so from here on S does not load again in this
+        // process, whether or not its rows go.
+        let loaded = self
+            .host_by_session(id)
+            .and_then(|host| Some((host.agent.get_session(id)?, host)));
+        if let Some((session, host)) = &loaded {
+            slot.closed.store(true, Ordering::Release);
+            if let Err(error) = session.close().await {
+                // The facts the close could not write go with the rest.
+                tracing::error!(%error, session_id = id, "Session cleanup failed before its delete");
+            }
+            host.traces.wait_session(id).await;
+        }
+        let stored = match &self.session_store {
+            Some(store) => store.delete_session(id).await?,
+            None => false,
+        };
+        let mut inner = self.directory.inner.lock().expect("agent index");
+        inner.versions.remove(id);
+        inner.unavailable_sessions.remove(id);
+        if loaded.is_some() || stored {
+            slot.closed.store(true, Ordering::Release);
+        } else {
+            inner.drop_slot(id, &slot);
+        }
+        Ok(())
+    }
+    /// `session.fork` ([S5c §6](../../../docs/design/appserver/session-deletion-and-fork.md#6-fork)):
+    /// acquires the source, restoring it if needed, and checks the cut as
+    /// `session.branch_create` does (at most the published `main` head, the
+    /// end of an atomic batch, a context boundary) and as a rest point. The
+    /// fork is a prepared creation whose prepare step is SessionStore's fork
+    /// transaction; it belongs to the source's Agent and protocol version,
+    /// and its `main` opens with `branch/resume`.
+    pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session> {
+        let store = self
+            .session_store
+            .clone()
+            .ok_or_else(|| AgentError::InvalidInput("a fork needs the native store".into()))?;
+        let usage = self.acquire(source).await?;
+        let session = &usage.session;
+        session.local_page("main", at, 1, at).await?;
+        let prefix = session.context("main", at).await?;
+        dim_agent_capabilities::history::validate_context_boundary(&prefix)
+            .and_then(|()| rest_point(&prefix.events))
+            .map_err(AgentError::InvalidInput)?;
+        let version = self
+            .version_of(source)
+            .ok_or_else(|| AgentError::Closed(source.into()))?;
+        let config = session.config().clone();
+        let source = source.to_owned();
+        let (id, prepare) = self.prepared(config.cwd.clone(), move |fork| {
+            Box::pin(async move { store.fork_session(&source, &fork, at).await })
+        });
+        let creation = usage
+            .host
+            .agent
+            .create_prepared_session(id.clone(), config, prepare);
+        self.admit(&id, &usage.host.agent_id, version, creation)
+            .await
     }
     /// `agent.create`: one more Agent, a peer of every other. A requested
     /// profile comes from outside the process and may only select provided
@@ -989,6 +1138,93 @@ impl AgentIndex {
     pub(crate) fn forget(&self, agent_id: &str) {
         self.directory.forget(agent_id);
     }
+}
+
+/// Whether a fork whose `main` holds `events` starts no work when it loads
+/// ([S5c §6.2](../../../docs/design/appserver/session-deletion-and-fork.md#62-the-cut)).
+/// The reload rules that start work read these facts: Loop and InputQueue
+/// start a turn for an open turn's work or for a Queue or Steer input not
+/// yet consumed, unless it was applied before the last interrupt or
+/// InputQueue deleted it on a withdrawal;
+/// BackgroundExec fails a task it finds open, and a task that ended while
+/// its generation was not closing posts a wake input that belongs before
+/// the cut. This reads only their public facts;
+/// a capability whose reload rule comes to start work from other facts
+/// adds them here, so a fork keeps starting nothing.
+fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String> {
+    use dim_agent_capabilities::workspace_tools::background::WAKE_RESULT_TAG;
+    use dim_agent_types::{ExecStatus, InputMode, InterruptScope};
+    let mut turn = false;
+    let mut interrupted_at = 0;
+    let mut closing = false;
+    // Inputs that drive a turn, by event id, with their `input/applied`.
+    let mut inputs: BTreeMap<&str, Option<u64>> = BTreeMap::new();
+    let mut tasks = BTreeSet::new();
+    // Waking `exec/ended` events without their wake input.
+    let mut wakes = BTreeSet::new();
+    for event in events {
+        match &event.kind {
+            EventKind::TurnStart(_) => turn = true,
+            EventKind::TurnEnd(_) => turn = false,
+            // A branch close ends its generation's wakes; the next
+            // generation, which opens the branch again, posts them.
+            EventKind::BranchStart(_) | EventKind::BranchResume(_) => closing = false,
+            EventKind::StopInterrupt(data) => {
+                interrupted_at = event.sequence;
+                closing |= data.scope == InterruptScope::Branch;
+            }
+            EventKind::InputMessage(data) => {
+                if data.effective_mode() != InputMode::Append {
+                    inputs.insert(&event.id, None);
+                }
+                if let Some(ended) = event
+                    .tags
+                    .iter()
+                    .flatten()
+                    .find_map(|tag| tag.strip_prefix(WAKE_RESULT_TAG))
+                {
+                    wakes.remove(ended);
+                }
+            }
+            EventKind::InputApplied(data) => {
+                if let Some(applied) = inputs.get_mut(data.input_id.as_str()) {
+                    *applied = Some(event.sequence);
+                }
+            }
+            EventKind::InputConsumed(data) => {
+                inputs.remove(data.input_id.as_str());
+            }
+            // A withdrawn input InputQueue deleted is never applied.
+            EventKind::InputDeleted(data) => {
+                inputs.remove(data.input_id.as_str());
+            }
+            EventKind::ExecStarted(data) => {
+                tasks.insert(data.task_id.as_str());
+            }
+            EventKind::ExecEnded(data) => {
+                tasks.remove(data.task_id.as_str());
+                if data.status != ExecStatus::Cancelled && !closing {
+                    wakes.insert(event.id.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+    let cause = if turn {
+        "a turn is open"
+    } else if inputs
+        .values()
+        .any(|applied| applied.is_none_or(|sequence| sequence > interrupted_at))
+    {
+        "an input is waiting to be consumed"
+    } else if !tasks.is_empty() {
+        "a background task is running"
+    } else if !wakes.is_empty() {
+        "a background task has not woken the branch"
+    } else {
+        return Ok(());
+    };
+    Err(format!("the fork position is not a rest point: {cause}"))
 }
 
 fn truncate_preview(value: &str, limit: usize) -> String {
