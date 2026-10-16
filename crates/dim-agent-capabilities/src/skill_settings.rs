@@ -2,8 +2,12 @@
 //! belong to Skills; this port has no filesystem or app-server dependency.
 use rutis::BoxFuture;
 use std::{collections::BTreeSet, sync::Arc};
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+/// The Settings source holding Skill enablement. A host whose storage changes
+/// outside the catalog announces each write as `settings.changed` on
+/// `settings_changes(SOURCE)`; the catalog reads `skills()` again after each.
+pub const SOURCE: &str = "skills";
 
 /// Opaque source revision, not a notification counter.
 pub type SettingsVersion = String;
@@ -43,11 +47,6 @@ pub trait SkillSettings: Send + Sync + 'static {
         enabled: bool,
         cancel: CancellationToken,
     ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>>;
-
-    /// Subscribe before reading `skills()`, then read again after each wake;
-    /// `skills()` carries the version. Wakes may coalesce. Does not watch
-    /// writes by other processes.
-    fn changes(&self) -> watch::Receiver<()>;
 }
 
 /// Storage port supplied to the catalog by its embedding host. A standalone

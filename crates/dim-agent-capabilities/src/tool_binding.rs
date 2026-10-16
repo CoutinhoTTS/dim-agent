@@ -10,7 +10,7 @@ use crate::{
     context_preparation::ToolSetAdoption,
     history::context_configuration,
     prompt::{Prompt, ToolAdoptOutcome},
-    tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet},
+    tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet, ToolsChanged},
 };
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, BranchOpening, BranchScope, Capability, Dispatcher, InBranch,
@@ -18,7 +18,7 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, Listener, TypedPlugin};
 use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
@@ -45,6 +45,20 @@ struct State {
 pub struct ToolBinding {
     registry: Arc<ToolRegistry>,
     state: Mutex<State>,
+    changed: tokio::sync::Notify,
+}
+
+impl Listener<ToolsChanged> for Arc<ToolBinding> {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: &'a ToolsChanged,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        Box::pin(async move {
+            self.changed.notify_one();
+            Ok(None)
+        })
+    }
 }
 
 /// The registry's current tool part and the sets it was built from.
@@ -308,12 +322,17 @@ impl TypedPlugin for ToolBindingPlugin {
             let binding = Arc::new(ToolBinding {
                 registry: registry.clone(),
                 state: Mutex::default(),
+                changed: tokio::sync::Notify::new(),
             });
             let lifecycle = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let opening_tasks = tasks.clone();
             // Subscribe before reading the registry so no change is missed.
-            let mut changed = registry.changed();
+            ctx.events().on(
+                ctx,
+                &EventKey::<ToolsChanged>::of().instance(self.scope.session.instance),
+                binding.clone(),
+            )?;
             // A new or resumed branch receives its model configuration while
             // `branch/start` or `branch/resume` dispatches (Prompt, which this
             // follows); adopt the tool part then, before the branch takes input.
@@ -365,7 +384,7 @@ impl TypedPlugin for ToolBindingPlugin {
             let (watcher, cancel) = (binding.clone(), lifecycle.clone());
             tasks.spawn(async move {
                 // Background work runs while the branch is Active; a
-                // change before that stays marked in `changed`.
+                // change before that retains a permit in `changed`.
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     active = phase.activated() => if !active { return },
@@ -374,7 +393,7 @@ impl TypedPlugin for ToolBindingPlugin {
                     tokio::select! {
                         _ = cancel.cancelled() => return,
                         _ = phase.closing() => return,
-                        result = changed.changed() => if result.is_err() { return },
+                        _ = watcher.changed.notified() => {},
                     }
                     // A failed adoption keeps the pins and the prefix; the
                     // next change retries.
