@@ -30,6 +30,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod sessions;
+pub(crate) use sessions::{Lookup, find_input};
 
 /// The process default profile carries the process Session defaults.
 fn process_default(defaults: &SessionConfig) -> AgentProfile {

@@ -6,8 +6,11 @@
 use super::AgentIndex;
 use crate::protocol::{PROTOCOL_VERSION, session_cwd};
 use dim_agent_capabilities::permission::PermissionState;
-use dim_agent_runtime::AgentError;
-use dim_agent_types::{ModelId, ModelSelection, PermissionPolicy, PermissionPreset};
+use dim_agent_runtime::{AgentError, Publication, Session};
+use dim_agent_types::{
+    AgentEvent, ContentBlock, EventKind, InputBlock, InputMessageData, InputMode, ModelId,
+    ModelSelection, PermissionPolicy, PermissionPreset, UserInput,
+};
 use rutis::Ctx;
 use rutis_bridge::session::{HostDispatch, Reply, Value};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -48,6 +51,65 @@ pub struct LaunchReply {
     pub policy: PermissionPolicy,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InputWrite {
+    pub session_id: String,
+    pub branch_id: String,
+    pub mode: InputMode,
+    /// `<source>:<uuid>` by convention; writes are not deduplicated.
+    pub submission_id: String,
+    /// Model-facing blocks; the first is the caller's marker.
+    pub raw_blocks: Vec<RawBlock>,
+    /// The user part, placed after the blocks; empty: none.
+    pub content: Vec<ContentBlock>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawBlock {
+    pub text: String,
+    #[serde(default)]
+    pub key: Option<BlockKey>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockKey {
+    pub r#use: KeyUse,
+    pub name: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyUse {
+    /// Stays in effect until a later block with the same key.
+    Live,
+    /// Delivered once; the key leaves effect.
+    Retire,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputReceipt {
+    pub input_id: String,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LookupRequest {
+    pub session_id: String,
+    pub branch_id: String,
+    pub submission_id: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum LookupReply {
+    #[serde(rename_all = "camelCase")]
+    Accepted {
+        input_id: String,
+        sequence: u64,
+    },
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionsErrorCode {
@@ -56,6 +118,8 @@ pub enum SessionsErrorCode {
     SessionClosed,
     BranchMissing,
     Reloading,
+    Ambiguous,
+    PublicationUnknown,
     Failed,
 }
 /// A `sessions` failure, carried as data (session-access A.6).
@@ -80,7 +144,10 @@ impl SessionsError {
     /// The caller may retry, after `lookup` or `history` where a write may
     /// have committed.
     pub fn retryable(&self) -> bool {
-        matches!(self.code, SessionsErrorCode::Reloading)
+        matches!(
+            self.code,
+            SessionsErrorCode::Reloading | SessionsErrorCode::PublicationUnknown
+        )
     }
 }
 impl From<AgentError> for SessionsError {
@@ -94,6 +161,72 @@ impl From<AgentError> for SessionsError {
         };
         Self::new(code, error.to_string())
     }
+}
+
+/// Waits until `sequence` is published, so a read right after the reply sees
+/// it. A branch that closes or fails first leaves the write unconfirmed.
+async fn published(publication: &Publication, sequence: u64) -> Result<(), SessionsError> {
+    let _ = publication
+        .watch()
+        .wait_for(|&(published, closed)| published >= sequence || closed)
+        .await;
+    if publication.sequence() < sequence {
+        return Err(SessionsError::new(
+            SessionsErrorCode::PublicationUnknown,
+            "committed, but publication was not confirmed; look it up after recovery",
+        ));
+    }
+    Ok(())
+}
+
+/// What a branch holds for one `submission_id`.
+pub(crate) enum Lookup {
+    Accepted(Arc<AgentEvent>),
+    Unknown,
+    Ambiguous,
+}
+/// Finds the `input/message` with `submission_id` on a branch: first waits
+/// until nothing committed is unpublished, so `Unknown` is final for every
+/// write that returned before the call, then scans the published pages.
+/// `sessions.lookup` and Rpc's `session.input_lookup` share it.
+pub(crate) async fn find_input(
+    session: &Session,
+    branch: &str,
+    submission_id: &str,
+) -> dim_agent_runtime::Result<Lookup> {
+    let publication = session.publication(branch)?;
+    let mut published = publication.watch();
+    loop {
+        published.borrow_and_update();
+        if !publication.has_pending() || published.changed().await.is_err() {
+            break;
+        }
+    }
+    if let Some(error) = publication.failure() {
+        return Err(error);
+    }
+    let through = session.sequence(branch)?;
+    let mut after = 0;
+    let mut found = None;
+    // ponytail: O(n) native scan; add a store-owned index only if lookup latency requires it.
+    while after < through {
+        let events = session.local_page(branch, after, 256, through).await?;
+        after = events
+            .last()
+            .ok_or_else(|| AgentError::Storage("published input page is missing".into()))?
+            .sequence;
+        for event in events {
+            if matches!(&event.kind, EventKind::InputMessage(data)
+                if data.submission_id.as_deref() == Some(submission_id))
+            {
+                if found.is_some() {
+                    return Ok(Lookup::Ambiguous);
+                }
+                found = Some(event);
+            }
+        }
+    }
+    Ok(found.map_or(Lookup::Unknown, Lookup::Accepted))
 }
 
 /// The launch cap (sessions service §6.1): the lower preset, the union of the
@@ -256,6 +389,71 @@ impl AgentIndex {
         })
         .await
     }
+
+    /// Writes `input/message` and replies once it is published.
+    pub async fn input(&self, write: InputWrite) -> Result<InputReceipt, SessionsError> {
+        self.until_unloaded(async {
+            if write.submission_id.is_empty() {
+                return Err(SessionsError::rejected("submissionId must not be empty"));
+            }
+            let lease = self.acquire(&write.session_id).await?;
+            let publication = lease.session.publication(&write.branch_id)?;
+            let blocks = write
+                .raw_blocks
+                .into_iter()
+                .map(|block| InputBlock::Raw {
+                    text: block.text,
+                    retire: block
+                        .key
+                        .as_ref()
+                        .is_some_and(|key| key.r#use == KeyUse::Retire),
+                    key: block.key.map(|key| key.name),
+                })
+                .collect();
+            let event = lease
+                .session
+                .input(
+                    InputMessageData {
+                        submission_id: Some(write.submission_id),
+                        user: (!write.content.is_empty()).then_some(UserInput {
+                            content: write.content,
+                        }),
+                        blocks,
+                        mode: Some(write.mode),
+                    },
+                    &write.branch_id,
+                )
+                .await?;
+            published(&publication, event.sequence).await?;
+            Ok(InputReceipt {
+                input_id: event.id.clone(),
+                sequence: event.sequence,
+            })
+        })
+        .await
+    }
+
+    /// Finds a committed input by its `submissionId` after an uncertain write.
+    pub async fn lookup(&self, request: LookupRequest) -> Result<LookupReply, SessionsError> {
+        self.until_unloaded(async {
+            if request.submission_id.is_empty() {
+                return Err(SessionsError::rejected("submissionId must not be empty"));
+            }
+            let lease = self.acquire(&request.session_id).await?;
+            match find_input(&lease.session, &request.branch_id, &request.submission_id).await? {
+                Lookup::Accepted(event) => Ok(LookupReply::Accepted {
+                    input_id: event.id.clone(),
+                    sequence: event.sequence,
+                }),
+                Lookup::Unknown => Ok(LookupReply::Unknown),
+                Lookup::Ambiguous => Err(SessionsError::new(
+                    SessionsErrorCode::Ambiguous,
+                    "more than one input has this submissionId",
+                )),
+            }
+        })
+        .await
+    }
 }
 
 /// `sessions` by name for every language: each call decodes one request
@@ -264,7 +462,7 @@ impl AgentIndex {
 pub(crate) struct SessionsService(pub(crate) Ctx);
 impl HostDispatch for SessionsService {
     fn methods(&self) -> Option<serde_json::Value> {
-        Some(json!({"launch": "async"}))
+        Some(json!({"launch": "async", "input": "async", "lookup": "async"}))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
         // Looked up per call, so an index reload never reloads a caller.
@@ -310,6 +508,8 @@ async fn call(
 ) -> Result<serde_json::Value, SessionsError> {
     match method {
         "launch" => reply(index.launch(request(args)?).await?),
+        "input" => reply(index.input(request(args)?).await?),
+        "lookup" => reply(index.lookup(request(args)?).await?),
         _ => Err(SessionsError::rejected(format!(
             "unknown sessions method {method}"
         ))),

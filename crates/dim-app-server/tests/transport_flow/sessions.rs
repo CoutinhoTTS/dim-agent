@@ -3,7 +3,7 @@
 use super::*;
 use dim_agent_capabilities::permission::{Permission, PermissionState};
 use dim_agent_runtime::{Agent, Session};
-use dim_agent_types::PermissionPolicy;
+use dim_agent_types::{InputBlock, InputMessageData, PermissionPolicy, UserInput};
 use rutis::{DepKey, Keyed};
 use rutis_bridge::session::HostDispatch;
 use std::sync::OnceLock;
@@ -78,10 +78,15 @@ impl Sessions {
 fn host_policy() -> Value {
     json!({"preset":"workspace-write","allowedTools":["confirm"],"disallowedTools":["blocked"]})
 }
-async fn serve_sessions() -> (RunningServer, Agent, Sessions, Client) {
+async fn serve_sessions(
+    database: Option<std::path::PathBuf>,
+) -> (RunningServer, Agent, Sessions, Client) {
     let sessions = Sessions::default();
     let consumer = sessions.clone();
-    let mut config = ServerConfig::default();
+    let mut config = ServerConfig {
+        database_path: database,
+        ..Default::default()
+    };
     config.session_defaults.tools = vec!["confirm".into()];
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let (server, agent) = launch_with(
@@ -143,7 +148,7 @@ async fn assert_launched(client: &mut Client, agent: &Agent, reply: &Value, expe
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defaults() {
-    let (server, agent, sessions, mut client) = serve_sessions().await;
+    let (server, agent, sessions, mut client) = serve_sessions(None).await;
     let cwd = std::env::temp_dir();
     // Created with full access, then narrowed: the bound is the dispatched
     // policy, not the creation-time config.
@@ -234,6 +239,186 @@ async fn launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defau
         assert_eq!(reply["error"]["code"], "rejected", "{reply}");
     }
     assert_eq!(agent.sessions().len(), 4, "failed launches create nothing");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A private directory for a native store, removed on drop.
+struct Store(std::path::PathBuf);
+impl Store {
+    fn new() -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = std::path::PathBuf::from("/tmp").join(format!("dss-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        Self(path)
+    }
+    fn database(&self) -> std::path::PathBuf {
+        self.0.join("dimcode.sqlite")
+    }
+}
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+async fn launched(sessions: &Sessions, agent: &Agent) -> Session {
+    let reply = sessions
+        .ok("launch", json!({"cwd":std::env::temp_dir()}))
+        .await;
+    agent
+        .get_session(reply["sessionId"].as_str().unwrap())
+        .unwrap()
+}
+fn input(session: &Session, submission: &str, content: Value) -> Value {
+    json!({"sessionId":session.id(),"branchId":"main","mode":"queue","submissionId":submission,
+        "rawBlocks":[{"text":"<dim-test kind=\"run\">marker</dim-test>"}],"content":content})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs() {
+    let store = Store::new();
+    let (server, agent, sessions, mut client) = serve_sessions(Some(store.database())).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = launched(&sessions, &agent).await;
+    let submission = format!("test:{}", uuid::Uuid::new_v4());
+    let mut request = input(
+        &session,
+        &submission,
+        json!([{"type":"text","text":"hello"}]),
+    );
+    request["rawBlocks"].as_array_mut().unwrap().extend([
+        json!({"text":"live","key":{"use":"live","name":"test/live"}}),
+        json!({"text":"retire","key":{"use":"retire","name":"test/old"}}),
+    ]);
+    let receipt = sessions.ok("input", request).await;
+    let sequence = receipt["sequence"].as_u64().unwrap();
+    // Replied after publication: readers see it at once.
+    assert!(session.sequence("main").unwrap() >= sequence);
+    let event = session
+        .local("main", sequence..=sequence)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(event.id, receipt["inputId"].as_str().unwrap());
+    let EventKind::InputMessage(data) = &event.kind else {
+        panic!("{event:?}")
+    };
+    assert_eq!(
+        *data,
+        InputMessageData {
+            submission_id: Some(submission.clone()),
+            user: Some(UserInput {
+                content: vec![dim_agent_types::ContentBlock::Text {
+                    text: "hello".into()
+                }],
+            }),
+            blocks: vec![
+                InputBlock::Raw {
+                    text: "<dim-test kind=\"run\">marker</dim-test>".into(),
+                    key: None,
+                    retire: false,
+                },
+                InputBlock::Raw {
+                    text: "live".into(),
+                    key: Some("test/live".into()),
+                    retire: false,
+                },
+                InputBlock::Raw {
+                    text: "retire".into(),
+                    key: Some("test/old".into()),
+                    retire: true,
+                },
+            ],
+            mode: Some(dim_agent_types::InputMode::Queue),
+        }
+    );
+    let at = |submission: &str| json!({"sessionId":session.id(),"branchId":"main","submissionId":submission});
+    assert_eq!(
+        sessions.ok("lookup", at(&submission)).await,
+        json!({"status":"accepted","inputId":event.id,"sequence":sequence})
+    );
+    assert_eq!(
+        sessions.ok("lookup", at("test:other")).await,
+        json!({"status":"unknown"})
+    );
+    for _ in 0..2 {
+        sessions
+            .ok("input", input(&session, "test:twice", json!([])))
+            .await;
+    }
+    assert_eq!(
+        sessions.error("lookup", at("test:twice")).await,
+        "ambiguous"
+    );
+    let mut missing_mode = input(&session, "test:invalid", json!([]));
+    missing_mode.as_object_mut().unwrap().remove("mode");
+    let mut empty = input(&session, "test:invalid", json!([{"type":"text","text":""}]));
+    empty["rawBlocks"] = json!([]);
+    let mut bad_key = input(&session, "test:invalid", json!([]));
+    bad_key["rawBlocks"][0]["key"] = json!({"use":"forever","name":"test/key"});
+    let mut no_branch = input(&session, "test:invalid", json!([]));
+    no_branch["branchId"] = json!("missing");
+    let mut no_session = input(&session, "test:invalid", json!([]));
+    no_session["sessionId"] = json!("missing");
+    for (request, code) in [
+        (input(&session, "", json!([])), "rejected"),
+        (missing_mode, "rejected"),
+        (empty, "rejected"),
+        (bad_key, "rejected"),
+        (no_branch, "branch_missing"),
+        (no_session, "session_closed"),
+    ] {
+        assert_eq!(
+            sessions.error("input", request.clone()).await,
+            code,
+            "{request}"
+        );
+    }
+    assert_eq!(sessions.error("lookup", at("")).await, "rejected");
+    assert_eq!(
+        sessions.ok("lookup", at("test:invalid")).await,
+        json!({"status":"unknown"}),
+        "rejected inputs write nothing"
+    );
+
+    // Hold publication: the input commits, its reply waits, and a lookup
+    // that starts after the commit waits too instead of reading `unknown`.
+    session.idle("main").await.unwrap();
+    let publication = session.publication("main").unwrap();
+    let lock = rusqlite::Connection::open(store.database()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let pending = format!("test:{}", uuid::Uuid::new_v4());
+    let write = tokio::spawn({
+        let sessions = sessions.clone();
+        let request = input(&session, &pending, json!([]));
+        async move { sessions.call("input", request).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !publication.has_pending() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let found = tokio::spawn({
+        let sessions = sessions.clone();
+        let request = at(&pending);
+        async move { sessions.call("lookup", request).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!write.is_finished() && !found.is_finished());
+    lock.execute_batch("COMMIT").unwrap();
+    let receipt = write.await.unwrap();
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert_eq!(
+        found.await.unwrap()["value"],
+        json!({"status":"accepted","inputId":receipt["value"]["inputId"],"sequence":receipt["value"]["sequence"]})
+    );
     server.shutdown();
     server.join().await.unwrap();
 }
