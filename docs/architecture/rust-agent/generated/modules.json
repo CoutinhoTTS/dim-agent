@@ -164,6 +164,15 @@
       ]
     },
     {
+      "id": "dim_agent_attachments",
+      "crate": "dim_agent_attachments",
+      "parent": null,
+      "file": "crates/dim-agent-attachments/src/lib.rs",
+      "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities",
       "crate": "dim_agent_capabilities",
       "parent": null,
@@ -2484,6 +2493,79 @@
         "path ModelChunk::Usage",
         "path ModelProtocol::OpenaiChat",
         "path ModelStream"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path SessionFileError",
+        "path SessionFileErrorCode::Cancelled",
+        "path SessionFileErrorCode::Invalid",
+        "path SessionFileErrorCode::NodeUnavailable",
+        "path SessionFileErrorCode::NotFound",
+        "path SessionFileErrorCode::Storage",
+        "path SessionFileErrorCode::TooLarge",
+        "path SessionFilesHost",
+        "use dim_agent_capabilities::host::SessionFileError",
+        "use dim_agent_capabilities::host::SessionFileErrorCode",
+        "use dim_agent_capabilities::host::SessionFilesHost"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::closed",
+        "path RpcError::reloading",
+        "path SessionMethods::provide",
+        "path methods::params",
+        "path methods::reply",
+        "use dim_agent_capabilities::methods",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
       ]
     },
     {
@@ -9420,6 +9502,13 @@
       "references": [
         "path dim_agent_aimux::AimuxPlugin",
         "path dim_agent_aimux::ConfiguredModelsPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_agent_attachments",
+      "references": [
+        "path dim_agent_attachments::install"
       ]
     },
     {
