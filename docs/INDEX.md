@@ -17,6 +17,7 @@
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
+- [C4 Session TypeScript binding design](design/session-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)

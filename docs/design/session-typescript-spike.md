@@ -2,7 +2,8 @@
 
 Scope: issue [#63](https://github.com/arcships/dim/issues/63), PR [#99](https://github.com/arcships/dim/pull/99). This is a transport and lifecycle experiment, not the product implementation of C4.
 
-Status: measured spike. The production binding design and C4 acceptance remain open.
+Status: measured spike. The [production binding design](session-typescript.md) is proposed;
+C4 product implementation and acceptance remain open.
 
 The probe uses the pinned rutis 0.10 runtime and loader, actual Dim Sessions, instance-scoped named services, the existing Session broadcast and a TypeScript `definePlugin` part. All experimental bindings stay in the example and fixture. No production capability, core lifecycle, dependency audit or persistence format changes.
 
@@ -65,7 +66,7 @@ Production bindings belong to the existing contract owners: ToolRegistry / tool 
 2. **Use existing loader assembly.** Register shared services inside `SESSION_GROUP`; load TS rows inside the Session subtree using the existing runtime resolver. Keep factories limited to configuration and instance identity. Share the Node process and use instance service labels; those labels provide namespace isolation, not a security sandbox. Do not reuse the private managed-provider configuration as a general capability loader.
 3. **Connect the tool at its owner.** Implement the language binding at the tool-contribution boundary, reuse C3's one-time fixed-table sampling and ToolBinding request snapshots, and validate the real model declaration → ToolExecutor → TS result flow on the immediate first request after create and restore. The binding must be available before that sample; no attachment polling or tool-specific branches in Timeline, Dispatcher or Session readiness.
 4. **Integrate the existing method and broadcast owners.** Expose the SessionMethods implementation from C1 #83 to TS, following the shared-type placement and routing contract settled in #120. Align broadcast data with C6 #85 and bind native node `events: {out, in}` / Cordis events to the dynamically named Session channel; do not create a second event source or duplicate RPC dispatch. Final subscription delivery/order and cancellation semantics require contract review; the transport measurements do not decide them.
-5. **Verify product acceptance.** A TS part must serve one real tool and one real Session RPC method, receive only its Session's broadcast, settle cancellation and unload, and preserve native execution when its optional provider becomes unavailable. Disabled parts must not be installed. Assembly issue #132 must be implemented before complete C4 acceptance: installed optional plugin parts must not gate Session readiness. This changes readiness membership, not dependency semantics; each part's required dependencies and audit remain unchanged. It does not block the spike.
+5. **Verify product acceptance.** A TS part must serve one real tool and one real Session RPC method, receive only its Session's broadcast, settle cancellation and unload, and preserve native execution when its optional provider becomes unavailable. Disabled parts must not be installed. Assembly issue #132 is implemented by merged [#137](https://github.com/arcships/dim/pull/137): installed optional plugin parts do not gate Session readiness. This changes readiness membership, not dependency semantics; each part's required dependencies and audit remain unchanged. C4 must exercise this behavior with its actual foreign rows.
 
 No evidence from this spike requires changing rutis, adding core lifecycle gates, weakening dependency auditing or skipping Pending rows. C4 can proceed with a contract review based on the proven transport, while #63 remains open for the production flow.
 
@@ -97,4 +98,7 @@ The retained harness pieces each serve an exercised boundary: Node/rows wrappers
 
 ## Requirements raised to mechanism owners
 
-The spike raises no new requirement to rutis. Assembly-owned optional-part readiness is tracked separately in [#132](https://github.com/arcships/dim/issues/132), a prerequisite for complete C4 acceptance. The fixture does not implement it or introduce a core lifecycle phase.
+The spike raises no new requirement to rutis. Assembly-owned optional-part readiness was
+implemented separately in [#137](https://github.com/arcships/dim/pull/137), closing
+[#132](https://github.com/arcships/dim/issues/132). The fixture does not implement it or
+introduce a core lifecycle phase; C4 product acceptance still needs the actual foreign-row flow.
