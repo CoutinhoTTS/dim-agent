@@ -117,6 +117,12 @@ the operation does not need to be a new public service API.
 No public wire method, event or language-neutral service is introduced. ProcessSpec and the
 existing `{code, reason}` error data retain their single definitions.
 
+The accepted [ShellInput design Q4](plugins/ShellInput.md#appendix-f-decisions-and-deferrals) assumes
+transparent isolation in `spawn` without a consumer change. This proposal instead retains raw
+spawn for trusted host uses and prepares the three product consumers asynchronously. Architecture
+review must align that integration choice with P1 before implementation; the proposal does not
+silently supersede P1's contract.
+
 ## Platform bindings
 
 ### macOS
@@ -182,6 +188,23 @@ Product integration must verify the same boundary through its actual consumers. 
 kernel that refuses required namespaces is unsupported
 for isolation; command execution refuses without switching to a weaker Landlock policy or
 ordinary execution.
+
+#### ShellInput background compatibility
+
+[ShellInput A.2](plugins/ShellInput.md#a2-execution) permits `!cmd &` to
+finish the run while redirected background work outlives it, the Session and App Server.
+The native cancellation probe keeps its command root alive; it does not verify this normal-exit
+contract. In [bubblewrap 0.12.0's source](https://github.com/containers/bubblewrap/blob/v0.12.0/bubblewrap.c),
+the monitor reports the initial payload's exit while the namespace init reaps remaining children;
+`--die-with-parent` also binds processes to their parent lifetime. A private PID namespace changes
+the identity a command prints as `$!`. These semantics require an explicit compatibility decision
+and normal-exit flow coverage before selecting the final product arguments.
+
+Do not infer background survival from whole-tree cancellation, assume a namespace PID can be
+used by a later isolated command, or add a run supervisor/protocol to hide the mismatch. Verify
+run completion, redirected descendant lifetime, current grants and the documented way to stop
+that work. If the selected isolation boundary changes P1 A.2, align the authoritative designs
+before implementation; no lifetime change is accepted by this proposal alone.
 
 ### Windows
 
