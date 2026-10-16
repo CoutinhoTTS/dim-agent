@@ -10,7 +10,7 @@
 
 压缩是 Loop 控制上下文窗口的一部分。它是 Loop 的一个步骤，和模型调用、工具批次一样，不绑定 turn。压缩步骤运行期间，Loop 不推进到下一步。否则压缩期间上下文可能溢出，新事件也会基于旧上下文决定，与替换内容不一致。
 
-自动压缩已经在请求的准备中运行（`context/prepare` → `context/compaction` → `model/call`），Loop 等待该请求的终态（[context_policy.rs](../../../../crates/dim-agent-capabilities/src/context_policy.rs)）。但它在生产环境里从不运行，因为 App Server 绑定的是 `ContextModelHost(None)`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。
+自动压缩已经在请求的准备中运行（`context/prepare` → 压缩 → `model/call`），Loop 等待该请求的终态（[context_policy.rs](../../../../crates/dim-agent-capabilities/src/context_policy.rs)）。但它在生产环境里从不运行，因为 App Server 绑定的是 `ContextModelHost(None)`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。
 
 F1 把压缩分成三层（§2.2），并新增：
 
@@ -20,10 +20,11 @@ F1 把压缩分成三层（§2.2），并新增：
 4. **一条压缩路径。** ContextPolicy 的压缩步骤是一个函数。自动压缩在准备中调用它，Loop 的手动步骤也调用它。
 5. **手动压缩是 Loop 的一个步骤。** `session.context.compact` 写指令 `context/compact`，由 Loop 安排一个压缩步骤：
    - 在 turn 内，步骤在下一个步骤边界运行，即准备下一个请求之前。
-   - 没有 turn 在运行时，步骤立即运行，只写 `context/compaction`。
-6. **用量查询。** `session.context.usage` 返回当前预算，不写任何东西。
+   - 没有 turn 在运行时，步骤立即运行，只写它自己的压缩事实。
+6. **压缩状态是事实。** 每次策略调用都由两条 Timeline 事实包住：调用前写的 `context/compaction-start`，以及恰好一条引用它的 `context/compaction` 结果。客户端、历史和重载结算都读取这两条事实（§4.3、§5.7）。
+7. **用量查询。** `session.context.usage` 返回当前预算，不写任何东西。
 
-不变的部分：Provider、Aimux、ModelProvider、Timeline、Dispatcher、事件信封、rutis 和 `context/prepare`。F1 新增事件类型 `context/compact`，并直接修改 `context/compaction`；软件尚未发布，接受破坏性修改。
+不变的部分：Provider、Aimux、ModelProvider、Timeline、Dispatcher、事件信封、rutis 和 `context/prepare`。F1 新增事件类型 `context/compact` 与 `context/compaction-start`，并直接修改 `context/compaction`；软件尚未发布，接受破坏性修改。
 
 ### 1.1 为什么这么小
 
@@ -94,8 +95,9 @@ Loop 在一个受跟踪的任务中，调用 `ContextPolicy::compact_step` 自�
 | 项 | 所有者 | 类别 |
 | --- | --- | --- |
 | `context/compact {}` | Loop | 新指令事件（§4.3） |
-| `context/compaction` | 由 ContextPolicy 代其调用方写入 | 现有事实，有改动（§4.3） |
-| 压缩槽：`{command, running: Option<CancellationToken>}` | Loop | 私有。由 `context/compact` 和 `context/compaction` 折叠，装载时重建（§5.4） |
+| `context/compaction-start` | 由 ContextPolicy 代其调用方写入 | 新事实（§4.3） |
+| `context/compaction` | 由 ContextPolicy 代其调用方写入；重载时由负责结算的所有者写入 | 现有事实，有改动（§4.3） |
+| 压缩槽：`{command, start?, running: Option<CancellationToken>}` | Loop | 私有。由指令、开始与结果折叠，装载时重建（§5.5） |
 
 Session 值不持有状态。解析出的连接只存在于一次策略调用内。
 
@@ -148,7 +150,8 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 | 事件 | 写入方 | 消费方 | 数据 |
 | --- | --- | --- | --- |
 | `context/compact`（新） | Loop，经其公开写操作 `AgentLoop::compact` | Loop，按序号 | `{}` |
-| `context/compaction`（有改动） | ContextPolicy，代其调用方 | Loop（手动步骤的终态）、ContextPolicy（重试复用）、投影、ContextMethods | `{turn_id?, request_id?, command?, through, outcome}` |
+| `context/compaction-start`（新） | ContextPolicy 在 `compact_step` 中代其调用方（Loop 的步骤或 ContextPreparation）写入 | Loop 与 ContextPreparation（重建）、客户端 | `{turn_id?, request_id?, command?, through, trigger: "manual" \| "threshold" \| "recovery", strategy}` |
+| `context/compaction`（有改动） | ContextPolicy，代其调用方；重载时由负责结算的所有者写入 | Loop（手动步骤的终态）、ContextPolicy（重试复用）、投影、ContextMethods、客户端 | `{turn_id?, request_id?, command?, start?, through, outcome}` |
 
 `outcome` 为以下之一：
 
@@ -162,6 +165,17 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 | 自动（阈值、预算恢复） | 该请求所在的 turn | 该请求 | 无 |
 | turn 内的手动步骤 | 该 turn | 无 | 被服务的 `context/compact` 的序号 |
 | 没有 turn 时的手动步骤 | 无 | 无 | 被服务的 `context/compact` 的序号 |
+
+**开始与结果的配对。**
+
+- `compact_step` 在调用 `strategy.compact` 之前立即写 `context/compaction-start`。在调用任何策略之前就结束的压缩不写开始。
+- 每条开始之后恰好有一条 `context/compaction`，其 `start` 等于该开始的序号，`turn_id`、`request_id`、`command`、`through` 与开始相同；结果为 `completed`、`skipped`、`failed` 或 `cancelled`。
+- 没有 `start` 的结果只出现在一种情况：手动指令在调用任何策略之前就结束了。
+  - 无法构造请求时为 `failed`（没有 `context/configured`、没有能力快照）；
+  - 待处理的指令被中断丢弃或在重载时结算时为 `cancelled`。
+- 没有走到策略调用的自动压缩两条事实都不写，与现在一样。
+- 每个分支任何时候最多只有一条开始没有结果：Loop 不在有在途请求时运行手动步骤，ContextPreparation 一次只运行一个准备。
+- 重载时，没有结果的开始意味着当时有压缩在途，由它的所有者写 `cancelled` 结果（§5.8）。自动压缩在开始之后被取消（中断或 steer）时，现在也写 `cancelled` 结果，而不再不写事实。
 
 **重放规则（所有策略）：**
 
@@ -177,7 +191,7 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - 原生存储只按 `through` 索引已完成的压缩。
 - 冻结的 v1 样本不改。v1 到原生的转换把 `summary` 映射为 `replacement: [summary_message(summary)]`、`strategy: "summary"`，并把其中的 id 映射为 `Some`。
 
-**动态事件（决定 A）。** 现在先把 `context/compact` 作为 `EventKind` 变体加入。#2 落地后（插件注册自己的事件类型；Timeline 检查结构与类型范围，不检查内容），它迁移为由 Loop 拥有的动态注册事件。F1 是 #2 的第一个真实使用者。
+**动态事件（决定 A）。** 现在先把 `context/compact` 和 `context/compaction-start` 作为 `EventKind` 变体加入。#2 落地后（插件注册自己的事件类型；Timeline 检查结构与类型范围，不检查内容），它们迁移为动态注册事件：`context/compact` 由 Loop 拥有，`context/compaction-start` 由压缩事实的所有者拥有。F1 是 #2 的第一个真实使用者。
 
 **诊断（破坏性修改）。** `CompactionDiagnosticsRecord` 改为与策略无关，原来面向摘要的必填字段移入一个由策略拥有的对象：
 
@@ -193,16 +207,20 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 公共字段由 ContextPolicy 填写，策略返回自己的对象。旧的扁平记录直接删除，不与新记录并存。冻结的 v1 样本不改；v1 到原生的转换把其中的扁平字段映射到公共部分和一个 `summary` 对象。
 
-**客户端可见性。** SessionBroadcast 不加过滤地转发每个分支事件（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)），但 Rpc 的 wire 过滤器——[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs) 中的 `ProductEvent::new`——目前会丢掉 `context/compaction`。F1 让协议 v3 连接能看到 `context/compact` 和 `context/compaction`，客户端由此能看到待处理的指令和每一个结果。`context/budget` 和 `context/prepare` 仍然隐藏。
+**客户端可见性。** SessionBroadcast 不加过滤地转发每个分支事件（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)），但 Rpc 的 wire 过滤器——[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs) 中的 `ProductEvent::new`——目前会丢掉 `context/compaction`。F1 经 `ProductEvent::new` 让协议 v3 连接能看到 `context/compact`、`context/compaction-start` 和 `context/compaction`，客户端由此可以从实时事件或历史中看到每一种状态。`context/budget` 和 `context/prepare` 仍然隐藏。
 
 ### 4.4 Rust 绑定
 
 ```rust
 // dim-agent-types/src/events.rs
 EventKind::ContextCompact(ContextCompactData {})                  // "context/compact"
+EventKind::ContextCompactionStart(ContextCompactionStartData {     // "context/compaction-start"
+    turn_id: Option<String>, request_id: Option<String>, command: Option<u64>,
+    through: u64, trigger: CompactionTrigger, strategy: String })
 pub struct ContextCompactionData {
     pub turn_id: Option<String>, pub request_id: Option<String>,
-    pub command: Option<u64>, pub through: u64, pub outcome: ContextCompactionResult }
+    pub command: Option<u64>, pub start: Option<u64>, pub through: u64,
+    pub outcome: ContextCompactionResult }
 pub enum ContextCompactionResult {
     Completed { cursor: String, replacement: Vec<Message>, strategy: String,
                 diagnostics: Box<CompactionDiagnosticsRecord>,
@@ -214,6 +232,7 @@ pub trait ContextModel { fn context_window(&self) -> f64; fn output_tokens(&self
                          fn threshold_tokens(&self) -> f64;
                          fn count_tokens(&self, r: &ModelRequest) -> f64; }   // 移除 compact
 pub trait CompactionStrategy: Send + Sync + 'static {
+    fn name(&self) -> &str;                            // 写入开始事实，例如 "summary"
     fn compact(&self, input: CompactionInput, cancel: CancellationToken)
         -> HostFuture<'_, StrategyOutcome>; }          // Completed | Skipped
 pub struct CompactionStrategyHost(pub Option<Arc<dyn CompactionStrategy>>);
@@ -287,14 +306,15 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 1. **保留边界。** `retain_from` 是分支上最后 K 轮中最老那一轮的第一条（暂定 K = 2，#128），含正在进行的那一轮。一轮从 `turn/start` 到 `turn/end`。
    - 条目按其来源事件在固定上下文中的序号归属到某一轮。
    - 从快照状态恢复的条目早于该快照的压缩，算作比任何保留轮都早。
-2. **策略。** 调用 `strategy.compact`，传入 `retain_from`、`fallback`（恢复时）和 `trigger`。
-3. **验收。** 对任何策略都检查：
+2. **开始。** 追加 `context/compaction-start`，带调用方的 id、`command`、`through`、`trigger` 和 `strategy.name()`。
+3. **策略。** 调用 `strategy.compact`，传入 `retain_from`、`fallback`（恢复时）和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`。
+4. **验收。** 对任何策略都检查：
    - 游标通过现有的合法切点检查；
    - 游标在 `retain_from` 之前，除非适用 `fallback`；
    - 投影后的请求比之前小，且低于窗口。
 
    任何一项不通过，结果变为 `failed`。
-4. **提交。** 带上调用方的 id 和 `command` 追加 `context/compaction`，然后保存可选快照。
+5. **结果。** 带上调用方的 id、`command` 和 `start` 追加 `context/compaction`，然后保存可选快照。
 
 调用方：
 
@@ -311,8 +331,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
       -- Loop 消费 k：有在途请求 -> 待处理
       step/tool-call {T, R1} ... step/tool-result {T, R1}
       -- Loop 消费工具结果（边界 b）：待处理 -> 压缩步骤
+ s    context/compaction-start {turn_id: T,       写入方：ContextPolicy（Loop 的步骤）
+        command: k, through: b, trigger: manual, strategy: "summary"}
  m    context/compaction {turn_id: T, command: k,  写入方：ContextPolicy（Loop 的步骤）
-                          through: b, outcome}
+                          start: s, through: b, outcome}
       -- Loop 消费 m：步骤结束 -> 照常 next_model
       input/consumed* ; step/model-start {T, R2}   Loop（不变）
       context/prepare {T, R2, ...} -> model/call   基于压缩后的上下文
@@ -323,10 +345,23 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 ```
  k    context/compact {}                          写入方：Loop（AgentLoop::compact）
       -- Loop 消费 k：没有在途请求 -> 立即运行压缩步骤
- m    context/compaction {command: k, through: k, outcome}   写入方：ContextPolicy
+ s    context/compaction-start {command: k, through: k,      写入方：ContextPolicy
+                                trigger: manual, strategy: "summary"}
+ m    context/compaction {command: k, start: s, through: k, outcome}   写入方：ContextPolicy
       -- Loop 消费 m：步骤结束 -> try_start
       （没有 turn/start，没有 turn/end；步骤期间应用的驱动输入此时启动 turn，
        基于压缩后的上下文准备）
+```
+
+**对照：自动压缩（在请求的准备中）：**
+
+```
+      step/model-start {T, R} ; context/prepare {T, R, through: p}       Loop
+      context/budget {T, R}                                              ContextPreparation
+ s    context/compaction-start {turn_id: T, request_id: R, through: p,   ContextPolicy
+        trigger: threshold | recovery, strategy: "summary"}
+ m    context/compaction {turn_id: T, request_id: R, start: s, through: p, outcome}
+      model/call {T, R}                                                  ContextPreparation
 ```
 
 **调度规则：**
@@ -344,7 +379,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 全部在 `crates/dim-agent-capabilities/src/agent_loop.rs`：
 
-1. **订阅。** 加入 `context/compact` 和 `context/compaction`；`Deps` 加入 `CompactionStrategyHost`。
+1. **订阅。** 加入 `context/compact`、`context/compaction-start` 和 `context/compaction`；`Deps` 加入 `CompactionStrategyHost`。
 2. **公开写操作。** `AgentLoop::compact()` 追加 `context/compact` 并返回其序号。`AgentLoop` 加上 `PublicService` 标记。
 3. **压缩槽**，由已消费事件折叠。消费 `context/compact` 时，Loop 把步骤标为待处理；没有在途请求时立即启动。
 4. **边界。**
@@ -353,60 +388,48 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 5. **步骤任务。** 与准备任务一样受跟踪；按 `start_preparation` 的方式构造请求，调用 `ContextPolicy::compact_step`。
 6. **步骤终态。** 消费到带 `command` 的 `context/compaction` 时，Loop 清空压缩槽并继续：在 turn 内调用 `next_model`，否则调用 `try_start`。
 7. **中断。** `stop/interrupt` 取消正在运行的步骤，并为待处理的步骤写 `cancelled`。
-8. **重建。** 压缩槽由事件折叠；在途的指令以 `cancelled` 结算。
+8. **重建。** 压缩槽由指令、开始与结果的配对折叠：
+   - 有手动开始而没有结果：步骤当时在运行。Loop 写带该 `start` 和 `command` 的 `cancelled` 结果。
+   - 有指令而既没有开始也没有覆盖它的结果：指令当时处于待处理。Loop 写带该 `command`、不带 `start` 的 `cancelled` 结果。
 
 不变的部分：turn 与请求的生命周期、输入消费、工具批次、对模型请求的 steer、预算恢复、`LoopSnapshot` 和 `context/prepare`。
 
 ### 5.6 ContextPreparation 新增的内容
 
 - `ContextPolicy::prepare` 改为调用 `compact_step`。ContextPreparation 注入 `CompactionStrategyHost`；两个宿主都是 `Some` 时它才有策略。
+- `rebuild`：没有结果的自动开始（没有 `command`）先以 `cancelled` 结果结算，然后照旧以重载终态结算未完成的准备。
 - `usage(cancel)` 读取已提交头部，运行现有估算。不写任何东西。
 
 ### 5.7 客户端看到的压缩状态
 
-每次压缩，客户端能看到三种状态：
+每种状态都是 Timeline 事实，客户端任何时候都可以从实时事件或历史中看到：
 
-| 状态 | 客户端如何看到 | 类别 |
+| 状态 | 事实 | 适用于 |
 | --- | --- | --- |
-| 待处理（手动） | 有一条 `context/compact`，但还没有 `command` 覆盖它的 `context/compaction` | Timeline 事实（§4.3，可见） |
-| 运行中 | 通知 `context.compaction.started` | Session 广播通知（C6） |
-| 已结束 | `context/compaction`：`completed`、`skipped`、`failed` 或 `cancelled` | Timeline 事实（可见） |
+| 待处理 | 有一条 `context/compact`，但还没有引用它的开始或结果 | 手动 |
+| 运行中 | 有一条 `context/compaction-start`，但还没有它的结果 | 手动与自动 |
+| 已结束 | `context/compaction`（`completed`、`skipped`、`failed`、`cancelled`） | 手动与自动 |
 
-**为什么“开始”是通知而不是事实。** 后续没有任何决定读取它：重载时，待处理的步骤和运行中的步骤都被结算为 `cancelled`（§5.8）；自动压缩本来就受它所属请求的约束。因此按原则 §4 规则 9，它不进 Timeline。
-
-**通知记录。** 通知使用 C6 的通用通知记录 `{source, kind, data}`（[#49](https://github.com/arcships/dim/issues/49)）：
-
-```text
-{ source: "context", kind: "compaction.started",
-  data: { branchId, trigger: "manual" | "threshold" | "recovery",
-          command?, turnId?, requestId? } }
-```
-
-- **发出方。** 手动压缩由 Loop 的步骤任务发出，自动压缩由 ContextPreparation 发出。两者都在 `compact_step` 内、调用 `strategy.compact` 之前发出，所以在调用任何策略之前就被策略层跳过的压缩不会发出通知。
-- **送达。** 它在 Session 广播通道上发出，由 Rpc 按 C6 的规定原样转发。送达是尽力而为的：在压缩期间才接入的客户端从事实（待处理的指令）得知状态，而不是靠错过的通知。
-
-**考虑过的其他方案。**
-
-- 在 `LoopSnapshot` 中加 `compacting` 标记，只能覆盖 Loop 的手动步骤，覆盖不到 ContextPreparation 中的自动压缩，而且 `LoopSnapshot` 是运行时类型。
-- 在 Timeline 上写“开始”事件会违反规则 9。
-
-**依赖。** 只有这条通知依赖 C6；宿主、步骤和事实都不依赖，就像只有 ContextMethods 依赖 C1 一样。
+- 在压缩中途接入的客户端读取分支历史（`session.history` 或接入时的重放），看到一条没有结果的开始，就能显示“运行中”，不需要额外的通道。
+- 开始带 `trigger`（manual、threshold 或 recovery）和 `strategy`，结果带结局。客户端不需要其他状态。
+- wire 过滤器的改动见 §4.3。
 
 ### 5.8 失败、中断、重载与重启
 
 | 情况 | Timeline 事实 | Loop 接下来做什么 | 客户端看到什么 |
 | --- | --- | --- | --- |
-| 策略错误或验收失败，turn 内的手动压缩 | `context/compaction {failed}` | 不压缩，继续该 turn（`next_model`）。下一个请求超过窗口时，由现有的预算恢复强制压缩（`fallback` 切点）；这次也失败的话，请求和 turn 失败 | 开始通知，然后是 `failed`；回复 `compaction_failed` |
-| 同上，turn 外的手动压缩 | `context/compaction {failed}` | 不再做别的（有输入在等时调用 `try_start`） | 开始通知，然后是 `failed`；回复 `compaction_failed` |
-| 同上，自动压缩 | `context/compaction {failed}` | 不变：请求不压缩继续；在恢复中则请求失败 | 开始通知，然后是 `failed` |
-| 步骤期间 `stop/interrupt` | `cancelled {reason}`，策略已经返回时为 `completed`；待处理的步骤立即写 `cancelled` | 在 turn 内，经现有的 `next_model` 检查，turn 以 `Cancelled` 结束 | `cancelled` 或 `completed`；回复与之一致 |
-| 自动压缩期间 `stop/interrupt` | 不变：策略没有返回时不写压缩事实；请求以 `Cancelled` 结束 | 不变 | 开始通知，然后是请求的终态 |
-| 插件重载（Loop 或策略部件） | 新一代 Loop 为已消费但没有事实的指令写 `context/compaction {command, cancelled: "capability reloading"}`。ContextPreparation 照旧结算被打断的准备 | 不重放。被重建的 turn 照旧以 `Failed` 结束 | `cancelled`；等待中的回复为 `operation_interrupted` 或 `compaction_cancelled` |
-| 压缩中途进程崩溃或重启 | 下次装载时按重载的方式结算 | 同重载 | 重启后看到 `cancelled` |
+| 策略错误或验收失败，turn 内的手动压缩 | 开始，然后是 `context/compaction {start, failed}` | 不压缩，继续该 turn（`next_model`）。下一个请求超过窗口时，由现有的预算恢复强制压缩（`fallback` 切点）；这次也失败的话，请求和 turn 失败 | 运行中，然后是 `failed`；回复 `compaction_failed` |
+| 同上，turn 外的手动压缩 | 开始，然后是 `failed` | 不再做别的（有输入在等时调用 `try_start`） | 运行中，然后是 `failed`；回复 `compaction_failed` |
+| 同上，自动压缩 | 开始，然后是 `failed` | 不变：请求不压缩继续；在恢复中则请求失败 | 运行中，然后是 `failed` |
+| 手动，无法构造请求（没有配置或快照） | 不带 `start` 的 `failed` | 同上 | 待处理，然后是 `failed` |
+| 正在运行的步骤（手动或自动）被 `stop/interrupt` | 该开始的 `cancelled {reason}`，策略已经返回时为 `completed` | turn 内的手动压缩：经 `next_model` 检查，turn 以 `Cancelled` 结束。自动压缩：请求照旧以 `Cancelled` 结束 | 运行中，然后是 `cancelled` 或 `completed`；回复与之一致 |
+| 手动指令待处理时被 `stop/interrupt` | 不带 `start` 的 `cancelled` | turn 的行为不变 | 待处理，然后是 `cancelled` |
+| 插件重载 | 对每条没有结果的开始，由其所有者写带该 `start` 的 `cancelled: "capability reloading"`：手动开始由 Loop 写，自动开始由 ContextPreparation 写（在现有重载终态之前）。待处理的指令由 Loop 写不带 `start` 的 `cancelled` | 不重放。被重建的 turn 照旧以 `Failed` 结束 | 运行中或待处理，然后是 `cancelled`；等待中的回复为 `operation_interrupted` 或 `compaction_cancelled` |
+| 压缩中途进程崩溃或重启 | 下次装载时，从同样的未配对开始和指令出发，按重载的方式结算 | 同重载 | 装载前从历史看到运行中，之后是 `cancelled` |
 
 **关于崩溃与重启：**
 
-- **事实是原子的。** Timeline 批次原子提交，所以 `context/compaction` 要么完整存在，要么不存在，不会只写一半。
+- **事实是原子的。** Timeline 批次原子提交，所以开始或结果要么完整存在，要么不存在，不会只写一半。在两者之间崩溃会留下一条没有结果的开始，由下次装载结算。
 - **快照只是缓存。** 在事实与投影快照之间崩溃不会造成问题：投影从事实重放（原则 §4 规则 9）。
 - **模型工作会丢失。** 进行中的策略模型工作会丢失。下一次自动触发或新的 `/compact` 会重新压缩。
 - **不续做半途的压缩。** 运行时在任何地方都不会在重载后重放模型调用，因为模型调用不是幂等的。而且用户的意图可能已经过时：历史可能已经增长，用户也可能不再需要它。
@@ -448,8 +471,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | Provider、ProductResolver、Aimux | 不变；摘要策略经 `ProviderConnectionResolver` 和 `ModelHost` 使用它们 |
 | AuxiliaryModel（S4） | 不使用。共用 `invoke_with_recovery`；谁先合入谁负责抽取 |
 | `sessionMethods`（C1） | 两个方法需要它。宿主值和策略不需要 C1 |
-| Session 广播通知（C6，#49） | 只有开始通知需要它（§5.7） |
-| Rpc `ProductEvent`（`tree_protocol.rs`） | 让 v3 连接能看到 `context/compact` 和 `context/compaction` |
+| Rpc `ProductEvent`（`tree_protocol.rs`） | 让 v3 连接能看到 `context/compact`、`context/compaction-start` 和 `context/compaction` |
 | turn 的消费方（客户端、将来的 Goal、Hooks） | 不受影响。turn 之外的手动压缩不写 `turn/*` |
 | #2 动态事件 | `context/compact` 迁移为动态注册；F1 是 #2 的第一个真实使用者 |
 | `--models` 配置、mock 配置 | 两个宿主都是 `None`：不压缩，也不登记 `session.context` |
@@ -460,7 +482,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 规则 | 回答 |
 | --- | --- |
 | 原则 §1（Capability、App Server 边界） | 新部件和补充都在 `dim-agent-capabilities`；App Server 只在产品配置中安装它们。 |
-| §1 唯一事件总线 | 指令和事实都在分支 Timeline 上，经其 Dispatcher 消费。方法的等待读取的也是这个 Timeline。开始通知经 C6 的通用记录走现有的 Session 广播通道，不是第二条总线。 |
+| §1 唯一事件总线 | 指令和事实都在分支 Timeline 上，经其 Dispatcher 消费。方法的等待读取的也是这个 Timeline。客户端从同样的事实看到压缩状态，没有旁路。 |
 | §3 依赖方向 | 新部件依赖核心服务。ContextPreparation 和 Loop 依赖 `ContextModelHost` 与 `CompactionStrategyHost` 两个键，每种配置都显式绑定它们。没有可选依赖。 |
 | §3 改动其他模块（Loop） | 已批准的改动。需求来自 Loop 自己对上下文窗口的控制：压缩是 Loop 的一个步骤，和模型调用、工具批次一样，Loop 不能在一个将被替换内容取代的上下文上推进。它在 Loop 内闭环：自动压缩本来就在 Loop 的请求准备中运行，手动步骤在同一个排序者之下使用同一个函数。 |
 | §3 不改动即可扩展（三层） | 机制（Loop 步骤与触发）和合同（记录与重放）固定，策略是可替换的 Session 值。新增策略既不改 Loop，也不改记录和重放；重放旧记录从不调用策略（§2.2）。 |
@@ -472,7 +494,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | §4 规则 6（上下文只来自交接后的事件） | 替换内容只经已完成事实的投影到达模型。待处理输入不被步骤消费（AGENTS 规则 10）。 |
 | §4 规则 7（公开事件与服务） | `TreeCommands`、`PublicService` 上的 `Branch::service`、`ProviderConnectionResolver`、`ModelHost`、`sessionMethods`。 |
 | §4 规则 8（基础设施不变） | Timeline、Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。新事件类型以后迁移到 #2 的动态注册。 |
-| §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。“压缩开始”没有任何后续决定读取，所以是广播通知而不是事实（§5.7）。用量查询不写任何东西。 |
+| §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。按维护者的决定，`context/compaction-start` 和可见的结果都是事实，理由有两条。第一，它们不只是驱动某个状态机：用户和其他状态机读取历史时需要这些内容（任何时候接入的 UI 都必须看到压缩正在进行，或者它是怎样结束的）。第二，重载结算要用它们：没有结果的开始意味着当时有压缩在途。Loop 和 ContextPreparation 由开始与结果的配对重建，这比只靠指令更精确：它能区分运行中和待处理，也覆盖自动压缩。用量查询不写任何东西。 |
 | ADR 002 D1（作用域） | 窗口事实、策略和方法：Session。指令、步骤和压缩槽：分支，在 Loop 中。 |
 | ADR 002 D2（无接线模块） | ContextMethods 经 `sessionMethods` 暴露所有者的操作。 |
 | ADR 002 D3（依赖） | 只硬依赖核心。Provider 或 Aimux 重载会传播到策略部件（已接受的代价）。 |
@@ -484,8 +506,8 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - `session.context` 命名空间。
 - 指令 `context/compact`。
 - 改动后的 `context/compaction`（可选 id、`command`、`cancelled`，以 `replacement` 和 `strategy` 代替 `summary`，与策略无关的诊断）。
-- `context/compact` 和 `context/compaction` 对 v3 客户端可见。
-- 通知 `context.compaction.started`（C6 记录）。
+- 事实 `context/compaction-start` 及结果上的 `start` 引用。
+- `context/compact`、`context/compaction-start` 和 `context/compaction` 对 v3 客户端可见。
 
 内部 Rust 改动：
 
@@ -494,7 +516,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - `CompactionCheckpoint.replacement`。
 - `AgentLoop` 与 `ContextPreparation` 上的 `PublicService`。
 
-**向机制所有者提出的需求：** 无。已在计划中的 #2 将承载 `context/compact`。
+**向机制所有者提出的需求：** 无。已在计划中的 #2 将承载 `context/compact` 和 `context/compaction-start`。
 
 ## 10. 决定与待定问题
 
@@ -507,11 +529,11 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 记录 | `replacement` 与 `strategy`，一条重放规则；可选 id、`command`、`cancelled`；直接修改（尚未发布） |
 | 端口 | `ContextModel`（窗口事实）与 `CompactionStrategy`（替换内容），各来自自己的 Session 值 |
 | 其他策略、组合 | F1 不做 |
-| 新事件类型 | 现在作为 `EventKind` 变体，#2 之后改为动态注册 |
+| 新事件类型 | `context/compact` 与 `context/compaction-start` 现在作为 `EventKind` 变体，#2 之后改为动态注册 |
 | `--models` 配置 | 没有能力快照，不压缩：接受 |
 | 提供方报告的溢出 | 单独的 Aimux issue，不在 F1 内 |
 | 诊断 | 现在就改成与策略无关：公共计数加一个由策略拥有的对象（破坏性修改） |
-| 客户端看到的压缩状态 | 待处理与已结束靠事实；开始靠 C6 通知（§5.7） |
+| 压缩状态 | 事实：待处理 = 有指令无开始，运行中 = 有开始无结果，已结束 = 结果（§5.7） |
 | 半途的压缩 | 从不续做；结算为 `cancelled`（§5.8） |
 
 待定：除 #128 外没有。
@@ -520,10 +542,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 测试用产品配置的 App Server 连接一个上下文窗口很小的 mock HTTP 提供方（`crates/dim-app-server/tests`），另加 `crates/dim-agent-capabilities/tests` 中的 Loop 与策略流程测试。
 
-1. **自动。** 超过阈值后，下一次准备写 `context/budget` 并发出一个摘要请求。它提交 `completed` 的 `context/compaction`：带该请求的 id，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，切点在最后 2 轮之前。模型请求以这条消息开头，原样保留最后 2 轮。
+1. **自动。** 超过阈值后，下一次准备依次写 `context/budget`、`context/compaction-start {trigger: threshold}`，并发出一个摘要请求。它提交 `completed` 的 `context/compaction`：带该请求的 id 和 `start`，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，切点在最后 2 轮之前。模型请求以这条消息开头，原样保留最后 2 轮。
 2. **预算恢复。** 重试时以 `trigger: provider_output_budget_exhausted` 压缩。
-3. **手动，没有 turn。** `session.context.compact` 只写 `context/compact`，然后是 `context/compaction {command}`；没有 `turn/*`、`step/*` 或 `model/call`。回复为 `completed`。
-4. **手动，turn 内。** 序列为 `step/tool-result` → `context/compaction {turn_id, command}` → 下一个请求的 `step/model-start`，该请求基于压缩后的上下文准备。
+3. **手动，没有 turn。** `session.context.compact` 只写 `context/compact`、`context/compaction-start {command}` 和 `context/compaction {command, start}`；没有 `turn/*`、`step/*` 或 `model/call`。回复为 `completed`。
+4. **手动，turn 内。** 序列为 `step/tool-result` → `context/compaction-start {turn_id, command}` → `context/compaction {turn_id, command, start}` → 下一个请求的 `step/model-start`，该请求基于压缩后的上下文准备。
 5. **重放与替换策略。**
    - 压缩之后重载的 Session、以及压缩之后 fork 出的分支，投影出的消息与之前相同。
    - 把摘要策略换成一个返回两条 `replacement` 消息的测试策略：其结果按同一条规则提交和重放，Loop 和策略层代码都不用改。
@@ -531,14 +553,11 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 6. **中断、重载与重启。**
    - 步骤期间 `session.stop` 写 `cancelled`（策略已经返回时为 `completed`）。
    - 步骤期间插件重载写 `cancelled: capability reloading`，不发第二次策略调用。
-   - 在摘要请求被挂住时杀掉 App Server 进程，再在同一个 home 上启动：不留下半截事实；下次装载为该指令写 `cancelled: capability reloading`；Session 投影出的历史与压缩前相同；新的 `/compact` 正常压缩。
+   - 在摘要请求被挂住时杀掉 App Server 进程，再在同一个 home 上启动：留下一条没有结果的开始，没有半截结果；下次装载写带该 `start` 的 `cancelled: capability reloading`，自动压缩同理；Session 投影出的历史与压缩前相同；新的 `/compact` 正常压缩。
    - 在事实之后、快照保存之前崩溃：从事实投影出压缩后的历史。
    - turn 内的手动压缩失败后 turn 继续；下一个请求超过窗口时由预算恢复压缩。
 8. **客户端看到的压缩状态。**
-   - 接入该 Session 的 v3 客户端依次收到 `context/compact`、带 `trigger: manual` 和指令序号的通知 `context.compaction.started`、`context/compaction`。
-   - 自动压缩时，客户端先收到带 `trigger: threshold` 和请求 id 的通知，然后是事实。
-   - 在调用任何策略之前就被策略层跳过的压缩不发通知。
-7. **用量、失败、凭据。**
-   - 用量查询返回窗口事实和估算，不写任何东西。
-   - 摘要请求失败时事实为 `failed`。
-   - 事实、回复和诊断中不出现 API key。
+   - 接入该 Session 的 v3 客户端实时收到 `context/compact`、`context/compaction-start`（`trigger: manual`）和 `context/compaction`。
+   - 在摘要请求被挂住时才接入的客户端，从分支历史（一条没有结果的开始）看到“运行中”。
+   - 自动压缩显示 `trigger: threshold` 和请求 id。
+   - 在以上所有测试中（成功、跳过、失败、中断、重载、崩溃），每条 `context/compaction-start` 都恰好有一条带其 `start` 的 `context/compaction`，也没有结果引用不存在的 `start`。
