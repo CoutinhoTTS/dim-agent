@@ -4,7 +4,7 @@ Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-pl
 
 > **Before-callback paths withdrawn.** The before-callback behaviour this document describes (delaying the commit of `input/message`, adding blocks to it, or withdrawing it in its own batch) is withdrawn with Hooks ([#21](https://github.com/arcships/dim/issues/21)); before callbacks only transform a draft synchronously. These passages are removed in the P3 design review.
 
-`dimcode acp` serves the Agent Client Protocol (ACP) over standard input and output so that editors can drive dim. It is a protocol adapter in the CLI process: it connects to the daemon over local RPC exactly like the CLI, maps each ACP session to a non-interactive dim Session, each ACP prompt to a `session.submit`, Session events to ACP `session/update` notifications, and dim approval requests to ACP permission requests. It opens no execution path in the daemon, writes nothing except through Rpc's built-in Session methods and `sessionMethods` services (dispatched by Rpc through the Session), and declares no event. The outcome of a prompt removed before it runs is decided from InputQueue's result fact `input/deleted`: when the effective `input/withdraw` was in the input's own batch (a before callback, for example a Hooks `user_prompt_submit` rule, [Hooks](Hooks.md)) it is the ACP stop reason `refusal`, with the optional `reason` of that `input/withdraw` shown as text; in every other case (the gateway's own cancel, or another client's withdraw) it is `cancelled`. Its only contracts are the RPC wire protocol and the ACP schema, both language-neutral data, so it has no Rust binding appendix ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)).
+`dimcode acp` serves the Agent Client Protocol (ACP) over standard input and output so that editors can drive dim. It is a protocol adapter in the CLI process: it connects to the daemon over local RPC exactly like the CLI, maps each ACP session to an interactive dim Session (the editor answers its approvals, [session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), each ACP prompt to a `session.submit`, Session events to ACP `session/update` notifications, and dim approval requests to ACP permission requests. It opens no execution path in the daemon, writes nothing except through Rpc's built-in Session methods and `sessionMethods` services (dispatched by Rpc through the Session), and declares no event. The outcome of a prompt removed before it runs is decided from InputQueue's result fact `input/deleted`: when the effective `input/withdraw` was in the input's own batch (a before callback, for example a Hooks `user_prompt_submit` rule, [Hooks](Hooks.md)) it is the ACP stop reason `refusal`, with the optional `reason` of that `input/withdraw` shown as text; in every other case (the gateway's own cancel, or another client's withdraw) it is `cancelled`. Its only contracts are the RPC wire protocol and the ACP schema, both language-neutral data, so it has no Rust binding appendix ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)).
 
 ## 1. Structure
 
@@ -19,7 +19,7 @@ flowchart LR
   end
   subgraph daemon["Daemon (App Server)"]
     Rpc["Rpc: local RPC protocol v3"]:::contract
-    Agents["Agents: session.create with interactive false"]
+    Agents["Agents: session.create (interactive)"]
     IQ["InputQueue: session.input.withdraw (sessionMethods)"]
     Appr["Approval: approval.respond"]
     Att["Attachments: attachment.put (sessionMethods key attachment)"]
@@ -39,7 +39,7 @@ The gateway depends on public RPC only; no daemon plugin knows it exists, and re
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `dimcode acp` | CLI process (not a daemon plugin) | Local RPC protocol v3 ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)): `hello`, `session.create` (with `interactive: false`, Agents supplement), `session.attach`/`detach`, `session.submit`, `session.input_lookup`, `session.history`, `session.stop`, `session.permission.update`, `approval.respond`; `session.input.withdraw` (InputQueue, `sessionMethods`) and `attachment.put` ([Attachments](Attachments.md), `sessionMethods` key `attachment`) ([session-boundary](../contracts/session-boundary.md)); the `input/withdraw {input_id, reason?}` and `input/deleted` data contracts ([session access A.4](../contracts/session-access.md#a4-withdrawal)); notifications `session.event`, `session.state`, `session.model.progress`, `approval.request`, `approval.cancelled`, `session.closed`; CLI daemon discovery | ACP agent on stdio; the ACP↔dim mapping of this document |
+| `dimcode acp` | CLI process (not a daemon plugin) | Local RPC protocol v3 ([protocol.rs](../../../crates/dim-app-server/src/protocol.rs), [tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)): `hello`, `session.create` (interactive, so without the `interactive` field), `session.attach`/`detach`, `session.submit`, `session.input_lookup`, `session.history`, `session.stop`, `session.permission.update`, `approval.respond`; `session.input.withdraw` (InputQueue, `sessionMethods`) and `attachment.put` ([Attachments](Attachments.md), `sessionMethods` key `attachment`) ([session-boundary](../contracts/session-boundary.md)); the `input/withdraw {input_id, reason?}` and `input/deleted` data contracts ([session access A.4](../contracts/session-access.md#a4-withdrawal)); notifications `session.event`, `session.state`, `session.model.progress`, `approval.request`, `approval.cancelled`, `session.closed`; CLI daemon discovery | ACP agent on stdio; the ACP↔dim mapping of this document |
 
 ## 2. Data and state
 
@@ -71,7 +71,7 @@ sequenceDiagram
   participant R as Rpc
   participant TL as Session Timeline (main)
   E->>G: session/new {cwd, mcpServers}
-  G->>R: session.create {cwd, agentId?, interactive: false}, then session.attach
+  G->>R: session.create {cwd, agentId?}, then session.attach
   G-->>E: sessionId, modes (mcpServers ignored)
   E->>G: session/prompt {prompt}
   G->>R: session.submit {branchId main, submissionId, user, mode queue}
@@ -172,7 +172,7 @@ All other rows: [Appendix B](#appendix-b-full-conflict-table).
 | `resource_link` | `Text` line `"@<uri>"` (A6) | Same message |
 | `session/set_mode` | Nothing: `permission/changed` is Session configuration, not model text | — |
 
-The gateway writes no raw blocks, keys, prompt sources or tool declarations; a before callback may add its own attributed raw blocks (Hooks `user_prompt_submit` context) to the same input, placed before the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are non-interactive, so `ask_user` is declared but answers that no one is available to answer; otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
+The gateway writes no raw blocks, keys, prompt sources or tool declarations; a before callback may add its own attributed raw blocks (Hooks `user_prompt_submit` context) to the same input, placed before the gateway's user content. Its inputs survive compaction only through the summary; child branches see them if consumed before their cut. ACP Sessions are interactive, so a question from `ask_user` is shown as waiting for an answer in another dim client (A13); otherwise the context is the same as any Queue input. The model never sees ACP identities, `mcpServers`, client capabilities, updates or diagnostics.
 
 ## 6. Interfaces (summary)
 
@@ -196,13 +196,13 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.1 Command events for state owned by others | Cancellation is the command `input/withdraw` through InputQueue's `session.input.withdraw`, or `stop/interrupt` through `session.stop`; owners write the results, and a withdraw with no effect writes nothing and replies `notHeld`. |
 | §4.2 No withdrawal after handover | After `input/applied` the gateway no longer withdraws and uses Loop's own command `session.stop`. |
 | §4.3 Intervene before a write only through before callbacks | The gateway registers no before callback; it checks ACP content only at its own stdio boundary as a client, and Rpc keeps only parameter-shape checks. |
-| §4.4 Core mechanisms carry no business meaning | The gateway asks no change of Timeline or any core mechanism; it uses only the generic optional `interactive` parameter of `session.create` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), which carries no ACP behaviour. |
+| §4.4 Core mechanisms carry no business meaning | The gateway asks no change of Timeline or any core mechanism; it creates ordinary interactive Sessions with `session.create` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), with no ACP behaviour in the daemon. |
 | §4.5 Read the whole batch before deciding | The gateway decides a prompt's outcome only from result facts (`input/deleted`, `input/consumed`, `turn/end`) received in sequence order, after the batch that carries them. |
 | §4.6 Model context only from handed-over events | The gateway's prompt is ordinary user content that enters context only once consumed; a deleted prompt never does. |
 | §4.7 Plugins interact only through public events and services | The gateway decides from InputQueue's `input/deleted`, reads only the public `reason` field of `input/withdraw` for display, and depends on no plugin-internal state or Hooks-specific event. |
 | §4.8 Generic requirements to mechanism owners | Not applicable: no mechanism change is needed. |
 | §4.9 Only facts later decisions use enter the Timeline | The gateway declares no event; it writes only the user's input and the commands `input/withdraw` and `stop/interrupt`, and its own state stays in CLI process memory. |
-| §1 Capability and App Server boundary | The gateway is a CLI-process client, not a Capability or a daemon plugin; it needs only the optional `interactive` parameter of `session.create` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)). |
+| §1 Capability and App Server boundary | The gateway is a CLI-process client, not a Capability or a daemon plugin; it needs only `session.create` as it is ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)). |
 | ADR 002 D1 Scope follows the owner | Its state is per CLI process and per ACP connection, so it lives in the CLI process. |
 | ADR 002 D2 No wiring modules | No wiring module; the gateway only calls public RPC. |
 | ADR 002 D3 Dependencies follow scope | It has no in-process dependencies; daemon reloads appear as `service_reloading` and are retried. |
@@ -211,7 +211,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None. The optional `interactive` parameter of `session.create` is defined in [session access A.3](../contracts/session-access.md#a3-sessionconfig-fields).
+None. ACP Sessions are interactive ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), so the gateway uses `session.create` as it is.
 
 ## Appendix A. Interface details
 
@@ -225,7 +225,7 @@ None. The optional `interactive` parameter of `session.create` is defined in [se
 | --- | --- | --- |
 | `initialize` | `hello {protocolVersion: 3}` once per process | Reply: `agentCapabilities { loadSession: true, promptCapabilities { image: true, audio: false, embeddedContext: true } }`, `authMethods: []` (A2) |
 | `authenticate` | — | Not offered; the local transport authenticates |
-| `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?, interactive: false}`, then `session.attach` | `sessionId` = dim session id; `modes` = permission presets, current = the Session's (A3); `mcpServers` ignored (E13) |
+| `session/new {cwd, mcpServers}` | `session.create {cwd, agentId?}`, then `session.attach` | `sessionId` = dim session id; `modes` = permission presets, current = the Session's (A3); `mcpServers` ignored (E13) |
 | `session/load {sessionId, cwd, mcpServers}` | `session.attach`, then `session.history` of `main` from 0 | Replay before the response; `cwd` mismatch → `invalid_params`; an already-open session returns the same mapping; the Session keeps its own `interactive` fact |
 | `session/prompt {sessionId, prompt}` | `session.submit {sessionId, branchId: "main", submissionId: <uuid>, user, mode: "queue"}` | Response when the consuming turn ends; `input/deleted` → at once `refusal` if the withdraw was in the input's own batch, else `cancelled`; a second prompt while one is in flight → `prompt_in_progress` (A4) |
 | `session/cancel {sessionId}` | `session.input.withdraw {sessionId, branchId: "main", inputId: input_event_id}` if still held (no `input/applied` seen), else (or if the reply is `notHeld`) `session.stop {sessionId, branchId: "main"}` | Prompt responds `cancelled` |
@@ -283,7 +283,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | Approval answered elsewhere | earlier `approval/respond` | Later editor answer rejected, ignored | Approval |
 | Approval cancelled by stop while the editor asks | `approval/cancelled` | ACP request cannot be retracted; later answer ignored | Approval |
 | Question in a loaded interactive Session | `question/asked` | Waits for another client; cancel interrupts → `question/cancelled` (A13) | Questions |
-| ACP-created Session | — | Non-interactive: `ask_user` answers that no one is available to answer | Questions |
+| Question in an ACP-created Session | `question/asked` | Interactive: shown as waiting for another client, as for a loaded Session (A13) | Questions |
 | Compaction during the prompt | — | No update; streaming unaffected | — |
 | Child branch created by the model | — | No message updates; its approvals forwarded | Gateway (A7) |
 | Session closed | `session.closed` | In-flight prompt `cancelled`; later `session_not_found` | Gateway |
@@ -313,7 +313,7 @@ Parameters are validated at the stdio boundary against the shared schema. Gatewa
 
 Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus the shared conformance suite (agent side):
 
-1. initialize, new, prompt → chunks without duplication across progress and committed text; `end_turn`; the created Session is non-interactive, and `ask_user` answers that no one is available to answer.
+1. initialize, new, prompt → chunks without duplication across progress and committed text; `end_turn`; the created Session is interactive (no `interactive` field in its record), and its approvals reach the editor as permission requests.
 2. Tool call updates; permission allow and deny; approval answered by another client.
 3. Cancel before adoption (deleted), after adoption (`notHeld`, stop), after consumption; stop racing turn end; another client's withdrawal.
 4. `session/load` replays history in order; a loaded interactive Session's question shows the waiting update and cancel ends it.
@@ -339,8 +339,8 @@ Flow tests driving `dimcode acp` over stdio against a mock-model daemon, plus th
 | A11 | An input adopted before the stop stays pending and runs later | Interrupt contract | Requires withdrawal of adopted inputs |
 | A12 | Reconnect window 30 s | Judgment | Other bound |
 | A13 | Questions in loaded interactive Sessions are shown as waiting, not answered over ACP | Decisions E13; ACP has no question request | Map to an ACP elicitation if one is standardized |
-| A14 | Deferred: no client label. `session.create` has no `client` parameter and `SessionConfig` no `createdBy` until something decides with them; ACP passes only `interactive: false` | [session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) | — |
-| A15 | Deferred with A14: "ACP Session display" (feature list, `/settings`) is a CLI display preference owned by the CLI and is not defined while there is no client label; if the CLI later needs a filter, it can use `interactive`; nothing in this adapter | Feature list names only the setting | Defined elsewhere; adapter unchanged |
+| A14 | Deferred: no client label. `session.create` has no `client` parameter and `SessionConfig` no `createdBy` until something decides with them; ACP passes no client label | [session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) | — |
+| A15 | Deferred with A14: "ACP Session display" (feature list, `/settings`) is a CLI display preference owned by the CLI and is not defined while there is no client label; if the CLI later needs a filter, it needs a client label, since ACP Sessions are interactive like CLI Sessions; nothing in this adapter | Feature list names only the setting | Defined elsewhere; adapter unchanged |
 
 ## Appendix F. Open questions
 

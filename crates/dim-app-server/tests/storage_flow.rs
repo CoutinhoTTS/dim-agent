@@ -83,13 +83,27 @@ async fn append(
         .unwrap()
 }
 
-#[tokio::test]
-async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
-    use dim_agent_capabilities::history::{
-        project_context_history, project_history, projection_checkpoint,
-    };
+/// The tables of the documented record example that hold business rows, in
+/// an order foreign keys accept.
+const BUSINESS_TABLES: &[&str] = &[
+    "settings_documents",
+    "providers",
+    "provider_selections",
+    "provider_imports",
+    "agents",
+    "agent_sessions",
+    "session_owners",
+    "timeline_branches",
+    "timeline_content",
+    "timeline_events",
+    "timeline_snapshots",
+    "session_files",
+    "session_file_owners",
+];
+/// Inserts the rows of `tables` from the complete record example in
+/// native-storage-format.md.
+fn insert_documented_records(connection: &Connection, tables: &[&str]) {
     use rusqlite::{params_from_iter, types::Value as SqlValue};
-
     let document = include_str!("../../../docs/design/appserver/native-storage-format.md");
     let json = document
         .split_once("## 完整记录示例")
@@ -102,36 +116,14 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .unwrap()
         .0;
     let example: serde_json::Value = serde_json::from_str(json).unwrap();
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let store = SqliteTimelineStore::new(db.clone());
-    let connection = Connection::open(&database.0).unwrap();
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON")
-        .unwrap();
-    connection
-        .execute("DELETE FROM agent_store_format", [])
-        .unwrap();
-    for table in [
-        "agent_store_format",
-        "settings_documents",
-        "providers",
-        "provider_selections",
-        "provider_imports",
-        "agents",
-        "agent_sessions",
-        "session_owners",
-        "timeline_branches",
-        "timeline_content",
-        "timeline_events",
-        "timeline_snapshots",
-    ] {
+    for table in tables {
         for row in example[table].as_array().unwrap() {
             let row = row.as_object().unwrap();
             let columns = row.keys().cloned().collect::<Vec<_>>();
             let values = row
                 .values()
                 .map(|value| match value {
+                    serde_json::Value::Null => SqlValue::Null,
                     serde_json::Value::Number(value) => SqlValue::Integer(value.as_i64().unwrap()),
                     serde_json::Value::String(value) => SqlValue::Text(value.clone()),
                     value => SqlValue::Text(value.to_string()),
@@ -149,6 +141,98 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
                 .unwrap();
         }
     }
+}
+
+/// The v13 schema exactly as v13 daemons wrote it, frozen here so that tests
+/// can build disposable v13 stores after the daemon moved on.
+const V13_SCHEMA: &[&str] = &[
+    "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 13))",
+    "CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL)",
+    "CREATE TABLE provider_imports (kind TEXT NOT NULL, id TEXT NOT NULL, source_schema TEXT NOT NULL, source_version INTEGER NOT NULL, source_digest TEXT NOT NULL, PRIMARY KEY (kind, id))",
+    "CREATE TABLE providers (provider_id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), record TEXT NOT NULL)",
+    "CREATE TABLE provider_selections (scope TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), provider_id TEXT NOT NULL, model_id TEXT NOT NULL)",
+    "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0))",
+    "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))",
+    "CREATE UNIQUE INDEX agents_default_unique ON agents(is_default) WHERE is_default = 1",
+    "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))",
+    "CREATE TABLE timeline_branches (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, info TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence >= 0), PRIMARY KEY (session_id, branch_id), FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id))",
+    "CREATE TABLE timeline_content (session_id TEXT NOT NULL, hash TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY (session_id, hash), FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id))",
+    "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, event_id TEXT, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))",
+    "CREATE TABLE timeline_snapshots (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), interpreter TEXT NOT NULL, event_id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (session_id, branch_id, interpreter, sequence), FOREIGN KEY (session_id, branch_id, sequence) REFERENCES timeline_events(session_id, branch_id, sequence))",
+    "CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id)",
+    "CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence)",
+    "CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL",
+    "CREATE INDEX timeline_tool_use_starts ON timeline_events(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'",
+];
+/// What v15 adds to v13 besides the marker.
+const V15_ADDITIONS: &[&str] = &[
+    "CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)",
+    "CREATE TABLE session_file_owners (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), file_id TEXT NOT NULL REFERENCES session_files(file_id), PRIMARY KEY (session_id, file_id))",
+    "CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)",
+];
+/// Builds a disposable v13 store, as a v13 daemon created it.
+fn v13_store(path: &std::path::Path) -> Connection {
+    let connection = Connection::open(path).unwrap();
+    for sql in V13_SCHEMA {
+        connection.execute_batch(sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (13)", [])
+        .unwrap();
+    connection
+}
+/// The schema statements of a store, sorted.
+fn schema(connection: &Connection) -> Vec<String> {
+    let mut statements: Vec<String> = connection
+        .prepare("SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    statements.sort();
+    statements
+}
+/// Every row of `table`, rendered and sorted.
+fn rows(connection: &Connection, table: &str) -> Vec<String> {
+    let mut query = connection
+        .prepare(&format!("SELECT * FROM {table}"))
+        .unwrap();
+    let columns = query.column_count();
+    let mut rows: Vec<String> = query
+        .query_map([], |row| {
+            (0..columns)
+                .map(|index| {
+                    row.get::<_, rusqlite::types::Value>(index)
+                        .map(|value| format!("{value:?}"))
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map(|values| values.join("|"))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    rows.sort();
+    rows
+}
+
+#[tokio::test]
+async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
+    use dim_agent_capabilities::history::{
+        project_context_history, project_history, projection_checkpoint,
+    };
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let connection = Connection::open(&database.0).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON")
+        .unwrap();
+    connection
+        .execute("DELETE FROM agent_store_format", [])
+        .unwrap();
+    insert_documented_records(&connection, &["agent_store_format"]);
+    insert_documented_records(&connection, BUSINESS_TABLES);
     drop(connection);
 
     assert_eq!(store.branches("s1").await.unwrap().len(), 2);
@@ -745,74 +829,80 @@ async fn invalid_ancestor_directory_rejects_only_its_session() {
 
 #[test]
 fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
-    for (native_tables, sql) in [
-        (false, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
+    /// The store a case changes.
+    enum Base {
+        Empty,
+        V13,
+        V15,
+    }
+    for (base, sql) in [
+        (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
         (
-            false,
+            Base::Empty,
             "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 1)); INSERT INTO agent_store_format VALUES (1)",
         ),
         (
-            false,
+            Base::Empty,
             "CREATE TABLE agent_store_format (version INTEGER PRIMARY KEY); INSERT INTO agent_store_format VALUES (99)",
         ),
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 1));
             INSERT INTO agent_store_format VALUES (1);
             INSERT INTO agents VALUES ('legacy', '{"name":"legacy","description":"","systemPrompt":"","tools":[]}', 1)"#,
         ),
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 2));
             INSERT INTO agent_store_format VALUES (2);"#,
         ),
         // v4 records keep input state, business blocks and prompt deliveredBy.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 4));
             INSERT INTO agent_store_format VALUES (4);"#,
         ),
         // v5 calls closed only by projection fill-ins have no closing fact (agent-029).
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 5));
             INSERT INTO agent_store_format VALUES (5);"#,
         ),
         // v6 stores a derived account catalog, without canonical model overrides.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 6));
             INSERT INTO agent_store_format VALUES (6);"#,
         ),
         // v7 selections identify only a model; v8 fixes the full provider/model identity.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 7));
             INSERT INTO agent_store_format VALUES (7);"#,
         ),
         // v8 has no managed OAuth binding in the provider record.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 8));
             INSERT INTO agent_store_format VALUES (8);"#,
         ),
         // v10 has a private account catalog JSON variant, not normalized managed records.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 10));
             INSERT INTO agent_store_format VALUES (10);"#,
         ),
         // v11's inline checkpoint schema must be preserved and rejected.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 11));
             INSERT INTO agent_store_format VALUES (11);
@@ -822,7 +912,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         ),
         // v9 is an unpublished development format without import markers.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE provider_imports; DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 9));
             INSERT INTO agent_store_format VALUES (9);
@@ -830,7 +920,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         ),
         // The removed branch-only v14 envelope must not be downgraded to v13.
         (
-            true,
+            Base::V13,
             r#"DROP TABLE settings_documents; DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 14));
             INSERT INTO agent_store_format VALUES (14);
@@ -839,20 +929,35 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         ),
         // A matching v13 schema cannot disguise a v14 format marker either.
         (
-            true,
+            Base::V13,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=14",
         ),
-        // A matching schema still requires a valid format marker.
-        (true, "DELETE FROM agent_store_format"),
+        // A matching schema still requires a valid format marker; a v13
+        // schema without marker 13 is never upgraded.
+        (Base::V13, "DELETE FROM agent_store_format"),
         (
-            true,
+            Base::V13,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=99",
         ),
+        // A v15 schema requires marker 15; it is never read as v13.
+        (Base::V15, "DELETE FROM agent_store_format"),
+        (
+            Base::V15,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=13",
+        ),
+        // A partly upgraded v13 store is neither format.
+        (
+            Base::V13,
+            "CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)",
+        ),
+        (Base::V15, "DROP INDEX session_file_owners_by_file"),
     ] {
         let database = Database::new();
-        if native_tables {
-            // v1 used the same tables; only its format marker predates v3.
-            drop(SqliteStorage::open(database.0.clone()).unwrap());
+        match base {
+            Base::Empty => {}
+            // v1 to v13 used the same tables; only their markers differ.
+            Base::V13 => drop(v13_store(&database.0)),
+            Base::V15 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -876,6 +981,131 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
     }
 }
 
+fn marker(connection: &Connection) -> Vec<i64> {
+    connection
+        .prepare("SELECT version FROM agent_store_format")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// S5a's one-way upgrade: an exact v13 store becomes the exact v15 store in
+/// place, with every business row unchanged, and only that open reports it.
+#[tokio::test]
+async fn a_v13_store_upgrades_in_place_once() {
+    let mut v15: Vec<String> = V13_SCHEMA
+        .iter()
+        .chain(V15_ADDITIONS)
+        .map(|sql| sql.replace("(version = 13)", "(version = 15)"))
+        .collect();
+    v15.sort();
+
+    // An empty store is created at v15.
+    let fresh = Database::new();
+    let db = SqliteStorage::open(fresh.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+    let connection = Connection::open(&fresh.0).unwrap();
+    assert_eq!(schema(&connection), v15);
+    assert_eq!(marker(&connection), [15]);
+    drop(connection);
+
+    // A v13 store holding every documented business row.
+    let database = Database::new();
+    let connection = v13_store(&database.0);
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON")
+        .unwrap();
+    let v13_tables = &BUSINESS_TABLES[..BUSINESS_TABLES.len() - 2];
+    insert_documented_records(&connection, v13_tables);
+    let before: Vec<_> = v13_tables
+        .iter()
+        .map(|table| rows(&connection, table))
+        .collect();
+    assert!(before.iter().filter(|rows| !rows.is_empty()).count() >= 7);
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), Some(13));
+    let store = SqliteTimelineStore::new(db.clone());
+    assert_eq!(store.branches("s1").await.unwrap().len(), 2);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), v15);
+    assert_eq!(marker(&connection), [15]);
+    let after: Vec<_> = v13_tables
+        .iter()
+        .map(|table| rows(&connection, table))
+        .collect();
+    assert_eq!(after, before);
+    for table in ["session_files", "session_file_owners"] {
+        assert!(rows(&connection, table).is_empty());
+    }
+    drop(connection);
+
+    // The upgraded store reopens as v15 and reports nothing.
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+}
+
+/// The daemon names the one-way upgrade on stderr, where its default log
+/// filter would hide a tracing event, and only on the start that upgrades.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let database = Database::new();
+    drop(v13_store(&database.0));
+    let path = database.0.canonicalize().unwrap();
+    let socket = PathBuf::from("/tmp").join(format!("dim-upgrade-{}/s", uuid::Uuid::new_v4()));
+    let mut reports = vec![];
+    for _ in 0..2 {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+            .args(["--mock-model", "--no-ws", "--unix"])
+            .arg(&socket)
+            .arg("--database")
+            .arg(&database.0)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(ready.contains("unixPath"), "{ready}");
+        child.kill().await.unwrap();
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .await
+            .unwrap();
+        reports.push(stderr);
+    }
+    let line = format!(
+        "Upgraded native store {} from format v13 to v15; earlier dimcode versions cannot open it.",
+        path.display()
+    );
+    assert!(
+        reports[0].lines().any(|report| report == line),
+        "{reports:?}"
+    );
+    assert!(!reports[1].contains("Upgraded native store"), "{reports:?}");
+    let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+}
+
 #[tokio::test]
 async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     let database = Database::new();
@@ -884,7 +1114,7 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
         dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone()),
     ));
     let session = root.plugin(capability_plugin(
-        dim_app_server::storage::SessionStorePlugin,
+        dim_app_server::storage::SessionStorePlugin::new(0),
     ));
     (&sqlite).await.unwrap();
     (&session).await.unwrap();

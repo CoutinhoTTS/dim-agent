@@ -423,6 +423,47 @@ pub trait ResolveContextModel: Send + Sync + 'static {
 /// An explicit optional policy binding keeps dependencies visible in every profile.
 pub struct ContextModelHost(pub Option<Arc<dyn ResolveContextModel>>);
 
+/// A Session file SessionStore stored. `path` is absolute on the Session's
+/// resource node and names the same bytes for the file's whole life.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSessionFile {
+    pub file_id: String,
+    pub path: std::path::PathBuf,
+    pub bytes: u64,
+}
+/// The `sessionFiles` error codes: `not_found`, `invalid`, `too_large`,
+/// `node_unavailable`, `cancelled` and `storage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFileErrorCode {
+    NotFound,
+    Invalid,
+    TooLarge,
+    NodeUnavailable,
+    Cancelled,
+    Storage,
+}
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct SessionFileError {
+    pub code: SessionFileErrorCode,
+    pub message: String,
+}
+/// `sessionFiles.put`: stores `content` once, read-only, as the file `name`
+/// owned by `session_id`. Cancellation takes effect until the file is
+/// committed; afterwards the reply stands.
+pub trait PutSessionFile: Send + Sync + 'static {
+    fn put(
+        &self,
+        session_id: String,
+        name: String,
+        content: Vec<u8>,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+}
+/// The process service `sessionFiles`, provided by SessionStore, so that its
+/// consumers name no App Server type.
+pub struct SessionFilesHost(pub Arc<dyn PutSessionFile>);
+
 pub struct IdentityContext;
 impl PrepareContext for IdentityContext {
     fn prepare(

@@ -1,6 +1,7 @@
 # SessionStore Session files
 
-Status: Draft (for review). Roadmap item S5a ([#59](https://github.com/arcships/dim/issues/59)), after S6 ([#51](https://github.com/arcships/dim/issues/51)).
+Status: Implemented. Roadmap item S5a ([#59](https://github.com/arcships/dim/issues/59), [#95](https://github.com/arcships/dim/pull/95)), after S6 ([#51](https://github.com/arcships/dim/issues/51)). The fork and delete
+methods that use it are S5c's (§13); §17 lists what the implementation changed.
 Overview: [Appendix B.2](../overview.md#b2-app-server-process-plugins), SessionStore and FileStorage rows. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) process scope, inside the existing SessionStore plugin.
 Consumers: [Attachments](../plugins/Attachments.md) (P2) and Session fork and deletion (S5c).
@@ -200,6 +201,11 @@ txn 2 finding the Session gone or its row no longer pending under G. SessionStor
 unowned and a sweep is scheduled. If that update fails too, the row stays pending under G, and
 the next generation sweeps it.
 
+The put runs as SessionStore's own task: a caller that stops waiting cancels it, and the task
+still ends by committing or abandoning, so no row stays pending under a live generation. Until
+P3 adds `resourceNode`, the put reads no node: it looks up the control node's FileStorage, and
+txn 1 answers `not_found` (D2).
+
 ### 5.2 Fork (S5c)
 
 ```
@@ -251,7 +257,7 @@ also removes the Session's command output on the node first
 | --- | --- |
 | A put abandons a file | Its directory may exist |
 | A commit removes owner rows (S5c delete, creation rollback) | Files may have lost their last owner |
-| The first put on a node in each SessionStore generation | Pending rows of a crashed or reloaded generation, unowned rows a failed removal left, and directories whose removal a power loss undid |
+| Every put on a node until a sweep of the current SessionStore generation has completed there (D3) | Pending rows of a crashed or reloaded generation, unowned rows a failed removal left, and directories whose removal a power loss undid |
 | S5c cleanup | Explicit reclamation |
 
 Step 3 is safe because the directory belongs to one database (§3.1), and a put
@@ -314,7 +320,7 @@ business directory.
 | --- | --- |
 | Parent | Every component but the last is opened as `open_directory` opens it: an existing directory reached without following links, never the reserved directory. A missing parent fails `Io` `NotFound`; there is no recursive creation, and callers create each level in order |
 | Reserved names | `path` already rejects the reserved prefix `.dim-file-storage-` and `auth.json.lock` by name (`InvalidPath`) |
-| Aliases | Aliases are checked the way `lock` checks them, before anything is created. The parent's reserved directory is ensured first, so any spelling the filesystem equates with it already exists. Then the lock keys for the last component and for `auth.json.lock` are opened in that reserved directory; if they are the same file, the name is an alias of the account marker and the call fails `InvalidPath` |
+| Aliases | Aliases are checked the way `lock` checks them, before anything is created. The parent's reserved directory is ensured first, so any spelling the filesystem equates with it already exists. Then the key for `auth.json.lock` is ensured in that reserved directory and the key for the last component is opened if it exists; if they are the same file, the name is an alias of the account marker and the call fails `InvalidPath` |
 | Create | An absent last component is created relative to the held parent handle: Unix `mkdirat` with mode `0700`; Windows `NtCreateFile` with `FILE_CREATE` and `FILE_DIRECTORY_FILE`, inheriting the parent's DACL |
 | Present | An existing directory is opened as `open_directory` opens it, so an alias of the reserved directory fails `InvalidPath`. An existing business directory counts as created, just as S6's `remove` counts an absent entry as removed. Any other existing entry (file, link, reparse point, special file) fails `Io` and is left untouched; links are never followed |
 | Durability | In both the created and the present case the parent is synced before the call returns, so a retry after `Unsynced` confirms durability. A sync failure returns `Unsynced` (the directory exists and is visible, durability unconfirmed); its message is generalized from "file replaced" to cover directories. Windows has no directory sync, as for `replace` |
@@ -322,10 +328,10 @@ business directory.
 | Cancellation | Checked up to the creation, which is the commit boundary. Once created, the sync result is reported |
 | Errors | `InvalidPath`, `Io` (`NotFound` parent, an existing non-directory entry, other I/O), `Unsynced`, `Closed`, `Cancelled`, `Worker` |
 
-The lock keys the alias check opens stay in the reserved directory, as keys for file names do;
-`remove` deletes them with the directory. The operation lives inside FileStorage's own module,
-beside `list` and `remove`, and holds the same generation admission. FileStorage's plugin page
-documents it when it is implemented.
+The alias check never creates a key for the new directory's name, so a put leaves no key behind
+in `<db>.session-files/.dim-file-storage-locks`, which is never removed (Design changes, D1). The
+operation lives inside FileStorage's own module, beside `list` and `remove`, and holds the same
+generation admission. FileStorage's plugin page documents it.
 
 ## 8. Storage format
 
@@ -438,7 +444,7 @@ Attachments names no SessionStore type; the Rust binding is Appendix A.
 | `invalid` | `name` breaks the rule below | Nothing |
 | `too_large` | Content over 16 MiB | Nothing |
 | `node_unavailable` | The FileStorage of the Session's resource node is not reachable. On the control node this means FileStorage is reloading or closed. Retryable | Nothing owned; an abandoned directory is swept |
-| `cancelled` | Cancelled before txn 2, including SessionStore unloading | Nothing owned; swept |
+| `cancelled` | Cancelled before txn 2, including SessionStore unloading and a later generation's sweep claiming the pending row | Nothing owned; swept |
 | `storage` | SQLite or FileStorage failure, including `Unsynced` (durability unconfirmed) | Nothing owned; swept |
 
 Limits, and who owns them:
@@ -665,9 +671,30 @@ None to the runtime or rutis. Supplements and requirements to other owners:
    policy) is unchanged. Denying another Session's file or the database directory is acceptance
    of the item in §11.2, because `read` is not path-scoped (§11.1).
 
+Tests: items 1, 3 (unknown Session), 5, 6 (names, size, a cancelled call), 4 and 9 are flow
+tests through `sessionFiles` in
+[session_files_flow.rs](../../../crates/dim-app-server/tests/session_files_flow.rs); 2, and 3 and
+6 between the write and txn 2, run S5c's fork step and a hook at that point in
+[files/tests.rs](../../../crates/dim-app-server/src/storage/files/tests.rs); 7 is
+`a_v13_store_upgrades_in_place_once`, `the_daemon_reports_a_v13_upgrade_on_stderr_once` and the
+refusal cases in [storage_flow.rs](../../../crates/dim-app-server/tests/storage_flow.rs); 8 is
+`directory_creation_stays_inside_the_authorized_root` in
+[file_storage_flow.rs](../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs).
+
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
 `cargo test --workspace --locked`, and `cargo run --locked -p xtask -- graph` then `check`,
 because SessionStore provides a new service.
+
+## 17. Design changes in implementation
+
+Changes the implementation made to this design ([roadmap §5.3](../roadmap.md#53-实现中发现的变更)). Each affects
+only S5a.
+
+| # | Change | Why |
+| --- | --- | --- |
+| D1 | `create_directory` ensures the key for `auth.json.lock` and only opens the key for the new name, instead of opening both keys with creation (§7) | Opening a key with creation leaves a key file named after the directory, and FileStorage unlinks keys only when it removes their parent. `<db>.session-files` is never removed, so every put would have left one key there for good. An existing alias of the marker still resolves to the marker's key, so the check gives the same answer |
+| D2 | Before P3, a put reads no resource node. The Session's existence is decided by txn 1, after the FileStorage lookup, so an unknown Session gets `node_unavailable` while FileStorage is not active (§5.1) | `SessionConfig.resourceNode` does not exist yet, so a read before txn 1 would only repeat txn 1's check. P3 adds the node read before the lookup |
+| D3 | Every put schedules a sweep until one sweep of the generation has completed on its node, instead of only the first put (§5.4) | A first sweep stopped by an unavailable node would otherwise wait for an abandon or a release to retry; a completed sweep ends the extra requests |
 
 ## Appendix A. Rust binding
 
