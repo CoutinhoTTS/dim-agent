@@ -100,8 +100,10 @@ fn native_events() -> Vec<AgentEvent> {
             recovery: None,
         }),
         EventKind::ContextCompaction(ContextCompactionData {
-            turn_id: turn(),
-            request_id: request_id(),
+            turn_id: Some(turn()),
+            request_id: Some(request_id()),
+            command: None,
+            start: None,
             through: 4,
             outcome: ContextCompactionResult::Failed {
                 error: "fixture".into(),

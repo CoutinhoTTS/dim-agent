@@ -730,6 +730,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::host::ContextModelHost@session",
             "scope": null,
             "status": "Ready"
@@ -758,6 +763,12 @@
         "resolved": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "scope": null,
             "provider": 10,
             "generation": 1
@@ -796,6 +807,12 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "provider": 10,
             "declared": true,
             "external": true
@@ -1069,6 +1086,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_capabilities::host::ContextModelHost@session",
             "scope": null,
             "status": "Ready"
@@ -1102,6 +1124,12 @@
         "resolved": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "scope": null,
+            "provider": 10,
+            "generation": 1
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "scope": null,
             "provider": 10,
             "generation": 1
@@ -1146,6 +1174,12 @@
         "reads": [
           {
             "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "provider": 10,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
             "provider": 10,
             "declared": true,
             "external": true
@@ -2457,6 +2491,12 @@
     "bindings": [
       {
         "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+        "provider": 10,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::host::CompactionStrategyHost@session",
         "provider": 10,
         "generation": 1,
         "removing": false

@@ -2,7 +2,7 @@
 
 Status: Draft. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel` under the purpose key `session-title`. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the generic notice record is a runtime requirement in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
+SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the generic notice record is a runtime requirement in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 1. Structure
 
@@ -23,7 +23,7 @@ flowchart LR
   ST -->|"listen: input/applied on main"| SB
   ST -->|"read prefix up to N"| TT
   ST --> CFG
-  ST -->|"complete purpose session-title"| AUX
+  ST -->|"complete(model, text)"| AUX
   ST -->|"setTitle with revision"| META
   META -->|"title notice"| SB
   ST -->|"read at use"| Settings
@@ -34,7 +34,7 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel`, Settings source `session-title` | `sessionMethods` key `session.rename` (declared in its `provides`); purpose key `session-title`; Settings source `session-title` with fields `enabled`, `maxLength` |
+| `SessionTitle` | Session | Session broadcast of its Session, TimelineTree (fixed prefix of `main`), `SessionConfig`; process services SessionStore title metadata, Provider `AuxiliaryModel` (hard dependency: without Provider SessionTitle is reported failed for the missing service), Settings source `session-title` | `sessionMethods` key `session.rename` (declared in its `provides`); Settings source `session-title` with fields `enabled`, `maxLength`, `model` |
 
 Every dependency is at the Session scope or the enclosing process scope. Most are existing typed services; SessionStore title metadata and the title notice are proposed supplements, and Settings sources exist for Rust owners while the named `settings` service is not implemented (S8b) ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins); shapes in A.2). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). A reload of SessionStore, Provider or Settings reloads SessionTitle, which cancels an in-flight generation; this is accepted ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Business configuration changes never reload ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)).
 
@@ -50,10 +50,10 @@ flowchart TB
     MD["revision, title text, source auto or manual"]
   end
   CONF["SessionConfig: interactive, collaborationRole"]
-  CFG["session-title: enabled, maxLength"]
+  CFG["session-title: enabled, maxLength, model"]
   MEM["in-flight generation, failed attempts (memory)"]:::new
   FUI -->|"text only"| MEM
-  CC -->|"inherit hint"| MEM
+  CC -->|"Session model"| MEM
   CONF --> MEM
   CFG --> MEM
   MEM -->|"setTitle, expected revision"| MD
@@ -78,7 +78,7 @@ sequenceDiagram
   Note over ST: interactive leader, enabled, none in flight
   ST->>Meta: metadata: no title, revision r
   ST->>TL: prefix(main, published through N): first adopted operator input text
-  ST->>Aux: complete(session-title, text)
+  ST->>Aux: complete(model, text)
   Aux-->>ST: title text
   ST->>Meta: setTitle(expected r, auto)
   Meta-->>SB: title notice
@@ -148,14 +148,13 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | Set or clear a manual title |
-| `session-title` | Provider purpose key | Model policy for title generation; unconfigured inherits |
-| `session-title` source: `enabled`, `maxLength` | Business configuration (Settings source) | Turn generation off; title length |
+| `session-title` source: `enabled`, `maxLength`, `model` | Business configuration (Settings source) | Turn generation off; title length; model for titles (unset: the Session's model) |
 | `title`, `titleSource` in `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore | Display |
 | Title notice `{sessionId, title, titleSource, revision}` | Session broadcast notice emitted by SessionStore (generic record, §9; SessionStore supplement) | Live title update for subscribed clients |
 
 ## 7. Security
 
-The first input's text is sent to the model chosen for `session-title`; with the default inherit policy that is the Session's provider. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
+The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. A Session whose model is an `external-agent:*` entry is not titled automatically, so a title request never goes to an external agent bridge. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
 
 ## 8. Rule check
 
@@ -210,11 +209,11 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 | SessionStore metadata (supplement) | `metadata` | async | `{sessionId}` | `{revision, title?: {text, source: "auto" \| "manual"}}`; errors `not_found`, `storage` |
 | SessionStore metadata (supplement) | `setTitle` | async | `{sessionId, expectedRevision, title: {text, source} \| null}` | New `revision`; errors `conflict`, `not_found`, `storage`. After a commit SessionStore emits the title notice |
 | SessionStore (supplement) | title notice | Session broadcast notice (generic record, §9) | — | `{source: "SessionStore", kind: "title", data: {sessionId, title, titleSource, revision}}` on the Session's broadcast channel; no sequence number, not replayed |
-| Provider `AuxiliaryModel` | `complete` | async | `{purpose: "session-title", inherit?: model selection, request: {system, user}}` | Text; errors as data. The inherit hint is SessionTitle's assumption (A1). Cancelled by a cancel request or by dropping the call |
+| Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: text}], maxOutputTokens}}` ([design](../appserver/auxiliary-model.md)) | `{text, stopReason, usage}`; errors as data. Cancelled by a cancel request or by dropping the call |
 
 ### A.3 Configuration
 
-Settings source `session-title`, one document: `enabled: bool` default `true`; `maxLength: u32` default 80, range 10..=200 (A3). The schema SessionTitle declares carries the defaults and the range (`minimum`/`maximum`), so Settings rejects an out-of-range value on write and when reading a persisted file, and SessionTitle uses the delivered document without checking it again. Read at each decision. SessionTitle has no tool that writes configuration, so the document is written only through the client methods `settings.read`/`settings.update` (S8b, not implemented). A change is a data update with notification, never a reload. Enabling the plugin is structural configuration. Provider policy for `session-title` lives in Provider's per-purpose policy; unconfigured inherits the Session's model (A1).
+Settings source `session-title`, one document: `enabled: bool` default `true`; `maxLength: u32` default 80, range 10..=200 (A3); `model: {providerId, modelId} | null` default `null`, meaning the model of the latest `context/configured` in the prefix (A1). The schema SessionTitle declares carries the defaults and the range (`minimum`/`maximum`), so Settings rejects an out-of-range value on write and when reading a persisted file, and SessionTitle uses the delivered document without checking it again. Read at each decision. SessionTitle has no tool that writes configuration, so the document is written only through the client methods `settings.read`/`settings.update` (S8b, not implemented). A change is a data update with notification, never a reload. Enabling the plugin is structural configuration. An unselectable `model` makes the call fail `model_unavailable`, which counts as a failed attempt.
 
 ### A.4 Mechanics
 
@@ -225,7 +224,7 @@ Settings source `session-title`, one document: `enabled: bool` default `true`; `
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `metadata(session)`: skip if any title exists; keep revision `r` |
 | Read | Fixed prefix of `main` published through `N` (session-access A.5, `atLeast = N`); the first operator input (`user` content; A10) that has an `input/applied`, and its text. No such input or no text: no title (A8) |
-| Generate | `complete({purpose: "session-title", inherit: model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
+| Generate | `complete({model: the source's model, else the model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
 | Write | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
 | Reload / unload | Generation cancelled with the plugin; nothing written; events in the gap are not replayed |
@@ -283,7 +282,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | `AuxiliaryModel::complete` accepts an inherit hint (model of the latest `context/configured`) | Judgment | Provider resolves inheritance itself |
+| A1 | An unset `model` uses the Session's model (latest `context/configured`) | Judgment | A fixed default model |
 | A2 | Instruction text, 8-word target, 2000-character excerpt | Judgment | Different prompt or excerpt |
 | A3 | Title length default 80 (10..=200), single line | Judgment | Other limits |
 | A4 | 30 s generation budget | Judgment | Other timeout |
@@ -318,6 +317,6 @@ async fn set_title(&self, session_id: &str, expected_revision: u64, title: Optio
 pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
 pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
 // Provider AuxiliaryModel
-async fn complete(&self, purpose: &str, inherit: Option<ModelSelection>,
-    request: AuxiliaryRequest, cancel: CancellationToken) -> Result<String, AuxiliaryError>;
+async fn complete(&self, model: ModelId, request: AuxiliaryRequest,
+    cancel: CancellationToken) -> Result<AuxiliaryReply, AuxiliaryError>;
 ```
