@@ -760,6 +760,35 @@ impl AgentIndex {
             None => host.agent.create_session(config).await,
         }
     }
+    /// `session.delete` ([S5c §3.2](../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)):
+    /// holds S's admission gate, so nothing loads S meanwhile, closes S if
+    /// it is loaded, has SessionStore remove what it stores of S, then
+    /// forgets S and keeps its slot closed. An unknown id has nothing to
+    /// remove. A delete that fails before the rows go releases the gate
+    /// with the slot open, and S loads again on its next use.
+    pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()> {
+        let slot = self.slot(id);
+        let _gate = slot.gate.lock().await;
+        // A business close, as `session.close`: capabilities settle accepted
+        // work and release processes, leases and member requests.
+        if let Some(host) = self.host_by_session(id)
+            && let Some(session) = host.agent.get_session(id)
+        {
+            if let Err(error) = session.close().await {
+                // The facts the close could not write go with the rest.
+                tracing::error!(%error, session_id = id, "Session cleanup failed before its delete");
+            }
+            host.traces.wait_session(id).await;
+        }
+        if let Some(store) = &self.session_store {
+            store.delete_session(id).await?;
+        }
+        slot.closed.store(true, Ordering::Release);
+        let mut inner = self.directory.inner.lock().expect("agent index");
+        inner.versions.remove(id);
+        inner.unavailable_sessions.remove(id);
+        Ok(())
+    }
     /// `agent.create`: one more Agent, a peer of every other. A requested
     /// profile comes from outside the process and may only select provided
     /// tools, each once; without one the process default profile applies.

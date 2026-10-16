@@ -209,7 +209,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         })
                         .unwrap_or_else(|| product_home.join("rust")),
                 )
-                .join("command-output");
+                .join(dim_app_server::storage::COMMAND_OUTPUT_DIRECTORY);
             defaults::install_local_execution(
                 &mut builder,
                 ModelProviderPlugin::process,

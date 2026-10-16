@@ -210,6 +210,37 @@ impl SessionFiles {
         }
         self.0.tasks.wait().await;
     }
+
+    /// S5c's delete step: removes `command-output/<session_id>` below the
+    /// database directory through the node's FileStorage. An absent directory
+    /// counts as removed. FileStorage syncs the parent before it returns, so
+    /// the caller commits the row deletion only after a durable removal.
+    /// Fails without the node's FileStorage, or with `Locked` or
+    /// `DirectoryNotEmpty` while a writer outside the closed Session holds
+    /// an entry; the delete is then retried.
+    pub(super) async fn remove_command_output(
+        &self,
+        session_id: &str,
+    ) -> dim_agent_runtime::Result<()> {
+        let storage = self
+            .0
+            .ctx
+            .get::<FileStorage>()
+            .ok_or_else(|| error("the Session's resource node storage is unavailable"))?;
+        let path = storage
+            .path(
+                self.0.root,
+                Path::new(super::COMMAND_OUTPUT_DIRECTORY).join(session_id),
+            )
+            .map_err(error)?;
+        storage
+            .remove(&path, &self.0.stopping)
+            .await
+            .map_err(error)?;
+        #[cfg(test)]
+        tests::after_output_removal(session_id)?;
+        Ok(())
+    }
 }
 
 impl PutSessionFile for SessionFiles {

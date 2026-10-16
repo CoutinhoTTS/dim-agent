@@ -709,6 +709,7 @@ async fn run_connection(
                                             "session.history",
                                             "session.input_lookup",
                                             "session.create",
+                                            "session.delete",
                                             "session.model.progress",
                                             "session.methods",
                                         ]);

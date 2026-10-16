@@ -76,6 +76,7 @@ pub enum Call {
     Stop(Stop),
     Idle(Idle),
     Close(SessionId),
+    Delete(SessionId),
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
     AgentCreate(AgentCreate),
@@ -367,7 +368,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 20] = [
+const BUILTIN_METHODS: [&str; 21] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -382,6 +383,7 @@ const BUILTIN_METHODS: [&str; 20] = [
     "session.stop",
     "session.idle",
     "session.close",
+    "session.delete",
     "approval.respond",
     "session.branch_create",
     "agent.create",
@@ -458,6 +460,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.stop" => Call::Stop(params(raw_params)?),
             "session.idle" => Call::Idle(params(raw_params)?),
             "session.close" => Call::Close(params(raw_params)?),
+            "session.delete" => Call::Delete(params(raw_params)?),
             "approval.respond" => Call::ApprovalRespond(params(raw_params)?),
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),

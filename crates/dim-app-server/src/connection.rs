@@ -286,6 +286,7 @@ impl Connection {
             request.call,
             Call::Stop(_)
                 | Call::Close(_)
+                | Call::Delete(_)
                 | Call::AgentClose(_)
                 | Call::ExecStop(_)
                 | Call::Detach(_)
@@ -352,6 +353,7 @@ impl Connection {
                     | Call::History(_)
                     | Call::Summaries(_)
                     | Call::SessionMethods(_)
+                    | Call::Delete(_)
             )
         {
             return Err(RpcError::app(
@@ -412,6 +414,12 @@ impl Connection {
                 }
                 (Some(&p.session_id), None)
             }
+            // A delete reads none of the Session's records, so a damaged
+            // Session is deleted too: only its protocol version is checked.
+            Call::Delete(p) => {
+                self.authorize_version(rpc, &p.session_id)?;
+                (None, None)
+            }
             Call::AgentCreate(_) | Call::AgentList | Call::AgentClose(_) => {
                 if self.protocol_version() < 3 {
                     return Err(RpcError::app(
@@ -465,6 +473,15 @@ impl Connection {
     /// A Session belongs to the protocol version that created it, and one
     /// whose storage is damaged is unavailable.
     fn authorize(&self, rpc: &RpcService, id: &str) -> Result<(), RpcError> {
+        self.authorize_version(rpc, id)?;
+        if let Some(reason) = rpc.index.unavailable_session(id) {
+            return Err(RpcError::from(AgentError::Storage(reason)));
+        }
+        Ok(())
+    }
+    /// A Session belongs to the protocol version that created it. A Session
+    /// without a readable owner row has no recorded version.
+    fn authorize_version(&self, rpc: &RpcService, id: &str) -> Result<(), RpcError> {
         let known = rpc.index.version_of(id);
         if known.is_some_and(|version| version != self.protocol_version())
             || (known.is_none() && rpc.index.session(id).is_some())
@@ -474,9 +491,6 @@ impl Connection {
                 "session_protocol_version",
                 "Session belongs to another protocol version",
             ));
-        }
-        if let Some(reason) = rpc.index.unavailable_session(id) {
-            return Err(RpcError::from(AgentError::Storage(reason)));
         }
         Ok(())
     }
@@ -769,6 +783,15 @@ impl Connection {
                 rpc.index.remove_version(&params.session_id);
                 result.map(|_| Reply::empty())
             }
+            Call::Delete(params) => rpc
+                .index
+                .delete(&params.session_id)
+                .await
+                .map(|()| Reply::empty())
+                .map_err(|error| {
+                    tracing::error!(%error, session_id=%params.session_id, "Session delete failed");
+                    RpcError::from(error)
+                }),
             Call::ApprovalRespond(params) => {
                 let branch = params.branch_id.clone().unwrap_or_else(|| "main".into());
                 // Accepted commands belong to the Session and continue after disconnect.

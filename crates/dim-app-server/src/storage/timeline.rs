@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::RangeInclusive,
+    path::{Component, Path},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
@@ -241,12 +242,18 @@ impl SqliteTimelineStore {
 #[derive(Clone)]
 pub struct SessionStore {
     timeline: Arc<SqliteTimelineStore>,
+    /// The file steps on the Session's resource node: Session files and the
+    /// command output a delete removes.
+    files: SessionFiles,
 }
 impl SessionStore {
-    pub fn new(db: Arc<SqliteStorage>) -> Self {
-        Self {
-            timeline: SqliteTimelineStore::new(db),
-        }
+    /// `ctx` is SessionStore's own context, from which each file step reads
+    /// the node's FileStorage; `files_root` is the FileStorage root of the
+    /// database directory.
+    pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self {
+        let timeline = SqliteTimelineStore::new(db.clone());
+        let files = SessionFiles::new(db, ctx, files_root, timeline.sweep_files.clone());
+        Self { timeline, files }
     }
     pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
         self.timeline.clone()
@@ -430,6 +437,28 @@ impl SessionStore {
             })
             .await
     }
+    /// The storage steps of `session.delete` ([S5c §3.2](../../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)),
+    /// once Agents has closed the Session: its command output directory goes
+    /// first, durably, then every row of it in one transaction on the
+    /// Timeline writer, the operation a creation rollback runs, then the
+    /// Session-file sweep is scheduled for the files it released. Nothing of
+    /// the Session is read, so a damaged one goes too, and an unknown id has
+    /// nothing to remove. A failure before the commit leaves every row.
+    pub async fn delete_session(&self, id: &str) -> Result<()> {
+        // The id names a directory below the output root; only a single
+        // path component can be a Session's.
+        if !matches!(Path::new(id).components().collect::<Vec<_>>()[..],
+            [Component::Normal(name)] if name == id)
+        {
+            return Err(AgentError::InvalidInput(format!("invalid Session id {id}")));
+        }
+        self.files.remove_command_output(id).await?;
+        self.timeline.rollback_session(id).await?;
+        // Also on a retry that released nothing: an earlier attempt may have
+        // committed and stopped before its sweep.
+        self.timeline.sweep_files.notify_one();
+        Ok(())
+    }
     pub async fn create_owned_session(
         &self,
         session_id: &str,
@@ -479,13 +508,8 @@ impl TypedPlugin for SessionStorePlugin {
         (db,): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let store = Arc::new(SessionStore::new(db.clone()));
-            let files = SessionFiles::new(
-                db,
-                ctx.clone(),
-                self.files_root,
-                store.timeline.sweep_files.clone(),
-            );
+            let store = Arc::new(SessionStore::new(db, ctx.clone(), self.files_root));
+            let files = store.files.clone();
             let (timeline, owned_files) = (store.timeline.clone(), files.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {

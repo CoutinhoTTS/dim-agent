@@ -2202,7 +2202,8 @@ async fn a_cold_read_failure_preserves_the_record_and_other_session_progress() {
 async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sessions = dim_app_server::storage::SessionStore::new(db.clone());
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
     let store = sessions.timeline_store();
     store
         .create_session("paged", &SessionConfig::default())
@@ -2291,7 +2292,8 @@ async fn directory_history_pages_keep_a_fixed_head_and_resolve_prior_tool_calls(
 async fn tool_use_starts_are_found_by_request_and_call_id() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let sessions = dim_app_server::storage::SessionStore::new(db.clone());
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
     let store = sessions.timeline_store();
     store
         .create_session("starts", &SessionConfig::default())
