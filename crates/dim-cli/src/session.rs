@@ -6,7 +6,7 @@ use crate::{
     export,
     input::Input,
 };
-use dim_agent_types::{ApprovalCallData, ModelId};
+use dim_agent_types::{ApprovalCallData, ContentBlock, ModelId, UserInput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -60,7 +60,11 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value, method: &str) -> Result<
     serde_json::from_value(value).map_err(|_| format!("Invalid {method} notification").into())
 }
 
-pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
+pub async fn chat(
+    client: &mut Client,
+    options: &Options,
+    images: Vec<ContentBlock>,
+) -> Result<i32> {
     let interactive = options.prompt.is_none() && !matches!(options.action, Action::Exec);
     let mut input = if interactive {
         Some(Input::new()?)
@@ -101,12 +105,12 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
         }).await?;
         display.failed = false;
         display.muted = false;
-        let mut code = wait_turn(client, &session_id, None, &mut display, &mut input).await?;
+        let mut code = wait_turn(client, &session_id, None, Vec::new(), &mut display, &mut input).await?;
         if code != 0 {
             return Ok(code);
         }
-        if let Some(prompt) = &options.prompt {
-            return wait_turn(client, &session_id, Some(prompt), &mut display, &mut input).await;
+        if options.prompt.is_some() || !images.is_empty() {
+            return wait_turn(client, &session_id, options.prompt.as_deref(), images, &mut display, &mut input).await;
         }
         loop {
             let reader = input.as_mut().expect("interactive input");
@@ -147,7 +151,7 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                 _ => {}
             }
             display.failed = false;
-            code = wait_turn(client, &session_id, Some(&text), &mut display, &mut input).await?;
+            code = wait_turn(client, &session_id, Some(&text), Vec::new(), &mut display, &mut input).await?;
             if code != 0 && code != 130 && code != 2 {
                 return Ok(code);
             }
@@ -215,12 +219,25 @@ async fn wait_turn(
     client: &mut Client,
     session_id: &str,
     prompt: Option<&str>,
+    images: Vec<ContentBlock>,
     display: &mut Display,
     input: &mut Option<Input>,
 ) -> Result<i32> {
-    let mut submit = match prompt {
-        Some(text) => Some(client.send("session.submit", json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"text":text,"mode":"queue"})).await?),
-        None => None,
+    let mut submit = if prompt.is_some() || !images.is_empty() {
+        let mut params = json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"mode":"queue"});
+        if images.is_empty() {
+            params["text"] = json!(prompt.expect("text submission"));
+        } else {
+            let content = prompt
+                .into_iter()
+                .map(|text| ContentBlock::Text { text: text.into() })
+                .chain(images)
+                .collect();
+            params["user"] = json!(UserInput { content });
+        }
+        Some(client.send("session.submit", params).await?)
+    } else {
+        None
     };
     let mut idle = if submit.is_none() {
         Some(
@@ -323,7 +340,7 @@ async fn wait_turn(
         }
         match event {
             Message::Response { id, result } if Some(id) == submit => {
-                result?;
+                result.map_err(|error| format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again"))?;
                 submit = None;
                 if stop.is_none() && settled.is_none() {
                     idle = Some(

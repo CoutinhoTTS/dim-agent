@@ -1,7 +1,8 @@
 # CLI attachment input
 
-Status: proposed client interaction contract. The native CLI currently accepts one line per
-turn. The server interfaces are implemented: `attachment.put` (#102), image content blocks in
+Status: headless image input implemented; interactive attachment input pending. The native
+interactive CLI currently accepts one line per turn. The server interfaces are implemented:
+`attachment.put` (#102), image content blocks in
 `session.submit`, and ModelProvider's image handling (#92). This document defines the remaining
 CLI attachment work assigned in [roadmap #114](https://github.com/arcships/dim/issues/114).
 
@@ -248,9 +249,12 @@ without disconnect: the CLI reports uncertainty and exits without sending a seco
 All homes and images are disposable. Native clipboard calibration
 uses an isolated desktop session with fixture clipboard contents.
 
-This document changes no executable; product tests have not been run for the proposed editor.
-Implementation starts after design acceptance. No App Server, core, protocol, assembly, persisted
-format or capability change is required. No mechanism requirement is raised.
+Headless image flows cover supported formats, byte/order preservation, boundaries, local path
+resolution, combined encoded frames and uncertain error replies without resubmission. The
+existing actual CLI/App Server model flow checks the image in the model HTTP request and stored
+history after resume. The interactive editor and native clipboard remain unimplemented and
+unverified. No App Server, core, protocol, assembly, persisted format or capability change is
+required. No mechanism requirement is raised.
 
 ## Rule check and ablation
 

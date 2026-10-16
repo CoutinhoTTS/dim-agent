@@ -5,8 +5,9 @@ pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
   tui                              Open the interactive scrollback client\n\
-  exec [-p TEXT] [--json]          Run a prompt (or redirected stdin) and exit\n\
-  exec resume SESSION_ID [-p TEXT] [--json]\n\
+  exec [-p TEXT] [--image PATH ...] [--json]\n\
+                                   Run text and/or local images and exit\n\
+  exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]\n\
   session export SESSION_ID --format markdown|json [--output PATH]\n\
   login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
@@ -19,6 +20,7 @@ Commands:\n\
   daemon stop                      Gracefully stop an existing daemon\n\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
+  --image PATH                    Add a local image to exec (repeatable)\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
@@ -63,6 +65,7 @@ pub enum Action {
 pub struct Options {
     pub action: Action,
     pub prompt: Option<String>,
+    pub images: Vec<PathBuf>,
     pub json: bool,
     pub resume: Option<String>,
     pub home: PathBuf,
@@ -85,6 +88,7 @@ impl Options {
         let mut options = Self {
             action: Action::Chat,
             prompt: None,
+            images: Vec::new(),
             json: false,
             resume: None,
             home: std::env::var_os("DIMCODE_HOME")
@@ -134,6 +138,7 @@ impl Options {
                     }
                 }
                 "--json" => options.json = true,
+                "--image" => options.images.push(PathBuf::from(value(&mut args)?)),
                 "--format" => {
                     let Action::Export { format, .. } = &mut options.action else {
                         return Err("--format requires session export".into());
@@ -219,6 +224,7 @@ impl Options {
             .prompt
             .as_ref()
             .is_some_and(|text| text.trim().is_empty())
+            && options.images.is_empty()
         {
             return Err("Prompt cannot be empty".into());
         }
@@ -250,6 +256,12 @@ impl Options {
         }
         if options.json && !matches!(options.action, Action::Exec) {
             return Err("--json requires exec".into());
+        }
+        if !options.images.is_empty() && !matches!(options.action, Action::Exec) {
+            return Err("--image requires exec".into());
+        }
+        if options.images.len() > 20 {
+            return Err("At most 20 images may be submitted".into());
         }
         if matches!(options.action, Action::Export { .. }) && !export_format {
             return Err("session export requires --format markdown|json".into());

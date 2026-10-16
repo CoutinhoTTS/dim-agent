@@ -297,6 +297,239 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "你好世界\n");
 }
 
+fn image_fixture(format: image::ImageFormat, width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(width, height)
+        .write_to(&mut bytes, format)
+        .unwrap();
+    bytes.into_inner()
+}
+
+#[test]
+fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    for source in [
+        "images",
+        "prompt",
+        "empty",
+        "stdin",
+        "whitespace",
+        "twenty",
+        "terminal",
+    ] {
+        let home = Home::new();
+        let workspace = home.0.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let mut images = Vec::new();
+        let mut paths = Vec::new();
+        for (index, (format, media_type)) in [
+            (image::ImageFormat::Png, "image/png"),
+            (image::ImageFormat::Jpeg, "image/jpeg"),
+            (image::ImageFormat::WebP, "image/webp"),
+            (image::ImageFormat::Gif, "image/gif"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = image_fixture(format, 1, if index == 0 { 8000 } else { 1 });
+            let path = format!("image {index}.txt");
+            fs::write(home.0.join(&path), &bytes).unwrap();
+            images.push(json!({"type":"image","source":{"type":"base64","mediaType":media_type,"data":STANDARD.encode(bytes)}}));
+            paths.push(path);
+        }
+        if source == "twenty" {
+            images = images.iter().cycle().take(20).cloned().collect();
+            paths = paths.iter().cycle().take(20).cloned().collect();
+        }
+        let text = match source {
+            "prompt" => Some("compare /exit literally"),
+            "empty" => Some(""),
+            "stdin" => Some("stdin\r\nwith trailing newline\n"),
+            "whitespace" => Some(" \t\n"),
+            _ => None,
+        };
+        let mut expected = Vec::new();
+        if let Some(text) = text {
+            expected.push(json!({"type":"text","text":text}));
+        }
+        expected.extend(images);
+        let daemon = home.daemon(move |wire| {
+            wire.start(source == "prompt");
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["user"]["content"], json!(expected));
+            assert!(submit["params"].get("text").is_none());
+            assert_eq!(submit["params"]["mode"], "queue");
+            uuid::Uuid::parse_str(submit["params"]["submissionId"].as_str().unwrap()).unwrap();
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":30}));
+            wire.detach();
+        });
+        let mut command = home.command();
+        command
+            .current_dir(&home.0)
+            .args(["--cwd", workspace.to_str().unwrap(), "exec"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if source == "prompt" {
+            command.args(["resume", "session", "--json"]);
+        }
+        if matches!(source, "prompt" | "empty") {
+            command.args(["-p", text.unwrap()]);
+        }
+        if matches!(source, "stdin" | "whitespace") {
+            command.stdin(Stdio::piped());
+        }
+        for path in paths {
+            command.arg("--image").arg(path);
+        }
+        let output = if source == "terminal" {
+            let (_terminal, child) = Terminal::launch(command);
+            wait(child)
+        } else {
+            let mut child = command.spawn().unwrap();
+            if matches!(source, "stdin" | "whitespace") {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(text.unwrap().as_bytes())
+                    .unwrap();
+            }
+            wait(child)
+        };
+        daemon.join().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn invalid_exec_images_fail_before_connecting_or_creating_home() {
+    let home = Home::new();
+    fs::remove_dir_all(home.0.join("rust")).unwrap();
+    let png = image_fixture(image::ImageFormat::Png, 1, 1);
+    let mut bad_crc = png.clone();
+    bad_crc[29] ^= 1;
+    let mut oversized = png.clone();
+    oversized.resize(5 * 1024 * 1024 + 1, 0);
+    let mut zero = image_fixture(image::ImageFormat::Gif, 1, 1);
+    zero[6..8].fill(0);
+    for (name, bytes, reason) in [
+        ("text", b"not an image".to_vec(), "PNG, JPEG, WebP or GIF"),
+        ("truncated", png[..8].to_vec(), "Invalid or truncated"),
+        ("jpeg", b"\xff\xd8\xff".to_vec(), "Invalid or truncated"),
+        ("gif", b"GIF89a".to_vec(), "Invalid or truncated"),
+        ("webp", b"RIFF\0\0\0\0WEBP".to_vec(), "Invalid or truncated"),
+        ("zero", zero, "dimensions"),
+        ("crc", bad_crc, "Invalid or truncated"),
+        (
+            "wide",
+            image_fixture(image::ImageFormat::Png, 8001, 1),
+            "8000",
+        ),
+        (
+            "tall",
+            image_fixture(image::ImageFormat::Gif, 1, 8001),
+            "8000",
+        ),
+        ("large", oversized, "5 MiB"),
+    ] {
+        let file = home.0.join(name);
+        fs::write(&file, bytes).unwrap();
+        let output = home
+            .command()
+            .arg("exec")
+            .arg("--image")
+            .arg(file)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(reason),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!home.0.join("rust").exists());
+    }
+    for args in [
+        vec!["--image", "missing.png"],
+        vec!["tui", "--image", "missing.png"],
+        vec!["exec", "--image"],
+        vec!["exec", "--image", "missing.png"],
+        vec!["exec", "--image", "http://127.0.0.1:9/missing.png"],
+        vec!["exec", "--image", home.0.to_str().unwrap()],
+        std::iter::once("exec")
+            .chain(["--image", "missing.png"].repeat(21))
+            .collect(),
+    ] {
+        let output = home
+            .command()
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!home.0.join("rust").exists());
+    }
+}
+
+#[test]
+fn exec_images_check_the_combined_encoded_frame_before_sending() {
+    let home = Home::new();
+    let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
+    png.resize(5 * 1024 * 1024, 0);
+    let image = home.0.join("large.png");
+    fs::write(&image, png).unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        wire.detach();
+    });
+    let mut command = home.command();
+    command.arg("exec").stdin(Stdio::null());
+    for _ in 0..3 {
+        command.arg("--image").arg(&image);
+    }
+    let output = command.output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn submit_errors_on_a_live_connection_exit_without_resending() {
+    for app_error in ["submission_unknown", "publication_failed"] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.start(false);
+            let submit = wire.read("session.submit");
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"committed","sequence":9,"create_at":1,"type":"input","name":"message","data":{"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"once"}]},"mode":"queue"}}}));
+            wire.send(json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,"message":"Publication failed after queueing input","data":{"appError":app_error}}}));
+            wire.detach();
+        });
+        let output = home
+            .command()
+            .args(["exec", "-p", "once"])
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("session: session"));
+        assert!(diagnostic.contains("input may already be queued"));
+        assert!(diagnostic.contains("instead of sending it again"));
+    }
+}
+
 #[test]
 fn noninteractive_approval_denies_and_drains_outstanding_responses_before_detach() {
     let home = Home::new();
@@ -1296,10 +1529,16 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn configured_api_key_model_uses_production_tools_and_restores_the_same_session() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let binary = std::env::var("DIM_TEST_APP_SERVER")
         .expect("Set DIM_TEST_APP_SERVER to the dim-app-server binary");
     let home = Home::new();
     let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let image = home.0.join("screenshot.dat");
+    let bytes = image_fixture(image::ImageFormat::Png, 1, 1);
+    fs::write(&image, &bytes).unwrap();
+    let image_data = STANDARD.encode(bytes);
+    let model_image = image_data.clone();
     fs::write(home.0.join("marker.txt"), "production-read-marker\n").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -1345,6 +1584,22 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             let mut bytes = vec![0; length];
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
+            if phase == 2 {
+                let user = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|message| message["role"] == "user")
+                    .unwrap();
+                assert_eq!(
+                    user["content"],
+                    json!([
+                        {"type":"text","text":"continue"},
+                        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}}
+                    ])
+                );
+            }
             let mut names: Vec<_> = request["tools"]
                 .as_array()
                 .unwrap()
@@ -1440,6 +1695,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             session,
             "--prompt",
             "continue",
+            "--image",
+            image.to_str().unwrap(),
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1476,6 +1733,13 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     let conversation: Value = serde_json::from_slice(&exported.stdout).unwrap();
     assert_eq!(conversation["sessionId"], session);
     assert_eq!(conversation["branchId"], "main");
+    assert!(conversation["events"].as_array().unwrap().iter().any(|event| {
+        event["type"] == "input" && event["name"] == "message"
+            && event["data"]["user"]["content"] == json!([
+                {"type":"text","text":"continue"},
+                {"type":"image","source":{"type":"base64","mediaType":"image/png","data":image_data}}
+            ])
+    }));
     assert!(
         conversation["events"]
             .as_array()

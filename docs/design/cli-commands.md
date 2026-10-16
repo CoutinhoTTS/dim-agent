@@ -7,16 +7,17 @@ client of the existing daemon. This document defines the CLI interface for
 the implementation; the [native CLI contract](../../crates/dim-cli/README.md)
 describes the current executable.
 
-The proposed [attachment input contract](cli-attachment-input.md) defines the idle draft editor,
-local image sources, paste handling and exec image arguments.
+The [attachment input contract](cli-attachment-input.md) defines the idle draft editor,
+local image sources and paste handling. Its headless exec image arguments are implemented;
+the interactive editor and native insertion sources remain pending.
 
 ## Commands
 
 | Entry | Behavior |
 | --- | --- |
 | `dimcode tui` | Open the existing interactive scrollback client. |
-| `dimcode exec [-p TEXT] [--json]` | Run one prompt and exit; read redirected stdin when `-p` is absent. |
-| `dimcode exec resume SESSION_ID [-p TEXT] [--json]` | Continue the named persisted Session with one prompt. |
+| `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | Run text and/or local images and exit; read redirected stdin when `-p` is absent. |
+| `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
@@ -87,6 +88,10 @@ settlement, and exits with code 3. It does not change
 `SessionConfig.interactive`. Sessions created as noninteractive retain Approval's existing owner-side policy (#98 D10).
 Other exit codes retain the native CLI contract, including 2 for turn failure
 and 130 for interruption. A transport failure does not retry a submission.
+Repeated `--image` arguments follow the headless attachment contract: text first,
+then validated original image bytes in argument order, with paths relative to the
+invoking process. An image-only invocation is valid. A submission error on a live
+connection also retains the existing diagnostic/exit path, because it can follow commit.
 
 In JSON mode, stdout contains one compact JSON-RPC notification per line using
 the daemon's existing `method` and `params`. Only notifications for the selected
