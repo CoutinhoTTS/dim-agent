@@ -1965,12 +1965,21 @@ impl App {
                 )
             );
         }
-        live.extend(composer_box);
+        // A prompt that must be answered first (an approval, a question, the
+        // exit confirmation) takes the composer's place, as Amp's do: there
+        // is nothing to type into meanwhile.
+        let replaced = matches!(
+            self.prompt,
+            Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_))
+        );
+        if !replaced {
+            live.extend(composer_box);
+        }
         // Panels sit under the composer: a runtime prompt, or the command
         // palette while a command is being typed.
         let outer = cols.saturating_sub(2 + MARGIN).max(4);
         let margin = " ".repeat(MARGIN);
-        let composer_rows = rows.len() + 2;
+        let composer_rows = if replaced { 0 } else { rows.len() + 2 };
         let panel_rows = (size.1 as usize)
             .saturating_sub(composer_rows + 1 + 4 + 1)
             .min(18);
@@ -2023,7 +2032,7 @@ impl App {
         if !self.fullscreen {
             live.push(self.status_line(cols));
         }
-        frame.cursor = Some((
+        frame.cursor = (!replaced).then_some((
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
         ));
