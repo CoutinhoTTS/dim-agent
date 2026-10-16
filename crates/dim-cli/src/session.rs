@@ -1,8 +1,9 @@
 use crate::{
     Result,
-    args::Options,
+    args::{Action, Options},
     client::{Client, Message},
     display::{self, Display, Event, Progress},
+    export,
     input::Input,
 };
 use dim_agent_types::{
@@ -26,7 +27,7 @@ struct Created {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct History {
-    events: Vec<Event>,
+    events: Vec<Value>,
     through: u64,
     next_after: u64,
     done: bool,
@@ -67,13 +68,13 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value, method: &str) -> Result<
 }
 
 pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
-    let interactive = options.prompt.is_none();
+    let interactive = options.prompt.is_none() && !matches!(options.action, Action::Exec);
     let mut input = if interactive {
         Some(Input::new()?)
     } else {
         None
     };
-    let mut display = Display::new(interactive);
+    let mut display = Display::new(interactive, options.json);
     let session_id = if let Some(id) = &options.resume {
         id.clone()
     } else {
@@ -101,7 +102,12 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
         .rpc("session.attach", json!({"sessionId":session_id}))
         .await?;
     let result = async {
-        history(client, &session_id, &mut display, interactive).await?;
+        display.muted = !interactive;
+        display.cursor = read_history(client, &session_id, 0, |value| {
+            if options.json { Ok(()) } else { display.event(serde_json::from_value(value)?, true) }
+        }).await?;
+        display.failed = false;
+        display.muted = false;
         let mut code = wait_turn(client, &session_id, None, &mut display, &mut input).await?;
         if code != 0 {
             return Ok(code);
@@ -123,26 +129,47 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
             if text.trim().is_empty() {
                 continue;
             }
-            if matches!(
-                text.split_whitespace().next(),
-                Some("/effort" | "/reasoning" | "/fast" | "/agent")
-            ) {
-                let result = {
-                    let operation = configure(client, &session_id, &text, &mut display);
-                    tokio::pin!(operation);
-                    tokio::select! {
-                        result = &mut operation => result,
-                        signal = tokio::signal::ctrl_c() => {
-                            signal?;
-                            println!("\nWaiting for configuration result; it may already be adopted.");
-                            operation.await
+            match text.split_whitespace().next() {
+                Some("/effort" | "/reasoning" | "/fast" | "/agent") => {
+                    let result = {
+                        let operation = configure(client, &session_id, &text, &mut display);
+                        tokio::pin!(operation);
+                        tokio::select! {
+                            result = &mut operation => result,
+                            signal = tokio::signal::ctrl_c() => {
+                                signal?;
+                                println!("\nWaiting for configuration result; it may already be adopted.");
+                                operation.await
+                            }
                         }
+                    };
+                    if let Err(error) = result {
+                        display.record(&format!("Error: {error}"))?;
                     }
-                };
-                if let Err(error) = result {
-                    display.record(&format!("Error: {error}"))?;
+                    continue;
                 }
-                continue;
+                Some("/exit") => {
+                    if text.trim() == "/exit" {
+                        break;
+                    }
+                    display.record("Usage: /exit")?;
+                    continue;
+                }
+                Some("/export") => {
+                    let result = async {
+                        let rest = text.trim_start().strip_prefix("/export").expect("export command").trim_start();
+                        let (format, path) = rest.split_once(char::is_whitespace)
+                            .filter(|(_, path)| !path.trim_start().is_empty())
+                            .ok_or("Usage: /export <markdown|json> PATH\nPATH is relative to the CLI current directory; ~ is literal.")?;
+                        let path = path.trim_start();
+                        export::write(client, &session_id, format.parse()?, Some(std::path::Path::new(path))).await
+                    }.await;
+                    if let Err(error) = result {
+                        display.record(&format!("Error: {error}"))?;
+                    }
+                    continue;
+                }
+                _ => {}
             }
             display.failed = false;
             code = wait_turn(client, &session_id, Some(&text), &mut display, &mut input).await?;
@@ -167,15 +194,13 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
     }
 }
 
-async fn history(
+pub async fn read_history(
     client: &mut Client,
     session_id: &str,
-    display: &mut Display,
-    render: bool,
-) -> Result<()> {
+    mut after: u64,
+    mut consume: impl FnMut(Value) -> Result<()>,
+) -> Result<u64> {
     let mut through = None;
-    let mut after = display.cursor;
-    display.muted = !render;
     loop {
         let mut params =
             json!({"sessionId":session_id,"branchId":"main","after":after,"limit":256});
@@ -184,6 +209,7 @@ async fn history(
         }
         let page: History = client.typed("session.history", params).await?;
         if through.is_some_and(|through| through != page.through)
+            || page.through > dim_agent_types::JS_MAX_SAFE_INTEGER
             || page.next_after < after
             || page.next_after > page.through
             || !page.done && page.next_after == after
@@ -192,20 +218,20 @@ async fn history(
         }
         through = Some(page.through);
         for event in page.events {
-            if event.sequence <= after || event.sequence > page.next_after {
+            let sequence = event["sequence"]
+                .as_u64()
+                .ok_or("Invalid history event sequence")?;
+            if sequence <= after || sequence > page.next_after {
                 return Err("History event is outside its page".into());
             }
-            display.event(event, true)?;
+            consume(event)?;
         }
         after = page.next_after;
-        display.cursor = after;
         if page.done {
             if after != page.through {
                 return Err("History ended before its fixed watermark".into());
             }
-            display.failed = false;
-            display.muted = false;
-            return Ok(());
+            return Ok(after);
         }
     }
 }
@@ -253,7 +279,11 @@ async fn configure(
             return Ok(());
         }
     } else {
-        history(client, session_id, display, true).await?;
+        display.cursor = read_history(client, session_id, display.cursor, |value| {
+            display.event(serde_json::from_value(value)?, true)
+        })
+        .await?;
+        display.failed = false;
         let model = display
             .model
             .as_ref()
@@ -360,7 +390,12 @@ async fn configure(
             return Ok(());
         }
     }
-    history(client, session_id, display, true).await
+    display.cursor = read_history(client, session_id, display.cursor, |value| {
+        display.event(serde_json::from_value(value)?, true)
+    })
+    .await?;
+    display.failed = false;
+    Ok(())
 }
 
 async fn wait_turn(
@@ -438,7 +473,7 @@ async fn wait_turn(
         let event = tokio::select! {
             signal = tokio::signal::ctrl_c(), if stop.is_none() && settled.is_none() => {
                 signal?;
-                println!();
+                if !display.json { println!(); }
                 display.record("[stopping] Waiting for resource settlement")?;
                 code = 130;
                 approvals.clear(); prompted = false;
@@ -461,6 +496,18 @@ async fn wait_turn(
             }
             message = client.next() => message?,
         };
+        if display.json
+            && let Message::Notice { method, params } = &event
+            && params["sessionId"].as_str() == Some(session_id)
+        {
+            let mut output = std::io::stdout().lock();
+            serde_json::to_writer(
+                &mut output,
+                &json!({"jsonrpc":"2.0","method":method,"params":params}),
+            )?;
+            writeln!(output)?;
+            output.flush()?;
+        }
         match event {
             Message::Response { id, result } if Some(id) == submit => {
                 result?;
@@ -548,6 +595,23 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
     let Message::Notice { method, params } = notice else {
         unreachable!()
     };
+    if display.json {
+        if params["sessionId"].as_str() == Some(session_id) {
+            if method == "session.closed" {
+                return Err("Session closed while attached".into());
+            }
+            let event = &params["event"];
+            if method == "session.event"
+                && params["branchId"] == "main"
+                && ((event["type"] == "turn" && event["name"] == "end")
+                    || (event["type"] == "step" && event["name"] == "model-output-end"))
+                && event["data"]["status"] == "failed"
+            {
+                display.failed = true;
+            }
+        }
+        return Ok(());
+    }
     match method.as_str() {
         "session.event" => {
             let notice: EventNotice = decode(params, &method)?;
@@ -561,7 +625,9 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
                 display.progress(notice)?;
             }
         }
-        "session.closed" => return Err("Session closed while attached".into()),
+        "session.closed" if params["sessionId"].as_str() == Some(session_id) => {
+            return Err("Session closed while attached".into());
+        }
         _ => {}
     }
     std::io::stdout().flush()?;

@@ -138,6 +138,7 @@ struct TextPosition {
 
 pub struct Display {
     pub model: Option<Configuration>,
+    pub json: bool,
     pub cursor: u64,
     pub failed: bool,
     pub muted: bool,
@@ -149,9 +150,10 @@ pub struct Display {
     completed_tools: HashSet<String>,
 }
 impl Display {
-    pub fn new(interactive: bool) -> Self {
+    pub fn new(interactive: bool, json: bool) -> Self {
         Self {
             model: None,
+            json,
             cursor: 0,
             failed: false,
             muted: false,
@@ -184,7 +186,7 @@ impl Display {
         Ok(())
     }
     fn text(&mut self, text: &str) -> Result<()> {
-        if text.is_empty() || self.muted {
+        if text.is_empty() || self.muted || self.json {
             return Ok(());
         }
         if !self.text_open && self.interactive {
