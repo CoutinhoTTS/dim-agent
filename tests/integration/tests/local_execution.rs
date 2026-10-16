@@ -3,14 +3,19 @@
 #![cfg(unix)]
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    file_storage::FileStoragePlugin,
     history::HistoryRenderer,
     host::*,
-    host_platform::{EXEC_SHELL_UNAVAILABLE, HostPlatform, ShellStatus, resolve_shell},
+    host_platform::{
+        EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, HostPlatformConfig,
+        HostPlatformPlugin, ShellStatus, resolve_shell,
+    },
     timeline_tree::TreeCommands,
     wait,
     workspace_tools::{
         self, WorkspaceToolsConfig,
         background::{BackgroundExec, WAKE_RESULT_TAG, WAKE_TASK_TAG},
+        exec::{Decoder, build_process_spec, truncate_preview},
     },
 };
 use dim_agent_runtime::*;
@@ -254,10 +259,13 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
 
 impl Harness {
     async fn new(platform: HostPlatform, hook: Hook) -> Self {
-        let store = Arc::new(MemoryTimelineStore::default());
-        let (cwd, output_root) = (scratch("cwd"), scratch("output"));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
         let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        Self::with_platform(root, view, hook).await
+    }
+    async fn with_platform(root: Ctx, view: rutis::FiberView, hook: Hook) -> Self {
+        let store = Arc::new(MemoryTimelineStore::default());
+        let (cwd, output_root) = (scratch("cwd"), scratch("output"));
         let file_writes = root.plugin(capability_plugin(
             workspace_tools::FileWriteCoordinatorPlugin::default(),
         ));
@@ -450,6 +458,105 @@ fn tool_results(events: &[Arc<AgentEvent>]) -> usize {
 }
 
 // ------------------------------------------------------------------- exec
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exec_and_external_shell_callers_use_live_shell_preferences() {
+    use tokio::io::AsyncReadExt;
+
+    let home = scratch("shell-config");
+    let config = home.join("exec-shell.json");
+    std::fs::write(&config, "invalid json").unwrap();
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
+        HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+        },
+    )));
+    let harness = Harness::with_platform(root, view, Hook::None).await;
+    let platform = harness.root.get::<HostPlatform>().unwrap();
+    let session = harness.session().await;
+
+    // A bad preference leaves the service active and is exposed as refusal data.
+    let shell = platform.exec_shell().await;
+    let (reason, refusal_code) = build_process_spec(&platform, &shell, "true", &harness.cwd)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(refusal_code, EXEC_SHELL_CONFIG_INVALID);
+    assert!(reason.contains("Invalid exec shell config"));
+
+    // Both callers observe each file edit without reloading the service or Session.
+    for (index, executable) in ["/bin/sh", "/bin/bash"].into_iter().enumerate() {
+        std::fs::write(
+            &config,
+            json!({"version": 1, "executablePath": executable}).to_string(),
+        )
+        .unwrap();
+        let shell = platform.exec_shell().await;
+        let command = "printf '%s' \"$0\"";
+        let spec = build_process_spec(&platform, &shell, command, &harness.cwd)
+            .await
+            .unwrap();
+        assert_eq!(spec.executable, PathBuf::from(executable));
+        let mut process = platform.spawn(spec).unwrap();
+        let mut output = Vec::new();
+        process.stdout().read_to_end(&mut output).await.unwrap();
+        assert!(process.wait().await.unwrap().success());
+        let mut decoder = Decoder::default();
+        let decoded = format!("{}{}", decoder.write(&output), decoder.end());
+        assert_eq!(truncate_preview(&decoded), executable);
+
+        harness
+            .run(&session, &[("exec", json!({"command": command}))])
+            .await;
+        session.idle("main").await.unwrap();
+        let events = local_events(&session).await;
+        assert_eq!(tool_results(&events), index + 1);
+        assert!(text(results(&events).last().unwrap()).contains(executable));
+        assert!(Arc::ptr_eq(
+            &platform,
+            &harness.root.get::<HostPlatform>().unwrap()
+        ));
+    }
+
+    std::fs::write(&config, r#"{"version":1,"executablePath":"/missing/sh"}"#).unwrap();
+    let marker = harness.cwd.join("must-not-run");
+    let command = "touch must-not-run";
+    let shell = platform.exec_shell().await;
+    let (reason, refusal_code) = build_process_spec(&platform, &shell, command, &harness.cwd)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(refusal_code, EXEC_SHELL_UNAVAILABLE);
+    assert!(reason.contains("/missing/sh"));
+    harness
+        .run(&session, &[("exec", json!({"command": command}))])
+        .await;
+    session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    assert_eq!(
+        code(results(&events).last().unwrap()),
+        Some("exec_shell_unavailable")
+    );
+    assert!(!marker.exists());
+
+    // Deleting the preference restores automatic selection on the next call.
+    std::fs::remove_file(&config).unwrap();
+    harness
+        .run(
+            &session,
+            &[("exec", json!({"command": "printf recovered"}))],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    assert!(text(results(&events).last().unwrap()).contains("recovered"));
+    harness.shutdown().await;
+    std::fs::remove_dir_all(home).unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn foreground_output_is_canonical_and_offloaded_like_ts() {

@@ -45,19 +45,24 @@ own scope:
 | Observe a Session's events | the existing Session broadcast, from a Session-scoped plugin |
 | Observe and act on a branch's events in order | the branch Dispatcher, from a branch-scoped plugin |
 | Put content into the model context | Session or branch input (adopted inputs), tool results |
-| Act on a write before it is committed | a Timeline before callback registered by a branch-scoped plugin (synchronous, or asynchronous with the runtime supplement: the write keeps its place in order and commits after the callback, which may transform the draft or append to the same batch only commands to an event's owner or its own declared events; it never fails or blocks the write) |
-| Withdraw an input before it is applied | the `input/withdraw {input_id, reason?}` command event (clients, process callers, or a before callback in the input's own batch); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
+| Act on a write before it is committed | a Timeline before callback registered by a branch-scoped plugin: it synchronously transforms the draft inside the commit lock, never blocks the write, never waits for external work, and the original draft commits on failure ([principles §4 rule 3](../architecture/rust-agent/principles.md)) |
+| Withdraw an input before it is applied | the `input/withdraw {input_id, reason?}` command event (clients or process callers); InputQueue consumes it in order and writes `input/deleted {input_id}` only while it holds the input unapplied |
 | Expose a client method about a Session | a Session-scoped `sessionMethods` service that Rpc dispatches through the Session |
 | Expose a host management method | a process plugin's `managementMethods` service in Rpc's method table; connections from paired devices are never served management methods |
 | Reach other Sessions | Agents' `sessions` service (AgentIndex and the Session public interface), as Collaboration does |
 | React to another process plugin's outcomes | an event notice, not a dependency |
 
-### D3. Dependencies follow scope; rare restarts are accepted
+### D3. Dependencies follow scope and point from extensions to the core
 
-A plugin depends on plugins at its own scope or an enclosing scope. Because reloads are rare and
-structural, a reload propagating to dependents (and failing in-flight turns) is an accepted cost
-of those operations; no mechanism is added to prevent it. Crash isolation of volatile runtimes,
-if needed later, belongs to rutis (issue #6), not to application wiring.
+A plugin depends on plugins at its own scope or an enclosing scope, and dependencies point from
+extensions to the core. A core part (for example Session assembly, ToolRegistry, Rpc, and content
+owners such as Mcp and SkillsCatalog) never takes a hard dependency on an optional plugin: it looks
+the optional provider up on each call, or attaches the providers active when it loads (later ones
+on its next reload). An optional plugin that is
+missing, Pending, Failed or reloading therefore affects only its own features (#34). Within this
+rule, because reloads are rare and structural, a reload propagating to its real dependents (and
+failing their in-flight turns) is an accepted cost; no mechanism is added to prevent it. A runtime
+crash is an infrastructure failure, like an App Server crash, and nothing is designed around it.
 
 ### D4. Structural configuration and business configuration are separate
 
@@ -122,8 +127,8 @@ records (`RequiredCheck`) and the Management plugin are withdrawn.
 
 ## Existing plugins
 
-Existing plugins already follow D1. One configuration item does not follow D4: the exec shell is
-read once in HostPlatform's `apply`; it should be business configuration read at each spawn.
+Existing plugins follow D1. HostPlatform follows D4 by reading the exec shell's business
+configuration through `exec_shell()` for each command; changing it does not reload plugins.
 
 ## Consequences
 

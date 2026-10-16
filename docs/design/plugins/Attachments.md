@@ -2,6 +2,8 @@
 
 Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
+> **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
+
 Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (proposed ModelProvider supplement, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`) ([session-boundary](../contracts/session-boundary.md)); contracts are given in language-neutral form, the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file owned by SessionStore on the Session's resource node and returns its path; the user's text references the path and the model reads the file with `read` when needed. Fork sharing and deletion of those files are SessionStore behavior. No events.
 
 ## 1. Structure
@@ -33,16 +35,16 @@ Attachments depends only on SessionStore, an enclosing-scope plugin ([ADR 002](.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `AttachmentsPlugin` | Session | `S:SessionIdentity`; SessionStore Session-file supplement | `sessionMethods` key `attachment` (`attachment.put`) |
+| `AttachmentsPlugin` | Session | `S:SessionIdentity`; SessionStore `sessionFiles` | `sessionMethods` key `attachment` (`attachment.put`) |
 
-Contracts depended on: `sessionMethods` (Rpc resolves the Session and calls it); a SessionStore supplement that stores an immutable file on the Session's resource node, shares it on fork and removes it with the last owning Session ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins), SessionStore); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a store on an offline resource node fails `node_unavailable` while Attachments stays loaded, which requires services imported over a rutis link to stay registered while the link is down and fail calls (requirement [#5](https://github.com/arcships/dim/issues/5), stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners)); ModelProvider's image handling when it builds a request (proposed supplement, A.1 and [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Contracts defined here: `attachment.put`, its error codes and limits, the CLI image checks and reference format. Attachments names no other plugin's internal type.
+Contracts depended on: `sessionMethods` (Rpc resolves the Session and calls it); a SessionStore supplement, the process service `sessionFiles`, that stores an immutable file on the Session's resource node, shares it on fork and removes it with the last owning Session ([session files](../appserver/session-files.md), [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)); the node-offline rule ([overview §6.3](../overview.md#63-multiple-nodes)): a store on an offline resource node fails `node_unavailable` while Attachments stays loaded, because SessionStore looks up the node's FileStorage on each call ([#38](https://github.com/arcships/dim/issues/38), [session files §2](../appserver/session-files.md#2-structure)); ModelProvider's image handling when it builds a request (proposed supplement, A.1 and [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Contracts defined here: `attachment.put`, its error codes and limits, the CLI image checks and reference format. Attachments names no other plugin's internal type.
 
 ## 2. Data and state
 
 ```mermaid
 flowchart TB
-  subgraph SSD["SessionStore: Session directory (A1)"]
-    F["attachments/attachment_id/name: immutable text"]
+  subgraph SSD["SessionStore: Session files (A1)"]
+    F["db.session-files/fileId/name: immutable text"]
   end
   subgraph TL["Session Timeline"]
     IM["input/message: image blocks in user content; path text"]
@@ -53,7 +55,7 @@ flowchart TB
   SUB["Rpc session.submit"] --> IM
 ```
 
-Attachments has no state: files belong to the Session's data in SessionStore, and images exist only inside the `input/message` Rpc writes with the user as author. `attachment_id` is a random UUID, so a fork's inherited history keeps valid paths because SessionStore shares the files instead of copying them (A6).
+Attachments has no state: files belong to the Session's data in SessionStore, and images exist only inside the `input/message` Rpc writes with the user as author. `attachmentId` is the Session file's id, a random UUID chosen by SessionStore. A fork's inherited history keeps valid paths because SessionStore shares the files instead of copying them, and their directory belongs to no single Session (A6).
 
 Events: none. Images are part of the existing `input/message`; text attachments appear only as paths in user text.
 
@@ -90,7 +92,7 @@ sequenceDiagram
   participant SS as SessionStore
   C->>R: attachment.put {sessionId, name, text}
   R->>A: sessionMethods call(MethodCall) (Session resolved by Rpc)
-  A->>SS: store immutable file (Session's resource node)
+  A->>SS: sessionFiles.put (Session's resource node)
   A-->>C: {attachmentId, path, bytes, lines}
   C->>R: session.submit text containing the path reference
 ```
@@ -104,7 +106,7 @@ The path is returned only after the file is durable. The model later reads it wi
 | Attachments not enabled | `attachment.put` gets `unknown_method`; images unaffected |
 | Model switched after submit to one without images | ModelProvider sends a text placeholder instead of the image (A.1) |
 | `input/deleted` of an image input | Never applied or consumed; text files stay with the Session |
-| Fork racing delete of the source | Decided by SessionStore's fork/delete ordering; files shared, never copied |
+| Fork racing delete of the source | A fork committed first keeps the files, shared and never copied; otherwise the fork fails ([session files §6](../appserver/session-files.md#6-deletion-crash-recovery-and-serialization)) |
 | Resource node offline | `attachment.put` fails `node_unavailable`; images unaffected; `read` of a path fails like any `read`; nothing reloads or goes Pending |
 
 Full table: Appendix B.
@@ -122,14 +124,14 @@ Compaction keeps neither images nor file contents verbatim, only the summary (a 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `attachment.put` | `sessionMethods` (Session, key `attachment`) | Store a text attachment in the Session directory, return its path |
+| `attachment.put` | `sessionMethods` (Session, key `attachment`) | Store a text attachment as a Session file, return its path |
 | CLI image checks | Client contract (A.1, A.3) | Sniff the format and enforce limits before submitting |
 | Image handling at request build | ModelProvider supplement (proposed, A.1) | Send each image block or replace it with a text placeholder per the request's model |
 | `attachment_*` errors | `appError` on `attachment.put` | Rejection reasons |
 
 ## 7. Security
 
-The CLI decodes images only to check headers and limits; ModelProvider decodes them only to check what the request's adapter accepts; Rpc does not inspect them. Text attachments are written by SessionStore under the Session directory, never at client-chosen paths (`name` is a file name). Files are readable through `read` under the Session's permission policy; attachments confer no extra authority. Paired remote devices may call `attachment.put` and `session.submit` like any Session method; their images skip the CLI checks, and ModelProvider's handling is the server-side guard. Contents are user data replayed to the model; the CLI must not attach secrets implicitly. A fork reads only files its inherited history references.
+The CLI decodes images only to check headers and limits; ModelProvider decodes them only to check what the request's adapter accepts; Rpc does not inspect them. Text attachments are written by SessionStore under its Session-files directory, never at client-chosen paths (`name` is a file name). Files are readable through `read` under the Session's permission policy; attachments confer no extra authority. Paired remote devices may call `attachment.put` and `session.submit` like any Session method; their images skip the CLI checks, and ModelProvider's handling is the server-side guard. Contents are user data replayed to the model; the CLI must not attach secrets implicitly. Reading a file never prompts and records no grant; [session files §11](../appserver/session-files.md#11-security) gives how reads are admitted and what path-scoped file access must keep.
 
 ## 8. Rule check
 
@@ -139,13 +141,13 @@ The CLI decodes images only to check headers and limits; ModelProvider decodes t
 | Principles §4 rule 2 (handover) | Attachments never touches inputs; images enter only inside `input/message` and are handed to Loop by `input/applied` as usual. |
 | Principles §4 rule 3 (before callbacks only) | No check at the RPC or Session entry: Rpc checks only parameter shape, image checks live in the CLI and in ModelProvider's request building (principles §4 rule 3). |
 | Principles §4 rule 4 (no business meaning in core) | No core change; ModelProvider's image handling applies to every image block regardless of writer. |
-| Principles §4 rule 5 (read the whole batch) | Not applicable: Attachments decides on no event. |
+| Principles §4 rule 5 (batch) | Not applicable: Attachments decides on no event. |
 | Principles §4 rule 6 (context from handed-over events) | Images reach the model only from consumed inputs; deleted inputs never enter context. |
 | Principles §4 rule 7 (public events and services only) | Attachments uses only `sessionMethods` and SessionStore's public Session-file operation. |
-| Principles §4 rule 8 (requirements to mechanism owners) | The only runtime or rutis requirement, #5, is stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners). The ModelProvider supplement is a requirement to another plugin and is listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), with the reasons in A.1. |
+| Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement: the offline rule relies on SessionStore looking up the node's FileStorage on each call (#38), not on the withdrawn #5. The ModelProvider supplement is a requirement to another plugin and is listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities), with the reasons in A.1. |
 | Principles §4 rule 9 (only facts later decisions use) | Attachments writes no event; text files are SessionStore state and images ride in the existing `input/message`. |
 | Principles §1 (Capability and App Server boundary) | Attachments is a Session Capability in its own crate; Rpc holds no image logic. |
-| ADR 002 D1 (scope follows state) | Session scope: text files belong to the Session. |
+| ADR 002 D1 (scope follows state) | Session scope: `attachment.put` acts for its own Session. The text files are that Session's data, kept by the process-scoped SessionStore because forks share them. |
 | ADR 002 D2 (no wiring modules) | No wiring module; Attachments depends only on SessionStore. |
 | ADR 002 D3 (dependencies follow scope) | Its only dependency, SessionStore, is in the enclosing process scope; a SessionStore reload reloads Attachments. |
 | ADR 002 D4 (structural vs business configuration) | Enabling is structural; Attachments has no business configuration (limits are fixed, A2). |
@@ -153,7 +155,7 @@ The CLI decodes images only to check headers and limits; ModelProvider decodes t
 
 ## 9. Requirements raised to mechanism owners
 
-None of its own to the runtime or rutis. #5 (imported services stay registered while a rutis link is down) is stated in [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners).
+None of its own to the runtime or rutis. The offline rule relies on SessionStore looking up the node's FileStorage on each call ([#38](https://github.com/arcships/dim/issues/38)), not on [#5](https://github.com/arcships/dim/issues/5), which is withdrawn.
 
 The ModelProvider supplement (image handling at request build) is a requirement to another plugin; it is listed in [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities) and specified in A.1.
 
@@ -194,7 +196,7 @@ Service `sessionMethods`, Session scope, key `attachment`. `describe()` returns 
 | --- | --- |
 | `name` | `[A-Za-z0-9._-]{1,64}`, no leading dot; default `paste.txt` |
 | `text` | UTF-8, at most 10 MiB (A2); empty rejected |
-| Storage | SessionStore writes `attachments/<attachmentId>/<name>` atomically under the Session's attachments root on its resource node (A1); an offline node returns `node_unavailable` |
+| Storage | SessionStore's `sessionFiles.put` writes the text once, read-only, at `<db>.session-files/<fileId>/<name>` (next to the native database `<db>`) on the Session's resource node, and `attachmentId` is that `fileId` (A1, [session files](../appserver/session-files.md)); an offline node returns `node_unavailable` |
 | `path` | Absolute path on the Session's resource node, as `read` resolves it for the Session |
 | Errors | `session_closed`, `attachment_invalid`, `attachment_too_large`, `node_unavailable`, `service_reloading`, `unknown_method` |
 
@@ -217,7 +219,7 @@ The CLI reads images (clipboard, `@`, pasted paths), checks them (A.1) and sends
 | Concurrent Steer/Queue/Append | Timeline order | Unaffected | InputQueue |
 | `attachment.put`, submit never sent | — | File stays with the Session; removed with it | SessionStore |
 | `attachment.put` racing Session delete | — | `session_closed`, or the file is removed by the delete | SessionStore |
-| Fork racing delete of the source | — | Per SessionStore's fork/delete ordering | SessionStore |
+| Fork racing delete of the source | — | A fork committed first keeps the files; otherwise the fork fails ([session files §6](../appserver/session-files.md#6-deletion-crash-recovery-and-serialization)) | SessionStore |
 | Compaction | consumed < compaction | Only through the summary; files stay | ContextPreparation |
 | Child branch cut | consumed < cut | Child inherits image and path; same files | History projection |
 | Attachments reloaded | — | `attachment.put` gets `service_reloading`; an in-flight call before commit ends `operation_interrupted` | Rpc |
@@ -226,7 +228,7 @@ The CLI reads images (clipboard, `@`, pasted paths), checks them (A.1) and sends
 | Duplicate or late `attachment.put` | — | New attachment each call (A7) | Attachments |
 | Paired remote device submits | — | No CLI checks; ModelProvider handling applies (A.1) | ModelProvider |
 | Session unload/restore, client detach | — | No effect | — |
-| Resource node offline at `attachment.put` | — | `node_unavailable`; nothing stored; Attachments stays loaded; a retry succeeds once the node is back (requirement on #5) | SessionStore |
+| Resource node offline at `attachment.put` | — | `node_unavailable`; nothing stored; Attachments stays loaded; a retry succeeds once the node is back (SessionStore looks up the node's FileStorage per call, #38) | SessionStore |
 
 ## Appendix C. Errors and recovery
 
@@ -255,7 +257,7 @@ An image the CLI rejects is never sent. A file stored without a later submit is 
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | Text attachments are Session files owned by SessionStore and stored on the Session's resource node under a per-Session attachments root; SessionStore keeps the ownership record on the control node. For a Session on the control node this is the Session directory | Judgment; `read` runs on the resource node | Other layout or inline text content |
+| A1 | Text attachments are Session files owned by SessionStore and stored on the Session's resource node under `<db>.session-files/<fileId>/`, a directory no single Session owns, so the path survives forks and the source's deletion; SessionStore keeps the ownership rows on the control node ([session files](../appserver/session-files.md)) | Judgment; `read` runs on the resource node | Other layout or inline text content |
 | A2 | Limits: 20 images, 5 MiB, 8000 px (CLI), 10 MiB text (`attachment.put`); reject rather than resize | Edge-case reference; judgment | Different limits or resizing |
 | A3 | The CLI never sends URL image sources; ModelProvider replaces them | Overview "final content"; judgment | Provider fetches URLs |
 | A4 | With unknown model capability ModelProvider sends images | Judgment | Unknown replaced by the placeholder |

@@ -4,6 +4,7 @@ use dim_agent_capabilities::file_storage::{FileLease, FileStorage, FileStorageEr
 use dim_agent_runtime::{Capability, KeysOf};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value, host_key};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     fs::Permissions,
@@ -11,6 +12,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+const FORMAT_VERSION: u32 = 1;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredFile {
+    version: u32,
+    text: String,
+}
 
 fn failure(error: FileStorageError) -> Value {
     let code = match error {
@@ -213,10 +223,17 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                             let cancel = CancellationToken::new();
                             let result = match method {
                                 "read" => match lease.read(&cancel).await {
-                                    Ok(bytes) => String::from_utf8(bytes)
-                                        .map(|text| json!(text).into())
+                                    Ok(bytes) => serde_json::from_slice::<StoredFile>(&bytes)
                                         .map_err(|_| {
                                             FileStorageError::Io(io::ErrorKind::InvalidData.into())
+                                        })
+                                        .and_then(|record| {
+                                            if record.version != FORMAT_VERSION {
+                                                return Err(FileStorageError::Io(
+                                                    io::ErrorKind::InvalidData.into(),
+                                                ));
+                                            }
+                                            Ok(json!(record.text).into())
                                         }),
                                     Err(FileStorageError::Io(error))
                                         if error.kind() == io::ErrorKind::NotFound =>
@@ -227,7 +244,11 @@ fn lease_value(lease: Arc<tokio::sync::Mutex<Option<FileLease>>>, tasks: TaskTra
                                 },
                                 "replace" => lease
                                     .replace(
-                                        argument.unwrap().into_bytes(),
+                                        serde_json::to_vec(&StoredFile {
+                                            version: FORMAT_VERSION,
+                                            text: argument.unwrap(),
+                                        })
+                                        .expect("text records contain only serializable fields"),
                                         private_permissions(),
                                         &cancel,
                                     )

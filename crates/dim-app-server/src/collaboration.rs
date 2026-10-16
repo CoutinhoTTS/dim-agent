@@ -182,16 +182,20 @@ impl Collaboration {
         config.cwd = leader.config().cwd.clone();
         config.permission_policy = leader.config().permission_policy.clone();
         config.collaboration_role = CollaborationRole::Member;
-        if let Some(selection) = &self.index.model_selection {
-            config.model = match selection
-                .0
-                .resolve(
-                    host.profile.model.clone(),
-                    Some(config.cwd.clone().into()),
-                    self.stop.clone(),
-                )
-                .await
-            {
+        if self.index.selects_models() {
+            let selected = match self.index.model_selection() {
+                Some(selection) => selection
+                    .0
+                    .resolve(
+                        host.profile.model.clone(),
+                        Some(config.cwd.clone().into()),
+                        self.stop.clone(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string()),
+                None => Err("model selection is unavailable while its provider reloads".into()),
+            };
+            config.model = match selected {
                 Ok(model) => model,
                 Err(error) => {
                     if owned {
@@ -202,7 +206,7 @@ impl Collaboration {
                             .unwrap()
                             .remove(&host.agent_id);
                     }
-                    return Err(member_create_failed(error.to_string()));
+                    return Err(member_create_failed(error));
                 }
             };
         }
@@ -2146,7 +2150,10 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
     )
 }
 
-struct AgentTool(Arc<CollaborationCapability>);
+struct AgentTool {
+    capability: Arc<CollaborationCapability>,
+    stopping: CancellationToken,
+}
 impl ToolHandler for AgentTool {
     fn execute(
         &self,
@@ -2154,7 +2161,12 @@ impl ToolHandler for AgentTool {
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
-        Box::pin(self.0.run(call, context, cancel))
+        Box::pin(async move {
+            if self.stopping.is_cancelled() {
+                return Err(HostError::Cancelled(RELOADING.into()));
+            }
+            self.capability.run(call, context, cancel).await
+        })
     }
 }
 
@@ -2193,7 +2205,10 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                 self.scope.named_key::<ToolContribution>(AGENT_TOOL),
                 Arc::new(ToolContribution {
                     definition: agent_definition(config.collaboration_role),
-                    handler: Arc::new(AgentTool(service.clone())),
+                    handler: Arc::new(AgentTool {
+                        capability: service.clone(),
+                        stopping: ctx.cancellation_token(),
+                    }),
                 }),
             )?;
             ctx.provide_as(self.scope.key::<CollaborationCapability>(), service)?;

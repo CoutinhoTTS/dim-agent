@@ -62,6 +62,7 @@ pub(crate) struct Assembly {
     tool_sources: Vec<String>,
     host_tools: Vec<String>,
     prompt_sources: Vec<String>,
+    session_methods: Vec<String>,
 }
 #[derive(Clone)]
 pub struct AgentBuilder {
@@ -85,6 +86,7 @@ impl AgentBuilder {
                 tool_sources: vec![],
                 host_tools: vec![],
                 prompt_sources: vec![],
+                session_methods: vec![],
             },
         }
     }
@@ -179,6 +181,20 @@ impl AgentBuilder {
             .iter()
             .chain(&self.assembly.tools)
             .map(String::as_str)
+    }
+    /// Records a `sessionMethods` namespace that a Session capability
+    /// provides: the Session's known namespaces (methods contract A.1), which
+    /// the host reads with [`Self::session_method_namespaces`].
+    pub fn session_methods(&mut self, namespace: impl Into<String>) -> &mut Self {
+        let namespace = namespace.into();
+        if !self.assembly.session_methods.contains(&namespace) {
+            self.assembly.session_methods.push(namespace);
+        }
+        self
+    }
+    /// The namespaces recorded with [`Self::session_methods`].
+    pub fn session_method_namespaces(&self) -> &[String] {
+        &self.assembly.session_methods
     }
     /// Registers a branch capability; the factory runs once per branch
     /// subtree, and once more when the assembly is installed, with a
@@ -677,6 +693,7 @@ pub(crate) struct SessionAssembly {
     pub unloading: CancellationToken,
     pub faults: FaultReporter,
     pub closing: CancellationToken,
+    pub lifecycle: SessionLifecycle,
     pub diagnostics: Diagnostics,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
 }
@@ -704,6 +721,10 @@ impl TypedPlugin for SessionScopePlugin {
         Box::pin(async move {
             let (owner, scope) = (&self.0, self.1);
             ctx.provide_as(
+                scope.key::<crate::SessionLoader>(),
+                Arc::new(crate::SessionLoader::new(owner.loader.clone())),
+            )?;
+            ctx.provide_as(
                 scope.key::<Diagnostics>(),
                 Arc::new(owner.diagnostics.clone()),
             )?;
@@ -719,6 +740,10 @@ impl TypedPlugin for SessionScopePlugin {
                     restored: owner.restored,
                     unloading: owner.unloading.clone(),
                 }),
+            )?;
+            ctx.provide_as(
+                scope.key::<SessionLifecycle>(),
+                Arc::new(owner.lifecycle.clone()),
             )?;
             ctx.provide_as(
                 scope.key::<TimelineFactory>(),
@@ -1264,6 +1289,7 @@ pub(crate) async fn build_session(
         restored: matches!(initialization, SessionInitialization::Restore(_)),
         faults: FaultReporter::default(),
         unloading: CancellationToken::new(),
+        lifecycle: SessionLifecycle::new(closing.clone()),
         closing,
         diagnostics,
         loaded: Mutex::new(None),
@@ -1346,6 +1372,8 @@ pub(crate) async fn build_session(
     match result {
         Ok((view, tree)) => Ok(BuiltSession { owner, view, tree }),
         Err(error) => {
+            // Never published: deferred background work ends without starting.
+            owner.lifecycle.advance(SessionPhase::Closed);
             let rollback = match started {
                 Ok(created) => Some(created),
                 Err((_, created)) => created,
