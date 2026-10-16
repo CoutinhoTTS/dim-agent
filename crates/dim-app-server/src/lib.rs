@@ -577,7 +577,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(mcp::McpPublication::register(&mut builtins));
         rows.push(owner(
             "mcp",
-            register_capability(&mut builtins, || mcp::McpPlugin),
+            register_capability(&mut builtins, move || mcp::McpPlugin::new(home_root)),
         ));
         rows.push(register_capability(&mut builtins, move || {
             dim_agent_capabilities::host_platform::HostPlatformPlugin::new(

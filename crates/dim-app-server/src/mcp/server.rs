@@ -2,7 +2,7 @@
 mod sse;
 mod stdio;
 
-use super::McpService;
+use super::auth::{Credential, McpAuth, Refusal, credential_key};
 use super::config::{BearerAuth, McpServerSettings, RemoteTransport};
 use dim_agent_runtime::{Capability, KeysOf, StateCell};
 use dim_agent_types::{
@@ -20,18 +20,19 @@ use rmcp::{
         ListToolsRequest, PaginatedRequestParams, ServerResult,
     },
     service::{
-        NotificationContext, PeerRequestOptions, RunningService, RxJsonRpcMessage, TxJsonRpcMessage,
+        NotificationContext, PeerRequestOptions, RunningService, RxJsonRpcMessage, ServiceError,
+        TxJsonRpcMessage,
     },
     transport::{
         StreamableHttpClientTransport, Transport,
         common::client_side_sse::BoxedSseResponse,
         streamable_http_client::{
-            StreamableHttpClient, StreamableHttpClientTransportConfig, StreamableHttpError,
-            StreamableHttpPostResponse,
+            AuthRequiredError, StreamableHttpClient, StreamableHttpClientTransportConfig,
+            StreamableHttpError, StreamableHttpPostResponse,
         },
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Gate, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
@@ -56,6 +57,11 @@ pub enum McpServerError {
     InvalidResponse,
     #[error("MCP cleanup failed")]
     Cleanup,
+    #[error("MCP server authorization required")]
+    AuthRequired { expired: bool },
+    /// A `403 insufficient_scope`, with the challenged scopes.
+    #[error("MCP server requires additional scopes")]
+    InsufficientScope(String),
 }
 pub type Result<T> = std::result::Result<T, McpServerError>;
 
@@ -73,6 +79,11 @@ pub enum McpServerState {
     Connected,
     Failed,
     Closed,
+    /// The server refused the request for lack of a usable OAuth credential.
+    /// The next request reconnects, for example once the user signs in.
+    AuthRequired {
+        expired: bool,
+    },
 }
 
 struct Notifications(StateCell<u64>);
@@ -84,14 +95,104 @@ impl ClientHandler for Notifications {
 
 type HttpError = StreamableHttpError<reqwest_mcp::Error>;
 
+/// A connection's OAuth credential, and the state its refusals set.
+#[derive(Clone)]
+pub(super) struct Authorization {
+    credential: Credential,
+    server: reqwest_mcp::Url,
+    state: StateCell<McpServerState>,
+}
+impl Authorization {
+    fn refused(&self, refusal: Refusal) -> McpServerError {
+        match refusal {
+            Refusal::Unavailable => McpServerError::RequestFailed,
+            Refusal::Required | Refusal::Expired => {
+                let expired = matches!(refusal, Refusal::Expired);
+                self.state.set(McpServerState::AuthRequired { expired });
+                McpServerError::AuthRequired { expired }
+            }
+        }
+    }
+    /// Only `error="insufficient_scope"` is step-up; rmcp reports any `403`
+    /// with a challenge as insufficient scope. Refused during the handshake,
+    /// the connection cannot be used until the user signs in again.
+    fn insufficient_scope(&self, header: &str) -> Option<String> {
+        let scopes = self.credential.insufficient_scope(header, &self.server)?;
+        self.state.update(|state| {
+            if *state == McpServerState::Connecting {
+                *state = McpServerState::AuthRequired { expired: false };
+            }
+        });
+        Some(scopes.join(" "))
+    }
+}
+
 // rmcp's bootstrap POSTs are inline awaits which do not observe the worker
 // cancellation token. Cancel their HTTP futures (including an initial SSE
 // response) explicitly. After initialization this token remains uncancelled;
 // normal close uses rmcp's graceful request draining and session DELETE.
+// An OAuth connection attaches a bearer to every request (design §5.6).
 #[derive(Clone)]
 struct InitializingClient {
     client: Client,
     cancel: CancellationToken,
+    authorization: Option<Authorization>,
+}
+impl InitializingClient {
+    async fn authorized<T, Fut>(
+        &self,
+        auth_header: Option<String>,
+        call: impl Fn(Option<String>) -> Fut,
+    ) -> std::result::Result<T, HttpError>
+    where
+        Fut: Future<Output = std::result::Result<T, HttpError>>,
+    {
+        let Some(authorization) = &self.authorization else {
+            return match call(auth_header).await {
+                Err(HttpError::InsufficientScope(_)) => Err(forbidden()),
+                result => result,
+            };
+        };
+        let result = authorization
+            .credential
+            .send(call, |result| match result {
+                Err(HttpError::AuthRequired(error)) => {
+                    Some(Some(error.www_authenticate_header.clone()))
+                }
+                Err(HttpError::Client(error))
+                    if error.status() == Some(reqwest_mcp::StatusCode::UNAUTHORIZED) =>
+                {
+                    Some(None)
+                }
+                // rmcp reports a POST `401` without `WWW-Authenticate` as text.
+                Err(HttpError::UnexpectedServerResponse(message))
+                    if message.starts_with("HTTP 401 ") =>
+                {
+                    Some(None)
+                }
+                _ => None,
+            })
+            .await
+            .map_err(|refusal| match authorization.refused(refusal) {
+                McpServerError::AuthRequired { .. } => {
+                    HttpError::AuthRequired(AuthRequiredError::new(String::new()))
+                }
+                _ => HttpError::UnexpectedServerResponse("authorization unavailable".into()),
+            })?;
+        match result {
+            Err(HttpError::InsufficientScope(error))
+                if authorization
+                    .insufficient_scope(&error.www_authenticate_header)
+                    .is_none() =>
+            {
+                Err(forbidden())
+            }
+            result => result,
+        }
+    }
+}
+fn forbidden() -> HttpError {
+    HttpError::UnexpectedServerResponse("forbidden".into())
 }
 impl StreamableHttpClient for InitializingClient {
     type Error = reqwest_mcp::Error;
@@ -122,10 +223,20 @@ impl StreamableHttpClient for InitializingClient {
         headers: HashMap<HeaderName, HeaderValue>,
         limit: usize,
     ) -> std::result::Result<StreamableHttpPostResponse, HttpError> {
+        let post = self.authorized(auth_header, |token| {
+            self.client.post_message_with_max_sse_event_size(
+                uri.clone(),
+                message.clone(),
+                session_id.clone(),
+                token,
+                headers.clone(),
+                limit,
+            )
+        });
         let response = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => return Err(HttpError::TransportChannelClosed),
-            result = self.client.post_message_with_max_sse_event_size(uri, message, session_id, auth_header, headers, limit) => result?,
+            result = post => result?,
         };
         Ok(match response {
             StreamableHttpPostResponse::Sse(stream, session) => StreamableHttpPostResponse::Sse(
@@ -144,9 +255,11 @@ impl StreamableHttpClient for InitializingClient {
         auth_header: Option<String>,
         headers: HashMap<HeaderName, HeaderValue>,
     ) -> std::result::Result<(), HttpError> {
-        self.client
-            .delete_session(uri, session_id, auth_header, headers)
-            .await
+        self.authorized(auth_header, |token| {
+            self.client
+                .delete_session(uri.clone(), session_id.clone(), token, headers.clone())
+        })
+        .await
     }
     async fn get_stream(
         &self,
@@ -175,16 +288,17 @@ impl StreamableHttpClient for InitializingClient {
         headers: HashMap<HeaderName, HeaderValue>,
         limit: usize,
     ) -> std::result::Result<BoxedSseResponse, HttpError> {
-        self.client
-            .get_stream_with_max_sse_event_size(
-                uri,
-                session_id,
-                last_event_id,
-                auth_header,
-                headers,
+        self.authorized(auth_header, |token| {
+            self.client.get_stream_with_max_sse_event_size(
+                uri.clone(),
+                session_id.clone(),
+                last_event_id.clone(),
+                token,
+                headers.clone(),
                 limit,
             )
-            .await
+        })
+        .await
     }
 }
 
@@ -207,7 +321,11 @@ impl<T: Transport<RoleClient> + 'static> Transport<RoleClient> for OwnedTranspor
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
         let message = self.inner.as_mut().expect("live transport").receive().await;
         if message.is_none() {
-            self.state.set(McpServerState::Failed);
+            self.state.update(|state| {
+                if !matches!(state, McpServerState::AuthRequired { .. }) {
+                    *state = McpServerState::Failed;
+                }
+            });
         }
         message
     }
@@ -265,6 +383,7 @@ enum TransportConfig {
 
 pub struct McpServer {
     transport: TransportConfig,
+    authorization: Option<Authorization>,
     state: StateCell<McpServerState>,
     tool_changes: StateCell<u64>,
     connection: AsyncMutex<Option<Connection>>,
@@ -281,6 +400,13 @@ impl McpServer {
     }
     pub fn tool_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.tool_changes.subscribe()
+    }
+    /// Changes when this server's OAuth credential changes; `None` without
+    /// OAuth.
+    pub fn credential_changes(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.authorization
+            .as_ref()
+            .map(|authorization| authorization.credential.subscribe())
     }
 
     /// Fetch every page; reject cycles/duplicate names instead of publishing a partial set.
@@ -385,6 +511,12 @@ impl McpServer {
             _ = cancel.cancelled() => return Err(McpServerError::Cancelled),
             guard = self.connection.lock() => guard,
         };
+        // Refused for lack of a credential: start over with a new connection.
+        if matches!(self.state.get(), McpServerState::AuthRequired { .. })
+            && let Some(refused) = connection.take()
+        {
+            let _ = refused.close().await;
+        }
         if let Some(connection) = connection.as_ref() {
             if connection.running.is_closed() {
                 self.state.set(McpServerState::Failed);
@@ -410,6 +542,9 @@ impl McpServer {
                 Ok(peer)
             }
             Err(error) => {
+                if let McpServerState::AuthRequired { expired } = self.state.get() {
+                    return Err(McpServerError::AuthRequired { expired });
+                }
                 self.state.set(McpServerState::Failed);
                 Err(error)
             }
@@ -425,6 +560,7 @@ impl McpServer {
                     InitializingClient {
                         client: http_client()?,
                         cancel: handshake_cancel.clone(),
+                        authorization: self.authorization.clone(),
                     },
                     config.clone(),
                 );
@@ -436,7 +572,7 @@ impl McpServer {
                     biased;
                     _ = cancel.cancelled() => return Err(McpServerError::Cancelled),
                     _ = tokio::time::sleep_until(deadline) => return Err(McpServerError::Timeout),
-                    result = sse::SseTransport::connect(http_client()?, config, handshake_cancel.clone()) => result?,
+                    result = sse::SseTransport::connect(http_client()?, config, self.authorization.clone(), handshake_cancel.clone()) => result?,
                 };
                 self.initialize(transport, cancel, handshake_cancel, deadline)
                     .await
@@ -465,10 +601,12 @@ impl McpServer {
         let initialize =
             Notifications(self.tool_changes.clone()).serve_with_ct(transport, lifetime.clone());
         tokio::pin!(initialize);
+        // Poll the handshake before honoring cancellation: rmcp's HTTP worker
+        // waits for its first message without observing its cancellation
+        // token, so a transport closed before sending one never finishes
+        // closing.
         let failure = tokio::select! {
             biased;
-            _ = cancel.cancelled() => McpServerError::Cancelled,
-            _ = tokio::time::sleep_until(deadline) => McpServerError::Timeout,
             result = &mut initialize => {
                 match result {
                     Ok(running) => {
@@ -481,6 +619,8 @@ impl McpServer {
                     }
                 }
             }
+            _ = cancel.cancelled() => McpServerError::Cancelled,
+            _ = tokio::time::sleep_until(deadline) => McpServerError::Timeout,
         };
         handshake_cancel.cancel();
         lifetime.cancel();
@@ -511,7 +651,7 @@ impl McpServer {
             biased;
             _ = cancel.cancelled() => McpServerError::Cancelled,
             _ = tokio::time::sleep(Duration::from_secs(60)) => McpServerError::Timeout,
-            response = &mut handle.rx => return response.map_err(|_| McpServerError::RequestFailed)?.map_err(|_| McpServerError::RequestFailed),
+            response = &mut handle.rx => return response.map_err(|_| McpServerError::RequestFailed)?.map_err(|error| self.failure(&error)),
         };
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
@@ -519,6 +659,33 @@ impl McpServer {
         )
         .await;
         Err(failure)
+    }
+
+    /// Authorization outcomes of a request, from the transport's own error.
+    fn failure(&self, error: &ServiceError) -> McpServerError {
+        let ServiceError::TransportSend(error) = error else {
+            return McpServerError::RequestFailed;
+        };
+        let refused = match self.state.get() {
+            McpServerState::AuthRequired { expired } => McpServerError::AuthRequired { expired },
+            _ => McpServerError::RequestFailed,
+        };
+        match error.error.downcast_ref::<HttpError>() {
+            Some(HttpError::AuthRequired(_)) => return refused,
+            Some(HttpError::InsufficientScope(error)) => {
+                return McpServerError::InsufficientScope(
+                    error.required_scope.clone().unwrap_or_default(),
+                );
+            }
+            _ => {}
+        }
+        match error.error.downcast_ref::<McpServerError>() {
+            Some(McpServerError::AuthRequired { .. }) => refused,
+            Some(McpServerError::InsufficientScope(scopes)) => {
+                McpServerError::InsufficientScope(scopes.clone())
+            }
+            _ => McpServerError::RequestFailed,
+        }
     }
 
     async fn run<T, F, Fut>(&self, cancel: &CancellationToken, operation: F) -> Result<T>
@@ -615,9 +782,11 @@ fn http_client() -> Result<Client> {
 pub(super) struct McpServerPlugin {
     pub key: TypeKey,
     transport: TransportConfig,
+    oauth: Option<(super::auth::CredentialKey, reqwest_mcp::Url)>,
 }
 impl McpServerPlugin {
-    pub fn new(configuration: McpServerSettings, key: TypeKey) -> Result<Self> {
+    pub fn new(id: &str, configuration: McpServerSettings, key: TypeKey) -> Result<Self> {
+        let oauth = credential_key(id, &configuration);
         let transport = match &configuration {
             McpServerSettings::Stdio {
                 command,
@@ -640,24 +809,34 @@ impl McpServerPlugin {
                 }
             }
         };
-        Ok(Self { key, transport })
+        Ok(Self {
+            key,
+            transport,
+            oauth,
+        })
     }
 }
 impl TypedPlugin for McpServerPlugin {
-    // Only orders this server inside the directory's lifetime.
-    type Deps = (Gate<McpService>,);
+    // Also orders this server inside the directory's lifetime.
+    type Deps = (Arc<McpAuth>,);
     fn name(&self) -> &str {
         "McpServer"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        _: Self::Deps,
+        (auth,): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let state = StateCell::new(McpServerState::Disconnected);
             let service = Arc::new(McpServer {
                 transport: self.transport.clone(),
-                state: StateCell::new(McpServerState::Disconnected),
+                authorization: self.oauth.clone().map(|(key, server)| Authorization {
+                    credential: auth.credential(key),
+                    server,
+                    state: state.clone(),
+                }),
+                state,
                 tool_changes: StateCell::new(0),
                 connection: AsyncMutex::new(None),
                 stopping: ctx.cancellation_token(),
