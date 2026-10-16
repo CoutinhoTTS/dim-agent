@@ -160,8 +160,8 @@ async fn product_submit_acknowledges_only_a_committed_input() {
     );
     let mut observer = Client::new_version(&server, true, 3).await;
     let lookup = json!({"sessionId":sid,"branchId":"main","submissionId":submission});
-    // The lookup covers what was published when it began; reading those
-    // stored pages waits while the database is locked.
+    // The lookup first waits until the committed input is published, so
+    // `unknown` is final for every write that returned before it.
     let looked_up = observer.send("session.input_lookup", lookup.clone()).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), observer.response(looked_up))
@@ -169,13 +169,12 @@ async fn product_submit_acknowledges_only_a_committed_input() {
             .is_err()
     );
     lock.execute_batch("COMMIT").unwrap();
-    assert_eq!(
-        observer.response(looked_up).await["result"]["status"],
-        "unknown"
-    );
+    let found = observer.response(looked_up).await;
     let receipt = client.response(request).await;
     assert_ok(&receipt);
     let event = &receipt["result"]["event"];
+    assert_eq!(found["result"]["status"], "accepted");
+    assert_eq!(found["result"]["event"], *event);
     let stored: String = lock.query_row(
         "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND sequence=?2",
         rusqlite::params![sid, event["sequence"].as_i64().unwrap()],

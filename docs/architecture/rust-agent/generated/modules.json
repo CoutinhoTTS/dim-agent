@@ -1199,6 +1199,18 @@
       ]
     },
     {
+      "id": "dim_app_server::agents::sessions",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::agents",
+      "file": "crates/dim-app-server/src/agents/sessions.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_app_server::approval",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1276,7 +1288,6 @@
       "parent": "dim_app_server::connection",
       "file": "crates/dim-app-server/src/connection/tree.rs",
       "unexpandedMacros": [
-        "matches",
         "tokio::select",
         "vec"
       ]
@@ -10362,6 +10373,17 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "mod sessions",
+        "path sessions",
+        "path sessions::SessionsService",
+        "use sessions::Lookup",
+        "use sessions::find_input"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_app_server::protocol",
       "references": [
         "path AgentInfo",
@@ -10400,6 +10422,132 @@
         "path Traces",
         "path Traces::new",
         "use crate::trace::Traces"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_capabilities::input_queue",
+      "references": [
+        "path InputQueue",
+        "path Withdrawal",
+        "path Withdrawal::Deleted",
+        "path Withdrawal::NotHeld",
+        "use dim_agent_capabilities::input_queue::InputQueue",
+        "use dim_agent_capabilities::input_queue::Withdrawal"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path PermissionState",
+        "use dim_agent_capabilities::permission::PermissionState"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path Session",
+        "use dim_agent_runtime::Session"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_runtime::branch",
+      "references": [
+        "path Publication",
+        "use dim_agent_runtime::Publication"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::Closed",
+        "path AgentError::InvalidInput",
+        "path AgentError::Reloading",
+        "path AgentError::Storage",
+        "path AgentError::UnknownBranch",
+        "path dim_agent_runtime::Result",
+        "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock",
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path InputBlock::Raw",
+        "path InputMessageData",
+        "path InputMode",
+        "path InputWithdrawData",
+        "path UserInput",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::InputMode",
+        "use dim_agent_types::InputWithdrawData",
+        "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "path PermissionPolicy::default",
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path ModelSelection",
+        "use dim_agent_types::ModelSelection"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_app_server::agents",
+      "references": [
+        "path AgentIndex",
+        "path super::session_config",
+        "use super::AgentIndex"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path PROTOCOL_VERSION",
+        "path session_cwd",
+        "use crate::protocol::PROTOCOL_VERSION",
+        "use crate::protocol::session_cwd"
       ]
     },
     {
@@ -11135,7 +11283,7 @@
         "path SessionSkillsResult",
         "path SessionSummary",
         "path agent_unknown",
-        "path canonical_cwd"
+        "path session_cwd"
       ]
     },
     {
@@ -11386,7 +11534,6 @@
         "path RpcError::app",
         "path RpcError::from",
         "path RpcError::invalid",
-        "path RpcError::wire",
         "path params"
       ]
     },
@@ -11413,8 +11560,18 @@
         "path InputMessageData",
         "path InputMessageData::default",
         "path UserInput",
-        "use dim_agent_types::BranchSource",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::BranchSource"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "path Lookup::Accepted",
+        "path Lookup::Ambiguous",
+        "path Lookup::Unknown",
+        "path crate::agents::find_input",
+        "use crate::agents::Lookup"
       ]
     },
     {
