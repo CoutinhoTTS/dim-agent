@@ -3866,6 +3866,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "dim-agent-aimux",
+ "dim-agent-attachments",
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
@@ -3874,6 +3875,7 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

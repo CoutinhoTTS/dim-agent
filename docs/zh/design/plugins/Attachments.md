@@ -1,6 +1,6 @@
 # Attachments
 
-状态：Ready。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。路线图条目 P2（[#66](https://github.com/arcships/dim/issues/66)）。依赖均已合入：C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83)）、S5a（[#59](https://github.com/arcships/dim/issues/59)，[#95](https://github.com/arcships/dim/pull/95)）、S6（[#51](https://github.com/arcships/dim/issues/51)，[#87](https://github.com/arcships/dim/pull/87)）和 S11（[#56](https://github.com/arcships/dim/issues/56)，[#92](https://github.com/arcships/dim/pull/92)）（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
+状态：Implemented（[#102](https://github.com/arcships/dim/pull/102)）；capability 页面 [Attachments](../../../architecture/rust-agent/plugins/Attachments.md)。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。路线图条目 P2（[#66](https://github.com/arcships/dim/issues/66)）。依赖均已合入：C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83)）、S5a（[#59](https://github.com/arcships/dim/issues/59)，[#95](https://github.com/arcships/dim/pull/95)）、S6（[#51](https://github.com/arcships/dim/issues/51)，[#87](https://github.com/arcships/dim/pull/87)）和 S11（[#56](https://github.com/arcships/dim/issues/56)，[#92](https://github.com/arcships/dim/pull/92)）（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
 
 让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（S11，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。Attachments 是一个小型 Session 插件，通过 `sessionMethods` 服务（Session 作用域，key `attachment`；[session-boundary](../contracts/session-boundary.md)）提供一个 Session 方法 `attachment.put`；契约是语言中立的，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法通过 SessionStore 的 `sessionFiles` 服务把文本附件（一次大段粘贴）存为不可变的 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为（[Session 文件](../appserver/session-files.md)）。没有事件。
 
@@ -254,7 +254,7 @@ ModelProvider 补充（已在 S11 实现，`model_provider/images.rs`；[总体�
 | `bytes` | SessionStore 的 `bytes`，即存储的长度 |
 | 单个请求的大小 | 一个传输帧，最多 16 MiB 的 JSON。更大的帧会在 Rpc 分发之前结束连接，因此由客户端检查编码后的请求（A.3） |
 
-回复原样传递 SessionStore 的回复，不添加任何派生数据：客户端持有文本，引用格式也由客户端决定（A5）。
+参数中有任何其他字段即为形状错误（`invalid_params`），与 `session.input.withdraw` 相同（Q10）。回复原样传递 SessionStore 的回复，不添加任何派生数据：客户端持有文本，引用格式也由客户端决定（A5）。
 
 错误。除 `invalid_params` 外，Attachments 自己的错误码都是 `-32000`：
 
@@ -359,14 +359,14 @@ P2 的流程测试，通过公开 RPC，在有原生存储和本地执行的 App
 2. 给定的 `name` 被保留。空的 `text`、`../x`、`.hidden` 或 `AUTH.JSON` 这样的 `name`，以及 10 MiB 加一个字节的 `text`，以 `attachment_invalid` 或 `attachment_too_large` 被拒绝，Session 文件目录中不出现任何文件。
 3. 没有原生存储的主机对 `attachment.put` 回复 `unknown_method`。
 
-不在 P2 的测试中：`node_unavailable`、取消和存储失败属于 SessionStore，由 S5a 的测试覆盖（[Session 文件 §16](../appserver/session-files.md#16-验收流程测试)）；Attachments 不依赖 FileStorage，因此按构造保持加载。分叉共享和删除由 S5a 在 SessionStore 的 Rust API 上覆盖，由 S5c 通过 RPC 覆盖（`session.fork` 和 `session.delete` 尚不存在）。
+A.2 映射的其余部分也有测试（Q11）。通过 RPC：存储失败（`<db>.session-files` 处已有一个条目）回复 `storage_failed`，不拥有任何文件，重试会存下文件；已关闭的 Session 回复 `session_closed`。卸载、Session 记录在提交前已不存在、节点不活跃，这三种情况无法通过 RPC 可靠触发，因此在 Rpc 分发所用的 `sessionMethods` 契约上、基于真实的 SessionStore 测试：分别回复 `service_reloading`、`session_closed` 和 `node_unavailable`，都不存储任何内容。SessionStore 自己的 `too_large` 不会出现在 10 MiB 检查之后，没有测试。分叉共享和删除由 S5a 在 SessionStore 的 Rust API 上覆盖，由 S5c 通过 RPC 覆盖（`session.fork` 和 `session.delete` 尚不存在）。测试：[attachments_flow.rs](../../../../crates/dim-app-server/tests/attachments_flow.rs)。
 
 图片部分，归 S11 和 CLI：
 
 1. 非视觉模型：请求中是占位，历史中的输入不变；能力未知：发送图片。原始客户端用 `session.submit` 发送无法解码的图片时，Rpc 接受，请求中换成占位（S11）。
 2. CLI：接受 PNG、JPEG、WebP 和 GIF 并使用嗅探出的媒体类型；标错类型的 JPEG 被纠正；BMP 和 URL 在发送前被拒绝；21 张图片、6 MiB 的图片和 9000 px 的边长在发送前被拒绝；保留草稿。
 
-验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及 `cargo run --locked -p xtask -- graph` 再 `check`，因为装配了新的 Capability。随实现一起，capability 页面移入或链接到 `architecture/rust-agent/plugins/`（[roadmap §5.1](../../../design/roadmap.md#51-设计状态)）。
+验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及 `cargo run --locked -p xtask -- graph` 再 `check`，因为装配了新的 Capability。capability 页面是 [architecture/rust-agent/plugins/Attachments](../../../architecture/rust-agent/plugins/Attachments.md)（[roadmap §5.1](../../../design/roadmap.md#51-设计状态)）：xtask 生成本地执行图时按 `serve` 的方式安装 Attachments，`sessionFiles` 换成仅供生成图用、不存储任何文件的替身，因此 `check` 会校验该页面。
 
 ## 附录 E. 假设
 
@@ -396,17 +396,19 @@ P2 的流程测试，通过公开 RPC，在有原生存储和本地执行的 App
 | Q7 | 传输帧与 10 MiB 限制 | 已决定：限制不变；超过 16 MiB 的请求到不了 Attachments，因此由客户端检查编码后的大小（A.3） |
 | Q8 | 资源节点 | 推迟到 P3：P3 在每次调用时按 `SessionConfig.resourceNode` 查找节点服务（[overview §6.3](../overview.md#63-多节点)）。SessionStore 已经每次调用时查找 FileStorage，并为每个文件记录其节点（Session 文件 §3.1），因此离线节点会得到 `node_unavailable`，Attachments 无需改动。P2 中每个 Session 都使用控制节点。早先的各行依赖 [#5](https://github.com/arcships/dim/issues/5)，它已撤回 |
 | Q9 | 已配对设备 | 推迟到 RemoteGateway（P3）。Rpc 把 `attachment.put` 提供给每个被提供 Session 方法的连接（E3）；Attachments 不读取连接，因此无需改动 |
+| Q10 | 参数中的未知字段 | 实现时决定：作为 `invalid_params` 拒绝，与 `session.input.withdraw` 和 `session.create` 一样。客户端只在契约变更之后发送新字段 |
+| Q11 | 错误映射的测试 | 实现时决定：P2 测试 A.2 中每个可触发的码。RPC 无法可靠触发的码在 `sessionMethods` 契约上、基于真实的 SessionStore 测试（AGENTS.md 允许为此单独写测试） |
 
 ## 附录 G. Rust 绑定
 
-Attachments 用 Rust 实现，放在自己的 crate 中，依赖 dim-agent-runtime 和 dim-agent-capabilities，不依赖 dim-app-server。下面 C1 的名称来自已合入的 [#83](https://github.com/arcships/dim/pull/83)。
+Attachments 用 Rust 实现，放在自己的 crate `dim-agent-attachments` 中（[lib.rs](../../../../crates/dim-agent-attachments/src/lib.rs)），依赖 dim-agent-runtime 和 dim-agent-capabilities，不依赖 dim-app-server；`xtask check` 保证它位于 App Server 组合层之下。下面 C1 的名称来自已合入的 [#83](https://github.com/arcships/dim/pull/83)。
 
 | 中立契约 | Rust 绑定 |
 | --- | --- |
 | 插件 | `TypedPlugin` 与 `Capability`；`Deps = (InSession<SessionIdentity>, Arc<SessionFilesHost>)`，Session key 限定于工厂的 `SessionScope` |
-| 安装 | 在 `serve` 中，设置了 `native_home` 时：`builder.session_methods("attachment").session_plugin(AttachmentsPlugin::new)`，在 Rpc 的行读取 `session_method_namespaces()` 之前 |
+| 安装 | `dim_agent_attachments::install(builder)`：`builder.session_methods("attachment").session_plugin(AttachmentsPlugin::new)`。`serve` 在设置了 `native_home` 时调用它，在 Rpc 的行读取 `session_method_namespaces()` 之前；xtask 生成本地执行图时也调用它 |
 | `sessionMethods` key `attachment` | `dim_agent_capabilities::methods::SessionMethods::provide(ctx, &scope, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)`，在 `apply` 中、插件自己的 effect 之后调用。`Handler` 接受 `(method, params, CancellationToken, Progress)`；不使用 `Progress`（`progress: false`） |
-| 参数与回复 | `methods::params::<T>(params)`（形状错误时为 `invalid_params`）和 `methods::reply(value)` |
+| 参数与回复 | `methods::params::<T>(params)`（形状错误时为 `invalid_params`，包括未知字段）和 `methods::reply(value)` |
 | `sessionFiles.put` | `SessionFilesHost(Arc<dyn PutSessionFile>)`：`put(session_id, name, content: Vec<u8>, cancel)` 返回 `StoredSessionFile {file_id, path, bytes}` 或 `SessionFileError {code: SessionFileErrorCode, message}`（[Session 文件附录 A](../appserver/session-files.md#附录-a-rust-绑定)）；`session_id` 来自 `SessionIdentity`，`cancel` 是处理函数的令牌 |
 | 错误 | `NotFound` → `RpcError::closed()`；`Cancelled` → `RpcError::reloading()`；`Invalid`、`TooLarge`、`NodeUnavailable`、`Storage` 以及 Attachments 自己的检查 → `RpcError::app(-32000, code, message)`，码见 A.2 |
 | 图片内容块 | `ContentBlock::Image { source: ImageSource { source_type: Base64 \| Url, media_type, data, url } }`（[content.rs](../../../../crates/dim-agent-types/src/content.rs)） |

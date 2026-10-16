@@ -1,6 +1,6 @@
 # Attachments
 
-Status: Ready. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Roadmap item P2 ([#66](https://github.com/arcships/dim/issues/66)). Its dependencies have merged: C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)), S5a ([#59](https://github.com/arcships/dim/issues/59), [#95](https://github.com/arcships/dim/pull/95)), S6 ([#51](https://github.com/arcships/dim/issues/51), [#87](https://github.com/arcships/dim/pull/87)) and S11 ([#56](https://github.com/arcships/dim/issues/56), [#92](https://github.com/arcships/dim/pull/92)) ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
+Status: Implemented ([#102](https://github.com/arcships/dim/pull/102)); capability page [Attachments](../../architecture/rust-agent/plugins/Attachments.md). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Roadmap item P2 ([#66](https://github.com/arcships/dim/issues/66)). Its dependencies have merged: C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)), S5a ([#59](https://github.com/arcships/dim/issues/59), [#95](https://github.com/arcships/dim/pull/95)), S6 ([#51](https://github.com/arcships/dim/issues/51), [#87](https://github.com/arcships/dim/pull/87)) and S11 ([#56](https://github.com/arcships/dim/issues/56), [#92](https://github.com/arcships/dim/pull/92)) ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
 Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (S11, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file through SessionStore's `sessionFiles` service and returns its path; the user's text quotes the path and the model reads the file with `read` when it needs it. Fork sharing and deletion of those files are SessionStore behaviour ([session files](../appserver/session-files.md)). No events.
 
@@ -254,7 +254,7 @@ Service `sessionMethods`, Session scope, key `attachment`. `describe()` returns 
 | `bytes` | SessionStore's `bytes`, the stored length |
 | Size of one request | One transport frame, at most 16 MiB of JSON. A larger frame ends the connection before Rpc dispatches it, so the client checks the encoded request (A.3) |
 
-The reply passes SessionStore's reply through and adds nothing derived: the client has the text, and the reference format is the client's (A5).
+Params with any other field are of the wrong shape (`invalid_params`), as for `session.input.withdraw` (Q10). The reply passes SessionStore's reply through and adds nothing derived: the client has the text, and the reference format is the client's (A5).
 
 Errors. Attachments' own codes are `-32000`, except `invalid_params`:
 
@@ -359,14 +359,14 @@ P2 flow tests, through public RPC on an App Server with native storage and local
 2. A given `name` is kept. An empty `text`, a `name` such as `../x`, `.hidden` or `AUTH.JSON`, and a `text` of 10 MiB plus one byte are rejected with `attachment_invalid` or `attachment_too_large`, and no file appears in the Session-files directory.
 3. A host without native storage answers `attachment.put` with `unknown_method`.
 
-Not in P2's tests: `node_unavailable`, cancellation and storage failures are SessionStore's and covered by S5a's tests ([session files §16](../appserver/session-files.md#16-acceptance-flow-tests)); Attachments does not depend on FileStorage, so it stays loaded by construction. Fork sharing and deletion are covered by S5a at SessionStore's Rust API and by S5c through RPC (`session.fork` and `session.delete` do not exist yet).
+The rest of the A.2 mapping is also tested (Q11). Through RPC, a storage failure (an entry occupying `<db>.session-files`) answers `storage_failed` with nothing owned, and a retry stores the file; a closed Session answers `session_closed`. An unload, a Session record gone before the commit and an inactive node cannot be triggered reliably through RPC, so they run at the `sessionMethods` contract Rpc dispatches to, over the real SessionStore: `service_reloading`, `session_closed` and `node_unavailable`, each with nothing stored. SessionStore's own `too_large` cannot follow the 10 MiB check and has no test. Fork sharing and deletion are covered by S5a at SessionStore's Rust API and by S5c through RPC (`session.fork` and `session.delete` do not exist yet). Tests: [attachments_flow.rs](../../../crates/dim-app-server/tests/attachments_flow.rs).
 
 Image half, owned by S11 and the CLI:
 
 1. Non-vision model: the request carries the placeholder and the input in history is unchanged; unknown capability: the image is sent. A raw `session.submit` with an undecodable image is accepted by Rpc and replaced by the placeholder in the request (S11).
 2. CLI: PNG, JPEG, WebP and GIF accepted with sniffed media types; a mislabeled JPEG corrected; BMP and URL rejected before sending; 21 images, a 6 MiB image and a 9000 px side rejected before sending; the draft is kept.
 
-Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo run --locked -p xtask -- graph` then `check`, because a new Capability is assembled. With the implementation the capability page moves to or links from `architecture/rust-agent/plugins/` ([roadmap §5.1](../roadmap.md#51-设计状态)).
+Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo run --locked -p xtask -- graph` then `check`, because a new Capability is assembled. The capability page is [architecture/rust-agent/plugins/Attachments](../../architecture/rust-agent/plugins/Attachments.md) ([roadmap §5.1](../roadmap.md#51-设计状态)): xtask's local graph installs Attachments as `serve` does, with a graph-only `sessionFiles` that stores nothing, so `check` validates the page.
 
 ## Appendix E. Assumptions
 
@@ -396,17 +396,19 @@ Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked --
 | Q7 | Transport frame against the 10 MiB limit | Decided: the limit stays; a request over 16 MiB never reaches Attachments, so the client checks its encoded size (A.3) |
 | Q8 | Resource nodes | Deferred to P3, which looks node services up on each call by `SessionConfig.resourceNode` ([overview §6.3](../overview.md#63-multiple-nodes)). SessionStore already looks FileStorage up per call and records each file's node (session files §3.1), so an offline node yields `node_unavailable` with no change to Attachments. In P2 every Session uses the control node. The earlier rows relied on [#5](https://github.com/arcships/dim/issues/5), which is withdrawn |
 | Q9 | Paired devices | Deferred to RemoteGateway (P3). Rpc serves `attachment.put` to every connection that is served Session methods (E3); Attachments does not read the connection, so it needs no change |
+| Q10 | Unknown params fields | Decided in implementation: rejected as `invalid_params`, as `session.input.withdraw` and `session.create` reject them. A client sends a new field only after a contract change |
+| Q11 | Tests of the error mapping | Decided in implementation: P2 tests every reachable A.2 code. Codes RPC cannot trigger reliably are tested at the `sessionMethods` contract over the real SessionStore (AGENTS.md allows a dedicated test there) |
 
 ## Appendix G. Rust binding
 
-Attachments is implemented in Rust, in its own crate, which depends on dim-agent-runtime and dim-agent-capabilities and not on dim-app-server. C1's names below are those merged in [#83](https://github.com/arcships/dim/pull/83).
+Attachments is implemented in Rust in its own crate, `dim-agent-attachments` ([lib.rs](../../../crates/dim-agent-attachments/src/lib.rs)), which depends on dim-agent-runtime and dim-agent-capabilities and not on dim-app-server; `xtask check` keeps it below the App Server composition layer. C1's names below are those merged in [#83](https://github.com/arcships/dim/pull/83).
 
 | Neutral contract | Rust binding |
 | --- | --- |
 | Plugin | `TypedPlugin` and `Capability`; `Deps = (InSession<SessionIdentity>, Arc<SessionFilesHost>)`, the Session key scoped to the factory's `SessionScope` |
-| Installation | In `serve`, when `native_home` is set: `builder.session_methods("attachment").session_plugin(AttachmentsPlugin::new)`, before Rpc's row reads `session_method_namespaces()` |
+| Installation | `dim_agent_attachments::install(builder)`: `builder.session_methods("attachment").session_plugin(AttachmentsPlugin::new)`. `serve` calls it when `native_home` is set, before Rpc's row reads `session_method_namespaces()`; xtask's local graph calls it too |
 | `sessionMethods` key `attachment` | `dim_agent_capabilities::methods::SessionMethods::provide(ctx, &scope, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)`, called in `apply` after the plugin's own effects. `Handler` takes `(method, params, CancellationToken, Progress)`; `Progress` is unused (`progress: false`) |
-| Params and reply | `methods::params::<T>(params)` (`invalid_params` on a wrong shape) and `methods::reply(value)` |
+| Params and reply | `methods::params::<T>(params)` (`invalid_params` on a wrong shape, unknown fields included) and `methods::reply(value)` |
 | `sessionFiles.put` | `SessionFilesHost(Arc<dyn PutSessionFile>)`: `put(session_id, name, content: Vec<u8>, cancel)` returns `StoredSessionFile {file_id, path, bytes}` or `SessionFileError {code: SessionFileErrorCode, message}` ([session files Appendix A](../appserver/session-files.md#appendix-a-rust-binding)); `session_id` comes from `SessionIdentity`, `cancel` is the handler's token |
 | Errors | `NotFound` → `RpcError::closed()`; `Cancelled` → `RpcError::reloading()`; `Invalid`, `TooLarge`, `NodeUnavailable`, `Storage` and Attachments' own checks → `RpcError::app(-32000, code, message)` with the codes of A.2 |
 | Image content block | `ContentBlock::Image { source: ImageSource { source_type: Base64 \| Url, media_type, data, url } }` ([content.rs](../../../crates/dim-agent-types/src/content.rs)) |

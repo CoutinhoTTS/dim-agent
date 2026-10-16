@@ -1,13 +1,15 @@
 # Local-execution business plugins
 
-This directory covers the **29 business plugins and content groups in the local-execution
+This directory covers the **31 business plugins and content groups in the local-execution
 profile**, not every App Server plugin. The authoritative assembly is
-[`defaults::install_local_execution`](../../../../crates/dim-agent-capabilities/src/defaults.rs),
+[`defaults::install_local_execution`](../../../../crates/dim-agent-capabilities/src/defaults.rs)
+plus Attachments, which `serve` adds where the host has native storage,
 with process services and scripted model hosts supplied by
 [`xtask`](../../../../xtask/src/plugins.rs). Its recorded bindings are in
 [`generated/local/services.json`](../generated/local/services.json).
 The graph uses isolated host facts and one fixture Skill, not the developer's
 home. The host fixture reuses HostPlatformPlugin's declared dependencies and keys.
+SessionStore's `sessionFiles` is a graph-only fixture that stores nothing.
 
 Infrastructure rows `BranchScope`, `SessionScope`, `SessionBroadcast`,
 `SessionBroadcastEnd`, `SessionExtension`, `rutis-loader`, `session` and `branch`, and the scripted
@@ -20,7 +22,7 @@ plugin with the same name.
 | Scope | Plugins |
 | --- | --- |
 | Process | [FileWriteCoordinator](FileWriteCoordinator.md), [SkillsCatalog](SkillsCatalog.md), [HostPlatform](HostPlatform.md), [FileStorage](FileStorage.md) |
-| Session | [Skills](Skills.md), [SkillContributions](SkillContributions.md), [SkillContentInstances](SkillContentInstances.md), [SkillContent](SkillContent.md), [PromptSources](PromptSources.md), [PromptRegistry](PromptRegistry.md), [Wait](Wait.md), [WorkspaceTools](WorkspaceTools.md), [ToolRegistry](ToolRegistry.md), [TimelineTree](TimelineTree.md) |
+| Session | [Skills](Skills.md), [SkillContributions](SkillContributions.md), [SkillContentInstances](SkillContentInstances.md), [SkillContent](SkillContent.md), [PromptSources](PromptSources.md), [PromptRegistry](PromptRegistry.md), [Wait](Wait.md), [WorkspaceTools](WorkspaceTools.md), [ToolRegistry](ToolRegistry.md), [TimelineTree](TimelineTree.md), [InputMethods](InputMethods.md), [Attachments](Attachments.md) |
 | Branch | [SkillsBranch](SkillsBranch.md), [PromptSourcesBranch](PromptSourcesBranch.md), [WaitBranch](WaitBranch.md), [BackgroundExec](BackgroundExec.md), [FileReads](FileReads.md), [ToolExecutor](ToolExecutor.md), [ToolBinding](ToolBinding.md), [Approval](Approval.md), [Permission](Permission.md), [ModelProvider](ModelProvider.md), [Loop](Loop.md), [InputQueue](InputQueue.md), [Prompt](Prompt.md), [ContextPreparation](ContextPreparation.md), [TreeTimeline](TreeTimeline.md) |
 
 ## Reading and maintaining these pages

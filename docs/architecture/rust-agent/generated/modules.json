@@ -164,6 +164,15 @@
       ]
     },
     {
+      "id": "dim_agent_attachments",
+      "crate": "dim_agent_attachments",
+      "parent": null,
+      "file": "crates/dim-agent-attachments/src/lib.rs",
+      "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities",
       "crate": "dim_agent_capabilities",
       "parent": null,
@@ -359,6 +368,9 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/input_queue.rs",
       "unexpandedMacros": [
+        "matches",
+        "serde_json::json",
+        "tokio::select",
         "vec"
       ]
     },
@@ -383,6 +395,13 @@
         "tokio::select",
         "unreachable"
       ]
+    },
+    {
+      "id": "dim_agent_capabilities::model_provider::images",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::model_provider",
+      "file": "crates/dim-agent-capabilities/src/model_provider/images.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_agent_capabilities::model_provider::recovery",
@@ -2363,6 +2382,79 @@
       ]
     },
     {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path SessionFileError",
+        "path SessionFileErrorCode::Cancelled",
+        "path SessionFileErrorCode::Invalid",
+        "path SessionFileErrorCode::NodeUnavailable",
+        "path SessionFileErrorCode::NotFound",
+        "path SessionFileErrorCode::Storage",
+        "path SessionFileErrorCode::TooLarge",
+        "path SessionFilesHost",
+        "use dim_agent_capabilities::host::SessionFileError",
+        "use dim_agent_capabilities::host::SessionFileErrorCode",
+        "use dim_agent_capabilities::host::SessionFilesHost"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::closed",
+        "path RpcError::reloading",
+        "path SessionMethods::provide",
+        "path methods::params",
+        "path methods::reply",
+        "use dim_agent_capabilities::methods",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path InSession",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::InSession",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_attachments",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path SessionScope",
+        "use dim_agent_runtime::SessionScope"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::adapters",
       "references": [
@@ -3480,6 +3572,8 @@
       "to": "dim_agent_capabilities::input_queue",
       "references": [
         "path InputQueuePlugin::new",
+        "path crate::input_queue::INPUT_METHODS",
+        "path crate::input_queue::InputMethodsPlugin::new",
         "use crate::input_queue::InputQueuePlugin"
       ]
     },
@@ -4087,14 +4181,38 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path SessionMethods::provide",
+        "path params",
+        "path reply",
+        "use crate::methods::Interruption",
+        "use crate::methods::MethodDecl",
+        "use crate::methods::SessionMethods",
+        "use crate::methods::params",
+        "use crate::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use crate::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::capability",
       "references": [
         "path Capability",
         "path InBranch",
+        "path InSession",
         "path KeysOf",
         "path scoped",
         "use dim_agent_runtime::Capability",
         "use dim_agent_runtime::InBranch",
+        "use dim_agent_runtime::InSession",
         "use dim_agent_runtime::KeysOf",
         "use dim_agent_runtime::scoped"
       ]
@@ -4128,7 +4246,9 @@
       "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::InvalidInput",
         "path Result",
+        "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result"
       ]
     },
@@ -4137,7 +4257,9 @@
       "to": "dim_agent_runtime::scope",
       "references": [
         "path BranchScope",
-        "use dim_agent_runtime::BranchScope"
+        "path SessionScope",
+        "use dim_agent_runtime::BranchScope",
+        "use dim_agent_runtime::SessionScope"
       ]
     },
     {
@@ -4156,14 +4278,21 @@
         "path AgentEvent",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
+        "path EventKind::InputWithdraw",
         "path EventKind::StopInterrupt",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
         "path InputAppliedData",
+        "path InputDeletedData",
+        "path InputMessageData",
         "path InputMode",
         "path InputMode::Append",
         "path InputMode::Queue",
+        "path InputMode::Steer",
+        "path InputWithdrawData",
+        "path UserInput",
         "path events"
       ]
     },
@@ -4217,6 +4346,14 @@
         "path ModelHost",
         "path ProviderConnectionResolver",
         "path ResolvedModelConnection"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider",
+      "to": "dim_agent_capabilities::model_provider::images",
+      "references": [
+        "mod images",
+        "path images::adapt"
       ]
     },
     {
@@ -4375,6 +4512,25 @@
       "to": "dim_agent_types::model",
       "references": [
         "path model"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ImageSource",
+        "path ImageSourceType::Base64",
+        "path Message",
+        "path MessageContent::Parts",
+        "path MessagePart::Image",
+        "path MessagePart::Text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest"
       ]
     },
     {
@@ -6353,6 +6509,8 @@
         "path EventKind::ContextScope",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
+        "path EventKind::InputWithdraw",
         "path EventKind::ModelCall",
         "path EventKind::ModelOutputEnd",
         "path EventKind::ModelStart",
@@ -8871,6 +9029,13 @@
       "references": [
         "path dim_agent_aimux::AimuxPlugin",
         "path dim_agent_aimux::ConfiguredModelsPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_agent_attachments",
+      "references": [
+        "path dim_agent_attachments::install"
       ]
     },
     {
@@ -13127,7 +13292,9 @@
         "path EventKind::ExecStarted",
         "path EventKind::InputApplied",
         "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
+        "path EventKind::InputWithdraw",
         "path EventKind::ModelCall",
         "path EventKind::ModelContent",
         "path EventKind::ModelOutputEnd",
