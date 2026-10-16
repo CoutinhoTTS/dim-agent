@@ -245,7 +245,32 @@ Readers update with the struct:
 **Dynamic events (decision A).** `context/compact` is added as an `EventKind` variant now. When
 #2 lands (plugins register their own event types; Timeline checks structure and type range,
 not content), it migrates to dynamic registration owned by the Loop. F1 is #2's first real
-consumer. `tree_protocol.rs` classifies `context/compact` as not client-visible.
+consumer.
+
+**Diagnostics (breaking).** `CompactionDiagnosticsRecord` becomes strategy-neutral. The
+summary-oriented required fields move into a strategy-owned object:
+
+```text
+{ reason: "auto" | "manual", trigger,           // common
+  cut: string, retainFrom?: string,
+  estimatedInputTokens, estimatedOutputTokens,  // before and after, from count_tokens
+  entriesReplaced, modelCallCount, durationMs,
+  strategy: { kind: string, ... } }             // owned by the strategy
+// summary strategy: { kind: "summary", summaryChars, estimatedSummaryTokens,
+//                     chunkCount, compactedToolPayloadCount, droppedMessageCount }
+```
+
+ContextPolicy fills the common fields; the strategy returns its own object. The old flat record
+is removed, not kept beside the new one. The frozen v1 samples are not changed; the v1-to-native
+conversion maps their flat fields into the common part and a `summary` object.
+
+**Client visibility.** SessionBroadcast forwards every branch event unfiltered
+([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)), but
+Rpc's wire filter `ProductEvent::new` in
+[tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs) drops
+`context/compaction` today. F1 makes `context/compact` and `context/compaction` visible to
+protocol v3 connections, so clients see a pending command and every result. `context/budget`
+and `context/prepare` stay hidden.
 
 ### 4.4 Rust binding
 
@@ -344,8 +369,9 @@ How the summary is produced:
 - **Chunking.** An entry larger than one call's input budget is truncated in the middle and
   counted in `compactedToolPayloadCount`. A longer transcript is folded in chunks: each call
   gets the running summary and the next chunk.
-- **Diagnostics.** The existing record, filled from the run (`reason` and `trigger` from
-  `input.trigger`).
+- **Diagnostics.** The summary object (`kind: "summary"`, `summaryChars`,
+  `estimatedSummaryTokens`, `chunkCount`, `compactedToolPayloadCount`, `droppedMessageCount`);
+  ContextPolicy fills the common part.
 
 ### 5.3 One compaction path (ContextPolicy)
 
@@ -418,17 +444,8 @@ Callers:
 - **No advance.** While a step runs, `next_model` and `try_start` wait for its fact. Inputs queue
   as usual and are not consumed by the step.
 
-**Steer, interrupt and reload:**
-
-- **Steer.** A driving input applied during a step does not cancel it. It joins the next request,
-  or starts a turn after the step.
-- **Interrupt.** A `stop/interrupt` cancels a running step and drops a pending one, consistent
-  with automatic compaction:
-  - A result the strategy already returned is committed (`completed`).
-  - Otherwise the fact is `cancelled {reason}`.
-  - Inside a turn, the turn then ends `Cancelled` through the existing `next_model` check.
-- **Reload.** A consumed `context/compact` without its fact is settled by the new Loop
-  generation with `cancelled: "capability reloading"`. The strategy call is not replayed.
+**Steer.** A driving input applied during a step does not cancel it. It joins the next request,
+or starts a turn after the step. Interrupt, failure, reload and restart are in §5.8.
 
 ### 5.5 What the Loop gains
 
@@ -461,6 +478,69 @@ requests, budget recovery, `LoopSnapshot` and `context/prepare`.
 - `ContextPolicy::prepare` calls `compact_step`. ContextPreparation injects
   `CompactionStrategyHost`, and its policy exists when both hosts are `Some`.
 - `usage(cancel)` reads the committed head and runs the existing estimate. It writes nothing.
+
+### 5.7 Compaction state for clients
+
+Clients see three states for each compaction:
+
+| State | How the client sees it | Kind |
+| --- | --- | --- |
+| Pending (manual) | A `context/compact` without a `context/compaction` whose `command` covers it | Timeline fact (§4.3, visible) |
+| Running | Notice `context.compaction.started` | Session broadcast notice (C6) |
+| Ended | `context/compaction`: `completed`, `skipped`, `failed` or `cancelled` | Timeline fact (visible) |
+
+**Why "started" is a notice and not a fact.** No later decision reads it: on reload, a pending
+step and a running step are both settled as `cancelled` (§5.8), and an automatic compaction is
+already bounded by its request. Principles §4 rule 9 therefore keeps it out of the Timeline.
+
+**Notice record.** The notice uses C6's generic notice record `{source, kind, data}`
+([#49](https://github.com/arcships/dim/issues/49)):
+
+```text
+{ source: "context", kind: "compaction.started",
+  data: { branchId, trigger: "manual" | "threshold" | "recovery",
+          command?, turnId?, requestId? } }
+```
+
+- **Emitters.** The Loop's step task emits it for a manual compaction, and ContextPreparation
+  emits it for an automatic one. Both emit it right before `strategy.compact` is called, inside
+  `compact_step`, so a compaction skipped by the policy before any strategy call emits none.
+- **Delivery.** It is emitted on the Session broadcast channel and forwarded by Rpc unchanged, as
+  C6 defines. It is best effort: a client that attaches during a compaction learns the state
+  from the facts (a pending command), not from a missed notice.
+
+**Alternatives considered.**
+
+- A `compacting` flag in `LoopSnapshot` would cover only the Loop's manual step, not automatic
+  compaction inside ContextPreparation, and `LoopSnapshot` is a runtime type.
+- A Timeline "started" event would break rule 9.
+
+**Dependency.** Only the notice depends on C6. The hosts, the step and the facts do not, in the
+same way that only ContextMethods depends on C1.
+
+### 5.8 Failure, interrupt, reload and restart
+
+| Case | Timeline facts | What the Loop does next | What the client sees |
+| --- | --- | --- | --- |
+| Strategy error or validation failure, manual inside a turn | `context/compaction {failed}` | Continues the turn uncompacted (`next_model`). If the next request exceeds the window, the existing budget recovery forces a compaction (`fallback` cut); if that also fails, the request and the turn fail | Started notice, then `failed`; reply `compaction_failed` |
+| Same, manual outside a turn | `context/compaction {failed}` | Nothing more (`try_start` if an input is waiting) | Started notice, then `failed`; reply `compaction_failed` |
+| Same, automatic | `context/compaction {failed}` | Unchanged: the request continues uncompacted; under recovery the request fails | Started notice, then `failed` |
+| `stop/interrupt` during a step | `cancelled {reason}`, or `completed` if the strategy had already returned; a pending step is written `cancelled` at once | Inside a turn, the turn ends `Cancelled` through the existing `next_model` check | `cancelled` or `completed`; reply to match |
+| `stop/interrupt` during an automatic compaction | Unchanged: no compaction fact unless the strategy had returned; the request ends `Cancelled` | Unchanged | Started notice, then the request's terminal |
+| Plugin reload (Loop or strategy part) | The new Loop generation writes `context/compaction {command, cancelled: "capability reloading"}` for a consumed command without a fact. ContextPreparation settles an interrupted preparation as today | No replay. A rebuilt turn ends `Failed` as today | `cancelled`; a waiting reply is `operation_interrupted` or `compaction_cancelled` |
+| Process crash or restart mid-compaction | On the next load, the same settlement as a reload | Same as reload | `cancelled` after restart |
+
+**About crashes and restarts:**
+
+- **Atomic facts.** Timeline batches commit atomically, so a `context/compaction` is either
+  fully present or absent, never half written.
+- **Snapshots are only a cache.** A crash between the fact and the projection snapshot is
+  harmless: projection replays from the fact (principles §4 rule 9).
+- **Model work is lost.** The strategy's model work in flight is lost. The next automatic trigger,
+  or a new `/compact`, compacts again.
+- **No resume of a half-finished compaction.** Model calls are not idempotent and are not replayed
+  after a reload anywhere in the runtime. The user's intent may also be stale: the history may
+  have grown, or the user may no longer want it.
 
 ## 6. Errors
 
@@ -506,6 +586,8 @@ request continues uncompacted; under recovery it fails the request.
 | Provider, ProductResolver, Aimux | Unchanged; the summary strategy uses `ProviderConnectionResolver` and `ModelHost` |
 | AuxiliaryModel (S4) | Not used. Shares `invoke_with_recovery`; whichever lands first extracts it |
 | `sessionMethods` (C1) | Required for the two methods. The host values and the strategy do not need C1 |
+| Session broadcast notice (C6, #49) | Required only for the started notice (§5.7) |
+| Rpc `ProductEvent` (`tree_protocol.rs`) | Makes `context/compact` and `context/compaction` visible to v3 connections |
 | Turn consumers (clients, future Goal, Hooks) | Unaffected. A manual compaction outside a turn writes no `turn/*` |
 | #2 dynamic events | `context/compact` migrates to dynamic registration; F1 is #2's first real consumer |
 | `--models` profile, mock profile | Both hosts `None`: no compaction, and `session.context` is not recorded |
@@ -516,7 +598,7 @@ request continues uncompacted; under recovery it fails the request.
 | Rule | Answer |
 | --- | --- |
 | Principles §1 (Capability, App Server boundary) | New parts and supplements live in `dim-agent-capabilities`; the App Server only installs them in its product profile. |
-| §1 one event bus | The command and the fact are on the branch Timeline and consumed through its Dispatcher. The method's wait reads that Timeline. |
+| §1 one event bus | The command and the fact are on the branch Timeline and consumed through its Dispatcher. The method's wait reads that Timeline. The started notice uses the existing Session broadcast channel through C6's generic record, not a second bus. |
 | §3 dependency direction | New parts depend on core services. ContextPreparation and the Loop depend on the `ContextModelHost` and `CompactionStrategyHost` keys, which every profile binds explicitly. No optional dependency. |
 | §3 changing another module (Loop) | Approved change. The need is the Loop's own control of the context window: compaction is a Loop step like a model call or a tool batch, and the Loop must not advance on a context the replacement supersedes. It closes within the Loop: automatic compaction already runs in its request preparation, and the manual step uses the same function under the same sequencer. |
 | §3 extension without change (three layers) | The mechanism (Loop step and trigger) and the contract (record and replay) are fixed. The strategy is a replaceable Session value. A new strategy changes neither the Loop, nor the record, nor replay, and replay of old records never calls a strategy (§2.2). |
@@ -528,7 +610,7 @@ request continues uncompacted; under recovery it fails the request.
 | §4 rule 6 (context only from handed-off events) | The replacement reaches the model only through the projection of a completed fact. Pending inputs are not consumed by a step (AGENTS rule 10). |
 | §4 rule 7 (public events and services) | `TreeCommands`, `Branch::service` on `PublicService`s, `ProviderConnectionResolver`, `ModelHost`, `sessionMethods`. |
 | §4 rule 8 (infrastructure unchanged) | Timeline, Dispatcher, envelope, rutis, loader, Agent assembly and facades unchanged. The new event kind moves to #2's dynamic registration later. |
-| §4 rule 9 (only needed facts) | `context/compact` is read by the Loop's later decisions and on reload. `context/compaction` is used by projection. Usage writes nothing. |
+| §4 rule 9 (only needed facts) | `context/compact` is read by the Loop's later decisions and on reload. `context/compaction` is used by projection. "Compaction started" is read by no later decision, so it is a broadcast notice, not a fact (§5.7). Usage writes nothing. |
 | ADR 002 D1 (scope) | Window facts, strategy and methods: Session. Command, step and slot: branch, in the Loop. |
 | ADR 002 D2 (no wiring modules) | ContextMethods exposes owners' operations through `sessionMethods`. |
 | ADR 002 D3 (dependencies) | Hard dependencies on core only. A Provider or Aimux reload propagates to the strategy part (accepted cost). |
@@ -540,7 +622,9 @@ request continues uncompacted; under recovery it fails the request.
 - The `session.context` namespace.
 - The command `context/compact`.
 - The changed `context/compaction` (optional ids, `command`, `cancelled`, `replacement` and
-  `strategy` instead of `summary`).
+  `strategy` instead of `summary`, strategy-neutral diagnostics).
+- `context/compact` and `context/compaction` become visible to v3 clients.
+- The notice `context.compaction.started` (C6 record).
 
 Internal Rust changes:
 
@@ -566,13 +650,11 @@ Internal Rust changes:
 | New event kind | `EventKind` variant now, dynamic registration after #2 |
 | `--models` profile | No capability snapshot, no compaction: accepted |
 | Provider-reported overflow | Separate Aimux issue, outside F1 |
+| Diagnostics | Strategy-neutral now: common counts plus a strategy-owned object (breaking) |
+| Compaction state for clients | Facts for pending and ended; a C6 notice for started (§5.7) |
+| Half-finished compaction | Never resumed; settled as `cancelled` (§5.8) |
 
-Open:
-
-1. **Diagnostics per strategy.** `CompactionDiagnosticsRecord` has required summary-oriented
-   fields (`summaryChars`, `estimatedSummaryTokens`, …). It fits the only F1 strategy. Should the
-   record become strategy-neutral now (common counts plus a strategy-owned object), or when the
-   second strategy arrives?
+Open: none beyond #128.
 
 ## 11. Acceptance (flow tests)
 
@@ -596,9 +678,26 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
    - A test strategy bound in place of the summary strategy, returning a two-message
      `replacement`, is committed and replayed by the same rule, with no Loop or policy change.
    - The policy rejects a test strategy whose cursor lies inside the retained turns.
-6. **Interrupt and reload.** `session.stop` during a step writes `cancelled` (or `completed` if
-   the strategy had returned). A restart during a step writes `cancelled` without a second
-   strategy call.
+6. **Interrupt, reload and restart.**
+   - `session.stop` during a step writes `cancelled` (or `completed` if the strategy had
+     returned).
+   - A plugin reload during a step writes `cancelled: capability reloading` without a second
+     strategy call.
+   - Killing the App Server process while the summarizer request is held open, then starting it
+     again on the same home, leaves no partial fact. The next load writes
+     `cancelled: capability reloading` for the command. The Session projects the history as
+     before the compaction, and a new `/compact` compacts normally.
+   - A crash after the fact but before the snapshot save projects the compacted history from the
+     fact.
+   - A manual compaction failing inside a turn lets the turn continue. When the next request
+     exceeds the window, budget recovery compacts.
+8. **Compaction state for clients.**
+   - A v3 client attached to the Session receives `context/compact`, then the notice
+     `context.compaction.started` with `trigger: manual` and the command, then
+     `context/compaction`.
+   - For an automatic compaction it receives the notice with `trigger: threshold` and the
+     request ids, then the fact.
+   - A policy skip before any strategy call emits no notice.
 7. **Usage, failure, credentials.**
    - Usage returns the window facts and an estimate, and writes nothing.
    - A failing summarizer gives a `failed` fact.
