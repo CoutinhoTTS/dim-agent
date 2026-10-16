@@ -1,9 +1,13 @@
-use crate::Result;
+use crate::{Result, export::Format};
 use std::path::PathBuf;
 
 pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
+  tui                              Open the interactive scrollback client\n\
+  exec [-p TEXT] [--json]          Run a prompt (or redirected stdin) and exit\n\
+  exec resume SESSION_ID [-p TEXT] [--json]\n\
+  session export SESSION_ID --format markdown|json [--output PATH]\n\
   login PROVIDER --directory URL [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
@@ -30,6 +34,8 @@ Options:\n\
   -V, --version                    Show version without starting a daemon\n\n\
 Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
 Idle MCP commands: /mcp, /mcp login [--no-browser] [--client-secret] ID, /mcp logout ID.\n\
+Idle commands: /export <markdown|json> PATH, /exit.\n\
+PATH is relative to the CLI current directory; ~ is literal.\n\
 Approval accepts only y/yes; empty input denies. Noninteractive approval exits 3.\n\
 Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
             3 interactive approval required, 130 interrupted.\n";
@@ -37,6 +43,13 @@ Exit codes: 0 success, 1 configuration/transport error, 2 model/turn failure,\n\
 #[derive(Debug)]
 pub enum Action {
     Chat,
+    Tui,
+    Exec,
+    Export {
+        session_id: String,
+        format: Format,
+        output: Option<PathBuf>,
+    },
     Login(String),
     Account(String),
     Logout(String),
@@ -44,7 +57,10 @@ pub enum Action {
     McpList,
     McpLogin(String),
     McpLogout(String),
-    McpEnable { id: String, enabled: bool },
+    McpEnable {
+        id: String,
+        enabled: bool,
+    },
     DaemonStop,
     Help,
     Version,
@@ -53,6 +69,7 @@ pub enum Action {
 pub struct Options {
     pub action: Action,
     pub prompt: Option<String>,
+    pub json: bool,
     pub resume: Option<String>,
     pub home: PathBuf,
     pub cwd: PathBuf,
@@ -76,6 +93,7 @@ impl Options {
         let mut options = Self {
             action: Action::Chat,
             prompt: None,
+            json: false,
             resume: None,
             home: std::env::var_os("DIMCODE_HOME")
                 .map(PathBuf::from)
@@ -100,6 +118,7 @@ impl Options {
             client_secret: false,
         };
         let mut args = args;
+        let mut export_format = false;
         while let Some(arg) = args.next() {
             let value = |args: &mut dyn Iterator<Item = String>| -> Result<String> {
                 args.next()
@@ -114,8 +133,35 @@ impl Options {
                     options.action = Action::Version;
                     return Ok(options);
                 }
-                "-p" | "--prompt" => options.prompt = Some(value(&mut args)?),
-                "--resume" => options.resume = Some(value(&mut args)?),
+                "-p" | "--prompt" => {
+                    if options.prompt.replace(value(&mut args)?).is_some() {
+                        return Err("Supply the prompt only once".into());
+                    }
+                }
+                "--resume" => {
+                    if options.resume.replace(value(&mut args)?).is_some() {
+                        return Err("Supply the Session only once".into());
+                    }
+                }
+                "--json" => options.json = true,
+                "--format" => {
+                    let Action::Export { format, .. } = &mut options.action else {
+                        return Err("--format requires session export".into());
+                    };
+                    if export_format {
+                        return Err("Supply the export format only once".into());
+                    }
+                    *format = value(&mut args)?.parse()?;
+                    export_format = true;
+                }
+                "--output" => {
+                    let Action::Export { output, .. } = &mut options.action else {
+                        return Err("--output requires session export".into());
+                    };
+                    if output.replace(PathBuf::from(value(&mut args)?)).is_some() {
+                        return Err("Supply the output path only once".into());
+                    }
+                }
                 "--home" => options.home = PathBuf::from(value(&mut args)?),
                 "--cwd" => options.cwd = PathBuf::from(value(&mut args)?),
                 "--server" => options.server = Some(PathBuf::from(value(&mut args)?)),
@@ -135,6 +181,26 @@ impl Options {
                     "Use --client-secret without a value; enter the secret at the hidden prompt"
                         .into(),
                 ),
+                "tui" if matches!(options.action, Action::Chat) => options.action = Action::Tui,
+                "exec" if matches!(options.action, Action::Chat) => options.action = Action::Exec,
+                "resume" if matches!(options.action, Action::Exec) => {
+                    if options.resume.replace(value(&mut args)?).is_some() {
+                        return Err("Supply the Session only once".into());
+                    }
+                }
+                "session" if matches!(options.action, Action::Chat) => {
+                    if value(&mut args)? != "export" {
+                        return Err(
+                            "Use session export SESSION_ID --format markdown|json [--output PATH]"
+                                .into(),
+                        );
+                    }
+                    options.action = Action::Export {
+                        session_id: value(&mut args)?,
+                        format: Format::Markdown,
+                        output: None,
+                    };
+                }
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
                         "list" => Action::McpList,
@@ -196,10 +262,19 @@ impl Options {
         if options.resume.is_some() && options.model.is_some() {
             return Err("A resumed session retains its model; omit --provider and --model".into());
         }
-        if !matches!(options.action, Action::Chat)
+        if !matches!(options.action, Action::Chat | Action::Tui | Action::Exec)
             && (options.prompt.is_some() || options.resume.is_some() || options.model.is_some())
         {
             return Err("Commands cannot be combined with chat options".into());
+        }
+        if matches!(options.action, Action::Tui) && options.prompt.is_some() {
+            return Err("tui does not accept --prompt; use exec".into());
+        }
+        if options.json && !matches!(options.action, Action::Exec) {
+            return Err("--json requires exec".into());
+        }
+        if matches!(options.action, Action::Export { .. }) && !export_format {
+            return Err("session export requires --format markdown|json".into());
         }
         if options.refresh && !matches!(options.action, Action::Models(_)) {
             return Err("--refresh requires the models command".into());
