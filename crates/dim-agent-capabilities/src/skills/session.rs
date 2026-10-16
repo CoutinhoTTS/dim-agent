@@ -149,8 +149,10 @@ impl TypedPlugin for SkillsPlugin {
         Box::pin(async move {
             let cwd = PathBuf::from(&config.cwd);
             let lifecycle = ctx.cancellation_token();
-            let failed = |error: super::SkillsError| CordisError::PluginFailed(Box::new(error));
-            let mut changes = catalog.subscribe().map_err(failed)?;
+            // Listen before the first query, so no later change goes unseen.
+            let (wake, mut changes) = watch::channel(());
+            ctx.events()
+                .on(ctx, &super::catalog_changes(), super::Wake(wake))?;
             let contents = Arc::new(tokio::sync::Mutex::new(super::content::Contents::new(
                 self.scope,
                 contributions,
@@ -200,7 +202,7 @@ impl TypedPlugin for SkillsPlugin {
             let context = ctx.clone();
             tasks.spawn(async move {
                 // Replacing instances during assembly would race Session readiness.
-                // The receiver keeps changes seen meanwhile for the first update.
+                // The receiver keeps changes announced meanwhile for the first update.
                 tokio::select! {
                     _ = stopped.cancelled() => return,
                     published = session.activated() => if !published { return },
