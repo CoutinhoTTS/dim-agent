@@ -263,9 +263,10 @@ also removes the Session's command output on the node first
 Step 3 is safe because the directory belongs to one database (§3.1), and a put
 commits its row before it creates its directory. Any directory the listing returns either has
 a row by the time the rows are read (a pending or owned file, which the pass skips) or never
-had one. It is needed because FileStorage removal is not synced
-([S6](https://github.com/arcships/dim/pull/87)): after a power loss a removed directory can
-reappear while its row deletion, committed with `synchronous=FULL`, stays deleted. Entries
+had one. It is needed because a directory can lack a row: after a power loss a removed directory
+can reappear while its row deletion, committed with `synchronous=FULL`, stays deleted. FileStorage
+removal was not synced before S5c ([S6](https://github.com/arcships/dim/pull/87)); it now syncs
+the parent before it returns, which closes that window on hosts that can sync a directory. Entries
 created outside SessionStore are removed the same way: the directory is SessionStore's.
 
 At most one sweep runs per node. A trigger during a sweep schedules one more pass. Sweeps are
