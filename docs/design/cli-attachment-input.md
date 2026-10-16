@@ -274,7 +274,9 @@ changes at 80x24, 40x10 and 15x6. The renderer accounts for previously painted l
 when terminal width changes. Unix input owns a separately opened descriptor for the inherited
 terminal, so nonblocking reads cannot change stdout's status flags. The CLI flow also verifies
 complete model output while a terminal reader pauses. Windows input uses virtual-terminal mode with the existing console
-record reader; native Windows console acceptance remains unverified. Native clipboard checks
+record reader. Its ConPTY flow exercises Unicode/grapheme editing, arrow/delete input,
+bracketed paste boundaries and raw Ctrl+C clearing through the real console. It reuses the
+workspace's portable-pty version as a Windows-only development dependency. Native clipboard checks
 use a unique AppKit pasteboard, an isolated Xvfb/X11 desktop and a private Windows window station.
 The Windows boundary flow runs on the disposable Windows CI job; its execution must pass before
 claiming that platform's clipboard acceptance. Isolated Xvfb/X11 and headless Sway/Wayland checks

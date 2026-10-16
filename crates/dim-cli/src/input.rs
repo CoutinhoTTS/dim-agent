@@ -468,3 +468,151 @@ impl Drop for Input {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_flow {
+    use super::*;
+    use crate::composer::{self, Draft};
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::{
+        io::Read,
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    struct Child(Box<dyn portable_pty::Child + Send + Sync>);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn until(
+        receiver: &mpsc::Receiver<Vec<u8>>,
+        output: &mut Vec<u8>,
+        consumed: &mut usize,
+        text: &str,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(index) = output[*consumed..]
+                .windows(text.len())
+                .position(|bytes| bytes == text.as_bytes())
+            {
+                *consumed += index + text.len();
+                return;
+            }
+            let bytes = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "Console did not show {text:?}: {error}; {}",
+                        String::from_utf8_lossy(output)
+                    )
+                });
+            output.extend(bytes);
+        }
+    }
+
+    #[test]
+    fn conpty_keyboard_and_paste_keep_the_editor_contract() {
+        if std::env::var_os("DIM_CLI_CONSOLE_CHILD").is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut interrupts = tokio::signal::windows::ctrl_c().unwrap();
+                let mut input = Input::new().unwrap();
+                let mut draft = Draft::default();
+                for (stage, expected) in [(1, "ABC"), (2, "after paste"), (3, "after clear")] {
+                    println!("CONSOLE_STAGE_{stage}");
+                    assert!(
+                        composer::edit(
+                            &mut input,
+                            &mut draft,
+                            None,
+                            &std::env::temp_dir(),
+                            &mut interrupts
+                        )
+                        .await
+                        .unwrap()
+                    );
+                    assert_eq!(draft.plain(), Some(expected));
+                    draft.clear();
+                }
+                println!("CONSOLE_COMPLETE");
+            });
+            return;
+        }
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "input::windows_flow::conpty_keyboard_and_paste_keep_the_editor_contract",
+            "--nocapture",
+        ]);
+        command.env("DIM_CLI_CONSOLE_CHILD", "1");
+        let mut child = Child(pair.slave.spawn_command(command).unwrap());
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (send, receive) = mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let mut bytes = [0; 4096];
+            loop {
+                match reader.read(&mut bytes) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) => {
+                        if send.send(bytes[..size].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let (mut output, mut consumed) = (Vec::new(), 0);
+        until(&receive, &mut output, &mut consumed, "CONSOLE_STAGE_1");
+        until(&receive, &mut output, &mut consumed, "Ctrl+J: newline");
+        writer
+            .write_all("A中e\u{301}👩‍💻🇨🇳\x7f\x7f\x7f\x1b[D\x1b[3~B\x1b[CC\r".as_bytes())
+            .unwrap();
+        writer.flush().unwrap();
+        until(&receive, &mut output, &mut consumed, "CONSOLE_STAGE_2");
+        until(&receive, &mut output, &mut consumed, "Ctrl+J: newline");
+        writer
+            .write_all(b"\x1b[200~one\r\n/exit\n\x1b[201~")
+            .unwrap();
+        writer.flush().unwrap();
+        until(&receive, &mut output, &mut consumed, "[Paste 1: 2 lines]");
+        writer.write_all(b"\x7fafter paste\r").unwrap();
+        writer.flush().unwrap();
+        until(&receive, &mut output, &mut consumed, "CONSOLE_STAGE_3");
+        until(&receive, &mut output, &mut consumed, "Ctrl+J: newline");
+        writer.write_all(b"one\ntwo").unwrap();
+        writer.flush().unwrap();
+        until(&receive, &mut output, &mut consumed, "two");
+        writer.write_all(b"\x03after clear\r").unwrap();
+        writer.flush().unwrap();
+        until(&receive, &mut output, &mut consumed, "CONSOLE_COMPLETE");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "Console child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        drop(writer);
+        drop(pair.master);
+        reading.join().unwrap();
+        assert!(status.success());
+    }
+}

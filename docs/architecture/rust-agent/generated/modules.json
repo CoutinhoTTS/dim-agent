@@ -1932,6 +1932,18 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::input::windows_flow",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode::input",
+      "file": "crates/dim-cli/src/input.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic",
+        "println"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::login",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -15165,6 +15177,29 @@
       "references": [
         "path Result",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::input",
+      "to": "dim_cli::@bin:dimcode::input::windows_flow",
+      "references": [
+        "mod windows_flow"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::input::windows_flow",
+      "to": "dim_cli::@bin:dimcode::composer",
+      "references": [
+        "path Draft::default",
+        "use crate::composer",
+        "use crate::composer::Draft"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::input::windows_flow",
+      "to": "dim_cli::@bin:dimcode::input",
+      "references": [
+        "path Input::new"
       ]
     },
     {
