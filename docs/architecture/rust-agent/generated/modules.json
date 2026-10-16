@@ -4908,6 +4908,7 @@
         "path ShellEdition::Sh",
         "path ShellEdition::WindowsPowershell",
         "path ShellEdition::Zsh",
+        "path ShellStatus",
         "path ShellStatus::Available",
         "path ShellStatus::Unavailable",
         "use crate::host_platform::ExecShellRuntime",
@@ -6226,6 +6227,14 @@
     },
     {
       "from": "dim_agent_capabilities::tool_registry",
+      "to": "dim_agent_runtime::diagnostics",
+      "references": [
+        "path Diagnostics",
+        "use dim_agent_runtime::Diagnostics"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::InvalidInput",
@@ -6776,21 +6785,13 @@
       "references": [
         "path HostPlatform",
         "path Os::Windows",
-        "path ProcessSpec",
         "path ProcessTree",
-        "path ShellEdition",
-        "path ShellEdition::GitBash",
-        "path ShellKind::Cmd",
         "path ShellKind::Posix",
-        "path ShellKind::Powershell",
-        "path crate::host_platform::ShellStatus::Available",
-        "path crate::host_platform::ShellStatus::Unavailable",
-        "path crate::host_platform::env_var",
+        "use crate::host_platform::EXEC_SHELL_CONFIG_INVALID",
+        "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
         "use crate::host_platform::HostPlatform",
         "use crate::host_platform::Os",
-        "use crate::host_platform::ProcessSpec",
         "use crate::host_platform::ProcessTree",
-        "use crate::host_platform::ShellEdition",
         "use crate::host_platform::ShellKind"
       ]
     },
@@ -9706,6 +9707,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path ToolExecutionContext",

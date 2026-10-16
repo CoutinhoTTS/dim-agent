@@ -88,19 +88,19 @@ pub fn skill_file(name: &str, description: &str, body: &str) -> String {
 }
 
 pub fn platform(home: &Path) -> HostPlatform {
-    HostPlatform {
-        home: home.to_owned(),
-        os: Os::Linux,
-        arch: "x64".into(),
-        timezone: Some("Asia/Shanghai".into()),
-        env: Vec::new(),
-        shell: ShellStatus::Available(ExecShellRuntime {
-            executable_path: "/bin/zsh".into(),
-            edition: ShellEdition::Zsh,
-            source: ShellSource::Login,
-            output_encoding: OutputEncoding::Utf8,
-        }),
-    }
+    let mut platform = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
+        executable_path: "/bin/zsh".into(),
+        edition: ShellEdition::Zsh,
+        source: ShellSource::Login,
+        output_encoding: OutputEncoding::Utf8,
+    }))
+    .unwrap();
+    platform.home = home.to_owned();
+    platform.os = Os::Linux;
+    platform.arch = "x64".into();
+    platform.timezone = Some("Asia/Shanghai".into());
+    platform.env.clear();
+    platform
 }
 
 pub enum Step {
@@ -379,14 +379,10 @@ impl Default for Options {
 /// The product profile: PromptSources and Skills with scripted hosts.
 pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
-    root.provide_as(
-        TypeKey::of::<HostPlatform>(),
-        Arc::new(HostPlatform {
-            timezone: Some(options.timezone.into()),
-            ..platform(&dirs.home)
-        }),
-    )
-    .unwrap();
+    let mut host = platform(&dirs.home);
+    host.timezone = Some(options.timezone.into());
+    root.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(host))
+        .unwrap();
     root.provide_as(
         TypeKey::of::<SkillSettingsHost>(),
         Arc::new(SkillSettingsHost(options.settings.clone())),

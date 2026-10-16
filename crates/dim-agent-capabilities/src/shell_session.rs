@@ -361,7 +361,7 @@ impl ShellSession {
             let inner = self.inner.lock().await;
             inner.had_reset.then(|| "[shell was reset]".to_owned())
         };
-        let shell = self.host.persistent_shell();
+        let shell = self.host.persistent_shell().await;
         let (exe, dialect) = match shell {
             ShellStatus::Available(runtime) => {
                 let dialect = match runtime.edition {
