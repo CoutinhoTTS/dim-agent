@@ -405,6 +405,7 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     let today = options.today.clone();

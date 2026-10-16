@@ -8,8 +8,8 @@ use axum::{
 use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{
-        AwsCredentials, BedrockAuth, ModelChunk, ModelConnection, ModelHost,
-        ProviderConnectionResolver,
+        AuxiliaryErrorCode, AuxiliaryModelHost, AuxiliaryRequest, AwsCredentials, BedrockAuth,
+        ModelChunk, ModelConnection, ModelHost, ModelStopReason, ProviderConnectionResolver,
     },
 };
 use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
@@ -260,11 +260,11 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
         root.plugin(capability_plugin(
             dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
         ));
+        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
         active(&root.plugin(dim_agent_runtime::capability_plugin(
             ProviderPlugin::default(),
         )))
         .await;
-        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
         let provider = root.get::<ProviderService>().unwrap();
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
         let host = root.get::<ModelHost>().unwrap();
@@ -576,11 +576,11 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     root.plugin(capability_plugin(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
+    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
     let plain = root.plugin(dim_agent_runtime::capability_plugin(
         ProviderPlugin::default(),
     ));
     active(&plain).await;
-    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
     let provider = root.get::<ProviderService>().unwrap();
     let cancel = CancellationToken::new();
     let mut config = input("external", &base, StaticAuth::Bearer, None, "secrets", 43);
@@ -837,6 +837,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(capability_plugin(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
+    root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
     let view = root.plugin(dim_agent_runtime::capability_plugin(
         ProviderPlugin::default(),
     ));
@@ -1261,6 +1262,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(capability_plugin(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
+    root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         active(&root.plugin(dim_agent_runtime::capability_plugin(
@@ -1336,11 +1338,11 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     root.plugin(capability_plugin(
         dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
     ));
+    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
     active(&root.plugin(dim_agent_runtime::capability_plugin(
         ProviderPlugin::default(),
     )))
     .await;
-    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
     let provider = root.get::<ProviderService>().unwrap();
     let resolver = root.get::<ProviderConnectionResolver>().unwrap();
     let host = root.get::<ModelHost>().unwrap();
@@ -1669,11 +1671,11 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
         root.plugin(capability_plugin(
             dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
         ));
+        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
         active(&root.plugin(dim_agent_runtime::capability_plugin(
             ProviderPlugin::default(),
         )))
         .await;
-        active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
         let provider = root.get::<ProviderService>().unwrap();
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
         let host = root.get::<ModelHost>().unwrap();
@@ -2569,6 +2571,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         restarted.plugin(dim_agent_runtime::capability_plugin(
             ProviderPlugin::default(),
         )),
+        restarted.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -2681,6 +2684,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         isolated.plugin(dim_agent_runtime::capability_plugin(
             ProviderPlugin::default(),
         )),
+        isolated.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -2776,4 +2780,204 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     server.abort();
     let _ = server.await;
     let _ = std::fs::remove_dir_all(home);
+}
+
+/// Never answers, so a call stays in flight until it is cancelled.
+async fn hang() -> &'static str {
+    std::future::pending().await
+}
+
+#[tokio::test]
+async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/hang/{*path}", post(hang))
+        .route("/{*path}", post(completion))
+        .with_state(seen.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{address}");
+    let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/provider-flow")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&home).unwrap();
+
+    let root = Ctx::root().unwrap();
+    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    root.plugin(capability_plugin(SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
+    )));
+    root.plugin(capability_plugin(ManagedProvidersPlugin));
+    root.plugin(capability_plugin(
+        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
+    ));
+    root.plugin(capability_plugin(
+        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
+    ));
+    active(&root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin))).await;
+    let view = root.plugin(dim_agent_runtime::capability_plugin(
+        ProviderPlugin::default(),
+    ));
+    active(&view).await;
+    let provider = root.get::<ProviderService>().unwrap();
+    let auxiliary = root.get::<AuxiliaryModelHost>().unwrap();
+    let cancel = CancellationToken::new();
+    let saved = provider
+        .save_static(
+            input(
+                "aux",
+                &base,
+                StaticAuth::Bearer,
+                Some("aux-secret"),
+                "aux",
+                4096,
+            ),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    provider
+        .save_static(
+            input(
+                "hang",
+                &format!("{base}/hang"),
+                StaticAuth::Bearer,
+                Some("hang-secret"),
+                "hang",
+                4096,
+            ),
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let request = |max_output_tokens| AuxiliaryRequest {
+        system: Some("Title this conversation".into()),
+        messages: vec![Message::text(Role::User, "hello")],
+        max_output_tokens,
+    };
+    let max_tokens = |body: &Value| {
+        body.get("max_tokens")
+            .or_else(|| body.get("max_completion_tokens"))
+            .and_then(Value::as_u64)
+    };
+
+    // The given model gets the system text and messages, a capped budget and no tools.
+    let reply = auxiliary
+        .0
+        .complete(target("aux"), request(Some(32)), cancel.clone())
+        .await
+        .unwrap();
+    assert_eq!(reply.text, "ok");
+    assert_eq!(reply.stop_reason, ModelStopReason::EndTurn);
+    let sent = seen.lock().unwrap().pop().unwrap();
+    assert_eq!(sent.marker.as_deref(), Some("aux"));
+    assert_eq!(sent.authorization.as_deref(), Some("Bearer aux-secret"));
+    assert_eq!(sent.body["model"], "same");
+    assert!(sent.body.to_string().contains("Title this conversation"));
+    assert!(sent.body.to_string().contains("hello"));
+    assert!(sent.body.get("tools").is_none());
+    assert_eq!(max_tokens(&sent.body), Some(32));
+    // An omitted or oversized budget is the model's limit.
+    auxiliary
+        .0
+        .complete(target("aux"), request(Some(1_000_000)), cancel.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        max_tokens(&seen.lock().unwrap().pop().unwrap().body),
+        Some(4096)
+    );
+
+    // Caller defects are rejected before any request.
+    let mut empty = request(None);
+    empty.messages.clear();
+    for invalid in [empty, request(Some(0))] {
+        let error = auxiliary
+            .0
+            .complete(target("aux"), invalid, cancel.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, AuxiliaryErrorCode::InvalidRequest);
+    }
+    assert!(seen.lock().unwrap().is_empty());
+
+    // Cancelling, or dropping, an in-flight call ends it.
+    let call_cancel = CancellationToken::new();
+    let call = auxiliary
+        .0
+        .complete(target("hang"), request(None), call_cancel.clone());
+    tokio::pin!(call);
+    tokio::select! {
+        result = &mut call => panic!("unexpected {result:?}"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+    }
+    call_cancel.cancel();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, AuxiliaryErrorCode::Cancelled);
+    assert!(!error.message.contains("secret"));
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            auxiliary
+                .0
+                .complete(target("hang"), request(None), cancel.clone()),
+        )
+        .await
+        .is_err()
+    );
+
+    // A disabled model is unavailable: nothing is sent and nothing else is tried.
+    let disabled = provider
+        .set_enabled_models("aux".into(), saved.version, vec![], &cancel)
+        .await
+        .unwrap();
+    let error = auxiliary
+        .0
+        .complete(target("aux"), request(None), cancel.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, AuxiliaryErrorCode::ModelUnavailable);
+    assert!(seen.lock().unwrap().is_empty());
+    // So is a model whose Provider was deleted.
+    provider
+        .delete_static("aux".into(), disabled.version, &cancel)
+        .await
+        .unwrap();
+    let error = auxiliary
+        .0
+        .complete(target("aux"), request(None), cancel.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, AuxiliaryErrorCode::ModelUnavailable);
+    assert!(seen.lock().unwrap().is_empty());
+
+    // Unloading Provider ends an in-flight call as cancelled.
+    let pending = tokio::spawn({
+        let auxiliary = auxiliary.clone();
+        async move {
+            auxiliary
+                .0
+                .complete(target("hang"), request(None), CancellationToken::new())
+                .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    view.dispose().await.unwrap();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, AuxiliaryErrorCode::Cancelled);
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
 }

@@ -4,7 +4,7 @@ use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     file_storage::{FileStorage, FileStorageError, FileStoragePlugin},
     history::HistoryRenderer,
-    host::{ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
@@ -84,6 +84,7 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     // Neither the JS row ID nor its module path is registered in Builtins.
     let names = [

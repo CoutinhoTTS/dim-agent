@@ -606,6 +606,11 @@
         "generation": 1,
         "injects": [
           {
+            "service": "dim_agent_capabilities::host::ModelHost",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
             "scope": null,
             "status": "Ready"
@@ -627,6 +632,12 @@
           }
         ],
         "resolved": [
+          {
+            "service": "dim_agent_capabilities::host::ModelHost",
+            "scope": null,
+            "provider": 6,
+            "generation": 1
+          },
           {
             "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
             "scope": null,
@@ -653,6 +664,12 @@
           }
         ],
         "reads": [
+          {
+            "service": "dim_agent_capabilities::host::ModelHost",
+            "provider": 6,
+            "declared": true,
+            "external": true
+          },
           {
             "service": "dim_app_server::codex_oauth::OpenAICodexOAuthService",
             "provider": 10,
@@ -834,6 +851,12 @@
       {
         "service": "dim_agent_capabilities::file_storage::FileStorage",
         "provider": 4,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_agent_capabilities::host::AuxiliaryModelHost",
+        "provider": 12,
         "generation": 1,
         "removing": false
       },

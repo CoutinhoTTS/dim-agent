@@ -383,7 +383,8 @@ fn summary(event: &EventKind) -> Value {
             (Some(&d.turn_id), Some(&d.request_id), None)
         }
         EventKind::ContextPrepare(d) => (Some(&d.turn_id), Some(&d.request_id), None),
-        EventKind::ContextCompaction(d) => (Some(&d.turn_id), Some(&d.request_id), None),
+        EventKind::ContextCompactionStart(d) => (d.turn_id.as_ref(), d.request_id.as_ref(), None),
+        EventKind::ContextCompaction(d) => (d.turn_id.as_ref(), d.request_id.as_ref(), None),
         EventKind::ContextBudget(d) => (Some(&d.turn_id), Some(&d.request_id), None),
         EventKind::ModelCall(d) => (Some(&d.turn_id), Some(&d.request_id), None),
         EventKind::ModelUsage(d) => (Some(&d.turn_id), Some(&d.request_id), None),
@@ -481,6 +482,8 @@ fn summary(event: &EventKind) -> Value {
         EventKind::ApprovalRequest(d) => value["source"] = json!(d.source),
         EventKind::InputApplied(d) => value["input_id"] = json!(d.input_id),
         EventKind::InputConsumed(d) => value["input_id"] = json!(d.input_id),
+        EventKind::InputWithdraw(d) => value["input_id"] = json!(d.input_id),
+        EventKind::InputDeleted(d) => value["input_id"] = json!(d.input_id),
         EventKind::StopInterrupt(d) => value["scope"] = json!(d.scope),
         _ => {}
     }

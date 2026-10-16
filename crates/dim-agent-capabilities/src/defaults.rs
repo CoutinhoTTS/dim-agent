@@ -81,6 +81,8 @@ fn install_with_prompt_capability_and_branch(
     builder
         .session_plugin(SessionBroadcastEndPlugin::new)
         .session_plugin(TimelineTreePlugin::new)
+        .session_plugin(crate::input_queue::InputMethodsPlugin::new)
+        .session_methods(crate::input_queue::INPUT_METHODS)
         .session_tool_registry(ToolRegistryPlugin::new)
         .timeline_plugin(SessionBroadcastPlugin::new)
         .timeline_plugin(TreeTimelinePlugin::new)
@@ -149,6 +151,7 @@ pub fn mock_model_hosts_with_history(builder: &mut AgentBuilder, history: Histor
         .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
 }
 pub fn mock_hosts(builder: &mut AgentBuilder) {
