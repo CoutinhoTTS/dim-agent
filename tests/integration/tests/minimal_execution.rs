@@ -9,6 +9,7 @@ use dim_agent_capabilities::{
     host::*,
     host_platform::{EXEC_SHELL_UNAVAILABLE, HostPlatform, ShellStatus, resolve_shell},
     model_provider::ModelProviderPlugin,
+    permission::{CommandRulesHost, NoCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
@@ -181,6 +182,7 @@ impl Harness {
             .session_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
             .session_plugin(DefaultPrepareModelPlugin::new);
         dim_agent_capabilities::defaults::install_minimal_execution(
             &mut builder,

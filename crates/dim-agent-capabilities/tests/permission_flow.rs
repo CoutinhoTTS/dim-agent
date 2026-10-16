@@ -1,15 +1,21 @@
 //! Branch permission through the public Session interfaces.
 use dim_agent_capabilities::{
+    approval::Approval,
     defaults,
     host::*,
-    permission::{Decision, Permission, PermissionState, PermissionUpdateError},
+    model_provider::ModelProviderPlugin,
+    permission::{
+        CommandRulesHost, Decision, Permission, PermissionState, PermissionUpdateError,
+        ReadCommandRules,
+    },
+    prompt::InitialPromptConfiguration,
     tool_registry::definition,
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -60,10 +66,48 @@ impl ToolDriver for RiskTools {
     }
 }
 
+/// The user's command rules as the test sets them; `None` is an unreadable
+/// source.
+struct TestRules(Mutex<Option<Vec<CommandRule>>>);
+impl TestRules {
+    fn new(rules: Vec<CommandRule>) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(Some(rules))))
+    }
+    fn set(&self, rules: Option<Vec<CommandRule>>) {
+        *self.0.lock().unwrap() = rules;
+    }
+}
+impl ReadCommandRules for TestRules {
+    fn rules(&self, _: CancellationToken) -> HostFuture<'_, Vec<CommandRule>> {
+        let rules = self.0.lock().unwrap().clone();
+        Box::pin(async move { rules.ok_or_else(|| HostError::failed("invalid rules file")) })
+    }
+}
+fn rule(command: &str, matching: CommandMatch, decision: CommandRuleDecision) -> CommandRule {
+    CommandRule {
+        command: command.into(),
+        matching,
+        decision,
+    }
+}
+
 fn agent(tools: Arc<RiskTools>) -> Agent {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(Arc::new(MemoryTimelineStore::default()));
     defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    defaults::tool_host(&mut builder, tools);
+    builder.build()
+}
+/// The default profile with `rules` bound in place of its empty host.
+fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<TestRules>) -> Agent {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(Arc::new(MemoryTimelineStore::default()))
+        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_value(Arc::new(InitialPromptConfiguration(None)))
+        .session_value(Arc::new(CommandRulesHost(rules)));
+    defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools);
     builder.build()
@@ -90,6 +134,62 @@ async fn call(session: &Session, name: &str) -> bool {
     session.idle("main").await.unwrap();
     last_result(session, "main").await.is_error == Some(true)
 }
+/// Submits `exec` with `command` on main.
+async fn submit_exec(session: &Session, command: &str) {
+    let input = serde_json::json!({ "command": command });
+    session
+        .submit(format!("tool:exec {input}"), InputMode::Queue, "main")
+        .await
+        .unwrap();
+}
+/// Runs `exec` with `command`; returns its result.
+async fn exec(session: &Session, command: &str) -> ToolResult {
+    submit_exec(session, command).await;
+    session.idle("main").await.unwrap();
+    last_result(session, "main").await
+}
+/// Waits for the approval request of a call with `command` on main.
+async fn approval_request(session: &Session, command: &str) -> String {
+    loop {
+        let found = session
+            .local("main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ApprovalRequest(data)
+                    if data
+                        .call
+                        .input
+                        .get("command")
+                        .and_then(|value| value.as_str())
+                        == Some(command) =>
+                {
+                    Some(data.approval_id.clone())
+                }
+                _ => None,
+            });
+        if let Some(id) = found {
+            return id;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+async fn approval_requests(session: &Session) -> usize {
+    session
+        .local("main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::ApprovalRequest(_)))
+        .count()
+}
+fn text(result: &ToolResult) -> &str {
+    match &result.content {
+        ToolContent::Text(text) => text,
+        other => panic!("text result expected: {other:?}"),
+    }
+}
 async fn last_result(session: &Session, branch: &str) -> ToolResult {
     session
         .history(branch, None)
@@ -103,8 +203,17 @@ async fn last_result(session: &Session, branch: &str) -> ToolResult {
         })
         .unwrap()
 }
-fn verdict(decision: Decision) -> &'static str {
-    match decision {
+/// Decides a call of `name` without input.
+async fn verdict(permission: &Permission, name: &str, risk: Option<&str>) -> &'static str {
+    let call = ApprovalCallData {
+        name: name.into(),
+        input: JsonObject::new(),
+    };
+    match permission
+        .decide(&call, risk, &CancellationToken::new())
+        .await
+        .unwrap()
+    {
         Decision::Allow => "allow",
         Decision::Ask { .. } => "ask",
         Decision::Deny { .. } => "deny",
@@ -133,7 +242,7 @@ async fn presets_decide_by_risk_and_denied_calls_do_not_run() {
             let permission = session.service::<Permission>("main").unwrap();
             for ((name, risk), expected) in TOOLS.iter().zip(verdicts) {
                 assert_eq!(
-                    verdict(permission.decide(name, *risk)),
+                    verdict(&permission, name, *risk).await,
                     expected,
                     "{policy:?} {name}"
                 );
@@ -201,7 +310,7 @@ async fn tool_lists_override_presets_and_disallowed_wins() {
         let risk = TOOLS.iter().find(|(tool, _)| *tool == name).unwrap().1;
         let session = agent.create_session(config(policy)).await.unwrap();
         let permission = session.service::<Permission>("main").unwrap();
-        assert_eq!(verdict(permission.decide(&name, risk)), expected);
+        assert_eq!(verdict(&permission, &name, risk).await, expected);
         session.close().await.unwrap();
     }
     agent.close().await.unwrap();
@@ -325,7 +434,6 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
-    use dim_agent_capabilities::approval::Approval;
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let agent = agent(tools.clone());
@@ -434,7 +542,6 @@ impl Capability for RespondOnStop {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
-    use dim_agent_capabilities::approval::Approval;
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -489,4 +596,150 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
     })
     .await
     .expect("stopped approval settled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn allow_rules_answer_approval_only_for_simple_commands_within_the_preset() {
+    use CommandMatch::Prefix;
+    use CommandRuleDecision::Allow;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let tools = Arc::new(RiskTools::default());
+        let rules = TestRules::new(vec![rule("cargo test", Prefix, Allow)]);
+        let agent = ruled_agent(tools.clone(), rules);
+        let session = agent
+            .create_session(config(preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        assert_eq!(text(&exec(&session, "cargo test -p x").await), "exec ran");
+        assert_eq!(approval_requests(&session).await, 0);
+        // Not simple, or not on a word boundary: the preset asks.
+        let approval = session.service::<Approval>("main").unwrap();
+        for command in ["cargo test; rm x", "cargo test > out", "cargo testx"] {
+            submit_exec(&session, command).await;
+            let id = approval_request(&session, command).await;
+            approval.respond(&id, ApprovalDecision::Deny).await.unwrap();
+            session.idle("main").await.unwrap();
+        }
+        assert_eq!(approval_requests(&session).await, 3);
+        session.close().await.unwrap();
+
+        // An allow rule never lifts a preset denial.
+        let session = agent
+            .create_session(config(preset(PermissionPreset::ReadOnly)))
+            .await
+            .unwrap();
+        assert_eq!(
+            text(&exec(&session, "cargo test").await),
+            "Tool `exec` is not allowed by the read-only preset (starting processes)"
+        );
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+        session.close().await.unwrap();
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("allow rule flow completed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_time() {
+    use CommandMatch::Prefix;
+    use CommandRuleDecision::{Allow, Deny};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let tools = Arc::new(RiskTools::default());
+        let rules = TestRules::new(vec![]);
+        let agent = ruled_agent(tools.clone(), rules.clone());
+        let session = agent
+            .create_session(config(preset(PermissionPreset::FullAccess)))
+            .await
+            .unwrap();
+        assert_eq!(text(&exec(&session, "git push origin").await), "exec ran");
+        // The next call reads the new rules; nothing reloads.
+        rules.set(Some(vec![
+            rule("git push", Prefix, Deny),
+            rule("git push", Prefix, Allow),
+        ]));
+        for command in ["git push origin", "echo ok && git push", "x=$(git push)"] {
+            let result = exec(&session, command).await;
+            assert_eq!(result.is_error, Some(true), "{command}");
+            assert_eq!(
+                text(&result),
+                "Command denied by command rule `git push` (prefix)"
+            );
+        }
+        assert_eq!(text(&exec(&session, "git status").await), "exec ran");
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 2);
+        session.close().await.unwrap();
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("deny rule flow completed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let tools = Arc::new(RiskTools::default());
+        let rules = TestRules::new(vec![]);
+        let agent = ruled_agent(tools.clone(), rules.clone());
+        let session = agent
+            .create_session(config(preset(PermissionPreset::WorkspaceWrite)))
+            .await
+            .unwrap();
+        submit_exec(&session, "git push").await;
+        let id = approval_request(&session, "git push").await;
+        rules.set(Some(vec![rule(
+            "git push",
+            CommandMatch::Exact,
+            CommandRuleDecision::Deny,
+        )]));
+        let approval = session.service::<Approval>("main").unwrap();
+        approval
+            .respond(&id, ApprovalDecision::Allow)
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let reason = "Command denied by command rule `git push` (exact)";
+        assert_eq!(text(&last_result(&session, "main").await), reason);
+        assert!(
+            session
+                .local("main", ..)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| matches!(
+                    &event.kind,
+                    EventKind::ApprovalCancelled(data)
+                        if data.approval_id == id && data.reason == reason
+                ))
+        );
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 0);
+        session.close().await.unwrap();
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("recheck flow completed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreadable_rules_deny_command_calls_only() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let tools = Arc::new(RiskTools::default());
+        let rules = TestRules::new(vec![]);
+        rules.set(None);
+        let agent = ruled_agent(tools.clone(), rules);
+        let session = agent
+            .create_session(config(preset(PermissionPreset::FullAccess)))
+            .await
+            .unwrap();
+        assert_eq!(
+            text(&exec(&session, "ls").await),
+            "Command rules could not be read: invalid rules file"
+        );
+        assert!(!call(&session, "read").await);
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+        session.close().await.unwrap();
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("unreadable rules flow completed");
 }
