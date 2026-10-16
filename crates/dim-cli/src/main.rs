@@ -1,6 +1,7 @@
 mod args;
 mod client;
 mod display;
+mod export;
 mod input;
 mod login;
 mod session;
@@ -38,7 +39,16 @@ fn prepare() -> Result<Option<Options>> {
         println!("dimcode {}", env!("CARGO_PKG_VERSION"));
         return Ok(None);
     }
-    if matches!(options.action, Action::Chat)
+    if matches!(options.action, Action::Tui) && !std::io::stdin().is_terminal() {
+        return Err("tui requires an interactive terminal".into());
+    }
+    if matches!(options.action, Action::Exec)
+        && options.prompt.is_none()
+        && std::io::stdin().is_terminal()
+    {
+        return Err("exec requires --prompt TEXT or redirected stdin".into());
+    }
+    if matches!(options.action, Action::Chat | Action::Exec)
         && options.prompt.is_none()
         && !std::io::stdin().is_terminal()
     {
@@ -63,6 +73,14 @@ async fn run(options: Options) -> Result<i32> {
     }
     let mut client = client::connect(&options).await?;
     match &options.action {
+        Action::Export {
+            session_id,
+            format,
+            output,
+        } => {
+            export::write(&mut client, session_id, *format, output.as_deref()).await?;
+            Ok(0)
+        }
         Action::Login(provider) => login::login(&mut client, &options, provider).await,
         Action::Account(provider) => {
             #[derive(serde::Deserialize)]
@@ -284,7 +302,7 @@ async fn run(options: Options) -> Result<i32> {
             }
             Ok(0)
         }
-        Action::Chat => session::chat(&mut client, &options).await,
+        Action::Chat | Action::Tui | Action::Exec => session::chat(&mut client, &options).await,
         Action::Help | Action::Version | Action::DaemonStop => unreachable!(),
     }
 }

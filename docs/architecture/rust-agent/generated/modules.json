@@ -1816,6 +1816,17 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::export",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/export.rs",
+      "unexpandedMacros": [
+        "eprintln",
+        "format",
+        "json"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::input",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -1847,9 +1858,11 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "println",
         "tokio::select",
-        "unreachable"
+        "unreachable",
+        "writeln"
       ]
     }
   ],
@@ -14366,12 +14379,15 @@
         "path Action::Account",
         "path Action::Chat",
         "path Action::DaemonStop",
+        "path Action::Exec",
+        "path Action::Export",
         "path Action::Help",
         "path Action::Login",
         "path Action::Logout",
         "path Action::McpEnable",
         "path Action::McpList",
         "path Action::Models",
+        "path Action::Tui",
         "path Action::Version",
         "path Options",
         "path Options::parse",
@@ -14395,6 +14411,14 @@
       "to": "dim_cli::@bin:dimcode::display",
       "references": [
         "mod display"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::export",
+      "references": [
+        "mod export",
+        "path export::write"
       ]
     },
     {
@@ -14426,6 +14450,15 @@
       "references": [
         "path Result",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::args",
+      "to": "dim_cli::@bin:dimcode::export",
+      "references": [
+        "path Format",
+        "path Format::Markdown",
+        "use crate::export::Format"
       ]
     },
     {
@@ -14485,6 +14518,69 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path BranchCreateData::deserialize",
+        "path BranchCreateFailedData::Cancelled",
+        "path BranchCreateFailedData::Failed",
+        "path BranchCreateFailedData::deserialize",
+        "path InputBlock::Raw",
+        "path InputMessageData::deserialize",
+        "path TextData::deserialize",
+        "path ToolResultData::deserialize",
+        "path ToolUseData::deserialize",
+        "use dim_agent_types::BranchCreateData",
+        "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::InputBlock",
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::TextData",
+        "use dim_agent_types::ToolResultData",
+        "use dim_agent_types::ToolUseData"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "path crate::Error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode::client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode::display",
+      "references": [
+        "use crate::display"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::export",
+      "to": "dim_cli::@bin:dimcode::session",
+      "references": [
+        "path session::read_history",
+        "use crate::session"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::input",
       "to": "dim_cli::@bin:dimcode",
       "references": [
@@ -14533,6 +14629,13 @@
     },
     {
       "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
@@ -14560,6 +14663,7 @@
       "to": "dim_cli::@bin:dimcode::args",
       "references": [
         "path Options",
+        "use crate::args::Action",
         "use crate::args::Options"
       ]
     },
@@ -14588,6 +14692,14 @@
         "use crate::display::Display",
         "use crate::display::Event",
         "use crate::display::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_cli::@bin:dimcode::export",
+      "references": [
+        "path export::write",
+        "use crate::export"
       ]
     },
     {
@@ -14968,6 +15080,10 @@
     {
       "module": "dim_cli::@bin:dimcode::input",
       "path": "INPUT_RECORD::default"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::session",
+      "path": "char::is_whitespace"
     }
   ]
 }
