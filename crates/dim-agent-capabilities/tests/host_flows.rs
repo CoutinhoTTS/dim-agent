@@ -1648,3 +1648,129 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
     .await
     .unwrap();
 }
+
+fn model_with_vision(model_id: &str, vision: bool) -> ModelSelection {
+    ModelSelection {
+        provider_id: "test".into(),
+        model_id: model_id.into(),
+        capability_snapshot: Some(ModelCapabilitySnapshot {
+            target: ModelId {
+                provider_id: "test".into(),
+                model_id: model_id.into(),
+            },
+            capabilities: ModelCapabilities {
+                modalities: vec!["text".into()],
+                tool_calling: true,
+                streaming: true,
+                structured_output: false,
+                vision,
+                audio: false,
+                reasoning: false,
+                context_window: 32_000,
+                max_output_tokens: 4096,
+                provider_state: None,
+            },
+            reasoning: None,
+            service_tier: None,
+        }),
+        config: None,
+        metadata: None,
+    }
+}
+fn image(media_type: &str, data: Option<&str>, url: Option<&str>) -> ContentBlock {
+    ContentBlock::Image {
+        source: ImageSource {
+            source_type: if url.is_some() {
+                ImageSourceType::Url
+            } else {
+                ImageSourceType::Base64
+            },
+            media_type: media_type.into(),
+            data: data.map(str::to_owned),
+            url: url.map(str::to_owned),
+        },
+    }
+}
+fn sent_parts(request: &ModelRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| match &message.content {
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    MessagePart::Image { source } => format!("image:{}", source.media_type),
+                    MessagePart::Text { text, .. } => text.clone(),
+                    _ => String::new(),
+                })
+                .collect(),
+            MessageContent::Text(text) => vec![text.clone()],
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let agent = builder(Arc::new(RecordingModel(requests.clone())), Arc::new(MockTools)).build();
+        let session = agent.create_session(SessionConfig::default()).await.unwrap();
+        session
+            .configure(ConfigureUpdate { model: Some(model_with_vision("seeing", true)), ..Default::default() }, "main")
+            .await
+            .unwrap();
+        let png = "iVBORw0KGgo=";
+        session
+            .input(
+                InputMessageData {
+                    user: Some(UserInput {
+                        content: vec![
+                            ContentBlock::Text { text: "look".into() },
+                            image("image/png", Some(png), None),
+                            image("image/png", None, Some("https://example.test/a.png")),
+                            image("image/bmp", Some(png), None),
+                            image("image/png", Some("not base64!"), None),
+                        ],
+                    }),
+                    mode: Some(InputMode::Queue),
+                    ..Default::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        // A model that takes images gets the sendable one; the others cannot be sent.
+        let unsendable = "[Image omitted: the image cannot be sent to this model.]";
+        assert_eq!(
+            sent_parts(requests.lock().unwrap().last().unwrap()),
+            ["look", "image:image/png", unsendable, unsendable, unsendable]
+        );
+
+        session
+            .configure(ConfigureUpdate { model: Some(model_with_vision("text-only", false)), ..Default::default() }, "main")
+            .await
+            .unwrap();
+        session.submit("next".into(), InputMode::Queue, "main").await.unwrap();
+        session.idle("main").await.unwrap();
+        // The text-only model gets placeholders for every image and still answers.
+        let request = requests.lock().unwrap().last().unwrap().clone();
+        assert_eq!(request.model_id, "text-only");
+        let omitted = "[Image omitted: the current model does not accept images.]";
+        let parts = sent_parts(&request);
+        assert_eq!(parts[..5], ["look", omitted, omitted, omitted, omitted]);
+        assert!(parts.contains(&"next".to_string()));
+        let history = session.history("main", None).await.unwrap();
+        assert!(history.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next"))));
+        // The adopted input and the committed request keep their images.
+        assert!(history.iter().any(|event| matches!(&event.kind,
+            EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user| user.content.iter().any(|block| matches!(block, ContentBlock::Image { .. }))))));
+        assert!(history.iter().any(|event| matches!(&event.kind,
+            EventKind::ModelCall(call) if call.request.model_id == "text-only"
+                && call.request.messages.iter().any(|message| matches!(&message.content,
+                    MessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, MessagePart::Image { .. })))))));
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
