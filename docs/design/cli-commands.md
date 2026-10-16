@@ -33,6 +33,12 @@ to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
 
+For both export entries, relative output paths use the CLI process's current
+directory, including after resume; neither the Session's cwd nor `--home` changes
+that base. The CLI treats `~` literally. Usage/help states: `PATH is relative to
+the CLI current directory; ~ is literal; use an absolute path for another base`.
+An invoking shell may expand an argument before the CLI receives it.
+
 Other target commands require their owning features. F6 does not implement a
 fullscreen interface, persistent RPC/ACP server, verification/repair loop,
 provider editor, Session deletion/fork, or model-request snapshot export.
@@ -45,6 +51,10 @@ $ dimcode tui --home /tmp/dim-work
 dimcode · model: provider/model
 workspace: /workspace/project
 session: <session-id>
+
+> /export markdown
+Usage: /export <markdown|json> PATH
+PATH is relative to the CLI current directory; ~ is literal.
 
 > /export markdown /tmp/Session notes.md
 Exported Markdown: /tmp/Session notes.md
@@ -68,7 +78,10 @@ exports an empty event list or a Markdown heading without fabricated messages.
 
 `exec` uses the existing create/attach/history/submit/idle/detach sequence and
 stop settlement. A resumed running turn settles before the new prompt is
-submitted. Noninteractive approval is denied and settled with exit code 3.
+submitted. As the attached interaction client, `exec` actively sends the ordinary
+denial response to an approval request, waits for settlement, and exits with
+code 3. It does not change `SessionConfig.interactive`. Sessions created as
+noninteractive retain Approval's existing owner-side policy (#98 D10).
 Other exit codes retain the native CLI contract, including 2 for turn failure
 and 130 for interruption. A transport failure does not retry a submission.
 
@@ -101,6 +114,11 @@ including gaps caused by filtered records. The CLI reuses its existing cursor
 checks. Export does not submit input, change model context, close the Session,
 or implement a server-side exporter.
 
+The exported branch is always `main`; child branch histories are not fetched or
+included. Markdown renders each `branch/create` fact with its child id as
+`Child branch <id> (contents not exported).` JSON preserves that main-branch
+event unchanged. A reader can distinguish delegation from missing content.
+
 JSON output contains `{sessionId, branchId, through, events}`. Each event is the
 public history event without dropping unknown fields or event kinds. This is
 a conversation export, not a restore/import file or native database format.
@@ -111,6 +129,9 @@ without allowing a message to close the surrounding tool-result fence.
 
 The CLI reads the fixed prefix successfully before opening an output file.
 Files use create-new semantics: existing paths fail without replacement.
+On Unix they are created with mode 0600 through the standard OpenOptions
+extension; Windows uses the native inherited ACL. Existing files are never
+opened to change their permissions.
 No output file is created after a history error. A write failure is reported
 and may leave a partial newly created file; no success message is printed.
 Export-to-stdout failures return a nonzero code. Interactive export errors
@@ -128,5 +149,7 @@ Reuse `cli_flow.rs` and its actual daemon profile fixture to cover `exec` and
 resume, stdout/stderr separation, public JSON notification preservation,
 turn/approval failure and stop settlement, fixed-watermark multi-page export,
 both formats, existing-file rejection, and interactive command interception.
+Cover relative paths when the CLI and Session directories differ, literal `~`
+usage, child-branch omission/markers, and Unix file privacy.
 Use isolated homes only. Implementation requires the focused CLI flows and
 affected Clippy.
