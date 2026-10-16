@@ -38,7 +38,8 @@ pub struct PromptCheckpointState {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectionCheckpointState {
-    pub compacted_through: String,
+    /// Timeline event id of the cut the anchoring compaction made.
+    pub retain_from: String,
     pub prompts: PromptCheckpointState,
     pub delivered: Vec<ContextBaselineEntry>,
     pub inputs: Vec<(String, InputMessageData)>,

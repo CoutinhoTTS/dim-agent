@@ -9,8 +9,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{
-        CredentialRecoveryPhase, CredentialRejection, HostError, HostErrorKind, ModelChunk,
-        ModelHost, ProviderConnectionResolver,
+        AuxiliaryErrorCode, AuxiliaryModelHost, AuxiliaryRequest, CredentialRecoveryPhase,
+        CredentialRejection, HostError, HostErrorKind, ModelChunk, ModelHost,
+        ProviderConnectionResolver,
     },
 };
 use dim_agent_runtime::capability_plugin;
@@ -1214,6 +1215,41 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         );
     }
 
+    // An auxiliary call settles a credential rejected again after recovery,
+    // as a Session request does: the Grok account is signed out.
+    f.polls.store(2, Ordering::SeqCst);
+    let begin = grok.begin_device(&cancel).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while grok.attempt_status(begin.attempt_id).await.unwrap() == AttemptStatus::Pending {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(grok.status(&cancel).await.unwrap().authenticated);
+    let auxiliary = root.get::<AuxiliaryModelHost>().unwrap();
+    let sent = f.model_requests.lock().unwrap().len();
+    f.model_rejections.store(2, Ordering::SeqCst);
+    let error = auxiliary
+        .0
+        .complete(
+            ModelId {
+                provider_id: "grok-build".into(),
+                model_id: "grok-build-0.1".into(),
+            },
+            AuxiliaryRequest {
+                system: None,
+                messages: vec![Message::text(Role::User, "hello")],
+                max_output_tokens: None,
+            },
+            cancel.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, AuxiliaryErrorCode::Failed);
+    assert_eq!(f.model_requests.lock().unwrap().len(), sent + 2);
+    assert!(!grok.status(&cancel).await.unwrap().authenticated);
+
     let before = read(&home);
     let list = provider.list(&cancel).await.unwrap();
     let summary = list
@@ -1298,6 +1334,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         restarted.plugin(dim_agent_runtime::capability_plugin(
             ProviderPlugin::default(),
         )),
+        restarted.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
         active(plugin).await;

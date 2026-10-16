@@ -20,8 +20,9 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
                         .map(|payload| format!("custom:{payload}"))
                         .map_err(|error| error.to_string())
                 };
-                renderer.decode_checkpoint =
-                    |snapshot| serde_json::from_str(snapshot.state.strip_prefix("custom:")?).ok();
+                renderer.decode_checkpoint = |snapshot, _| {
+                    serde_json::from_str(snapshot.state.strip_prefix("custom:")?).ok()
+                };
             }
             _ => unreachable!(),
         }
@@ -41,8 +42,10 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             .create_session(SessionConfig::default())
             .await
             .unwrap();
+        // Past the threshold from the first turn on, only the third turn
+        // has a turn to compact; the last two are kept.
         let original = "x".repeat(1_500);
-        for input in [&original, "next"] {
+        for input in [&original, "next", "third"] {
             session
                 .submit(input.into(), InputMode::Queue, "main")
                 .await
@@ -57,11 +60,11 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
                 _ => None,
             })
             .collect();
-        assert!(
-            matches!(compactions.as_slice(), [ContextCompactionResult::Completed {
-        summary, ..
-    }] if summary == "short")
-        );
+        assert!(matches!(compactions.as_slice(), [
+                ContextCompactionResult::Skipped { .. },
+                ContextCompactionResult::Skipped { .. },
+                ContextCompactionResult::Completed { replacement, .. },
+            ] if *replacement == [dim_agent_capabilities::history::summary_message("short")]));
         let saved = store
             .latest_snapshot(
                 &TimelineKey {
@@ -108,18 +111,22 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
                 _ => None,
             })
             .collect();
-        assert_eq!(requests.len(), 2);
-        for request in requests {
-            assert_eq!(
-                request.messages[0].as_ref(),
-                &dim_agent_capabilities::history::summary_message("short")
-            );
-            assert!(
-                !request
-                    .messages
-                    .contains(&Arc::new(Message::text(Role::User, &original)))
-            );
-        }
+        assert_eq!(requests.len(), 3);
+        let request = requests.last().unwrap();
+        assert_eq!(
+            request.messages[0].as_ref(),
+            &dim_agent_capabilities::history::summary_message("short")
+        );
+        assert!(
+            !request
+                .messages
+                .contains(&Arc::new(Message::text(Role::User, &original)))
+        );
+        assert!(
+            request
+                .messages
+                .contains(&Arc::new(Message::text(Role::User, "next")))
+        );
         agent.close().await.unwrap();
     }
 }
@@ -197,21 +204,31 @@ impl TypedPlugin for RewriteCompaction {
                         | ContextCompactionResult::Skipped { diagnostics, .. } => {
                             diagnostics.clone()
                         }
-                        ContextCompactionResult::Failed { diagnostics, .. } => {
-                            diagnostics.clone().unwrap()
+                        ContextCompactionResult::Failed { diagnostics, .. } => diagnostics
+                            .clone()
+                            .unwrap_or_else(checkpoint_projection::diagnostics),
+                        ContextCompactionResult::Cancelled { .. } => {
+                            checkpoint_projection::diagnostics()
                         }
                     };
                     match edit {
                         Edit::None => {}
                         Edit::Summary | Edit::FirstCursor | Edit::Completed => {
-                            let cursor = if matches!(edit, Edit::FirstCursor) {
-                                &history.first().unwrap().id
+                            // Keep from the second entry, or nothing: the
+                            // request's own model-start is the last event.
+                            let retain_from = if matches!(edit, Edit::FirstCursor) {
+                                history[1].source.clone()
                             } else {
-                                &history.last().unwrap().id
+                                context.events.last().unwrap().id.clone()
                             };
                             data.outcome = ContextCompactionResult::Completed {
-                                cursor: cursor.clone(),
-                                summary: "committed summary".into(),
+                                retain_from,
+                                replacement: vec![
+                                    dim_agent_capabilities::history::summary_message(
+                                        "committed summary",
+                                    ),
+                                ],
+                                strategy: "test".into(),
                                 diagnostics,
                                 context_baseline: Vec::new(),
                             };
@@ -229,11 +246,15 @@ impl TypedPlugin for RewriteCompaction {
                             }
                         }
                         Edit::BrokenCursor => {
-                            if let ContextCompactionResult::Completed { cursor, .. } =
-                                &mut data.outcome
-                            {
-                                *cursor = "outside-this-history".into();
-                            }
+                            data.outcome = ContextCompactionResult::Completed {
+                                retain_from: "outside-this-history".into(),
+                                replacement: vec![
+                                    dim_agent_capabilities::history::summary_message("broken"),
+                                ],
+                                strategy: "test".into(),
+                                diagnostics,
+                                context_baseline: Vec::new(),
+                            };
                         }
                     }
                     Ok(draft)
@@ -355,16 +376,19 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
     )
     .unwrap();
     let ContextCompactionResult::Completed {
-        cursor, summary, ..
+        retain_from,
+        replacement,
+        ..
     } = &compaction.outcome
     else {
         panic!("expected compaction")
     };
-    assert_eq!(cursor, &history[0].id);
-    let expected: Vec<_> =
-        std::iter::once(dim_agent_capabilities::history::summary_message(summary))
-            .chain(history[1..].iter().map(|entry| entry.message.clone()))
-            .collect();
+    assert_eq!(retain_from, &history[1].source);
+    let expected: Vec<_> = replacement
+        .iter()
+        .cloned()
+        .chain(history[1..].iter().map(|entry| entry.message.clone()))
+        .collect();
     let request = events
         .iter()
         .rev()
@@ -491,9 +515,9 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
     assert!(events.iter().any(|event| matches!(
         &event.kind,
         EventKind::ContextCompaction(ContextCompactionData {
-            outcome: ContextCompactionResult::Completed { cursor, .. },
+            outcome: ContextCompactionResult::Completed { retain_from, .. },
             ..
-        }) if cursor == "outside-this-history"
+        }) if retain_from == "outside-this-history"
     )));
     assert!(events.iter().any(|event| matches!(
         &event.kind,
@@ -536,6 +560,6 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
         .collect();
     assert_eq!(ends.len(), 2);
     assert!(matches!(ends[1], TurnOutcome::Failed { error }
-        if error.contains("Compaction cursor is outside")));
+        if error.contains("Compaction cut is outside")));
     agent.close().await.unwrap();
 }

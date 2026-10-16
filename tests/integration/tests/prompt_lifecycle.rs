@@ -392,6 +392,7 @@ fn builder_with_context(host: Arc<Prompts>, prepare: Arc<dyn PrepareContext>) ->
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(prepare)))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     defaults::install_with_prompt(&mut builder, host, None);
     builder

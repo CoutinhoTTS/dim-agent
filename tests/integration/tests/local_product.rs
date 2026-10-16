@@ -62,6 +62,7 @@ async fn product(dirs: &Dirs) -> Product {
         .session_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
     defaults::install_local_execution(
         &mut builder,

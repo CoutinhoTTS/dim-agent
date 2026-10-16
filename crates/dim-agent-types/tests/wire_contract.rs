@@ -58,23 +58,29 @@ fn frozen_typescript_samples_roundtrip_without_losing_fields() {
             && value["name"] == "compaction"
             && value["data"]["status"] == "completed"
         {
-            let internal: AgentEvent = serde_json::from_value(value.clone()).unwrap();
-            let encoded = serde_json::to_value(&internal).unwrap();
-            assert!(
-                !encoded["data"]
-                    .as_object()
-                    .unwrap()
-                    .contains_key("checkpoint")
+            // The native record names its cut by `retain_from` and stores a
+            // replacement: the frozen form is neither read natively nor
+            // written to v1 connections.
+            assert!(serde_json::from_value::<AgentEvent>(value.clone()).is_err());
+            let mut native = value.clone();
+            let data = native["data"].as_object_mut().unwrap();
+            data.remove("cursor");
+            data.remove("summary");
+            data.insert("retain_from".into(), json!("event-2"));
+            data.insert(
+                "replacement".into(),
+                json!([{"role": "user", "content": "summary"}]),
             );
-            assert_eq!(
-                serde_json::from_value::<AgentEvent>(encoded).unwrap(),
-                internal
+            data.insert("strategy".into(), json!("summary"));
+            data.insert(
+                "diagnostics".into(),
+                json!({"reason": "auto", "trigger": "threshold", "estimatedInputTokens": 1,
+                    "entriesReplaced": 1, "modelCallCount": 1, "durationMs": 1,
+                    "strategy": {"kind": "summary", "summaryChars": 7}}),
             );
-            equal_json(
-                &serde_json::to_value(v1::SharedEvent::new(std::sync::Arc::new(internal)).unwrap())
-                    .unwrap(),
-                value,
-            );
+            let internal: AgentEvent = serde_json::from_value(native.clone()).unwrap();
+            equal_json(&serde_json::to_value(&internal).unwrap(), &native);
+            assert!(v1::SharedEvent::new(std::sync::Arc::new(internal)).is_none());
         }
     }
     assert_eq!(kinds.len(), 22);

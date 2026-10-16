@@ -1,6 +1,7 @@
 use crate::{
+    context_policy::{CompactionStep, ContextPolicy, configured_request},
     history::{HistoryRenderer, context_configuration, context_messages},
-    host::{ContextModelHost, PrepareModelHost},
+    host::{CompactionStrategyHost, ContextModelHost, HostError, PrepareModelHost},
     prompt_state::PromptSnapshot,
     steer::REPLACED_BY_STEER,
     tool_binding::ToolBinding,
@@ -68,8 +69,42 @@ impl Applied {
         }
     }
 }
+/// The one outstanding manual compaction command: written and without a
+/// result. Repeated requests join it (`AgentLoop::compact`); deduplication
+/// belongs to the interaction boundary, not to a queue of commands.
+struct Command {
+    sequence: u64,
+    /// The Loop has consumed the command; it starts at the next boundary.
+    consumed: bool,
+    /// The running step's cancellation.
+    running: Option<CancellationToken>,
+}
+#[derive(Default)]
+struct CompactionSlot {
+    command: Option<Command>,
+    /// Why an interrupt cancelled the running step.
+    stop_reason: Option<String>,
+}
+impl CompactionSlot {
+    fn running(&self) -> bool {
+        self.command
+            .as_ref()
+            .is_some_and(|command| command.running.is_some())
+    }
+    /// Consumed and waiting for a boundary.
+    fn waiting(&self) -> bool {
+        self.command
+            .as_ref()
+            .is_some_and(|command| command.consumed && command.running.is_none())
+    }
+}
+/// The reason a `context/compact` consumed while another command is
+/// outstanding is skipped.
+pub const ALREADY_IN_PROGRESS: &str = "a compaction is already in progress";
 pub struct AgentLoop {
     turn: Mutex<Option<Turn>>,
+    /// Locked after `turn`.
+    compaction: Mutex<CompactionSlot>,
     observable: Arc<StateCell<LoopSnapshot>>,
     timeline: Arc<Timeline>,
     /// Sequence of the last `stop/interrupt`. Inputs applied before it that
@@ -86,7 +121,8 @@ pub struct AgentLoop {
     /// turn ends.
     binding: Arc<ToolBinding>,
     history: Arc<HistoryRenderer>,
-    recovery: bool,
+    /// Compaction is bound: budget recovery and manual steps run.
+    policy: Option<ContextPolicy>,
     /// Events up to this sequence were applied by the rebuild at load.
     rebuilt: AtomicU64,
     tasks: TaskTracker,
@@ -120,9 +156,30 @@ impl AgentLoop {
                 && !claimed.contains(&input.id)
         })
     }
-    /// Starts a turn when idle and an applied input drives one.
+    /// The only writer of `context/compact`. With a command outstanding
+    /// (written and without a result) it writes nothing and returns that
+    /// command's sequence, so every caller waits for the same result;
+    /// otherwise it appends the command and returns its sequence.
+    pub fn compact(&self) -> Result<u64> {
+        let mut compaction = self.compaction.lock().unwrap();
+        if let Some(command) = &compaction.command {
+            return Ok(command.sequence);
+        }
+        let sequence = self
+            .timeline
+            .append(EventKind::ContextCompact(ContextCompactData {}).into())?
+            .sequence;
+        compaction.command = Some(Command {
+            sequence,
+            consumed: false,
+            running: None,
+        });
+        Ok(sequence)
+    }
+    /// Starts a turn when idle and an applied input drives one; nothing
+    /// starts while a compaction step runs.
     fn try_start(&self, slot: &mut Option<Turn>) -> Result<()> {
-        if slot.is_some() {
+        if slot.is_some() || self.compaction.lock().unwrap().running() {
             return Ok(());
         }
         // With no open turn every consumption was dispatched: nothing is claimed.
@@ -193,7 +250,14 @@ impl AgentLoop {
         self.timeline.append_batch_registered(events, |_| Ok(()))?;
         Ok(())
     }
-    fn next_model(&self, turn: &mut Turn, source: Option<ContextPrepareData>) -> Result<()> {
+    /// A step boundary unless `source` retries a request: a pending
+    /// compaction step runs before the next request, which waits for it.
+    fn next_model(
+        self: &Arc<Self>,
+        turn: &mut Turn,
+        source: Option<ContextPrepareData>,
+        at: u64,
+    ) -> Result<()> {
         if let Some(error) = turn.failed.clone() {
             return self.end(turn, TurnOutcome::Failed { error });
         }
@@ -205,7 +269,138 @@ impl AgentLoop {
                 },
             );
         }
+        if source.is_none() {
+            let mut compaction = self.compaction.lock().unwrap();
+            if compaction.running() {
+                turn.request = None;
+                return Ok(());
+            }
+            if compaction.waiting() {
+                turn.request = None;
+                self.start_step(&mut compaction, Some(turn.id.clone()), at);
+                return Ok(());
+            }
+        }
         self.start_request(turn, source)
+    }
+    /// Starts the waiting step in a tracked task; its result resumes the Loop.
+    fn start_step(
+        self: &Arc<Self>,
+        compaction: &mut CompactionSlot,
+        turn_id: Option<String>,
+        through: u64,
+    ) {
+        // An unloading Loop starts nothing; the next load settles the command.
+        if self.lifecycle.is_cancelled() {
+            return;
+        }
+        let cancel = self.lifecycle.child_token();
+        let command = compaction.command.as_mut().expect("a waiting step");
+        command.running = Some(cancel.clone());
+        let command = command.sequence;
+        compaction.stop_reason = None;
+        let owner = self.clone();
+        self.tasks.spawn(async move {
+            let result = AssertUnwindSafe(owner.run_step(turn_id, command, through, cancel))
+                .catch_unwind()
+                .await
+                .map_err(|panic| AgentError::fault("Loop", dim_agent_runtime::panic_message(panic)))
+                .and_then(|result| result);
+            if let Err(error) = result {
+                owner.dispatcher.fail(error);
+            }
+        });
+    }
+    /// Builds the request as a preparation would and runs the one compaction
+    /// path. A request that cannot be built ends the command without a start.
+    async fn run_step(
+        &self,
+        turn_id: Option<String>,
+        command: u64,
+        through: u64,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let unstarted = |outcome| {
+            self.timeline.append(
+                EventKind::ContextCompaction(ContextCompactionData {
+                    turn_id: turn_id.clone(),
+                    request_id: None,
+                    command: Some(command),
+                    start: None,
+                    through,
+                    outcome,
+                })
+                .into(),
+            )?;
+            Ok(())
+        };
+        let failed = |error: String| {
+            unstarted(ContextCompactionResult::Failed {
+                error,
+                diagnostics: None,
+            })
+        };
+        let cancelled = || {
+            if self.lifecycle.is_cancelled() {
+                return CAPABILITY_RELOADING.to_owned();
+            }
+            self.compaction
+                .lock()
+                .unwrap()
+                .stop_reason
+                .clone()
+                .unwrap_or_else(|| "Operation cancelled".to_owned())
+        };
+        let Some(policy) = &self.policy else {
+            return failed("Context compaction is not available".into());
+        };
+        let context = self.history.context(&self.timeline, through).await?;
+        let history =
+            (self.history.render)(&context).map_err(|error| AgentError::fault("Loop", error))?;
+        let Some(request) = configured_request(&context, &history) else {
+            return failed("Context is not configured; adopt a model first".into());
+        };
+        let view = policy
+            .view(request, context, history, Vec::new())
+            .map_err(|error| AgentError::fault("Loop", error.to_string()))?;
+        let model = match policy
+            .resolver
+            .resolve(view.prepared.clone(), cancel.clone())
+            .await
+        {
+            Ok(_) | Err(_) if cancel.is_cancelled() => {
+                return unstarted(ContextCompactionResult::Cancelled {
+                    reason: cancelled(),
+                });
+            }
+            Ok(model) => model,
+            Err(error) => return failed(error.to_string()),
+        };
+        let estimate = policy
+            .estimate(&view.prepared, model.as_ref(), view.events())
+            .map_err(|error| AgentError::fault("Loop", error.to_string()))?;
+        policy
+            .compact_step(
+                CompactionStep {
+                    turn_id,
+                    request_id: None,
+                    command: Some(command),
+                    through,
+                    trigger: CompactionTrigger::Manual,
+                    provider_budget: None,
+                },
+                &view,
+                model,
+                &estimate,
+                cancel,
+                &cancelled,
+            )
+            .await
+            .map_err(|error| match error {
+                HostError::Cancelled(reason) => AgentError::Cancelled(reason),
+                error => AgentError::fault("Loop", error.to_string()),
+            })?;
+        Ok(())
     }
     /// Writes the inputs the next request consumes, then its `step/model-start`.
     fn start_request(&self, turn: &mut Turn, source: Option<ContextPrepareData>) -> Result<()> {
@@ -291,9 +486,22 @@ impl AgentLoop {
     }
     /// Rebuilds the current turn from this branch's committed local events.
     /// An unfinished turn is marked failed; with nothing outstanding it ends now.
+    /// A command without a result (its step running, or waiting) is settled
+    /// `cancelled` once, with its start if it had one; it is not resumed.
     fn rebuild(&self, slot: &mut Option<Turn>, events: &[Arc<AgentEvent>]) -> Result<()> {
+        let mut commands: Vec<u64> = Vec::new();
+        let mut starts: Vec<(u64, ContextCompactionStartData)> = Vec::new();
         for event in events {
             match &event.kind {
+                EventKind::ContextCompact(_) => commands.push(event.sequence),
+                EventKind::ContextCompactionStart(data) if data.command.is_some() => {
+                    starts.push((event.sequence, data.clone()))
+                }
+                EventKind::ContextCompaction(data) => {
+                    // A result answers only its own command.
+                    commands.retain(|command| Some(*command) != data.command);
+                    starts.retain(|(sequence, _)| Some(*sequence) != data.start);
+                }
                 EventKind::InputApplied(data) => {
                     self.pending.lock().unwrap().push(Applied::new(event, data))
                 }
@@ -374,6 +582,38 @@ impl AgentLoop {
                     }
                 }
             }
+        }
+        for (start, data) in starts {
+            let command = data.command.expect("a manual start");
+            commands.retain(|unsettled| *unsettled != command);
+            self.timeline.append(
+                EventKind::ContextCompaction(ContextCompactionData {
+                    turn_id: data.turn_id,
+                    request_id: None,
+                    command: Some(command),
+                    start: Some(start),
+                    through: data.through,
+                    outcome: ContextCompactionResult::Cancelled {
+                        reason: CAPABILITY_RELOADING.into(),
+                    },
+                })
+                .into(),
+            )?;
+        }
+        for command in commands {
+            self.timeline.append(
+                EventKind::ContextCompaction(ContextCompactionData {
+                    turn_id: None,
+                    request_id: None,
+                    command: Some(command),
+                    start: None,
+                    through: command,
+                    outcome: ContextCompactionResult::Cancelled {
+                        reason: CAPABILITY_RELOADING.into(),
+                    },
+                })
+                .into(),
+            )?;
         }
         self.publish(slot);
         let Some(turn) = slot.as_mut() else {
@@ -601,6 +841,40 @@ impl AgentLoop {
             // turn/start is still pending, and the inputs not yet consumed.
             EventKind::StopInterrupt(data) => {
                 self.interrupted_at.store(event.sequence, Ordering::Release);
+                {
+                    // The running step is cancelled; a waiting one ends now.
+                    let mut compaction = self.compaction.lock().unwrap();
+                    match compaction.command.as_ref() {
+                        Some(Command {
+                            running: Some(cancel),
+                            ..
+                        }) => {
+                            cancel.cancel();
+                            compaction.stop_reason = Some(data.reason.clone());
+                        }
+                        Some(Command {
+                            sequence,
+                            consumed: true,
+                            ..
+                        }) => {
+                            self.timeline.append(
+                                EventKind::ContextCompaction(ContextCompactionData {
+                                    turn_id: slot.as_ref().map(|turn| turn.id.clone()),
+                                    request_id: None,
+                                    command: Some(*sequence),
+                                    start: None,
+                                    through: event.sequence,
+                                    outcome: ContextCompactionResult::Cancelled {
+                                        reason: data.reason.clone(),
+                                    },
+                                })
+                                .into(),
+                            )?;
+                            compaction.command = None;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(turn) = slot.as_mut() {
                     turn.interrupted = Some(data.reason.clone());
                     if let Some(cancel) = turn
@@ -624,7 +898,7 @@ impl AgentLoop {
                 turn.open = true;
                 // next_model consumes every applied input, including those
                 // left over from before an interrupt.
-                let result = self.next_model(turn, None);
+                let result = self.next_model(turn, None, event.sequence);
                 // Running is published once turn/start is dispatched.
                 self.publish(&slot);
                 return result;
@@ -640,7 +914,97 @@ impl AgentLoop {
                 // Whatever request the turn ended with is settled.
                 self.binding.retain_only(None);
                 self.publish(&slot);
+                // A step still waiting at the turn's end runs now, with no turn.
+                let mut compaction = self.compaction.lock().unwrap();
+                if compaction.waiting() {
+                    self.start_step(&mut compaction, None, event.sequence);
+                    return Ok(());
+                }
+                drop(compaction);
                 return self.try_start(&mut slot);
+            }
+            EventKind::ContextCompact(_) => {
+                let mut compaction = self.compaction.lock().unwrap();
+                match compaction.command.as_mut() {
+                    // The outstanding command, written by `compact`.
+                    Some(command) if command.sequence == event.sequence => command.consumed = true,
+                    // Another command is outstanding: this one is not queued.
+                    Some(_) => {
+                        self.timeline.append(
+                            EventKind::ContextCompaction(ContextCompactionData {
+                                turn_id: slot.as_ref().map(|turn| turn.id.clone()),
+                                request_id: None,
+                                command: Some(event.sequence),
+                                start: None,
+                                through: event.sequence,
+                                outcome: ContextCompactionResult::Skipped {
+                                    reason: ALREADY_IN_PROGRESS.into(),
+                                    diagnostics: Box::new(CompactionDiagnosticsRecord {
+                                        reason: CompactionReason::Manual,
+                                        trigger: CompactionTrigger::Manual,
+                                        retain_from: None,
+                                        retain_limit: None,
+                                        estimated_input_tokens: 0.,
+                                        estimated_output_tokens: None,
+                                        entries_replaced: 0,
+                                        model_call_count: 0,
+                                        duration_ms: 0,
+                                        strategy: CompactionStrategyRecord {
+                                            kind: self.policy.as_ref().map_or_else(
+                                                || "none".to_owned(),
+                                                |policy| policy.strategy.name().to_owned(),
+                                            ),
+                                            details: JsonObject::new(),
+                                        },
+                                    }),
+                                },
+                            })
+                            .into(),
+                        )?;
+                        return Ok(());
+                    }
+                    // Written outside `compact`, or by an earlier Loop.
+                    None => {
+                        compaction.command = Some(Command {
+                            sequence: event.sequence,
+                            consumed: true,
+                            running: None,
+                        })
+                    }
+                }
+                // At once when no request is in flight; otherwise at the next
+                // step boundary.
+                if slot
+                    .as_ref()
+                    .is_none_or(|turn| turn.request.is_none() && !turn.ending)
+                {
+                    let turn_id = slot.as_ref().map(|turn| turn.id.clone());
+                    self.start_step(&mut compaction, turn_id, event.sequence);
+                }
+                return Ok(());
+            }
+            EventKind::ContextCompaction(data) => {
+                // The result of the outstanding command clears the slot; only
+                // a step that ran resumes the Loop. Other results (skips and
+                // settlements) change nothing.
+                let mut compaction = self.compaction.lock().unwrap();
+                let Some(command) = compaction
+                    .command
+                    .take_if(|command| Some(command.sequence) == data.command)
+                else {
+                    return Ok(());
+                };
+                drop(compaction);
+                if command.running.is_none() {
+                    return Ok(());
+                }
+                return match slot.as_mut() {
+                    Some(turn) if turn.open && !turn.ending => {
+                        self.next_model(turn, None, event.sequence)
+                    }
+                    Some(_) => Ok(()),
+                    None => self.try_start(&mut slot),
+                };
             }
             // Results closing calls that were never dispatched settle no batch
             // (ADR agent-029); Loop writes some of them with its turn end.
@@ -709,7 +1073,7 @@ impl AgentLoop {
             EventKind::ModelOutputEnd(data) if request.stage == Stage::Model => {
                 match &data.outcome {
                     ModelOutputOutcome::Failed { error, budget, .. } => {
-                        if self.recovery
+                        if self.policy.is_some()
                             && budget.is_some()
                             && request
                                 .source
@@ -718,7 +1082,7 @@ impl AgentLoop {
                         {
                             let mut source = request.source.clone().expect("checked source");
                             source.recovery = budget.clone();
-                            self.next_model(turn, Some(source))?;
+                            self.next_model(turn, Some(source), event.sequence)?;
                         } else {
                             self.end(
                                 turn,
@@ -735,7 +1099,7 @@ impl AgentLoop {
                         {
                             // Replaced by a steer: the turn goes on with it.
                             self.binding.release(&request.id);
-                            self.next_model(turn, None)?;
+                            self.next_model(turn, None, event.sequence)?;
                         } else {
                             // A reload settled the request: the turn fails and stops.
                             if reason == CAPABILITY_RELOADING {
@@ -768,7 +1132,7 @@ impl AgentLoop {
                             // An input applied during the output: the turn
                             // goes on with it instead of ending.
                             self.binding.release(&request.id);
-                            self.next_model(turn, None)?;
+                            self.next_model(turn, None, event.sequence)?;
                         } else {
                             let reason = match finish_reason {
                                 FinishReason::EndTurn => "end_turn",
@@ -806,7 +1170,7 @@ impl AgentLoop {
                 }
                 // Every call of the request settled.
                 self.binding.release(&request.id);
-                self.next_model(turn, None)?;
+                self.next_model(turn, None, event.sequence)?;
             }
             _ => {
                 return Err(AgentError::fault(
@@ -843,6 +1207,7 @@ impl TypedPlugin for LoopPlugin {
         InBranch<ToolBinding>,
         InSession<HistoryRenderer>,
         InSession<ContextModelHost>,
+        InSession<CompactionStrategyHost>,
     );
     fn name(&self) -> &str {
         "Loop"
@@ -857,11 +1222,15 @@ impl TypedPlugin for LoopPlugin {
             InBranch(binding),
             InSession(history),
             InSession(context),
+            InSession(strategy),
         ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let policy = ContextPolicy::bind(&timeline, &context, &strategy, &history)
+                .map_err(|error| CordisError::PluginFailed(error.into()))?;
             let service = Arc::new(AgentLoop {
                 turn: Mutex::new(None),
+                compaction: Mutex::new(CompactionSlot::default()),
                 observable: Arc::new(StateCell::new(LoopSnapshot::default())),
                 timeline,
                 interrupted_at: AtomicU64::new(0),
@@ -870,7 +1239,7 @@ impl TypedPlugin for LoopPlugin {
                 prepare,
                 binding,
                 history,
-                recovery: context.0.is_some(),
+                policy,
                 rebuilt: AtomicU64::new(0),
                 tasks: TaskTracker::new(),
                 lifecycle: ctx.cancellation_token(),
@@ -907,6 +1276,8 @@ impl TypedPlugin for LoopPlugin {
                     "step/tool-start",
                     "step/tool-completed",
                     "step/tool-result",
+                    "context/compact",
+                    "context/compaction",
                 ],
                 move |event| {
                     let owner = owner.clone();
