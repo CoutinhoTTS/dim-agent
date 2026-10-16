@@ -99,9 +99,12 @@ impl Store {
     async fn mount(home: &Home, file_storage: bool) -> Self {
         let root = Ctx::root().unwrap();
         if file_storage {
-            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            // Nothing depends on FileStorage, so wait for it before a put.
+            (&root.plugin(capability_plugin(FileStoragePlugin::new(vec![
                 home.0.clone(),
-            ])));
+            ]))))
+                .await
+                .unwrap();
         }
         root.plugin(capability_plugin(SqliteStoragePlugin::new(home.database())));
         root.plugin(capability_plugin(SessionStorePlugin::new(0)));
@@ -310,14 +313,12 @@ async fn sweeps_remove_only_what_no_row_of_this_database_owns() {
     let fresh = store.put("s1", "fresh.txt", b"fresh").await.unwrap();
     let mut owned = vec![kept.file_id.clone(), fresh.file_id.clone()];
     owned.sort();
-    eventually(|| home.entries() == owned).await;
-    assert_eq!(
-        home.rows("SELECT file_id FROM session_files"),
-        owned
-            .iter()
-            .map(|id| format!("Text(\"{id}\")"))
-            .collect::<Vec<_>>()
-    );
+    let rows: Vec<_> = owned.iter().map(|id| format!("Text(\"{id}\")")).collect();
+    // The sweep removes an entry, then its row.
+    eventually(|| {
+        home.entries() == owned && home.rows("SELECT file_id FROM session_files") == rows
+    })
+    .await;
     assert_eq!(std::fs::read(&kept.path).unwrap(), b"kept");
     assert_eq!(
         std::fs::read(other.join("paste.txt")).unwrap(),
@@ -331,8 +332,10 @@ async fn sweeps_remove_only_what_no_row_of_this_database_owns() {
         .rollback_session("s1")
         .await
         .unwrap();
-    eventually(|| home.entries().is_empty()).await;
-    assert!(home.rows("SELECT file_id FROM session_files").is_empty());
+    eventually(|| {
+        home.entries().is_empty() && home.rows("SELECT file_id FROM session_files").is_empty()
+    })
+    .await;
     assert!(other.join("paste.txt").exists());
     store.root.shutdown().await.unwrap();
 }
