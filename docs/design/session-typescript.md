@@ -19,7 +19,7 @@ The existing owners implement their language bindings:
 | App Server assembly | Validate structural input, register names derived from declarations, append ordinary rows inside `SESSION_GROUP`, select the existing runtime resolver. |
 | ToolRegistry | Read a named foreign declaration at its existing first-read sample and retain that provider generation in the fixed table. |
 | C1 `SessionMethods` | Bind a foreign handler to the existing generation-owned admission, progress, interruption and drain. |
-| Session broadcast | Encode its own records for the native rutis event path. |
+| Session broadcast | Supply the existing typed records and their existing `AgentEvent` serde value at the language boundary. |
 | TypeScript part | Own its business state, work, effects, errors and cancellation settlement. |
 
 There is no registration plugin, event-forwarding service, second bus, optional dependency,
@@ -202,111 +202,181 @@ does not make another optional row required or change Session publication.
 
 ## Native Session broadcast
 
-C4's broadcast acceptance requires TS to receive existing Session facts. It does not require
-arbitrary TS publication or C6's additional Notice record. Fact reception can be designed and
-verified independently of C6's notice/Rpc forwarding work.
+**Proposed, not implemented.** This binding receives the current Session's existing Event facts.
+The original Config convention, activation behavior and transport integration require confirmation
+before implementation. Tool/C1 bindings above are independent of that approval.
 
-Use rutis' existing node `Events` / Cordis `Link` path. Do not invoke a `notice` service to
-deliver broadcasts. Subscriptions are registered during row apply. Business consumption must
-wait for the existing `SessionLifecycle::activated()`, not merely the row becoming Active:
-row publication and Session publication are different. A subscriber does not delay Session
-publication. It does not replay missed events; the owning service's query supplies current state
-when its feature requires it. Records retain the Session channel's emit order, including emission
-order across branches, and each event's branch sequence. No shared cross-branch Timeline position
-is introduced.
+### Source and payload
 
-Row-owned work ends through the existing `SessionLifecycle::closing()` and row disposal.
-`Closed` is emitted during Session-capability unload, after closing has begun; a row inside
-that Session is not guaranteed to receive it. The [broadcast contract](../architecture/rust-agent/event-driven-flows.md#6-session-广播)
-requires a listener that must receive the end record to use a context that outlives the Session.
-No additional closing phase or delivery guarantee is introduced here.
+The original row subscribes to `session_channel(SessionIdentity.session_id)`. Its
+`SessionBroadcastEvent::Event { branch_id, event: Arc<AgentEvent> }` already supplies the complete
+data. At the Rust-to-Node boundary, build `{branchId, event}` with the existing
+[`AgentEvent` / `EventKind` Serialize implementation](../../crates/dim-agent-types/src/events.rs);
+workspace serde already supports `Arc`. The SDK `NodeEvent.args` is `[{branchId, event}]`, so the
+Cordis handler receives one record. The source channel and row's Link select its Session.
 
-Session broadcast owns the single serialization of its public record at the language boundary:
-an event carries `{branchId, event}` with the existing `AgentEvent` serde value, and the Session
-end is distinct from an event. Host `Fence` records stay observation machinery and are not
-business data. C4 does not define C6's `{source, kind, data}` notice or put UI notices into
-Timeline. C6 can extend its own record and reuse this binding; final notice/Rpc forwarding
-semantics remain [C6 #49/#85](https://github.com/arcships/dim/issues/49).
+Preserve every Event kind and its native fields, sequence and safe-integer contract. Do not
+substitute Rpc's filtered `ProductEvent`, rewrite controls/model/prompt facts, or convert to the
+legacy v1 union. Existing [wire](../../crates/dim-agent-types/tests/wire_contract.rs),
+[control](../../crates/dim-agent-types/tests/control_contract.rs) and
+[branch](../../crates/dim-agent-types/tests/branch_contract.rs) fixtures stay unchanged. Serialization
+errors follow the listener's existing error path. No new owner codec, record type or core API is
+needed to serialize an already defined type at this external boundary.
 
-The native `EventsPlugin` consumes `NodeEvent` JSON arguments, whereas the current broadcaster
-emits non-serializable `SessionBroadcastEvent`. A codec alone does not connect these two keys.
-The broadcast owner must define the sole neutral payload encoding; the native event projection
-must then consume it without making the broadcaster hard-depend on optional TypeScript transport.
-Neither a second emit nor saying both types use rutis proves that ownership/dispatch contract.
-This design does not select an App Server listener plugin or a forwarding service as that bridge.
-The exact owner-level native projection remains to be settled before broadcast implementation.
-The branch Dispatcher must not wait for Node I/O. No delivery registry, durable cursor,
-acknowledgment protocol or retry loop is added.
+`Fence` remains host observation machinery. A row inside the Session ends through closing and
+disposal and is not guaranteed to receive `Closed`; an end-record observer must outlive the
+Session ([event-driven flows §6](../architecture/rust-agent/event-driven-flows.md#6-session-广播)).
+Do not translate this into Rpc `session.closed`, whose owner also waits for trace/resource
+settlement. C6's Notice payload and arbitrary TS publication are separate contracts.
 
-### Transport choice requiring review
+### Original-module Config
 
-The shared raw row runtime starts with `Mount::default()`: its event emission whitelist is fixed
-at startup, and it does not offer `events.forward`. A direct `Process::emit` or an `EventsPlugin`
-aimed at that endpoint cannot subscribe to a Session channel allocated later. This is a limit
-of that composition, not a missing rutis event feature or a request to change rutis.
+The proposed opt-in is `config.nativeEvents: null` on an ordinary loader row. Absence requests no
+binding or transport resources. This is a new structural Config convention to confirm, not an
+existing RowSchema/metadata declaration or an inference from `provides`.
 
-The separate native-peer transport experiment uses the same Node process for its foreign rows
-and binds each peer's `Events` input to one dynamic `session/<id>` channel. Native delivery,
-dynamic names, independent unload and continued delivery to another row are proven. It does
-not instantiate actual Dim Sessions or verify their typed broadcast binding. Product peer and
-event effects must belong to the original row. A retained remote object must reject calls after
-the part's effect begins unloading; a stale handle is not evidence of a live generation.
+```json
+{
+  "id": "session-observer",
+  "name": "/absolute/session-observer/index.ts",
+  "config": {"nativeEvents": null},
+  "provides": {}
+}
+```
 
-That result covers distinct channels, not several rows sharing one Session channel. A same-channel
-calibration with two real native peers in one Node process delivers one Rust emission twice to
-each row. Each link re-emits that name through Cordis `parallel`, whose listeners are shared;
-service-isolation labels do not filter those events. After unloading one row, the remaining row
-receives the next emission once. The candidate must not independently forward the canonical
-Session name through every row's link into that shared context. Native projection and event
-scoping remain contract choices; consumer-side deduplication is not the solution.
+The original module explicitly admits this optional field in its Config schema: `null` for the
+request and the following Link object for execution. App Server accepts only an absent or null
+external marker; it derives the object during that original row's apply and replaces only the
+marker before the original factory runs. The original factory/schema checks and Cordis
+`plugin.Config` validate the realized config. Other members and original inject/provides
+contracts retain their owners; unknown fields are not stripped or admitted implicitly.
 
-A separate native calibration projects each typed source directly through its existing peer's
-`events.forward`, using an event name derived from that peer's actual identity. Two rows on one
-synthetic Session source each receive one copy, a third row receives only its second Session's
-records, and the other rows continue after one unloads. It needs no separate event-name field,
-generation counter, intermediate `NodeEvent` emission or deduplication state. These are transport
-observations, not a selected product contract or actual BoundRow/Session acceptance.
+| Realized `nativeEvents` field | Existing SDK contract | Producer / consumer |
+| --- | --- | --- |
+| `peer` | `Link.peer`, expected remote endpoint | Shared host listener identity; consumed by Link and Events.peer |
+| `id` | `Link.id`, this Node endpoint | A fresh SDK PeerId per apply, using the existing UUID facility; also this row's native event name |
+| `dial` | `Link.dial` | Host's actual loopback listener endpoint, consumed by Link |
+| `token` | `Link.token` | Fresh credential accepted by this row's named SDK identity; consumed by the existing token handshake |
 
-The existing broadcaster's `emit` returns immediately; rutis dispatches the channel in an
-existing ordered task and awaits its listeners there. Awaiting the native call can delay that
-Session notification chain, but does not make the branch Dispatcher await Node I/O. Creating an
-async future or spawning one task per fact does not prove ordered enqueueing: the public native
-connection has no synchronous send-only ticket API. Unsubscribing removes future registration
-lookup, not a callback snapshot already being dispatched; cancellation cannot revoke a record
-already consumed by TS. The actual row's ownership and in-flight settlement remain acceptance
-work rather than reasons to add a queue, cursor or lifecycle phase.
+These are structural runtime inputs, never Settings, Timeline data, logs or replies. Loader/fiber
+identity remains distinct from the transport peer: reapply uses a fresh peer id even when the row
+identity stays the same. Queued events retain their old key and cannot select a new generation's
+listener through a reused name. No separate event-name field, generation counter or peer-id list
+is added.
 
-This route is a **candidate requiring review**, with these costs and implementation conditions:
+The module starts native Cordis Link and Events in its own row, with local isolation of
+`rutisPeer.<peer>` / `rutisLink.<peer>` services. `Events.in: [nativeEvents.id]` and
+`ctx.on(nativeEvents.id, handler)` use the same unique name. Service isolation alone does not
+filter the shared Cordis event bus. The small `definePlugin` context has no event API; this binding
+uses a native Cordis module.
 
-- The measured composition has one shared loopback listener, one native peer/link and one Node
-  I/O worker per foreign row, in addition to the shared raw runtime channel. A listener per row
-  is an unselected composition, not the measured cost. No RSS, maximum Session count or throughput
-  claim follows from the transport success; product resource ownership remains unselected.
-- Connection settings, peer identities and channel names must be derived by assembly from the
-  Session instance, passed as structural runtime data, and cleaned up by that same row. They
-  cannot be user-maintained Session-id lists or a mutable central subscription manager.
-  The existing row's Config is captured when its runtime plugin is constructed; there is no
-  separate host-parameter bag. Generated transport fields need an explicit original-module
-  Config contract and must pass that module's existing schema validation.
-  Neither RowSchema nor the runtime module description supplies a standard event opt-in or
-  peer-parameter slot. Tool-only rows cannot silently receive new fields. The minimal unresolved
-  input contract is an original-module Config field that explicitly requests fact reception and
-  admits its Link parameters; its location and shape remain unselected.
-- Establish the native link and event subscription as part of that row's apply before publishing
-  its services; dispose subscriptions and settle the row's work on unload. Its real required
-  dependencies retain their normal audit and reload behavior.
-- The exact structural handoff to the native Cordis row and public end-record encoding must be
-  agreed with the broadcast owner before implementation. They are not inferred from the spike's
-  `notice` DTO, fixed fixture tokens or private `c4*` services.
-- The same-row factory can declare and obtain the existing scoped `SessionLifecycle` in native
-  apply, and row-owned delivery work can await `activated()`. Its actual native projection and
-  cancellation path must be demonstrated before claiming TS event consumption satisfies that
-  lifecycle. The small `definePlugin` context currently offers no named lifecycle binding.
+The pinned RuntimeResolver JsFactory permits deferred `inner.build`: its inject keys match the
+resulting row, and its native config/instance validators add nothing beyond the defaults. BoundRow
+can retain that factory/config and realize it in apply. Node still validates the original Config
+in `rows.load`. This does not authorize deferring meaningful validators of arbitrary factories.
 
-The tool and method bindings above do not depend on selecting a new event transport. C4's full
-acceptance does depend on native broadcast, so it cannot be reported complete while this choice
-and its fact-reception binding remain unresolved. C6's additional Notice record and Rpc forwarding
-are separate work. No speculative core/transport capability is proposed as a workaround.
+Initial apply and full reapply are covered by this construction; volatile updates are not.
+Pinned loader `JsRow::start` forwards `VolatileUpdate.config` directly to `Process::update_row`;
+Node `updateRow` commits volatile references or restarts its Cordis row, bypassing BoundRow apply.
+A raw null marker would overwrite the realized Link. Current App Server embedding uses
+`reconcile(..., None)` without an editable layer. That is the current entry's boundary, not proof
+of mutable-row support. This proposal preserves that update path and records the limitation;
+it adds no interceptor or second config authority. PluginManager remains responsible for editable
+intent; mutable opted-in rows are outside this proposal's acceptance claim.
+
+### Existing transport handoff and owners
+
+```text
+SessionBroadcastEvent on session/<Session id>
+  -> original row: synchronous phase/cancellation check and existing serde
+  -> emit(node_event(Link.id), NodeEvent { args: [{branchId, event}] })
+  -> existing SDK EventsPlugin on this row's unique key, same rutis bus
+  -> peer events.forward -> Cordis Events.in: [Link.id]
+```
+
+`NodeEvent` and `node_event(name)` are existing SDK transport definitions. The Session callback
+projects and emits synchronously; SDK's per-key ordered chain owns network/handler waits. This
+obeys the Session listener's no-I/O-wait contract in event-driven flows §6 without a product
+forwarding service, wiring row, custom queue/worker or second bus. Forwarding the canonical Session
+name independently through several peers duplicates delivery in shared Cordis; each link instead
+uses its unique id in both directions of this one-way path.
+
+The existing SessionNodeRuntime owns one shared loopback listener. Each original row owns its
+named StaticIdentity, listening peer/link, SDK EventsPlugin and source subscription, registering
+cleanup immediately. Each apply uses `StaticIdentity::new(host_peer).accept_token(token, row_peer)`;
+its LinkConfig names that identity and the shared listener. The host endpoint is common, while
+credentials and peer registration are row-owned.
+
+Pinned `rutis-bridge` 0.10.0 supports this through `identity.rs` named identities, `link.rs` named
+identity lookup and per-link Registration, and `registration.rs::Registrations` credential checks
+against each live registration's identity and generation. A central credential registry or fixed
+row whitelist is unnecessary. The synthetic probe used a fixed three-token identity and did not
+verify this dynamic composition inside actual BoundRow.
+
+The existing raw loader endpoint starts with Mount::default and does not serve events.forward;
+the native peer path targets the shared Cordis context instead. Measured transport cost is one
+shared listener, one native peer/link and one Node I/O worker per receiving row, alongside the
+existing loader channel. There is no RSS, throughput or maximum Session-count guarantee. The
+PeerId-alias probe established two rows receiving one copy each, second-source isolation and
+independent unload. It awaited peer calls directly; it did not verify the NodeEvent handoff,
+real Session activation, Config realization or dynamic identities. Those are product acceptance.
+
+### Apply and disposal
+
+1. Obtain declared Session identity/lifecycle and shared runtime dependencies. Provide the row's
+   named identity and start its listening peer/link with immediate cleanup registration. Do not
+   wait for a connection before Node can dial it.
+2. Build/apply the original JS factory with realized Config and register its cleanup immediately.
+   Its native module starts Link and Events.
+3. Wait cancellably for this row's peer Ready and events feature, then install SDK EventsPlugin
+   with outbound `[Link.id]` and no inbound names. Await its existing fiber registration and
+   register the typed Session listener before apply returns. Another optional row stays independent.
+4. The source callback uses its captured row context/token and synchronously checks Session phase
+   Active before emitting. Loading/closing/cancelled callbacks return without delivery. It does
+   not await activated() inside the Session chain. Failed Sessions never activate; facts before
+   subscription or activation are not buffered or replayed. This startup-delivery behavior requires
+   confirmation; autonomous startup work is outside this binding.
+
+The wrapper retains the original inject keys and declares every external SDK dependency; its
+own named identity uses existing self access. Peer/readiness waits observe row cancellation and
+Session closing. The callback's supplied Ctx belongs to the emitter and is not its cleanup owner.
+
+Pinned rutis `bus.rs::emit` snapshots listeners synchronously and chains dispatch per exact key.
+Session emit order therefore reaches each row's NodeEvent key in order, where SDK EventsPlugin
+waits for each forward and settlement. Branch sequence stays unchanged; other keys do not await
+that chain, though rows share Node's event loop and transport resources. Local acceptance is not
+remote completion.
+
+On disposal, stop new source handoffs, unregister the source and SDK subscription, then explicitly
+close the captured peer connection with existing `Connection::close` before releasing foreign
+resources. This synchronous close interrupts blocked transport, closes the call table and finishes
+outstanding waits; it does not depend on an aborted Link task having been polled. Existing C1
+drain still precedes foreign unload. The original module settles its own accepted work through
+its effects; closing a link cannot revoke an already consumed fact or forcibly stop a TS handler.
+
+Exact-key unsubscribe does not join captured snapshots. SDK EventsPlugin's Forward holds the old
+Arc<Peer>, ignores callback Ctx and does not select row cancellation; a captured old forward must
+fail against its closed connection, not select a new generation. LinkPlugin task abort alone is
+not a completed close, and Connection::drain is not an outgoing-notification join. Actual BoundRow
+unload/reload must verify connection closure, module effect settlement and stale-delivery rejection.
+No extra tracker, lock, retry loop, cursor or lifecycle phase is prescribed.
+
+### Review and acceptance
+
+Confirm the Config convention, current immutable-entry limitation, startup-delivery behavior and
+transport/ownership integration before implementation. The complete Event payload retains the
+existing source contract. Product verification then uses protected serve/Rpc, the original module
+schema, two receiving rows in one Session and another Session in the same Node process. It must
+cover activation/failed initialization, absent/disabled opt-in, one copy per delivered emission,
+ordering, dynamic identities, in-flight unload, same-row reload, stale peers, and continued native
+tool/C1 execution. Synthetic transport success does not fulfill this acceptance.
+
+[S8b §4.5](appserver/settings-service.md#45-events) process settings/<source> and settings/projects
+are different typed sources, owned by SettingsChanged and ProjectAuthorized. Their approved
+serialization is not implemented, and Link does not declare source selection. They remain S8b
+owner work; until binding exists, TS owners read at use time as its design specifies. This Session
+binding adds no generic source map or Settings watch channel. Full C4 stays incomplete until its
+Session fact reception passes the actual flow; C6 Notice remains separate.
 
 ## Lifetime and failure
 
@@ -345,7 +415,7 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 | App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, names/catalog derived from `provides`, optional Session rows and native resolver factory composition. |
 | ToolRegistry and its page | Native/foreign owner selection and declaration decoding at its existing first read. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
-| Session broadcast | Pending: owner serialization, native projection and activation delivery after their contracts are settled; no hard dependency on optional transport. C6 owns notice data. |
+| Session broadcast | Pending: Config/SDK handoff and lifecycle acceptance with the existing AgentEvent serde payload; no hard dependency on optional transport. C6 owns notice data. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
 | Documentation | Owner pages, App Server README and Session-boundary Appendix F updated to the actually implemented subset. |
 | Tests and fixture | One real App Server/Node flow using a disposable home and local Rpc; focused malformed-boundary cases in that flow. |
@@ -381,7 +451,9 @@ manifest, separate name arrays, registration manager and per-call provider are u
 Same-row factory composition is retained because C1 must drain before unloading its foreign
 handler. The tool declaration stays at first registry read, so no deferred contribution wrapper
 or eager tool registration is needed. Promise cancellation preserves the existing `drain` reply.
-The additional native peer remains a reviewed transport decision, not an assumed requirement.
+The existing SDK NodeEvent handoff is retained to keep native I/O out of the canonical Session
+listener while reusing per-key ordering; removing it would violate the existing listener contract.
+The additional native peer remains a proposed transport choice requiring confirmation.
 
 ## Rule check
 
