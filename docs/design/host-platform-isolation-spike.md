@@ -207,8 +207,9 @@ make arbitrary wrapper invocation safe with an inherited host terminal. See bubb
 [TIOCSTI warning](https://github.com/containers/bubblewrap/blob/main/README.md#limitations).
 The measured kernel has `dev.tty.legacy_tiocsti=1`; the example does not change that setting.
 
-These are native mechanism flows, not WorkspaceTools foreground/background execution or
-ShellSession integration with the proposed policy file. Environment selection, policy edits and
+These are native mechanism flows, not WorkspaceTools foreground/background execution, ShellInput
+user commands or ShellSession integration with the proposed policy file. Environment selection,
+policy edits and
 actual consumer admission/result flows remain product acceptance work. No bubblewrap latency,
 external-network routing, abstract UNIX-socket or other-kernel guarantee is measured. The machine
 is deleted after collecting results; the checked-in example reproduces the flows.
@@ -220,6 +221,7 @@ is deleted after collecting results; the checked-in example reproduces the flows
 | `host_platform.rs` / `HostPlatform::spawn` | Exact child environment, cwd, argv and process-group ownership; an executable wrapper fits its existing input |
 | `HostPlatform::spawn_pty` | Same spec enters the portable PTY implementation; the same wrapper starts successfully |
 | `workspace_tools/exec.rs` | Foreground/background execution both use `HostPlatform::spawn` |
+| `shell_input.rs` | User-started `shell.run` uses the shared command builder and spawn, with cancellable preparation before final run admission |
 | `shell_session.rs` | Persistent shell startup uses `HostPlatform::spawn_pty` |
 | `HostPlatform::build_process_spec` (S7) | Reads the current shell and constructs argv/environment; isolation need not duplicate shell parsing |
 

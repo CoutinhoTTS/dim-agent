@@ -9,8 +9,9 @@ mechanisms; it does not establish the policy below. Architecture review precedes
 HostPlatform requires isolation by default on macOS and Linux, applying an execution-node-local
 policy before a command starts. Windows currently has no supported isolation backend and retains
 ordinary execution as an explicit platform exception. There is no isolation enable/disable setting.
-The initial consumers are WorkspaceTools exec, including background execution, and ShellSession
-PTY creation. Descendants inherit the boundary. The App Server, model connections, MCP servers
+The consumers are WorkspaceTools exec, including background execution, user-started ShellInput
+commands, and ShellSession PTY creation. Descendants inherit the boundary. The App Server, model
+connections, MCP servers
 and trusted in-process/TypeScript plugins are outside this change. MCP isolation remains the
 separate open question in [overview §9](overview.md#9-open-questions).
 
@@ -84,8 +85,9 @@ shells when the file changes. Read at use time satisfies ADR 002 D4 without new 
 
 1. The existing consumer performs its tool or shell-input admission and constructs ProcessSpec.
    WorkspaceTools continues to use `build_process_spec` for the current shell and its command
-   checks. ShellSession retains its existing persistent-shell selection.
-2. Both consumers pass that spec through one HostPlatform-owned asynchronous preparation
+   checks. ShellInput uses the same builder inside its existing cancellable preparation, before
+   final run admission. ShellSession retains its existing persistent-shell selection.
+2. All three consumers pass that spec through one HostPlatform-owned asynchronous preparation
    operation immediately before starting it. On macOS and Linux, HostPlatform reads its required
    policy, filters the existing environment and constructs the selected backend's executable/argv/cwd.
    On Windows, it returns the original spec unchanged without reading an isolation file. The
@@ -96,6 +98,11 @@ shells when the file changes. Read at use time satisfies ADR 002 D4 without new 
    background handoff and terminal-state responsibilities. No isolation task supervisor or
    independent process-lifetime state is added.
 
+ShellInput includes isolation in its existing preparation/call-token race, before the final
+registry admission and synchronous spawn. Do not await policy I/O under its admission lock.
+Refusal or pre-admission cancellation leaves the runId unused and writes no Append input;
+already admitted runs retain the generation's ownership, stop and `!`/`!!` recording semantics.
+
 The preparation is an actual ProcessSpec transformation at the process-execution boundary,
 not another service, registry or authorization port. Raw spawn/PTY primitives remain available
 for trusted host probes and embeddings; they do not promise isolation. Internal shell/runtime
@@ -105,7 +112,7 @@ Other features integrate at their own documented execution boundary, without spe
 
 Crate-local operation: `HostPlatform::prepare_isolated_process(spec).await ->
 Result<ProcessSpec, ProcessSpecError>`, visible only within dim-agent-capabilities. Only the Windows
-exception returns the original spec unchanged. Both consumers already live in that crate, so
+exception returns the original spec unchanged. All three consumers already live in that crate, so
 the operation does not need to be a new public service API.
 No public wire method, event or language-neutral service is introduced. ProcessSpec and the
 existing `{code, reason}` error data retain their single definitions.
@@ -170,7 +177,7 @@ bytes/mode, an inaccessible private fixture, symlink rejection, a private networ
 and basic PTY startup. A subsequent [native-handle calibration](host-platform-isolation-spike.md#linux-bubblewrap-process-and-terminal-calibration)
 also verifies actual ProcessTree/PtyProcessTree settlement, PTY input/resize, interactive bash
 job control and live host IPv4/IPv6 TCP/UDP plus unmounted UNIX-socket boundaries on that baseline.
-These fixtures do not establish product policy loading or exec/ShellSession integration.
+These fixtures do not establish product policy loading or consumer integration.
 Product integration must verify the same boundary through its actual consumers. A container or
 kernel that refuses required namespaces is unsupported
 for isolation; command execution refuses without switching to a weaker Landlock policy or
@@ -195,7 +202,8 @@ Preparation uses existing ProcessSpecError data:
 Runtime setup failure, including a namespace/profile refusal, is an existing spawn failure or
 backend nonzero exit with its diagnostic, according to where it occurs. It is not a successful
 command and never retries the payload without isolation. Tool errors use the existing tool-result
-path; ShellSession reports startup failure through its existing response. No Rpc error code,
+path; ShellInput uses its existing preparation-refusal mapping and ShellSession its existing
+startup-failure response. No JSON-RPC numeric error code,
 permission category or Timeline format is added. Diagnostic text must not echo environment values
 or the policy file body.
 
@@ -213,7 +221,7 @@ history. Detach, close and process cancellation retain their current ownership a
 | Location | Necessary change |
 | --- | --- |
 | HostPlatform | Own file location, boundary parsing, mandatory macOS/Linux preparation, Windows bypass and backend argv/profile construction. Reuse FileStorage and existing process/error types. |
-| WorkspaceTools exec / ShellSession | Prepare their existing ProcessSpec before their existing spawn/PTY call; preserve admission, shell checks and tree ownership. |
+| WorkspaceTools exec / ShellInput / ShellSession | Prepare their existing ProcessSpec before their existing spawn/PTY call; preserve admission, shell checks and tree ownership. ShellInput keeps preparation cancellable before its atomic admission. |
 | App Server assembly / xtask example assembly | Supply host-local file location through HostPlatformConfig, with the existing conditional FileStorage dependency. Regenerate architecture output only when implementation changes assembly. |
 | HostPlatform and integration flow configurations | Update existing HostPlatformConfig literals for the optional field; embeddings using an exhaustive literal need the same source update. |
 | Owner docs and flow tests | Describe the actual supported OS baseline, configuration and refusals; verify actual shell execution through public product flows. |
@@ -233,8 +241,12 @@ credentials-free environment and local listeners. Windows exercises ordinary exe
 the original environment, without requiring or reading the isolation file. Do not add a separate
 test for every private parser/helper.
 
+Cover actual `shell.run`/`shell.stop` user flows alongside exec and PTY, including preparation
+interruption, reuse of an unadmitted runId, and Append/private mode outcomes. Isolation refusal
+must start no process and produce no command-result input. Reuse the existing ShellInput flow.
+
 Do not claim F5 complete from the spike, design approval or one backend. Product acceptance
-requires mandatory isolation through exec and PTY on macOS and Linux and the Windows exception,
+requires mandatory isolation through exec, user shell commands and PTY on macOS and Linux and the Windows exception,
 with the supported baselines recorded.
 
 ## Rule check
