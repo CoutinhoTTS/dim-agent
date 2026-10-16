@@ -6226,6 +6226,14 @@
     },
     {
       "from": "dim_agent_capabilities::tool_registry",
+      "to": "dim_agent_runtime::diagnostics",
+      "references": [
+        "path Diagnostics",
+        "use dim_agent_runtime::Diagnostics"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::InvalidInput",
@@ -9683,6 +9691,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path ToolExecutionContext",

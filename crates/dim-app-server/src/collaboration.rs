@@ -2150,7 +2150,10 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
     )
 }
 
-struct AgentTool(Arc<CollaborationCapability>);
+struct AgentTool {
+    capability: Arc<CollaborationCapability>,
+    stopping: CancellationToken,
+}
 impl ToolHandler for AgentTool {
     fn execute(
         &self,
@@ -2158,7 +2161,12 @@ impl ToolHandler for AgentTool {
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
-        Box::pin(self.0.run(call, context, cancel))
+        Box::pin(async move {
+            if self.stopping.is_cancelled() {
+                return Err(HostError::Cancelled(RELOADING.into()));
+            }
+            self.capability.run(call, context, cancel).await
+        })
     }
 }
 
@@ -2197,7 +2205,10 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                 self.scope.named_key::<ToolContribution>(AGENT_TOOL),
                 Arc::new(ToolContribution {
                     definition: agent_definition(config.collaboration_role),
-                    handler: Arc::new(AgentTool(service.clone())),
+                    handler: Arc::new(AgentTool {
+                        capability: service.clone(),
+                        stopping: ctx.cancellation_token(),
+                    }),
                 }),
             )?;
             ctx.provide_as(self.scope.key::<CollaborationCapability>(), service)?;

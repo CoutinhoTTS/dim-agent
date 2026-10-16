@@ -79,5 +79,5 @@ loading uses the current view rather than an old model-visible list.
 | 作用域 | Session |
 | 注入 | `P:SkillsCatalog`、`S:Contributions`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader` |
 | 提供 | `S:PromptSource#dim/skills/instructions`、`S:PromptSource#dim/skills/list`、`S:SessionSkills`、`S:ToolContribution#skill` |
-| 被注入于 | `PromptRegistry`、`SkillsBranch`、`ToolRegistry` |
+| 被注入于 | `PromptRegistry`、`SkillsBranch` |
 <!-- /generated -->
