@@ -11449,7 +11449,8 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::provider::preferences",
       "references": [
-        "path crate::provider::ModelPreferences"
+        "path crate::provider::ModelPreferences",
+        "path crate::provider::ModelPreferences::default"
       ]
     },
     {
@@ -13879,6 +13880,7 @@
         "path AnthropicThinkingType::Disabled",
         "path CompatibleThinking",
         "path ModelConfig",
+        "path ProviderReasoningConfig::default",
         "path ReasoningOff::EnableThinking",
         "path ReasoningOff::ThinkingBudget",
         "path ReasoningOff::ThinkingType",
