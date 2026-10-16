@@ -1,6 +1,7 @@
-use dim_agent_runtime::{AgentError, ModelId, PermissionPolicy};
+use dim_agent_capabilities::methods::{RpcError, params};
+use dim_agent_runtime::{ModelId, PermissionPolicy};
 use dim_agent_types::{AgentEvent, InputMode, JS_MAX_SAFE_INTEGER, JsonObject, UserInput, v1};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -31,84 +32,14 @@ pub enum RequestId {
     String(String),
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RpcError {
-    pub code: i32,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<ErrorData>,
-}
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorData {
-    pub app_error: &'static str,
-}
-impl RpcError {
-    pub fn invalid(message: impl Into<String>) -> Self {
-        Self::app(-32602, "invalid_params", message)
-    }
-    pub fn app(code: i32, app_error: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data: Some(ErrorData { app_error }),
-        }
-    }
-    pub fn wire(code: i32, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data: None,
-        }
-    }
-    /// The server service is reloading; the request did not run and may be retried.
-    pub fn reloading() -> Self {
-        Self::app(
-            -32000,
-            "service_reloading",
-            "Server service is reloading; retry",
-        )
-    }
-    pub fn is_closed(&self) -> bool {
-        self.data
-            .as_ref()
-            .is_some_and(|data| data.app_error == "session_closed")
-    }
-    pub fn closed() -> Self {
-        Self::app(
-            -32000,
-            "session_closed",
-            "Session is closed or does not exist",
-        )
-    }
-    pub fn agent_unknown() -> Self {
-        Self::app(-32000, "agent_unknown", "Agent is closed or does not exist")
-    }
-}
-impl From<AgentError> for RpcError {
-    fn from(error: AgentError) -> Self {
-        let app = match &error {
-            AgentError::InvalidInput(_) | AgentError::UnknownBranch(_) => "session_invalid_input",
-            AgentError::Closed(_) => "session_closed",
-            AgentError::Build(_) => {
-                return Self::app(
-                    -32000,
-                    "session_build_failed",
-                    "Session initialization failed",
-                );
-            }
-            AgentError::Reloading(_) => return Self::reloading(),
-            _ => return Self::wire(-32603, "Session operation failed"),
-        };
-        Self::app(-32000, app, error.to_string())
-    }
+/// The error of an unknown or closed Agent.
+pub(crate) fn agent_unknown() -> RpcError {
+    RpcError::app(-32000, "agent_unknown", "Agent is closed or does not exist")
 }
 impl From<crate::agents::AgentOpError> for RpcError {
     fn from(error: crate::agents::AgentOpError) -> Self {
         match error {
-            crate::agents::AgentOpError::Unknown(_) => {
-                Self::app(-32000, "agent_unknown", "Agent is closed or does not exist")
-            }
+            crate::agents::AgentOpError::Unknown(_) => agent_unknown(),
             crate::agents::AgentOpError::Build(_) => {
                 Self::app(-32000, "agent_build_failed", "Agent initialization failed")
             }
@@ -126,7 +57,12 @@ pub struct Request {
 #[derive(Debug)]
 pub enum Call {
     Hello(Hello),
-    Management { method: String, params: Value },
+    /// A method no built-in decodes: a management or Session method, routed
+    /// by Rpc with its raw params.
+    Contributed {
+        method: String,
+        params: Value,
+    },
     Ping,
     Shutdown(Shutdown),
     Create(Create),
@@ -153,6 +89,7 @@ pub enum Call {
     PromptRefresh(BranchRequest),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
+    SessionMethods(SessionId),
 }
 
 impl Call {
@@ -253,6 +190,12 @@ pub struct ModelUpdateResult {
     pub model: ModelId,
     pub outcome: &'static str,
 }
+/// The `session.methods` reply: the declared methods of the namespaces the
+/// Session lists whose providers are active, each `{name, mutating}`.
+#[derive(Debug, Serialize)]
+pub struct SessionMethodsResult {
+    pub methods: Vec<dim_agent_capabilities::methods::MethodDecl>,
+}
 #[derive(Debug, Serialize)]
 pub struct SessionSkillsResult {
     pub skills: Vec<dim_agent_capabilities::skills::SkillSummary>,
@@ -314,6 +257,11 @@ pub struct Create {
     pub trace: Option<TraceOption>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub agent_id: Option<String>,
+    /// Absent keeps the Agent's Session config value, interactive by default;
+    /// clients send it only when `false` because older daemons reject
+    /// unknown fields.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub interactive: Option<bool>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -418,31 +366,37 @@ pub struct BranchCreate {
 
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
-/// management names (for example `session.shell`).
+/// contributed names (for example `session.shell`).
+const BUILTIN_METHODS: [&str; 20] = [
+    "hello",
+    "daemon.ping",
+    "daemon.shutdown",
+    "session.create",
+    "session.list",
+    "session.summaries",
+    "session.attach",
+    "session.detach",
+    "session.submit",
+    "session.input_lookup",
+    "session.history",
+    "session.stop",
+    "session.idle",
+    "session.close",
+    "approval.respond",
+    "session.branch_create",
+    "agent.create",
+    "agent.list",
+    "agent.close",
+    "session.methods",
+];
+
+/// Every exact built-in method name.
+pub(crate) fn builtin_methods() -> impl Iterator<Item = &'static str> {
+    BUILTIN_METHODS.into_iter().chain(LOCAL_EXECUTION_METHODS)
+}
+
 pub(crate) fn is_builtin_method(method: &str) -> bool {
-    LOCAL_EXECUTION_METHODS.contains(&method)
-        || matches!(
-            method,
-            "hello"
-                | "daemon.ping"
-                | "daemon.shutdown"
-                | "session.create"
-                | "session.list"
-                | "session.summaries"
-                | "session.attach"
-                | "session.detach"
-                | "session.submit"
-                | "session.input_lookup"
-                | "session.history"
-                | "session.stop"
-                | "session.idle"
-                | "session.close"
-                | "approval.respond"
-                | "session.branch_create"
-                | "agent.create"
-                | "agent.list"
-                | "agent.close"
-        )
+    builtin_methods().any(|builtin| builtin == method)
 }
 
 /// Validates the envelope and built-in calls. Runtime contributions retain raw
@@ -485,9 +439,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
     let raw_params = obj
         .remove("params")
         .unwrap_or_else(|| Value::Object(Default::default()));
-    fn params<T: DeserializeOwned>(value: Value) -> Result<T, RpcError> {
-        serde_json::from_value(value).map_err(|_| RpcError::invalid("Invalid request parameters"))
-    }
     let result = (|| -> Result<Call, RpcError> {
         Ok(match method.as_str() {
             "hello" => Call::Hello(params(raw_params)?),
@@ -523,7 +474,8 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.prompt.refresh" => Call::PromptRefresh(params(raw_params)?),
             "session.mcp" => Call::SessionMcp(params(raw_params)?),
             "session.mcp.refresh" => Call::McpRefresh(params(raw_params)?),
-            _ => Call::Management {
+            "session.methods" => Call::SessionMethods(params(raw_params)?),
+            _ => Call::Contributed {
                 method,
                 params: raw_params,
             },
@@ -626,7 +578,7 @@ pub enum InputLookupResult {
 #[serde(untagged)]
 pub enum Reply {
     Hello(HelloResult),
-    Management(Value),
+    Contributed(Value),
     Ping(PingResult),
     Create(CreateResult),
     List(Vec<SessionInfo>),
@@ -644,6 +596,7 @@ pub enum Reply {
     ModelUpdate(ModelUpdateResult),
     Configuration(ConfigurationResult),
     McpState(McpStateResult),
+    SessionMethods(SessionMethodsResult),
     Empty(Empty),
 }
 impl Reply {
@@ -692,6 +645,14 @@ pub struct ClosedNotice {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+/// Progress of the contributed call `id` (methods contract A.2), sent only
+/// to the connection that made the call and before its reply.
+#[derive(Debug, Serialize)]
+pub struct ProgressNotice {
+    pub id: RequestId,
+    pub method: String,
+    pub data: Value,
+}
 #[derive(Debug, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Notification {
@@ -717,6 +678,8 @@ pub enum Notification {
     TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled),
     #[serde(rename = "session.model.progress")]
     ModelProgress(crate::tree_protocol::ModelProgressNotice),
+    #[serde(rename = "management.progress")]
+    Progress(ProgressNotice),
 }
 
 #[derive(Debug, Serialize)]
