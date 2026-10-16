@@ -574,6 +574,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
+        // Session files need SessionStore (native storage); `read` needs
+        // local execution.
+        if native_home.is_some() {
+            dim_agent_attachments::install(&mut builder);
+        }
         rows.push(mcp::McpPublication::register(&mut builtins));
         rows.push(owner(
             "mcp",

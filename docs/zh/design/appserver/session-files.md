@@ -298,7 +298,7 @@ CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)
 
 ### 9.2 Attachments 如何使用
 
-Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中声明 `S:SessionIdentity` 和进程服务 `sessionFiles`：这是对外层作用域核心部件的依赖（D3）。SessionStore 重载会让 Attachments 重载，它的规则检查已接受这一点。处理 `attachment.put` 时，它调用 `put(sessionId = 自身 Session, name, content = 文本的 UTF-8 字节)`，回复 `{attachmentId: fileId, path, bytes}` 以及它自己统计的 `lines`。Attachments 不引用 SessionStore 的任何类型；Rust 绑定见附录 A。
+Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中声明 `S:SessionIdentity` 和进程服务 `sessionFiles`：这是对外层作用域核心部件的依赖（D3）。SessionStore 重载会让 Attachments 重载，它的规则检查已接受这一点。处理 `attachment.put` 时，它调用 `put(sessionId = 自身 Session, name, content = 文本的 UTF-8 字节)`，回复 `{attachmentId: fileId, path, bytes}`。Attachments 不引用 SessionStore 的任何类型；Rust 绑定见附录 A。
 
 | `sessionFiles` 错误 | `attachment.put` 结果 |
 | --- | --- |
@@ -306,8 +306,8 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 | `invalid` | `attachment_invalid` |
 | `too_large` | `attachment_too_large`（Attachments 的 10 MiB 限制低于 SessionStore 的，因此不会发生） |
 | `node_unavailable` | `node_unavailable` |
-| `cancelled` | `operation_interrupted`，即该调用的 `report` 中断 |
-| `storage` | `storage_failed`；Attachments 在 P2 的设计复核中加入这个码（§15） |
+| `cancelled` | `service_reloading`：没有存储任何内容，且该调用是 `drain`，因此以这个结果回复 |
+| `storage` | `storage_failed`，与 SessionTitle 对同一失败的映射相同（§15） |
 
 ## 10. 错误、限制与不可变性
 

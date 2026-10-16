@@ -19,6 +19,7 @@ pub(crate) const APP_SERVER_COMPOSITION_BELOW: &[&str] = &[
     "dim-agent-runtime",
     "dim-agent-capabilities",
     "dim-agent-aimux",
+    "dim-agent-attachments",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

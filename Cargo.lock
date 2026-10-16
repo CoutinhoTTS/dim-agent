@@ -759,6 +759,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-agent-attachments"
+version = "0.1.0"
+dependencies = [
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "rutis",
+ "serde",
+]
+
+[[package]]
 name = "dim-agent-capabilities"
 version = "0.1.0"
 dependencies = [
@@ -845,6 +855,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dim-agent-aimux",
+ "dim-agent-attachments",
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
@@ -3883,6 +3894,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "dim-agent-aimux",
+ "dim-agent-attachments",
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
@@ -3891,6 +3903,7 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
