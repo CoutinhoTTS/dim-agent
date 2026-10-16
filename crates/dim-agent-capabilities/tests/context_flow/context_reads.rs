@@ -93,6 +93,10 @@ impl TypedPlugin for TestModelHost {
                 self.0.key::<ContextModelHost>(),
                 Arc::new(ContextModelHost(None)),
             )?;
+            ctx.provide_as(
+                self.0.key::<CompactionStrategyHost>(),
+                Arc::new(CompactionStrategyHost(None)),
+            )?;
             Ok(Effect::Done)
         })
     }
@@ -623,7 +627,8 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
             .create_session(SessionConfig::default())
             .await
             .unwrap();
-        for input in ["x".repeat(1_500), "next".into()] {
+        // The third turn compacts the first; the last two are kept.
+        for input in ["x".repeat(1_500), "next".into(), "third".into()] {
             let before = store.reads.load(Ordering::SeqCst);
             session
                 .submit(input, InputMode::Queue, "main")
@@ -642,7 +647,7 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
                 .iter()
                 .filter(|event| matches!(event.kind, EventKind::ModelCall(_)))
                 .count(),
-            2
+            3
         );
         if policy {
             let compaction = history
@@ -700,11 +705,14 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
             assert_eq!(
                 history
                     .iter()
-                    .filter(|event| matches!(event.kind, EventKind::ContextCompaction(_)))
+                    .filter(
+                        |event| matches!(&event.kind, EventKind::ContextCompaction(data)
+                        if matches!(data.outcome, ContextCompactionResult::Completed { .. }))
+                    )
                     .count(),
                 1
             );
-            for request in history.iter().filter_map(|event| match &event.kind {
+            if let Some(request) = history.iter().rev().find_map(|event| match &event.kind {
                 EventKind::ModelCall(data) => Some(&data.request),
                 _ => None,
             }) {
@@ -1032,6 +1040,9 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             Context::default(),
         )))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(
+            Context::default(),
+        )))))
         .session_plugin(DefaultPrepareModelPlugin::new)
         .timeline_store(store.clone());
     let copy = gate.clone();
@@ -1195,6 +1206,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .session_value(Arc::new(ModelHost(Arc::new(HeldTextModel(end.clone())))))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_plugin(DefaultPrepareModelPlugin::new);
         defaults::install(&mut builder);
         builder.timeline_store(store);

@@ -183,6 +183,7 @@ fn env(source: Arc<TestSource>, store: Option<Arc<MemoryTimelineStore>>) -> Env 
         .session_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
     defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
     defaults::install_with_prompt(
@@ -536,6 +537,7 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
             .session_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
         defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
         defaults::install_with_prompt(

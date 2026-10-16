@@ -4,7 +4,7 @@ use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     defaults,
     history::HistoryRenderer,
-    host::{ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
@@ -40,6 +40,7 @@ pub async fn graph() -> Result<Value> {
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     let server = serve(builder, config).await?;
     let mut snapshot = server.diagnostics();

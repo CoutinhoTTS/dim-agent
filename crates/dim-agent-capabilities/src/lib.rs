@@ -45,6 +45,7 @@ impl SessionService for skills::SessionSkills {}
 impl SessionService for host::PrepareModelHost {}
 impl SessionService for host::PrepareContextHost {}
 impl SessionService for host::ContextModelHost {}
+impl SessionService for host::CompactionStrategyHost {}
 impl SessionService for host::PromptHost {}
 impl SessionService for host::ModelHost {}
 impl SessionService for host::ToolHost {}
@@ -78,3 +79,5 @@ impl PublicService for skills::SkillsBranch {}
 impl PublicService for tool_registry::ToolSourcesView {}
 impl PublicService for methods::SessionMethods {}
 impl SessionService for tool_registry::ToolSourcesView {}
+impl PublicService for agent_loop::AgentLoop {}
+impl PublicService for context_preparation::ContextPreparation {}
