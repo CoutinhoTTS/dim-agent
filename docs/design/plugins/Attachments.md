@@ -1,6 +1,6 @@
 # Attachments
 
-Status: Ready (pending maintainer confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Roadmap item P2 ([#66](https://github.com/arcships/dim/issues/66)). Implementation starts when C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83) in review), S5a ([#59](https://github.com/arcships/dim/issues/59), after S6 [#51](https://github.com/arcships/dim/issues/51)) and S11 ([#56](https://github.com/arcships/dim/issues/56)) have landed ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
+Status: Ready (pending maintainer confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Roadmap item P2 ([#66](https://github.com/arcships/dim/issues/66)). Implementation starts when C1 ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83) in review), S5a ([#59](https://github.com/arcships/dim/issues/59), after S6 [#51](https://github.com/arcships/dim/issues/51)) and S11 ([#56](https://github.com/arcships/dim/issues/56), [#92](https://github.com/arcships/dim/pull/92) in review) have landed ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
 Lets the user attach images and large text to a submission. Images need no plugin: the CLI checks them (format sniffing, limits) and sends them as image content blocks in `session.submit`; Rpc checks only the parameter shape, and ModelProvider handles the model's image capability when it builds each request (S11, [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)). Attachments is a small Session plugin that provides one Session method, `attachment.put`, through a `sessionMethods` service (Session scope, key `attachment`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). The method stores a text attachment (a large paste) as an immutable Session file through SessionStore's `sessionFiles` service and returns its path; the user's text quotes the path and the model reads the file with `read` when it needs it. Fork sharing and deletion of those files are SessionStore behaviour ([session files](../appserver/session-files.md)). No events.
 
@@ -176,7 +176,7 @@ Compaction keeps neither images nor file contents verbatim, only the summary (a 
 | --- | --- | --- |
 | `attachment.put` | `sessionMethods` (Session, key `attachment`) | Store a text attachment as a Session file, return its path |
 | CLI image checks and paste reference | Client contract (A.1, A.3) | Sniff the format and enforce limits before submitting; quote a stored paste by its path |
-| Image handling at request build | ModelProvider (S11; A.1, A.4) | Send each image block or replace it with a text placeholder per the request's model |
+| Image handling at request build | ModelProvider supplement (implemented, S11, A.1) | Send each image block or replace it with a text placeholder per the request's model |
 | `attachment.put` errors | `appError` (A.2, Appendix C) | Rejection reasons |
 
 ## 7. Security
@@ -225,14 +225,16 @@ CLI checks, before submitting:
 
 Limits (A2): at most 20 images per submission, 5 MiB decoded each, 8000 px per side; violations rejected, never resized. Blocks keep their order.
 
-ModelProvider's handling, applied to every image block when it builds a model request (S11; the requirements are in A.4):
+ModelProvider supplement (implemented in S11, `model_provider/images.rs`; [overview Appendix B.1](../overview.md#b1-session-and-branch-capabilities)), applied to every image block when it builds a model request:
 
 | Image block | Request content |
 | --- | --- |
 | The request's model accepts image input and the adapter accepts the block's format and size | Sent as is |
-| The model does not accept image input (Provider catalog) | A text placeholder, for example `[Image omitted: the current model does not accept images.]` |
+| The model does not accept image input (Provider catalog) | Text `[Image omitted: the current model does not accept images.]` |
 | Capability unknown | Sent as is; the provider decides (A4) |
-| URL source, undecodable data, or a format or size the adapter does not accept | A text placeholder, for example `[Image omitted: the image cannot be sent to this model.]` (A10) |
+| URL source, missing or undecodable base64 data, or a format other than PNG, JPEG, WebP or GIF | Text `[Image omitted: the image cannot be sent to this model.]` (A10) |
+
+Size is not checked here: no adapter publishes a per-model image size limit, so an oversized image is sent and the provider decides, as for unknown capability (A4). The CLI limits (A2) still apply before submitting.
 
 The history is never changed; each request decides again from its own model.
 
@@ -284,7 +286,7 @@ The CLI reads images (clipboard, `@`, pasted paths), checks them (A.1) and sends
 
 ### A.4 Requirements to other owners
 
-**ModelProvider: image handling (S11, [#56](https://github.com/arcships/dim/issues/56)).** `attachment.put` does not call ModelProvider; the image half of the feature relies on it. Attachments needs:
+**ModelProvider: image handling (S11, [#56](https://github.com/arcships/dim/issues/56), implemented in [#92](https://github.com/arcships/dim/pull/92)).** `attachment.put` does not call ModelProvider; the image half of the feature relies on it. Attachments needs:
 
 | # | Needed | Why |
 | --- | --- | --- |
@@ -294,6 +296,8 @@ The CLI reads images (clipboard, `@`, pasted paths), checks them (A.1) and sends
 | M4 | An unknown capability sends the image as is | A4 |
 | M5 | A URL source, undecodable data, or a format or size the adapter does not accept becomes a placeholder instead of failing the model call | A10: a failing call would repeat every turn while the input stays in context |
 | M6 | The placeholder says that an image was omitted and why; A.1 suggests wording, and S11 owns the final text | The model should know an image was there |
+
+#92 meets M1 to M4 and M6. It narrows M5: image size is not checked (A.1 gives the reason). Attachments accepts the narrowing.
 
 Images in tool results are outside this requirement. How S11 reads the capability and where in ModelProvider it converts are S11's design.
 

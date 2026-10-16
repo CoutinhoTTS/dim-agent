@@ -1,6 +1,6 @@
 # Attachments
 
-状态：Ready（待维护者确认）。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。路线图条目 P2（[#66](https://github.com/arcships/dim/issues/66)）。C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83) 评审中）、S5a（[#59](https://github.com/arcships/dim/issues/59)，在 S6 [#51](https://github.com/arcships/dim/issues/51) 之后）和 S11（[#56](https://github.com/arcships/dim/issues/56)）合入后开始实现（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
+状态：Ready（待维护者确认）。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。路线图条目 P2（[#66](https://github.com/arcships/dim/issues/66)）。C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83) 评审中）、S5a（[#59](https://github.com/arcships/dim/issues/59)，在 S6 [#51](https://github.com/arcships/dim/issues/51) 之后）和 S11（[#56](https://github.com/arcships/dim/issues/56)，[#92](https://github.com/arcships/dim/pull/92) 评审中）合入后开始实现（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
 
 让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（S11，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。Attachments 是一个小型 Session 插件，通过 `sessionMethods` 服务（Session 作用域，key `attachment`；[session-boundary](../contracts/session-boundary.md)）提供一个 Session 方法 `attachment.put`；契约是语言中立的，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法通过 SessionStore 的 `sessionFiles` 服务把文本附件（一次大段粘贴）存为不可变的 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为（[Session 文件](../appserver/session-files.md)）。没有事件。
 
@@ -176,7 +176,7 @@ Client      Rpc        Branch Timeline                      Model           Work
 | --- | --- | --- |
 | `attachment.put` | `sessionMethods`（Session，key `attachment`） | 把文本附件存为 Session 文件，返回其路径 |
 | CLI 图片检查与粘贴引用 | 客户端契约（A.1、A.3） | 提交前嗅探格式、执行限制；用路径引用已存的粘贴 |
-| 构建请求时的图片处理 | ModelProvider（S11；A.1、A.4） | 按请求所用模型发送图片块，或换成文本占位 |
+| 构建请求时的图片处理 | ModelProvider 补充（已实现，S11，A.1） | 按请求所用模型发送图片块，或换成文本占位 |
 | `attachment.put` 错误 | `appError`（A.2、附录 C） | 拒绝原因 |
 
 ## 7. 安全
@@ -225,14 +225,16 @@ CLI 在提交前检查：
 
 限制（A2）：每次提交最多 20 张图片，每张解码后 5 MiB，每边 8000 px；违反即拒绝，从不缩放。块保持其顺序。
 
-ModelProvider 的处理，在构建模型请求时作用于每个图片块（S11；需求见 A.4）：
+ModelProvider 补充（已在 S11 实现，`model_provider/images.rs`；[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)），在构建模型请求时作用于每个图片块：
 
 | 图片块 | 请求内容 |
 | --- | --- |
 | 请求所用模型接受图片输入，且适配器接受该块的格式和大小 | 原样发送 |
-| 模型不接受图片输入（Provider 目录） | 文本占位，例如 `[Image omitted: the current model does not accept images.]` |
+| 模型不接受图片输入（Provider 目录） | 文本 `[Image omitted: the current model does not accept images.]` |
 | 能力未知 | 原样发送；由提供方决定（A4） |
-| URL 来源、无法解码的数据，或适配器不接受的格式或大小 | 文本占位，例如 `[Image omitted: the image cannot be sent to this model.]`（A10） |
+| URL 来源、缺失或无法解码的 base64 数据，或 PNG、JPEG、WebP、GIF 以外的格式 | 文本 `[Image omitted: the image cannot be sent to this model.]`（A10） |
+
+这里不检查大小：没有适配器公布按模型的图片大小上限，所以超大的图片照常发送，由提供方决定，与能力未知时相同（A4）。CLI 的限制（A2）在提交前仍然适用。
 
 历史从不改变；每个请求按自己的模型重新决定。
 
@@ -284,7 +286,7 @@ CLI 读取图片（剪贴板、`@`、粘贴的路径），检查后（A.1）在 
 
 ### A.4 对其他所有者的需求
 
-**ModelProvider：图片处理（S11，[#56](https://github.com/arcships/dim/issues/56)）。** `attachment.put` 不调用 ModelProvider；功能的图片部分依赖它。Attachments 需要：
+**ModelProvider：图片处理（S11，[#56](https://github.com/arcships/dim/issues/56)，实现见 [#92](https://github.com/arcships/dim/pull/92)）。** `attachment.put` 不调用 ModelProvider；功能的图片部分依赖它。Attachments 需要：
 
 | # | 需要 | 原因 |
 | --- | --- | --- |
@@ -294,6 +296,8 @@ CLI 读取图片（剪贴板、`@`、粘贴的路径），检查后（A.1）在 
 | M4 | 能力未知时原样发送图片 | A4 |
 | M5 | URL 来源、无法解码的数据，或适配器不接受的格式或大小变为占位，而不是让模型调用失败 | A10：输入留在上下文中，调用失败会在每一轮重复 |
 | M6 | 占位说明有一张图片被省略及其原因；A.1 给出建议措辞，最终文本由 S11 决定 | 模型应知道那里有过一张图片 |
+
+#92 满足 M1 到 M4 和 M6。它收窄了 M5：不检查图片大小（原因见 A.1）。Attachments 接受这处收窄。
 
 工具结果中的图片不在这项需求内。S11 如何读取能力、在 ModelProvider 的哪里转换，属于 S11 的设计。
 
