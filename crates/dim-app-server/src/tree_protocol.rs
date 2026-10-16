@@ -40,6 +40,10 @@ impl ProductEvent {
             // Withdrawal is new in v3: the command carries the reason clients
             // show, the result says the input is never applied.
             EventKind::InputWithdraw(_) | EventKind::InputDeleted(_) => version >= 3,
+            // Compaction state is read from these facts (pending, running, done).
+            EventKind::ContextCompact(_)
+            | EventKind::ContextCompactionStart(_)
+            | EventKind::ContextCompaction(_) => version >= 3,
             EventKind::InputMessage(_)
             | EventKind::InputApplied(_)
             | EventKind::InputConsumed(_)
@@ -77,7 +81,6 @@ impl ProductEvent {
             | EventKind::PromptConfigureRequest(_)
             | EventKind::PromptConfigureResult(_)
             | EventKind::ContextPrepare(_)
-            | EventKind::ContextCompaction(_)
             | EventKind::ContextBudget(_)
             | EventKind::ModelCall(_)
             // Reloading a stored branch is not a client business fact.

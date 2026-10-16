@@ -148,6 +148,7 @@ pub fn mock_model_hosts_with_history(builder: &mut AgentBuilder, history: Histor
         .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
 }
 pub fn mock_hosts(builder: &mut AgentBuilder) {

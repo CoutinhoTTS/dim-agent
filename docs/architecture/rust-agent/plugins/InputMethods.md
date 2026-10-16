@@ -1,28 +1,25 @@
 # InputMethods
 
 Owner: [input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs).
-Provides the Session's `session.input.withdraw` method through `sessionMethods`.
+Provides `sessionMethods["session.input"]`: `session.input.withdraw` for every
+branch of its Session, served through that branch's InputQueue.
 
 ## Dependencies
 
 | Service | Purpose |
 | --- | --- |
-| `S:TreeCommands` | Resolve the requested branch and its InputQueue for each call. |
+| `S:TreeCommands` | Find the branch named by a call and read its InputQueue. |
 
 ## Events and lifetime
 
-Validates method parameters at the request boundary, then passes the withdrawal
-and optional Steer input to the branch's InputQueue. InputQueue owns the command,
-the atomic replacement batch and the decision; InputMethods returns its answer
-without changing queue state itself. An already adopted or unknown input returns
-`notHeld`. The method uses the existing SessionMethods admission and unload
-ownership, declares interruption reporting, and owns no background tasks or
-persistent state.
+Writes no events itself; InputQueue commits `input/withdraw` and its result.
+The method provider follows the shared Session method admission: an unload
+interrupts a call, and a caller's disconnect cancels nothing.
 
 ## Tests
 
-[host_flows.rs](../../../../crates/dim-agent-capabilities/tests/host_flows.rs):
-`a_held_input_is_withdrawn_once_and_an_applied_one_is_not`.
+[session_methods.rs](../../../../crates/dim-app-server/tests/transport_flow/session_methods.rs)
+covers `session.input.withdraw` through Rpc.
 
 <!-- generated:plugin InputMethods — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
