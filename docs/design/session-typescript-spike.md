@@ -19,25 +19,25 @@ Source: [Rust host](../../crates/dim-app-server/examples/session_typescript_spik
 
 ## Results
 
-Measured on 2026-10-15: macOS ARM64, Node v24.21.0, Rust host in the dev profile, four Tokio workers. Each case makes 20 warm-up calls and then 500 sequential calls over the real local runtime channel. Percentiles use nearest rank. Payload size is the ASCII string content, excluding JSON and channel framing. Timings include argument copying, serialization, dispatch, the JS reply and result decoding; they are not just socket latency.
+Measured on 2026-10-16: macOS ARM64, Node v24.21.0, Rust host in the dev profile, four Tokio workers. Each case makes 20 warm-up calls and then 500 sequential calls over the real local runtime channel. Percentiles use nearest rank. Payload size is the ASCII string content, excluding JSON and channel framing. Timings include argument copying, serialization, dispatch, the JS reply and result decoding; they are not just socket latency.
 
 | Payload | Method | p50 | p95 | p99 |
 | --- | --- | --- | --- | --- |
-| 64 B | sync | 68.916 µs | 82.708 µs | 97.583 µs |
-| 64 B | async | 109.625 µs | 122.125 µs | 147.000 µs |
-| 4 KiB | sync | 152.000 µs | 163.584 µs | 171.250 µs |
-| 4 KiB | async | 201.709 µs | 218.458 µs | 234.834 µs |
-| 64 KiB | sync | 1.506 ms | 1.596 ms | 1.638 ms |
-| 64 KiB | async | 1.552 ms | 1.643 ms | 1.704 ms |
+| 64 B | sync | 86.625 µs | 112.625 µs | 180.791 µs |
+| 64 B | async | 111.209 µs | 125.583 µs | 149.542 µs |
+| 4 KiB | sync | 152.208 µs | 163.000 µs | 167.666 µs |
+| 4 KiB | async | 202.709 µs | 217.125 µs | 233.875 µs |
+| 64 KiB | sync | 1.494 ms | 1.560 ms | 1.604 ms |
+| 64 KiB | async | 1.524 ms | 1.600 ms | 1.673 ms |
 
-Top-level loader reconciliation took 124.059 ms; creating the first Session took 8.634 ms; closing a Session with a hanging TS call took 2.366 ms. These are single observations, not startup percentiles. The Agent anchor declares the existing `RuntimeRows` dependency: row metadata refresh must finish before Sessions are created. No startup polling or new readiness phase is used.
+Top-level loader reconciliation took 116.997 ms; creating the first Session took 8.048 ms; closing a Session with a hanging TS call took 2.195 ms. These are single observations, not startup percentiles. The Agent anchor declares the existing `RuntimeRows` dependency: row metadata refresh must finish before Sessions are created. No startup polling or new readiness phase is used.
 
 | Flow | Evidence |
 | --- | --- |
 | Two real Sessions, one Node process | Both parts report the same process ID and their own Session IDs. |
 | Instance service isolation | Each part reads its Session's native `c4Session` service through loader-generated isolate labels. |
 | Tool data crosses the channel | Rust sends a native `ToolCall`; the returned declaration and result deserialize as `ToolDefinition` and `ToolResult`. |
-| Actual Session broadcast, isolated | The first Session's native echo turn reaches its TS observer; the second receives none of that turn's `input/applied` records. Existing broadcast fences establish completion without sleeps. |
+| Actual Session broadcast, isolated | The first Session's native echo turn reaches its TS observer; the second receives none of that turn's `input/applied` records. Each fence call is first checked to remain pending for 100 ms without its notice, then completed by its matching broadcast fence before inspecting either Session. Delivery is not inferred from a sleep. |
 | Explicit cancellation | A hanging call observes the exported cancellation Promise and completes once. |
 | Unload settlement | Session close runs the TS effect, completes its hanging call and records exactly one cleanup. |
 | Stale handler | A retained service object rejects calls after its part unloads. This is enforced by the fixture's generation guard, not by assuming the old remote object disappeared. |
@@ -51,21 +51,21 @@ Not measured: concurrent throughput, process RSS, runtime-crash recovery, Window
 
 - `ServiceCatalog::register_shared_instance` maps a named service to each Session instance and gives its Node copy an isolate label. `register_instance` alone only names a typed Rust service; it does not create a cross-language binding.
 - Existing runtime rows export `HostDispatch`, not native `ToolContribution`. The tool DTO experiment calls the exported object directly and deserializes its declaration/result at the Rust boundary. It does not prove the ToolRegistry / ToolExecutor path.
-- `definePlugin` exposes only `use`, `provide` and `effect`; it has no event subscription method. The probe serializes the actual Session channel into an experimental named service call. This is a fixture for measuring transport, not an accepted broadcast protocol or an additional product event bus.
+- The small `definePlugin` context exposes `use`, `provide` and `effect`, but this is not the limit of rutis event support. Native node rows support `events: {out, in}` ([node guide](https://github.com/arcships/rutis/blob/main/docs/guide/nodes.en.md#what-a-link-can-do)); Cordis offers `Events` forwarding and mount `events`/`emits` ([Cordis guide](https://github.com/arcships/rutis/blob/main/docs/guide/cordis.en.md)). The probe's experimental `notice` service is only a transport fixture. Product C4 must use the native event path, establish how its TS rows subscribe to dynamically named Session channels, and review delivery/cleanup semantics; the fixture does not prove that binding or justify a new rutis requirement.
 - Method DTO transport is distinct from C1 Session RPC dispatch. C1 #83 owns Session RPC dispatch; the shared-type placement and routing contract are settled by merged #120. The probe must not introduce a replacement `sessionMethods` service.
 - Session assembly waits for installed required rows, including runtime dependencies. The experiment does not add optional dependency edges or skip Pending rows.
 
 ## Integration ownership
 
-Production bindings belong to the existing contract owners: ToolRegistry / tool contribution, Session broadcast, and C1 SessionMethods. The example's combined probe must not become a wiring plugin. C3 #82 supplies fixed-tool sampling, E2 #122 owns tool-change event replacement, C1 #83/#120 owns Session method lookup/dispatch, and C6 #85 owns broadcast records. Those tasks are not implemented here.
+Production bindings belong to the existing contract owners: ToolRegistry / tool contribution, Session broadcast, and C1 SessionMethods. The example's combined probe must not become a wiring plugin. C3 #82 supplies fixed-tool sampling, E2 #122 owns tool-change event replacement, merged C1 #83/#120 owns Session method lookup/dispatch, C6 #85 owns broadcast records, and assembly issue #132 owns optional-part readiness membership. Those tasks are not implemented here.
 
 ## Minimum implementation sequence
 
 1. **Finalize the neutral bindings before product code.** Define tool service identity, declaration/error decoding, cancellation and Session broadcast subscription/cleanup against A.5 and the existing broadcast. The probe's `c4*` names, `notice` DTO and extra Promise argument are experimental, not public contracts. Do not expose the combined probe as a production adapter.
 2. **Use existing loader assembly.** Register shared services inside `SESSION_GROUP`; load TS rows inside the Session subtree using the existing runtime resolver. Keep factories limited to configuration and instance identity. Share the Node process and use instance service labels; those labels provide namespace isolation, not a security sandbox. Do not reuse the private managed-provider configuration as a general capability loader.
 3. **Connect the tool at its owner.** Implement the language binding at the tool-contribution boundary, reuse C3's one-time fixed-table sampling and ToolBinding request snapshots, and validate the real model declaration → ToolExecutor → TS result flow on the immediate first request after create and restore. The binding must be available before that sample; no attachment polling or tool-specific branches in Timeline, Dispatcher or Session readiness.
-4. **Integrate the existing method and broadcast owners.** Expose the SessionMethods implementation from C1 #83 to TS, following the shared-type placement and routing contract settled in #120. Align broadcast data with C6 #85 and subscribe to the existing Session channel; do not create a second event source or duplicate RPC dispatch. Final subscription delivery/order and cancellation semantics require contract review; the transport measurements do not decide them.
-5. **Verify product acceptance.** A TS part must serve one real tool and one real Session RPC method, receive only its Session's broadcast, settle cancellation and unload, and preserve native execution when its optional provider becomes unavailable. Disabled parts must not be installed. Installed required Pending rows keep their current waiting semantics; the roadmap's stronger optional-startup wording needs explicit reconciliation before claiming it is implemented.
+4. **Integrate the existing method and broadcast owners.** Expose the SessionMethods implementation from C1 #83 to TS, following the shared-type placement and routing contract settled in #120. Align broadcast data with C6 #85 and bind native node `events: {out, in}` / Cordis events to the dynamically named Session channel; do not create a second event source or duplicate RPC dispatch. Final subscription delivery/order and cancellation semantics require contract review; the transport measurements do not decide them.
+5. **Verify product acceptance.** A TS part must serve one real tool and one real Session RPC method, receive only its Session's broadcast, settle cancellation and unload, and preserve native execution when its optional provider becomes unavailable. Disabled parts must not be installed. Assembly issue #132 must be implemented before complete C4 acceptance: installed optional plugin parts must not gate Session readiness. This changes readiness membership, not dependency semantics; each part's required dependencies and audit remain unchanged. It does not block the spike.
 
 No evidence from this spike requires changing rutis, adding core lifecycle gates, weakening dependency auditing or skipping Pending rows. C4 can proceed with a contract review based on the proven transport, while #63 remains open for the production flow.
 
@@ -97,4 +97,4 @@ The retained harness pieces each serve an exercised boundary: Node/rows wrappers
 
 ## Requirements raised to mechanism owners
 
-None. The spike investigates existing mechanisms and records integration gaps; it does not infer a need to extend rutis or core lifecycle.
+The spike raises no new requirement to rutis. Assembly-owned optional-part readiness is tracked separately in [#132](https://github.com/arcships/dim/issues/132), a prerequisite for complete C4 acceptance. The fixture does not implement it or introduce a core lifecycle phase.

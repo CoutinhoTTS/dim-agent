@@ -201,6 +201,14 @@ async fn fence(
     probe: &Arc<dyn HostDispatch>,
     token: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let waiting = call(probe, "fence", vec![json!(token).into()]);
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err(),
+        "a fence must stay pending until its notice arrives"
+    );
     loaded.ctx.events().emit(
         &loaded.ctx,
         &session_channel(&loaded.session_id),
@@ -209,7 +217,7 @@ async fn fence(
             token,
         }),
     )?;
-    call(probe, "fence", vec![json!(token).into()]).await?;
+    tokio::time::timeout(Duration::from_secs(5), waiting).await??;
     Ok(())
 }
 async fn measure(

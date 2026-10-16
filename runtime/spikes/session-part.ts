@@ -75,9 +75,9 @@ export default definePlugin({
       },
       async fence(token: number) {
         alive()
-        return null
         if (!fences.has(token)) await new Promise<void>(resolve => waiting.set(token, resolve))
         alive()
+        return null
       },
       async started() {
         alive()
