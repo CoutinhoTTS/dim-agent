@@ -1191,6 +1191,11 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
             "remove keep [Paste 1: 2 lines]",
             "ABC",
             "first\nZsecond",
+            "kept across EOF",
+            "shift\nenter\nworks",
+            "after malformed UTF-8",
+            "standalone\rCR\r",
+            "resized draft",
         ] {
             let submit = wire.read("session.submit");
             assert_eq!(submit["params"]["text"], expected);
@@ -1223,7 +1228,33 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
     terminal.until("\n> ");
     terminal.raw(b"first\nsecond\x1b[H\x1b[A\x1b[BZ\x1b[F\r");
     terminal.until("\n> ");
-    terminal.write(b"/exit\n");
+    terminal.write(b"kept across EOF");
+    terminal.raw(b"\x04");
+    terminal.until("Draft retained; clear it before exiting");
+    terminal.raw(b"\x1a\r");
+    terminal.until("\n> ");
+    terminal.raw(b"shift\x1b[13;2uenter\x1b[27;2;13~works\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\xf0after malformed UTF-8\r");
+    terminal.until("\n> ");
+    terminal.paste("standalone\rCR\r");
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.raw(b"\r");
+    terminal.until("\n> ");
+    let size = libc::winsize {
+        ws_row: 6,
+        ws_col: 15,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0
+    );
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGWINCH) }, 0);
+    terminal.raw(b"resized draft\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\x04");
     assert!(wait(child).status.success());
     daemon.join().unwrap();
     let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
@@ -1314,7 +1345,7 @@ fn interactive_paste_put_rejection_retains_confirmed_paths_without_uploading_aga
         wire.reply(&submit, json!({"event":{}}));
         let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
         let put = wire.read("attachment.put");
-        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32601,"message":"unknown_method"}}));
+        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32601,"message":"unknown_method","data":{"appError":"unknown_method"}}}));
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], "clean draft");
         wire.reply(&submit, json!({"event":{}}));
@@ -1378,6 +1409,8 @@ fn interactive_paste_cancellation_drains_the_put_and_reuses_its_confirmed_path()
     admitted.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     terminal.until("Waiting for the text attachment to settle");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Still waiting for the text attachment to settle");
     release.send(()).unwrap();
     terminal.until("Preparation cancelled");
     terminal.write(b"\n");
@@ -1467,6 +1500,9 @@ fn interactive_paste_boundaries_reject_without_losing_the_existing_draft() {
     let (mut terminal, child) = Terminal::launch(home.command());
     terminal.until("\n> ");
     terminal.write(b"kept");
+    terminal.raw(b"\x1b[200~unfinished\x03");
+    terminal.raw(b"\x03");
+    terminal.until("Paste cancelled; draft retained");
     terminal.raw(b"\x1b[200~\xff\x1b[201~");
     terminal.until("Paste must be UTF-8");
     terminal.paste(&"x".repeat(10 * 1024 * 1024 + 1));

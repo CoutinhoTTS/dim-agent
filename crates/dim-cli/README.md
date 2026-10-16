@@ -51,12 +51,20 @@ Multiline pastes and pastes over 16 KiB appear as atomic markers:
 ```text
 > Explain [Paste 1: 120 lines]
   and compare with the current file.
-Enter: send   Ctrl+J: newline   Ctrl+C: clear
+Enter: send   Ctrl+J: newline   Ctrl+C: clear   Ctrl+C twice: cancel paste
 ```
 
 Arrows move by grapheme or display row; Home/End select the logical line's ends.
 Backspace/Delete remove an entire marker. Ctrl+C clears a nonempty idle draft;
-with an empty draft it exits. EOF exits without submitting the draft. Text wraps
+with an empty draft it exits. An EOF key exits only when the draft is empty;
+otherwise the draft remains editable. Ctrl+Z is an EOF key only on Windows.
+If a paste never delivers its closing delimiter, press Ctrl+C twice to discard
+that paste while keeping the preceding draft. That consecutive pair is reserved
+inside bracketed paste; a single Ctrl+C byte remains literal paste content.
+Paste bytes are not newline-normalized. Line labels follow Rust str::lines():
+standalone CR is retained but is not a line separator.
+An external interrupt discards the current paste and clears the idle draft.
+Text wraps
 and scrolls with the terminal size, and draft control characters are escaped for
 display while the original text is retained. A terminal reporting zero geometry
 uses 80 columns and 24 rows for the missing dimensions.
@@ -69,6 +77,9 @@ reply, retains a confirmed path and sends no further put or model input.
 Connection loss or an uncertain submission reply exits without retrying.
 Recognized commands require plain single-line input; attached command drafts are
 retained before any put or execution.
+An ordinary single-line terminal paste is plain text, so a pasted command runs
+only after the user presses Enter. Text resembling a stored-paste reference is
+ordinary user text, not an authenticated attachment handle.
 
 Clipboard images/files, @ completion and dropped-path insertion are the remaining
 native sources in the [attachment input contract](../../docs/design/cli-attachment-input.md).
