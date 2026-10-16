@@ -125,6 +125,7 @@ pub fn install_local_execution(
     install_with_prompt_capability(builder, model);
     crate::workspace_tools::install(builder, workspace);
     crate::wait::install(builder);
+    crate::shell_input::install(builder);
     crate::prompt_sources::install(builder);
     crate::skills::install(builder);
 }

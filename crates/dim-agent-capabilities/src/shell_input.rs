@@ -1,0 +1,466 @@
+//! ShellInput, see `docs/architecture/rust-agent/plugins/ShellInput.md` and
+//! the design `docs/design/plugins/ShellInput.md`.
+//!
+//! `ShellInputPlugin` (Session) serves `shell.run`, `shell.stop` and
+//! `shell.list` through `sessionMethods` key `shell`. A command the user typed
+//! runs in the Session's working directory, built and read exactly as `exec`
+//! builds and reads it; at most one runs per Session. A run belongs to this
+//! plugin generation, not to the call that started it: the call's token only
+//! ends the wait for the reply, while the generation's cancellation or the
+//! Session's closing terminates the process tree.
+use crate::{
+    host_platform::{HostPlatform, ProcessTree},
+    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
+    timeline_tree::TreeCommands,
+    workspace_tools::exec::{
+        OutputSink, capture_preview, pump, sanitize, signal_name, truncate_preview,
+    },
+};
+use dim_agent_runtime::{
+    AgentBuilder, Capability, Diagnostics, InSession, KeysOf, SessionConfig, SessionLifecycle,
+    SessionPhase, SessionScope, scoped,
+};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    collections::HashSet,
+    io,
+    path::PathBuf,
+    process::ExitStatus,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::{sync::oneshot, time::Instant};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+/// The Session method namespace ShellInput provides.
+pub const SHELL_METHODS: &str = "shell";
+const MAX_COMMAND_BYTES: usize = 64 * 1024;
+
+/// Installs ShellInput in every Session and records its namespace.
+pub fn install(builder: &mut AgentBuilder) {
+    builder
+        .session_plugin(ShellInputPlugin::new)
+        .session_methods(SHELL_METHODS);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Mode {
+    /// `!!command`: the result goes only to the caller.
+    Private,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunParams {
+    /// Read by Rpc to route the call; the provider already serves this Session.
+    #[serde(rename = "sessionId")]
+    _session_id: String,
+    #[serde(default = "main_branch")]
+    branch_id: String,
+    run_id: String,
+    command: String,
+    mode: Mode,
+}
+fn main_branch() -> String {
+    "main".into()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StopParams {
+    #[serde(rename = "sessionId")]
+    _session_id: String,
+    run_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListParams {
+    #[serde(rename = "sessionId")]
+    _session_id: String,
+}
+
+/// A started run as `shell.list` reports it.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunInfo {
+    run_id: String,
+    branch_id: String,
+    mode: Mode,
+    command: String,
+    /// Unix milliseconds.
+    started_at: u64,
+}
+
+struct Running {
+    info: RunInfo,
+    stop: CancellationToken,
+    /// Cancelled once the run has ended and left the registry.
+    ended: CancellationToken,
+}
+
+#[derive(Default)]
+struct Registry {
+    running: Option<Running>,
+    /// Run ids started in this generation: a command never runs twice.
+    used: HashSet<String>,
+}
+
+struct ShellInput {
+    platform: Arc<HostPlatform>,
+    cwd: PathBuf,
+    tree: Arc<TreeCommands>,
+    lifecycle: Arc<SessionLifecycle>,
+    diagnostics: Arc<Diagnostics>,
+    /// This generation's cancellation: with the Session's closing, it ends
+    /// every run.
+    generation: CancellationToken,
+    /// Run tasks, owned by this generation rather than by their calls.
+    runs: TaskTracker,
+    registry: Mutex<Registry>,
+}
+
+fn refused(app_error: &'static str, message: impl Into<String>) -> RpcError {
+    RpcError::app(-32000, app_error, message)
+}
+
+/// What ended the wait for a running command.
+enum End {
+    Exited(io::Result<ExitStatus>),
+    Stopped,
+    Interrupted,
+}
+
+impl ShellInput {
+    /// Refuses a run that cannot start now.
+    fn admit(&self, registry: &Registry, run_id: &str) -> Result<(), RpcError> {
+        if self.generation.is_cancelled() {
+            return Err(RpcError::reloading());
+        }
+        if registry.running.is_some() {
+            return Err(refused(
+                "shell_busy",
+                "Another command is running in this Session",
+            ));
+        }
+        if registry.used.contains(run_id) {
+            return Err(refused(
+                "duplicate_run",
+                format!("runId {run_id} was already used"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The Session part is ending: a run then writes nothing.
+    fn ending(&self) -> bool {
+        self.generation.is_cancelled() || self.lifecycle.phase() >= SessionPhase::Closing
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        value: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        let p: RunParams = params(value)?;
+        if p.command.is_empty() || p.command.len() > MAX_COMMAND_BYTES {
+            return Err(RpcError::invalid(
+                "command must be non-empty and at most 64 KiB",
+            ));
+        }
+        if p.run_id.is_empty()
+            || p.run_id.len() > 64
+            || !p
+                .run_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(RpcError::invalid("runId must match [A-Za-z0-9-]{1,64}"));
+        }
+        self.admit(&self.registry.lock().unwrap(), &p.run_id)?;
+        self.tree.get(&p.branch_id)?;
+        let (spec, _) = self
+            .platform
+            .build_process_spec(&p.command, &self.cwd)
+            .await
+            .map_err(|error| {
+                refused(
+                    "shell_unavailable",
+                    format!("{}: {}", error.code, error.reason),
+                )
+            })?;
+        let (send, reply) = oneshot::channel();
+        {
+            let mut registry = self.registry.lock().unwrap();
+            // The disposer closes `runs` under this lock after the generation
+            // token fired: every run admitted here is tracked, and no run
+            // starts once the generation is unloading.
+            self.admit(&registry, &p.run_id)?;
+            let tree = self.platform.spawn(spec).map_err(|error| {
+                refused("spawn_failed", format!("Failed to spawn process: {error}"))
+            })?;
+            let info = RunInfo {
+                run_id: p.run_id,
+                branch_id: p.branch_id,
+                mode: p.mode,
+                command: p.command,
+                started_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+            let (stop, ended) = (CancellationToken::new(), CancellationToken::new());
+            registry.used.insert(info.run_id.clone());
+            registry.running = Some(Running {
+                info: info.clone(),
+                stop: stop.clone(),
+                ended: ended.clone(),
+            });
+            self.runs
+                .spawn(self.clone().supervise(info, tree, stop, ended, send));
+        }
+        tokio::select! {
+            reply = reply => reply.unwrap_or_else(|_| Err(RpcError::interrupted())),
+            // An Rpc reload or this provider's unload ends only the wait; the
+            // run stays with this generation (A.4 Two cancellations).
+            _ = cancel.cancelled() => Err(RpcError::interrupted()),
+        }
+    }
+
+    /// Owns one run until it ends, then leaves the registry and replies.
+    async fn supervise(
+        self: Arc<Self>,
+        run: RunInfo,
+        mut tree: ProcessTree,
+        stop: CancellationToken,
+        ended: CancellationToken,
+        reply: oneshot::Sender<Result<Value, RpcError>>,
+    ) {
+        let span = self
+            .diagnostics
+            .span("shell.run", None, None, Some(&run.run_id));
+        let started = Instant::now();
+        let output = Arc::new(RunOutput::default());
+        let stop_pumps = CancellationToken::new();
+        let pumps = [
+            tokio::spawn(pump(tree.stdout(), output.clone(), stop_pumps.clone())),
+            tokio::spawn(pump(tree.stderr(), output.clone(), stop_pumps.clone())),
+        ];
+        let ending = async {
+            tokio::select! {
+                _ = self.generation.cancelled() => {}
+                _ = self.lifecycle.closing() => {}
+            }
+        };
+        // An exit already there wins over a stop or the end of the part.
+        let end = tokio::select! {
+            biased;
+            status = tree.wait() => End::Exited(status),
+            _ = ending => End::Interrupted,
+            _ = stop.cancelled() => End::Stopped,
+        };
+        let terminated = match end {
+            End::Exited(Ok(_)) => Ok(()),
+            _ => tree.terminate().await,
+        };
+        // Output ready at the exit is read for exec's grace, then the pipes
+        // close; descendants left in the background do not hold the run.
+        stop_pumps.cancel();
+        futures_util::future::join_all(pumps).await;
+        drop(tree);
+        let (result, outcome) = if self.ending() {
+            (Err(RpcError::interrupted()), "interrupted".to_owned())
+        } else {
+            let (status, exit, reason) = match (end, terminated) {
+                (End::Exited(Ok(status)), _) => ("completed", Some(status), None),
+                (End::Exited(Err(error)), _) => (
+                    "failed",
+                    None,
+                    Some(format!("Failed to wait for process: {error}")),
+                ),
+                (_, Err(error)) => (
+                    "failed",
+                    None,
+                    Some(format!("Command could not be terminated: {error}")),
+                ),
+                _ => ("stopped", None, None),
+            };
+            let code = exit.and_then(|status| status.code());
+            let signal = exit.and_then(signal_name);
+            let (text, truncated) = output.bounded();
+            let mut result = json!({
+                "runId": run.run_id,
+                "status": status,
+                "output": text,
+                "truncated": truncated,
+                "durationMs": started.elapsed().as_millis() as u64,
+            });
+            if let Some(code) = code {
+                result["exitCode"] = code.into();
+            }
+            if let Some(signal) = &signal {
+                result["signal"] = signal.as_str().into();
+            }
+            if let Some(reason) = reason {
+                result["reason"] = reason.into();
+            }
+            let exit = code.map(|code| code.to_string()).or(signal);
+            let outcome = match exit {
+                Some(exit) => format!("{status}:{exit}"),
+                None => status.to_owned(),
+            };
+            (Ok(result), outcome)
+        };
+        // Free the Session before replying, so the caller can start the next run.
+        self.registry.lock().unwrap().running = None;
+        ended.cancel();
+        span.record("outcome", outcome.as_str());
+        let _ = reply.send(result);
+    }
+
+    async fn stop(&self, value: Value, cancel: CancellationToken) -> Result<Value, RpcError> {
+        let p: StopParams = params(value)?;
+        let ended = match &self.registry.lock().unwrap().running {
+            Some(running) if running.info.run_id == p.run_id => {
+                running.stop.cancel();
+                running.ended.clone()
+            }
+            _ => return reply(json!({"stopped": false})),
+        };
+        tokio::select! {
+            _ = ended.cancelled() => reply(json!({"stopped": true})),
+            _ = cancel.cancelled() => Err(RpcError::interrupted()),
+        }
+    }
+
+    fn list(&self, value: Value) -> Result<Value, RpcError> {
+        let _: ListParams = params(value)?;
+        let registry = self.registry.lock().unwrap();
+        let runs: Vec<_> = registry
+            .running
+            .iter()
+            .map(|running| &running.info)
+            .collect();
+        reply(json!({ "runs": runs }))
+    }
+}
+
+/// The output of one run: exec's bounded tail of both pipes.
+#[derive(Default)]
+struct RunOutput(Mutex<Captured>);
+#[derive(Default)]
+struct Captured {
+    preview: String,
+    /// Bytes decoded in all; more than `preview` holds means its head was cut.
+    decoded: usize,
+}
+impl OutputSink for RunOutput {
+    async fn push(&self, text: &str) {
+        let mut captured = self.0.lock().unwrap();
+        captured.decoded += text.len();
+        capture_preview(&mut captured.preview, text);
+    }
+}
+impl RunOutput {
+    /// exec's bounds (the last 2000 lines within 50 KiB), and whether they
+    /// left anything out.
+    fn bounded(&self) -> (String, bool) {
+        let captured = self.0.lock().unwrap();
+        let text = truncate_preview(&captured.preview);
+        let truncated = captured.decoded > captured.preview.len()
+            || text.len() < sanitize(&captured.preview).len();
+        (text, truncated)
+    }
+}
+
+/// Session plugin providing `sessionMethods` key `shell`.
+pub struct ShellInputPlugin {
+    scope: SessionScope,
+}
+impl ShellInputPlugin {
+    pub fn new(scope: &SessionScope) -> Self {
+        Self { scope: *scope }
+    }
+}
+impl TypedPlugin for ShellInputPlugin {
+    type Deps = (
+        Arc<HostPlatform>,
+        InSession<SessionConfig>,
+        InSession<TreeCommands>,
+        InSession<SessionLifecycle>,
+        InSession<Diagnostics>,
+    );
+    fn name(&self) -> &str {
+        "ShellInput"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (
+            platform,
+            InSession(config),
+            InSession(tree),
+            InSession(lifecycle),
+            InSession(diagnostics),
+        ): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let shell = Arc::new(ShellInput {
+                platform,
+                // `session.create` validated and canonicalized the cwd.
+                cwd: PathBuf::from(&config.cwd),
+                tree,
+                lifecycle,
+                diagnostics,
+                generation: ctx.cancellation_token(),
+                runs: TaskTracker::new(),
+                registry: Mutex::default(),
+            });
+            let owner = shell.clone();
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        {
+                            let _registry = owner.registry.lock().unwrap();
+                            owner.runs.close();
+                        }
+                        owner.runs.wait().await;
+                        Ok(())
+                    })
+                }))
+            })?;
+            // After the effect above, so the provider's unload, which settles
+            // the calls, runs before the runs are awaited.
+            SessionMethods::provide(
+                ctx,
+                &self.scope,
+                SHELL_METHODS,
+                vec![
+                    MethodDecl::new("shell.run", true, Interruption::Report),
+                    MethodDecl::new("shell.stop", true, Interruption::Report),
+                    MethodDecl::new("shell.list", false, Interruption::Report),
+                ],
+                Arc::new(move |method, value, cancel, _| {
+                    let shell = shell.clone();
+                    Box::pin(async move {
+                        // The provider admits only the declared names.
+                        match method.as_str() {
+                            "shell.run" => shell.run(value, cancel).await,
+                            "shell.stop" => shell.stop(value, cancel).await,
+                            _ => shell.list(value),
+                        }
+                    })
+                }),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+impl Capability for ShellInputPlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
