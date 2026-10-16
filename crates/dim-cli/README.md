@@ -11,7 +11,8 @@ and exits; redirected stdin supplies the prompt when `-p` is absent.
 Session. Session handles and diagnostics go to stderr. The stream preserves
 public fields, includes live observations after attach and does not replay stored
 history. Approval is denied, the turn is stopped and settled, and exec exits 3.
-Ctrl+C waits for settlement and exits 130.
+Ctrl+C waits for settlement and exits 130. Further interrupts while settling
+keep waiting; they do not carry over to the next interactive prompt.
 
 `exec --image PATH` adds a local PNG, JPEG, WebP or GIF; repeat it for several
 images or omit text for an image-only request. Empty or whitespace-only text is
