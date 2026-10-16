@@ -23,7 +23,7 @@
         "reads": []
       },
       {
-        "id": 24,
+        "id": 25,
         "parent": 2,
         "name": "Transport",
         "state": "Active",
@@ -49,7 +49,7 @@
           {
             "service": "dim_app_server::connection::ConnectionHub",
             "scope": null,
-            "provider": 22,
+            "provider": 23,
             "generation": 1
           },
           {
@@ -68,7 +68,7 @@
         "reads": [
           {
             "service": "dim_app_server::connection::ConnectionHub",
-            "provider": 22,
+            "provider": 23,
             "declared": true,
             "external": true
           },
@@ -81,7 +81,7 @@
         ]
       },
       {
-        "id": 23,
+        "id": 24,
         "parent": 2,
         "name": "Rpc",
         "state": "Active",
@@ -117,19 +117,19 @@
           {
             "service": "dim_app_server::agents::AgentIndex",
             "scope": null,
-            "provider": 20,
+            "provider": 21,
             "generation": 1
           },
           {
             "service": "dim_app_server::collaboration::Collaboration",
             "scope": null,
-            "provider": 21,
+            "provider": 22,
             "generation": 1
           },
           {
             "service": "dim_app_server::connection::ConnectionHub",
             "scope": null,
-            "provider": 22,
+            "provider": 23,
             "generation": 1
           },
           {
@@ -148,13 +148,13 @@
         "reads": [
           {
             "service": "dim_app_server::agents::AgentIndex",
-            "provider": 20,
+            "provider": 21,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_app_server::connection::ConnectionHub",
-            "provider": 22,
+            "provider": 23,
             "declared": true,
             "external": true
           },
@@ -173,7 +173,7 @@
         ]
       },
       {
-        "id": 22,
+        "id": 23,
         "parent": 2,
         "name": "Connection",
         "state": "Active",
@@ -203,7 +203,7 @@
         ]
       },
       {
-        "id": 21,
+        "id": 22,
         "parent": 2,
         "name": "Collaboration",
         "state": "Active",
@@ -224,33 +224,33 @@
           {
             "service": "dim_app_server::agents::AgentIndex",
             "scope": null,
-            "provider": 20,
+            "provider": 21,
             "generation": 1
           },
           {
             "service": "dim_app_server::collaboration::CollaborationDirectory",
             "scope": null,
-            "provider": 19,
+            "provider": 20,
             "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_app_server::agents::AgentIndex",
-            "provider": 20,
+            "provider": 21,
             "declared": true,
             "external": true
           },
           {
             "service": "dim_app_server::collaboration::CollaborationDirectory",
-            "provider": 19,
+            "provider": 20,
             "declared": true,
             "external": true
           }
         ]
       },
       {
-        "id": 20,
+        "id": 21,
         "parent": 2,
         "name": "Agents",
         "state": "Active",
@@ -286,7 +286,7 @@
           {
             "service": "dim_app_server::agents::AgentDirectory",
             "scope": null,
-            "provider": 18,
+            "provider": 19,
             "generation": 1
           },
           {
@@ -317,7 +317,7 @@
         "reads": [
           {
             "service": "dim_app_server::agents::AgentDirectory",
-            "provider": 18,
+            "provider": 19,
             "declared": true,
             "external": true
           },
@@ -348,7 +348,7 @@
         ]
       },
       {
-        "id": 19,
+        "id": 20,
         "parent": 2,
         "name": "CollaborationDirectory",
         "state": "Active",
@@ -358,7 +358,7 @@
         "reads": []
       },
       {
-        "id": 18,
+        "id": 19,
         "parent": 2,
         "name": "AgentDirectory",
         "state": "Active",
@@ -366,6 +366,36 @@
         "injects": [],
         "resolved": [],
         "reads": []
+      },
+      {
+        "id": 18,
+        "parent": 2,
+        "name": "PermissionRules",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "scope": null,
+            "provider": 13,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_app_server::settings::SettingsService",
+            "provider": 13,
+            "declared": true,
+            "external": true
+          }
+        ]
       },
       {
         "id": 17,
@@ -851,13 +881,13 @@
       },
       {
         "service": "dim_app_server::agents::AgentDirectory",
-        "provider": 18,
+        "provider": 19,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::agents::AgentIndex",
-        "provider": 20,
+        "provider": 21,
         "generation": 1,
         "removing": false
       },
@@ -869,19 +899,19 @@
       },
       {
         "service": "dim_app_server::collaboration::Collaboration",
-        "provider": 21,
+        "provider": 22,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::collaboration::CollaborationDirectory",
-        "provider": 19,
+        "provider": 20,
         "generation": 1,
         "removing": false
       },
       {
         "service": "dim_app_server::connection::ConnectionHub",
-        "provider": 22,
+        "provider": 23,
         "generation": 1,
         "removing": false
       },
@@ -940,6 +970,12 @@
         "removing": false
       },
       {
+        "service": "dim_app_server::methods::ManagementMethods#permission",
+        "provider": 18,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_app_server::methods::ManagementMethods#provider",
         "provider": 12,
         "generation": 1,
@@ -977,7 +1013,7 @@
       },
       {
         "service": "dim_app_server::transport::ListenAddresses",
-        "provider": 24,
+        "provider": 25,
         "generation": 1,
         "removing": false
       },

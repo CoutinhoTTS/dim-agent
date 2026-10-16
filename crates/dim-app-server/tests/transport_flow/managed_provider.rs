@@ -79,6 +79,7 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
             output_root: home.join("output"),
         },
     );
+    dim_app_server::permission_rules::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))

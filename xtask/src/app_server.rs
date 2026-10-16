@@ -36,6 +36,7 @@ pub async fn graph() -> Result<Value> {
             output_root: dir.join("command-output"),
         },
     );
+    dim_app_server::permission_rules::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
