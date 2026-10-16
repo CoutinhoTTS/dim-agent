@@ -211,9 +211,23 @@ impl Agent {
                 .map(Session::start)
             }
             .await;
-            if let Ok(session) = &result
-                && owner.0.closing.is_cancelled()
-            {
+            // Publication and close admission are decided under the entries
+            // lock (lifecycle §3): once Agent::close has taken its snapshot, a
+            // finished build is closed here instead of being published.
+            let unpublished = {
+                let mut entries = owner.0.entries.lock().unwrap();
+                match &result {
+                    Ok(session) if !owner.0.closing.is_cancelled() => {
+                        *session.0.agent.lock().unwrap() = Arc::downgrade(&owner.0);
+                        entries.insert(id.clone(), Entry::Ready(session.clone()));
+                        session.activate();
+                        None
+                    }
+                    Ok(session) => Some(session.clone()),
+                    Err(_) => None,
+                }
+            };
+            if let Some(session) = unpublished {
                 let cancelled = AgentError::Cancelled("agent closed during initialization".into());
                 result = match session.close().await {
                     Ok(()) => Err(cancelled),
@@ -226,20 +240,8 @@ impl Agent {
                     Err(cleanup) => failure.with_cleanup(cleanup),
                 });
             }
-            if let Ok(session) = &result {
-                *session.0.agent.lock().unwrap() = Arc::downgrade(&owner.0);
-            }
-            {
-                let mut entries = owner.0.entries.lock().unwrap();
-                match &result {
-                    Ok(session) => {
-                        entries.insert(id.clone(), Entry::Ready(session.clone()));
-                        session.activate_supervisor();
-                    }
-                    Err(_) => {
-                        entries.remove(&id);
-                    }
-                }
+            if result.is_err() {
+                owner.0.entries.lock().unwrap().remove(&id);
             }
             send.send_replace(Some(result));
         });
@@ -358,7 +360,10 @@ impl Session {
             supervisor: Mutex::new(None),
         }))
     }
-    fn activate_supervisor(&self) {
+    /// Publication: starts fault supervision and lets Session capabilities
+    /// begin the background work they deferred during assembly.
+    fn activate(&self) {
+        self.0.owner.lifecycle.advance(SessionPhase::Active);
         let weak = Arc::downgrade(&self.0);
         let mut faults = self.0.owner.faults.watch();
         let stop = self.0.owner.closing.clone();
@@ -564,6 +569,20 @@ impl Session {
             .get_as::<T>(loaded.scope.key::<T>())
             .ok_or_else(|| AgentError::Reloading(std::any::type_name::<T>().into()))
     }
+    /// Reads one named service of the currently loaded Session subtree, such
+    /// as the `sessionMethods` provider of a namespace. Like
+    /// [`Self::session_service`], a missing key is `Reloading`: telling an
+    /// absent name from one whose provider is not active is the caller's.
+    pub fn session_named_service<T: ?Sized + SessionService + PublicService>(
+        &self,
+        name: &str,
+    ) -> Result<Arc<T>> {
+        let loaded = self.0.owner.loaded()?;
+        loaded
+            .ctx
+            .get_as::<T>(loaded.scope.named_key::<T>(name))
+            .ok_or_else(|| AgentError::Reloading(format!("{} {name}", std::any::type_name::<T>())))
+    }
     pub fn on<S: Clone + Send + Sync + 'static>(
         &self,
         branch: &str,
@@ -629,6 +648,7 @@ impl Session {
     }
     fn finish(&self, unloading: bool) -> BoxFuture<'static, Result<()>> {
         self.0.owner.closing.cancel();
+        self.0.owner.lifecycle.advance(SessionPhase::Closing);
         let this = self.clone();
         self.0.close.start(&self.0.handle, async move {
             let diagnostics = &this.0.owner.diagnostics;
@@ -668,6 +688,7 @@ impl Session {
             if let Err(e) = shutdown_scope(&this.0.view, &children).await {
                 errors.push(e);
             }
+            this.0.owner.lifecycle.advance(SessionPhase::Closed);
             let supervisor = this.0.supervisor.lock().unwrap().take();
             if let Some(task) = supervisor
                 && let Err(e) = task.await

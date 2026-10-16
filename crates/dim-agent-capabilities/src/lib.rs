@@ -12,6 +12,7 @@ pub mod history;
 pub mod host;
 pub mod host_platform;
 pub mod input_queue;
+pub mod methods;
 pub mod model_provider;
 mod output;
 pub mod permission;
@@ -47,6 +48,7 @@ impl SessionService for host::ContextModelHost {}
 impl SessionService for host::PromptHost {}
 impl SessionService for host::ModelHost {}
 impl SessionService for host::ToolHost {}
+impl SessionService for methods::SessionMethods {}
 impl BranchService for input_queue::InputQueue {}
 impl BranchService for agent_loop::AgentLoop {}
 impl BranchService for prompt::Prompt {}
@@ -66,6 +68,7 @@ impl BranchService for wait::Wait {}
 // Business ports safe to obtain from a Session handle: RPC calls them by
 // request branch, tool handlers by call branch.
 impl PublicService for approval::Approval {}
+impl PublicService for input_queue::InputQueue {}
 impl PublicService for permission::Permission {}
 impl PublicService for workspace_tools::background::BackgroundExec {}
 impl PublicService for shell_session::ShellSession {}
@@ -74,4 +77,5 @@ impl PublicService for workspace_tools::file_reads::FileReads {}
 impl PublicService for wait::Wait {}
 impl PublicService for skills::SkillsBranch {}
 impl PublicService for tool_registry::ToolSourcesView {}
+impl PublicService for methods::SessionMethods {}
 impl SessionService for tool_registry::ToolSourcesView {}

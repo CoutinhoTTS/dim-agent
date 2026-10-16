@@ -507,3 +507,63 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
     assert!(agent.sessions().is_empty());
     agent.close().await.unwrap();
 }
+
+/// A Session service provided once per name, as `sessionMethods` is once per
+/// namespace.
+struct Named(&'static str);
+impl SessionService for Named {}
+impl PublicService for Named {}
+struct NamedProvider(SessionScope);
+impl TypedPlugin for NamedProvider {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "test.named"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): Self::Deps,
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            for name in ["one", "two"] {
+                ctx.provide_as(
+                    self.0.named_key::<Named>(name),
+                    std::sync::Arc::new(Named(name)),
+                )?;
+            }
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for NamedProvider {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_facade_reads_a_named_session_service_by_name() {
+    let mut b = builder();
+    b.session_plugin(|scope| NamedProvider(*scope));
+    let agent = b.build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    for name in ["one", "two"] {
+        assert_eq!(
+            session.session_named_service::<Named>(name).unwrap().0,
+            name
+        );
+    }
+    // A name nobody provides reads as reloading; telling an absent name from
+    // a reloading provider is the caller's (methods contract §9.1).
+    assert!(matches!(
+        session.session_named_service::<Named>("three"),
+        Err(AgentError::Reloading(_))
+    ));
+    session.close().await.unwrap();
+    assert!(matches!(
+        session.session_named_service::<Named>("one"),
+        Err(AgentError::Closed(_))
+    ));
+    agent.close().await.unwrap();
+}
