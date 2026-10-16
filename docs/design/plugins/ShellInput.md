@@ -368,7 +368,8 @@ H1 to H3 block ShellInput. The other half of S7, reading the exec shell configur
 | Scenario | Sequence order | Outcome | Owner of the decision |
 | --- | --- | --- | --- |
 | Result before the next request of a running turn | X < `step/model-start` | Consumed with that request | Loop |
-| Result while a tool batch runs | X < `step/tool-result` | Consumed at the next request after the batch result | Loop |
+| Result applied while a tool batch runs | `input/applied` X < `step/tool-result` | Consumed at the next request after the batch result | Loop |
+| Result applied after the batch result | `step/tool-result` < `input/applied` X | Consumed with the first request Loop starts after the apply, since Loop decides a request when it dispatches the batch result: after the next batch result, or the first request of the next turn | InputQueue, Loop |
 | Result while idle | X, no turn | Pending; consumed when the next Queue or Steer input starts a turn; never starts one | InputQueue, Loop |
 | Turn interrupt before X | I < X | Run unaffected; X pending until the next turn | Loop |
 | X applied, then interrupt before consumption | X < I | Pending; consumed by the next turn | Loop |
@@ -428,7 +429,7 @@ Dispatch errors (`unknown_method` when the process did not assemble ShellInput, 
 ## Appendix D. Acceptance
 
 1. `!echo hi` while idle: one Append input with the marker; no turn starts; the first model request of the next prompt contains it before the prompt.
-2. `!` during a turn with a tool batch: consumed with the first request after the batch result, in the same turn.
+2. `!` during a turn with a tool batch, applied while the batch runs: consumed with the first request after the batch result, in the same turn.
 3. `!!`: progress and the result reach the caller; the Timeline is unchanged.
 4. A turn stop does not stop a run; `shell.stop` terminates the tree (no process left) and records `status="stopped"` with the partial output.
 5. A second `shell.run` in the same Session returns `shell_busy`; a reused `runId` returns `duplicate_run`.
@@ -437,7 +438,7 @@ Dispatch errors (`unknown_method` when the process did not assemble ShellInput, 
 8. Session reload during the run: tree terminated, nothing written, the command does not run again.
 9. Client disconnect during the run: the run continues and its input is recorded.
 10. Rpc reload during a running `!` command: the reload completes at once and the call replies `operation_interrupted`; the command keeps running, and its input is recorded when it exits.
-11. A process that did not assemble ShellInput answers `shell.run` with `unknown_method`; with ShellInput assembled, `shell.run` answers `service_reloading` while the Session's ShellInput part is not active.
+11. A process that did not assemble ShellInput answers `shell.run` with `unknown_method`; with ShellInput assembled, `shell.*` answer `service_reloading` while the Session's ShellInput part is not active, as when ShellInput alone reloads during a run, which ends the run as in 8.
 12. Rpc reload while a run's command is being built: the reload completes at once, the call replies `operation_interrupted`, nothing starts and the `runId` stays unused.
 13. A run is admitted again with its spawn: a `shell.stop` that reached its `runId` first means it starts nothing and replies `stopped`; a run started meanwhile makes it `shell_busy`, and its `runId` used meanwhile `duplicate_run`.
 

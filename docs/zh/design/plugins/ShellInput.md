@@ -368,7 +368,8 @@ H1 到 H3 阻塞 ShellInput。S7 的另一半，即每次 spawn 时读取 exec s
 | 场景 | 序号顺序 | 结果 | 决策归属 |
 | --- | --- | --- | --- |
 | 结果在运行中轮次的下一次请求之前 | X < `step/model-start` | 随该请求被消费 | Loop |
-| 工具批次运行期间的结果 | X < `step/tool-result` | 在批次结果之后的下一次请求时被消费 | Loop |
+| 工具批次运行期间被应用的结果 | `input/applied` X < `step/tool-result` | 在批次结果之后的下一次请求时被消费 | Loop |
+| 批次结果之后才被应用的结果 | `step/tool-result` < `input/applied` X | 在应用之后 Loop 开始的第一次请求时被消费，因为 Loop 在分发批次结果时就决定了下一次请求：即下一个批次结果之后的请求，或下一轮的第一次请求 | InputQueue、Loop |
 | 空闲时的结果 | X，无轮次 | 待处理；在下一个 Queue 或 Steer 输入开启轮次时被消费；从不开启轮次 | InputQueue、Loop |
 | X 之前的轮次中断 | I < X | 运行不受影响；X 待处理直到下一轮 | Loop |
 | X 已应用，然后在消费前中断 | X < I | 待处理；由下一轮消费 | Loop |
@@ -428,7 +429,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 ## 附录 D. 验收
 
 1. 空闲时 `!echo hi`：一条带标记的 Append 输入；不开启轮次；下一个提示的第一次模型请求在提示之前包含它。
-2. 带工具批次的轮次中执行 `!`：在同一轮中、随批次结果之后的第一次请求被消费。
+2. 带工具批次的轮次中执行 `!`，且在批次运行期间被应用：在同一轮中、随批次结果之后的第一次请求被消费。
 3. `!!`：进度和结果到达调用方；Timeline 不变。
 4. 轮次停止不会停止运行；`shell.stop` 终止进程树（不留进程），并以部分输出记录 `status="stopped"`。
 5. 同一 Session 中的第二个 `shell.run` 返回 `shell_busy`；重复使用的 `runId` 返回 `duplicate_run`。
@@ -437,7 +438,7 @@ ShellInput 自己的错误（除注明外为 `-32000`）：
 8. 运行期间 Session 重载：进程树终止，不写任何内容，命令不会再次运行。
 9. 运行期间客户端断开：运行继续，其输入被记录。
 10. `!` 命令运行期间 Rpc 重载：重载立即完成，调用回复 `operation_interrupted`；命令继续运行，结束时其输入被记录。
-11. 没有装配 ShellInput 的进程对 `shell.run` 回复 `unknown_method`；装配了 ShellInput 时，该 Session 的 ShellInput 部件未激活期间 `shell.run` 回复 `service_reloading`。
+11. 没有装配 ShellInput 的进程对 `shell.run` 回复 `unknown_method`；装配了 ShellInput 时，该 Session 的 ShellInput 部件未激活期间 `shell.*` 回复 `service_reloading`，例如运行期间只重载 ShellInput 时，运行按第 8 条结束。
 12. 运行的命令正在构造时 Rpc 重载：重载立即完成，调用回复 `operation_interrupted`，什么都不启动，`runId` 保持未使用。
 13. 运行在 `spawn` 时再次准入：先到达该 `runId` 的 `shell.stop` 让它什么都不启动、回复 `stopped`；其间已启动的另一次运行让它回复 `shell_busy`，其间用掉了它的 `runId` 则回复 `duplicate_run`。
 

@@ -125,6 +125,10 @@ the command builder.
 `a_session_reload_terminates_the_run_without_writing`,
 `an_rpc_reload_before_the_spawn_starts_nothing`,
 `a_run_is_admitted_again_with_its_spawn`,
+`a_run_recorded_during_a_tool_batch_follows_its_result`,
+`a_closed_branch_refuses_the_write_but_not_the_run`,
+`reloading_shell_input_alone_ends_its_run`,
+`diagnostics_carry_only_the_run_id_and_outcome`,
 `the_caller_receives_progress_before_the_reply`,
 `progress_items_are_capped_and_count_what_they_leave_out`. Feature `testing`
 adds `shell_input::testing::hold_start`, which holds a run's command build open

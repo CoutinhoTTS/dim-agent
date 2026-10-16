@@ -2,12 +2,52 @@
 use super::*;
 use dim_agent_capabilities::{
     model_provider::ModelProviderPlugin, shell_input::testing::hold_start,
-    workspace_tools::WorkspaceToolsConfig,
+    timeline_tree::TreeCommands, workspace_tools::WorkspaceToolsConfig,
 };
+use dim_agent_runtime::SessionScope;
 use std::{
     os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
 };
+use tokio::time::Instant;
+
+/// What a test reaches inside the most recent Session: a plugin context, to
+/// restart ShellInput alone, and the Session's branch tree, to close a branch
+/// through its facade, as no RPC does.
+#[derive(Clone, Default)]
+struct Probe(Arc<std::sync::Mutex<Option<Probed>>>);
+struct Probed {
+    ctx: rutis::Ctx,
+    tree: Arc<TreeCommands>,
+}
+struct ProbePlugin {
+    scope: SessionScope,
+    probe: Probe,
+}
+impl TypedPlugin for ProbePlugin {
+    type Deps = InSession<TreeCommands>;
+    fn name(&self) -> &str {
+        "test.shell-probe"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        InSession(tree): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            *self.probe.0.lock().unwrap() = Some(Probed {
+                ctx: ctx.clone(),
+                tree,
+            });
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for ProbePlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
 
 /// A local-execution server, ShellInput included, with an isolated home whose
 /// exec shell is `/bin/sh`, and one Session working in `work`. A fixed model
@@ -16,11 +56,18 @@ struct Shell {
     server: RunningServer,
     client: Client,
     sid: String,
+    /// The Session's trace archive, when its creation asked for one.
+    trace: Option<String>,
+    probe: Probe,
     home: PathBuf,
     work: PathBuf,
 }
 impl Shell {
     async fn launch() -> Self {
+        Self::launch_with(json!({})).await
+    }
+    /// `session` adds to the `session.create` params.
+    async fn launch_with(session: Value) -> Self {
         let home = PathBuf::from("/tmp").join(format!("dsh-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -57,6 +104,12 @@ impl Shell {
         );
         dim_app_server::permission_rules::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
+        let probe = Probe::default();
+        let slot = probe.clone();
+        builder.session_plugin(move |scope| ProbePlugin {
+            scope: *scope,
+            probe: slot.clone(),
+        });
         let model = models.default_model().clone();
         let server = serve(
             builder,
@@ -81,18 +134,43 @@ impl Shell {
         .await
         .unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
-        let created = client.rpc("session.create", json!({"cwd": work})).await;
+        let mut params = json!({"cwd": work});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(session.as_object().unwrap().clone());
+        let created = client.rpc("session.create", params).await;
         let sid = created["result"]["sessionId"]
             .as_str()
             .unwrap_or_else(|| panic!("{created}"))
             .to_owned();
+        let trace = created["result"]["tracePath"].as_str().map(str::to_owned);
         Self {
             server,
             client,
             sid,
+            trace,
+            probe,
             home,
             work,
         }
+    }
+    /// Restarts the Session's ShellInput plugin and nothing else.
+    fn restart_shell_input(
+        &self,
+    ) -> rutis::BoxFuture<'static, Result<(), Arc<rutis::CordisError>>> {
+        let session = self.server.agent().unwrap().get_session(&self.sid).unwrap();
+        let plugins = session.diagnostics().unwrap().plugins;
+        let id = plugins
+            .iter()
+            .find(|plugin| plugin.name == "ShellInput")
+            .unwrap()
+            .id;
+        let ctx = self.probe.0.lock().unwrap().as_ref().unwrap().ctx.clone();
+        ctx.view(id).unwrap().restart()
+    }
+    fn tree(&self) -> Arc<TreeCommands> {
+        self.probe.0.lock().unwrap().as_ref().unwrap().tree.clone()
     }
     fn run_params(&self, run_id: &str, command: &str, mode: &str) -> Value {
         json!({"sessionId": self.sid, "runId": run_id, "command": command, "mode": mode})
@@ -131,6 +209,11 @@ impl Shell {
                 )
                 .await,
         );
+        self.history(after).await
+    }
+    /// Main-branch events after `after`, as published so far.
+    async fn history(&mut self, after: u64) -> Vec<Value> {
+        let sid = self.sid.clone();
         let page = self
             .client
             .rpc(
@@ -138,7 +221,10 @@ impl Shell {
                 json!({"sessionId": sid, "branchId": "main", "after": after, "limit": 1000}),
             )
             .await;
-        page["result"]["events"].as_array().unwrap().clone()
+        page["result"]["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{page}"))
+            .clone()
     }
     /// The recorded inputs among main-branch events after `after`.
     async fn recorded(&mut self, after: u64) -> Vec<Value> {
@@ -659,6 +745,203 @@ async fn a_recorded_run_is_one_append_input_for_the_next_request() {
     shell.shutdown().await;
 }
 
+/// Design D2: a run recorded and applied while a tool batch runs is consumed
+/// with the first model request after the batch result, in the same turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_recorded_during_a_tool_batch_follows_its_result() {
+    let mut shell = Shell::launch_with(
+        json!({"tools": ["exec"], "permissionPolicy": {"allowedTools": ["exec"]}}),
+    )
+    .await;
+    let sid = shell.sid.clone();
+    let before = shell.through().await;
+    let tool = json!({"command": "echo > tool.tmp && mv tool.tmp tool; while [ ! -f go ]; do sleep 0.02; done"});
+    assert_ok(
+        &shell
+            .client
+            .rpc(
+                "session.submit",
+                json!({"sessionId": sid, "branchId": "main", "text": format!("tool:exec {tool}")}),
+            )
+            .await,
+    );
+    written(&shell.work, "tool").await;
+    let reply = shell.run("during", "echo hi", "record").await;
+    let sequence = reply["result"]["recorded"]["sequence"].clone();
+    // Applied while the batch runs. Loop decides each request when it
+    // dispatches the batch result, so an input applied after that result
+    // would wait for the next request (design Appendix B).
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = shell.history(before).await;
+            let id = events
+                .iter()
+                .find(|event| event["sequence"] == sequence)
+                .map(|event| event["id"].clone());
+            if events.iter().any(|event| {
+                event["name"] == "applied" && id.as_ref() == Some(&event["data"]["input_id"])
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the input is applied");
+    std::fs::write(shell.work.join("go"), "").unwrap();
+    let events = shell.events(before).await;
+    let position = |matches: &dyn Fn(&Value) -> bool| {
+        events
+            .iter()
+            .position(matches)
+            .unwrap_or_else(|| panic!("{events:?}"))
+    };
+    let input = position(&|event| event["sequence"] == sequence);
+    let result = position(&|event| event["name"] == "tool-result");
+    let consumed = position(&|event| {
+        event["name"] == "consumed" && event["data"]["input_id"] == events[input]["id"]
+    });
+    let requests: Vec<_> = (0..events.len())
+        .filter(|at| events[*at]["name"] == "model-start")
+        .collect();
+    assert!(input < result && result < consumed, "{events:?}");
+    assert!(
+        requests.len() == 2 && requests[0] < input && consumed < requests[1],
+        "{events:?}"
+    );
+    let turns: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "turn")
+        .map(|event| &event["name"])
+        .collect();
+    assert_eq!(turns.len(), 2, "one turn: {events:?}");
+    shell.shutdown().await;
+}
+
+/// Design D7 (first half): closing the run's branch does not stop it; the
+/// write is refused and the reply carries the output with `recorded.error`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_branch_refuses_the_write_but_not_the_run() {
+    let mut shell = Shell::launch_with(
+        json!({"tools": ["branch"], "permissionPolicy": {"allowedTools": ["branch"]}}),
+    )
+    .await;
+    let sid = shell.sid.clone();
+    let at = shell.through().await;
+    let created = shell
+        .client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId": sid, "parentBranchId": "main", "at": at, "prompt": "child"}),
+        )
+        .await;
+    let child = created["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_owned();
+    let mut params = shell.run_params("held", WAITING, "record");
+    params["branchId"] = json!(child);
+    let held = shell.client.send("shell.run", params).await;
+    let pid = written(&shell.work, "pid").await;
+    shell.tree().get(&child).unwrap().close().await.unwrap();
+    assert!(alive(&pid));
+    std::fs::write(shell.work.join("go"), "").unwrap();
+    let reply = shell.client.response(held).await;
+    let result = &reply["result"];
+    assert_eq!(result["status"], "completed", "{reply}");
+    assert_eq!(result["output"], "started\nfinished\n");
+    let error = &result["recorded"]["error"];
+    assert_eq!(error["appError"], "session_closed", "{reply}");
+    assert!(error["message"].is_string());
+    shell.shutdown().await;
+}
+
+/// Design D11 (second half) and D8 for ShellInput alone: reloading only the
+/// plugin interrupts the call, terminates the tree (here one that ignores
+/// SIGTERM, so the old generation unloads for its grace) and writes nothing.
+/// Meanwhile the Session answers `shell.*` with `service_reloading`; the next
+/// generation then serves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reloading_shell_input_alone_ends_its_run() {
+    let mut shell = Shell::launch().await;
+    let sid = shell.sid.clone();
+    let before = shell.through().await;
+    let held = shell
+        .send_run(
+            "held",
+            "trap '' TERM; echo $$ > pid.tmp && mv pid.tmp pid; while true; do sleep 0.02; done",
+            "record",
+        )
+        .await;
+    let pid = written(&shell.work, "pid").await;
+    let restart = tokio::spawn(shell.restart_shell_input());
+    let reply = shell.client.response(held).await;
+    assert_eq!(app_error(&reply), "operation_interrupted", "{reply}");
+    let reply = shell
+        .client
+        .rpc("shell.list", json!({"sessionId": sid}))
+        .await;
+    assert_eq!(app_error(&reply), "service_reloading", "{reply}");
+    restart.await.unwrap().unwrap();
+    // The old generation's disposer waited for the run to end its tree.
+    assert!(!alive(&pid));
+    assert_eq!(shell.list().await, json!([]));
+    assert!(shell.recorded(before).await.is_empty());
+    let reply = shell.run("next", "echo next", "private").await;
+    assert_eq!(reply["result"]["output"], "next\n");
+    shell.shutdown().await;
+}
+
+/// Design A11: diagnostics carry one `shell.run` span per run with its runId
+/// and outcome, never the command or its output; only a recorded run's input
+/// holds them, as Timeline data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diagnostics_carry_only_the_run_id_and_outcome() {
+    let mut shell = Shell::launch_with(json!({"trace": true})).await;
+    let sid = shell.sid.clone();
+    let path = shell.trace.clone().unwrap();
+    for (run_id, mode) in [("one", "private"), ("two", "record")] {
+        // Markers no id or hex digest can contain.
+        let command = format!("echo {mode}-output-zqxw # {mode}-command-zqxw");
+        let reply = shell.run(run_id, &command, mode).await;
+        assert_eq!(reply["result"]["status"], "completed", "{reply}");
+    }
+    assert_ok(
+        &shell
+            .client
+            .rpc("session.close", json!({"sessionId": sid}))
+            .await,
+    );
+    let rows = read_trace(&path).await;
+    let spans: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row["record"]["kind"] == "span" && row["record"]["fields"]["operation"] == "shell.run"
+        })
+        .map(|row| &row["record"])
+        .collect();
+    for run_id in ["one", "two"] {
+        let ended = spans
+            .iter()
+            .find(|span| span["phase"] == "end" && span["fields"]["call_id"] == run_id)
+            .unwrap_or_else(|| panic!("{run_id}: {spans:?}"));
+        assert_eq!(ended["fields"]["outcome"], "completed:0");
+    }
+    for row in &rows {
+        let text = row.to_string();
+        let timeline = row["record"]["kind"] == "timeline";
+        assert!(
+            !text.contains("private-output-zqxw")
+                && !text.contains("private-command-zqxw")
+                && (timeline || !text.contains("zqxw")),
+            "{text}"
+        );
+    }
+    let recorded = |marker: &str| rows.iter().any(|row| row.to_string().contains(marker));
+    assert!(recorded("record-command-zqxw") && recorded("record-output-zqxw"));
+    shell.shutdown().await;
+}
+
 /// Design D9: a caller that disconnects does not stop its run, which is
 /// recorded when it ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -730,7 +1013,7 @@ async fn progress_until_reply(client: &mut Client, id: u64) -> (Vec<Value>, Valu
 
 /// Design D3 and A.1: the caller receives the output as progress while the
 /// command runs and before the reply, decoded and with control characters
-/// removed as in exec.
+/// removed as in exec, at most one item per 100 ms.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_caller_receives_progress_before_the_reply() {
     let mut shell = Shell::launch().await;
@@ -755,6 +1038,29 @@ async fn the_caller_receives_progress_before_the_reply() {
     let (progress, reply) = progress_until_reply(&mut shell.client, id).await;
     assert_eq!(progress, [json!({"text": "two\n"})]);
     assert_eq!(reply["result"]["output"], "one\ntwo\n");
+
+    // At most one item per 100 ms: a command writing every 20 ms streams a
+    // few items, not one per write, and they add up to the output.
+    let started = Instant::now();
+    let id = shell
+        .send_run(
+            "steady",
+            "i=0; while [ $i -lt 60 ]; do echo $i; sleep 0.02; i=$((i+1)); done",
+            "private",
+        )
+        .await;
+    let (progress, reply) = progress_until_reply(&mut shell.client, id).await;
+    let elapsed = started.elapsed().as_millis() as usize;
+    assert!(
+        progress.len() >= 3 && progress.len() <= elapsed / 100 + 2,
+        "{} items in {elapsed} ms",
+        progress.len()
+    );
+    let text: String = progress
+        .iter()
+        .map(|item| item["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(text, reply["result"]["output"].as_str().unwrap());
     shell.shutdown().await;
 }
 
