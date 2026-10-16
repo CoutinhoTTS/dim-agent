@@ -40,6 +40,10 @@ mod linux {
                 .enable_all()
                 .build()?
                 .block_on(terminal_controls()),
+            Some("--background-exit") => tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(background_exit()),
             Some("--tcp") => {
                 TcpStream::connect_timeout(&args[2].parse()?, Duration::from_millis(600))?
                     .write_all(PACKET)?;
@@ -278,6 +282,131 @@ mod linux {
             }
         })
         .await?;
+        Ok(())
+    }
+
+    async fn background_exit() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("dim-f5-background-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        let fixture = Fixture(root);
+        let readonly = fixture.0.join("readonly");
+        std::fs::create_dir(&readonly)?;
+        let platform = HostPlatform::current(ShellStatus::Unavailable {
+            code: EXEC_SHELL_UNAVAILABLE,
+            reason: "Explicit probe argv".into(),
+        })?;
+        let mut observations = Vec::new();
+        for mode in ["raw", "private-pid-parent-death", "private-pid-only"] {
+            let workspace = fixture.0.join(mode);
+            std::fs::create_dir(&workspace)?;
+            std::fs::write(workspace.join("heartbeat"), b"")?;
+            let prepare = |spec| {
+                if mode == "raw" {
+                    return spec;
+                }
+                let mut spec = isolated(spec, &readonly);
+                if mode == "private-pid-only" {
+                    spec.args.retain(|arg| arg != "--die-with-parent");
+                }
+                spec
+            };
+            let script = "(while :; do printf x >> heartbeat; sleep 0.05; done) > background.log 2>&1 & echo $! > child.pid; echo ready; while test ! -f release; do sleep 0.01; done";
+            let mut tree = platform.spawn(prepare(command(
+                &workspace,
+                Path::new("/bin/sh"),
+                vec!["-c".into(), script.into()],
+            )))?;
+            let mut line = String::new();
+            tokio::time::timeout(LIMIT, BufReader::new(tree.stdout()).read_line(&mut line))
+                .await??;
+            assert_eq!(line.trim(), "ready");
+            let namespace_pid = std::fs::read_to_string(workspace.join("child.pid"))?
+                .trim()
+                .parse::<i32>()?;
+            let pids = descendants()?;
+            let host_pid = pids
+                .iter()
+                .copied()
+                .find(|pid| {
+                    std::fs::read_to_string(format!("/proc/{pid}/status"))
+                        .ok()
+                        .and_then(|status| {
+                            status
+                                .lines()
+                                .find(|line| line.starts_with("NSpid:"))
+                                .and_then(|line| line.split_whitespace().last())
+                                .and_then(|pid| pid.parse::<i32>().ok())
+                        })
+                        == Some(namespace_pid)
+                })
+                .ok_or("Background child is absent from the probe's descendants")?;
+            std::fs::write(workspace.join("release"), b"")?;
+            let status = match tokio::time::timeout(LIMIT, tree.wait()).await {
+                Ok(status) => Some(status?),
+                Err(_) => {
+                    tree.terminate().await?;
+                    None
+                }
+            };
+            drop(tree);
+            let heartbeat = workspace.join("heartbeat");
+            let before = std::fs::read(&heartbeat)?.len();
+            let continued = tokio::time::timeout(Duration::from_millis(500), async {
+                loop {
+                    if std::fs::read(&heartbeat)?.len() > before {
+                        return Ok::<_, std::io::Error>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            let keeps_running = match continued {
+                Ok(result) => {
+                    result?;
+                    true
+                }
+                Err(_) => false,
+            };
+            let later = run(
+                &platform,
+                prepare(command(
+                    &workspace,
+                    Path::new("/bin/sh"),
+                    vec![
+                        "-c".into(),
+                        "kill -0 \"$1\"".into(),
+                        "pid-check".into(),
+                        namespace_pid.to_string().into(),
+                    ],
+                )),
+            )
+            .await?;
+            let observation = json!({
+                "mode":mode,"rootExitCode":status.and_then(|status| status.code()),
+                "rootWaitTimedOut":status.is_none(),"backgroundContinuesAfterWaitAndDrop":keeps_running,
+                "namespacePid":namespace_pid,"hostPid":host_pid,
+                "laterCommandCanAddressPid":later.status.success(),"recordedHostPids":pids
+            });
+            for &pid in &pids {
+                // SAFETY: only descendants recorded in this disposable probe are terminated.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+            gone(&pids).await?;
+            if mode == "raw" {
+                assert_eq!(observation["rootExitCode"], 0);
+                assert!(keeps_running && later.status.success(), "{observation}");
+            }
+            observations.push(observation);
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "scope":"actual HostPlatform wait/drop and redirected background work; no product integration or policy change",
+                "observations":observations
+            }))?
+        );
         Ok(())
     }
 

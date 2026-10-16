@@ -214,6 +214,40 @@ actual consumer admission/result flows remain product acceptance work. No bubble
 external-network routing, abstract UNIX-socket or other-kernel guarantee is measured. The machine
 is deleted after collecting results; the checked-in example reproduces the flows.
 
+## Linux bubblewrap normal exit and background compatibility
+
+Measured on 2026-10-16 in a disposable isolated Debian 13.7 / Linux 7.2.9 ARM64 machine,
+bubblewrap 0.12.0, Rust 1.98.1 and UID 501. Run the existing example with `--background-exit`.
+The raw control and two bubblewrap constructions use actual `HostPlatform::spawn`, root `wait`
+and handle drop. A background shell appends to a workspace heartbeat with stdout/stderr redirected;
+the command root waits for a fixture release file, then exits normally. The collector records
+only its descendants before releasing that root, observes later heartbeat growth, and invokes a
+fresh command with `kill -0` on the original `$!`. That operation observes identity without
+signalling another process. Cleanup terminates and verifies disappearance of the recorded PIDs.
+
+| Construction | Root exit | Heartbeat grows after wait/drop | Later command addresses original `$!` |
+| --- | --- | --- | --- |
+| Ordinary spawn | 0 | Yes | Yes |
+| Existing private namespaces with `--die-with-parent` | 0 | No | No |
+| Same arguments except no `--die-with-parent` | 0 | Yes | No |
+
+All root waits complete within five seconds. For the ordinary control, the printed child PID
+equals its host PID. Both namespace cases print PID 3, with distinct host PIDs; a later fresh
+namespace cannot address the surviving child by that printed PID. The namespace-only variant
+is an ablation, not a proposed weakening of the selected boundary. The ordinary control asserts
+continued execution and successful PID observation; the isolated cases report their actual result
+rather than asserting compatibility that has not been achieved. Linux example Clippy with
+`-D warnings` passes.
+
+This establishes a concrete incompatibility with [ShellInput A.2](plugins/ShellInput.md#a2-execution):
+the candidate arguments stop redirected background work on normal exit, and merely removing
+parent-death handling does not preserve the documented later-command stop method. It does not
+exercise actual ShellInput/WorkspaceTools policy loading, Session/App Server shutdown, another
+kernel or the proposed product environment filtering. No product argument, process lifetime,
+protocol, background registry or supervisor is changed. Resolve the authoritative compatibility
+contract before implementation. The machine has no host share or SSH agent and is deleted after
+collecting the results.
+
 ## Existing implementation and integration points
 
 | Existing owner | Relevant behavior |

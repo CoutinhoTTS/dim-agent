@@ -194,11 +194,21 @@ ordinary execution.
 [ShellInput A.2](plugins/ShellInput.md#a2-execution) permits `!cmd &` to
 finish the run while redirected background work outlives it, the Session and App Server.
 The native cancellation probe keeps its command root alive; it does not verify this normal-exit
-contract. In [bubblewrap 0.12.0's source](https://github.com/containers/bubblewrap/blob/v0.12.0/bubblewrap.c),
-the monitor reports the initial payload's exit while the namespace init reaps remaining children;
-`--die-with-parent` also binds processes to their parent lifetime. A private PID namespace changes
-the identity a command prints as `$!`. These semantics require an explicit compatibility decision
-and normal-exit flow coverage before selecting the final product arguments.
+contract. A separate [normal-exit calibration](host-platform-isolation-spike.md#linux-bubblewrap-normal-exit-and-background-compatibility)
+uses actual HostPlatform wait/drop and redirected background work on the same Linux baseline:
+
+| Construction | Root wait | Background executes after wait/drop | A later fresh command can address `$!` |
+| --- | --- | --- | --- |
+| Ordinary spawn control | Exit 0 | Yes | Yes |
+| Private PID namespace and `--die-with-parent` | Exit 0 | No | No |
+| Same boundary without `--die-with-parent` | Exit 0 | Yes | No |
+
+The selected candidate arguments therefore contradict P1's normal-exit background behavior.
+Removing parent-death handling alone is insufficient: the surviving child's namespace PID is
+not addressable from the next command's new namespace. No parent-death relaxation is adopted by
+this calibration. Product isolation arguments and P1's lifetime/manual-stop contract must be
+aligned before implementation. Session/App Server shutdown and product consumer admission are
+not exercised by this mechanism probe.
 
 Do not infer background survival from whole-tree cancellation, assume a namespace PID can be
 used by a later isolated command, or add a run supervisor/protocol to hide the mismatch. Verify

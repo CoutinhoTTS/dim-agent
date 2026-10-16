@@ -46,6 +46,8 @@ integration and platform acceptance are in the [F5 product design](../../../desi
 That proposed contract requires isolation by default on macOS/Linux and refuses command startup
 when the required policy or backend is missing. Unsupported Windows retains ordinary execution.
 It has no enable/disable setting and grants no implicit access to the cwd or host home.
+The Linux normal-exit probe demonstrates a P1 background-lifetime/PID incompatibility with the
+candidate arguments; the product design retains that compatibility gate before implementation.
 
 ## Command construction
 
