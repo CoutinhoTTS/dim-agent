@@ -1,7 +1,7 @@
 use crate::{Result, client::Client, display, session};
 use dim_agent_types::{
     BranchCreateData, BranchCreateFailedData, ContentBlock, InputBlock, InputMessageData, TextData,
-    ToolCompletedData, ToolResultData, ToolUseData,
+    ToolResultData, ToolUseData,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -136,16 +136,6 @@ fn markdown(session_id: &str, events: &[Value]) -> Result<String> {
                 fence(
                     &mut output,
                     &serde_json::to_string_pretty(&data.call.input)?,
-                    "json",
-                );
-            }
-            (Some("step"), Some("tool-completed")) => {
-                text_request = None;
-                let data = ToolCompletedData::deserialize(data)?;
-                output.push_str(&format!("\n\n### Tool completed: {}\n", data.call_id));
-                fence(
-                    &mut output,
-                    &serde_json::to_string_pretty(&data.result)?,
                     "json",
                 );
             }

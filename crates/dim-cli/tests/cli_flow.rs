@@ -510,9 +510,10 @@ fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
             json!({"sequence":4,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"Hello "}}),
             json!({"sequence":5,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"world"}}),
             json!({"sequence":6,"type":"step","name":"tool-use","data":{"turn_id":"t","request_id":"r","call":{"id":"call","name":"read","input":{"path":"file"}}}}),
-            json!({"sequence":7,"type":"step","name":"tool-result","data":{"turn_id":"t","request_id":"r","results":[{"call_id":"call","result":{"content":"```\n# must remain inside fence\n``````"}}]}}),
-            json!({"sequence":8,"type":"branch","name":"create","data":{"branch":"child","at":{"kind":"create"},"source":{"kind":"host","operation_id":"export-fixture"},"prompt":"child contents are elsewhere"}}),
-            json!({"sequence":9,"type":"branch","name":"create-failed","data":{"status":"failed","branch":"child","createEvent":8,"error":"fixture"}}),
+            json!({"sequence":7,"type":"step","name":"tool-completed","data":{"turn_id":"t","request_id":"r","call_event_id":"dispatch","call_id":"call","result":{"content":"```\n# must remain inside fence\n``````"}}}),
+            json!({"sequence":8,"type":"step","name":"tool-result","data":{"turn_id":"t","request_id":"r","results":[{"call_id":"call","result":{"content":"```\n# must remain inside fence\n``````"}}]}}),
+            json!({"sequence":9,"type":"branch","name":"create","data":{"branch":"child","at":{"kind":"create"},"source":{"kind":"host","operation_id":"export-fixture"},"prompt":"child contents are elsewhere"}}),
+            json!({"sequence":10,"type":"branch","name":"create-failed","data":{"status":"failed","branch":"child","createEvent":9,"error":"fixture"}}),
             json!({"sequence":15,"type":"branch","name":"create-failed","data":{"status":"cancelled","branch":"cancelled-child","createEvent":14,"reason":"fixture"}}),
         ];
         let returned = events.clone();
@@ -521,13 +522,13 @@ fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
             wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
             let first = wire.read("session.history");
             assert_eq!(first["params"],json!({"sessionId":"session","branchId":"main","after":0,"limit":256}));
-            wire.reply(&first,json!({"events":&returned[..9],"through":20,"nextAfter":12,"done":false}));
+            wire.reply(&first,json!({"events":&returned[..10],"through":20,"nextAfter":12,"done":false}));
             let second = wire.read("session.history");
             assert_eq!(second["params"]["after"],12); assert_eq!(second["params"]["through"],20);
             if mode == "history-error" {
                 wire.send(json!({"jsonrpc":"2.0","id":second["id"],"error":{"code":-32000,"message":"fixture history failure"}}));
             } else {
-                wire.reply(&second,json!({"events":&returned[9..],"through":20,"nextAfter":20,"done":true}));
+                wire.reply(&second,json!({"events":&returned[10..],"through":20,"nextAfter":20,"done":true}));
             }
         });
         let mut command = home.command();
@@ -584,6 +585,7 @@ fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
                 ] {
                     assert!(markdown.contains(text), "{text}: {markdown}");
                 }
+                assert_eq!(markdown.matches("# must remain inside fence").count(), 1);
                 assert_eq!(
                     fs::metadata(&path).unwrap().permissions().mode() & 0o777,
                     0o600

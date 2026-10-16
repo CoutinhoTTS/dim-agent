@@ -14489,7 +14489,6 @@
         "path InputBlock::Raw",
         "path InputMessageData::deserialize",
         "path TextData::deserialize",
-        "path ToolCompletedData::deserialize",
         "path ToolResultData::deserialize",
         "path ToolUseData::deserialize",
         "use dim_agent_types::BranchCreateData",
@@ -14497,7 +14496,6 @@
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::TextData",
-        "use dim_agent_types::ToolCompletedData",
         "use dim_agent_types::ToolResultData",
         "use dim_agent_types::ToolUseData"
       ]
