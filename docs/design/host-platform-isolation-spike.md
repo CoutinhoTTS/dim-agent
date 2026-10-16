@@ -62,7 +62,7 @@ inferred from that result. The checked-in fixture states its broader read allowa
 | `HostPlatform::spawn_pty` | Same spec enters the portable PTY implementation; the same wrapper starts successfully |
 | `workspace_tools/exec.rs` | Foreground/background execution both use `HostPlatform::spawn` |
 | `shell_session.rs` | Persistent shell startup uses `HostPlatform::spawn_pty` |
-| `workspace_tools::exec::build_process_spec` (S7) | Already constructs shell argv and environment; isolation need not duplicate shell parsing |
+| `HostPlatform::build_process_spec` (S7) | Reads the current shell and constructs argv/environment; isolation need not duplicate shell parsing |
 
 No event subscription is needed to launch or terminate this process: each caller owns its tree
 and already owns cancellation. Tool permission and approval stay at their existing boundaries.

@@ -14,7 +14,11 @@ use std::{
     process::{ExitStatus, Stdio},
     sync::Arc,
 };
-use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::{
+    io::AsyncReadExt,
+    process::{Child, ChildStderr, ChildStdout},
+    sync::Mutex,
+};
 use tokio_util::sync::CancellationToken;
 
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
@@ -126,9 +130,13 @@ pub struct HostPlatform {
     pub timezone: Option<String>,
     /// Environment of the service process at start; never a client's.
     pub env: Vec<(OsString, OsString)>,
-    /// Initial shell snapshot, also used by explicitly constructed platforms.
-    pub shell: ShellStatus,
+    shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
+}
+
+struct ResolvedShell {
+    config: Result<Option<Vec<u8>>, String>,
+    status: ShellStatus,
 }
 
 impl std::fmt::Debug for HostPlatform {
@@ -139,7 +147,10 @@ impl std::fmt::Debug for HostPlatform {
             .field("arch", &self.arch)
             .field("timezone", &self.timezone)
             .field("env", &self.env)
-            .field("shell", &self.shell)
+            .field(
+                "shell",
+                &self.shell.try_lock().ok().map(|shell| shell.status.clone()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -152,6 +163,12 @@ pub struct ProcessSpec {
     pub cwd: PathBuf,
     /// The complete child environment; nothing is inherited.
     pub env: Vec<(OsString, OsString)>,
+}
+
+#[derive(Debug)]
+pub struct ProcessSpecError {
+    pub code: &'static str,
+    pub reason: String,
 }
 
 impl HostPlatform {
@@ -170,19 +187,33 @@ impl HostPlatform {
             .into(),
             timezone: iana_time_zone::get_timezone().ok(),
             env,
-            shell,
+            shell: Arc::new(Mutex::new(ResolvedShell {
+                config: Ok(None),
+                status: shell,
+            })),
             shell_file: None,
         })
     }
     /// Reads the configured exec shell for this invocation without reloading
     /// the plugin. Explicitly constructed platforms keep their supplied shell.
     pub async fn exec_shell(&self) -> ShellStatus {
-        match &self.shell_file {
-            Some((storage, root, relative)) => {
-                resolve_shell(read_config(storage, *root, relative).await, &self.env).await
+        let mut resolved = self.shell.lock().await;
+        if let Some((storage, root, relative)) = &self.shell_file {
+            let config = read_config(storage, *root, relative).await;
+            if config != resolved.config
+                || matches!(
+                    resolved.status,
+                    ShellStatus::Unavailable {
+                        code: EXEC_SHELL_UNAVAILABLE,
+                        ..
+                    }
+                )
+            {
+                let status = resolve_shell(config.clone(), &self.env).await;
+                *resolved = ResolvedShell { config, status };
             }
-            None => self.shell.clone(),
         }
+        resolved.status.clone()
     }
     /// Starts `spec` as the root of its own process tree.
     pub fn spawn(&self, spec: ProcessSpec) -> io::Result<ProcessTree> {
@@ -197,6 +228,266 @@ impl HostPlatform {
             .stderr(Stdio::piped());
         native::spawn(command)
     }
+}
+
+const RUNTIME_BIN_ENV_KEYS: [&str; 5] = [
+    "DIMCODE_CLI_BIN",
+    "DIMCODE_UV_BIN",
+    "DIMCODE_PYTHON_BIN",
+    "DIMCODE_NODE_BIN",
+    "DIMCODE_BUNDLED_GIT_BIN",
+];
+const PLUGIN_BIN_DIRS_ENV: &str = "DIMCODE_PLUGIN_BIN_DIRS";
+
+impl HostPlatform {
+    /// Builds a command with the current exec shell and returns that same shell.
+    /// Tool policies and cwd argument resolution belong to the caller.
+    pub async fn build_process_spec(
+        &self,
+        command: &str,
+        cwd: &Path,
+    ) -> Result<(ProcessSpec, ExecShellRuntime), ProcessSpecError> {
+        let shell = match self.exec_shell().await {
+            ShellStatus::Available(shell) => shell,
+            ShellStatus::Unavailable { code, reason } => {
+                return Err(ProcessSpecError { code, reason });
+            }
+        };
+        let kind = shell.edition.kind();
+        if self.os == Os::Windows && kind == ShellKind::Cmd && windows_network_share(cwd) {
+            return Err(ProcessSpecError {
+                code: "EXEC_SHELL_CWD_UNSUPPORTED",
+                reason:
+                    "Command Prompt cannot use a network-share workspace as its current directory."
+                        .into(),
+            });
+        }
+        if !tokio::fs::metadata(cwd)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Err(ProcessSpecError {
+                code: "cwd_not_found",
+                reason: format!("Working directory not found: {}", cwd.display()),
+            });
+        }
+        let env = build_env(self);
+        let command = if kind == ShellKind::Posix {
+            prepend_runtime_path(
+                command,
+                &env,
+                self,
+                &shell.executable_path,
+                shell.edition,
+                cwd,
+            )
+            .await
+            .map_err(|reason| ProcessSpecError {
+                code: "EXEC_SHELL_PATH_MAPPING_FAILED",
+                reason,
+            })?
+        } else {
+            command.to_owned()
+        };
+        let args: &[&str] = match kind {
+            ShellKind::Posix => &["-lc"],
+            ShellKind::Powershell => &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
+            ShellKind::Cmd => &["/d", "/s", "/v:off", "/c"],
+        };
+        Ok((
+            ProcessSpec {
+                executable: shell.executable_path.clone(),
+                args: args
+                    .iter()
+                    .map(OsString::from)
+                    .chain([command.into()])
+                    .collect(),
+                cwd: cwd.to_owned(),
+                env,
+            },
+            shell,
+        ))
+    }
+}
+
+fn windows_network_share(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('/', "\\");
+    normalized.to_uppercase().starts_with("\\\\?\\UNC\\")
+        || (normalized.starts_with("\\\\") && !normalized.starts_with("\\\\?\\"))
+}
+
+/// TS `buildEnv`: the service start environment with forced overrides.
+fn build_env(platform: &HostPlatform) -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = platform.env.clone();
+    if platform.os == Os::Windows
+        && let Some(entry) = env.iter_mut().find(|(key, _)| {
+            key.to_str()
+                .is_some_and(|key| key.eq_ignore_ascii_case("PATH"))
+        })
+    {
+        entry.0 = "PATH".into();
+    }
+    let forced = [
+        ("TERM", "dumb"),
+        ("NO_COLOR", "1"),
+        ("PAGER", "cat"),
+        ("GIT_PAGER", "cat"),
+        ("GH_PAGER", "cat"),
+    ];
+    env.retain(|(key, _)| key != "FORCE_COLOR" && !forced.iter().any(|(name, _)| key == name));
+    env.extend(
+        forced
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+    );
+    env
+}
+
+fn env_str<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a str> {
+    crate::host_platform::env_var(env, key).and_then(|value| value.to_str())
+}
+
+/// Product runtime directories that a login shell may drop from `PATH`.
+fn runtime_path_entries(env: &[(OsString, OsString)], windows_paths: bool) -> Vec<String> {
+    let mut output: Vec<String> = vec![];
+    let mut push = |entry: String| {
+        if !output.contains(&entry) {
+            output.push(entry);
+        }
+    };
+    for key in RUNTIME_BIN_ENV_KEYS {
+        if let Some(value) = env_str(env, key).filter(|value| !value.is_empty())
+            && Path::new(value).is_absolute()
+        {
+            let path = Path::new(value);
+            push(path.parent().unwrap_or(path).to_string_lossy().into_owned());
+        }
+    }
+    if let Some(value) = env_str(env, PLUGIN_BIN_DIRS_ENV).map(str::trim) {
+        let separator = if windows_paths { ';' } else { ':' };
+        value
+            .split(separator)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty() && Path::new(entry).is_absolute())
+            .for_each(|entry| push(entry.to_owned()));
+    }
+    output
+}
+
+fn quote_posix(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// TS `prependRuntimePathForPosixCommand`.
+async fn prepend_runtime_path(
+    command: &str,
+    env: &[(OsString, OsString)],
+    platform: &HostPlatform,
+    shell: &Path,
+    edition: ShellEdition,
+    cwd: &Path,
+) -> Result<String, String> {
+    let git_bash = edition == ShellEdition::GitBash;
+    let entries = runtime_path_entries(env, git_bash);
+    if entries.is_empty() {
+        return Ok(command.to_owned());
+    }
+    let mapped = if git_bash {
+        map_git_bash_entries(&entries, platform, shell, env, cwd).await?
+    } else {
+        entries
+    };
+    let prefix: Vec<String> = mapped.iter().map(|entry| quote_posix(entry)).collect();
+    Ok(format!(
+        "export PATH={}:\"$PATH\"; {command}",
+        prefix.join(":")
+    ))
+}
+
+async fn map_git_bash_entries(
+    entries: &[String],
+    platform: &HostPlatform,
+    shell: &Path,
+    env: &[(OsString, OsString)],
+    cwd: &Path,
+) -> Result<Vec<String>, String> {
+    let cygpath = git_bash_cygpath(shell).ok_or_else(|| {
+        format!(
+            "Git Bash path converter is unavailable: {}",
+            shell.display()
+        )
+    })?;
+    let run = |args: [&str; 2]| {
+        capture(
+            platform,
+            ProcessSpec {
+                executable: cygpath.clone(),
+                args: args.iter().map(OsString::from).collect(),
+                cwd: cwd.to_owned(),
+                env: env.to_vec(),
+            },
+        )
+    };
+    let normalize = |value: &str| {
+        value
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    let mut output = vec![];
+    for entry in entries {
+        let result: Result<String, String> = async {
+            let mapped = run(["-u", entry]).await?.trim().to_owned();
+            if !mapped.starts_with('/') {
+                return Err(format!("cygpath returned a non-absolute path for {entry}"));
+            }
+            let bytes = entry.as_bytes();
+            let drive = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'\\' | b'/');
+            if drive || entry.starts_with("\\\\") {
+                let round_trip = run(["-w", &mapped]).await?.trim().to_owned();
+                if normalize(&round_trip) != normalize(entry) {
+                    return Err(format!("cygpath round-trip mismatch for {entry}"));
+                }
+            }
+            Ok(mapped)
+        }
+        .await;
+        output.push(result.map_err(|error| {
+            format!("Failed to map bundled runtime paths for Git Bash: {error}")
+        })?);
+    }
+    Ok(output)
+}
+
+fn git_bash_cygpath(bash: &Path) -> Option<PathBuf> {
+    let mut current = bash.parent()?;
+    for _ in 0..4 {
+        let git = current.join("cmd").join("git.exe");
+        let cygpath = current.join("usr").join("bin").join("cygpath.exe");
+        if git.is_file() && cygpath.is_file() {
+            return Some(cygpath);
+        }
+        current = current.parent()?;
+    }
+    None
+}
+
+/// Runs a product helper and returns its stdout.
+async fn capture(platform: &HostPlatform, spec: ProcessSpec) -> Result<String, String> {
+    let mut tree = platform.spawn(spec).map_err(|error| error.to_string())?;
+    let mut stdout = tree.stdout();
+    drop(tree.stderr());
+    let mut bytes = vec![];
+    let read = stdout.read_to_end(&mut bytes).await;
+    let status = tree.wait().await.map_err(|error| error.to_string())?;
+    read.map_err(|error| error.to_string())?;
+    if !status.success() {
+        return Err(format!("converter exited with {status}"));
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
 /// A variable of an environment snapshot; names are case-insensitive on Windows.
@@ -308,27 +599,22 @@ impl TypedPlugin for HostPlatformPlugin {
         (When(storage),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let config = match (&self.config.exec_shell_file, &storage) {
-                (Some((root, relative)), Some(storage)) => {
-                    read_config(storage, *root, relative).await
-                }
-                _ => Ok(None),
-            };
-            let env: Vec<_> = std::env::vars_os().collect();
-            let shell = resolve_shell(config, &env).await;
-            let mut platform = HostPlatform::current(shell)
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
-            platform.shell_file = self
+            let shell_file = self
                 .config
                 .exec_shell_file
-                .as_ref()
-                .map(|(root, relative)| {
-                    (
-                        storage.expect("FileStorage is a declared dependency"),
-                        *root,
-                        relative.clone(),
-                    )
-                });
+                .clone()
+                .zip(storage)
+                .map(|((root, relative), storage)| (storage, root, relative));
+            let config = match &shell_file {
+                Some((storage, root, relative)) => read_config(storage, *root, relative).await,
+                None => Ok(None),
+            };
+            let env: Vec<_> = std::env::vars_os().collect();
+            let shell = resolve_shell(config.clone(), &env).await;
+            let mut platform = HostPlatform::current(shell)
+                .map_err(|error| CordisError::PluginFailed(error.into()))?;
+            platform.shell_file = shell_file;
+            platform.shell.lock().await.config = config;
             ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
             Ok(Effect::Done)
         })
@@ -379,6 +665,20 @@ pub async fn resolve_shell(
             };
         }
     };
+    #[cfg(unix)]
+    let detected = {
+        let env = env.to_vec();
+        match tokio::task::spawn_blocking(move || native::detect(&env)).await {
+            Ok(detected) => detected,
+            Err(error) => {
+                return ShellStatus::Unavailable {
+                    code: EXEC_SHELL_UNAVAILABLE,
+                    reason: format!("Failed to detect command shells: {error}"),
+                };
+            }
+        }
+    };
+    #[cfg(windows)]
     let detected = native::detect(env).await;
     let selected = match &explicit {
         Some(path) => detected
@@ -567,7 +867,7 @@ mod unix {
             .map(|(_, edition)| *edition)
     }
 
-    pub async fn detect(env: &[(OsString, OsString)]) -> Detection {
+    pub fn detect(env: &[(OsString, OsString)]) -> Detection {
         let env_login = env_var(env, "SHELL")
             .and_then(OsStr::to_str)
             .map(str::trim)
@@ -1351,13 +1651,13 @@ pub async fn kill_job(pid: u32) -> io::Result<()> {
 impl HostPlatform {
     /// Resolves the persistent shell: bash, zsh, pwsh, or Windows PowerShell.
     /// Other shells fall back per the platform rules.
-    pub fn persistent_shell(&self) -> ShellStatus {
-        match &self.shell {
+    pub async fn persistent_shell(&self) -> ShellStatus {
+        match self.exec_shell().await {
             ShellStatus::Available(runtime) => match runtime.edition {
                 ShellEdition::Bash
                 | ShellEdition::Zsh
                 | ShellEdition::Pwsh
-                | ShellEdition::WindowsPowershell => ShellStatus::Available(runtime.clone()),
+                | ShellEdition::WindowsPowershell => ShellStatus::Available(runtime),
                 _ => self.fallback_persistent_shell(),
             },
             ShellStatus::Unavailable { .. } => self.fallback_persistent_shell(),
