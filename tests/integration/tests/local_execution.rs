@@ -15,7 +15,7 @@ use dim_agent_capabilities::{
     workspace_tools::{
         self, WorkspaceToolsConfig,
         background::{BackgroundExec, WAKE_RESULT_TAG, WAKE_TASK_TAG},
-        exec::{Decoder, build_process_spec, truncate_preview},
+        exec::{Decoder, truncate_preview},
     },
 };
 use dim_agent_runtime::*;
@@ -239,21 +239,15 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
-    let mut platform = HostPlatform::current(ShellStatus::Unavailable {
-        code: EXEC_SHELL_UNAVAILABLE,
-        reason: String::new(),
-    })
-    .unwrap();
+    let mut env: Vec<_> = std::env::vars_os().collect();
+    env.retain(|(key, _)| key != "SHELL");
+    env.push(("SHELL".into(), "/bin/sh".into()));
+    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
     platform.env.extend(
         extra
             .iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value))),
     );
-    // A fixed POSIX shell keeps the tests independent of the login shell.
-    let mut env = platform.env.clone();
-    env.retain(|(key, _)| key != "SHELL");
-    env.push(("SHELL".into(), "/bin/sh".into()));
-    platform.shell = resolve_shell(Ok(None), &env).await;
     platform
 }
 
@@ -480,13 +474,13 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let session = harness.session().await;
 
     // A bad preference leaves the service active and is exposed as refusal data.
-    let shell = platform.exec_shell().await;
-    let (reason, refusal_code) = build_process_spec(&platform, &shell, "true", &harness.cwd)
+    let refusal = platform
+        .build_process_spec("true", &harness.cwd)
         .await
         .err()
         .unwrap();
-    assert_eq!(refusal_code, EXEC_SHELL_CONFIG_INVALID);
-    assert!(reason.contains("Invalid exec shell config"));
+    assert_eq!(refusal.code, EXEC_SHELL_CONFIG_INVALID);
+    assert!(refusal.reason.contains("Invalid exec shell config"));
 
     // Both callers observe each file edit without reloading the service or Session.
     for (index, executable) in ["/bin/sh", "/bin/bash"].into_iter().enumerate() {
@@ -495,12 +489,13 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
             json!({"version": 1, "executablePath": executable}).to_string(),
         )
         .unwrap();
-        let shell = platform.exec_shell().await;
         let command = "printf '%s' \"$0\"";
-        let spec = build_process_spec(&platform, &shell, command, &harness.cwd)
+        let (spec, shell) = platform
+            .build_process_spec(command, &harness.cwd)
             .await
             .unwrap();
         assert_eq!(spec.executable, PathBuf::from(executable));
+        assert_eq!(shell.executable_path, spec.executable);
         let mut process = platform.spawn(spec).unwrap();
         let mut output = Vec::new();
         process.stdout().read_to_end(&mut output).await.unwrap();
@@ -525,13 +520,13 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     std::fs::write(&config, r#"{"version":1,"executablePath":"/missing/sh"}"#).unwrap();
     let marker = harness.cwd.join("must-not-run");
     let command = "touch must-not-run";
-    let shell = platform.exec_shell().await;
-    let (reason, refusal_code) = build_process_spec(&platform, &shell, command, &harness.cwd)
+    let refusal = platform
+        .build_process_spec(command, &harness.cwd)
         .await
         .err()
         .unwrap();
-    assert_eq!(refusal_code, EXEC_SHELL_UNAVAILABLE);
-    assert!(reason.contains("/missing/sh"));
+    assert_eq!(refusal.code, EXEC_SHELL_UNAVAILABLE);
+    assert!(refusal.reason.contains("/missing/sh"));
     harness
         .run(&session, &[("exec", json!({"command": command}))])
         .await;
@@ -690,11 +685,11 @@ fn exit_drains_output_even_when_offload_is_slow() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unavailable_shell_fails_exec_without_running_it() {
-    let mut platform = platform(&[]).await;
-    platform.shell = ShellStatus::Unavailable {
+    let platform = HostPlatform::current(ShellStatus::Unavailable {
         code: EXEC_SHELL_UNAVAILABLE,
         reason: "Selected command shell is unavailable: /opt/zsh".into(),
-    };
+    })
+    .unwrap();
     let harness = Harness::new(platform, Hook::None).await;
     let session = harness.session().await;
     let marker = harness.cwd.join("a");
