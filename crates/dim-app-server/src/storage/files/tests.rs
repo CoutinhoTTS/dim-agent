@@ -1,9 +1,11 @@
 //! Interleavings the public service cannot produce on demand (session-files
 //! §6): a hook runs between the file write and txn 2, and sweeps run where
 //! the test decides instead of in the background. The fork step is S5c's,
-//! run here inside a transaction as S5c's fork will run it.
+//! run here inside a transaction as S5c's fork will run it. A second hook
+//! stops a Session delete between its output removal and its row
+//! transaction, as a crash would (S5c §4).
 use super::*;
-use crate::storage::SqliteTimelineStore;
+use crate::storage::{SessionStore, SqliteTimelineStore};
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_runtime::{SessionConfig, TimelineStore, capability_plugin};
 use std::path::PathBuf;
@@ -28,6 +30,20 @@ fn on_commit(session_id: &str, hook: impl FnOnce() + Send + 'static) {
         .lock()
         .unwrap()
         .push((session_id.into(), Box::new(hook)));
+}
+
+/// Sessions whose next delete stops after its output removal.
+static STOP_AFTER_OUTPUT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub(super) fn after_output_removal(session_id: &str) -> dim_agent_runtime::Result<()> {
+    let mut stops = STOP_AFTER_OUTPUT.lock().unwrap();
+    match stops.iter().position(|stopped| stopped == session_id) {
+        Some(index) => {
+            stops.swap_remove(index);
+            Err(error("stopped after the output removal"))
+        }
+        None => Ok(()),
+    }
 }
 
 struct Fixture {
@@ -243,5 +259,86 @@ async fn puts_ended_before_txn_2_are_abandoned_and_swept() {
     assert!(fixture.files.0.sweep().await);
     assert!(fixture.rows().is_empty());
     assert!(fixture.entries().is_empty());
+    fixture.close().await;
+}
+
+/// S5c §4 and acceptance 9: a delete stopped after its output removal
+/// leaves every row and no output; its retry removes the rows and releases
+/// the Session's files, and the next generation's first put sweeps them.
+#[tokio::test]
+async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
+    let fixture = Fixture::new().await;
+    let store = SessionStore::new(fixture.db.clone(), fixture.root.clone(), 0);
+    let output = |id: &str| fixture.home.join("command-output").join(id);
+    fixture.session("deleted").await;
+    fixture.session("kept").await;
+    let stored = fixture
+        .put("deleted", CancellationToken::new())
+        .await
+        .unwrap();
+    std::fs::create_dir_all(output("deleted").join("nested")).unwrap();
+    std::fs::write(output("deleted").join("nested/exec.log"), b"output").unwrap();
+    std::fs::create_dir_all(output("kept")).unwrap();
+    let sessions = || {
+        fixture
+            .connection()
+            .prepare("SELECT session_id FROM agent_sessions UNION ALL SELECT session_id FROM timeline_branches ORDER BY 1")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+
+    // Stopped after the removal: every row stays, the output is gone.
+    STOP_AFTER_OUTPUT.lock().unwrap().push("deleted".into());
+    assert!(store.delete_session("deleted").await.is_err());
+    assert_eq!(sessions(), ["deleted", "deleted", "kept", "kept"]);
+    assert_eq!(fixture.rows(), [format!("{}|-|1", stored.file_id)]);
+    assert!(!output("deleted").exists());
+    fixture
+        .timeline
+        .branches("deleted")
+        .await
+        .expect("the Session still loads without its output");
+
+    // The retry removes every row; the released file waits for a sweep.
+    assert!(store.delete_session("deleted").await.unwrap());
+    assert_eq!(sessions(), ["kept", "kept"]);
+    assert_eq!(fixture.rows(), [format!("{}|-|0", stored.file_id)]);
+    assert_eq!(fixture.entries(), std::slice::from_ref(&stored.file_id));
+    assert!(output("kept").exists());
+    // Deleting it again, or an unknown id, finds nothing to remove.
+    assert!(!store.delete_session("deleted").await.unwrap());
+    assert!(!store.delete_session("unknown").await.unwrap());
+    assert_eq!(sessions(), ["kept", "kept"]);
+
+    // The next generation's first put sweeps what the delete released.
+    let next = SessionFiles::new(
+        fixture.db.clone(),
+        fixture.root.clone(),
+        0,
+        Arc::new(Notify::new()),
+    );
+    next.start();
+    let kept = next
+        .put(
+            "kept".into(),
+            "paste.txt".into(),
+            b"kept".to_vec(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..500 {
+        if fixture.rows() == [format!("{}|-|1", kept.file_id)] {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(fixture.rows(), [format!("{}|-|1", kept.file_id)]);
+    assert_eq!(fixture.entries(), [kept.file_id]);
+    next.close().await;
+    drop(store);
     fixture.close().await;
 }

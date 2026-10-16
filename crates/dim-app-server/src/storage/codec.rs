@@ -45,6 +45,29 @@ struct WireStep {
     result: Option<WireDraft>,
 }
 
+impl References {
+    fn hashes(&self) -> impl Iterator<Item = &str> {
+        self.messages
+            .iter()
+            .chain(&self.tools)
+            .chain(&self.system)
+            .map(String::as_str)
+    }
+}
+impl WireEvent {
+    /// The content rows this event and its before trace reference.
+    pub(super) fn references(&self) -> impl Iterator<Item = &str> {
+        let drafts = self.trace.iter().flat_map(|trace| {
+            std::iter::once(&trace.original)
+                .chain(trace.steps.iter().filter_map(|step| step.result.as_ref()))
+        });
+        self.refs
+            .iter()
+            .chain(drafts.filter_map(|draft| draft.refs.as_ref()))
+            .flat_map(References::hashes)
+    }
+}
+
 enum Content {
     Message(Arc<Message>),
     Tools(Arc<Vec<ToolDefinition>>),

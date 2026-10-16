@@ -709,9 +709,13 @@ async fn run_connection(
                                             "session.history",
                                             "session.input_lookup",
                                             "session.create",
+                                            "session.delete",
                                             "session.model.progress",
                                             "session.methods",
                                         ]);
+                                        if hub.config().database_path.is_some() {
+                                            features.push("session.fork");
+                                        }
                                     }
                                     if local && hub.config().local_execution() {
                                         features.extend(LOCAL_EXECUTION_METHODS);

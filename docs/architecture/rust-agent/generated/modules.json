@@ -9989,6 +9989,13 @@
       ]
     },
     {
+      "from": "dim_app_server::@bin:dim-app-server",
+      "to": "dim_app_server::storage",
+      "references": [
+        "path dim_app_server::storage::COMMAND_OUTPUT_DIRECTORY"
+      ]
+    },
+    {
       "from": "dim_app_server::agent_records",
       "to": "dim_agent_runtime::error",
       "references": [
@@ -10013,6 +10020,13 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path dim_agent_capabilities::history::validate_context_boundary"
       ]
     },
     {
@@ -10104,7 +10118,17 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_types::events",
       "references": [
+        "path EventKind::BranchResume",
+        "path EventKind::BranchStart",
+        "path EventKind::ExecEnded",
+        "path EventKind::ExecStarted",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
+        "path EventKind::StopInterrupt",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::EventKind"
       ]
@@ -10856,8 +10880,10 @@
         "path Call::Close",
         "path Call::Contributed",
         "path Call::Create",
+        "path Call::Delete",
         "path Call::Detach",
         "path Call::ExecStop",
+        "path Call::Fork",
         "path Call::Hello",
         "path Call::History",
         "path Call::Idle",
@@ -10879,6 +10905,7 @@
         "path ConfigurationResult",
         "path Create",
         "path CreateResult",
+        "path ForkResult",
         "path ModelUpdateResult",
         "path Notification::Progress",
         "path Outbound::notice",
@@ -10894,6 +10921,7 @@
         "path Reply::Contributed",
         "path Reply::Create",
         "path Reply::ExecEnded",
+        "path Reply::Fork",
         "path Reply::List",
         "path Reply::McpState",
         "path Reply::ModelUpdate",
@@ -13826,9 +13854,17 @@
     },
     {
       "from": "dim_app_server::storage::files",
+      "to": "dim_app_server::storage",
+      "references": [
+        "path super::COMMAND_OUTPUT_DIRECTORY"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files",
       "to": "dim_app_server::storage::files::tests",
       "references": [
         "mod tests",
+        "path tests::after_output_removal",
         "path tests::before_commit"
       ]
     },
@@ -13876,6 +13912,13 @@
     },
     {
       "from": "dim_app_server::storage::files::tests",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::files::tests",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "use dim_agent_runtime::TimelineStore"
@@ -13903,8 +13946,10 @@
       "from": "dim_app_server::storage::files::tests",
       "to": "dim_app_server::storage::timeline",
       "references": [
+        "path SessionStore::new",
         "path SqliteTimelineStore",
         "path SqliteTimelineStore::new",
+        "use crate::storage::SessionStore",
         "use crate::storage::SqliteTimelineStore"
       ]
     },
@@ -13978,6 +14023,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path Result",
         "use dim_agent_runtime::AgentError",
@@ -14055,9 +14101,11 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::files",
       "references": [
+        "path SessionFiles",
         "path SessionFiles::new",
         "path files",
         "path files::release",
+        "path files::share",
         "use super::files",
         "use super::files::SessionFiles"
       ]
@@ -14716,6 +14764,18 @@
     {
       "module": "dim_app_server::@bin:dim-app-server::pipe_client",
       "path": "OwnedHandle::from_raw_handle"
+    },
+    {
+      "module": "dim_app_server::agents",
+      "path": "ExecStatus::Cancelled"
+    },
+    {
+      "module": "dim_app_server::agents",
+      "path": "InputMode::Append"
+    },
+    {
+      "module": "dim_app_server::agents",
+      "path": "InterruptScope::Branch"
     },
     {
       "module": "dim_app_server::managed_oauth",
