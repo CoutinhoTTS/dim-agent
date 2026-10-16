@@ -39,8 +39,10 @@ per-call lookup. Rpc's generic Session-method dispatch does not implement modes.
 - `Prompt::open` already preserves System entries and the adopted model on resume
   and child creation. No opening/recovery extension is needed.
 - PromptSources' periodic checks already refresh project/user instructions,
-  environment and date. `Branch::context(branch.sequence())` exposes a fixed
-  published context prefix without another state service.
+  environment and date.
+- `Branch::get` reads a capability's published StateCell. The existing
+  `PromptSnapshot` contains prompt entries and revisions, but no adopted model
+  configuration; F3 adds that derived value to this owner-held snapshot.
 
 ## Model parameters
 
@@ -55,7 +57,7 @@ session.model.update {
 
 Both target fields are present or both absent; partial targets and explicit null
 are invalid. Explicit-target requests keep their current semantics. Without a
-target, read the current adopted configuration at a published prefix and apply
+target, read the current adopted configuration from Prompt's branch snapshot and apply
 only supplied preferences to that captured base. Other configuration values remain
 unchanged. Provider owns validation and native reasoning-off/tier mapping; the CLI
 does not reconstruct complete preferences from provider-specific request fields.
@@ -76,6 +78,15 @@ fail without adoption; no value is guessed from a model name.
 protocol supporting this preference. Other tier names do not implicitly mean fast
 mode. Effort, token limits and other settings from the captured base are retained.
 There is no persisted `fast` flag.
+
+The snapshot field uses the existing `ModelConfiguration` type. Prompt's
+projection updates it from adopted `context/configured` facts, and initializes it
+from the existing context/checkpoint reconstruction when a branch opens or
+restores. `Branch::get::<PromptSnapshot>()` supplies the latest published value;
+a missing or reloading state follows the existing unavailable/error behavior.
+Preference commands do not call `Branch::context`, replay history or fill missing
+configuration with defaults. This adds no service key, runtime state, persisted
+field or second configuration type.
 
 ## Agent configuration adoption
 
@@ -145,8 +156,14 @@ One CLI awaits each command before sending another command/input. Across clients
 a preference candidate can be prepared from a prefix preceding another client's
 change; Prompt ordering can then adopt that candidate's older base model/settings.
 This is a known limit, not a concurrent patch guarantee. Record it for consolidated
-configuration design rather than adding revisions, CAS, retries, a global lock or
-another serialization layer. No speculative core requirement follows from it.
+configuration design. Moving the read into Prompt's queue would also require
+validating the delta against whichever model that queue then contains. The
+current Provider operation asynchronously resolves catalog/protocol metadata in
+the App Server and returns a complete typed selection; Prompt's queue accepts
+that selection, not Provider's business preference type or a resolver callback.
+Adding a Provider dependency or a new deferred validation/patch contract is not
+part of this design. Keep the captured-candidate semantics without revisions,
+CAS, retries, a global lock or another serialization layer.
 
 Errors reuse existing invalid-parameter, Agent-unknown, model/provider,
 configuration-superseded, reload/interruption and Session-closed contracts.
@@ -184,12 +201,13 @@ become model input; headless prompt/stdin content keeps its literal meaning.
 | --- | --- |
 | Provider / current model-update entry | Apply preferences to an adopted base when no target is supplied; preserve explicit-target behavior. |
 | Agents Session entry | Resolve a profile and submit prompt/model through one contributed method. |
-| Prompt | Accept frozen sources through its current command/adoption path. |
+| Prompt | Accept frozen sources through its current command/adoption path; expose adopted ModelConfiguration in its existing published snapshot. |
 | PromptSources | Reuse System-entry construction and refresh dynamic sources only. |
 | CLI | Three commands, choice display and replies. |
 
 New public content is the absent-target model-update semantics, the Agent Session
-method and Prompt's resolved-source operation. Each serves the operations above.
+method, Prompt's resolved-source operation and its derived configuration snapshot
+field. Each serves the operations above.
 No core port, durable event, persistence format, loader option, lifecycle stage,
 dependency manager or general configuration registry is added.
 
@@ -199,6 +217,9 @@ adoption; Prompt lifecycle checks atomic adoption, supersession, failure, unchan
 and restoration; CLI binary/PTY flows check routing and recovery. Include absent
 and present profile models, empty prompts, unchanged tools/permissions/owner,
 refresh after switching, child cut inheritance and an already bound request.
+Verify that preference reads use the published snapshot after adoption and
+restore, without history replay on each command; concurrent clients retain the
+documented complete-candidate ordering rather than a delta-merge guarantee.
 Do not test private queue/helper calls. Run graph/check when implementing the
 Session entry registration, not for this design document.
 
@@ -218,7 +239,7 @@ supplies immutable content. Neither owns another module's state.
 | §4.4 | No core business branch; Provider owns mapping and Prompt owns adoption. |
 | §4.5 | ConfigurationPublisher commits prompt/model facts atomically. |
 | §4.6 | Context follows existing adopted configuration and consumed inputs/results. |
-| §4.7 | Public profiles, model resolution, branch context and Prompt operations. |
+| §4.7 | Public profiles, model resolution, published Prompt state and Prompt operations. |
 | §4.8 | Existing infrastructure suffices; no mechanism-owner requirement. |
 | §4.9 | Only adopted facts are durable; names, choices and replies remain UI data. |
 | §1 / D1 | Process catalogs, Session entry and branch state keep their owners; App Server adds only the Agents entry. |
