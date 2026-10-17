@@ -9,7 +9,8 @@ Web 是一个 Session 插件，以两个按工具名作 key 的 Session 级 `too
 ```mermaid
 flowchart LR
   subgraph PROC["进程"]
-    Settings["Settings：web 业务来源、凭据引用解析器"]
+    Settings["Settings：web 业务来源"]
+    Credentials["宿主凭据存储：credentials（若配置）"]
   end
   subgraph SESS["Session"]
     Web["Web：toolContribution web_search、web_fetch"]:::new
@@ -18,7 +19,8 @@ flowchart LR
   subgraph BR["分支"]
     Exec["ToolBinding、ToolExecutor、Approval、Permission"]
   end
-  Web -->|"使用时读取来源 web，解析 secretRef"| Settings
+  Web -->|"使用时读取来源 web"| Settings
+  Web -->|"按调用解析 secretRef"| Credentials
   ToolRegistry -.->|"分支首次初始化时接入 toolContribution"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall)、取消请求"| Web
@@ -27,11 +29,15 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Web` | Session（仅启用时安装） | Settings 来源 `web` 与凭据引用解析器；诊断通道 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
+| `Web` | Session（仅启用时安装） | 已具名的 `settings` 与 `credentials`；缺失保持既有 Pending 语义 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
 
-**依赖的契约：** `toolContribution`（附录 A.1）；Settings 业务来源与凭据引用解析器；由 Permission 读取的 `ToolDefinition.risk = "network"`（既有，[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。**本文定义的契约：** 工具名称、参数与结果格式；`web` 业务文档。诊断通道是既有的类型化服务。Settings 来源目前只通过 Rust 的 `BusinessDocument` 绑定存在；语言中立的 `settings` 服务和凭据引用解析器是尚未实现的 Settings 补充（S8b，[总体设计 §6.4](../overview.md#64-约定) 与[附录 B.2](../overview.md#b2-app-server-进程插件)）。将它们按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
+**依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)、`credentials.resolve` 及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings 与具名凭据绑定，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
 
-**重载。** Web 只依赖外层作用域（Settings）。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 在分支初始化首次读取注册表时接入 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行，Web 的工具在下次重载前不可用；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
+Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Session row 入口；不在 App Server 增加业务代码、注册表或宿主端口。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
+
+产品凭据存储提供者仍是 #118 的未决项。`CredentialsHost::provide` 已能让 embedding host 提供具名解析器，但这不代表默认产品已有存储。rutis 只把 row 的必需 `inject` 服务租入 Node；未声明的 `ctx.use` 不是对原生服务的可选查找。当前方案声明 `settings` 与 `credentials`：解析器缺失时整个 Web row 保持 Pending，不改装配等待或增加热接入；原生 Session 照常工作。先用测试宿主的解析器验证协议，产品启用仍受 #118 约束。
+
+**重载。** Web 只依赖外层进程服务（Settings 与凭据解析）。启用、禁用或升级 Web，或 Settings/凭据服务重载，只重载 Web：ToolRegistry 在分支初始化首次读取注册表时接入 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行，Web 的工具在下次重载前不可用；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
 **节点。** 请求从承载该 Session 的 App Server 进程发出，而非从 Session 的资源节点发出（A2）。
 
@@ -153,7 +159,80 @@ sequenceDiagram
 | `web_fetch` | `toolContribution`（Session，key `web_fetch`），风险 `network` | 抓取一个公开的 `http(s)` URL；带分页的有界文本切片 |
 | `web` 来源 | Web 的 Settings 来源中的业务配置，使用时读取 | 搜索服务、私有主机例外、代理 |
 
-没有 Session 方法、没有 `managementMethods`，也没有 CLI 子命令：配置经 Settings 的客户端方法 `settings.read`/`settings.update`（S8b，尚未实现）与 `/settings` 完成。细节见附录 A。
+没有 Session 方法、`managementMethods` 或 CLI 子命令：受保护客户端经已实现的 `settings.read`/`settings.update` 修改配置，不假设已有 `/settings` 界面。细节见附录 A。
+
+### 6.1 C4 row 与来源
+
+Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `provides`，宿主使用同一份 row。row id `web` 也是来源所有者及 `credentials.resolve` 的 owner；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
+
+```json
+{
+  "id": "web",
+  "name": "/absolute/web/index.ts",
+  "config": {},
+  "provides": {
+    "toolContribution:web_search": {
+      "declaration": "sync",
+      "execute": "async"
+    },
+    "toolContribution:web_fetch": {
+      "declaration": "sync",
+      "execute": "async"
+    }
+  },
+  "settings": [
+    {
+      "source": "web",
+      "userFile": "web.json",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "search_service": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "endpoint": {
+                "type": "string",
+                "format": "uri"
+              },
+              "secretRef": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "allow_private_hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "proxy": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "userOnly": [
+        "/allow_private_hosts"
+      ]
+    }
+  ]
+}
+```
+
+插件声明 `inject: ["settings", "credentials"]`，apply 只登记工具和资源清理；`declaration()` 同步返回，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:{user:true}})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；只在需要 secretRef 时调用 `credentials.resolve({owner:"web", reference})`。不重复校验或填充已交付的文档。
+
+本方案先使用 `web.json` 用户来源，不声明 projectFile，不发明用户/项目合并规则（A16，待设计评审确认）。私有主机例外由客户端写入；Web 没有写配置工具。包的安装与 loader 可编辑意图保持 PluginManager 的职责。
 
 ## 7. 安全
 
@@ -175,18 +254,18 @@ sequenceDiagram
 | 原则 §4 第 5 条（批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 结果只以 ToolExecutor 写入的 `step/tool-result` 事实进入模型。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolContribution`、Settings 业务来源和凭据解析器。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 没有自己对运行时或 rutis 的需求；所用的 Settings 补充列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)；#4 写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 复用已实现的 C4、Settings 与具名凭据绑定；产品存储缺失沿 #118 跟踪，不增加 core、rutis 或 loader 能力。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Web 不写事件；抓取缓存只在内存中。 |
 | 原则 §1（Capability 与 App Server 边界） | Web 是放在自己插件包中的 Session Capability；App Server 不含它的代码。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：Web 不持有跨 Session 共享的状态。 |
 | ADR 002 D2（不设接线模块） | 没有接线模块；搜索适配器是内置的（A1）。 |
-| ADR 002 D3（依赖跟随作用域） | 唯一依赖 Settings 位于外层作用域；Settings 重载会重载 Web，这是可接受的。 |
+| ADR 002 D3（依赖跟随作用域） | Settings 与凭据解析均在外层进程作用域；必需服务缺失则 Web Pending，重载只沿真实依赖传播，原生 Session 仍可运行。 |
 | ADR 002 D4（结构配置与业务配置分离） | 启用是结构配置；`web` 文档是 Web 自己 Settings 来源中的业务配置，每次调用时读取。 |
 | ADR 002 D5（合同语言中立） | 契约语言中立；Rust 形式见附录 G。 |
 
 ## 9. 向机制所有者提出的需求
 
-无。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；诊断通道属于其通用能力覆盖的公开类型化服务。Settings 业务来源与凭据引用解析器是 Settings 的补充，列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。
+无。工具接入、row 来源声明、Settings 读写/事件和具名凭据解析都已有合同与实现。缺失的产品存储是 #118 已记录的提供者决策，Web 不另提 core、rutis、loader、生命周期、可选依赖或诊断服务需求。Node row 保留既有必需依赖和 Pending 语义。
 
 ## 附录 A. 接口细节
 
@@ -197,9 +276,9 @@ sequenceDiagram
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
 | `declaration` | 同步 | — | `ToolDeclaration {name, description, inputSchema, risk: "network"}` |
-| `execute` | 异步 | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
+| `execute` | 异步 | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}, cancelled: Promise<void>` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
 
-取消是针对该调用的取消请求，或消费方丢弃该调用；Web 中止请求，若仍回复则回复 `cancelled`。错误是 `isError: true` 的 `ToolResult`（附录 C），从不是调用失败。参数由 handler 校验；违反时返回错误结果，不访问网络。
+C4 额外传入现有按引用的 `cancelled` Promise。其完成时 Web 先中止请求并释放 socket/定时器，再结算自己的调用；row 的 effect 同样释放其持有资源。ToolExecutor 负责中断终态，Web 不写第二条取消事实，也不重试未知结果。业务错误是 `isError: true` 的 `ToolResult`（附录 C）；运行时/协议绑定故障仍按 C4 的调用失败处理，不伪装成成功或业务结果。参数由 handler 校验；违反时返回错误结果，不访问网络。
 
 ### A.2 `web_search`
 
@@ -222,7 +301,7 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-标题与摘要为纯文本，各占一行，摘要至多 500 个字符。零结果返回 `No results for "<query>".`（不是错误）。不显示服务名。`structuredContent` 为客户端携带 `{ results: [{ title, url, snippet, published_at? }] }`。总时限 20 s（A5）。
+标题与摘要为纯文本，各占一行，摘要至多 500 个字符。零结果返回 `No results for "<query>".`（不是错误）。不显示服务名。`structuredContent` 为客户端携带 `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }`。总时限 20 s（A5）。
 
 ### A.3 `web_fetch`
 
@@ -245,7 +324,7 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-方括号行仅在适用时出现。`structuredContent`：`{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited }`。
+方括号行仅在适用时出现。`structuredContent`：`{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`。
 
 | 项目 | 规则 |
 | --- | --- |
@@ -357,7 +436,7 @@ Characters: <start>-<end> of <total>
 | --- | --- | --- | --- |
 | A1 | 搜索服务（包括基于账号的服务）是内置适配器；没有后端注册表 | ADR 002 D2 | 由 Web 拥有的搜索后端契约 |
 | A2 | 请求从承载 Session 的 App Server 进程发出 | 判断 | 经资源节点的服务进行网络访问 |
-| A3 | `web_search` 始终声明，无可用服务时失败 | ADR 002 D4（配置从不重载） | 声明将随配置变化 |
+| A3 | Web row Active 时始终声明 `web_search`，无可用搜索服务时失败 | ADR 002 D4（配置从不重载） | 声明将随配置变化 |
 | A4 | 查询长度 500；`max_results` 1 到 10，默认 5 | 判断 | 限制改变 |
 | A5 | 连接 10 s，抓取 30 s，搜索 20 s；下载 5 MiB | 判断 | 限制改变 |
 | A6 | 仅 `http`/`https`，至多 2048 个字符，不含 userinfo | 判断 | 输入面更宽 |
@@ -370,12 +449,15 @@ Characters: <start>-<end> of <total>
 | A13 | 内置适配器列表是实现选择 | overview 未指定服务 | 由 overview 固定某个服务 |
 | A14 | 抓取内容周围不加框定文本 | 判断 | 需要定义模型可见的框定 |
 | A15 | 配置的代理支持对 IP 地址做 HTTP `CONNECT`，`http` 和 `https` 目标都支持 | 维护者决定：有无代理都是同一个固定连接保证 | 只接受主机名的代理不能用；私有地址保护将依赖代理 |
+| A16 | 初始来源只声明用户文件 `web.json`，按 user scope 读取；无隐式项目合并 | 本方案，待评审确认 | 先定义项目来源与合并业务语义，再配置既有 projectFile |
 
 ## 附录 F. 待对齐问题
 
-| 问题 | 描述 |
+| 问题 | 当前边界 |
 | --- | --- |
-| 按名称获取 Settings | TypeScript 实现需要 Settings 来源、凭据引用解析器与诊断通道按名称暴露（Settings 部分属于 S8b；[#4](https://github.com/arcships/dim/issues/4)，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)）；`toolContribution` 本身是语言中立的 |
+| 设计确认 | 工具参数、网络/内容策略及 A1–A16 需完成设计评审后才能实施；A16 不假定项目合并已有业务含义 |
+| 产品凭据存储 | #118 仍待提供者决策；测试宿主可通过现有 CredentialsHost::provide 验证，产品缺失时 Web row 保持 Pending，不为 Web 扩协议 |
+| 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
 
 ## 附录 G. Rust 绑定
 

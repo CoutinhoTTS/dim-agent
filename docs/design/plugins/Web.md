@@ -9,7 +9,8 @@ Web is a Session plugin that gives the model `web_search` and `web_fetch` as two
 ```mermaid
 flowchart LR
   subgraph PROC["Process"]
-    Settings["Settings: web business source, credential-reference resolver"]
+    Settings["Settings: web business source"]
+    Credentials["Host secret store: credentials, when configured"]
   end
   subgraph SESS["Session"]
     Web["Web: toolContribution web_search, web_fetch"]:::new
@@ -18,7 +19,8 @@ flowchart LR
   subgraph BR["Branch"]
     Exec["ToolBinding, ToolExecutor, Approval, Permission"]
   end
-  Web -->|"read source web at use, resolve secretRef"| Settings
+  Web -->|"read source web at use"| Settings
+  Web -->|"resolve secretRef per call"| Credentials
   ToolRegistry -.->|"attaches toolContribution on first branch initialization"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall), cancel request"| Web
@@ -27,11 +29,15 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Web` | Session (installed only when enabled) | Settings source `web` and credential-reference resolver; diagnostics channel | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
+| `Web` | Session (installed only when enabled) | Named `settings` and `credentials`; missing services keep the existing Pending semantics | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
 
-**Contracts depended on:** `toolContribution` (Appendix A.1); Settings business source and credential-reference resolver; `ToolDefinition.risk = "network"` read by Permission (existing, [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)). **Contracts defined here:** tool names, parameters and result formats; the `web` business document. The diagnostics channel is an existing typed service. Settings sources exist today only through the Rust `BusinessDocument` binding; the language-neutral `settings` service and the credential-reference resolver are Settings supplements that are not implemented yet (S8b, [overview §6.4](../overview.md#64-conventions) and [Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing them by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
+**Contracts depended on:** the implemented [C4 tool binding](../session-typescript.md), [named Settings/source declarations](../appserver/settings-service.md), `credentials.resolve`, and Permission's existing `network` risk. #150 supplies tools, #166/#175 supply Settings and the named credential binding, and #177 supplies Settings events. Web consumes no Session broadcast and does not wait for #168. **Contracts defined here:** the two tools, result formats and the `web` document.
 
-**Reload.** Web depends only on an enclosing scope (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
+Web uses one JSON declaration in its own TypeScript package and gives it to the existing Session row entry; App Server gains no business code, registry or host port. Calls read Settings at use time, so the existing events require no additional subscription or cache-invalidation protocol. Non-fatal configuration diagnostics use existing `ToolResult.structuredContent`; there is no assumed injectable TypeScript diagnostics channel.
+
+The product credential-store provider remains open in #118. `CredentialsHost::provide` already lets an embedding host supply the named resolver; it does not establish a default product store. rutis leases only a row's required `inject` services into Node: undeclared `ctx.use` is not optional lookup of a native service. This proposal declares both `settings` and `credentials`. Without the resolver the whole Web row remains Pending, with native Session use unchanged; no assembly wait rule or hot attachment is added. A test-host resolver can verify the protocol; product enablement still depends on #118.
+
+**Reload.** Web depends only on enclosing process services (Settings and credentials). Enabling, disabling or upgrading Web, or a Settings/credential-service reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
 
 **Node.** Requests leave from the App Server process that hosts the Session, not from the Session's resource node (A2).
 
@@ -104,7 +110,7 @@ sequenceDiagram
   end
 ```
 
-`web_search` is always declared when Web is enabled; it fails with `search_unavailable` until a usable service is configured (A3). Changing the service takes effect at the next call.
+While the Web row is Active, `web_search` is always declared; it fails with `search_unavailable` until a usable service is configured (A3). Changing the service takes effect at the next call.
 
 ## 4. Timing and conflicts
 
@@ -126,7 +132,7 @@ sequenceDiagram
 | --- | --- | --- |
 | Configuration edit during a call | Call continues with values read at its start; next call uses the new values | Web |
 | Service removed between calls | Next `web_search` returns `search_unavailable` | Web |
-| Web or Settings reload mid-call | The call is settled as reloaded; ToolRegistry and Loop keep running and Web's tools are absent until the Session's next reload (D3, C3) | ToolExecutor |
+| Web, Settings or credential service reload mid-call | The call is settled as reloaded; ToolRegistry and Loop keep running and Web's tools are absent until the Session's next reload (D3, C3) | ToolExecutor |
 | Process restart mid-call | ToolExecutor settles the committed call as not surviving recovery; Web never repeats a request | ToolExecutor |
 | Compaction after a result | Fetched text survives only through the summary | ContextPreparation |
 
@@ -153,7 +159,80 @@ Full table in Appendix B.
 | `web_fetch` | `toolContribution` (Session, key `web_fetch`), risk `network` | Fetch one public `http(s)` URL; bounded text slice with pagination |
 | `web` source | Business configuration in Web's Settings source, read at use | Search service, private-host exceptions, proxy |
 
-No Session methods, no `managementMethods` and no CLI subcommand: configuration goes through Settings' client methods `settings.read`/`settings.update` (S8b, not implemented) and `/settings`. Details in Appendix A.
+No Session methods, `managementMethods` or CLI subcommand: protected client configuration uses the implemented `settings.read`/`settings.update`. No `/settings` UI is assumed. Details in Appendix A.
+
+### 6.1 C4 row and source
+
+The package ships this declaration as one JSON file: the module imports its `provides` and the host uses the same row. Row id `web` is both the source owner and the owner passed to `credentials.resolve`; TypeScript does not register sources again. The example retains existing loader and Settings shapes:
+
+```json
+{
+  "id": "web",
+  "name": "/absolute/web/index.ts",
+  "config": {},
+  "provides": {
+    "toolContribution:web_search": {
+      "declaration": "sync",
+      "execute": "async"
+    },
+    "toolContribution:web_fetch": {
+      "declaration": "sync",
+      "execute": "async"
+    }
+  },
+  "settings": [
+    {
+      "source": "web",
+      "userFile": "web.json",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "search_service": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "endpoint": {
+                "type": "string",
+                "format": "uri"
+              },
+              "secretRef": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "allow_private_hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "proxy": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "userOnly": [
+        "/allow_private_hosts"
+      ]
+    }
+  ]
+}
+```
+
+The plugin declares `inject: ["settings", "credentials"]`; apply registers tools and cleanup only. Synchronous `declaration()` performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:{user:true}})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and uses `credentials.resolve({owner:"web", reference})` only when a secretRef is needed. The delivered document is neither revalidated nor filled by Web.
+
+This proposal starts with the `web.json` user source, declares no projectFile and invents no user/project merge rule (A16, subject to design review). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
 
 ## 7. Security
 
@@ -175,18 +254,18 @@ No Session methods, no `managementMethods` and no CLI subcommand: configuration 
 | Principles §4 rule 5 (batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
 | Principles §4 rule 6 (context from handed-over events) | Results reach the model only as `step/tool-result` facts written by ToolExecutor. |
 | Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution`, the Settings business source and the credential resolver. |
-| Principles §4 rule 8 (requirements to mechanism owners) | No runtime or rutis requirement of its own; the Settings supplements it uses are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins); #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
+| Principles §4 rule 8 (requirements to mechanism owners) | Reuse implemented C4, Settings and named credential bindings; the absent product store stays in #118 without adding core, rutis or loader capability. |
 | Principles §4 rule 9 (only facts later decisions use) | Web writes no event; its fetch cache is memory only. |
 | Principles §1 (Capability and App Server boundary) | Web is a Session Capability in its own plugin package; App Server holds none of its code. |
 | ADR 002 D1 (scope follows state) | Session scope: Web holds no state shared across Sessions. |
 | ADR 002 D2 (no wiring modules) | No wiring module; search adapters are built in (A1). |
-| ADR 002 D3 (dependencies follow scope) | Its only dependency, Settings, is in the enclosing scope; a Settings reload reloads Web, which is accepted. |
+| ADR 002 D3 (dependencies follow scope) | Settings/credentials are process services; missing required services leave Web Pending and reload follows real dependencies while native Sessions continue. |
 | ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `web` document is business configuration in Web's own Settings source, read at each call. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
 
-None. #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); the diagnostics channel is one of the public typed services its generic capability covers. The Settings business source and credential-reference resolver are Settings supplements listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
+None. Tool attachment, row source declarations, Settings read/write/events and named credential resolution already have contracts and implementations. The absent product store is the provider decision already tracked by #118; Web raises no additional core, rutis, loader, lifecycle, optional-dependency or diagnostics-service requirement. Node rows retain their existing required-dependency/Pending semantics.
 
 ## Appendix A. Interface details
 
@@ -197,9 +276,9 @@ Each tool is one `toolContribution` service (Session scope, key = tool name):
 | Method | Kind | Request | Reply |
 | --- | --- | --- | --- |
 | `declaration` | sync | — | `ToolDeclaration {name, description, inputSchema, risk: "network"}` |
-| `execute` | async | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
+| `execute` | async | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}, cancelled: Promise<void>` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
 
-Cancellation is a cancel request for the call or the consumer dropping it; Web aborts the request and replies `cancelled` if it still replies. Errors are `ToolResult`s with `isError: true` (Appendix C), never call failures. Parameters are validated by the handler; a violation returns an error result without network access.
+C4 supplies the existing by-reference `cancelled` Promise as the second argument. When it settles, Web aborts requests and releases sockets/timers before settling its call; row effects likewise release owned resources. ToolExecutor owns interruption terminal facts: Web writes no second cancellation fact and never retries an unknown outcome. Business errors are `ToolResult`s with `isError: true` (Appendix C); runtime/protocol binding failures retain C4 call-failure behavior rather than being masked as success or business data. Parameters are validated by the handler; a violation returns an error result without network access.
 
 ### A.2 `web_search`
 
@@ -222,7 +301,7 @@ Search results for "<query>" (<n> results)
 [2] ...
 ```
 
-Titles and snippets are plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }] }` for clients. Total time limit 20 s (A5).
+Titles and snippets are plain text, one line each, snippet at most 500 characters. Zero results yield `No results for "<query>".` (not an error). The service name is not shown. `structuredContent` carries `{ results: [{ title, url, snippet, published_at? }], diagnostics?: [{code, message}] }` for clients. Total time limit 20 s (A5).
 
 ### A.3 `web_fetch`
 
@@ -245,7 +324,7 @@ Characters: <start>-<end> of <total>
 <converted text slice>
 ```
 
-Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited }`.
+Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_url, status, content_type, title?, start, end, total, truncated, download_limited, diagnostics?: [{code, message}] }`.
 
 | Item | Rule |
 | --- | --- |
@@ -357,7 +436,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | --- | --- | --- | --- |
 | A1 | Search services, including account-backed ones, are built-in adapters; no backend registry | ADR 002 D2 | A search-backend contract owned by Web |
 | A2 | Requests leave from the App Server process hosting the Session | Judgment | Network access through the resource node's services |
-| A3 | `web_search` is always declared and fails when no service is usable | ADR 002 D4 (configuration never reloads) | Declaration would follow configuration |
+| A3 | The Active Web row always declares `web_search`, failing when no search service is usable | ADR 002 D4 (configuration never reloads) | Declaration would follow configuration |
 | A4 | Query length 500; `max_results` 1 to 10, default 5 | Judgment | Limits change |
 | A5 | 10 s connect, 30 s fetch, 20 s search; 5 MiB download | Judgment | Limits change |
 | A6 | Only `http`/`https`, at most 2048 characters, no userinfo | Judgment | Wider input surface |
@@ -370,12 +449,15 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | A13 | Built-in adapter list is an implementation choice | Overview names no service | A service is fixed by the overview |
 | A14 | No framing text around fetched content | Judgment | Model-visible framing to define |
 | A15 | A configured proxy supports HTTP `CONNECT` to an IP address for both `http` and `https` targets | Maintainer decision: one pinning guarantee with and without a proxy | Proxies that only accept hostnames cannot be used; private-address protection would depend on the proxy |
+| A16 | Initial source is user file `web.json`, read at user scope; no implicit project merge | This proposal, review required | Define project source/merge semantics before using existing projectFile |
 
 ## Appendix F. Open questions
 
-| Question | Description |
+| Question | Current boundary |
 | --- | --- |
-| Settings by name | The TypeScript implementation needs the Settings source, credential-reference resolver and diagnostics channel exposed by name (the Settings parts are S8b; [#4](https://github.com/arcships/dim/issues/4), stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)); `toolContribution` itself is neutral |
+| Design confirmation | Tool parameters, network/content policy and A1–A16 require design review before implementation; A16 does not assume existing project merge semantics |
+| Product credential store | #118 retains the provider decision; a test host can use existing CredentialsHost::provide, while a product without it leaves Web Pending rather than extending the protocol for Web |
+| Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 
 ## Appendix G. Rust binding
 
