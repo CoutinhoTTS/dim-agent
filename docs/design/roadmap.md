@@ -66,7 +66,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 
-不排期，归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)（当前计划里没有任何项需要它们）：Questions 重新设计（#144）、Hooks 设计（#143，作为第三方插件兼容机制单独设计）、ExternalAgent 重新设计（#145）、Pursuit 设计（#146）、#2 动态事件（主要使用者是 Questions；落地时把 F1、S1 临时加入 `EventKind` 的 4 个事件迁过去）、压缩后的历史查询工具（#129，设计见 [Recall](plugins/Recall.md)）。F1 的后续调参 #128 留在当前计划，不阻塞。
+不排期，归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)（当前计划里没有任何项需要它们）：Questions 重新设计（#144）、Hooks 设计（#143，作为第三方插件兼容机制单独设计）、ExternalAgent 重新设计（#145）、Pursuit 设计（#146）、#2 动态事件（主要使用者是 Questions；落地时把 F1、S1 临时加入 `EventKind` 的 4 个事件迁过去）、回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)）。F1 的后续调参 #128 留在当前计划，不阻塞。
 
 已撤回：Notifications。提醒归客户端，定时任务结果通知归 Scheduler，对外沟通渠道由各平台各自的插件和工具负责。
 
