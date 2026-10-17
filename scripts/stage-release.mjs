@@ -149,7 +149,7 @@ try {
     cpSync(path.join(scratch, 'plugin'), path.join(output, 'plugins/dim-oauth'), { recursive: true });
     writeFileSync(path.join(output, 'NOTICE'), 'Dim public source is licensed under MIT; see LICENSE.\nThe separately supplied plugins/dim-oauth runtime is excluded from that MIT grant.\nThird-party runtimes retain their original license notices.\n');
     versions.node = process.versions.node;
-    versions.rutis = '0.10.0';
+    versions.rutis = JSON.parse(readFileSync(path.join(repo, 'runtime/package.json'), 'utf8')).dependencies['@arcships/rutis-runtime'];
   }
   const files = {};
   const inventory = (directory) => {
