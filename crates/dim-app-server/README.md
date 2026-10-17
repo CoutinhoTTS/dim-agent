@@ -258,21 +258,12 @@ This fragment shows declaration and ownership; a usable account plugin implement
 
 A plugin declares `inject: ['pluginFiles']` and opens a fresh scope during each `apply`. Register `scope.close()` with `ctx.effect` immediately after opening, then register business cleanup. The host chooses the authorized product root; the plugin supplies relative file paths only. This is a trusted-plugin API, not a sandbox for untrusted Node code.
 
-```ts
-type FileResult<T> = { ok: true; value: T } |
-  { ok: false; error: 'closed' | 'exists' | 'invalid_data' | 'invalid_path' | 'internal' | 'io' }
-interface FileLease {
-  read(): Promise<FileResult<string | null>>
-  replace(text: string): Promise<FileResult<null>>
-  backup(suffix: string): Promise<FileResult<null>>
-}
-interface FileScope {
-  withLock<T>(path: string, work: (file: FileLease) => Promise<T>, cancelled?: Promise<void>): Promise<FileResult<T>>
-  quiesce(): Promise<void>
-  close(): Promise<void>
-}
-interface PluginFiles { open(): Promise<FileScope> }
-```
+Import `PluginFiles`, `FileScope`, `FileLease` and `FileResult` with
+`import type { PluginFiles } from 'dimcode/plugin'`. The
+[SDK declarations](../../npm/plugin.d.ts) define the method types; the
+[plugin author's guide](../../docs/typescript-plugin-authoring.md) shows their use.
+`quiesce()` synchronously returns null; `close()` waits for admitted work and
+resolves to null. Awaiting either remains valid.
 
 `withLock` holds the native FileStorage lease through the complete callback, including asynchronous work. Reads validate the storage record below and return its UTF-8 text; a missing file returns null. Replacement is atomic and flushed, with Unix mode 0600 and native Windows DACL handling. `backup` creates a flushed, exclusive sibling copy with an alphanumeric/hyphen suffix. A failed partial backup is retained; an existing backup is never overwritten. Storage errors expose only fixed codes, never file contents or exception text. An error after replacement does not imply rollback or authorize replaying remote side effects.
 
@@ -432,8 +423,9 @@ It installs no production capability bridge or Session RPC methods.
 
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
 runtime package and anchor paths, plus ordinary loader rows. Tool names and Session method
-namespaces come from each row's existing `RowSchema.provides` dictionary; use one shared JSON
-file in the host and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md).
+namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
+source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
+and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The [public embedding example](examples/session_typescript.rs) starts the real server with offline
 mock model/tools, a protected Unix socket and a fresh temporary SQLite/trace home, then calls it

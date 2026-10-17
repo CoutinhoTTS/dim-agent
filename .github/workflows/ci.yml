@@ -58,6 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
+          node --test runtime/plugin-sdk.test.mjs
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"

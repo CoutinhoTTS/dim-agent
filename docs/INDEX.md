@@ -18,6 +18,7 @@
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
+- [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
 - [C5 branch TypeScript binding contract (proposed)](design/branch-typescript.md)
