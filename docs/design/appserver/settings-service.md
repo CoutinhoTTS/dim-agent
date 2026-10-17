@@ -1,7 +1,8 @@
 # Settings service
 
 Status: Design approved; Rust side implemented (S8b part 1, §12); declarations on C4 rows and
-the TypeScript owner path implemented (part 2, §12); event delivery to TypeScript parts pending. Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
+the TypeScript owner path implemented (part 2, §12); event delivery to TypeScript parts implemented
+(part 3, §12); a product `credentials` provider is not chosen (§10 question 4). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
 Builds on S8a ([#54](https://github.com/arcships/dim/issues/54), PR [#90](https://github.com/arcships/dim/pull/90));
 implementation depends on C4 ([#63](https://github.com/arcships/dim/issues/63)).
 Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:
@@ -240,9 +241,31 @@ A declared source emits `settings.changed` exactly as a Rust source does, after 
 both write paths. The payload never carries the document. A consumer reads once, then follows the
 events.
 
-A TypeScript part receives these events through the C4 binding for rutis events (§10, question
-2). S8b does not add a delivery path of its own. Until that binding exists, a TypeScript owner
-reads at use time, which is what most owners do anyway (F2's Permission does).
+A TypeScript part of the Session runtime receives both events with rutis 0.11 leaf events:
+`ctx.on('settings.changed', (payload) => …)` and `ctx.on('settings.project_authorized', …)`, the
+payload being the JSON above as the one argument. The Session runtime declares the two names
+(`LocalRuntime::emits`), and its existing rows part, `SessionNodeRows`, forwards them (§10
+question 2):
+
+```
+ Settings emit (settings/<source>, settings/projects)
+   -> SessionNodeRows listeners: queue {name, payload}, return   (other listeners never wait for Node)
+   -> one task, commit order: Process::emit(name, [payload])
+   -> each loaded part's ctx.on listener
+```
+
+- Every source's changes are forwarded, Rust sources included; a part filters on `source`. The
+  payload never carries a document, so this exposes nothing a part could not read.
+- No replay: a part reads once when it starts, then follows the events, as a Rust consumer does.
+  An event emitted before a part's row loaded (for example its own Session's project
+  authorization during creation) is not delivered to it.
+- A failed delivery (a throwing listener) is logged and does not stop later events. The queue
+  and task end with `SessionNodeRows`.
+- The listeners only queue, so a slow part cannot delay Settings' other listeners. The queue has
+  no bound; Settings writes are rare, unlike Session broadcast records (#174).
+
+Reading at use time remains valid for owners that do not need to react to changes (F2's
+Permission does).
 
 ### 4.6 Rust binding
 
@@ -408,7 +431,7 @@ than drop them.
 | Permission rules (F2) | Unchanged; see §8.1 |
 | Provider | `ResolveProviderSecret` is replaced by `credentials` (§4.4). The secret store stays optional by configuration, as today |
 | ADR 004 D4 | It says Settings publishes no management methods until S8b. S8b adds the `settings` namespace, limited to declared sources. ADR 004 is updated with the implementation |
-| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). The binding that delivers rutis events to TypeScript parts is still C4's (§10 question 2) |
+| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). Its Session runtime declares the two Settings event names and `SessionNodeRows` forwards them (§4.5) |
 | PluginManager (P3) | When it produces C4 rows from its package boundary, it produces their `settings` member too |
 | Rpc | Unchanged; it dispatches the new namespace like any owner's |
 | Timeline, Dispatcher, rutis, loader | Unchanged |
@@ -460,11 +483,9 @@ or rutis.
 1. ~~**Which manifest carries the `settings` entry.**~~ Settled with C4's loading path: C4 adds no
    package manifest, and its rows carry the package's structural declarations. The entry is the
    row's `settings` member, next to `provides` (§3.1).
-2. **How a TypeScript part listens to rutis events.** rutis 0.10's `definePlugin` context offers
-   only `use`, `provide` and `effect`. rutis-bridge can emit a rutis event into the Node runtime
-   (`EmitToCordis` with a mount's `emits`), but only for mounted Cordis plugins. The C4 spike lists
-   event subscription as an open binding item. S8b only needs that binding to carry the §4.5
-   payloads and to end the listener with the part.
+2. ~~**How a TypeScript part listens to rutis events.**~~ Settled with rutis 0.11 leaf events
+   (#173): the Session runtime declares the two event names and `SessionNodeRows` forwards them
+   (§4.5). The Session broadcast binding (#168, #174) is separate and does not carry them.
 3. **Packages installed while running.** Declarations are Settings factory configuration, so a
    runtime install (PluginManager, P3) would reload Settings and its dependents (MCP, Skills).
    ADR 002 D3 accepts reloads after structural operations, but whether this one is acceptable is
@@ -543,6 +564,11 @@ item 5, item 6 for Provider (token and AWS JSON through one store) and for the
   (item 5: a Rust source name, a second declaration by another package, a malformed entry) run in
   the same file. These are `node_` flows, run by CI's Node step.
 
+**Part 3 (S8b-3).** `settings.changed` / `settings.project_authorized` reach TypeScript parts
+(§4.5, §10 question 2). `transport_flow/settings_methods.rs` checks that the owner fixture's
+`ctx.on` listeners receive the three `example` changes of item 3 in commit order, and the
+authorization of a project created after the part loaded.
+
 Still open:
 
 - The TypeScript half of item 6. A TypeScript owner can inject `credentials` only when a
@@ -550,5 +576,3 @@ Still open:
   §10 question 4. A Session-scoped test store is not the contract (§4.4 is process scope), and a
   row that injects an absent service stays Pending. The Provider half and the service shape are
   covered (part 1).
-- Delivering `settings.changed` / `settings.project_authorized` to TypeScript parts (§4.5, §10
-  question 2), with C4's leaf-event binding ([#174](https://github.com/arcships/dim/pull/174)).

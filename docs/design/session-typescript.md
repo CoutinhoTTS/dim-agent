@@ -38,7 +38,10 @@ marketplaces and editable plugin intent remain PluginManager work.
 The input contains the existing `LocalRuntime::node` arguments (`node`, `jsRuntime`, `anchor`,
 absolute paths) and `rows`, an array of ordinary loader row objects. One Session TypeScript
 runtime is shared across the rows and Sessions. Its runtime name differs from an account runtime;
-no private account manifest or account service is required by this entry.
+no private account manifest or account service is required by this entry. The runtime declares
+the leaf events `settings.changed` and `settings.project_authorized`, which `SessionNodeRows`
+forwards from Settings ([settings-service §4.5](appserver/settings-service.md#45-events)); a part
+subscribes with `ctx.on`.
 
 Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `inject` and `isolate`
 semantics. The C4 row metadata is `provides`, with **exactly the existing
