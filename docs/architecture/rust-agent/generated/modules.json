@@ -255,7 +255,8 @@
         "format",
         "matches",
         "tracing::warn",
-        "unreachable"
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -1698,6 +1699,7 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "serde_json::json",
         "tokio::select",
         "tracing::warn",
@@ -10138,6 +10140,7 @@
         "mod session_typescript",
         "path session_typescript::Parts::new",
         "path session_typescript::SessionTypeScriptConfig",
+        "path session_typescript::forward_session_events",
         "path session_typescript::forward_settings_events",
         "path session_typescript::settings_sources"
       ]
@@ -14182,6 +14185,17 @@
     },
     {
       "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::session_broadcast",
+      "references": [
+        "path SessionBroadcastEvent",
+        "path SessionBroadcastEvent::Closed",
+        "path SessionBroadcastEvent::Event",
+        "path SessionBroadcastEvent::Fence",
+        "use dim_agent_capabilities::session_broadcast::SessionBroadcastEvent"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsChanged",
@@ -14199,12 +14213,32 @@
     },
     {
       "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path Session",
+        "use dim_agent_runtime::Session"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
         "path SESSION_GROUP",
         "use dim_agent_runtime::AgentBuilder",
         "use dim_agent_runtime::SESSION_GROUP"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "path SessionIdentity",
+        "path SessionLifecycle",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::SessionLifecycle"
       ]
     },
     {
@@ -14223,6 +14257,14 @@
         "path ServerError::Configuration",
         "use crate::Result",
         "use crate::ServerError"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_app_server::agents",
+      "references": [
+        "path AgentIndex",
+        "use crate::agents::AgentIndex"
       ]
     },
     {

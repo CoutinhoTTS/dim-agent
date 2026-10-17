@@ -230,7 +230,7 @@ Full table: [Appendix B](#appendix-b-full-conflict-table).
 
 | Aspect | Rule |
 | --- | --- |
-| Compaction | One replay rule, automatic or manual, inside a turn or not (F1): the `replacement`, then the keyed baseline, which is the latest live block of each key placed before `retain_from` (retired keys are not replayed), then the events from `retain_from` on (the last K turns) verbatim. So the model sees the current objective (`goal:objective`) and the current status (`goal:status`), through the baseline or verbatim in the retained turns, and the latest block of each key comes last. Goal blocks and continuations in the retained turns stay verbatim; earlier ones before `retain_from` survive only through the replacement |
+| Compaction | One replay rule, automatic or manual, inside a turn or not (F1): the `replacement`, then the keyed baseline, which is the latest live block of each key placed before `retain_from` (retired keys are not replayed), then the events from `retain_from` on (the retained tail) verbatim. So the model sees the current objective (`goal:objective`) and the current status (`goal:status`), through the baseline or verbatim in the retained turns, and the latest block of each key comes last. Goal blocks and continuations in the retained turns stay verbatim; earlier ones before `retain_from` survive only through the replacement |
 | Child branches and forked Sessions | Inherit the blocks before the cut, which name their branch and tell delegated work not to call `goal_update`; Goal retires the inherited keys with one `clear` (reason `new_branch`) when it consumes the new branch's `branch/start` (§3.4), so the new branch starts with no goal (A3), also after a compaction there |
 | Sessions with `interactive = false` | Same mapping; Goal does not read `SessionConfig.interactive` (C2), and continuations drive turns without an interaction counterpart |
 | Never visible | `submissionId`, mode, count of operator inputs, the fold, diagnostics, other plugins' events |
@@ -485,6 +485,8 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | Question | Description |
 | --- | --- |
 | `edit` of an active idle goal | `edit` is Append (A1) and starts no work on an idle branch; the user resumes to restart. A Goal-side rule that starts a continuation on consuming an `edit` is possible if users need it |
+| Evaluator judge | [Pursuit](Pursuit.md) (#146, Draft) proposes `judge: "evaluator"` on `set`, under which `goal_update completed` is a claim that an evaluator branch checks. This document is amended when that design is accepted |
+| A11 against the fork design | The merged [fork design](../appserver/session-deletion-and-fork.md) opens a forked `main` with `branch/resume` and copies its events, not with a `branch/start` after them as A11 assumes ([Pursuit §16](Pursuit.md#16-open-questions)) |
 
 ## Appendix G. Rust binding
 

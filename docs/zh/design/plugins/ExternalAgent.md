@@ -329,7 +329,7 @@ sequenceDiagram
 
 ## 8. 规则检查
 
-规则：[principles §1 与 §4](../../architecture/rust-agent/principles.md)、[ADR 002](../../adr/002-plugin-scope.md) D1–D5。
+规则：[principles §1 与 §4](../../../architecture/rust-agent/principles.md)、[ADR 002](../../adr/002-plugin-scope.md) D1–D5。
 
 | 规则 | 本文如何遵守 |
 | --- | --- |

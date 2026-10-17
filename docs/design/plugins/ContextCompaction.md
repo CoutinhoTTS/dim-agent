@@ -4,8 +4,10 @@ Status: Implemented on the F1 branch (approved design; implementation notes in �
 Overview: [Appendix B.1 ContextPreparation row](../overview.md#b1-session-and-branch-capabilities).
 Scope: [ADR 002](../../adr/002-plugin-scope.md): Session parts plus supplements to the existing
 branch capabilities Loop and ContextPreparation. §12 records where the implementation refines this text.
-The trigger and retention values are provisional and are studied in
-[#128](https://github.com/arcships/dim/issues/128).
+The trigger, retention and recovery rules follow the
+[#128](https://github.com/arcships/dim/issues/128) research
+([compaction-trigger](../research/compaction-trigger.md)); its reserve and retention share are
+provisional heuristics.
 
 ## 1. Summary
 
@@ -202,7 +204,7 @@ ContextPreparation reports when it loads.
 | `history` | The projected entries from the previous `retain_from` on (existing) |
 | `checkpoint` | The previous `{retain_from, replacement, context_baseline}` (changed from `cursor` and `summary`) |
 | `request`, `model` | The request whose context is compacted, and its `ContextModel` window facts (new) |
-| `retain_limit` | Event id of the first event of the oldest of the last K turns; the strategy's `retain_from` must be at or before it (new; §5.3) |
+| `retain_limit` | `retain_from` of the earliest legal cut whose kept tail fits the retention budget (for a manual step, at least the latest turn's start); the strategy's `retain_from` must be at or before it (new; §5.3) |
 | `trigger` | `Threshold`, `ProviderOutputBudgetExhausted` or `Manual` (new) |
 | estimates, `provider_budget` | Existing |
 
@@ -422,7 +424,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | --- | --- |
 | `context_window` | `snapshot.capabilities.contextWindow`, the catalog value with its existing overrides |
 | `output_tokens` | `request.config.maxTokens` if set, else `snapshot.capabilities.maxOutputTokens`; never above the latter |
-| `threshold_tokens` | `0.8 × (context_window − output_tokens)`, provisional (#128) |
+| `threshold_tokens` | `B − reserve`, where `B = context_window − output_tokens` (the input budget) and `reserve = min(max(0.10 × B, 16,000), 0.20 × B)`. The reserve absorbs the estimation error of the next request; it is a provisional heuristic that does not cover every request without a provider baseline ([research §3.3, §6.4](../research/compaction-trigger.md#33-recommendation)) |
 | `count_tokens` | UTF-8 bytes of the serialized system prompt, messages and tool declarations divided by 4; each image part counts a fixed 1,600 tokens. Provisional (#128). Used for deltas over the provider's `prompt_tokens`, the first request, `validate` and the reduction check |
 
 ### 5.2 ProductSummaryStrategy
@@ -472,10 +474,14 @@ How the summary is produced:
 
 `compact_step` is the existing compaction section of `ContextPolicy::prepare`, extracted:
 
-1. **Retention limit.** `retain_limit` is the id of the `turn/start` of the oldest of the last K
-   turns on the branch (provisional K = 2, #128), the running turn included. If fewer than K
-   turns exist, there is no limit before which to compact, and the fallback cut of
-   `CompactionInput::cut` applies.
+1. **Retention limit.** The retention budget is `0.25 × B` (provisional, #128). `retain_limit` is
+   the `retain_from` of the earliest legal cut that keeps something and whose kept tail fits that
+   budget, counted with `count_tokens` on the keyed baseline at the cut plus the entries from the
+   cut on. The baseline counts because it is replayed after every cut. This keeps whole recent
+   turns when they fit and cuts inside the running turn when it is too large. A manual step cuts
+   at the start of the latest turn, or at the token-rule cut when that keeps less. When no cut
+   qualifies (one entry or the baseline alone exceeds the budget), there is no limit, and the
+   fallback cut of `CompactionInput::cut` applies.
 2. **Start.** It appends `context/compaction-start` with the caller's ids, `command`,
    `through`, `trigger` and `strategy.name()`.
 3. **Strategy.** It calls `strategy.compact` with `retain_limit`, the legal `cuts` and
@@ -499,6 +505,13 @@ Callers:
 - **The Loop's manual step.** Trigger `Manual`. The request is built as `start_preparation`
   builds one: the latest `context/configured` settings and system with the projected messages,
   without binding tools.
+
+**Budget recovery.** `validate`, called by ModelProvider before every model call, uses the
+trigger's estimate of the request (the provider baseline plus the delta when one exists, else the
+full local count) and fails with budget facts when it exceeds `B`; the Loop then retries the request
+once with `recovery`. Recovery thus means "the request does not fit the declared budget",
+consistent with the trigger. Without a provider baseline the full local estimate and its error
+remain (#128).
 
 ### 5.4 Manual compaction
 
@@ -632,7 +645,7 @@ time:
 
 | Case | Timeline facts | What the Loop does next | What the client sees |
 | --- | --- | --- | --- |
-| Strategy error or validation failure, manual inside a turn | start, then `context/compaction {start, failed}` | Continues the turn uncompacted (`next_model`). If the next request exceeds the window, the existing budget recovery forces a compaction (fallback cut); if that also fails, the request and the turn fail | Running, then `failed`; reply `compaction_failed` |
+| Strategy error or validation failure, manual inside a turn | start, then `context/compaction {start, failed}` | Continues the turn uncompacted (`next_model`). If the next request exceeds the input budget, the existing budget recovery forces a compaction (fallback cut); if that also fails, the request and the turn fail | Running, then `failed`; reply `compaction_failed` |
 | Same, manual outside a turn | start, then `failed` | Nothing more (`try_start` if an input is waiting) | Running, then `failed`; reply `compaction_failed` |
 | Same, automatic | start, then `failed` | Unchanged: the request continues uncompacted; under recovery the request fails | Running, then `failed` |
 | Manual, no request can be built (no configuration or snapshot) | `failed` without `start` | As above | Pending, then `failed` |
@@ -761,7 +774,7 @@ Internal Rust changes:
 | Item | Decision |
 | --- | --- |
 | Which model compacts | The request's own model, in the summary strategy; a separate model is deferred |
-| Trigger and retention | `0.8 × (window − output)`, K = 2 turns, `bytes / 4`, 1,600 tokens per image: provisional, #128 |
+| Trigger and retention | #128: trigger at `B − min(max(0.10 × B, 16,000), 0.20 × B)`; keep the longest tail, keyed baseline included, that fits `0.25 × B`; manual steps keep at most the latest turn; `validate` compares the trigger's estimate with `B`; `bytes / 4` and 1,600 tokens per image unchanged. The reserve and share are provisional heuristics |
 | Manual compaction | A Loop step scheduled by `context/compact`, inside or outside a turn, never creating a turn |
 | Where the step runs | In the Loop, calling the one ContextPolicy compaction function (§2.1) |
 | Record | `retain_from` (Timeline event id), `replacement` and `strategy` with one replay rule; optional ids, `command`, `cancelled`; changed directly (unreleased) |
@@ -774,7 +787,9 @@ Internal Rust changes:
 | Compaction state | Facts: pending = command without start, running = start without result, done = result (§5.7) |
 | Half-finished compaction | Never resumed; settled as `cancelled` (§5.8) |
 
-Open: none beyond #128.
+Open: the #128 follow-ups outside F1 (a summarizer request that reuses the conversation prefix,
+Anthropic cache breakpoints, provider-reported overflow mapped to recovery) and the summary
+evaluation of #170.
 
 ## 11. Acceptance (flow tests)
 
@@ -785,12 +800,19 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
 1. **Automatic.** Past the threshold, the next preparation writes `context/budget`, then
    `context/compaction-start {trigger: threshold}`, and sends one summarizer request. It commits
    `context/compaction` `completed` with the request's ids, `start`, no `command`, `strategy: "summary"`, a one-message `replacement`, and `retain_from` = the
-   `turn/start` of the second-to-last turn. The model request starts with that message and keeps the last 2 turns verbatim.
+   earliest legal cut whose kept tail fits `0.25 × B`. The model request starts with that message
+   and keeps that tail verbatim. The product window facts give the reserve's cap, floor and ratio
+   (32k/8k → 19,200; 128k/8k → 104,000; 1M/128k → 784,800). Many small turns after a large one
+   are kept beyond two turns, and a keyed block replayed after the cut keeps fewer of them than
+   the same block unkeyed.
 2. **Budget recovery.** The retry compacts with `trigger: provider_output_budget_exhausted`.
+   With a provider baseline, a request whose local count fits the window but whose baseline
+   estimate exceeds `B` recovers; one whose baseline estimate fits does not.
 3. **Manual, no turn.** `session.context.compact` writes exactly `context/compact`,
    `context/compaction-start {command}` and `context/compaction {command, start}`, with no
    `turn/*`, `step/*` or `model/call`. The reply is
-   `completed`.
+   `completed`. On a two-turn session the cut is the latest turn's start, or a cut inside that
+   turn when its input alone exceeds the retention budget.
 4. **Manual, inside a turn.** `step/tool-result` → `context/compaction-start {turn_id, command}`
    → `context/compaction {turn_id, command, start}` →
    the next request's `step/model-start`, prepared from the compacted context.
@@ -799,7 +821,7 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
      as before.
    - A test strategy bound in place of the summary strategy, returning a two-message
      `replacement`, is committed and replayed by the same rule, with no Loop or policy change.
-   - The policy rejects a test strategy whose `retain_from` lies inside the retained turns, or
+   - The policy rejects a test strategy whose `retain_from` lies inside the retained tail, or
      splits a tool call from its result.
    - A Session compacted with the default `HistoryRenderer` and replayed with a different
      renderer (another entry id scheme) still finds the cut from `retain_from` and projects the
@@ -821,7 +843,7 @@ window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
    - A crash after the fact but before the snapshot save projects the compacted history from the
      fact.
    - A manual compaction failing inside a turn lets the turn continue. When the next request
-     exceeds the window, budget recovery compacts.
+     exceeds the input budget, budget recovery compacts.
 7. **One outstanding command.**
    - Repeated or concurrent `session.context.compact` calls while a command is outstanding: the
      Timeline holds exactly one `context/compact`, one start and one result, and every caller
@@ -858,4 +880,5 @@ fix, the smallest choice was made and is recorded here.
 | Native storage example | The record example in [native-storage-format](../appserver/native-storage-format.md) uses the changed record and the v3 interpreter. |
 | Summarizer budget | Review fix: chunk packing and truncation count the whole summarizer request with the window facts' `count_tokens` against `context_window − output_tokens` (§5.2), so CJK-heavy history no longer exceeds the window; `product_summary.rs` checks every summarizer request. |
 | Acceptance | Acceptance 1, 3, 6 (crash and restart) and 8 run in the binary flow test `transport_flow/compaction.rs`. Acceptance 2, 4, 5 and the reload, interrupt and failure cases of 6 run in `dim-agent-capabilities/tests/context_flow` (`manual_compaction.rs` and the existing compaction tests). The crash between fact and snapshot is covered by the snapshot-failure test in `compaction_events.rs`. |
+| Trigger, retention and recovery (#128) | `ContextPolicy` keeps the estimate of the request its `prepare` returned (a full count after a completed compaction), so `validate` checks the same request without reading the context again; a request it did not prepare reads the context once. Each kept entry is counted once with `count_tokens` and summed, so the per-message separators of a joint count are left out. The trigger values are in `transport_flow/compaction.rs` and `product_summary.rs`; retention and recovery in `context_flow/retention.rs`; the manual cut in `manual_compaction.rs`. |
 | Dead zone and cut-off summaries | #169: the retention fallback no longer depends on budget recovery, so a single long turn compacts at its latest cut that keeps something; only recovery may replace everything. `fallback` is removed from `CompactionInput`. A summarizer reply stopped at `max_tokens` is retried in halves and fails at the smallest chunk instead of being kept. |

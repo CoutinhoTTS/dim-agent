@@ -219,21 +219,22 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         assert_ok(&usage);
         assert_eq!(usage["result"]["contextWindow"], 4000.0);
         assert_eq!(usage["result"]["outputTokens"], 200.0);
-        assert_eq!(usage["result"]["thresholdTokens"], 0.8 * 3800.0);
+        // A small window: the reserve is capped at 20 % of the input budget.
+        assert_eq!(usage["result"]["thresholdTokens"], 3800.0 - 0.2 * 3800.0);
         assert_eq!(usage["result"]["baselineSource"], "full_estimate");
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(overhead > 0.);
-        // With the state blocks of the first turn, two turns stay below the
-        // threshold, the third crosses it, and two with a summary are below
-        // it again.
-        let size = (0.8 * 3800.0 - overhead) / 3.;
+        // Each input fits the retention budget `0.25 × 3800 = 950` alone, two
+        // do not; several turns cross the threshold.
+        let size = 600.;
         let missing = client
             .rpc("session.context.compact", json!({"sessionId":sid}))
             .await;
         assert_eq!(missing["error"]["code"], -32602);
 
-        // Acceptance 1: past the threshold, a preparation compacts the turns
-        // before the last two with one summarizer request.
+        // Acceptance 1: past the threshold, a preparation compacts everything
+        // before the longest tail that fits the retention budget, with one
+        // summarizer request.
         let mut index = 0;
         let events = loop {
             turn(&mut client, &sid, &big(index, size)).await;
@@ -271,8 +272,13 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             .iter()
             .filter(|event| is(event, "turn/start"))
             .collect();
-        assert_eq!(data["retain_from"], starts[starts.len() - 2]["id"]);
-        // The request starts with the replacement and keeps the last two turns.
+        // The tail keeps the latest input and the previous reply: the earliest
+        // cut that fits lies inside the previous turn.
+        let position = |id: &Value| events.iter().position(|event| &event["id"] == id).unwrap();
+        let cut = position(&data["retain_from"]);
+        assert!(position(&starts[starts.len() - 2]["id"]) < cut);
+        assert!(cut < position(&starts[starts.len() - 1]["id"]));
+        // The request starts with the replacement and keeps the latest input.
         let request = provider
             .requests
             .lock()
@@ -285,7 +291,7 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         let sent = request["messages"].to_string();
         assert!(sent.contains("SUMMARY OF EARLIER TURNS"));
         assert!(sent.contains(&format!("turn-{} ", index - 1)));
-        assert!(sent.contains(&format!("turn-{} ", index - 2)));
+        assert!(!sent.contains(&format!("turn-{} ", index - 2)));
         assert!(!sent.contains("turn-0 "));
 
         // Acceptance 3 and 8: with no turn, the method writes the command,
