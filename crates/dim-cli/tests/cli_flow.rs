@@ -2886,6 +2886,92 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
 }
 
 #[test]
+fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_sockets() {
+    let home = Home::new();
+    let server = home.0.join("server");
+    let started = home.0.join("server.started");
+    fs::write(
+        &server,
+        "#!/bin/sh\n: > \"$0.started\"\nwhile test -f \"$0\"; do sleep 0.01; done\n",
+    )
+    .unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = home.command();
+    command
+        .arg("--server")
+        .arg(&server)
+        .args(["models", "fixture"]);
+
+    let socket = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+    let rejected = command.output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("private socket"));
+    assert!(
+        !started.exists(),
+        "an existing insecure endpoint must not start a server"
+    );
+    drop(listener);
+    fs::remove_file(&socket).unwrap();
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "server was not started");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "startup must wait for a private endpoint"
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let (stream, _) = loop {
+        match listener.accept() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => break result.unwrap(),
+        }
+    };
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut wire = Wire(BufReader::new(stream));
+    let hello = wire.read("hello");
+    wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+    let catalog = wire.read("provider.catalog");
+    wire.reply(
+        &catalog,
+        json!({"catalog":{"models":[],"disabledModelIds":[]}}),
+    );
+    let output = wait(child);
+    fs::remove_file(&server).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn initial_attach_eof_settles_a_shell_started_before_the_first_prompt() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

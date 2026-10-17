@@ -195,15 +195,15 @@ async fn puts_ended_before_txn_2_are_abandoned_and_swept() {
     let database = fixture.home.join("dimcode.sqlite");
 
     // The Session is deleted between the write and txn 2.
-    fixture.session("deleted").await;
-    on_commit("deleted", {
+    fixture.session("put-deleted").await;
+    on_commit("put-deleted", {
         let database = database.clone();
         move || {
             let connection = Connection::open(database).unwrap();
             for table in ["timeline_branches", "agent_sessions"] {
                 connection
                     .execute(
-                        &format!("DELETE FROM {table} WHERE session_id = 'deleted'"),
+                        &format!("DELETE FROM {table} WHERE session_id = 'put-deleted'"),
                         [],
                     )
                     .unwrap();
@@ -211,7 +211,7 @@ async fn puts_ended_before_txn_2_are_abandoned_and_swept() {
         }
     });
     assert_eq!(
-        fixture.put("deleted", CancellationToken::new()).await,
+        fixture.put("put-deleted", CancellationToken::new()).await,
         Err(SessionFileErrorCode::NotFound)
     );
 

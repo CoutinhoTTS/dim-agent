@@ -177,7 +177,7 @@ async fn replacing_a_subscription_invalidates_its_pending_delivery() {
             let replace = client.send(replacement, json!({"sessionId":sid})).await;
             let mut replies = HashMap::new();
             while replies.len() < 2 {
-                let value = client.read().await;
+                let value = client.read("idle and owner replacement responses").await;
                 if let Some(id) = value["id"].as_u64() {
                     replies.insert(id, value);
                 }

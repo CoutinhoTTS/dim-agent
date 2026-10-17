@@ -4,10 +4,12 @@
 use crate::host::*;
 use dim_agent_runtime::{
     AgentError, Capability, Contributions, Diagnostics, InSession, KeysOf, SessionConfig,
-    SessionScope, SessionService, ToolNames,
+    SessionIdentity, SessionScope, SessionService, ToolNames,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Listener, TypedPlugin};
+use rutis_bridge::session::{HostDispatch, Value, host_key_in, settle};
+use serde_json::json;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex, Weak},
@@ -347,7 +349,7 @@ fn owns(name: &str, key: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(':'))
 }
 
-fn valid_tool_name(name: &str) -> bool {
+pub fn valid_tool_name(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name
             .chars()
@@ -364,6 +366,88 @@ impl ToolHandler for HostTool {
     ) -> HostFuture<'_, ToolResult> {
         self.0.0.execute(call, context, cancel)
     }
+}
+
+struct ForeignTool {
+    service: Arc<dyn HostDispatch>,
+    generation: Arc<CancellationToken>,
+    session_id: String,
+    config: Arc<SessionConfig>,
+}
+impl ToolHandler for ForeignTool {
+    fn execute(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move {
+            if self.generation.is_cancelled() {
+                return Err(HostError::failed("tool provider generation is unloading"));
+            }
+            let cancel = cancel.child_token();
+            let _finish = cancel.clone().drop_guard();
+            let cancelled = Value::future(async move {
+                cancel.cancelled().await;
+                Ok(Value::Undefined)
+            });
+            let args = json!({
+                "sessionId": self.session_id,
+                "branchId": context.branch_id,
+                "turnId": context.turn_id,
+                "callId": call.id,
+                "arguments": call.input,
+                "config": self.config,
+            });
+            let reply = self
+                .service
+                .invoke("execute", Value::List(vec![args.into(), cancelled]))
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            let result = tokio::select! {
+                biased;
+                _ = self.generation.cancelled() => return Err(HostError::failed("tool provider generation is unloading")),
+                result = settle(reply) => result,
+            }
+                .and_then(|value| value.json())
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            serde_json::from_value(result)
+                .map_err(|error| HostError::failed(format!("invalid tool result: {error}")))
+        })
+    }
+}
+
+fn foreign_tool(
+    service: Arc<dyn HostDispatch>,
+    name: &str,
+    identity: &SessionIdentity,
+    config: Arc<SessionConfig>,
+    ctx: &Ctx,
+    scope: &SessionScope,
+) -> Result<Arc<ToolContribution>, String> {
+    let generation = ctx
+        .get_as::<CancellationToken>(
+            rutis::TypeKey::keyed_dynamic::<CancellationToken>(format!("toolContribution:{name}"))
+                .with_instance(scope.instance),
+        )
+        .ok_or("foreign tool has no owning generation")?;
+    let value = service
+        .invoke("declaration", Value::List(vec![]))
+        .and_then(|value| value.json())
+        .map_err(|error| error.to_string())?;
+    let definition: ToolDefinition =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    if definition.name != name || definition.risk.as_ref().is_none_or(|risk| risk.is_empty()) {
+        return Err("tool declaration must match its identity and declare its risk".into());
+    }
+    Ok(Arc::new(ToolContribution {
+        definition,
+        handler: Arc::new(ForeignTool {
+            service,
+            generation,
+            session_id: identity.session_id.clone(),
+            config,
+        }),
+    }))
 }
 pub fn definition(name: &str, description: &str, schema: serde_json::Value) -> ToolDefinition {
     ToolDefinition {
@@ -397,6 +481,7 @@ impl TypedPlugin for ToolRegistryPlugin {
         InSession<SessionConfig>,
         Contributions<SessionToolSource>,
         InSession<Diagnostics>,
+        InSession<SessionIdentity>,
     );
     fn name(&self) -> &str {
         "ToolRegistry"
@@ -409,6 +494,7 @@ impl TypedPlugin for ToolRegistryPlugin {
             InSession(config),
             Contributions(sources),
             InSession(diagnostics),
+            InSession(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -459,9 +545,44 @@ impl TypedPlugin for ToolRegistryPlugin {
                     let mut fixed = Vec::new();
                     for name in &config.tools {
                         let tool = if contributed.contains(name) {
-                            context.get_as::<ToolContribution>(
+                            let native = context.get_as::<ToolContribution>(
                                 scope.named_key::<ToolContribution>(name),
-                            )
+                            );
+                            match native {
+                                Some(tool) => Some(tool),
+                                None => match context.get_as::<dyn HostDispatch>(host_key_in(
+                                    &format!("toolContribution:{name}"),
+                                    scope.instance,
+                                )) {
+                                    Some(service) => {
+                                        match foreign_tool(
+                                            service,
+                                            name,
+                                            &identity,
+                                            config.clone(),
+                                            &context,
+                                            &scope,
+                                        ) {
+                                            Ok(tool) => Some(tool),
+                                            Err(error) => {
+                                                let span = diagnostics.span(
+                                                    "tool.attach",
+                                                    None,
+                                                    None,
+                                                    None,
+                                                );
+                                                span.record(
+                                                    "outcome",
+                                                    format!("invalid-declaration:{name}"),
+                                                );
+                                                tracing::warn!(tool = name, %error, "optional tool declaration rejected");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    None => None,
+                                },
+                            }
                         } else {
                             host_tools.get(name).cloned()
                         };
@@ -504,6 +625,6 @@ impl TypedPlugin for ToolRegistryPlugin {
 impl Capability for ToolRegistryPlugin {
     fn keys(&self) -> KeysOf<Self> {
         let scope = self.scope;
-        (scope, scope, (scope, self.sources.clone()), scope)
+        (scope, scope, (scope, self.sources.clone()), scope, scope)
     }
 }
