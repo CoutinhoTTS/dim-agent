@@ -142,6 +142,8 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
     builder.timeline_plugin(|scope| DrainLoadingBroadcast(*scope));
+    let mut parts = observers(&audit);
+    parts.rows.extend(fixture().rows);
     let server = serve(
         builder,
         ServerConfig {
@@ -151,7 +153,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             ))),
             database_path: Some(home.join("sessions.sqlite")),
             trace_directory: home.join("trace"),
-            session_typescript: Some(observers(&audit)),
+            session_typescript: Some(parts),
             ..Default::default()
         },
     )
@@ -189,6 +191,24 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         initial["result"]["binding"]["config"]["collaborationRole"],
         "leader"
     );
+    let methods = client
+        .rpc("session.typescript.status", json!({"sessionId":first}))
+        .await;
+    assert_ok(&methods);
+    server.restart("Agents").await.unwrap();
+    for (namespace, before) in [("observer", &initial), ("typescript", &methods)] {
+        let after = client
+            .rpc(
+                &format!("session.{namespace}.status"),
+                json!({"sessionId":first}),
+            )
+            .await;
+        assert_ok(&after);
+        assert_eq!(
+            after["result"]["generation"], before["result"]["generation"],
+            "an index reload must not reload Session rows"
+        );
+    }
     assert_ok(
         &client
             .rpc("session.attach", json!({"sessionId":first}))

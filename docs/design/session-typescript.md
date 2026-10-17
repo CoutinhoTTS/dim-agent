@@ -245,12 +245,15 @@ consumption retains the existing Dispatcher/C5 boundary.
 
 Existing `SessionNodeRows` owns one
 `on_pattern(EventPattern<SessionBroadcastEvent>::prefix("session/"))` subscription.
-It uses its existing Runtime dependency. When an enabled row declares the event
-binding below, it also declares `When<Arc<AgentIndex>>`; managed-provider NodeRows
-does not. No new forwarding Capability or public subscription registry is introduced.
+It uses its existing Runtime dependency. An enabled row declaring the event binding
+below enables observation. NodeRows does not inject AgentIndex: an index reload
+must leave the shared runtime's Session rows loaded (sessions-service D1, §8.3).
+No new forwarding Capability or public subscription registry is introduced.
 
-At callback entry, derive the Session id from the matched channel and call the
-non-restoring `AgentIndex::session(id)`. Admit only a present Session whose
+At callback entry, derive the Session id from the matched channel, look up the
+current index with `ctx.get::<AgentIndex>()`, and call its non-restoring
+`session(id)`. Without an active index, drop the observation without buffering or
+retry. Admit only a present Session whose
 `is_closing()` and `is_unloading()` are false. This is existing publication:
 `Agent::get_session` exposes Ready after `activate()` under the same entries lock.
 It neither creates/restores a Session nor adds a readiness wait.
@@ -419,6 +422,8 @@ Session/branch routing and native content/order, loading-time sampling, client
 notifications/fences while a leaf stalls, and continued delivery to another Session.
 Row-only reload ends owned work without replay, idle unload/restore creates fresh
 channel resources, and close/shutdown settle pending emits and queued observations.
+An Agents index restart leaves the observer and tool/method rows' generations unchanged;
+subsequent records retain single-copy delivery and native order.
 Creation snapshots cover interactive/non-interactive leaders and members; malformed
 bind modes, thrown calls, non-null/future replies and throwing listeners keep native
 and other-row execution available. These flow checks use real services and fences.

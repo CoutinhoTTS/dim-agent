@@ -47,13 +47,12 @@ enum SessionDelivery {
     Closed(String),
 }
 struct SessionEvents {
-    index: Arc<AgentIndex>,
     send: mpsc::UnboundedSender<SessionDelivery>,
 }
 impl rutis::PatternListener<SessionBroadcastEvent> for SessionEvents {
     fn call<'a>(
         &'a self,
-        _: &'a Ctx,
+        ctx: &'a Ctx,
         key: rutis::EventKey<SessionBroadcastEvent>,
         record: &'a SessionBroadcastEvent,
     ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
@@ -61,7 +60,8 @@ impl rutis::PatternListener<SessionBroadcastEvent> for SessionEvents {
         if let Some(session_id) = session_id {
             match record {
                 SessionBroadcastEvent::Event { branch_id, event } => {
-                    if let Some((_, session)) = self.index.session(session_id)
+                    if let Some(index) = ctx.get::<AgentIndex>()
+                        && let Some((_, session)) = index.session(session_id)
                         && !session.is_closing()
                         && !session.is_unloading()
                     {
@@ -88,13 +88,12 @@ impl rutis::PatternListener<SessionBroadcastEvent> for SessionEvents {
 pub(crate) fn forward_session_events(
     ctx: &Ctx,
     process: Arc<Process>,
-    index: Arc<AgentIndex>,
 ) -> std::result::Result<(), CordisError> {
     let (send, mut incoming) = mpsc::unbounded_channel();
     ctx.events().on_pattern(
         ctx,
         rutis::EventPattern::prefix("session/"),
-        SessionEvents { index, send },
+        SessionEvents { send },
     )?;
     let stop = ctx.cancellation_token();
     let task = tokio::spawn(async move {

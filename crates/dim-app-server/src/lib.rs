@@ -893,7 +893,6 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
 }
 
 /// A runtime's rows part; the flags select Settings and Session observation.
-/// Only enabled Session observers require AgentIndex for publication admission.
 struct NodeRows(
     Arc<rutis_loader::RuntimeResolver>,
     &'static str,
@@ -905,7 +904,6 @@ impl rutis::TypedPlugin for NodeRows {
     type Deps = (
         rutis::Keyed<rutis_bridge::runtime::Runtime>,
         Arc<rutis_loader::Loader>,
-        dim_agent_runtime::When<Arc<AgentIndex>>,
     );
     fn name(&self) -> &str {
         self.2
@@ -913,14 +911,14 @@ impl rutis::TypedPlugin for NodeRows {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (rutis::Keyed(runtime), _, dim_agent_runtime::When(index)): Self::Deps,
+        (rutis::Keyed(runtime), _): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             if self.3 {
                 session_typescript::forward_settings_events(ctx, runtime.process().clone())?;
             }
-            if let Some(index) = index {
-                session_typescript::forward_session_events(ctx, runtime.process().clone(), index)?;
+            if self.4 {
+                session_typescript::forward_session_events(ctx, runtime.process().clone())?;
             }
             rutis::Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
         })
@@ -928,7 +926,7 @@ impl rutis::TypedPlugin for NodeRows {
 }
 impl dim_agent_runtime::Capability for NodeRows {
     fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
-        (rutis::DepKey::dynamic(self.1), (), self.4.then_some(()))
+        (rutis::DepKey::dynamic(self.1), ())
     }
 }
 

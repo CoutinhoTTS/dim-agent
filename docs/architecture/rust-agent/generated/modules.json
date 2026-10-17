@@ -9908,7 +9908,6 @@
       "references": [
         "path dim_agent_runtime::Capability",
         "path dim_agent_runtime::KeysOf",
-        "path dim_agent_runtime::When",
         "path register_capability",
         "use dim_agent_runtime::register_capability"
       ]
