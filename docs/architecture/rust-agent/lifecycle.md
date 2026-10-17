@@ -36,7 +36,7 @@ flowchart TB
 
 ## 2. rutis 能力
 
-生命周期按 crates.io rutis 0.10.0 设计；接口见[单树装配](single-tree.md#rutis)。
+生命周期按 crates.io rutis 0.11.0 设计；接口见[单树装配](single-tree.md#rutis)。
 
 | 项目 | 使用方式 |
 | --- | --- |
