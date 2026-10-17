@@ -479,9 +479,21 @@ async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
             .await
             .unwrap();
         // Native member Sessions have no client protocol owner; use public C1.
-        let status = session
-            .session_named_service::<SessionMethods>("session.observer")
-            .unwrap()
+        // The optional observer can still be publishing after native creation.
+        let methods = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match session.session_named_service::<SessionMethods>("session.observer") {
+                    Ok(methods) => break methods,
+                    Err(dim_agent_runtime::AgentError::Reloading(_)) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("observer methods: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("observer methods publication");
+        let status = methods
             .accept(
                 "session.observer.status".into(),
                 json!({"sessionId":session.id()}),

@@ -168,7 +168,7 @@ flowchart LR
 | Scheduler | 进程 + Session | 定时任务；`schedule` 工具；运行结果通知 | P2 | TypeScript 优先 | [Scheduler](plugins/Scheduler.md) |
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |
-| ExternalAgent | 进程 | 外部 Agent 作为 ModelHost provider kind | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md)（需要重新设计） |
+| ExternalAgent | 进程 | 外部 Agent 作为 ModelHost provider kind | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
 | AcpGateway | CLI 进程 | 基于本地 RPC 的 ACP 服务器 | P3 | TypeScript 优先 | [AcpGateway](plugins/AcpGateway.md) |
 | RemoteGateway | 进程 | 远程入口、配对、设备 | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | 进程 | 多模态任务与实时连接 | P3 | TypeScript 优先 | [Modality](plugins/Modality.md) |
@@ -290,35 +290,29 @@ sequenceDiagram
 
 ### 5.6 Collaboration 委派给外部 Agent
 
-> 已撤回：下面的审批路径随 ExternalAgent 重新设计一并撤回（[#28](https://github.com/arcships/dim/issues/28)）。
-
 ```mermaid
 sequenceDiagram
-  participant L as Leader 分支（agent 工具）
+  participant L as Leader 分支
   participant C as Collaboration
-  participant M as 成员分支（ModelProvider, Approval）
-  participant X as ExternalAgent（ModelHost kind）
-  participant EA as 外部 Agent 进程
+  participant M as 成员分支（ModelProvider）
+  participant X as ExternalAgent（modelKind external-agent）
+  participant EA as 外部 Agent（所在节点的桥接）
   L->>C: agent 请求
   C->>M: collaboration/request，成员输入
-  M->>X: 以 ModelCallScope 调用
+  M->>X: 以 ModelCallScope 调用（ModelHost 每次调用查找 modelKind）
   X->>EA: 经 ACP 或 CLI 发送 prompt
   EA-->>X: 权限请求
-  X-->>M: approval_ask 流条目
-  M->>M: ModelProvider 经 Approval 准入，approval/request
-  M->>C: 成员中有待处理审批
-  C-->>L: 转发给 leader
-  L->>C: leader 模型通过 agent 工具决定
-  C->>M: approval/respond
-  M->>X: answerApproval(outcome)
+  X->>L: 经 sessions 写入带询问的 input/message（Steer）
+  L->>L: leader 模型调用 external_agent_allow 或 external_agent_reject（leader 的 Permission 与 Approval）
+  L->>X: 决定
   X->>EA: 允许一次或拒绝一次
   EA-->>X: 输出
-  X-->>M: 模型输出
+  X-->>M: 模型输出（只有 agent 产出的文本与思考）
   M-->>C: collaboration/result
   C-->>L: 结果
 ```
 
-权限请求以模型流中的 `approval_ask` 条目到达成员分支；ModelProvider 经该分支的 Approval 对其准入，并以 `answerApproval` 作答，因此它成为普通的 dim 审批（现有的 `approval/request` 与 `approval/respond` 事实）。Collaboration 成员的审批交给 leader 的模型，没有 leader 时由用户决定。从不选择 `always` 选项。
+权限请求从不进入模型流（[#28](https://github.com/arcships/dim/issues/28)）。ExternalAgent 经 Collaboration 的 `leaderOf` 找到 leader，把询问作为输入写入 leader 分支，leader 模型用一个工具决定，这次工具调用经过 leader 的 Approval 与 Permission。没有 leader 时由用户经 Session 方法回答；非交互 Session 直接拒绝。从不选择 `always` 选项（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-外部权限请求)）。
 
 ## 6. 通用约束
 
@@ -352,7 +346,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | --- | --- |
 | 控制节点 | 承载 App Server：Timeline、Session、配置来源、Provider、调度 |
 | 资源节点 | 宿主资源所在之处（文件、进程、shell、隔离、本地 CLI）。每个 Session 将绑定一个，记为 `SessionConfig.resourceNode`，创建时固定；这是 P3 新增的可选字段，缺省即控制节点；P1/P2 中每个 Session 都使用控制节点 |
-| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取；ExternalAgent 的桥接在其重新设计中改为 loader 行（#37） |
+| 宿主服务 | Session 资源节点上的 FileStorage、HostPlatform、隔离以及 WorkspaceTools 宿主侧，在每次调用时按 Session 的 `resourceNode` 查找（#38）。没有 Session 的进程插件（Modality OCR、ExternalAgent 桥接）在自身业务配置中指定节点，使用时读取。ExternalAgent 的 agent 进程位于每节点一行的桥接 loader 行（对端为 `peer:<node>/external-agent-bridge`），每次调用按节点查找（[ExternalAgent §3.4](plugins/ExternalAgent.md#34-桥接生命周期)） |
 | 节点绑定数据 | 隔离配置和外部 Agent 目录以节点和路径标识 |
 | 离线 | 对离线资源节点的调用以 `node_unavailable` 失败；依赖方不重载，也不进入 Pending。节点服务在每次调用时按 `resourceNode` 查找，因此节点离线只让这些调用以 `node_unavailable` 失败；不向 rutis 提需求（#38）。链接断开时，由资源节点自己的 HostPlatform 结束它启动的进程 |
 | 认证 | 复用 rutis 链接 token；管理方法只在配置后才导出 |
@@ -413,8 +407,8 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | **已撤回（Notifications 已撤回）。** Notifications 获取定时任务结果 | 已决定：任务 Session 是非交互的，因此 Scheduler 发布运行结果通知，Notifications 监听它，二者无依赖；通知由运行所属 Session 的 Notifications 实例投递，该 Session 未装载时丢失（§5.5） |
 | 定时任务存活 | 已决定：守护进程必须存活（[Scheduler](plugins/Scheduler.md)） |
 | FullAccess 与新类别 | 已决定：自动允许（约束 7） |
-| 外部 Agent 权限 | 重新设计（#28）：请求作为一条 `input/message` 写入主模型所在分支，主模型通过工具决定（[ExternalAgent](plugins/ExternalAgent.md)） |
-| 外部会话延续 | 提议：从分支历史重新初始化（[ExternalAgent](plugins/ExternalAgent.md)） |
+| 外部 Agent 权限 | 提议（#145）：在模型流之外询问调用方 Session 的交互对方：Collaboration leader 的模型经一条输入和一个决定工具（工具调用经过 leader 的 Approval 与 Permission），否则由用户经 Session 方法回答（[ExternalAgent §3.2](plugins/ExternalAgent.md#32-外部权限请求)） |
+| 外部会话延续 | 提议：记录只在内存中；记录丢失后从分支历史重新初始化（[ExternalAgent](plugins/ExternalAgent.md)） |
 | fork 时的权限预设 | 已决定：不特殊处理；预设随事实一起复制，应用层如需不同的预设，在 fork 后自行设置（#26） |
 | 重载传播 | 已决定：罕见结构性操作的可接受代价（[ADR 002](../adr/002-plugin-scope.md) D3） |
 | **已撤回（Hooks 待设计，#21）。** 异步 before 与同步写入方 | 已决定：写入方的追加在被接受时返回，提交结果经 Dispatcher 报告，因此 Loop 等写入方不会阻塞。属于异步 before 需求（[附录 F](#附录-f-向机制所有者提出的需求)） |
@@ -512,12 +506,12 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Rpc | 变更 | 方法表：内建方法，然后是按调用查找、不依赖其所有者的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive}`（只在其为 false 时发送）。内建方法 `session.delete` 与 `session.fork`（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）。把 Session 广播通知记录以 `session.notice` 原样转发给已附加的 v3 客户端（C6，已实现：[通知](appserver/session-notices.md)）。Session 列表中的 `title`/`titleSource`。只做外部边界校验（参数格式、`sessionId` 授权）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
 | Agents | 补充 | `sessions` 服务（[sessions 服务](appserver/sessions-service.md)）；`SessionConfig.interactive`；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建（[删除与分叉](appserver/session-deletion-and-fork.md#6-分叉)）；以外部 Agent 作为模型的 profile，经 Agents 的类型化公共写操作写入（[Session 访问](contracts/session-access.md)）；经 Agents 的 Session 入口提供 `session.agent.update`，按精确 profile ID 解析并采纳提示词和模型 | Scheduler、Workflow、fork、ExternalAgent、`/agent` |
-| Collaboration | 变更 | 成员模型：profile 的模型，否则为默认选择；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29） | ExternalAgent |
+| Collaboration | 变更 | 成员模型：profile 的模型，否则为默认选择；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29）；`leaderOf(sessionId)`，公开读取成员 Session 的 leader 分支 | ExternalAgent |
 | SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）；删除与清理；fork（复制切点之前的事实）（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除（S5a，已实现：`sessionFiles` 服务，[Session 文件](appserver/session-files.md)） | SessionTitle、Attachments、fork |
 | Settings | 补充 | S8a（Rust，已实现）：每个所有者一个或多个具名业务来源，每个来源一种文档类型；没有自己的订阅接口：写入提交后在 `settings/<source>` 上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，覆盖用户和项目作用域，不带文档内容；新授权的项目发出 `settings.project_authorized`；校验和默认值只在 Settings 边界应用；v13 中增量的 `user/<source>` 行（D4）。S8b（随 C4，尚未实现）：语言中立的 `settings` 服务，插件清单声明 JSON Schema、默认值、允许的作用域和仅限用户的字段；管理方法 `settings.read`/`settings.update`；凭据解析器 `credentials.resolve(owner, reference)`（§6.4） | 每个有业务配置的插件，包括用户编写的 Scheduler 任务（来源 `schedule`）和 Workflow 定义（来源 `workflow`） |
 | Provider | 补充 | 基于捕获的已采纳模型配置，校验并映射已声明的 effort/tier 偏好；`AuxiliaryModel` 服务：`complete(model, request)`，在任何 Session 之外的一次非流式调用，模型由调用方从自己的配置中传入（[设计](appserver/auxiliary-model.md)）；按 Modality 类别的非对话连接；外部 Agent 连接类型；连接条目经 Provider 的类型化公共写操作写入 | `/effort`、`/fast`、SessionTitle、Modality、ExternalAgent |
-| Aimux / ModelHost | 补充 | 来自其他插件的 provider kind；某 kind 没有 provider 时，其请求在受理前失败 | ExternalAgent |
-| `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、ExternalAgent、Modality、RemoteGateway、PluginManager |
+| Aimux / ModelHost | 补充 | 来自其他插件的 provider kind：对于它自己不驱动的种类，ModelHost 在每次调用时查找 `modelKind[<kind>]`，不依赖其提供方；某 kind 没有 provider 时，其请求在受理前失败 | ExternalAgent |
+| `pluginFiles`（`PluginFilesPlugin`） | 补充 | 二进制读写与格式版本（[受信插件存储](../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；代码位置不变 | Scheduler、Workflow、Modality、RemoteGateway、PluginManager |
 | Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth 插件 | 变更 | 把各自现有的管理方法作为 `managementMethods` 提供（线上兼容）；Mcp 的 `mcp.approve`/`mcp.revoke` 已删除，服务启用即运行，项目条目默认关闭、只能由用户本机配置启用（§6.4 批准范围） | Rpc 迁移 |
 | ManagedProviders | 补充 | 套餐用量查询 | `/usage` |
 | Mcp | 补充 | HTTP/SSE OAuth（[MCP OAuth](appserver/mcp-oauth.md)）；通过自己的类型化操作从 PluginManager 接收插件包中的 MCP 配置（#36） | MCP；PluginManager |
