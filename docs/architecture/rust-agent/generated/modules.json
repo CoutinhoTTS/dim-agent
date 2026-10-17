@@ -1318,6 +1318,16 @@
       ]
     },
     {
+      "id": "dim_app_server::credentials",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/credentials.rs",
+      "unexpandedMacros": [
+        "format",
+        "json"
+      ]
+    },
+    {
       "id": "dim_app_server::grok_oauth",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -1704,6 +1714,16 @@
       ]
     },
     {
+      "id": "dim_app_server::settings::declared",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::settings",
+      "file": "crates/dim-app-server/src/settings/declared.rs",
+      "unexpandedMacros": [
+        "format",
+        "json"
+      ]
+    },
+    {
       "id": "dim_app_server::settings::native",
       "crate": "dim_app_server",
       "parent": "dim_app_server::settings",
@@ -1711,6 +1731,16 @@
       "unexpandedMacros": [
         "format",
         "params"
+      ]
+    },
+    {
+      "id": "dim_app_server::settings_methods",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/settings_methods.rs",
+      "unexpandedMacros": [
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -9980,6 +10010,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::credentials",
+      "references": [
+        "mod credentials"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::grok_oauth",
       "references": [
         "mod grok_oauth",
@@ -10010,6 +10047,14 @@
       "references": [
         "mod mcp",
         "path mcp::McpPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path mcp::config::McpProjectEnablement",
+        "path mcp::config::McpSettings"
       ]
     },
     {
@@ -10053,7 +10098,8 @@
       "to": "dim_app_server::permission_rules",
       "references": [
         "mod permission_rules",
-        "path permission_rules::PermissionRulesPlugin"
+        "path permission_rules::PermissionRulesPlugin",
+        "path permission_rules::PermissionSettings"
       ]
     },
     {
@@ -10103,9 +10149,25 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path settings::SourceDeclaration"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::settings_methods",
+      "references": [
+        "mod settings_methods",
+        "path settings_methods::SettingsMethodsPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::skills_management",
       "references": [
         "mod skills_management",
+        "path skills_management::SkillDocument",
         "path skills_management::SkillsCatalogPlugin"
       ]
     },
@@ -13559,6 +13621,14 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::credentials",
+      "references": [
+        "path CredentialsHost",
+        "use crate::credentials::CredentialsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::grok_oauth",
       "references": [
         "path GrokOAuthService",
@@ -13678,13 +13748,10 @@
         "mod secrets",
         "path ProviderSecret::Aws",
         "path ProviderSecret::Token",
-        "path ProviderSecretHost",
         "path StaticCredential",
         "path StaticCredential::Inline",
         "path StaticCredential::Reference",
         "use secrets::ProviderSecret",
-        "use secrets::ProviderSecretHost",
-        "use secrets::ResolveProviderSecret",
         "use secrets::StaticCredential"
       ]
     },
@@ -14091,8 +14158,7 @@
         "path AwsCredentials",
         "path HostError",
         "path HostError::classified",
-        "path HostErrorKind::Unsupported",
-        "path HostFuture"
+        "path HostErrorKind::Unsupported"
       ]
     },
     {
@@ -14205,6 +14271,23 @@
     },
     {
       "from": "dim_app_server::settings",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "mod declared",
+        "path Declared",
+        "path Declared::compile",
+        "path SourceDeclaration",
+        "path declared",
+        "path declared::provide",
+        "use declared::Declared",
+        "use declared::Read",
+        "use declared::SourceDeclaration",
+        "use declared::Update",
+        "use declared::Writer"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings",
       "to": "dim_app_server::settings::native",
       "references": [
         "mod native"
@@ -14216,6 +14299,47 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::declared",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FilePath",
+        "path FileStorageError::Unsynced"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::declared",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope",
+        "path SettingsScope::Project"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::declared",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path Format",
+        "path ProjectAuthorized",
+        "path Result",
+        "path SettingsError",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Document",
+        "path SettingsError::Invalid",
+        "path SettingsError::InvalidScope",
+        "path SettingsError::Persistence",
+        "path SettingsError::Storage",
+        "path SettingsError::UnknownSource",
+        "path SettingsError::UserOnlyField",
+        "path SettingsError::Worker",
+        "path SettingsService",
+        "path SettingsSnapshot",
+        "path validate_file",
+        "path validate_namespace"
       ]
     },
     {
@@ -14236,7 +14360,7 @@
       "from": "dim_app_server::settings::native",
       "to": "dim_app_server::settings",
       "references": [
-        "path BusinessDocument",
+        "path Format",
         "path Result",
         "path SettingsError::Cancelled",
         "path SettingsError::Closed",
@@ -14245,8 +14369,82 @@
         "path SettingsError::Persistence",
         "path SettingsService",
         "path SettingsSnapshot",
-        "path decode",
-        "path revision"
+        "path revision",
+        "path snapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorageError::Unsynced",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::invalid",
+        "path RpcError::reloading",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path Capability",
+        "path KeysOf",
+        "path scoped",
+        "use dim_agent_runtime::Capability",
+        "use dim_agent_runtime::KeysOf",
+        "use dim_agent_runtime::scoped"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods::provide",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsError",
+        "path SettingsError::Cancelled",
+        "path SettingsError::Closed",
+        "path SettingsError::Conflict",
+        "path SettingsError::Document",
+        "path SettingsError::InvalidScope",
+        "path SettingsError::Storage",
+        "path SettingsError::UnknownSource",
+        "path SettingsService",
+        "use crate::settings::SettingsError",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings_methods",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path Read",
+        "path Update",
+        "path Writer::Client",
+        "use crate::settings::Read",
+        "use crate::settings::Update",
+        "use crate::settings::Writer"
       ]
     },
     {
@@ -15998,6 +16196,14 @@
     {
       "module": "dim_app_server::settings",
       "path": "D::default"
+    },
+    {
+      "module": "dim_app_server::settings",
+      "path": "F::Document"
+    },
+    {
+      "module": "dim_app_server::settings::native",
+      "path": "F::Document"
     },
     {
       "module": "dim_app_server::skills_management",

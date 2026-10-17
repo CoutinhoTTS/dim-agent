@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillDocument {
+pub(crate) struct SkillDocument {
     disabled_skill_ids: Vec<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,

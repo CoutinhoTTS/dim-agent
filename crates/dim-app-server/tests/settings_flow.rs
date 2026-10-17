@@ -5,12 +5,15 @@ use dim_agent_runtime::{capability_plugin, wait_active};
 use dim_app_server::{
     settings::{
         BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
-        SettingsPlugin, SettingsScope, SettingsService, project_authorizations, settings_changes,
+        SettingsPlugin, SettingsScope, SettingsService, SourceDeclaration, Writer,
+        project_authorizations, settings_changes,
     },
     storage::SqliteStoragePlugin,
 };
 use rutis::Ctx;
+use rutis_bridge::session::{HostDispatch, Value as RpcValue, host_key};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value as Json, json};
 use std::{fs, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -790,5 +793,273 @@ async fn business_documents_reject_escaping_filenames() {
         .await
         .unwrap();
     root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// The source the acceptance flows declare (settings-service §11): user and
+/// project files, a schema with a `default`, one user-only member.
+fn declaration(source: &str) -> SourceDeclaration {
+    SourceDeclaration {
+        owner: "example-package".into(),
+        source: source.into(),
+        user_file: format!("{source}.json"),
+        project_file: Some(format!(".{source}.json")),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "searchService": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "secretRef": {"type": "string"}
+                    },
+                    "required": ["kind"]
+                },
+                "maxResults": {"type": "integer", "minimum": 1, "default": 5}
+            },
+            "additionalProperties": false
+        }),
+        user_only: vec!["/searchService".into()],
+    }
+}
+/// One call of the owner service `settings`, as any language makes it.
+async fn owner_call(dispatch: &Arc<dyn HostDispatch>, method: &str, request: Json) -> Json {
+    match dispatch
+        .invoke(method, RpcValue::List(vec![request.into()]))
+        .unwrap()
+    {
+        RpcValue::Reference(reply) if reply.is_future() => {
+            reply.wait_async().await.unwrap().json().unwrap()
+        }
+        value => value.json().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn declared_source_owner_and_client_writes_in_both_profiles() {
+    for native in [false, true] {
+        let home = home();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+        let root = Ctx::root().unwrap();
+        let settings_plugin = if native {
+            SettingsPlugin::native(0, vec![])
+        } else {
+            SettingsPlugin::new(0, vec![])
+        };
+        let mut views = vec![root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            home.clone(),
+        ])))];
+        if native {
+            views.push(root.plugin(capability_plugin(SqliteStoragePlugin::new(
+                home.join("settings.sqlite"),
+            ))));
+        }
+        views.push(root.plugin(capability_plugin(
+            settings_plugin.declare(vec![declaration("example")]),
+        )));
+        let cancel = CancellationToken::new();
+        wait_active(&root, &views, Duration::from_secs(5), &cancel)
+            .await
+            .unwrap();
+        let settings = root.get::<SettingsService>().unwrap();
+        let owner = root
+            .get_as::<dyn HostDispatch>(host_key("settings"))
+            .unwrap();
+        let mut changes = listen(&root, &settings_changes("example"));
+        let user = json!({"source": "example", "scope": "user"});
+
+        // The first read is the default document.
+        let first = owner_call(&owner, "read", user.clone()).await;
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["value"]["document"], json!({"maxResults": 5}));
+        let first = first["value"]["revision"].as_str().unwrap().to_owned();
+        let initial = if native {
+            "native:user/example:1"
+        } else {
+            "missing"
+        };
+        assert_eq!(first, initial);
+        let update = |revision: &str, document: Json| json!({"source": "example", "scope": "user", "expectedRevision": revision, "document": document});
+        let saved = owner_call(&owner, "update", update(&first, json!({"maxResults": 7}))).await;
+        assert_eq!(saved["value"]["document"], json!({"maxResults": 7}));
+        let second = saved["value"]["revision"].as_str().unwrap().to_owned();
+        assert_ne!(second, first);
+        // Rejected writes change nothing and announce nothing.
+        for (document, code) in [
+            (json!({"maxResults": 8}), "conflict"),
+            (json!({"maxResults": 0}), "invalid_document"),
+            (
+                json!({"searchService": {"kind": "web", "secretRef": ""}}),
+                "invalid_document",
+            ),
+            (json!({"searchService": {"kind": "web"}}), "user_only_field"),
+            (json!([]), "invalid_document"),
+        ] {
+            let revision = if code == "conflict" { &first } else { &second };
+            let rejected = owner_call(&owner, "update", update(revision, document)).await;
+            assert_eq!(rejected["ok"], false);
+            assert_eq!(rejected["error"]["code"], code, "{rejected}");
+        }
+        assert_eq!(
+            owner_call(&owner, "read", user.clone()).await["value"]["revision"],
+            second.as_str()
+        );
+        // A client write may change the user-only member; the owner may then
+        // keep it, but not change it.
+        let service = json!({"kind": "web", "secretRef": "web-search"});
+        let third = settings
+            .update_declared(
+                "example",
+                SettingsScope::User,
+                &second,
+                json!({"maxResults": 7, "searchService": service}),
+                Writer::Client,
+                &cancel,
+            )
+            .await
+            .unwrap()
+            .revision;
+        let changed = owner_call(
+            &owner,
+            "update",
+            update(&third, json!({"searchService": {"kind": "other"}})),
+        )
+        .await;
+        assert_eq!(changed["error"]["code"], "user_only_field");
+        let kept = owner_call(
+            &owner,
+            "update",
+            update(&third, json!({"searchService": service})),
+        )
+        .await;
+        let stored = json!({"maxResults": 5, "searchService": service});
+        assert_eq!(kept["value"]["document"], stored);
+        let fourth = kept["value"]["revision"].as_str().unwrap().to_owned();
+        // One event per committed write, in commit order, on both paths.
+        saw(&mut changes, change(SettingsScope::User, &fourth)).await;
+        let announced: Vec<_> = changes
+            .borrow()
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect();
+        assert_eq!(
+            announced,
+            [&second, &third, &fourth].map(
+                |revision| json!({"source": "example", "scope": "user", "revision": revision})
+            )
+        );
+        if native {
+            let db = rusqlite::Connection::open(home.join("settings.sqlite")).unwrap();
+            let body: String = db
+                .query_row(
+                    "SELECT document FROM settings_documents WHERE source='user/example'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Json>(&body).unwrap(), stored);
+            assert!(!home.join("example.json").exists());
+        } else {
+            let file = fs::read(home.join("example.json")).unwrap();
+            assert_eq!(serde_json::from_slice::<Json>(&file).unwrap(), stored);
+        }
+
+        // Project scope needs an authorized root; `projects` lists them.
+        let unauthorized = owner_call(
+            &owner,
+            "read",
+            json!({"source": "example", "scope": {"project": 99}}),
+        )
+        .await;
+        assert_eq!(unauthorized["error"]["code"], "invalid_scope");
+        let mut authorized = listen(&root, &project_authorizations());
+        let project_root = settings
+            .authorize_project(project.clone(), &cancel)
+            .await
+            .unwrap();
+        saw(&mut authorized, |a: &ProjectAuthorized| {
+            a.root == project_root
+        })
+        .await;
+        let listed = json!({"root": project_root, "cwd": project});
+        assert_eq!(
+            serde_json::to_value(&authorized.borrow()[0]).unwrap(),
+            listed
+        );
+        assert_eq!(
+            owner_call(&owner, "projects", json!({})).await,
+            json!({"ok": true, "value": {"projects": [listed]}})
+        );
+        let in_project = owner_call(
+            &owner,
+            "read",
+            json!({"source": "example", "scope": {"project": project_root}}),
+        )
+        .await;
+        assert_eq!(
+            in_project["value"],
+            json!({"revision": "missing", "document": {"maxResults": 5}})
+        );
+
+        // Only declared sources are served, and a Rust type cannot take one.
+        let mcp = owner_call(&owner, "read", json!({"source": "mcp", "scope": "user"})).await;
+        assert_eq!(mcp["error"]["code"], "unknown_source");
+        assert!(matches!(
+            settings
+                .read::<Document>(SettingsScope::User, &cancel)
+                .await,
+            Err(SettingsError::Invalid(
+                "settings source belongs to another document type"
+            ))
+        ));
+        root.shutdown().await.unwrap();
+        assert_eq!(
+            owner_call(&owner, "read", user).await["error"]["code"],
+            "closed"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn invalid_or_conflicting_declarations_fail_assembly() {
+    let mut unreachable = declaration("example");
+    unreachable.user_only = vec!["/searchService/missing".into()];
+    let mut invalid_default = declaration("example");
+    invalid_default.schema["properties"]["maxResults"]["default"] = json!(0);
+    let mut escaping = declaration("example");
+    escaping.user_file = "../example.json".into();
+    let cases = [
+        SettingsPlugin::new(0, vec![])
+            .reserve::<dim_app_server::mcp::config::McpSettings>()
+            .declare(vec![declaration("mcp")]),
+        SettingsPlugin::new(0, vec![])
+            .declare(vec![declaration("example"), declaration("example")]),
+        SettingsPlugin::new(0, vec![]).declare(vec![unreachable]),
+        SettingsPlugin::new(0, vec![]).declare(vec![invalid_default]),
+        SettingsPlugin::new(0, vec![]).declare(vec![escaping]),
+    ];
+    let home = home();
+    for plugin in cases {
+        let root = Ctx::root().unwrap();
+        let views = vec![
+            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+                home.clone(),
+            ]))),
+            root.plugin(capability_plugin(plugin)),
+        ];
+        let error = wait_active(
+            &root,
+            &views,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("example-package"), "{error}");
+        root.shutdown().await.unwrap();
+    }
     fs::remove_dir_all(home).unwrap();
 }
