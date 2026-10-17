@@ -817,11 +817,14 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     }
     let entry = |id: &str, max: u64| {
         let caps = dim_agent_types::ModelCapabilities {
+            reasoning: true,
             context_window: 32000,
             max_output_tokens: max,
             ..Default::default()
         };
-        json!({"modelId":id,"displayName":id,"status":"active","capabilities":caps})
+        json!({"modelId":id,"displayName":id,"status":"active","capabilities":caps,
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}},
+                "serviceTier":{"supported":true,"options":["priority","default"]}}})
     };
     assert_ok(&client.rpc("provider.save",json!({"provider":{"providerId":"public-fixture","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"},"models":[entry("alpha",2048),entry("beta",4096)],"enabled":true}})).await);
     // Select the model as a user would; the no-selection fallback costs
@@ -1052,6 +1055,174 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         "beta"
     );
 
+    use dim_agent_capabilities::prompt_state::PromptSnapshot;
+    let adopted = || {
+        session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .configuration
+            .unwrap()
+    };
+    let original = adopted();
+    for preferences in [
+        json!({"reasoningEffort":"high"}),
+        json!({"serviceTier":"priority"}),
+        json!({"reasoningEffort":"none"}),
+        json!({"reasoningEffort":"low"}),
+    ] {
+        assert_ok(
+            &client
+                .rpc(
+                    "session.model.update",
+                    json!({"sessionId":sid,"branchId":"main","modelPreferences":preferences}),
+                )
+                .await,
+        );
+        assert_eq!(adopted().tools, original.tools);
+        if preferences["reasoningEffort"] == "none" {
+            assert!(adopted().config.unwrap().reasoning.is_none());
+        }
+    }
+    let selected = adopted();
+    let config = selected.config.as_ref().unwrap();
+    assert_eq!(config.max_tokens, Some(4096.));
+    assert_eq!(
+        config.reasoning.as_ref().unwrap().effort.as_deref(),
+        Some("low")
+    );
+    let options = config
+        .provider_options
+        .as_ref()
+        .unwrap()
+        .openai_compatible
+        .as_ref()
+        .unwrap();
+    assert_eq!(options.service_tier.as_deref(), Some("priority"));
+    assert!(options.thinking.is_none());
+    assert_eq!(client.rpc("session.model.update", json!({"sessionId":sid,"branchId":"main","modelPreferences":{"reasoningEffort":"low"}})).await["result"]["outcome"], "unchanged");
+    assert_eq!(adopted(), selected);
+    for fields in [
+        json!({}),
+        json!({"modelPreferences":{}}),
+        json!({"providerId":"public-fixture"}),
+        json!({"modelId":"beta"}),
+        json!({"providerId":null,"modelId":null}),
+        json!({"modelPreferences":{"reasoningEffort":"unsupported"}}),
+    ] {
+        let mut request = branch.clone();
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(
+            client
+                .rpc("session.model.update", request)
+                .await
+                .get("error")
+                .is_some()
+        );
+        assert_eq!(adopted(), selected);
+    }
+    let invalid_profile = client.rpc("agent.create", json!({"profile":{"name":"Unavailable model","description":"",
+        "systemPrompt":"Must not be adopted.","tools":[],"model":{"providerId":"public-fixture","modelId":"missing"}}})).await;
+    assert_ok(&invalid_profile);
+    assert!(client.rpc("session.agent.update", json!({"sessionId":sid,"branchId":"main","agentId":invalid_profile["result"]["agentId"]})).await.get("error").is_some());
+    assert_eq!(adopted(), selected);
+    assert!(
+        !session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .system
+            .contains("Must not be adopted.")
+    );
+    let profile = client.rpc("agent.create", json!({"profile":{"name":"Reviewer","description":"F3 fixture",
+        "systemPrompt":"Profile review instructions.","tools":[],"model":{"providerId":"public-fixture","modelId":"alpha"}}})).await;
+    assert_ok(&profile);
+    let profile_id = profile["result"]["agentId"].clone();
+    let update = json!({"sessionId":sid,"branchId":"main","agentId":profile_id});
+    assert_eq!(
+        client.rpc("session.agent.update", update.clone()).await["result"]["outcome"],
+        "adopted"
+    );
+    assert_eq!(adopted().model_id, "alpha");
+    assert_eq!(adopted().config.as_ref().unwrap().max_tokens, Some(2048.));
+    assert_eq!(adopted().tools, original.tools);
+    assert_eq!(
+        client.rpc("session.permission.get", branch.clone()).await["result"],
+        changed["result"]
+    );
+    assert!(server.agent().unwrap().get_session(&sid).is_some());
+    assert_eq!(
+        client.rpc("session.agent.update", update).await["result"]["outcome"],
+        "unchanged"
+    );
+    let before = adopted();
+    let prompt_only = client
+        .rpc(
+            "agent.create",
+            json!({"profile":{"name":"Prompt only","description":"",
+        "systemPrompt":"Prompt-only instructions.","tools":[]}}),
+        )
+        .await;
+    assert_ok(&prompt_only);
+    assert_ok(&client.rpc("session.agent.update", json!({"sessionId":sid,"branchId":"main","agentId":prompt_only["result"]["agentId"]})).await);
+    assert_eq!(adopted(), before);
+    assert_ok(&client.rpc("session.prompt.refresh", branch.clone()).await);
+    assert!(
+        session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .system
+            .contains("Prompt-only instructions.")
+    );
+    let empty = client
+        .rpc(
+            "agent.create",
+            json!({"profile":{"name":"Empty","description":"","systemPrompt":"","tools":[]}}),
+        )
+        .await;
+    assert_ok(&empty);
+    assert_ok(
+        &client
+            .rpc(
+                "session.agent.update",
+                json!({"sessionId":sid,"branchId":"main","agentId":empty["result"]["agentId"]}),
+            )
+            .await,
+    );
+    assert!(
+        !session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .entries
+            .keys()
+            .any(|(source, _)| source == dim_agent_capabilities::prompt_sources::SESSION)
+    );
+    let before = adopted();
+    assert_eq!(
+        client
+            .rpc(
+                "session.agent.update",
+                json!({"sessionId":sid,"branchId":"main","agentId":"unknown"})
+            )
+            .await["error"]["data"]["appError"],
+        "agent_unknown"
+    );
+    assert_eq!(
+        client
+            .rpc(
+                "session.agent.update",
+                json!({"sessionId":sid,"branchId":"other","agentId":profile_id})
+            )
+            .await["error"]["code"],
+        -32602
+    );
+    assert_eq!(adopted(), before);
+
     // A locked database delays owner publication. Rpc reload cancels its
     // response wait while the admitted Permission change remains owned.
     let lock = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
@@ -1275,6 +1446,9 @@ impl TypedPlugin for ModelHostOwner {
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let view = ctx.plugin(capability_plugin(ModelHostPlugin(self.scope)));
+            (&view).await.map_err(|error| {
+                rutis::CordisError::PluginFailed(format!("Model host failed: {error}").into())
+            })?;
             self.views.lock().unwrap().push(view);
             Ok(rutis::Effect::Done)
         })

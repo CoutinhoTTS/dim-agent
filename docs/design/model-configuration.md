@@ -1,7 +1,6 @@
 # Model preferences and Agent configuration
 
-Status: Proposed for [F3 #74](https://github.com/arcships/dim/issues/74).
-The commands and API changes below are not implemented.
+Implementation contract for [F3 #74](https://github.com/arcships/dim/issues/74).
 It follows the [design rules](../architecture/rust-agent/principles.md),
 [plugin scope](../adr/002-plugin-scope.md) and existing
 [Prompt](../architecture/rust-agent/plugins/Prompt.md) contracts.
@@ -26,6 +25,13 @@ capabilities and existing branches. `AgentProfile.tools` is not applied.
 The Session entry extends Agents' public entry surface. Its factory captures only
 configuration and instance identity; services come from `Deps`. Provider remains a
 per-call lookup. Rpc's generic Session-method dispatch does not implement modes.
+
+`AgentsSession` injects process `AgentIndex` and Session `TreeCommands`, provides
+`sessionMethods["session.agent"]`, and reads the addressed branch's public Prompt
+service per call. `SessionMethods::provide` owns admission, tasks and cleanup;
+unload reports interruption and releases the waiter without revoking committed
+Prompt commands. The entry stores no adopted configuration. Its implementation is
+[Agents' configuration entry](../../crates/dim-app-server/src/agents/configuration.rs).
 
 ## Existing mechanisms
 
@@ -55,12 +61,15 @@ session.model.update {
 } -> {model: {providerId, modelId}, outcome: "adopted" | "unchanged"}
 ```
 
+Without a target, at least one preference is required; an empty update is invalid.
 Both target fields are present or both absent; partial targets and explicit null
 are invalid. Explicit-target requests keep their current semantics. Without a
 target, read the current adopted configuration from Prompt's branch snapshot and apply
 only supplied preferences to that captured base. Other configuration values remain
 unchanged. Provider owns validation and native reasoning-off/tier mapping; the CLI
 does not reconstruct complete preferences from provider-specific request fields.
+Changing effort replaces mutually exclusive reasoning enable/budget controls;
+unrelated sampling, token limits, service tier and metadata are preserved.
 
 This extends the business request's choice of base configuration. `ConfigureUpdate`,
 `ModelSelection`, Timeline events and Session facades remain unchanged. No change
@@ -70,6 +79,10 @@ guessed complete selection.
 
 `/effort VALUE`, alias `/reasoning VALUE`, sends `reasoningEffort` without a target.
 Values come from declared `effortOptions` and the existing reasoning-off declaration.
+The CLI reads the adopted provider/model identity from the public
+`context/configured` view, then reads choices from the existing `provider.catalog`
+response. The public event does not expose internal model settings or capability
+snapshots. Catalog choices are display data; Provider validates each update.
 `none` needs that declaration or an advertised native `none`. Unsupported values
 fail without adoption; no value is guessed from a model name.
 
@@ -84,6 +97,9 @@ projection updates it from adopted `context/configured` facts, and initializes i
 from the existing context/checkpoint reconstruction when a branch opens or
 restores. `Branch::get::<PromptSnapshot>()` supplies the latest published value;
 a missing or reloading state follows the existing unavailable/error behavior.
+An available snapshot without adopted model configuration rejects an absent-target
+request with the existing `invalid_params` error; the caller can supply an explicit
+provider/model target. This is not a service reload.
 Preference commands do not call `Branch::context`, replay history or fill missing
 configuration with defaults. This adds no service key, runtime state, persisted
 field or second configuration type.
@@ -112,7 +128,9 @@ Prompt's existing branch service gains a resolved-source operation. Its data is 
 optional `ModelSelection` and a list of `{target: PromptSourceTarget, entry:
 PromptEntry | null}`; null revokes that target. The Rust binding reuses these types
 and Prompt's current loaded-source representation, derives the configure targets
-and freezes the values in the existing operation's pending record. It writes the
+and freezes the values in the existing operation's pending record. Each non-null entry
+must match its target source/scope; System entries require branch scope, matching
+the ordinary source-loading contract. It writes the
 existing configure command, enters the same Dispatcher/queue and publishes through
 the existing result path. The caller never writes the adopted result directly.
 
@@ -170,16 +188,17 @@ configuration-superseded, reload/interruption and Session-closed contracts.
 
 ## Scrollback interaction
 
-Commands run at the existing idle prompt. Bare `/effort` and `/fast` show supported
-choices from published `context/configured` history/notifications without mutation
-or a new query method. Bare `/agent` uses existing `agent.list` IDs, names and
-descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
+Commands run at the existing idle prompt. Bare `/effort` and `/fast` read the
+adopted provider/model identity from public `context/configured` history/notifications
+and show supported choices from the existing `provider.catalog` response, without
+mutation or a new query method. Bare `/agent` uses existing `agent.list` IDs, names
+and descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
 
 ```text
 > /effort high
-Reasoning effort adopted: high
+Reasoning effort configuration adopted: high
 > /fast off
-Service tier adopted: default
+Service tier configuration adopted: off
 > /agent
 ID                 NAME              DESCRIPTION
 <agent-id>         Reviewer          Review changes
@@ -191,7 +210,9 @@ Error: this model does not advertise priority/default service tiers.
 ```
 
 Enter submits a command; errors keep the prompt and Session. Ctrl+C/EOF keep the
-existing behavior. Lines wrap at terminal width and use existing escaping. No
+existing behavior for turns. Ctrl+C during configuration waits for its accepted
+operation's result before another line; the reply may describe an already adopted
+change. Lines wrap at terminal width and use existing escaping. No
 overlay, fullscreen UI, input queue or typeahead change. Command text does not
 become model input; headless prompt/stdin content keeps its literal meaning.
 

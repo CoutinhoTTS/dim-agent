@@ -21,10 +21,10 @@ Every statement carries its kind of evidence:
 | 3 | Retention unit | Last K = 2 turns | Tokens: keep the longest tail (keyed baseline included) that fits `0.25 × B`, cut at the earliest legal cut that fits | Medium |
 | 4 | Tail larger than the budget | Only budget recovery may cut inside the last K turns | Every trigger takes the latest legal cut when no cut fits; this removes the "dead zone" of a long single turn | High (the dead zone is a code fact) |
 | 5 | Keyed baseline | Not counted by retention | Counted in the retention budget, because it is replayed after every cut | Medium |
-| 6 | Prompt caching | Not considered | Do not lower the trigger for caching. Separate follow-ups: let the summarizer share the conversation prefix, and add Anthropic cache breakpoints | Medium |
-| 7 | Recovery | `validate` compares a full local estimate with the whole window | Use the same provider-baseline estimate as the trigger and compare it with `B` | Medium |
+| 6 | Prompt caching | Not considered | Cost does not decide the trigger: an early compaction pays off only under a break-even condition this note did not measure (§5.1). Separate follow-ups: let the summarizer share the conversation prefix, and add Anthropic cache breakpoints | Medium |
+| 7 | Recovery | `validate` compares a full local estimate with the whole window | With a provider baseline, use the same estimate as the trigger and compare it with `B`; without one the full estimate and its error remain (§6.4) | Medium |
 | 8 | Manual `/compact` | Same K = 2 turn limit, so it skips on short sessions | Cut at the start of the latest turn (or the token rule when that is smaller) | Low-medium |
-| 9 | Estimator | `bytes / 4`, 1,600 tokens per image | Keep both; the trigger's reserve absorbs the error | Medium-high |
+| 9 | Estimator | `bytes / 4`, 1,600 tokens per image | Keep both. The reserve absorbs the error of a delta over a provider baseline; it is a provisional heuristic that does not cover every no-baseline request (§6.4) | Medium-high |
 
 ## 2. How F1 decides today [Code]
 
@@ -108,10 +108,11 @@ threshold = B − reserve
 - **16,000 absolute floor.** One inline tool result is capped at 30,000 characters; its measured
   worst under-estimate is about 5,000 tokens (§6.2). 16,000 covers a batch of about three
   worst-case results, or one result plus the user input and the system and tool declaration drift.
-- **10 % ratio.** Covers full-estimate requests (no provider baseline: first request, after a
-  compaction, after a model switch), where the error applies to the whole request; measured
-  mixed coding content is within about ±15 % (§6.1). For 400k and larger windows this ratio is
-  also where Codex triggers.
+- **10 % ratio.** A provisional heuristic, not a proven bound. It is meant for full-estimate
+  requests (no provider baseline: the first request, right after a compaction, after a change of
+  prefix, model or configuration), where the error applies to the whole request. This note did not
+  measure a mixed transcript, so it claims no error bound for that case (see §6.4 for a case the
+  reserve does not cover). For 400k and larger windows this ratio is also where Codex triggers.
 - **20 % cap.** Small windows cannot afford 16k; the cap keeps a 32k model where it is today.
 - **No absolute upper trigger for 1M windows.** The two documented data points disagree (Claude
   Code compacts near 1M; the Anthropic API defaults to 150k). Without an evaluation of summary
@@ -185,11 +186,16 @@ threshold = B − reserve
   compaction keeps at most the system and tool prefix cached. Its summarizer request has a
   different system prompt and renders the transcript as text, so it shares no prefix with the
   conversation and pays full input price for the whole replaced range.
-- [Judgment] With caching working, carrying a context of `C` tokens costs about `0.1 × C` per
-  request, while one Dim compaction costs about `1.0 × C` of input plus the summary output and a
-  cache rebuild of the new, short prefix. Compacting earlier therefore costs more, not less; the
-  reasons to compact before the window fills are overflow safety (§3) and long-context quality.
-  The trigger should be as late as the reserve allows, which is what §3.3 does. The cheaper lever
+- [Judgment] Whether compacting earlier costs more depends on what follows. With a cache read at
+  `r` of the input price, a compaction pays off once
+  `compaction input + summary output + cache rebuild < r × Σ (old prompt − compacted prompt)`
+  over the later calls that would otherwise carry the old prefix. Many later small calls with a
+  warm cache can repay an early compaction. For example, with `r = 0.1`, `C = 100k` shrunk to
+  `S = 20k` saves 8k input-price units per later call, so a 150k-unit compaction is repaid within
+  about twenty calls. Few later calls, or a cache that expires between them, favour a late trigger.
+  This depends on call count, growth and cache lifetime, none of which this note measured, so cost
+  does not decide the trigger. The late trigger of §3.3 rests on overflow safety (§3) and on
+  keeping context the model may still need; it remains a heuristic. The cheaper lever
   is the summarizer: reusing the conversation prefix (Claude Code's approach) would cut its input
   cost by about 10× on cached providers. That changes the strategy's request shape and is a
   separate follow-up, as is adding Anthropic cache breakpoints (without them the 0.1× case does
@@ -203,8 +209,10 @@ threshold = B − reserve
   when the real input is about 70 % of the window, replacing the retained tail with the latest
   legal cut; log- or lock-file-heavy content (estimate up to 1.6× too low on Qwen) lets the real
   input reach the window first, and the provider error is not recovered.
-- [Judgment] `validate` should use the same estimate as the trigger (provider baseline plus delta,
-  from the branch's committed events) and fail at `estimate > B`. Recovery then means "the request
+- [Judgment] When a provider baseline exists, `validate` should use the same estimate as the
+  trigger (provider baseline plus delta, from the branch's committed events) and fail at
+  `estimate > B`. Without a baseline the full local estimate remains, and so does its error (§6.4);
+  this change does not remove that dependence. Recovery then means "the request
   does not fit the declared budget", which is consistent with the trigger and the summarizer's own
   chunk budget. With §3.3 and §4.2 in place, recovery is the fallback for a single delta larger
   than the reserve; the latest-legal-cut rule it uses stays as it is.
@@ -302,9 +310,17 @@ method:
 
 - With a provider baseline, only the delta since the last call is estimated, and per capped
   result the worst measured error is about 5k tokens: the 16k floor covers about three such results.
-- Without a baseline the error scales with the whole request; mixed coding transcripts sit within
-  about ±15 %, so a 10 % reserve on top of the JSON envelope margin is enough for the trigger, and
-  §5.2 removes the full-estimate dependence from recovery.
+- Without a baseline the error scales with the whole request, and the reserve does not cover every
+  case. The estimates in §6.1 already include the serialized JSON, so no separate envelope margin
+  applies on top. A counterexample from the reported Chinese-Markdown/cl100k ratio
+  (`31782 / 40161 ≈ 0.79`): at a 128,000-token window with 4,096 output tokens the proposed
+  trigger is 107,904, and a 130,000-token no-baseline input estimates to about 102,900. That is
+  below the trigger and the proposed validation budget, although the input alone exceeds the
+  window. This is arithmetic on the measured ratio, not a new provider measurement. A no-baseline
+  request is reachable: the first request, right after a compaction, or after a change of prefix,
+  model or configuration (`ContextPolicy::estimate` falls back to `count_tokens(request)`). Until a
+  provider-reported overflow carries budget facts into recovery (the Aimux follow-up in §5.2),
+  this limitation stays; the reserve is a provisional heuristic.
 - A tokenizer per model is not worth its weight: it adds per-provider vocabularies, still cannot
   count Claude locally, and the provider baseline already bounds the error to the delta. Codex uses
   the same `bytes / 4` approximation (`APPROX_BYTES_PER_TOKEN = 4` in

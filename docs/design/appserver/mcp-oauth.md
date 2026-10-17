@@ -1,6 +1,6 @@
 # MCP OAuth
 
-Status: Implemented on the daemon side (maintainer review on [#111](https://github.com/arcships/dim/pull/111)); the CLI part (§13) belongs to the CLI owner. Roadmap item F4
+Status: Implemented on the daemon side (maintainer review on [#111](https://github.com/arcships/dim/pull/111)) and in the native CLI (§13). Roadmap item F4
 ([#75](https://github.com/arcships/dim/issues/75)). Overview:
 [Appendix B.2, Mcp row](../overview.md#b2-app-server-process-plugins). Phase: P2. Language: Rust.
 Scope: inside the existing Mcp process plugin ([ADR 002](../../adr/002-plugin-scope.md)). Basis:
@@ -607,8 +607,7 @@ Requirements on the CLI owner (zerob13), stated as behaviour; the CLI's internal
    - Offer a way to enter a client secret with hidden input. The CLI never echoes, logs or
      stores it.
 2. **Return the callback.** When `redirectUri` is loopback and its port is free on both
-   `127.0.0.1` and `::1`, capture the callback with a short-lived local listener that serves one
-   request. Forward the full URL with `mcp.auth.complete`, then answer the browser with a static
+   `127.0.0.1` and `::1`, capture one matching callback with a short-lived local listener. Forward the full URL with `mcp.auth.complete`, then answer the browser with a static
    page.
    - Otherwise, for example when the port is busy, under SSH, or when the user asks not to open
      a browser, ask for the full callback URL with hidden input, as account login does.
@@ -620,9 +619,31 @@ Requirements on the CLI owner (zerob13), stated as behaviour; the CLI's internal
 5. **Status.** `mcp list` and `/mcp` show the catalog's `auth.status` (needing sign-in, signed
    in, sign-in expired) and `missingScopes`. A Session view shows
    `auth_required` with a sign-in hint.
-6. **Non-interactive.** Without a terminal (`exec`, pipes) the CLI never starts a sign-in; it
-   prints the command to run.
+6. **Non-interactive.** Explicit sign-in requires a terminal and otherwise prints the command to run.
+   `--prompt`, exec and piped prompt content remain literal model input, including slash text;
+   the CLI never interprets them as a sign-in action.
 7. **Errors.** Map the §9.3 codes to the listed actions, and never print a callback URL back.
+
+The native CLI exposes `mcp login ID [--no-browser] [--client-secret]`, `mcp logout ID`,
+idle `/mcp`, `/mcp login [--no-browser] [--client-secret] ID` and `/mcp logout ID`.
+It uses the public catalog's selected source, including project shadowing. The `--client-secret`
+flag requests hidden input, never an argument value. Loopback listeners bind both `127.0.0.1`
+and `::1`. Requests must use the configured callback path; unrelated paths receive 404 without
+consuming the listeners. Each connection has a two-second header deadline and bounded input;
+invalid connections leave capture available. The first matching callback releases the listeners,
+preserves its path/query against the known redirect origin and receives a static response after
+`complete` settles. Hidden paste remains available while waiting for the browser; the first
+callback or pasted line wins. The daemon remains
+the only validator of redirect, state, issuer and authorization results.
+
+Ctrl+C or expiry releases the listeners and hidden-input guard. Cancellation exits 130; expiry
+exits 1 with an expiry message. A submitted operation that completes successfully exits 0 even
+when its waiter was interrupted. Unknown-server errors do not echo unverified command text. An already-submitted RPC is
+drained before the interactive prompt returns, preserving the existing response identity.
+No attempt cancellation method, token state, background poller or daemon endpoint is added.
+The CLI's current configuration surface enables and disables entries; entry removal through
+the configuration API retains the sign-out-first requirement above. The CLI interaction is
+illustrated in [its README](../../../crates/dim-cli/README.md#mcp-servers).
 
 Other follow-up, not a requirement:
 

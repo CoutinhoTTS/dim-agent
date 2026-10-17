@@ -15,6 +15,7 @@ pub(crate) fn scope_is_visible(scope: &PromptScope, branch: &str, ancestors: &[S
 /// Rebuildable prompt state. Loading and publication belong to capabilities.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PromptSnapshot {
+    pub configuration: Option<ModelConfiguration>,
     pub entries: BTreeMap<(String, PromptScope), PromptEntry>,
     pub revision: Option<PromptReference>,
     pub system_revision: Option<PromptReference>,
@@ -26,6 +27,7 @@ pub struct PromptSnapshot {
 impl PromptSnapshot {
     pub fn from_checkpoint(state: &PromptCheckpointState) -> Self {
         Self {
+            configuration: None,
             entries: state
                 .entries
                 .iter()
@@ -56,6 +58,11 @@ impl PromptSnapshot {
             .as_ref()
             .map(|checkpoint| Self::from_checkpoint(&checkpoint.state.prompts))
             .unwrap_or_default();
+        state.configuration = context
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.state.configuration.as_ref())
+            .map(|data| (*data.settings).clone());
         for event in &context.events {
             state.apply(event);
         }
@@ -80,6 +87,9 @@ impl PromptSnapshot {
 
     pub fn apply(&mut self, event: &AgentEvent) {
         match &event.kind {
+            EventKind::ContextConfigured(data) => {
+                self.configuration = Some((*data.settings).clone());
+            }
             EventKind::PromptChanged(data) => {
                 let revision = PromptReference {
                     timeline: data.timeline.clone(),
