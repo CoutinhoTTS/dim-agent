@@ -1,6 +1,6 @@
 # Session 广播通知
 
-状态：已在 C6 实现（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）。需求：[SessionTitle §9 R1](../plugins/SessionTitle.md#9-向机制所有者提出的需求)。总览：[§6.2 第 2 条约束](../overview.md#62-约束)、[附录 B.2](../overview.md#b2-app-server-进程插件)（Rpc）、[附录 F](../overview.md#附录-f-向机制所有者提出的需求)。广播合同：[事件驱动流程 §6](../../../architecture/rust-agent/event-driven-flows.md#6-session-广播)。第一个发出方：SessionStore 标题元数据（S5b，[#60](https://github.com/arcships/dim/issues/60)，尚未实现）。
+状态：已在 C6 实现（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）。需求：[SessionTitle §9 R1](../plugins/SessionTitle.md#9-向机制所有者提出的需求)。总览：[§6.2 第 2 条约束](../overview.md#62-约束)、[附录 B.2](../overview.md#b2-app-server-进程插件)（Rpc）、[附录 F](../overview.md#附录-f-向机制所有者提出的需求)。广播合同：[事件驱动流程 §6](../../../architecture/rust-agent/event-driven-flows.md#6-session-广播)。第一个发出方：SessionStore 标题元数据（S5b，[#60](https://github.com/arcships/dim/issues/60)，[#96](https://github.com/arcships/dim/pull/96)：[标题元数据](session-title-metadata.md)）。
 
 ## 1. 概要
 
@@ -53,7 +53,7 @@ pub struct SessionNotice {
 
 | 规则 | 内容 |
 | --- | --- |
-| 含义 | 由所有者定义。`source` 是所有者的名字，每种 `kind` 及其 `data` 的含义由所有者写明（标题通知见 [SessionTitle A.2](../plugins/SessionTitle.md#a2-依赖的形状由所有者定义)）。广播和 Rpc 从不解释它们；客户端不处理的 `source` 或 `kind` 直接忽略。 |
+| 含义 | 由所有者定义。`source` 是所有者的名字，每种 `kind` 及其 `data` 的含义由所有者写明（标题通知见 [S5b §7](session-title-metadata.md#7-标题通知)）。广播和 Rpc 从不解释它们；客户端不处理的 `source` 或 `kind` 直接忽略。 |
 | Session | 记录本身不写 Session；频道就代表 Session，与 `Event` 相同。所有者不必在 `data` 里重复 Session id。 |
 | 位置 | 没有序号，没有批次；不持久化，不重放。通知只报告状态变了，不是之后的决定要用的事实。需要让客户端排序或去重变更的所有者，在 `data` 里放自己的修订号，标题通知就是这样做的。 |
 | 正文 | 所有监听方经 `Arc` 共享同一份正文，与 `Event` 相同；没有人复制或改写它。 |
@@ -76,8 +76,8 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice);
 | 重载 | 所有者卸载或重载期间不发出任何通知，恢复后也不重放。Session 能力的重载不影响 `notify`，它不经过 SessionBroadcast 插件。 |
 | 非 Rust 所有者 | 没有绑定。SessionTitle 需要的发出方 SessionStore 是 Rust。ExternalAgent 重设计草稿（[#145](https://github.com/arcships/dim/issues/145)，P3，TypeScript 优先）计划由 TypeScript Session 部件发出 `externalAgent.*` 通知；该部件需要按 [#4](https://github.com/arcships/dim/issues/4) 的具名服务规则另做绑定，由 ExternalAgent 在细化到 Ready 时提出（[路线图 §2](../../../design/roadmap.md#2-排期原则) 第 5 条）。 |
 
-例如 SessionStore 的 `setTitle`（S5b）提交新的修订号后调用
-`notify(&ctx, session_id, SessionNotice { source: "SessionStore".into(), kind: "title".into(), data })`，其中 `data` 是 SessionTitle A.2 给出的形状。
+例如 SessionStore 的 `setTitle`（S5b）提交新的修订号后，在它对标题写入的串行化之内调用
+`notify(&ctx, session_id, SessionNotice { source: "SessionStore".into(), kind: "title".into(), data })`，其中 `data` 是 `{title, titleSource, titleRevision}`（[S5b §5、§7](session-title-metadata.md#7-标题通知)）。
 
 ## 5. Rpc 转发
 
@@ -143,7 +143,7 @@ C4 叶子部件收不到通知。`SessionNodeRows` 只把 `Event` 记录转发�
 | D1 | `Notice` 是既有 Session 频道上的一种记录 | 同一频道让通知与事件保持顺序，并复用 Rpc 的监听器；单独的频道需要第二个订阅，也会失去这种顺序 |
 | D2 | `notify` 是函数，不是服务或插件 | 所有者不能依赖可选插件，通知也不需要生命周期：所有者重载只会停止它的通知 |
 | D3 | 没有监听方即丢弃；不排队，不重放 | R1 的要求；恢复靠所有者的查询，排队则需要保留策略和自己的生命周期 |
-| D4 | 记录不写 Session；由 Rpc 加上 `sessionId` | 频道代表 Session，与 `Event` 相同；每条 Session 通知都按 `sessionId` 路由，所有者也无法写错。这细化了 R1（其线上形式是记录本身）：标题数据中自带的 `sessionId` 变得多余，是否保留由 S5b 决定 |
+| D4 | 记录不写 Session；由 Rpc 加上 `sessionId` | 频道代表 Session，与 `Event` 相同；每条 Session 通知都按 `sessionId` 路由，所有者也无法写错。这细化了 R1（其线上形式是记录本身）：标题数据中自带的 `sessionId` 变得多余，S5b 不再保留它（[S5b §7](session-title-metadata.md#7-标题通知)） |
 | D5 | 只发协议 v3，不升版本 | v1、v2 已冻结；这条通知是增量的，与 v3 新增的事件种类相同 |
 | D6 | 可靠送达：慢客户端被断开 | 与事件一致；无声丢弃通知会让客户端落后且没有任何信号 |
 | D7 | `Closed` 之后的通知被丢弃 | `session.closed` 仍是订阅的最后一条 Session 通知；空档由所有者的查询覆盖 |

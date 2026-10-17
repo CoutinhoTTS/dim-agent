@@ -236,6 +236,24 @@ ProjectionCheckpoint = {
 - **不记来源**：不加记录分叉来源的列，也不写事件；目前没有任何决定使用它，[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-fields) 规定 Session 来源在有使用方时连同其格式决定一起加入。
 - **旧版本**：没有 S5c 的守护进程把分叉出的 Session 当作普通 Session 读取，把已删除的 Session 当作从未存在。
 
+### S5b v16 格式决定
+
+[路线图](../roadmap.md) S5b（[标题元数据](session-title-metadata.md#11-storage-format)）的格式决定：升级到 **v16**，从 v15 原地升级。
+
+- **新增一张表**：`session_metadata(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))`。`agent_store_format` 的约束改为 `CHECK (version = 16)`。
+  - 每个 Session 至多一行，没有行表示修订号 0、没有标题。
+  - `revision` 是该 Session 已提交 `setTitle` 的次数；清除标题时保留该行，`title` 与 `title_source` 置为 NULL，修订号不会回退。
+  - 删除 Session 时，在 S5c 的同一删除事务里、在 `agent_sessions` 之前删除这一行；分叉不复制它。
+- **不能留在 v15**：启动要求精确的 SQL 结构，v15 守护进程会拒绝多出表的库，不满足"旧读取器能正确解释新值"。标题不能放进已有的行：`agent_sessions.config` 是分叉整体复制的不可变创建配置，`settings_documents` 属于 Settings；给 `agent_sessions` 加列同样改变存储的 SQL。
+- **读取或转换路径**：在现有的启动准入事务内处理：
+  - 空库直接建 v16。
+  - 结构恰为 v15 且标记为 15 的库，在同一事务内重建 `agent_store_format`、写入 16，并建 `session_metadata`。不读取、不改写任何已有行；失败则回滚，原 v15 库保持不变。
+  - 结构恰为 v13 且标记为 13 的库，在同一事务内先走 S5a 的一步，再走本步，直接成为 v16。
+  - 恰为 v16 的库直接打开。
+  - 其他库（标记不符的 v15 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
+- **单向**：不做备份，与 S5a 相同（开发阶段的决定）。v15 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。升级日志沿用 S5a 的那一行，写明原版本：`Upgraded native store <path> from format v15 to v16; earlier dimcode versions cannot open it.`
+- **验证**：测试用 v15 结构的冻结副本和完整记录示例构建一次性 v15 库，升级后核对结构恰为 v16、业务行逐行不变；v13 库一次升级到 v16；从不打开用户已有的库（`storage_flow.rs`）。
+
 ## 索引与实际查询
 
 | 版本与索引 | 精确列序/条件 | 服务的查询 |
