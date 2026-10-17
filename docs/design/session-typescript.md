@@ -1,8 +1,8 @@
 # Session TypeScript parts
 
-Status: proposed tool/method binding design for [C4 #63](https://github.com/arcships/dim/issues/63),
-with native broadcast choices requiring owner alignment. Production implementation and full C4
-acceptance are pending. The [spike](session-typescript-spike.md)
+Status: tool/method bindings implemented for [C4 #63](https://github.com/arcships/dim/issues/63).
+Native broadcast choices require owner alignment; broadcast implementation and full C4 acceptance
+remain pending. The [spike](session-typescript-spike.md)
 establishes transport feasibility; its private service names and combined fixture are not this API.
 
 ## Scope and ownership
@@ -30,8 +30,8 @@ remain unchanged. This work does not expose arbitrary runtime services through t
 
 The initial usable entry is the public App Server embedding API:
 `serve(builder, ServerConfig { session_typescript: Some(...), .. })`. It runs an actual App Server and its
-normal Rpc path; an example must demonstrate a protected local connection with a disposable home.
-This configuration field is proposed here and does not exist yet. General CLI installation,
+normal Rpc path. The [embedding example](../../crates/dim-app-server/examples/session_typescript.rs)
+uses a protected Unix connection and a disposable storage home. General CLI installation,
 marketplaces and editable plugin intent remain PluginManager work.
 
 The input contains the existing `LocalRuntime::node` arguments (`node`, `jsRuntime`, `anchor`,
@@ -77,8 +77,21 @@ Node starts, while the host installs AgentBuilder's factories and Rpc's namespac
 the loader starts. C4 does not move that list into a mutable registration service or bootstrap
 a second runtime. On the existing online resolution, compare the Node description's `provides`
 with the row snapshot before loading that row. A mismatch is a row resolution error; it does
-not alter the configured names. The same resolved factory retains the original schema,
-dependency declarations, scoped factory, metadata and configuration validation.
+not alter the configured names. The pinned SDK's initial offline placeholder has no `provides`;
+only its existing runtime-source/unavailable-schema marker permits that provisional resolution.
+The SDK later uses `resolve_again` to obtain the online declaration before publishing its
+`RuntimeRows` catalog. An online description must match the snapshot, including when its actual
+`provides` is empty; missing online declarations are not accepted as placeholders. The same
+resolved factory retains the original schema, dependency declarations, scoped factory, metadata
+and configuration validation.
+
+After process reconciliation releases its loader operation, App Server's existing startup
+readiness waits for the configured runtimes' `RuntimeRows` catalogs as well as their process
+rows. It uses the existing startup deadline and failure cleanup. This orders Session creation
+after declaration discovery; it does not wait for genuinely Pending optional Session rows.
+
+Rows naming the same module must use the same snapshot; distinct row ids alone do not make
+conflicting structural declarations valid.
 
 At this external configuration boundary reject malformed identities, unsupported method modes,
 duplicate tools, duplicate namespaces, host-tool collisions and the C1 reserved-name/namespace
@@ -95,8 +108,9 @@ of an enabled row keep their existing Pending/reload behavior.
 The service and data contract is [Session boundary A.5](contracts/session-boundary.md#a5-tool-contribution).
 `declaration()` is synchronous; `execute(call, cancelled)` is asynchronous. The second argument
 is the existing bridge's by-reference cancellation Promise, an implementation of A.5's cancel
-action, not a new durable token, method or cancellation registry. It resolves on turn cancellation
-and when the native call ends. The provider must release external resources before settling.
+action, not a new durable token, method or cancellation registry. It resolves on turn cancellation,
+when the owning row unloads, and when the native call ends. The provider must release external
+resources before settling.
 
 The tool owner performs the only conversion between the neutral call and native execution:
 
@@ -125,8 +139,13 @@ ToolRegistry samples the ordinary native contribution and neutral service identi
 existing `LazyLock` initialization. Assembly permits only one configured owner per tool key;
 no other provider is tried after that owner's declaration or execution fails. The foreign
 service is looked up directly by its Session instance and bridge name. Its synchronous
-`declaration()` is decoded there, and the handler retains that exact object. There is no eager
-declaration during row apply, polling, asynchronous attachment or changed `ToolContribution`
+`declaration()` is decoded there, and the handler retains that exact object together with the
+original row context's existing `CancellationToken`, published under the same tool service name
+and Session instance as a typed native key. Cancellation rejects later executions through this
+retained handler and ends its in-flight native wait; it does not select a replacement generation
+or force an uncooperative JavaScript task to stop. The TypeScript owner still settles its work
+through its effects. There is no eager declaration during row apply, polling, asynchronous
+attachment or changed `ToolContribution`
 storage type. Synchronous declaration must not perform external asynchronous business work;
 like a synchronous Rust provider it can delay its caller if it does not return.
 
@@ -150,12 +169,16 @@ RemoteGateway origin or a new process `callChannel` service.
 `progress`. Existing C1 validation applies. A declaration requesting unsupported notification
 or handoff behavior fails the row rather than accepting work it cannot honor. Declarations
 are decoded once for that provider generation, before its native `SessionMethods` is published.
+Cancellation of the original row context also ends a pending `describe()` wait, so unload does
+not depend on that declaration Promise settling.
 
 `call` receives the existing neutral `{callId, method, params}` data plus the bridge cancellation
 Promise and per-call progress callback. `params` includes the original `sessionId` and optional
 `branchId`. `callId` is an opaque runtime correlation identity for this accepted call, not a
 durable business identity or the client's JSON-RPC id. No unimplemented `origin` fields are
-invented. A reply is `{kind: "value", value}`; `{kind: "handedOff"}` is unsupported in this subset.
+invented. A reply is `{kind: "value", value}`; an omitted `value` (including JavaScript `undefined`
+omitted during JSON serialization) becomes JSON `null`. `{kind: "handedOff"}` is unsupported in
+this subset.
 Errors are the existing neutral `{code, appError, message}` data, decoded once into C1's wire
 error. Provider-defined application codes must be preserved rather than replaced with a success
 value or leaked runtime exception; C1's Rust error storage must own the decoded string. The
@@ -189,6 +212,15 @@ The by-reference Promise is deliberate: dropping a remote future can discard its
 which cannot implement `drain`. The native call ends its Promise lease on normal completion too.
 TypeScript code cooperatively settles after cancellation; no timeout or forced-success reply
 is invented for an uncooperative plugin.
+
+`rows.load` can reply before the native projection publishes its exported services. The original
+row subscribes to the existing `ServiceChanged` event before loading and waits for all its own
+declared tool and method-service projections before its apply returns and it becomes Active.
+C1 binds the method namespaces during that apply; tool declarations remain unread until
+ToolRegistry's first read. The row context owns the subscription and cancellation ends the wait.
+The foreign cleanup is registered immediately after loading, so a failed declaration or cancelled
+binding still releases that row. This wait does not make another optional row required or change
+Session publication.
 
 ## Native Session broadcast
 
@@ -254,13 +286,17 @@ acceptance does depend on native broadcast, so it cannot be reported complete wh
 or C6 integration requirements remain unresolved. No speculative core/transport capability is
 proposed as a workaround.
 
+The separate [native broadcast proposal (#156)](https://github.com/arcships/dim/pull/156)
+is unapproved and unimplemented; it does not change the accepted constraints above.
+
 ## Lifetime and failure
 
 Loader owns generations and rows. Session closure stops branches before unloading Session
 parts. Each TS part immediately registers its acquired resources with its own `effect`, stops
 new work on disposal, releases I/O, settles accepted work and rejects retained service objects.
 The native C1 effect drains while the Node part is still alive. Tool cancellation follows its
-existing turn owner; no work transfers to another generation.
+existing turn owner and the original row's context cancellation; no work transfers to another
+generation.
 
 The tool/method subset permits synchronous service/effect registration in TS apply, and business
 work driven by accepted calls after Session publication. It does not yet expose a neutral
@@ -270,8 +306,10 @@ delivery's activation path is one of the explicit remaining contracts above; no 
 or API is proposed to hide this distinction.
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).
+Session assembly settles rows already Loading, including their tool/method projection waits.
 Host-appended optional rows stay in the original disposal group and diagnostics and do not enter
-the Session's required wait. Their hard dependencies, key validation and failure reporting do
+the Session's required Active wait: a row genuinely Pending on a missing dependency does not
+delay native Session use. Their hard dependencies, key validation and failure reporting do
 not weaken. Disabled parts have no row instance. An optional failure changes only its features;
 there is no automatic retry of an operation that may have produced external side effects.
 
@@ -286,28 +324,40 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 
 ## Impact and verification
 
-| Area | Necessary change after contract approval |
+| Area | Implementation and remaining boundary |
 | --- | --- |
 | App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, names/catalog derived from `provides`, optional Session rows and native resolver factory composition. |
 | ToolRegistry and its page | Native/foreign owner selection and declaration decoding at its existing first read. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
-| Session broadcast | Owner serialization, native projection and activation delivery after their contracts are settled; no hard dependency on optional transport. C6 owns notice data. |
+| Session broadcast | Pending: owner serialization, native projection and activation delivery after their contracts are settled; no hard dependency on optional transport. C6 owns notice data. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
 | Documentation | Owner pages, App Server README and Session-boundary Appendix F updated to the actually implemented subset. |
 | Tests and fixture | One real App Server/Node flow using a disposable home and local Rpc; focused malformed-boundary cases in that flow. |
 
-The flow must cover two Sessions sharing a Node PID; an Active tool declared on the immediate
+The executable Node/Rpc flows cover two Sessions sharing a Node PID; an Active tool declared on the immediate
 first model request after create and restore and executed through ToolExecutor; a pending optional
 part that does not block native use; a later Active tool omitted until reload; disabled rows;
-actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; native
-Session broadcast isolation and unload; continued native/other-Session use after one part closes.
+actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; continued
+native/other-Session use after one part closes. Native Session broadcast isolation and unload
+remain acceptance requirements for the pending broadcast binding.
 Gate each observed transition on an actual service/event/fence, not a sleep. Boundary cases cover
 declaration mismatch, invalid tool/method reply, name collisions and cancellation without leaking
 a Promise lease. Reuse C3/C1 tests for their unchanged native semantics.
+Native-store fork creates fresh Session-scoped providers from the copied configuration, and
+delete drains the fork's admitted method before unloading it while its source remains usable.
 
-No automated test is warranted for this documentation-only change. The existing spike and local
-same-row/native-event experiments are evidence for their stated boundaries, not results for the
-product implementation. Full product acceptance and cross-platform evidence remain pending.
+The existing CI Node step executes the product Node/Rpc flows alongside the managed-provider
+flow. Ordinary Session assembly covers the immediate first request after create and restore,
+including a tool-only module with no method namespace or test-only required dependency.
+Separate Pending and disabled rows verify native continuity. Row-only reload exercises in-flight
+tool cancellation and rejection through retained handlers, and unload during a stalled `describe`
+exercises binding cancellation. Invalid tool/method declarations, malformed replies, omitted
+method values, online snapshot mismatch and conflicting module snapshots remain boundary cases
+in those flows. The protected embedding example prints durable history; submit/idle success
+alone does not certify that a TypeScript tool executed.
+
+The spike and local native-event experiments remain evidence only for their stated boundaries.
+Full C4 acceptance, broadcast delivery and cross-platform evidence remain pending.
 
 ## Ablation
 
@@ -317,7 +367,11 @@ manifest, separate name arrays, registration manager and per-call provider are u
 Same-row factory composition is retained because C1 must drain before unloading its foreign
 handler. The tool declaration stays at first registry read, so no deferred contribution wrapper
 or eager tool registration is needed. Promise cancellation preserves the existing `drain` reply.
-The additional native peer remains a reviewed transport decision, not an assumed requirement.
+Startup uses the existing process readiness loop and SDK catalog publication; the row's own
+service-publication wait covers tools and methods without moving declaration reads. Retaining
+the original row's token ends stale native tool waits without a tracker, per-call subscription or
+new liveness API. The additional native peer remains a reviewed transport decision, not an
+assumed requirement.
 
 ## Rule check
 

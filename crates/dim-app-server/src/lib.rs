@@ -17,6 +17,7 @@ pub mod permission_rules;
 pub mod plugin_files;
 pub mod protocol;
 pub mod provider;
+pub mod session_typescript;
 pub mod settings;
 pub mod settings_methods;
 mod skills_management;
@@ -33,6 +34,7 @@ use dim_agent_runtime::{
     Agent, AgentBuilder, AgentError, SessionConfig, register_capability, wait_active,
 };
 use rutis::{Ctx, FiberView};
+use rutis_loader::RowsSource;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -53,6 +55,7 @@ pub struct ServerConfig {
     pub target_home: Option<PathBuf>,
     pub product_home: Option<PathBuf>,
     pub managed_plugin: Option<managed_provider::ManagedPluginConfig>,
+    pub session_typescript: Option<session_typescript::SessionTypeScriptConfig>,
     pub daemon_profile: protocol::DaemonProfile,
     /// Admission is disabled until the product execution profile is installed.
     pub session_execution: bool,
@@ -77,6 +80,7 @@ impl Default for ServerConfig {
             target_home: None,
             product_home: None,
             managed_plugin: None,
+            session_typescript: None,
             daemon_profile: protocol::DaemonProfile::Mock,
             session_execution: true,
             model_catalog: None,
@@ -217,6 +221,7 @@ pub const RESTARTABLE: [&str; 5] = ["Rpc", "Connection", "Transport", "Agents", 
 struct Processes {
     loader: rutis_loader::Loader,
     view: FiberView,
+    runtime_rows: Vec<rutis::TypeKey>,
 }
 impl Processes {
     /// The loader and the fiber of every top-level row (the process plugins).
@@ -254,10 +259,21 @@ impl Processes {
                     _ => ready = false,
                 }
             }
+            // RuntimeRows publishes its catalog after the process plugin's apply returns.
+            let unpublished = self.runtime_rows.iter().find(|key| {
+                root.get_as::<rutis_loader::RuntimeRows>((*key).clone())
+                    .is_none()
+            });
+            ready &= unpublished.is_none();
             if ready {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
+                if let Some(key) = unpublished {
+                    return Err(AgentError::Build(format!(
+                        "runtime row declarations were not published: {key:?}"
+                    )));
+                }
                 return wait_active(root, &views, Duration::ZERO, &CancellationToken::new()).await;
             }
             tokio::time::sleep_until(
@@ -315,6 +331,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
     trace::install(&mut builder);
+    builder
+        .session_plugin(agents::AgentsSessionPlugin::new)
+        .session_methods(agents::SESSION_NAMESPACE);
     #[cfg(not(unix))]
     if config.unix_path.is_some() {
         return Err(ServerError::Configuration(
@@ -542,11 +561,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             );
             let runtime = Arc::new(runtime);
             rows.push(register_capability(&mut builtins, move || {
-                NodeRuntime(runtime.clone())
+                NodeRuntime(runtime.clone(), "NodeRuntime")
             }));
             let row_resolver = resolver.clone();
             rows.push(register_capability(&mut builtins, move || {
-                NodeRows(row_resolver.clone())
+                NodeRows(row_resolver.clone(), "node", "NodeRows")
             }));
             rows.push(register_capability(&mut builtins, || {
                 managed_provider::ManagedProviderBinding
@@ -618,6 +637,23 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             register_capability(&mut builtins, || permission_rules::PermissionRulesPlugin),
         ));
     }
+    let session_parts = config
+        .session_typescript
+        .as_ref()
+        .map(|parts| {
+            session_typescript::Parts::new(parts, &mut builder, &mut service_catalog, &owners)
+        })
+        .transpose()?;
+    if let Some(parts) = &session_parts {
+        let runtime = parts.runtime.clone();
+        rows.push(register_capability(&mut builtins, move || {
+            NodeRuntime(runtime.clone(), "SessionNodeRuntime")
+        }));
+        let resolver = parts.rows_runtime.clone();
+        rows.push(register_capability(&mut builtins, move || {
+            NodeRows(resolver.clone(), "session-node", "SessionNodeRows")
+        }));
+    }
     agents::register(&mut builtins);
     rows.push(register_capability(&mut builtins, || {
         agents::AgentDirectoryPlugin
@@ -662,9 +698,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Agents, Sessions and branches are instances of this same loader.
     let reserved_names = private_row
         .iter()
+        .chain(session_parts.iter().flat_map(|parts| parts.rows.iter()))
         .flat_map(|row| [&row["id"], &row["name"]])
         .filter_map(serde_json::Value::as_str);
-    let session_row = match builder.install(&mut builtins, &root, reserved_names).await {
+    let mut session_row = match builder.install(&mut builtins, &root, reserved_names).await {
         Ok(row) => row,
         Err(error) => {
             startup.armed = false;
@@ -676,6 +713,12 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .into());
         }
     };
+    if let Some(parts) = &session_parts {
+        session_row["config"]
+            .as_array_mut()
+            .expect("installed Session rows")
+            .extend(parts.rows.clone());
+    }
     let mut rows: Vec<_> = rows
         .iter()
         .map(|name| serde_json::json!({ "id": name, "name": name }))
@@ -684,7 +727,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if let Some(row) = private_row {
         rows.push(row);
     }
+    let runtime_rows = session_parts
+        .iter()
+        .map(|parts| rutis_loader::RuntimeRows::key(parts.rows_runtime.runtime_name()))
+        .chain(
+            node_resolver
+                .iter()
+                .map(|resolver| rutis_loader::RuntimeRows::key(resolver.runtime_name())),
+        )
+        .collect();
     let mut resolver = rutis_loader::Chain::new().with(builtins);
+    if let Some(parts) = session_parts {
+        resolver = resolver.with_shared(parts.resolver);
+    }
     if let Some(node) = node_resolver {
         resolver = resolver.with_shared(node);
     }
@@ -700,6 +755,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let processes = Processes {
         loader,
         view: loader_view,
+        runtime_rows,
     };
     let assembly = rutis_loader::Layer::new(
         "assembly",
@@ -821,14 +877,18 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     directory.create(path)
 }
 
-struct NodeRows(Arc<rutis_loader::RuntimeResolver>);
+struct NodeRows(
+    Arc<rutis_loader::RuntimeResolver>,
+    &'static str,
+    &'static str,
+);
 impl rutis::TypedPlugin for NodeRows {
     type Deps = (
         rutis::Keyed<rutis_bridge::runtime::Runtime>,
         Arc<rutis_loader::Loader>,
     );
     fn name(&self) -> &str {
-        "NodeRows"
+        self.2
     }
     fn apply<'a>(
         &'a self,
@@ -842,7 +902,7 @@ impl rutis::TypedPlugin for NodeRows {
 }
 impl dim_agent_runtime::Capability for NodeRows {
     fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
-        (rutis::DepKey::dynamic("node"), ())
+        (rutis::DepKey::dynamic(self.1), ())
     }
 }
 
@@ -909,11 +969,11 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
     result
 }
 
-struct NodeRuntime(Arc<rutis_bridge::runtime::LocalRuntime>);
+struct NodeRuntime(Arc<rutis_bridge::runtime::LocalRuntime>, &'static str);
 impl rutis::TypedPlugin for NodeRuntime {
     type Deps = ();
     fn name(&self) -> &str {
-        "NodeRuntime"
+        self.1
     }
     fn apply<'a>(
         &'a self,

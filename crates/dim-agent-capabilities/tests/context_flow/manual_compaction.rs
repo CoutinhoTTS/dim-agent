@@ -159,6 +159,9 @@ impl TypedPlugin for StrategyOwner {
                 self.scope,
                 self.strategy.clone(),
             )));
+            (&view).await.map_err(|error| {
+                CordisError::PluginFailed(format!("Strategy provider failed: {error}").into())
+            })?;
             self.views.lock().unwrap().push(view);
             Ok(Effect::Done)
         })

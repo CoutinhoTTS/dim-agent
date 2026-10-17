@@ -21,6 +21,7 @@
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
+- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md) (proposed)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)

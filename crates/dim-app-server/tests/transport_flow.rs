@@ -73,6 +73,8 @@ mod permission_rules;
 #[path = "transport_flow/session_methods.rs"]
 mod session_methods;
 
+#[path = "transport_flow/session_typescript.rs"]
+mod session_typescript;
 #[path = "transport_flow/settings_methods.rs"]
 mod settings_methods;
 
@@ -164,7 +166,7 @@ impl Client {
             Transport::Ws(stream) => stream.send(Message::Text(text.into())).await.unwrap(),
         }
     }
-    async fn read(&mut self) -> Value {
+    async fn read(&mut self, expected: &str) -> Value {
         tokio::time::timeout(Duration::from_secs(10), async {
             match &mut self.transport {
                 Transport::Unix(stream) => {
@@ -186,14 +188,14 @@ impl Client {
             }
         })
         .await
-        .expect("response deadline")
+        .unwrap_or_else(|error| panic!("deadline waiting for {expected}: {error}"))
     }
     async fn response(&mut self, id: u64) -> Value {
         if let Some(index) = self.notices.iter().position(|v| v["id"] == id) {
             return self.notices.remove(index);
         }
         loop {
-            let value = self.read().await;
+            let value = self.read(&format!("response {id}")).await;
             if value["id"] == id {
                 return value;
             }
@@ -209,7 +211,7 @@ impl Client {
             return self.notices.remove(index);
         }
         loop {
-            let value = self.read().await;
+            let value = self.read(&format!("notice {method}")).await;
             if value["method"] == method {
                 return value;
             }
@@ -388,8 +390,12 @@ async fn trace_preserves_initialization_rollback_and_never_overwrites_evidence()
         let directory =
             std::env::temp_dir().join(format!("dim-trace-rollback-{}", uuid::Uuid::new_v4()));
         let path = directory.join("failed.jsonl");
-        // Missing TimelineTreeControl fails after the per-create Trace plugin is ready.
-        let builder = AgentBuilder::new(AgentConfig::default());
+        // Session services become ready before a missing branch dependency rolls them back.
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::install(&mut builder);
+        defaults::mock_hosts(&mut builder);
+        builder.timeline_plugin(|_| UnreadyCapability(true));
+        builder.startup_timeout(Duration::from_secs(1));
         let server = serve(
             builder,
             ServerConfig {
@@ -1203,7 +1209,7 @@ async fn handshake_errors_and_trace_are_real_transport_boundaries() {
     client
         .raw(json!({"jsonrpc":"2.0","id":-1.5,"method":"daemon.ping"}))
         .await;
-    let negative_id = client.read().await;
+    let negative_id = client.read("response -1.5").await;
     assert_eq!(negative_id["id"], json!(-1.5));
     assert_ok(&negative_id);
     let unknown = client.rpc("unknown", json!({})).await;
@@ -1510,7 +1516,7 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
         let attach = client
             .send("session.attach", json!({"sessionId":session.id()}))
             .await;
-        let reply = client.read().await;
+        let reply = client.read(&format!("response {attach}")).await;
         assert_eq!(reply["id"], attach, "the reply precedes every notification");
         assert_eq!(reply["result"], json!({}));
         assert_eq!(

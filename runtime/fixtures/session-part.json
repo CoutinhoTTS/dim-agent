@@ -1,0 +1,4 @@
+{
+  "toolContribution:ts_echo": {"declaration": "sync", "execute": "async"},
+  "sessionMethods:session.typescript": {"describe": "async", "call": "async"}
+}
