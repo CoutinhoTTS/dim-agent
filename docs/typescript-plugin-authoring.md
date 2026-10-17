@@ -18,7 +18,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
-| Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is tracked by #168; branch bindings remain C5 work. |
+| Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is implemented by #180 (design #174); its guide section is not written yet. Branch bindings remain C5 work. |
 
 See [Session TypeScript bindings](design/session-typescript.md) and
 [Settings](design/appserver/settings-service.md) for their contracts and delivery
@@ -318,9 +318,9 @@ this binding. On unload, C1 stops admission and settles accepted calls before th
 JavaScript row unloads: `report` replies with interruption, while `drain` preserves
 the provider's reply. No business task in this example runs during `apply`.
 
-Native Session broadcast remains [#168](https://github.com/arcships/dim/issues/168)
-work. rutis 0.11 supplies leaf events; the Dim Session binding design in
-[#174](https://github.com/arcships/dim/pull/174) is merged, but not implemented.
+Native Session broadcast is implemented by [#180](https://github.com/arcships/dim/pull/180)
+on rutis 0.11 leaf events, following the Dim Session binding design in
+[#174](https://github.com/arcships/dim/pull/174); this guide does not describe it yet.
 A runtime `ctx.on` API alone does not deliver Dim Session records.
 The implemented tool/method binding supplies no Session activation method,
 branch Dispatcher access or replacement polling mechanism.

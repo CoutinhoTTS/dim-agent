@@ -96,7 +96,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | S6 | FileStorage 列目录与删除 | S | 独立 | — | S5a |
 | S7 | HostPlatform argv 辅助、每次启动时读 shell 配置 | S | 独立 | — | ShellInput |
 | S8a | Settings 业务源（Rust）：每个所有者一个或多个源、两个作用域的变更通知、入口统一校验；目录形式的项目文件由所有者自己读 | M | Settings | A2 | Rust 所有者、S8b |
-| S8b | Settings 语言中立服务、`settings.read/update`、#166 Rust 服务、#175 C4 行来源声明/TypeScript owner 读写及 #177 事件已合入；不提供凭据服务 | M | Settings | Rust 部分依赖 S8a；TypeScript 来源、读写与事件依赖已合入的 C4 绑定 | Web、SessionTitle、Goal、Scheduler、Workflow |
+| S8b | Settings 语言中立服务、`settings.read/update`；#166 Rust 服务、#175 C4 行来源声明/TypeScript owner 读写及 #177 事件已合入；不提供凭据服务 | M | Settings | Rust 部分依赖 S8a；TypeScript 来源、读写与事件依赖已合入的 C4 绑定 | Web、SessionTitle、Goal、Scheduler、Workflow |
 | R1 | Rpc：管理插件处于 Failed 或 Unresolved 时返回不可重试的 `service_unavailable`（#116） | S | Rpc | — | 客户端 |
 | S10 | `pluginFiles` 格式版本（二进制留给 P3） | S | 独立 | — | Scheduler、Workflow |
 | S11 | ModelProvider：模型不支持图片时换成文本占位 | S | 独立 | — | Attachments |

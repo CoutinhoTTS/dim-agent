@@ -811,7 +811,7 @@ fn declaration(source: &str) -> SourceDeclaration {
                     "type": "object",
                     "properties": {
                         "kind": {"type": "string"},
-                        "secretRef": {"type": "string"}
+                        "apiKey": {"type": "string"}
                     },
                     "required": ["kind"]
                 },
@@ -903,7 +903,7 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         );
         // A client write may change the user-only member; the owner may then
         // keep it, but not change it.
-        let service = json!({"kind": "web", "secretRef": "web-search"});
+        let service = json!({"kind": "web", "apiKey": "web-search"});
         let third = settings
             .update_declared(
                 "example",
