@@ -561,7 +561,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             }));
             let row_resolver = resolver.clone();
             rows.push(register_capability(&mut builtins, move || {
-                NodeRows(row_resolver.clone(), "node", "NodeRows", false)
+                NodeRows(row_resolver.clone(), "node", "NodeRows", false, false)
             }));
             rows.push(register_capability(&mut builtins, || {
                 managed_provider::ManagedProviderBinding
@@ -658,8 +658,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             NodeRuntime(runtime.clone(), "SessionNodeRuntime")
         }));
         let resolver = parts.rows_runtime.clone();
+        let session_events = parts.session_events;
         rows.push(register_capability(&mut builtins, move || {
-            NodeRows(resolver.clone(), "session-node", "SessionNodeRows", true)
+            NodeRows(
+                resolver.clone(),
+                "session-node",
+                "SessionNodeRows",
+                true,
+                session_events,
+            )
         }));
     }
     agents::register(&mut builtins);
@@ -885,18 +892,20 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     directory.create(path)
 }
 
-/// A runtime's rows part; `true` also forwards Settings events to the
-/// runtime's parts (the Session TypeScript runtime declares them).
+/// A runtime's rows part; the flags select Settings and Session observation.
+/// Only enabled Session observers require AgentIndex for publication admission.
 struct NodeRows(
     Arc<rutis_loader::RuntimeResolver>,
     &'static str,
     &'static str,
+    bool,
     bool,
 );
 impl rutis::TypedPlugin for NodeRows {
     type Deps = (
         rutis::Keyed<rutis_bridge::runtime::Runtime>,
         Arc<rutis_loader::Loader>,
+        dim_agent_runtime::When<Arc<AgentIndex>>,
     );
     fn name(&self) -> &str {
         self.2
@@ -904,11 +913,14 @@ impl rutis::TypedPlugin for NodeRows {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (rutis::Keyed(runtime), _): Self::Deps,
+        (rutis::Keyed(runtime), _, dim_agent_runtime::When(index)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             if self.3 {
                 session_typescript::forward_settings_events(ctx, runtime.process().clone())?;
+            }
+            if let Some(index) = index {
+                session_typescript::forward_session_events(ctx, runtime.process().clone(), index)?;
             }
             rutis::Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
         })
@@ -916,7 +928,7 @@ impl rutis::TypedPlugin for NodeRows {
 }
 impl dim_agent_runtime::Capability for NodeRows {
     fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
-        (rutis::DepKey::dynamic(self.1), ())
+        (rutis::DepKey::dynamic(self.1), (), self.4.then_some(()))
     }
 }
 
