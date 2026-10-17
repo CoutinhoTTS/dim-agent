@@ -57,8 +57,8 @@ impl Draft {
             return None;
         };
         match text.split_whitespace().next()? {
-            "/exit" => Some("/exit"),
-            "/export" => Some("/export"),
+            command @ ("/exit" | "/export" | "/mcp" | "/effort" | "/reasoning" | "/fast"
+            | "/agent") => Some(command),
             _ if text.starts_with('!') => Some("!"),
             _ => None,
         }

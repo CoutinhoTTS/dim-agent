@@ -20,6 +20,7 @@ base64 = "0.22.1"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

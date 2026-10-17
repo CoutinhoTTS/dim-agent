@@ -72,12 +72,24 @@ const SOURCES: [&str; 6] = [
     DATE,
 ];
 
-/// The explicit refresh of every source this capability provides.
+/// Refreshes dynamic sources without replacing adopted System entries.
 pub fn refresh_update() -> ConfigureUpdate {
     ConfigureUpdate {
-        sources: targets(SOURCES),
+        sources: targets(CHECKED),
         model: None,
     }
+}
+
+/// The Session System entry used by both creation and explicit profile adoption.
+pub fn session_entry(body: String, scope: PromptScope) -> Option<PromptEntry> {
+    (!body.trim().is_empty()).then(|| PromptEntry {
+        source: SESSION.into(),
+        version: sha256_version(&body),
+        body,
+        scope,
+        delivery: PromptDelivery::System,
+        order: 50,
+    })
 }
 
 /// Mirrors TS `formatCurrentDate`.
@@ -335,12 +347,12 @@ impl LoadPrompt for Sources {
                     PromptDelivery::State,
                     210,
                 ),
-                SESSION => (
-                    (!self.config.system_prompt.trim().is_empty())
-                        .then(|| self.config.system_prompt.clone()),
-                    PromptDelivery::System,
-                    50,
-                ),
+                SESSION => {
+                    return Ok(session_entry(
+                        self.config.system_prompt.clone(),
+                        target.scope,
+                    ));
+                }
                 other => {
                     return Err(HostError::failed(format!("unknown prompt source: {other}")));
                 }

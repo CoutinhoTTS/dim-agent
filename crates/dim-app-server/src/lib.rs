@@ -325,6 +325,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
     trace::install(&mut builder);
+    builder
+        .session_plugin(agents::AgentsSessionPlugin::new)
+        .session_methods(agents::SESSION_NAMESPACE);
     #[cfg(not(unix))]
     if config.unix_path.is_some() {
         return Err(ServerError::Configuration(

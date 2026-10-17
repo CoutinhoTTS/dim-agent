@@ -388,8 +388,12 @@ async fn trace_preserves_initialization_rollback_and_never_overwrites_evidence()
         let directory =
             std::env::temp_dir().join(format!("dim-trace-rollback-{}", uuid::Uuid::new_v4()));
         let path = directory.join("failed.jsonl");
-        // Missing TimelineTreeControl fails after the per-create Trace plugin is ready.
-        let builder = AgentBuilder::new(AgentConfig::default());
+        // Session services become ready before a missing branch dependency rolls them back.
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::install(&mut builder);
+        defaults::mock_hosts(&mut builder);
+        builder.timeline_plugin(|_| UnreadyCapability(true));
+        builder.startup_timeout(Duration::from_secs(1));
         let server = serve(
             builder,
             ServerConfig {
