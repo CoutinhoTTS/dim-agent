@@ -1,6 +1,7 @@
 # Settings service
 
-Status: Design approved; implementation pending. Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
+Status: Design approved; Rust side implemented (S8b part 1, §12), manifest loading and
+TypeScript delivery pending (part 2, after C4). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
 Builds on S8a ([#54](https://github.com/arcships/dim/issues/54), PR [#90](https://github.com/arcships/dim/pull/90));
 implementation depends on C4 ([#63](https://github.com/arcships/dim/issues/63)).
 Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:
@@ -181,8 +182,8 @@ and only that package is written against it. This is the trust model of in-proce
 
 ### 4.3 Management methods `settings.*` (client path)
 
-Namespace `settings`, provided by Settings through `managementMethods`. They are never served to
-paired devices (overview §6.2 rule 9).
+Namespace `settings`, provided through `managementMethods` by `SettingsMethods`, a process part
+that depends on Settings (§4.6). They are never served to paired devices (overview §6.2 rule 9).
 
 | Method | Request | Reply | Errors |
 | --- | --- | --- | --- |
@@ -270,24 +271,41 @@ impl SettingsService {
 }
 ```
 
-- `SettingsPlugin::new`/`native` take the declarations as factory configuration, next to
-  `project_roots`. `apply` compiles each schema with `jsonschema` (already in `Cargo.lock` through
-  the vendored aimux) and records each declared name in the existing `claims` map. A Rust type
-  that later names a declared source fails with the existing "belongs to another document type".
+- `SettingsPlugin::new`/`native` take the declarations as factory configuration
+  (`.declare(Vec<SourceDeclaration>)`), next to `project_roots`; App Server assembly passes
+  `ServerConfig::settings_sources`. `apply` checks each declaration (§3.1), compiles its schema with
+  `jsonschema` (already in `Cargo.lock` through the vendored aimux) and records each declared name
+  in the existing `claims` map. A Rust type that later names a declared source fails with the
+  existing "belongs to another document type". Assembly also reserves the names of the Rust sources
+  it registers (`.reserve::<D>()`: `mcp`, `mcp-projects`, `skills`, `permission`), so a declaration
+  naming one, or two declarations of one source, fail assembly with the owner and source in the
+  message.
 - The file and native paths are shared with `BusinessDocument`, keyed by source name instead of
   `D::NAMESPACE`. CAS, the gate, leases, the unsynced case and `publish` stay as they are.
-- `SettingsError` gains `UnknownSource` and `UserOnlyField`. A schema failure is `Invalid` with
-  the validator's message (the instance path, never the value).
+- `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope` and
+  `Document(message)`. A written document that breaks the schema, is not an object or has an empty
+  `*Ref` is `Document` with the validator's message (the instance path, never the value); the
+  client path maps it to invalid params. A persisted document that breaks the schema stays
+  `Invalid` (`invalid_document` / `settings_failed`).
 - The `settings` service is a `HostDispatch` under `host_key("settings")`, and assembly registers
-  `settings` in the `ServiceCatalog`, as `pluginFiles` is done today.
-- Settings provides `ManagementMethods` for `settings`, and assembly lists Settings' row as the
-  owner of that namespace.
+  `settings` and `credentials` in the `ServiceCatalog`, as `pluginFiles` is done today. Replies use
+  the envelope of `sessions`: `{ok: true, value}` or `{ok: false, error: {code, message}}`.
+- The `ManagementMethods` for `settings` come from `SettingsMethods`, a process part that depends
+  on Settings (module `settings_methods`), the way PermissionRules owns `permission`. Settings
+  itself cannot own a namespace: Rpc reaches Settings through Agents, Rpc may not reach a
+  management owner (methods contract §3.2), and the module boundary keeps Settings persistence
+  infrastructure (ADR 004 D4, `xtask check`). Assembly lists the `SettingsMethods` row as the
+  owner of `settings`.
 - Credentials: `pub trait ResolveCredential { fn resolve(&self, owner: String, reference: String,
-  cancel: CancellationToken) -> HostFuture<'_, String>; }` and `pub struct
-  CredentialsHost(pub Arc<dyn ResolveCredential>)` replace `ResolveProviderSecret` and
-  `ProviderSecretHost`. Provider's `Deps` change from `When<Arc<ProviderSecretHost>>` to
-  `When<Arc<CredentialsHost>>`, behind the same configuration switch. A Rust store also provides
-  `host_key("credentials")` for TypeScript consumers.
+  cancel: CancellationToken) -> BoxFuture<'_, Result<String, CredentialError>>; }` (with
+  `CredentialError::{NotFound, Failed, Cancelled}`, since `HostError` has no not-found case) and
+  `pub struct CredentialsHost(pub Arc<dyn ResolveCredential>)` replace `ResolveProviderSecret` and
+  `ProviderSecretHost`, in `dim-app-server::credentials`. Provider's `Deps` change from
+  `When<Arc<ProviderSecretHost>>` to `When<Arc<CredentialsHost>>`, behind the same configuration
+  switch. A Rust store calls `CredentialsHost::provide`, which also provides
+  `host_key("credentials")` for TypeScript consumers. For AWS Bedrock auth Provider treats a value
+  that is a JSON object as AWS credentials and any other value as a bearer token, as inline
+  Bedrock credentials allow both.
 
 ## 5. Flows
 
@@ -477,3 +495,36 @@ through C4's path):
    and Provider resolves a `secretRef` token and an AWS JSON value through the same store. No
    value appears in replies, errors or traces.
 7. A paired-device connection is not served `settings.read`.
+
+## 12. Implementation status
+
+**Part 1 (Rust side, S8b-1).** Implemented without C4: serializable event payloads (§4.5), declared
+sources with schema validation, defaults and user-only fields (§3.1–§3.4), the `settings` service
+(§4.2), the `settings.*` methods (§4.3) and the `credentials` contract with Provider moved onto it
+(§4.4). Declarations come from `ServerConfig::settings_sources` / `SettingsPlugin::declare` until
+manifests are read. No product plugin provides `credentials` yet (§10 question 4): the contract,
+its `HostDispatch` and Provider's consumer exist, and only tests supply a store.
+
+Corrections made against the code (reflected in §4.3 and §4.6):
+
+- The client methods are owned by a separate process part, `SettingsMethods`, not by Settings
+  (methods contract §3.2; ADR 004 D4 boundary). This is the only new plugin row; the §2 diagram's
+  `managementMethods settings` sits in that part, and §9's ADR 002 D2 answer holds for it as for
+  PermissionRules: it is the client path of the Settings data, not a wiring module.
+- Rust sources are reserved at assembly so that a declaration naming one fails assembly (§11
+  item 5); Settings alone only learns Rust names on first use.
+- `SettingsError` has `InvalidScope` and `Document(message)` besides the two named variants, so
+  the client path can tell invalid params from a persisted failure.
+- `ResolveCredential` returns `CredentialError` (`not_found`, `failed`, `cancelled`) instead of
+  `HostError`, which cannot express `not_found`. The service reply envelope is the one of
+  `sessions`.
+
+Acceptance (§11) covered by Rust flow tests (`settings_flow.rs`, `transport_flow/settings_methods.rs`,
+`provider_flow.rs`), with the owner calling the `settings` service through its `HostDispatch`:
+item 1, item 2, item 3, item 4, item 5, item 6 for Provider (token and AWS JSON through one store)
+and for the `credentials.resolve` service shape, and item 7.
+
+**Part 2 (after C4).** Reading the `settings` entries from package manifests (§5.4, §10 question 1);
+running items 1–3 and the TypeScript half of item 6 with a TypeScript test package loaded through
+C4's path; delivering `settings.changed` / `settings.project_authorized` to TypeScript parts through
+C4's binding of rutis events (§4.5, §10 question 2).

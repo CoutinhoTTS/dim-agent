@@ -2,8 +2,12 @@
 //! service itself belongs to the App Server, which emits these events; a
 //! consumer listens with `ctx.events().on` and rereads its source.
 use rutis::{Event, EventKey};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// `"user"` or `{"project": root}`. `root` is the project root number
+/// Settings assigned in this process, never a durable identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SettingsScope {
     User,
     Project(usize),
@@ -11,9 +15,9 @@ pub enum SettingsScope {
 
 /// A committed write to one Settings source. It carries the revision written,
 /// never the document: a listener reads the source when it needs the content.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsChanged {
-    pub source: &'static str,
+    pub source: String,
     pub scope: SettingsScope,
     pub revision: String,
 }

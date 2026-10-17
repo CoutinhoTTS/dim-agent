@@ -1,6 +1,7 @@
 # Settings 服务
 
-状态：设计已通过评审，尚未实现。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
+状态：设计已通过评审；Rust 侧已实现（S8b 第 1 部分，§12），清单加载和 TypeScript 投递待做
+（第 2 部分，C4 之后）。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
 基于 S8a（[#54](https://github.com/arcships/dim/issues/54)，PR [#90](https://github.com/arcships/dim/pull/90)）；
 实现依赖 C4（[#63](https://github.com/arcships/dim/issues/63)）。
 总体设计：[§6.4 配置](../overview.md#64-约定)。作用域：
@@ -169,8 +170,8 @@ Settings 在内存中保存编译后的声明，由其工厂配置构建。此�
 
 ### 4.3 管理方法 `settings.*`（客户端路径）
 
-命名空间 `settings`，由 Settings 经 `managementMethods` 提供。从不向已配对设备提供（总体设计
-§6.2 第 9 条）。
+命名空间 `settings`，由依赖 Settings 的进程部分 `SettingsMethods` 经 `managementMethods` 提供
+（§4.6）。从不向已配对设备提供（总体设计 §6.2 第 9 条）。
 
 | 方法 | 请求 | 回复 | 错误 |
 | --- | --- | --- | --- |
@@ -256,23 +257,36 @@ impl SettingsService {
 }
 ```
 
-- `SettingsPlugin::new`/`native` 把声明作为工厂配置接收，与 `project_roots` 并列。`apply` 用
-  `jsonschema`（已经通过 vendored aimux 在 `Cargo.lock` 中）编译每个 schema，并把每个声明的名字
-  记入现有的 `claims` 表。之后若有 Rust 类型使用已声明的来源名，会得到现有的
-  "belongs to another document type" 错误。
+- `SettingsPlugin::new`/`native` 把声明作为工厂配置接收（`.declare(Vec<SourceDeclaration>)`），
+  与 `project_roots` 并列；App Server 装配传入 `ServerConfig::settings_sources`。`apply` 检查每个
+  声明（§3.1），用 `jsonschema`（已经通过 vendored aimux 在 `Cargo.lock` 中）编译其 schema，并把
+  每个声明的名字记入现有的 `claims` 表。之后若有 Rust 类型使用已声明的来源名，会得到现有的
+  "belongs to another document type" 错误。装配还预留它注册的 Rust 来源的名字
+  （`.reserve::<D>()`：`mcp`、`mcp-projects`、`skills`、`permission`），因此声明其中之一、或两个
+  声明同一来源，都会使装配失败，消息中带所有者和来源名。
 - 文件和原生路径与 `BusinessDocument` 共用，按来源名而不是 `D::NAMESPACE` 取键。CAS、gate、
   lease、unsynced 情形和 `publish` 保持不变。
-- `SettingsError` 新增 `UnknownSource` 和 `UserOnlyField`。schema 校验失败是 `Invalid`，带校验器
-  的消息（实例路径，从不带值）。
-- `settings` 服务是 `host_key("settings")` 下的 `HostDispatch`，装配把 `settings` 登记到
-  `ServiceCatalog`，与现在的 `pluginFiles` 相同。
-- Settings 为 `settings` 提供 `ManagementMethods`，装配把 Settings 的行列为该命名空间的所有者。
+- `SettingsError` 新增 `UnknownSource`、`UserOnlyField(pointer)`、`InvalidScope` 和
+  `Document(message)`。写入的文档违反 schema、不是对象或含空 `*Ref` 时为 `Document`，带校验器的
+  消息（实例路径，从不带值）；客户端路径把它映射为参数无效。已持久化的文档违反 schema 时仍为
+  `Invalid`（`invalid_document` / `settings_failed`）。
+- `settings` 服务是 `host_key("settings")` 下的 `HostDispatch`，装配把 `settings` 和
+  `credentials` 登记到 `ServiceCatalog`，与现在的 `pluginFiles` 相同。回复使用 `sessions` 的
+  信封：`{ok: true, value}` 或 `{ok: false, error: {code, message}}`。
+- `settings` 的 `ManagementMethods` 由 `SettingsMethods` 提供，它是依赖 Settings 的进程部分
+  （模块 `settings_methods`），与 PermissionRules 拥有 `permission` 的方式相同。Settings 本身不能
+  拥有命名空间：Rpc 经 Agents 依赖 Settings，而 Rpc 不得依赖管理方法所有者（方法契约 §3.2），
+  模块边界也让 Settings 保持为持久化基础设施（ADR 004 D4，`xtask check`）。装配把
+  `SettingsMethods` 的行列为 `settings` 的所有者。
 - 凭据：`pub trait ResolveCredential { fn resolve(&self, owner: String, reference: String,
-  cancel: CancellationToken) -> HostFuture<'_, String>; }` 与 `pub struct
-  CredentialsHost(pub Arc<dyn ResolveCredential>)` 取代 `ResolveProviderSecret` 和
-  `ProviderSecretHost`。Provider 的 `Deps` 从 `When<Arc<ProviderSecretHost>>` 改为
-  `When<Arc<CredentialsHost>>`，仍由同一个配置开关控制。Rust 实现的存储同时提供
-  `host_key("credentials")`，供 TypeScript 使用方使用。
+  cancel: CancellationToken) -> BoxFuture<'_, Result<String, CredentialError>>; }`（带
+  `CredentialError::{NotFound, Failed, Cancelled}`，因为 `HostError` 没有 not-found 情形）与
+  `pub struct CredentialsHost(pub Arc<dyn ResolveCredential>)` 取代 `ResolveProviderSecret` 和
+  `ProviderSecretHost`，位于 `dim-app-server::credentials`。Provider 的 `Deps` 从
+  `When<Arc<ProviderSecretHost>>` 改为 `When<Arc<CredentialsHost>>`，仍由同一个配置开关控制。
+  Rust 实现的存储调用 `CredentialsHost::provide`，它同时提供 `host_key("credentials")`，供
+  TypeScript 使用方使用。AWS Bedrock 认证下，Provider 把 JSON 对象形式的值视为 AWS 凭据，其他值
+  视为 bearer token，与内联 Bedrock 凭据同样允许两者。
 
 ## 5. 流程
 
@@ -445,3 +459,33 @@ TypeScript 行）：
 6. 使用测试 `credentials` 存储：TypeScript 所有者解析其文档中的 `*Ref`，Provider 经同一存储解析
    `secretRef` token 和 AWS JSON 值。回复、错误和 trace 中都不出现值。
 7. 已配对设备的连接得不到 `settings.read`。
+
+## 12. 实现状态
+
+**第 1 部分（Rust 侧，S8b-1）。** 不依赖 C4 已实现：可序列化的事件载荷（§4.5）、带 schema 校验、
+默认值和仅限用户字段的声明来源（§3.1–§3.4）、`settings` 服务（§4.2）、`settings.*` 方法（§4.3），
+以及 `credentials` 契约，Provider 已迁到该契约上（§4.4）。在读取清单之前，声明来自
+`ServerConfig::settings_sources` / `SettingsPlugin::declare`。目前没有产品插件提供 `credentials`
+（§10 第 4 条）：契约、它的 `HostDispatch` 和 Provider 这一使用方都已存在，只有测试提供存储。
+
+对照代码所做的修正（已反映到 §4.3 和 §4.6）：
+
+- 客户端方法由单独的进程部分 `SettingsMethods` 提供，而不是 Settings 本身（方法契约 §3.2；
+  ADR 004 D4 的边界）。这是唯一新增的插件行；§2 图中的 `managementMethods settings` 位于这一部分。
+  §9 中 ADR 002 D2 的回答对它同样成立，与 PermissionRules 一样：它是 Settings 数据的客户端路径，
+  不是接线模块。
+- 装配时预留 Rust 来源的名字，使声明 Rust 来源的清单在装配时失败（§11 第 5 条）；仅靠 Settings
+  只能在首次使用时得知 Rust 来源名。
+- `SettingsError` 除两个指定变体外还有 `InvalidScope` 和 `Document(message)`，使客户端路径能区分
+  参数无效与已持久化文档的失败。
+- `ResolveCredential` 返回 `CredentialError`（`not_found`、`failed`、`cancelled`），而不是无法表达
+  `not_found` 的 `HostError`。服务回复的信封与 `sessions` 相同。
+
+§11 验收中由 Rust 流程测试（`settings_flow.rs`、`transport_flow/settings_methods.rs`、
+`provider_flow.rs`）覆盖的部分，所有者经 `settings` 服务的 `HostDispatch` 调用：第 1、2、3、4、5 条，
+第 6 条中 Provider 的部分（token 和 AWS JSON 经同一存储）以及 `credentials.resolve` 服务形态，
+第 7 条。
+
+**第 2 部分（C4 之后）。** 从包清单读取 `settings` 条目（§5.4，§10 第 1 条）；用经 C4 路径加载的
+TypeScript 测试包运行第 1–3 条和第 6 条的 TypeScript 部分；经 C4 对 rutis 事件的绑定把
+`settings.changed` / `settings.project_authorized` 投递给 TypeScript 部分（§4.5，§10 第 2 条）。
