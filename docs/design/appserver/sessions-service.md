@@ -424,6 +424,9 @@ roughly 86 MB of allocations and 12,000 tasks, and each later creation is slower
 S2 needs no change for it. Every call holds a lease, `sessions` keeps no state in a loaded Session, and an `idle` wait
 ends at the first idle point, so a stale wait never pins a Session past it.
 
+The design is [Idle Session unload](idle-unload.md) (proposed). It narrows the relation bullet above: an open
+Collaboration request holds its member, a relation alone does not (its D2).
+
 ### 8.7 Deleting run Sessions
 
 Idle unload bounds memory, but every launched Session also stays in storage and in every client's Session list. One

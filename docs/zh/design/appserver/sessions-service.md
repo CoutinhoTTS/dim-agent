@@ -297,6 +297,8 @@ AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引�
 
 S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装载的 Session 中保存状态，`idle` 等待在第一个空闲点结束，因此过期的等待不会让 Session 在那之后仍被占用。
 
+设计见[空闲 Session 卸载](idle-unload.md)（提议）。它收窄了上面关于成员关系的一条：持有成员的是未结束的 Collaboration 请求，单有关系并不持有（其 D2）。
+
 ### 8.7 删除运行用的 Session
 
 空闲卸载约束的是内存，但每个启动的 Session 还留在存储里，也出现在每个客户端的 Session 列表中。每五分钟一个任务，一天就多约 288 个。因此由使用方删除它们（D14）：
