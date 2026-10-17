@@ -10,7 +10,8 @@ atomic ConfigurationPublisher used by Prompt.
 | Service | Purpose |
 | --- | --- |
 | `S:HistoryRenderer` | Render supported history for preparation/budget checks. |
-| `S:ContextModelHost` | Optional context-policy/recovery resolver. |
+| `S:ContextModelHost` | Optional window facts for context policy and recovery. |
+| `S:CompactionStrategyHost` | Optional compaction strategy; the policy exists when both hosts are bound. |
 | `S:PrepareContextHost` | Host preparation hook. |
 | `B:TimelineIdentity` | Identify configuration publication scope. |
 | `B:Dispatcher` | Receive preparation/steer/interrupt transitions and report faults. |
@@ -21,10 +22,12 @@ atomic ConfigurationPublisher used by Prompt.
 
 Consumes `context/prepare`, `stop/interrupt`, `step/model-start`, `input/applied`,
 turn start/end. Produces `model/call` on success or `step/model-output-end` on
-failure. Its publisher commits prompt changes, adopted inputs and
+failure, with `context/compaction-start` and one `context/compaction` around
+each strategy call. `usage` reads the head's budget without writing. Its publisher commits prompt changes, adopted inputs and
 `context/configured` atomically. Preparation is single-flight, tracked,
 cancelled by stop/steer and joined during cleanup; cleanup aggregates failures.
-Replay settles unmatched handoffs without rerunning host work. The mock profile
+Replay settles unmatched handoffs and automatic compaction starts without
+rerunning host work. The mock profile
 has no context resolver. Completed compaction facts remain authoritative across
 checkpoint selection. Recovery snapshots are built from the final adopted cut,
 saved separately after fact publication, and selected by interpreter compatibility.
@@ -46,7 +49,7 @@ proof of semantic correctness or authorization.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Diagnostics`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:ContextModelHost`、`S:HistoryRenderer`、`S:PrepareContextHost` |
+| 注入 | `B:Diagnostics`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:HistoryRenderer`、`S:PrepareContextHost` |
 | 提供 | `B:ConfigurationPublisher`、`B:ContextPreparation` |
 | 被注入于 | `ModelProvider`、`Prompt` |
 <!-- /generated -->

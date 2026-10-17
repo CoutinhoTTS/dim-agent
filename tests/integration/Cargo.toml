@@ -8,6 +8,8 @@ dim-agent-runtime = { workspace = true, features = ["testing"] }
 dim-agent-capabilities.workspace = true
 dim-agent-types.workspace = true
 rutis.workspace = true
+rutis-loader.workspace = true
+rutis-bridge.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true

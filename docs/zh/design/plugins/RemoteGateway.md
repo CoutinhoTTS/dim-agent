@@ -2,6 +2,8 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md)，[Transport、Connection 变更](../overview.md)，[多节点](../overview.md)，[通用约束](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（认证、断连与 TLS 的取舍与 [#5](https://github.com/arcships/dim/issues/5) 一起决定）。语言：Rust。
 
+> **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
+
 RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一个经认证的入口：通过二维码或配对码配对，每设备令牌及其轮换与吊销，以及 Web 工作区的静态资源。已配对设备使用现有的 App Server 协议；该入口只提供[方法](../contracts/session-boundary.md)契约中的 Session 方法（Rpc 的 Session 内置方法和每个 `sessionMethods` 服务），因此设备可以调用每个 Session 方法，包括 `session.permission.update` 和 `shell.*`（决策 E3），但从不能调用管理方法：`managementMethods` 与 Rpc 的管理类内置方法从不提供给已配对的远程设备。该入口是产品 UI 面，从不承载节点之间的 rutis 链路面。
 
 ## 1. 结构
@@ -158,7 +160,7 @@ sequenceDiagram
 
 | 场景 | 结果 | 负责方 |
 | --- | --- | --- |
-| 手机与终端回答同一审批或问题 | 第一个被消费的事实决定；第二个失败 | Approval、Questions |
+| 手机与终端回答同一审批或问题 | 审批：第一个被消费的事实决定；问题：第一个被接受的 `session.question.respond` 决定；第二个失败 | Approval、Questions |
 | 手机 `session.permission.update` 与终端竞争 | 两个 `permission/changed` 事实；序号较后者生效 | Permission |
 | 手机在输入被应用时撤回该输入（`session.input.withdraw`） | `input/applied` 先于 `input/withdraw`：`notHeld`，不写入任何内容，正常消费；`input/withdraw` 在先：`input/deleted`，从不被应用 | InputQueue |
 | 带待处理审批断开连接 | 保持待处理；重新附着时重放；无超时（A14） | Approval |
@@ -185,7 +187,7 @@ sequenceDiagram
 
 ## 7. 安全
 
-每个已配对设备可以在宿主的每个 Session 上调用每个 Session 方法：提交输入、回答审批和问题、停止轮次、`session.permission.update`、`session.exec.stop`、`session.model.update`、`session.mcp*`，以及在任何已授权目录中创建 Session（决策 E3、A12）。这放宽了如今仅限本地的执行类 Session 方法，并记录在[兼容性表](#a3-远程入口上的协议与兼容性)中。远程更改的权限预设是 Session 配置（决策 E4）：一个由子分支继承、在 fork 时重置为默认值的 Timeline 事实。该入口从不授予管理权限：配对、吊销和配置是管理方法，`daemon.shutdown` 是 Rpc 内置方法；它们都不提供给已配对设备。认证保持最小化（[overview 多节点](../overview.md)）：每设备一个 bearer 令牌，静态存储为哈希，由设备轮换，在本地吊销；配对码短时有效、一次性使用且有速率限制。Cookie 为 `HttpOnly`、`Secure`、`SameSite=Strict`，并进行同源 `Origin` 检查。令牌从不出现在 URL、日志、诊断或 Timeline 中。该入口从不接受 rutis 链路帧，也不导出服务。
+每个已配对设备可以在宿主的每个 Session 上调用每个 Session 方法：提交输入、回答审批和问题、停止轮次、`session.permission.update`、`session.exec.stop`、`session.model.update`、`session.mcp*`，以及在任何已授权目录中创建 Session（决策 E3、A12）。这放宽了如今仅限本地的执行类 Session 方法，并记录在[兼容性表](#a3-远程入口上的协议与兼容性)中。远程更改的权限预设是 Session 配置（决策 E4）：一个由子分支继承、fork 时随事实一起复制的 Timeline 事实（[#26](https://github.com/arcships/dim/issues/26)）。该入口从不授予管理权限：配对、吊销和配置是管理方法，`daemon.shutdown` 是 Rpc 内置方法；它们都不提供给已配对设备。认证保持最小化（[overview 多节点](../overview.md)）：每设备一个 bearer 令牌，静态存储为哈希，由设备轮换，在本地吊销；配对码短时有效、一次性使用且有速率限制。Cookie 为 `HttpOnly`、`Secure`、`SameSite=Strict`，并进行同源 `Origin` 检查。令牌从不出现在 URL、日志、诊断或 Timeline 中。该入口从不接受 rutis 链路帧，也不导出服务。
 
 ## 8. 规则检查
 
@@ -212,6 +214,8 @@ sequenceDiagram
 ## 9. 向机制所有者提出的需求
 
 ### 9.1 提供方在调用内向调用方发请求
+
+已撤回：rutis 是外部依赖，不向它提需求。认证与处理由 RemoteGateway 和 Transport 用 dim 侧的服务解决。
 
 | 项 | 内容 |
 | --- | --- |
@@ -312,8 +316,8 @@ RemoteGateway 没有启动或停止方法，也从不写自己的 `enabled` 字�
 | 远程 `session.permission.update` 对终端更新 | 序号 | 较后的 `permission/changed` 为当前值；工具准入使用准入时消费的策略 | Permission、Approval |
 | 远程 `session.exec.stop` 对 exec 完成 | 序号 | 较早的终态事实胜出 | WorkspaceTools exec 所有者 |
 | 远程输入附近的压缩或子分支切分 | — | 同任何输入（[session access](../contracts/session-access.md)） | ContextPreparation、InputQueue |
-| 远程权限变更后的 fork | — | fork 将预设重置为默认值（E4） | SessionStore |
-| 两台设备回答同一问题 | 第一个 `question/answered` | 第一个被接受 | Questions |
+| 远程权限变更后的 fork | — | fork 随事实一起复制预设（E4、#26） | SessionStore |
+| 两台设备回答同一问题 | 第一个被接受的 `session.question.respond` | 第一个被接受；第二个 `question_already_answered` | Questions |
 | 审批待处理时断开连接 | — | 保持待处理；重新附着时重放（A14） | Approval |
 | `session.submit` 已准入后断开，回复丢失 | 输入已提交 | 重连后按 `submissionId` 调用 `session.input_lookup` | 客户端 |
 | 设备请求运行时被吊销 | 已准入 < 吊销 | 连接关闭；命令继续；回复丢失 | Rpc |

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-app-server", "crates/dim-cli", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
+members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-agent-attachments", "crates/dim-app-server", "crates/dim-cli", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
 exclude = ["vendor/aimux"]
 
 [workspace.package]
@@ -11,14 +11,15 @@ rust-version = "1.98"
 repository = "https://github.com/arcships/dim"
 
 [workspace.dependencies]
-rutis = "0.10.0"
-rutis-loader = { version = "0.10.0", features = ["node"] }
-rutis-bridge = "0.10.0"
+rutis = "0.11.0"
+rutis-loader = { version = "0.11.0", features = ["node"] }
+rutis-bridge = "0.11.0"
 schemars = "1"
 dim-agent-types = { path = "crates/dim-agent-types" }
 dim-agent-runtime = { path = "crates/dim-agent-runtime" }
 dim-agent-capabilities = { path = "crates/dim-agent-capabilities" }
 dim-agent-aimux = { path = "crates/dim-agent-aimux" }
+dim-agent-attachments = { path = "crates/dim-agent-attachments" }
 aimux-core = { path = "vendor/aimux/aimux-core" }
 aimux-provider-utils = { path = "vendor/aimux/aimux-provider-utils" }
 aimux-providers = { path = "vendor/aimux/aimux-providers", default-features = false }

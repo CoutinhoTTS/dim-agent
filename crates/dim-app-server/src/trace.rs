@@ -1,7 +1,8 @@
 use crate::{
     agents::{AgentHost, AgentIndex},
-    protocol::{RpcError, TraceOption},
+    protocol::TraceOption,
 };
+use dim_agent_capabilities::methods::RpcError;
 use dim_agent_capabilities::trace::{
     TraceHost, TracePlugin,
     archive::{ArchiveContent, TraceArchive},
@@ -97,21 +98,23 @@ impl Traces {
         let agent = &agent_host.agent;
         let created = match stored_id {
             Some((id, prepare)) => {
-                agent
-                    .create_prepared_session_with_extension(
-                        id,
-                        config,
-                        prepare,
-                        TRACE_EXTENSION,
-                        host,
-                    )
+                let creation = agent.create_prepared_session_with_extension(
+                    id.clone(),
+                    config,
+                    prepare,
+                    TRACE_EXTENSION,
+                    host,
+                );
+                index
+                    .admit(&id, &agent_host.agent_id, version, creation)
                     .await
             }
-            None => {
-                agent
-                    .create_session_with_extension(config, TRACE_EXTENSION, host)
-                    .await
-            }
+            None => agent
+                .create_session_with_extension(config, TRACE_EXTENSION, host)
+                .await
+                .inspect(|session| {
+                    index.insert_version(session.id(), &agent_host.agent_id, version)
+                }),
         };
         let session = match created {
             Ok(session) => session,

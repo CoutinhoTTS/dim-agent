@@ -41,25 +41,28 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 | 观察 Session 的事件 | 现有的 Session 广播，由 Session 级插件监听 |
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 |
 | 把内容放入模型上下文 | Session 或分支输入（被采纳的输入）、工具结果 |
-| 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调（同步，或借助运行时补充异步执行：该写入保持其在顺序中的位置，并在回调之后提交；回调可以变换草稿，或向同一批次追加事件，追加的只能是发给事件所有者的指令或自己声明的事件；回调从不使写入失败或阻止写入） |
-| 在输入被应用前撤回它 | `input/withdraw {input_id, reason?}` 指令事件（由客户端、进程内调用方，或该输入所在批次中的 before 回调发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
+| 在写入提交前对其作出处理 | 由分支级插件注册的 Timeline before 回调：在提交锁内同步变换草稿，不阻止写入，不等待外部工作，失败时提交原草稿（[原则 §4 第 3 条](../../architecture/rust-agent/principles.md)） |
+| 在输入被应用前撤回它 | `input/withdraw {input_id, reason?}` 指令事件（由客户端或进程内调用方发出）；InputQueue 按序消费它，且仅在它持有该输入、尚未应用时写入 `input/deleted {input_id}` |
 | 暴露关于某个 Session 的客户端方法 | Session 级 `sessionMethods` 服务，由 Rpc 经该 Session 分发 |
 | 暴露宿主管理方法 | 进程插件在 Rpc 方法表中的 `managementMethods` 服务；已配对设备的连接不会获得管理方法 |
 | 访问其他 Session | Agents 的 `sessions` 服务（AgentIndex 和 Session 公共接口），与 Collaboration 的做法相同 |
 | 响应另一个进程插件的结果 | 事件通知，而非依赖 |
 
-### D3. 依赖跟随作用域；接受罕见的重启
+### D3. 依赖跟随作用域，并从扩展指向核心
 
-插件依赖自身作用域或外层作用域的插件。由于重载罕见且属结构性，重载传播到依赖方（并使在途 turn
-失败）是这些操作的可接受代价；不为阻止它增加任何机制。易变运行时的崩溃隔离如果日后需要，属于
-rutis（issue #6），而不属于应用层接线。
+插件依赖自身作用域或外层作用域的插件，依赖方向从扩展指向核心。核心部件（例如 Session 装配、
+ToolRegistry、Rpc，以及 Mcp、SkillsCatalog 这类内容所有者）从不硬依赖可选插件：它在每次调用时
+查找可选的提供方，或在自己装载时接入当时可用的提供方（之后起来的在下次重载时接入）。因此可选插件缺失、Pending、Failed 或正在重载时，只影响它自己
+的功能（#34）。在这条规则之内，由于重载罕见且属结构性，重载传播到真正的依赖方（并使其在途 turn
+失败）是可接受的代价；不为阻止它增加任何机制。运行时崩溃属于基础设施故障，与 App Server 崩溃
+相同，不为它做专门设计。
 
 ### D4. 结构性配置与业务配置分离
 
 | 类别 | 示例 | 位置 | 变更时 |
 | --- | --- | --- | --- |
 | 结构性插件配置 | 启用或禁用、运行时与包路径、节点绑定 | loader 行（issue #3 可编辑层） | 可能重载该行 |
-| 业务配置 | 搜索服务、通知渠道、Hook 规则、定时任务、工作流定义、模型用途策略、MCP 服务器与 Skill 文档、外部 Agent 条目与桥接、网关监听设置、OCR 组件路径、exec shell | 所属插件的业务来源（Settings 来源或插件自有存储） | 数据更新并通知；使用时读取；不重载 |
+| 业务配置 | 搜索服务、通知渠道、Hook 规则、定时任务、工作流定义、各使用者的辅助模型选择、MCP 服务器与 Skill 文档、外部 Agent 条目与桥接、网关监听设置、OCR 组件路径、exec shell | 所属插件的业务来源（Settings 来源或插件自有存储） | 数据更新并通知；使用时读取；不重载 |
 
 ### D5. 合同语言中立
 
@@ -87,14 +90,14 @@ issue #4 的工作。
 
 | 插件 | 作用域 | 理由 |
 | --- | --- | --- |
-| Questions | Session（`ask_user` 工具）+ 分支（待答问题、`question/*` 事实） | 问题属于某个分支的 turn |
+| Questions | Session（`ask_user` 工具）+ 分支（运行中 `ask_user` 调用的等待者；没有事件） | 问题属于某个分支的 turn |
 | Goal | Session（`goal_update` 工具）+ 分支（目标状态、续跑） | 目标属于某个分支，续跑按序跟随其事件 |
 | ShellInput | Session | 命令在 Session 的工作区中运行并写入其输入 |
 | Attachments | Session | 附件是 Session 数据 |
 | Web | Session | 没有跨 Session 共享的状态；只提供工具 |
 | SessionTitle | Session | 观察 main 上首条用户输入的采纳（`input/applied`）；标题由 SessionStore 保存 |
 | Notifications | Session | 观察 Session 的事件并提供 `notify` |
-| Hooks | Session（规则、Session 启动 Hook）+ 分支（用于提示词提交 Hook 与工具前 Hook 的 before 回调；工具后与 turn 结束 Hook） | 规则作用于 Session；执行发生在分支 |
+| Hooks | Session（Hook 文档、执行器）+ 分支（向 Permission 提供工具建议、经 Approval 回答、与 InputQueue 的提示词暂扣；工具后、Stop 与 Session 启动 Hook） | 规则作用于 Session；执行发生在分支 |
 | Scheduler | 进程（任务、触发器）+ Session（`schedule` 工具） | 调度跨越多个 Session |
 | Workflow | 进程（运行）+ Session（`workflow` 工具） | 一次运行跨越多个 Session |
 | ExternalAgent | 进程 | 外部 Agent 连接是共享的 |
@@ -112,8 +115,8 @@ issue #4 的工作。
 
 ## 现有插件
 
-现有插件已遵循 D1。有一项配置不符合 D4：exec shell 在 HostPlatform 的 `apply` 中只读取一次；
-它应作为业务配置在每次 spawn 时读取。
+现有插件遵循 D1。HostPlatform 通过每次执行命令时调用 `exec_shell()` 读取 exec shell 的业务
+配置来遵循 D4；修改它不会重载插件。
 
 ## 影响
 

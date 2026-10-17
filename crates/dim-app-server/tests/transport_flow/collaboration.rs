@@ -268,6 +268,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .session_value(Arc::new(ModelHost(Arc::new(LargeReportModel))))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_plugin(DefaultPrepareModelPlugin::new);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
@@ -1214,10 +1215,7 @@ async fn members_cancel_close_and_leave_the_team() {
         [CollaborationOutcome::Cancelled { .. }]
     ));
     assert!(agent_results(&timeline)[0].contains("Status: cancelled."));
-    // Reloading directory logic preserves both Team addressing and the
-    // temporary Agent's privacy. The remaining flow also checks its watcher
-    // still closes the Agent when its last Session closes.
-    server.restart("Agents").await.unwrap();
+    // Cancellation preserves Team addressing and the temporary Agent's privacy.
     say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
     idle(&mut client, &lead).await;
     let listed = last_ok(&events(&lead_session).await);
@@ -1499,20 +1497,23 @@ async fn members_cancel_close_and_leave_the_team() {
             reason: dim_agent_runtime::CAPABILITY_RELOADING.into(),
         }]
     );
+    // The registry keeps its old generation until it reloads; even a read-only
+    // action must reject the stopped provider, while host tools keep working.
+    say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
+    idle(&mut client, &lead).await;
+    assert!(
+        last_error(&events(&lead_session).await).contains(dim_agent_runtime::CAPABILITY_RELOADING)
+    );
     say(
         &mut client,
         &lead,
-        tool(json!({"action": "request", "agentId": default_agent,
-            "sessionId": member, "prompt": "work after reload"})),
+        "tool:echo {\"text\":\"still running\"}".into(),
         "queue",
     )
     .await;
-    let outcomes = poll("member reused after reload", async || {
-        let outcomes = result_of(&events(&lead_session).await, &member);
-        (outcomes.len() == 2).then_some(outcomes)
-    })
-    .await;
-    assert!(matches!(outcomes[1], CollaborationOutcome::Completed));
+    idle(&mut client, &lead).await;
+    let (error, text) = results(&events(&lead_session).await).pop().unwrap();
+    assert!(!error && text.contains("still running"), "{text}");
 
     server.shutdown();
     server.join().await.unwrap();
@@ -2028,7 +2029,10 @@ async fn undispatched_results_name_calls_from_their_starts() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -2045,6 +2049,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
         .session_value(Arc::new(ModelHost(Arc::new(PartialCallModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     dim_agent_capabilities::defaults::tool_host(
         &mut builder,
@@ -2310,6 +2315,19 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
             .rpc("session.close", json!({"sessionId":member}))
             .await,
     );
+    // Reattach the leader's tools to the current provider generation.
+    assert_ok(
+        &client
+            .rpc("session.detach", json!({"sessionId":lead}))
+            .await,
+    );
+    unload(&agent, &lead).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
+    let session = agent.get_session(&lead).unwrap();
     poll("restored member relation removed", async || {
         say(&mut client, &lead, tool(json!({"action":"list"})), "queue").await;
         idle(&mut client, &lead).await;

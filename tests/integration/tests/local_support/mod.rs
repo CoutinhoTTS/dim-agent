@@ -10,6 +10,7 @@ use dim_agent_capabilities::{
         ExecShellRuntime, HostPlatform, Os, OutputEncoding, ShellEdition, ShellSource, ShellStatus,
     },
     model_provider::ModelProviderPlugin,
+    permission::{CommandRulesHost, NoCommandRules},
     prompt_sources,
     skill_settings::{SkillSettings, SkillSettingsHost},
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
@@ -88,19 +89,19 @@ pub fn skill_file(name: &str, description: &str, body: &str) -> String {
 }
 
 pub fn platform(home: &Path) -> HostPlatform {
-    HostPlatform {
-        home: home.to_owned(),
-        os: Os::Linux,
-        arch: "x64".into(),
-        timezone: Some("Asia/Shanghai".into()),
-        env: Vec::new(),
-        shell: ShellStatus::Available(ExecShellRuntime {
-            executable_path: "/bin/zsh".into(),
-            edition: ShellEdition::Zsh,
-            source: ShellSource::Login,
-            output_encoding: OutputEncoding::Utf8,
-        }),
-    }
+    let mut platform = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
+        executable_path: "/bin/zsh".into(),
+        edition: ShellEdition::Zsh,
+        source: ShellSource::Login,
+        output_encoding: OutputEncoding::Utf8,
+    }))
+    .unwrap();
+    platform.home = home.to_owned();
+    platform.os = Os::Linux;
+    platform.arch = "x64".into();
+    platform.timezone = Some("Asia/Shanghai".into());
+    platform.env.clear();
+    platform
 }
 
 pub enum Step {
@@ -199,6 +200,138 @@ impl ToolDriver for GateTools {
     }
 }
 
+/// Holds the next Session's assembly open until released, while its other
+/// capabilities load concurrently: a window before the Session is published.
+/// A flow that needs another capability applied waits for it separately.
+#[derive(Default)]
+pub struct AssemblyHold {
+    armed: std::sync::atomic::AtomicBool,
+    pub entered: Notify,
+    pub release: Notify,
+}
+impl AssemblyHold {
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+struct AssemblyHoldPlugin(Arc<AssemblyHold>);
+impl rutis::TypedPlugin for AssemblyHoldPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "AssemblyHold"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        (): (),
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            if self.0.armed.swap(false, Ordering::SeqCst) {
+                self.0.entered.notify_one();
+                self.0.release.notified().await;
+            }
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for AssemblyHoldPlugin {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+
+/// Records what each Session's `SessionLifecycle` reports, and can hold one
+/// Session's unload to keep a close in progress.
+#[derive(Default)]
+pub struct LifecycleProbe {
+    pub events: Mutex<Vec<(String, &'static str)>>,
+    pub recorded: Notify,
+    hold_close: std::sync::atomic::AtomicBool,
+    pub close_held: Notify,
+    pub release_close: Notify,
+}
+impl LifecycleProbe {
+    pub fn hold_next_close(&self) {
+        self.hold_close.store(true, Ordering::SeqCst);
+    }
+    pub fn count(&self, event: &str) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, recorded)| *recorded == event)
+            .count()
+    }
+    pub async fn wait_for(&self, event: &str, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let recorded = self.recorded.notified();
+                if self.count(event) >= count {
+                    return;
+                }
+                recorded.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{count} {event} events: {:?}", self.events.lock().unwrap()));
+    }
+    fn record(&self, session: &str, event: &'static str) {
+        self.events.lock().unwrap().push((session.into(), event));
+        self.recorded.notify_waiters();
+    }
+}
+struct LifecycleProbePlugin {
+    scope: SessionScope,
+    probe: Arc<LifecycleProbe>,
+}
+impl rutis::TypedPlugin for LifecycleProbePlugin {
+    type Deps = (InSession<SessionLifecycle>, InSession<SessionIdentity>);
+    fn name(&self) -> &str {
+        "LifecycleProbe"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (InSession(lifecycle), InSession(identity)): Self::Deps,
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let probe = self.probe.clone();
+            let id = identity.session_id.clone();
+            // Session parts load concurrently: a flow that closes during
+            // assembly waits for this record first.
+            probe.record(&id, "applied");
+            let task = tokio::spawn(async move {
+                let published = lifecycle.activated().await;
+                probe.record(&id, if published { "active" } else { "inactive" });
+                if published {
+                    lifecycle.closing().await;
+                    probe.record(&id, "closing");
+                }
+            });
+            let probe = self.probe.clone();
+            ctx.effect(move || {
+                rutis::Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        if probe.hold_close.swap(false, Ordering::SeqCst) {
+                            probe.close_held.notify_one();
+                            probe.release_close.notified().await;
+                        }
+                        // Like a Session part's own work, the task ends once the
+                        // Session is closing or never published; aborting it
+                        // could drop that record.
+                        let _ = task.await;
+                        Ok(())
+                    })
+                }))
+            })?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for LifecycleProbePlugin {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.scope)
+    }
+}
+
 pub struct Env {
     pub root: rutis::Ctx,
     pub agent: Agent,
@@ -228,6 +361,8 @@ pub struct Options {
     pub settings: Arc<dyn SkillSettings>,
     pub today: Arc<Mutex<String>>,
     pub timezone: &'static str,
+    pub hold: Option<Arc<AssemblyHold>>,
+    pub probe: Option<Arc<LifecycleProbe>>,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -236,6 +371,8 @@ impl Default for Options {
             settings: Arc::new(MemorySkillSettings::default()),
             today: Arc::new(Mutex::new("2026-09-30".into())),
             timezone: "Asia/Shanghai",
+            hold: None,
+            probe: None,
         }
     }
 }
@@ -243,14 +380,10 @@ impl Default for Options {
 /// The product profile: PromptSources and Skills with scripted hosts.
 pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
-    root.provide_as(
-        TypeKey::of::<HostPlatform>(),
-        Arc::new(HostPlatform {
-            timezone: Some(options.timezone.into()),
-            ..platform(&dirs.home)
-        }),
-    )
-    .unwrap();
+    let mut host = platform(&dirs.home);
+    host.timezone = Some(options.timezone.into());
+    root.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(host))
+        .unwrap();
     root.provide_as(
         TypeKey::of::<SkillSettingsHost>(),
         Arc::new(SkillSettingsHost(options.settings.clone())),
@@ -271,6 +404,8 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         .session_value(Arc::new(ToolHost(Arc::new(GateTools(gate.clone())))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     let today = options.today.clone();
@@ -280,6 +415,15 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         std::time::Duration::from_millis(10),
     );
     skills::install(&mut builder);
+    if let Some(hold) = options.hold {
+        builder.session_plugin(move |_| AssemblyHoldPlugin(hold.clone()));
+    }
+    if let Some(probe) = options.probe {
+        builder.session_plugin(move |scope| LifecycleProbePlugin {
+            scope: *scope,
+            probe: probe.clone(),
+        });
+    }
     Env {
         agent: builder.build_in(&root),
         root,

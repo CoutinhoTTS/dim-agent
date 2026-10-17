@@ -62,6 +62,7 @@ pub(crate) struct Assembly {
     tool_sources: Vec<String>,
     host_tools: Vec<String>,
     prompt_sources: Vec<String>,
+    session_methods: Vec<String>,
 }
 #[derive(Clone)]
 pub struct AgentBuilder {
@@ -85,6 +86,7 @@ impl AgentBuilder {
                 tool_sources: vec![],
                 host_tools: vec![],
                 prompt_sources: vec![],
+                session_methods: vec![],
             },
         }
     }
@@ -180,6 +182,20 @@ impl AgentBuilder {
             .chain(&self.assembly.tools)
             .map(String::as_str)
     }
+    /// Records a `sessionMethods` namespace that a Session capability
+    /// provides: the Session's known namespaces (methods contract A.1), which
+    /// the host reads with [`Self::session_method_namespaces`].
+    pub fn session_methods(&mut self, namespace: impl Into<String>) -> &mut Self {
+        let namespace = namespace.into();
+        if !self.assembly.session_methods.contains(&namespace) {
+            self.assembly.session_methods.push(namespace);
+        }
+        self
+    }
+    /// The namespaces recorded with [`Self::session_methods`].
+    pub fn session_method_namespaces(&self) -> &[String] {
+        &self.assembly.session_methods
+    }
     /// Registers a branch capability; the factory runs once per branch
     /// subtree, and once more when the assembly is installed, with a
     /// placeholder scope, to name its module ([`Self::install`]).
@@ -239,6 +255,8 @@ impl AgentBuilder {
     /// Session and branch scopes, every capability and every extension, and
     /// returns the [`SESSION_GROUP`] row holding them and the nested
     /// [`BRANCH_GROUP`]; a host puts it inside its [`AGENT_GROUP`] row.
+    /// These registered parts are required for readiness. Additional host
+    /// rows remain owned by the group without being required to become Active.
     ///
     /// A fiber is shown under its module name, so each module is named after
     /// its plugin: a plugin is built once with `ctx`'s instance to read it.
@@ -289,25 +307,7 @@ impl AgentBuilder {
                 }
             }
             let session_scope_module = modules.name("SessionScope", builtins).await;
-            builtins.register_with::<NoConfig, _, _>(session_scope_module.clone(), |build| {
-                let owner = build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
-                    CordisError::PluginFailed("Session created without its assembly".into())
-                })?;
-                let scope = session_scope(build)?;
-                // Recorded before any row applies: a creation that does not end
-                // finds its instance by it.
-                *owner.instance.lock().unwrap() = Some(scope.instance);
-                Factory::new(move || typed(SessionScopePlugin((*owner).clone(), scope)))
-            });
             let branch_scope_module = modules.name("BranchScope", builtins).await;
-            builtins.register_with::<NoConfig, _, _>(branch_scope_module.clone(), |build| {
-                let owner = build.value::<Arc<BranchAssembly>>().ok_or_else(|| {
-                    CordisError::PluginFailed("branch created without its assembly".into())
-                })?;
-                let scope = branch_scope(build)?;
-                *owner.instance.lock().unwrap() = Some(scope.instance);
-                Factory::new(move || typed(BranchScopePlugin((*owner).clone(), scope)))
-            });
             let mut session = vec![row(&session_scope_module)];
             if !assembly.extensions.is_empty() {
                 let module = modules.name("SessionExtension", builtins).await;
@@ -359,11 +359,20 @@ impl AgentBuilder {
                     Factory::new(move || make(&scope))
                 });
             }
+            let required_branch: Arc<[String]> = branch
+                .iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned())
+                .collect();
+            let mut required_session: Vec<String> = session
+                .iter()
+                .map(|row| row["id"].as_str().unwrap().to_owned())
+                .collect();
             session.push(group(BRANCH_GROUP, branch));
             for (name, makes) in &assembly.extensions {
                 let mut rows = vec![];
                 for (plugin, make) in makes {
                     let module = modules.name(plugin, builtins).await;
+                    required_session.push(module.clone());
                     rows.push(row(&module));
                     let (make, plugin) = (make.clone(), plugin.clone());
                     builtins.register_with::<NoConfig, _, _>(module, move |build| {
@@ -381,6 +390,34 @@ impl AgentBuilder {
                 }
                 session.push(group(name, rows));
             }
+            let required_session: Arc<[String]> = required_session.into();
+            builtins.register_with::<NoConfig, _, _>(session_scope_module, move |build| {
+                let owner = build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
+                    CordisError::PluginFailed("Session created without its assembly".into())
+                })?;
+                let scope = session_scope(build)?;
+                // Recorded before any row applies, including a failed scope.
+                *owner.instance.lock().unwrap() = Some(scope.instance);
+                let required = required_session.clone();
+                Factory::new(move || {
+                    typed(SessionScopePlugin(
+                        (*owner).clone(),
+                        scope,
+                        required.clone(),
+                    ))
+                })
+            });
+            builtins.register_with::<NoConfig, _, _>(branch_scope_module, move |build| {
+                let owner = build.value::<Arc<BranchAssembly>>().ok_or_else(|| {
+                    CordisError::PluginFailed("branch created without its assembly".into())
+                })?;
+                let scope = branch_scope(build)?;
+                *owner.instance.lock().unwrap() = Some(scope.instance);
+                let required = required_branch.clone();
+                Factory::new(move || {
+                    typed(BranchScopePlugin((*owner).clone(), scope, required.clone()))
+                })
+            });
             Ok(group(SESSION_GROUP, session))
         })
         .catch_unwind()
@@ -475,13 +512,14 @@ impl PluginFactory<NoConfig> for Factory {
 /// Reserved identities outside Builtins, which owns registered module names.
 struct Modules(HashSet<String>);
 impl Modules {
-    async fn name(&self, plugin: &str, builtins: &Builtins) -> String {
+    async fn name(&mut self, plugin: &str, builtins: &Builtins) -> String {
         let mut name = plugin.to_owned();
         let mut suffix = 2;
         while self.0.contains(&name) || builtins.resolve(&name).await.is_ok() {
             name = format!("{plugin}#{suffix}");
             suffix += 1;
         }
+        self.0.insert(name.clone());
         name
     }
 }
@@ -663,6 +701,7 @@ pub(crate) struct Loaded<S> {
     pub ctx: Ctx,
     pub scope: S,
     pub children: Vec<FiberView>,
+    required: Arc<[String]>,
 }
 
 pub(crate) struct SessionAssembly {
@@ -677,6 +716,7 @@ pub(crate) struct SessionAssembly {
     pub unloading: CancellationToken,
     pub faults: FaultReporter,
     pub closing: CancellationToken,
+    pub lifecycle: SessionLifecycle,
     pub diagnostics: Diagnostics,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
 }
@@ -690,7 +730,7 @@ impl SessionAssembly {
     }
 }
 
-struct SessionScopePlugin(Arc<SessionAssembly>, SessionScope);
+struct SessionScopePlugin(Arc<SessionAssembly>, SessionScope, Arc<[String]>);
 impl TypedPlugin for SessionScopePlugin {
     type Deps = ();
     fn name(&self) -> &str {
@@ -703,6 +743,10 @@ impl TypedPlugin for SessionScopePlugin {
     ) -> RutisFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let (owner, scope) = (&self.0, self.1);
+            ctx.provide_as(
+                scope.key::<crate::SessionLoader>(),
+                Arc::new(crate::SessionLoader::new(owner.loader.clone())),
+            )?;
             ctx.provide_as(
                 scope.key::<Diagnostics>(),
                 Arc::new(owner.diagnostics.clone()),
@@ -719,6 +763,10 @@ impl TypedPlugin for SessionScopePlugin {
                     restored: owner.restored,
                     unloading: owner.unloading.clone(),
                 }),
+            )?;
+            ctx.provide_as(
+                scope.key::<SessionLifecycle>(),
+                Arc::new(owner.lifecycle.clone()),
             )?;
             ctx.provide_as(
                 scope.key::<TimelineFactory>(),
@@ -740,6 +788,7 @@ impl TypedPlugin for SessionScopePlugin {
                 ctx: ctx.clone(),
                 scope,
                 children: vec![],
+                required: self.2.clone(),
             }));
             Ok(Effect::Done)
         })
@@ -851,7 +900,7 @@ struct LoadedBranch {
     lifecycle: BranchLifecycle,
     opening: Arc<BranchOpening>,
 }
-struct BranchScopePlugin(Arc<BranchAssembly>, BranchScope);
+struct BranchScopePlugin(Arc<BranchAssembly>, BranchScope, Arc<[String]>);
 impl TypedPlugin for BranchScopePlugin {
     type Deps = ();
     fn name(&self) -> &str {
@@ -906,6 +955,7 @@ impl TypedPlugin for BranchScopePlugin {
                     ctx: ctx.clone(),
                     scope,
                     children: vec![],
+                    required: self.2.clone(),
                 },
                 diagnostics,
                 timeline,
@@ -988,7 +1038,16 @@ impl TimelineFactory {
                     &cancel,
                     {
                         let owner = owner.clone();
-                        move || *owner.instance.lock().unwrap()
+                        move || {
+                            let instance = *owner.instance.lock().unwrap();
+                            let required = owner
+                                .loaded
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .map(|loaded| loaded.scope.required.clone());
+                            (instance, required)
+                        }
                     },
                 )
                 .await
@@ -1005,6 +1064,7 @@ impl TimelineFactory {
                             ctx: current.scope.ctx.clone(),
                             scope: current.scope.scope,
                             children: created.children.clone(),
+                            required: current.scope.required.clone(),
                         },
                         diagnostics: current.diagnostics.clone(),
                         timeline: current.timeline.clone(),
@@ -1015,7 +1075,6 @@ impl TimelineFactory {
                     *loaded = Some(branch.clone());
                     branch
                 };
-                validate(&session.ctx, created.view.id)?;
                 announce(
                     &branch.diagnostics,
                     &created.view,
@@ -1085,20 +1144,20 @@ impl TimelineFactory {
     }
 }
 
-/// An instance whose rows all became Active: its group fiber and its rows.
+/// A created instance and all its rows, including optional unavailable parts.
 pub(crate) struct Created {
     pub view: FiberView,
     pub children: Vec<FiberView>,
 }
 
-/// Creates an instance of `group` from `ctx` and waits until every row in
-/// it is Active, within `timeout`. On failure the instance, when one was
+/// Creates an instance of `group` from `ctx` and waits until its registered
+/// rows are Active, within `timeout`. On failure the instance, when one was
 /// created, comes back with the error for the caller to roll back; when a
 /// timeout or cancellation leaves the creation running before the instance
 /// can be found, a task disposes it once the creation ends.
 ///
-/// `instance` reads the instance once the loader spawned its rows; it
-/// locates an instance whose creation is still running.
+/// `instance` reads its identity and the scope's registered row IDs; the
+/// identity locates an instance whose creation is still running.
 async fn create_instance(
     loader: &Loader,
     ctx: &Ctx,
@@ -1106,9 +1165,10 @@ async fn create_instance(
     configure: impl for<'a> FnOnce(CreateInstance<'a>) -> CreateInstance<'a> + Send + 'static,
     timeout: Duration,
     cancel: &CancellationToken,
-    instance: impl Fn() -> Option<rutis::InstanceId>,
+    instance: impl Fn() -> (Option<rutis::InstanceId>, Option<Arc<[String]>>),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
     let deadline = tokio::time::Instant::now() + timeout;
+    // shortcut: loader creation still settles Loading rows; revisit if apply must wait on external work.
     let mut creation = {
         let (loader, ctx, group) = (loader.clone(), ctx.clone(), group.clone());
         tokio::spawn(async move { configure(loader.create_instance(&ctx, &group)).await })
@@ -1128,7 +1188,9 @@ async fn create_instance(
             ));
         }
         None => {
-            let found = instance().and_then(|instance| locate(loader, ctx, instance));
+            let found = instance()
+                .0
+                .and_then(|instance| locate(loader, ctx, instance));
             let error = match &found {
                 _ if cancel.is_cancelled() => AgentError::Cancelled("initialization".into()),
                 Some(created) => timed_out(ctx, &created.children),
@@ -1145,42 +1207,56 @@ async fn create_instance(
             return Err((error, found));
         }
     };
+    let required = instance().1;
     let failures = created
         .report
         .into_iter()
+        .filter(|(id, _)| required.as_ref().is_none_or(|rows| rows.contains(id)))
         .filter_map(|(_, result)| match result {
             InstanceResult::Failed(error) => Some(loader_error(error)),
             _ => None,
         })
         .collect();
     let mut created = Created {
-        children: rows(loader, &created.view),
+        children: rows(loader, &created.view, None),
         view: created.view,
     };
     if let Err(error) = AgentError::aggregate(failures) {
         return Err((error, Some(created)));
     }
+    let Some(required) = required else {
+        return Err((
+            AgentError::Build(format!("{group} scope did not load")),
+            Some(created),
+        ));
+    };
+    let waiting = rows(loader, &created.view, Some(&required));
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let ready = wait_active(ctx, &created.children, remaining, cancel).await;
+    let ready = wait_active(ctx, &waiting, remaining, cancel).await;
     // A launcher may still be Pending when the loader returns. Once it is
     // Active its nested rows exist, but those rows may themselves be Pending.
     // Refresh on failure too, so rollback diagnostics cover everything built.
-    created.children = rows(loader, &created.view);
+    created.children = rows(loader, &created.view, None);
     if let Err(error) = ready {
         return Err((error, Some(created)));
     }
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    match wait_active(ctx, &created.children, remaining, cancel).await {
+    let waiting = rows(loader, &created.view, Some(&required));
+    match wait_active(ctx, &waiting, remaining, cancel)
+        .await
+        .and_then(|()| validate(ctx, created.view.id, &waiting))
+    {
         Ok(()) => Ok(created),
         Err(error) => Err((error, Some(created))),
     }
 }
 /// Candidate rows, including nested extensions. Main and child branches do
 /// not exist until Session publication and have their own assembly snapshots.
-fn rows(loader: &Loader, instance: &FiberView) -> Vec<FiberView> {
+fn rows(loader: &Loader, instance: &FiberView, required: Option<&[String]>) -> Vec<FiberView> {
     loader
         .entries()
         .into_iter()
+        .filter(|entry| required.is_none_or(|rows| rows.contains(&entry.id)))
         .filter(|entry| {
             entry
                 .instance
@@ -1202,7 +1278,7 @@ fn locate(loader: &Loader, ctx: &Ctx, instance: rutis::InstanceId) -> Option<Cre
         .id;
     let view = ctx.view(plugin)?;
     Some(Created {
-        children: rows(loader, &view),
+        children: rows(loader, &view, None),
         view,
     })
 }
@@ -1264,6 +1340,7 @@ pub(crate) async fn build_session(
         restored: matches!(initialization, SessionInitialization::Restore(_)),
         faults: FaultReporter::default(),
         unloading: CancellationToken::new(),
+        lifecycle: SessionLifecycle::new(closing.clone()),
         closing,
         diagnostics,
         loaded: Mutex::new(None),
@@ -1272,7 +1349,16 @@ pub(crate) async fn build_session(
     let deadline = tokio::time::Instant::now() + startup_timeout;
     let instance = |owner: &Arc<SessionAssembly>| {
         let owner = owner.clone();
-        move || *owner.instance.lock().unwrap()
+        move || {
+            let instance = *owner.instance.lock().unwrap();
+            let required = owner
+                .loaded
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|loaded| loaded.required.clone());
+            (instance, required)
+        }
     };
     let started = {
         let value = owner.clone();
@@ -1294,9 +1380,9 @@ pub(crate) async fn build_session(
             ctx: current.ctx.clone(),
             scope: current.scope,
             children: created.children.clone(),
+            required: current.required.clone(),
         });
         *owner.loaded.lock().unwrap() = Some(session.clone());
-        validate(host, created.view.id)?;
         announce(
             &owner.diagnostics,
             &created.view,
@@ -1346,6 +1432,8 @@ pub(crate) async fn build_session(
     match result {
         Ok((view, tree)) => Ok(BuiltSession { owner, view, tree }),
         Err(error) => {
+            // Never published: deferred background work ends without starting.
+            owner.lifecycle.advance(SessionPhase::Closed);
             let rollback = match started {
                 Ok(created) => Some(created),
                 Err((_, created)) => created,
@@ -1440,16 +1528,19 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
 
 /// Assembly checks for plugin authors. A diagnostics snapshot walks the whole
 /// process tree, so release builds skip it to keep Session creation constant-time.
-fn validate(ctx: &Ctx, scope: PluginId) -> Result<()> {
+fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
     if !cfg!(debug_assertions) {
         return Ok(());
     }
     let snapshot = ctx.diagnostics();
     let members = subtree(&snapshot, scope);
+    let required: HashSet<_> = required
+        .iter()
+        .flat_map(|view| subtree(&snapshot, view.id))
+        .collect();
     for plugin in snapshot.plugins.iter().filter(|p| members.contains(&p.id)) {
-        // A plugin registered inside a capability's apply is awaited by that capability.
-        let installed = plugin.id == scope || plugin.parent == Some(scope);
-        if installed && plugin.state != FiberState::Active {
+        // Required capabilities must await the children they register in apply.
+        if required.contains(&plugin.id) && plugin.state != FiberState::Active {
             return Err(AgentError::Build(format!(
                 "{} is not Active after its scope became ready: {:?}",
                 plugin.name, plugin.state
@@ -1521,6 +1612,9 @@ pub(crate) fn announce(
     phase: ComponentPhase,
 ) {
     for view in std::iter::once(scope).chain(children) {
+        if phase == ComponentPhase::Ready && view.state().state != FiberState::Active {
+            continue;
+        }
         diagnostics.component(view.name(), phase);
     }
 }

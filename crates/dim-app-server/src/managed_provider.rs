@@ -1,4 +1,5 @@
 //! Process-owned bridge to an optional managed-provider rutis service.
+pub(crate) mod management;
 use crate::model_catalog::{MAX_MODEL_TOKENS, ModelEntry};
 use dim_agent_capabilities::host::ModelProtocol;
 use dim_agent_runtime::{Capability, KeysOf};
@@ -526,6 +527,7 @@ impl TypedPlugin for ManagedProvidersPlugin {
                     Ok(())
                 }))
             })?;
+            management::provide(ctx, service.clone())?;
             ctx.provide_as(rutis::TypeKey::of::<ManagedProviders>(), service)?;
             Ok(Effect::Done)
         })

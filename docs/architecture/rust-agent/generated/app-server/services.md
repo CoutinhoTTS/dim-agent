@@ -8,17 +8,19 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p24["Transport"]
-    p23["Rpc"]
-    p22["Connection"]
-    p21["Collaboration"]
-    p20["Agents"]
-    p19["CollaborationDirectory"]
-    p18["AgentDirectory"]
-    p17["SkillsCatalog"]
-    p16["HostPlatform"]
-    p15["Mcp"]
-    p14["McpPublication"]
+    p26["Transport"]
+    p25["Rpc"]
+    p24["Connection"]
+    p23["Collaboration"]
+    p22["Agents"]
+    p21["CollaborationDirectory"]
+    p20["AgentDirectory"]
+    p19["PermissionRules"]
+    p18["SkillsCatalog"]
+    p17["HostPlatform"]
+    p16["Mcp"]
+    p15["McpPublication"]
+    p14["SettingsMethods"]
     p13["Settings"]
     p12["Provider"]
     p11["GrokOAuth"]
@@ -31,36 +33,34 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
-  p22 -->|"dim_app_server::connection::ConnectionHub"| p24
+  p24 -->|"dim_app_server::connection::ConnectionHub"| p26
+  p3 -->|"dim_app_server::control::ServerControl"| p26
+  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p26
+  p22 -->|"dim_app_server::agents::AgentIndex"| p25
+  p23 -->|"dim_app_server::collaboration::Collaboration"| p25
+  p24 -->|"dim_app_server::connection::ConnectionHub"| p25
+  p3 -->|"dim_app_server::control::ServerControl"| p25
+  p2 -->|"rutis_loader::loader::Loader"| p25
   p3 -->|"dim_app_server::control::ServerControl"| p24
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p24
-  p17 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p23
-  p20 -->|"dim_app_server::agents::AgentIndex"| p23
-  p10 -->|"dim_app_server::codex_oauth::OpenAICodexOAuthService"| p23
-  p21 -->|"dim_app_server::collaboration::Collaboration"| p23
-  p22 -->|"dim_app_server::connection::ConnectionHub"| p23
-  p3 -->|"dim_app_server::control::ServerControl"| p23
-  p11 -->|"dim_app_server::grok_oauth::GrokOAuthService"| p23
-  p9 -->|"dim_app_server::managed_provider::ManagedProviders"| p23
-  p15 -->|"dim_app_server::mcp::McpService"| p23
-  p12 -->|"dim_app_server::provider::ProviderService"| p23
-  p13 -->|"dim_app_server::settings::SettingsService"| p23
-  p3 -->|"dim_app_server::control::ServerControl"| p22
-  p20 -->|"dim_app_server::agents::AgentIndex"| p21
-  p19 -->|"dim_app_server::collaboration::CollaborationDirectory"| p21
-  p12 -->|"dim_agent_capabilities::host::ModelSelectionHost"| p20
-  p18 -->|"dim_app_server::agents::AgentDirectory"| p20
-  p13 -->|"dim_app_server::settings::SettingsService"| p20
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p20
-  p8 -->|"dim_app_server::storage::timeline::SessionStore"| p20
-  p2 -->|"rutis_loader::loader::Loader"| p20
-  p16 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p17
-  p13 -->|"dim_agent_capabilities::skill_settings::SkillSettingsHost"| p17
+  p22 -->|"dim_app_server::agents::AgentIndex"| p23
+  p21 -->|"dim_app_server::collaboration::CollaborationDirectory"| p23
+  p20 -->|"dim_app_server::agents::AgentDirectory"| p22
+  p13 -->|"dim_app_server::settings::SettingsService"| p22
+  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p22
+  p8 -->|"dim_app_server::storage::timeline::SessionStore"| p22
+  p2 -->|"rutis_loader::loader::Loader"| p22
+  p13 -->|"dim_app_server::settings::SettingsService"| p19
+  p17 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p18
+  p13 -->|"dim_app_server::settings::SettingsService"| p18
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p17
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p16
-  p14 -->|"dim_app_server::mcp::publication::Publication"| p15
+  p15 -->|"dim_app_server::mcp::publication::Publication"| p16
+  p13 -->|"dim_app_server::settings::SettingsService"| p16
   p13 -->|"dim_app_server::settings::SettingsService"| p15
+  p13 -->|"dim_app_server::settings::SettingsService"| p14
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p13
   p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p13
+  p6 -->|"dim_agent_capabilities::host::ModelHost"| p12
   p10 -->|"dim_app_server::codex_oauth::OpenAICodexOAuthService"| p12
   p11 -->|"dim_app_server::grok_oauth::GrokOAuthService"| p12
   p9 -->|"dim_app_server::managed_provider::ManagedProviders"| p12

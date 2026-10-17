@@ -1,23 +1,27 @@
-//! Source-targeted settings. No MCP connections or Skill discovery.
-mod mcp_approval;
+//! Business-owned documents with source-local persistence and CAS: Rust
+//! `BusinessDocument` sources and the JSON Schema sources non-Rust owners
+//! declare (settings-service design).
+mod declared;
 mod native;
 
 use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
-use dim_agent_capabilities::skill_settings::{
-    SettingsVersion, SkillSettings as SkillSettingsPort, SkillSettingsError, SkillSettingsHost,
-    SkillSettingsSnapshot,
-};
-use dim_agent_runtime::{Capability, KeysOf, StateCell, When};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
-use serde::{Deserialize, Serialize};
+use dim_agent_runtime::{Capability, KeysOf, When};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
+    any::TypeId,
     collections::BTreeMap,
+    marker::PhantomData,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+use declared::Declared;
+pub(crate) use declared::{Read, Update};
+pub use declared::{SourceDeclaration, Writer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
@@ -25,6 +29,18 @@ pub enum SettingsError {
     Storage(FileStorageError),
     #[error("invalid settings: {0}")]
     Invalid(&'static str),
+    /// Not a declared source; Rust sources are served by their owners.
+    #[error("unknown settings source")]
+    UnknownSource,
+    #[error("invalid settings scope: {0}")]
+    InvalidScope(&'static str),
+    /// A written document breaks its declared schema. The message names the
+    /// instance path, never the value.
+    #[error("invalid settings document: {0}")]
+    Document(String),
+    /// An owner write changes the user-only field at this JSON Pointer.
+    #[error("settings field {0} is changed only by the user")]
+    UserOnlyField(String),
     #[error("settings changed; read the current version before updating")]
     Conflict,
     #[error("settings service is closed")]
@@ -36,7 +52,6 @@ pub enum SettingsError {
     #[error("settings worker failed: {0}")]
     Worker(#[from] tokio::task::JoinError),
 }
-
 impl From<FileStorageError> for SettingsError {
     fn from(error: FileStorageError) -> Self {
         match error {
@@ -46,100 +61,100 @@ impl From<FileStorageError> for SettingsError {
         }
     }
 }
-
 pub type Result<T> = std::result::Result<T, SettingsError>;
 
-/// Roots are authorized FileStorage indices supplied by the product host, not
-/// arbitrary paths received from RPC. Project files are always `.mcp.json`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SettingsSource {
-    UserMcp,
-    ProjectMcp(usize),
-    Skills,
+/// Declared in the capabilities crate, so listeners in any crate share the type.
+pub use dim_agent_capabilities::settings::{SettingsChanged, SettingsScope, settings_changes};
+
+/// A project directory newly authorized for project sources.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAuthorized {
+    pub root: usize,
+    pub cwd: PathBuf,
+}
+impl Event for ProjectAuthorized {
+    const NAME: &'static str = "settings.project_authorized";
+    type Value = ();
+}
+/// The rutis channel of project authorizations.
+pub fn project_authorizations() -> EventKey<ProjectAuthorized> {
+    EventKey::dynamic("settings/projects")
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct McpSettings {
-    pub mcp_servers: BTreeMap<String, McpServerSettings>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_json::Value>,
+/// Wakes a receiver on every event it listens to, for an owner whose read
+/// loop waits on a watch receiver: it rereads the source after each wake.
+#[derive(Clone)]
+pub(crate) struct Wake(Arc<tokio::sync::watch::Sender<()>>);
+impl Wake {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(tokio::sync::watch::Sender::new(())))
+    }
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0.subscribe()
+    }
+}
+impl<E: Event<Value = ()>> rutis::Listener<E> for Wake {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: &'a E,
+    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
+        self.0.send_replace(());
+        Box::pin(async { Ok(None) })
+    }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum McpServerSettings {
-    Stdio {
-        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-        kind: Option<Stdio>,
-        command: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        args: Vec<String>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        env: BTreeMap<String, String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        enabled: Option<bool>,
-        #[serde(flatten)]
-        extra: BTreeMap<String, serde_json::Value>,
-    },
-    Remote {
-        #[serde(rename = "type")]
-        kind: RemoteTransport,
-        url: String,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        headers: BTreeMap<String, String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        auth: Option<BearerAuth>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        enabled: Option<bool>,
-        #[serde(flatten)]
-        extra: BTreeMap<String, serde_json::Value>,
-    },
+pub trait BusinessDocument: Default + Serialize + DeserializeOwned + Send + Sync + 'static {
+    const NAMESPACE: &'static str;
+    const USER_FILE: &'static str;
+    const PROJECT_FILE: Option<&'static str> = None;
+    fn validate(&self) -> Result<()>;
 }
-
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Stdio {
-    Stdio,
-}
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteTransport {
-    Http,
-    Sse,
-}
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum BearerAuth {
-    Bearer { token: String },
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillSettings {
-    pub disabled_skill_ids: Vec<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_json::Value>,
-}
-
-/// Contains server-side secrets (MCP headers/env); never serialize this snapshot
-/// directly into client notifications or diagnostic logs.
-#[derive(Clone, PartialEq)]
-pub enum SettingsDocument {
-    Mcp(McpSettings),
-    Skills(SkillSettings),
-}
-#[derive(Clone, PartialEq)]
-pub struct SettingsSnapshot {
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SettingsSnapshot<D> {
     pub revision: String,
-    pub document: SettingsDocument,
+    pub document: D,
 }
 
-enum SettingsChange {
-    Replace(SettingsDocument),
-    SkillEnabled { id: String, enabled: bool },
+/// How one source's documents cross the persistence boundary, so Rust and
+/// declared sources share the file and native paths, keyed by source name.
+trait Format: Send + Sync + 'static {
+    type Document: Serialize + Send + 'static;
+    fn source(&self) -> &str;
+    /// Decodes and checks a persisted document; `None` is a missing file.
+    fn decode(&self, bytes: Option<&[u8]>) -> Result<Self::Document>;
+}
+struct Typed<D>(PhantomData<fn() -> D>);
+impl<D: BusinessDocument> Format for Typed<D> {
+    type Document = D;
+    fn source(&self) -> &str {
+        D::NAMESPACE
+    }
+    fn decode(&self, bytes: Option<&[u8]>) -> Result<D> {
+        let document: D = match bytes {
+            Some(bytes) => serde_json::from_slice(bytes)
+                .map_err(|_| SettingsError::Invalid("invalid settings document"))?,
+            None => D::default(),
+        };
+        document.validate()?;
+        Ok(document)
+    }
+}
+fn typed<D: BusinessDocument>() -> Arc<Typed<D>> {
+    Arc::new(Typed(PhantomData))
+}
+
+/// Who holds a source name or file: a Rust document type or one declaration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Claimant {
+    Rust(TypeId),
+    Declared(usize),
+}
+fn claim_names(source: &str, user_file: &str, project_file: Option<&str>) -> Vec<String> {
+    [format!("namespace {source}"), format!("user {user_file}")]
+        .into_iter()
+        .chain(project_file.map(|file| format!("project {file}")))
+        .collect()
 }
 
 pub struct SettingsService {
@@ -150,12 +165,15 @@ pub struct SettingsService {
     stopping: CancellationToken,
     gate: Mutex<()>,
     updates: TaskTracker,
-    changed: StateCell<u64>,
-    skills_changed: StateCell<SettingsVersion>,
+    /// Settings' own plugin context, which emits change events.
+    events: Ctx,
+    /// The claimant of each namespace and file; another claimant naming one
+    /// of them would share its persisted source.
+    claims: Mutex<BTreeMap<String, Claimant>>,
+    /// The declared sources, compiled once at apply.
+    declared: BTreeMap<String, Arc<Declared>>,
 }
 impl SettingsService {
-    /// The product host authorizes canonical workspaces before Session loading.
-    /// This port is never exposed as an arbitrary path/root-index RPC.
     pub async fn authorize_project(
         self: &Arc<Self>,
         cwd: PathBuf,
@@ -173,56 +191,91 @@ impl SettingsService {
                 let root = owner.files.register_root(cwd.clone(), &cancel).await?;
                 let _guard = owner.gate.lock().unwrap();
                 owner.check_open(&cancel)?;
-                if owner.projects.lock().unwrap().insert(cwd, root) != Some(root) {
-                    owner.changed.update(|version| *version += 1);
+                if owner.projects.lock().unwrap().insert(cwd.clone(), root) != Some(root) {
+                    owner.emit(&project_authorizations(), ProjectAuthorized { root, cwd });
                 }
                 Ok(root)
             })
         };
         task.await?
     }
-
     pub fn project_root(&self, cwd: &Path) -> Option<usize> {
         self.projects.lock().unwrap().get(cwd).copied()
     }
-
-    pub(crate) fn mcp_sources(&self) -> Vec<(SettingsSource, Option<PathBuf>)> {
-        std::iter::once((SettingsSource::UserMcp, None))
-            .chain(
-                self.projects
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|(path, index)| (SettingsSource::ProjectMcp(*index), Some(path.clone()))),
-            )
+    pub fn project_path(&self, root: usize) -> Result<PathBuf> {
+        self.projects
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, index)| **index == root)
+            .map(|(path, _)| path.clone())
+            .ok_or(SettingsError::Invalid("unauthorized project"))
+    }
+    pub fn project_sources(&self) -> Vec<(usize, PathBuf)> {
+        self.projects
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, index)| (*index, path.clone()))
             .collect()
     }
-
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.changed.subscribe()
+    /// Announces a committed write on the source's channel. Callers hold the
+    /// commit order (the gate or the native connection), so events follow it.
+    fn publish(&self, source: &str, scope: SettingsScope, revision: &str) {
+        self.emit(
+            &settings_changes(source),
+            SettingsChanged {
+                source: source.to_owned(),
+                scope,
+                revision: revision.to_owned(),
+            },
+        );
     }
-
-    fn path(&self, source: SettingsSource) -> Result<FilePath> {
-        let (root, file) = match source {
-            SettingsSource::UserMcp => (self.home_root, "mcp.json"),
-            SettingsSource::Skills => (self.home_root, "skills.json"),
-            SettingsSource::ProjectMcp(root)
-                if self
-                    .projects
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .any(|index| *index == root) =>
-            {
-                (root, ".mcp.json")
-            }
-            SettingsSource::ProjectMcp(_) => {
-                return Err(SettingsError::Invalid("unauthorized project"));
+    /// The change is already committed; a refused announcement cannot undo it,
+    /// so it is recorded rather than returned to the writer.
+    fn emit<E: Event>(&self, key: &EventKey<E>, event: E) {
+        if let Err(error) = self
+            .events
+            .events()
+            .emit(&self.events, key, Arc::new(event))
+        {
+            tracing::warn!(event = E::NAME, %error, "Settings change was not announced");
+        }
+    }
+    fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
+        validate_namespace(D::NAMESPACE)?;
+        validate_file(D::USER_FILE)?;
+        if let Some(file) = D::PROJECT_FILE {
+            validate_file(file)?;
+        }
+        self.claim(
+            Claimant::Rust(TypeId::of::<D>()),
+            claim_names(D::NAMESPACE, D::USER_FILE, D::PROJECT_FILE),
+        )?;
+        self.locate(D::USER_FILE, D::PROJECT_FILE, scope)
+    }
+    fn locate(
+        &self,
+        user_file: &str,
+        project_file: Option<&str>,
+        scope: SettingsScope,
+    ) -> Result<FilePath> {
+        let (root, file) = match scope {
+            SettingsScope::User => (self.home_root, user_file),
+            SettingsScope::Project(root) => {
+                self.project_path(root)?;
+                (
+                    root,
+                    project_file.ok_or(SettingsError::Invalid("document has no project source"))?,
+                )
             }
         };
         Ok(self.files.path(root, file)?)
     }
-
+    fn claim(&self, claimant: Claimant, names: Vec<String>) -> Result<()> {
+        let mut claims = self.claims.lock().unwrap();
+        claim(&mut claims, claimant, names)
+    }
     fn check_open(&self, cancel: &CancellationToken) -> Result<()> {
         if self.stopping.is_cancelled() {
             Err(SettingsError::Closed)
@@ -232,82 +285,107 @@ impl SettingsService {
             Ok(())
         }
     }
-
-    pub async fn read(
+    pub async fn read<D: BusinessDocument>(
         &self,
-        source: SettingsSource,
+        scope: SettingsScope,
         cancel: &CancellationToken,
-    ) -> Result<SettingsSnapshot> {
+    ) -> Result<SettingsSnapshot<D>> {
         self.check_open(cancel)?;
-        if self.database.is_some()
-            && matches!(source, SettingsSource::UserMcp | SettingsSource::Skills)
-        {
-            return self.native_read(source, cancel).await;
-        }
-        decode(source, self.files.read(&self.path(source)?, cancel).await)
+        let path = self.path::<D>(scope)?;
+        self.read_source(typed::<D>(), path, scope, cancel).await
     }
-
-    /// CAS is checked in the source's write transaction or file lease, not against
-    /// an in-memory counter. Workspace edits made outside this service are detected.
-    pub async fn update(
+    pub async fn update<D: BusinessDocument>(
         self: &Arc<Self>,
-        source: SettingsSource,
-        expected_revision: &str,
-        document: SettingsDocument,
+        scope: SettingsScope,
+        expected: &str,
+        document: D,
         cancel: &CancellationToken,
-    ) -> Result<SettingsSnapshot> {
-        validate(source, &document)?;
-        self.write(
-            source,
-            expected_revision,
-            SettingsChange::Replace(document),
+    ) -> Result<SettingsSnapshot<D>> {
+        document.validate()?;
+        let path = self.path::<D>(scope)?;
+        self.replace(
+            typed::<D>(),
+            path,
+            scope,
+            expected,
+            document,
+            |_, _| Ok(()),
             cancel,
         )
         .await
     }
-
-    async fn write(
-        self: &Arc<Self>,
-        source: SettingsSource,
-        expected_revision: &str,
-        change: SettingsChange,
+    async fn read_source<F: Format>(
+        &self,
+        format: Arc<F>,
+        path: FilePath,
+        scope: SettingsScope,
         cancel: &CancellationToken,
-    ) -> Result<SettingsSnapshot> {
-        let path = self.path(source)?;
+    ) -> Result<SettingsSnapshot<F::Document>> {
+        if scope == SettingsScope::User && self.database.is_some() {
+            return self.native_read(format, path, cancel).await;
+        }
+        snapshot(&*format, self.files.read(&path, cancel).await)
+    }
+    /// CAS on the revision. `check` sees the current and the new document
+    /// under the same lease (or native transaction) as the revision check.
+    #[allow(clippy::too_many_arguments)]
+    async fn replace<F: Format>(
+        self: &Arc<Self>,
+        format: Arc<F>,
+        path: FilePath,
+        scope: SettingsScope,
+        expected: &str,
+        document: F::Document,
+        check: impl FnOnce(&F::Document, &F::Document) -> Result<()> + Send + 'static,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<F::Document>> {
         let task = {
             let _guard = self.gate.lock().unwrap();
             self.check_open(cancel)?;
             let owner = self.clone();
-            let expected_revision = expected_revision.to_owned();
+            let expected = expected.to_owned();
             let cancel = cancel.clone();
             self.updates.spawn(async move {
-                owner
-                    .replace(source, path, &expected_revision, change, &cancel)
-                    .await
+                if scope == SettingsScope::User && owner.database.is_some() {
+                    return owner
+                        .native_replace(format, path, expected, document, check, &cancel)
+                        .await;
+                }
+                let mut lease = owner.lease(&path, &cancel).await?;
+                let current = snapshot(&*format, lease.read(&cancel).await)?;
+                if current.revision != expected {
+                    return Err(SettingsError::Conflict);
+                }
+                check(&current.document, &document)?;
+                let mut bytes = serde_json::to_vec_pretty(&document)
+                    .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
+                bytes.push(b'\n');
+                let revision = revision(Some(&bytes));
+                match lease.replace(bytes, private_permissions(), &cancel).await {
+                    Ok(()) => {}
+                    // The new content is what readers now see: consumers follow
+                    // it, and the caller learns it may not survive a crash.
+                    Err(FileStorageError::Unsynced(error)) => {
+                        owner.publish(format.source(), scope, &revision);
+                        return Err(FileStorageError::Unsynced(error).into());
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                owner.publish(format.source(), scope, &revision);
+                Ok(SettingsSnapshot { revision, document })
             })
         };
         task.await?
     }
-
-    async fn replace(
+    async fn lease(
         &self,
-        source: SettingsSource,
-        path: FilePath,
-        expected_revision: &str,
-        change: SettingsChange,
+        path: &FilePath,
         cancel: &CancellationToken,
-    ) -> Result<SettingsSnapshot> {
-        if self.database.is_some()
-            && matches!(source, SettingsSource::UserMcp | SettingsSource::Skills)
-        {
-            return self
-                .native_replace(source, expected_revision, change, cancel)
-                .await;
-        }
-        let mut lease = loop {
+    ) -> Result<dim_agent_capabilities::file_storage::FileLease> {
+        loop {
             self.check_open(cancel)?;
-            match self.files.lock(&path, cancel).await {
-                Ok(lease) => break lease,
+            match self.files.lock(path, cancel).await {
+                Ok(lease) => return Ok(lease),
                 Err(FileStorageError::Locked) => tokio::select! {
                     _ = self.stopping.cancelled() => return Err(SettingsError::Closed),
                     _ = cancel.cancelled() => return Err(SettingsError::Cancelled),
@@ -315,239 +393,78 @@ impl SettingsService {
                 },
                 Err(error) => return Err(error.into()),
             }
-        };
-        let current = decode(source, lease.read(cancel).await)?;
-        if current.revision != expected_revision {
-            return Err(SettingsError::Conflict);
-        }
-        let Some(document) = change.apply(&current.document) else {
-            return Ok(current);
-        };
-        let mut bytes = match &document {
-            SettingsDocument::Mcp(value) => serde_json::to_vec_pretty(value),
-            SettingsDocument::Skills(value) => serde_json::to_vec_pretty(value),
-        }
-        .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
-        bytes.push(b'\n');
-        let revision = revision(Some(&bytes));
-        #[cfg(unix)]
-        let permissions = {
-            use std::os::unix::fs::PermissionsExt;
-            Some(std::fs::Permissions::from_mode(0o600))
-        };
-        #[cfg(not(unix))]
-        let permissions = None;
-        lease.replace(bytes, permissions, cancel).await?;
-        // Publish under the lease so concurrent commits cannot reorder versions.
-        if source == SettingsSource::Skills {
-            self.skills_changed.set(revision.clone());
-        }
-        self.changed.update(|version| *version += 1);
-        drop(lease);
-        Ok(SettingsSnapshot { revision, document })
-    }
-}
-
-impl SettingsChange {
-    fn apply(self, current: &SettingsDocument) -> Option<SettingsDocument> {
-        match self {
-            Self::Replace(document) => Some(document),
-            Self::SkillEnabled { id, enabled } => {
-                let SettingsDocument::Skills(mut settings) = current.clone() else {
-                    unreachable!("Skill updates use the Skills source")
-                };
-                if settings.disabled_skill_ids.contains(&id) != enabled {
-                    return None;
-                }
-                if enabled {
-                    settings.disabled_skill_ids.retain(|value| value != &id);
-                } else {
-                    settings.disabled_skill_ids.push(id);
-                }
-                Some(SettingsDocument::Skills(settings))
-            }
         }
     }
 }
-
-impl SkillSettingsPort for SettingsService {
-    fn skills(
-        &self,
-        cancel: CancellationToken,
-    ) -> BoxFuture<'_, std::result::Result<SkillSettingsSnapshot, SkillSettingsError>> {
-        Box::pin(async move {
-            let snapshot = self.read(SettingsSource::Skills, &cancel).await?;
-            let SettingsDocument::Skills(settings) = snapshot.document else {
-                unreachable!("Skills source decodes to a Skills document")
-            };
-            Ok(SkillSettingsSnapshot {
-                version: snapshot.revision,
-                disabled: settings.disabled_skill_ids.into_iter().collect(),
-            })
-        })
+fn claim(
+    claims: &mut BTreeMap<String, Claimant>,
+    claimant: Claimant,
+    names: Vec<String>,
+) -> Result<()> {
+    if names
+        .iter()
+        .any(|name| claims.get(name).is_some_and(|claimed| *claimed != claimant))
+    {
+        return Err(SettingsError::Invalid(
+            "settings source belongs to another document type",
+        ));
     }
-
-    fn update_skills(
-        self: Arc<Self>,
-        expected: SettingsVersion,
-        id: String,
-        enabled: bool,
-        cancel: CancellationToken,
-    ) -> BoxFuture<'static, std::result::Result<SettingsVersion, SkillSettingsError>> {
-        Box::pin(async move {
-            self.check_open(&cancel)?;
-            if id.trim().is_empty() {
-                return Err(SkillSettingsError::Invalid("empty Skill id".into()));
-            }
-            let saved = self
-                .write(
-                    SettingsSource::Skills,
-                    &expected,
-                    SettingsChange::SkillEnabled { id, enabled },
-                    &cancel,
-                )
-                .await?;
-            Ok(saved.revision)
-        })
+    for name in names {
+        claims.insert(name, claimant);
     }
-
-    fn changes(&self) -> tokio::sync::watch::Receiver<SettingsVersion> {
-        self.skills_changed.subscribe()
+    Ok(())
+}
+fn validate_namespace(value: &str) -> Result<()> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_')
+    {
+        return Err(SettingsError::Invalid("invalid document namespace"));
+    }
+    Ok(())
+}
+fn validate_file(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains(['/', '\\', '\0'])
+        || Path::new(value).is_absolute()
+    {
+        return Err(SettingsError::Invalid("invalid document filename"));
+    }
+    Ok(())
+}
+fn private_permissions() -> Option<std::fs::Permissions> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        None
     }
 }
-
-impl From<SettingsError> for SkillSettingsError {
-    fn from(error: SettingsError) -> Self {
-        match error {
-            SettingsError::Conflict => Self::Conflict,
-            SettingsError::Invalid(reason) => Self::Invalid(reason.into()),
-            SettingsError::Closed | SettingsError::Storage(FileStorageError::Closed) => {
-                Self::Closed
-            }
-            SettingsError::Cancelled | SettingsError::Storage(FileStorageError::Cancelled) => {
-                Self::Cancelled
-            }
-            error => Self::Failed(error.to_string()),
-        }
-    }
-}
-
 fn revision(bytes: Option<&[u8]>) -> String {
-    match bytes {
-        Some(bytes) => format!("{:x}", Sha256::digest(bytes)),
-        None => "missing".into(),
-    }
+    bytes.map_or_else(
+        || "missing".into(),
+        |bytes| format!("{:x}", Sha256::digest(bytes)),
+    )
 }
-
-fn decode(
-    source: SettingsSource,
+fn snapshot<F: Format>(
+    format: &F,
     read: std::result::Result<Vec<u8>, FileStorageError>,
-) -> Result<SettingsSnapshot> {
+) -> Result<SettingsSnapshot<F::Document>> {
     let bytes = match read {
         Ok(bytes) => Some(bytes),
         Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let document = match (source, bytes.as_deref()) {
-        (SettingsSource::Skills, Some(bytes)) => SettingsDocument::Skills(
-            serde_json::from_slice(bytes)
-                .map_err(|_| SettingsError::Invalid("invalid skills.json"))?,
-        ),
-        (SettingsSource::Skills, None) => SettingsDocument::Skills(SkillSettings {
-            disabled_skill_ids: vec![],
-            extra: BTreeMap::new(),
-        }),
-        (_, Some(bytes)) => SettingsDocument::Mcp(
-            serde_json::from_slice(bytes)
-                .map_err(|_| SettingsError::Invalid("invalid MCP configuration"))?,
-        ),
-        (_, None) => SettingsDocument::Mcp(McpSettings {
-            mcp_servers: BTreeMap::new(),
-            extra: BTreeMap::new(),
-        }),
-    };
-    validate(source, &document)?;
     Ok(SettingsSnapshot {
+        document: format.decode(bytes.as_deref())?,
         revision: revision(bytes.as_deref()),
-        document,
     })
-}
-
-fn validate(source: SettingsSource, document: &SettingsDocument) -> Result<()> {
-    match (source, document) {
-        (SettingsSource::Skills, SettingsDocument::Skills(settings)) => {
-            if settings.extra.contains_key("disabledSkillIds") {
-                return Err(SettingsError::Invalid("reserved Skill configuration field"));
-            }
-            if settings
-                .disabled_skill_ids
-                .iter()
-                .any(|id| id.trim().is_empty())
-            {
-                return Err(SettingsError::Invalid("empty Skill id"));
-            }
-        }
-        (
-            SettingsSource::UserMcp | SettingsSource::ProjectMcp(_),
-            SettingsDocument::Mcp(settings),
-        ) => {
-            if settings.extra.contains_key("mcpServers") {
-                return Err(SettingsError::Invalid("reserved MCP configuration field"));
-            }
-            for (id, server) in &settings.mcp_servers {
-                if id.trim().is_empty() {
-                    return Err(SettingsError::Invalid("empty MCP server id"));
-                }
-                let (target, extra) = match server {
-                    McpServerSettings::Stdio { command, extra, .. } => (command, extra),
-                    McpServerSettings::Remote {
-                        url, auth, extra, ..
-                    } => {
-                        if let Some(BearerAuth::Bearer { token }) = auth
-                            && token.trim().is_empty()
-                        {
-                            return Err(SettingsError::Invalid("empty MCP bearer token"));
-                        }
-                        (url, extra)
-                    }
-                };
-                if target.trim().is_empty()
-                    || extra.keys().any(|key| {
-                        matches!(
-                            key.as_str(),
-                            "type"
-                                | "command"
-                                | "args"
-                                | "env"
-                                | "cwd"
-                                | "enabled"
-                                | "url"
-                                | "headers"
-                                | "auth"
-                                | "transport"
-                                | "oauth"
-                        )
-                    })
-                {
-                    return Err(SettingsError::Invalid(
-                        "invalid MCP transport configuration",
-                    ));
-                }
-                if extra
-                    .get("metadata")
-                    .is_some_and(|value| !value.is_object())
-                {
-                    return Err(SettingsError::Invalid("MCP metadata must be an object"));
-                }
-            }
-        }
-        _ => {
-            return Err(SettingsError::Invalid(
-                "settings source and document disagree",
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -556,6 +473,10 @@ pub struct SettingsPlugin {
     project_roots: Vec<usize>,
     projects: Arc<Mutex<BTreeMap<PathBuf, usize>>>,
     native: bool,
+    /// Rust sources the composition root registers, claimed before any
+    /// declaration so a declaration cannot take one of their names.
+    reserved: Vec<(TypeId, Vec<String>)>,
+    declarations: Vec<SourceDeclaration>,
 }
 impl SettingsPlugin {
     pub fn new(home_root: usize, project_roots: Vec<usize>) -> Self {
@@ -564,16 +485,29 @@ impl SettingsPlugin {
             project_roots,
             projects: Arc::new(Mutex::new(BTreeMap::new())),
             native: false,
+            reserved: Vec::new(),
+            declarations: Vec::new(),
         }
     }
-
-    /// SQLite owns user documents after their first successful import. Workspace
-    /// files remain authoritative; legacy user files are retained but never dual-written.
     pub fn native(home_root: usize, project_roots: Vec<usize>) -> Self {
         Self {
             native: true,
             ..Self::new(home_root, project_roots)
         }
+    }
+    /// Reserves a Rust source's names: a declaration naming one fails assembly.
+    pub fn reserve<D: BusinessDocument>(mut self) -> Self {
+        self.reserved.push((
+            TypeId::of::<D>(),
+            claim_names(D::NAMESPACE, D::USER_FILE, D::PROJECT_FILE),
+        ));
+        self
+    }
+    /// The declared sources this Settings serves. Each is checked and compiled
+    /// in `apply`; an invalid or duplicate declaration fails assembly.
+    pub fn declare(mut self, declarations: Vec<SourceDeclaration>) -> Self {
+        self.declarations.extend(declarations);
+        self
     }
 }
 impl TypedPlugin for SettingsPlugin {
@@ -587,15 +521,39 @@ impl TypedPlugin for SettingsPlugin {
         (files, When(database)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let mut claims = BTreeMap::new();
+            for (owner, names) in &self.reserved {
+                claim(&mut claims, Claimant::Rust(*owner), names.clone())
+                    .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?;
+            }
+            let mut declared = BTreeMap::new();
+            for (index, declaration) in self.declarations.iter().enumerate() {
+                let failed = |reason: String| {
+                    CordisError::PluginFailed(
+                        format!(
+                            "settings source {} of {}: {reason}",
+                            declaration.source, declaration.owner
+                        )
+                        .into(),
+                    )
+                };
+                let compiled = Declared::compile(declaration.clone()).map_err(failed)?;
+                claim(
+                    &mut claims,
+                    Claimant::Declared(index),
+                    claim_names(
+                        &declaration.source,
+                        &declaration.user_file,
+                        declaration.project_file.as_deref(),
+                    ),
+                )
+                .map_err(|error| failed(error.to_string()))?;
+                declared.insert(declaration.source.clone(), Arc::new(compiled));
+            }
             for root in &self.project_roots {
                 let path = files
                     .root_path(*root)
                     .map_err(|error| CordisError::PluginFailed(error.into()))?;
-                if path.to_str().is_none() {
-                    return Err(CordisError::PluginFailed(Box::new(SettingsError::Invalid(
-                        "project cwd must be UTF-8",
-                    ))));
-                }
                 self.projects.lock().unwrap().insert(path, *root);
             }
             let service = Arc::new(SettingsService {
@@ -606,8 +564,9 @@ impl TypedPlugin for SettingsPlugin {
                 stopping: CancellationToken::new(),
                 gate: Mutex::new(()),
                 updates: TaskTracker::new(),
-                changed: StateCell::new(0),
-                skills_changed: StateCell::new("unread".into()),
+                events: ctx.clone(),
+                claims: Mutex::new(claims),
+                declared,
             });
             let owner = service.clone();
             ctx.effect(move || {
@@ -623,9 +582,7 @@ impl TypedPlugin for SettingsPlugin {
                     })
                 }))
             })?;
-            // Optional files are read by their consumers; a corrupt source must
-            // not prevent the settings authority from registering.
-            ctx.provide(SkillSettingsHost(service.clone()))?;
+            declared::provide(ctx, &service)?;
             ctx.provide_as(TypeKey::of::<SettingsService>(), service)?;
             Ok(Effect::Done)
         })

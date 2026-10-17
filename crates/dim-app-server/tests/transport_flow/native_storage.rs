@@ -160,8 +160,8 @@ async fn product_submit_acknowledges_only_a_committed_input() {
     );
     let mut observer = Client::new_version(&server, true, 3).await;
     let lookup = json!({"sessionId":sid,"branchId":"main","submissionId":submission});
-    // The lookup covers what was published when it began; reading those
-    // stored pages waits while the database is locked.
+    // The lookup first waits until the committed input is published, so
+    // `unknown` is final for every write that returned before it.
     let looked_up = observer.send("session.input_lookup", lookup.clone()).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), observer.response(looked_up))
@@ -169,13 +169,12 @@ async fn product_submit_acknowledges_only_a_committed_input() {
             .is_err()
     );
     lock.execute_batch("COMMIT").unwrap();
-    assert_eq!(
-        observer.response(looked_up).await["result"]["status"],
-        "unknown"
-    );
+    let found = observer.response(looked_up).await;
     let receipt = client.response(request).await;
     assert_ok(&receipt);
     let event = &receipt["result"]["event"];
+    assert_eq!(found["result"]["status"], "accepted");
+    assert_eq!(found["result"]["event"], *event);
     let stored: String = lock.query_row(
         "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND sequence=?2",
         rusqlite::params![sid, event["sequence"].as_i64().unwrap()],
@@ -275,6 +274,7 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
         builder.session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_plugin(ConfiguredModelPlugin::new);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
@@ -829,6 +829,15 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
         ..Default::default()
     };
     let (server, original_agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    // The server creates the missing database directory owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
     let mut client = Client::new_version(&server, false, 3).await;
     let original_instance = client.instance.clone();
     let mut parameters = create(json!(["branch"]));
@@ -943,6 +952,114 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
     server.join().await.unwrap();
     drop(recovered);
     drop(recovered_agent);
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// `session.create {interactive}` takes only a boolean and is creation data
+/// of the stored Session record on v13: only `false` is written, an
+/// interactive record keeps the fields written before `interactive` existed,
+/// and a record written before the field existed restores as interactive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_is_stored_with_the_session_and_absence_means_interactive() {
+    let directory = std::env::temp_dir().join(format!("dim-interactive-{}", uuid::Uuid::new_v4()));
+    let database = directory.join("dimcode.sqlite");
+    let config = ServerConfig {
+        database_path: Some(database.clone()),
+        ..Default::default()
+    };
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for invalid in [Value::Null, json!("false"), json!(0)] {
+        let mut parameters = create(json!([]));
+        parameters["interactive"] = invalid;
+        let rejected = client.rpc("session.create", parameters).await;
+        assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    }
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let interactive = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let mut parameters = create(json!([]));
+    parameters["interactive"] = json!(false);
+    let created = client.rpc("session.create", parameters).await;
+    assert_ok(&created);
+    let automated = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert!(
+        agent
+            .get_session(&interactive)
+            .unwrap()
+            .config()
+            .interactive
+    );
+    assert!(!agent.get_session(&automated).unwrap().config().interactive);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    drop(agent);
+
+    let connection = Connection::open(&database).unwrap();
+    let stored = |id: &str| -> serde_json::Map<String, Value> {
+        let config: String = connection
+            .query_row(
+                "SELECT config FROM agent_sessions WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&config).unwrap()
+    };
+    let mut fields: Vec<_> = stored(&interactive)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "collaborationRole",
+            "cwd",
+            "model",
+            "permissionPolicy",
+            "systemPrompt",
+            "tools"
+        ]
+    );
+    assert_eq!(stored(&automated)["interactive"], false);
+    // The record a daemon before C2 wrote for this Session: its six fields,
+    // stored directly so that restore reads bytes this code never produced.
+    let pre_c2 = json!({
+        "permissionPolicy": {"preset": "read-only", "allowedTools": ["echo", "wait"], "disallowedTools": []},
+        "cwd": std::env::temp_dir(),
+        "model": {"providerId": "mock", "modelId": "deterministic"},
+        "systemPrompt": "",
+        "tools": [],
+        "collaborationRole": "leader"
+    });
+    let updated = connection
+        .execute(
+            "UPDATE agent_sessions SET config = ?1 WHERE session_id = ?2",
+            rusqlite::params![pre_c2.to_string(), interactive],
+        )
+        .unwrap();
+    assert_eq!(updated, 1);
+    drop(connection);
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for id in [&interactive, &automated] {
+        assert_ok(&client.rpc("session.attach", json!({"sessionId": id})).await);
+    }
+    assert!(
+        agent
+            .get_session(&interactive)
+            .unwrap()
+            .config()
+            .interactive
+    );
+    assert!(!agent.get_session(&automated).unwrap().config().interactive);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    drop(agent);
     tokio::fs::remove_dir_all(directory).await.unwrap();
 }
 

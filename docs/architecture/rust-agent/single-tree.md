@@ -1,14 +1,36 @@
 # Rust Agent 与 App Server 单树装配
 
-状态：单树、能力重载结算、原生 Timeline 存储与重启恢复已实现；FileStorage、进程 Aimux 请求服务、产品 Provider 与可选 managed provider 绑定已接线；MCP 与用户 Skill 配置的来源优先发布、项目 MCP 宿主本地批准已实现（配置模型仍待 issue #3 对齐）；产品装配预检与类型化能力事件声明尚未接线（动态事件为 Proposed）。实现状态与待对齐提案以 [ADR 001](../../adr/001-harness-foundation.md) 为准。外部协议包括 v1/v2/v3，见 [dim-app-server](../../../crates/dim-app-server/README.md)。
+Status: single-tree assembly, capability reload settlement, native Timeline storage
+and recovery are implemented. FileStorage, process Aimux, product Provider and
+optional managed-provider bindings are connected. Native user MCP/Skill intent
+uses source-owned business documents; MCP connections and Skill content instances belong
+to Sessions. Project MCP entries start disabled until the user enables them. See
+[ADR 004](../../adr/004-loader-plugin-management.md) for implemented configuration
+scope. Rpc looks up [management methods](../../design/appserver/management-methods.md)
+per call as named services of account, provider, MCP and Skills owners, without
+depending on them, so an owner's reload affects only its namespace; business
+configuration changes do not reload those plugins. No Methods or Management
+plugin, registration port or separate management adapter row is required.
+Product assembly preflight and typed capability event declarations remain
+incomplete; proposals are recorded in [ADR 001](../../adr/001-harness-foundation.md).
+External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
-本文统一按 rutis 0.10.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
+本文统一按 rutis 0.11.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
 
 ## 结构
 
 每个进程一个 rutis root。进程级服务、Session 与分支都是这棵树上的 Plugin；所有有状态服务、监听器和长期任务都由 Plugin 提供，依赖全部经 `TypedPlugin::Deps` 声明。`main` 只解析启动参数、建立 Tokio runtime、调用 `serve`、处理进程信号；纯协议解析、序列化与无状态转换是普通函数。
 
-可选的 managed provider 账号插件由外部单独提供：给出 `--plugin-dir`、`--js-runtime` 与 `--node` 时，rutis Node runtime 与该插件作为同一进程树中的独立 loader 行装载，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；插件不可用时其 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#optional-managed-provider)）。MCP 服务器连接由宿主发布协调器 `McpPublication` 在同一 loader 中按作用域与代次建立 `McpServer` 行，见下文[配置发布与 MCP](#配置发布与-mcp)。
+可选的 managed provider 账号插件由外部单独提供：给出 `--plugin-dir`、`--js-runtime` 与 `--node` 时，rutis Node runtime 与该插件作为同一进程树中的独立 loader 行装载，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；插件不可用时其 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#optional-managed-provider)）。
+
+MCP connection generations are nested `McpConnections` group instances owned by
+each Session in the same loader. `McpPublication` serializes source selection
+and cross-Session retirement; it does not reconcile root layers.
+Its plugin declares Settings as a dependency and owns the publication worker in
+an asynchronous effect. Reload and disposal stop admission, settle the current
+operation and retire retained connections before withdrawing the service. The
+process shutdown coordinator neither starts nor joins MCP-specific tasks.
+See [ADR 004](../../adr/004-loader-plugin-management.md).
 
 `SettingsPlugin` 不作为 `SessionScopePlugin` 的 `Deps` 依赖：Session 创建入口传入已校验的配置快照，既有 Session 的设置变更由受影响能力按业务合同更新（如 McpSession 观察目录修订）。普通配置写入不通过 rutis 重载重建 Session。
 
@@ -28,7 +50,6 @@ rutis root
     ├─ ManagedProviderBinding、JS runtime 与账号插件行       （可选，单独提供的插件）
     ├─ Settings                                             （--product-home 或本地执行 Session）
     ├─ McpPublication、Mcp、HostPlatform、SkillsCatalog     （受保护 profile 且执行 Session）
-    ├─ McpServer ⟨每个作用域服务器的代次行⟩                （由 McpPublication 发布与退役）
     ├─ AgentDirectory（Agent 表、Session 协议版本与占用、serverInstanceId）
     ├─ Agents（AgentIndex：目录逻辑与 Agent 管理，经 loader 创建与关闭 Agent）
     ├─ CollaborationDirectory、Collaboration（Team 关系与临时 Agent 归属）
@@ -39,6 +60,8 @@ rutis root
         ├─ AgentScope（Agent 门面；子插件 Sessions 承载监听）
         └─ session ⟨instanced⟩                    实例 Session#1
             ├─ SessionScope、TimelineTree、ToolRegistry …
+            ├─ McpConnections ⟨instanced⟩         Session-local generations
+            │   └─ McpServer
             ├─ trace ⟨instanced⟩                  仅请求 trace 的 Session
             └─ branch ⟨instanced⟩                 实例 Branch（main 等）
                 └─ BranchScope（Timeline / Dispatcher）、InputQueue、Loop、
@@ -46,9 +69,30 @@ rutis root
                    ToolExecutor、TreeTimeline …
 ```
 
-分组只是 loader 配置行上的标注（实例化方式与配置位置），插件之间平级，顺序只来自 `Deps`。App Server 的配置行只由 `serve` 写入：`serve` 以 `register_capability` 把每个进程插件登记为模块（工厂每次装载构造新插件，跨代状态由工厂共享），一次 `reconcile` 写入全部进程行与 `agent` 分组行，再以 `wait_active` 等各行 Active；`RunningServer::restart` 经 `Loader::restart(行 id)` 重启。`AgentBuilder::install` 把作用域插件、各能力与 Session 扩展登记为 loader 模块（模块名即插件名，fiber 以此显示）并返回 `session` 行；App Server 把它放进 `agent` 行。独立使用的 `Agent`（`AgentBuilder::build`）自建 root 与 loader，`build_in(ctx)` 在宿主节点下自建一个隔离 `Loader` 键的 loader，两者都以 `AgentAnchor` 行建立 Agent 实例；`build_at(loader, ctx)` 使用宿主的 loader。
+Groups annotate loader configuration rows; dependency order comes from `Deps`.
+`serve` registers process factories with `register_capability` and owns the static
+assembly rows. All profiles reconcile their full assembly directly and wait for
+readiness. Native business documents import lazily per source; subsequent edits
+use Settings source-local CAS, not loader reconciliation. `RunningServer::restart`
+uses `Loader::restart(row_id)`.
 
-登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建必须检查 loader 的逐行失败报告，没有 fiber 的失败行也不能忽略；报告成功后仍须等待全部能力 Active，失败则回滚整个候选实例。
+`AgentBuilder::install` registers scope plugins, capabilities and Session extension
+templates and returns the `session` row, nested under `agent` by App Server.
+Standalone `AgentBuilder::build` owns a root and loader; `build_in(ctx)` owns an
+isolated loader key under the host; both create an `AgentAnchor` instance.
+`build_at(loader, ctx)` uses the host's existing loader.
+
+登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建检查 loader 的逐行失败报告，按登记生成的真实 row ID 等待 AgentBuilder 注册的部件，包括作用域根和显式请求的扩展；这些必需行即使没有 fiber，失败也不能忽略。失败则回滚整个候选实例。
+
+宿主通过现有 loader 行配置直接追加的可选部件不是 AgentBuilder 的必需注册：其 Pending、Failed 或运行时缺失保留在 loader 状态中，不阻塞必需部件和首条输入。注册路径决定等待范围，不按语言、展示名或当前状态推断，也不新增 required/optional 标记或注册 API。所有行仍由同一个作用域分组持有并一起清理；服务的 `Deps`、Pending、audit 和失效传播不变。必需部件仍会等待自己声明的全部依赖，不能通过可选行绕过。
+
+因此，ShellInput、Attachments 等经 `AgentBuilder` 注册的第一方 Rust 部件也属于必需成员：它们不能 Active，Session 就不能发布。当前接受这一后果，因为这些部件的启动失败主要属于实现错误，其依赖是核心服务。若某个 Rust 功能开始依赖可能长期不可用的服务，应改由现有 loader 行安装；只有实际需求到来时才重新评估显式成员标记，现在不增加标记 API。
+
+必需部件在 `apply` 中登记的子插件仍由该部件等待；返回意味着其服务和订阅已就绪。debug 发布校验检查必需行及其子树的 Active 状态，发现未等待的子插件就拒绝发布；仅可选行及其子树不参加此 Active 校验。两者仍参加依赖读取和实例键审计。release 保留原有的作者责任与按注册行等待，不增加全进程诊断扫描。
+
+这修正装配自身的等待范围（[#132](https://github.com/arcships/dim/issues/132)，[ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)、[Session access §9.4](../../design/contracts/session-access.md#94-optional-parts-per-enabled-plugin)、[规则 §4.8](principles.md#4-通过时间线扩展行为)）。输入仍经原有分支初始化、ToolBinding 取样和 BranchOpening；不增加发布阶段或工具专用接线。顺序、批次、Timeline 及重载语义均不变。
+
+loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返回的行可能占用该等待。此限制保留在 #132 中，不因此增加后台创建管理器；部件仍应遵守 apply 只登记服务/订阅、发布后再开始业务工作的规则。
 
 首次 loader 装配也属于 Agent 已登记的创建操作；调用方取消等待不取消装配拥有权，`Agent::close()` 等待在途创建及其回滚后才释放 loader。请求的 Session 扩展由 `SessionExtension` 行装载，该行显式注入 `SessionIdentity`，不等待普通 Session 能力全部就绪。扩展与普通能力一起受候选 Session 的启动期限、Active 检查和分组回滚约束；作用域及扩展装配入口只初始化一次，不作为可独立重启的业务能力。嵌套实例归 Session 分组所有，不归创建它的行所有。
 
@@ -79,24 +123,25 @@ rutis root
 | `SqliteStoragePlugin` | 共享数据库连接、事务、原生 schema 门禁、文件维护锁与关停 | `SqliteStorage` | —；启动参数固定数据库路径 |
 | `SessionStorePlugin` | 原生会话目录、Timeline 落盘/恢复及写入任务 | `SessionStore`、`TimelineStore` 持久化端口 | `SqliteStorage` |
 | `FileWriteCoordinatorPlugin` | 跨 Session 的逐路径写入 FIFO 准入域；跨代共享 | `FileWriteCoordinator` | — |
-| `SettingsPlugin` | 按来源的配置写入：用户 MCP/Skill 文档（导入后以 SQLite `settings_documents` 为权威，带修订检查）、工作区 `.mcp.json`（文件权威与内容 CAS）、宿主本地项目 MCP 批准 `mcp-approvals.json`；不建立 MCP 连接或发现 Skill | `SettingsService`、`SkillSettingsHost` | `FileStorage`、`When<SqliteStorage>` |
+| `SettingsPlugin` | Generic BusinessDocument sources and per-source CAS; no domain interpretation, approvals, connections or discovery | `SettingsService` | `FileStorage`, `When<SqliteStorage>` |
 | `OpenAICodexOAuthPlugin` / `GrokOAuthPlugin` | 各自账号字段、登录、刷新与终态 | `OpenAICodexOAuthService` / `GrokOAuthService` | `FileStorage` |
 | `ManagedProvidersPlugin` | 可选 managed provider 的当前绑定代次与在途操作；未绑定时请求明确失败 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |
 | `ProviderPlugin` | catalog、连接与选择管理、账号变更后的非秘密 binding | `ProviderService`、`ProviderConnectionResolver`、`ModelSelectionHost` | `SqliteStorage`、`ManagedProviders`、Codex/Grok 账号服务；可选秘密宿主 |
 | `AimuxPlugin`（进程级） | 共享 HTTP 资源、请求/流转换及取消桥接 | `ModelHost`：接收最终请求、已解析连接与取消信号的 request 对象 | 无业务服务依赖；不注入 Provider、ToolRegistry 或 Session |
 | `ConfiguredModelsPlugin` | `--model-config` 的开发模型目录与 resolver | 开发目录与 resolver | — |
-| `McpPublication`（宿主行） | 串行化来源发布、批准与代次变更的发布协调器；在 apply/dispose 之外向根 loader 写入 `McpServer` 行 | `Publication` | — |
-| `McpPlugin` | MCP 目录、连接租约与准入复查；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
+| `McpPublication` | Source selection, including project enablement from the user's record, and retirement across Session-owned instances; no root reconciliation | `Publication` | `SettingsService` |
+| `McpPlugin` | MCP 目录、连接租约与项目条目的用户启用记录；不拥有已配置行 | `McpService` | `SettingsService`、`Publication` |
 | `HostPlatformPlugin` | 平台与 exec shell 设置 | `HostPlatform` | `When<FileStorage>` |
-| `SkillsCatalogPlugin` | Skill 根发现与目录 | `SkillsCatalog` | `HostPlatform`、`SkillSettingsHost` |
+| `SkillsCatalogPlugin` | Skill discovery/catalog and business settings; privately supplies the reusable catalog's SkillSettingsHost | `SkillsCatalog`, Skills management contribution | `HostPlatform`, `SettingsService` |
 | `AgentDirectoryPlugin` | `AgentDirectory`：Agent 表与实例、Session 协议版本与占用、不可用记录、默认 agentId、serverInstanceId；不可重启 | `AgentDirectory` | — |
 | `rutis-loader` | 进程装配的配置行与 `agent` / `session` / `branch` / `trace` instanced 分组的实例 | `Loader` | — |
-| `AgentsPlugin` | `AgentIndex`：目录逻辑、Session 准入、经 loader 创建与关闭 Agent、默认及恢复 Agent 装载入口；进程 builder | `AgentIndex` | `AgentDirectory`、`Loader`；`--database` 另注入 `SqliteStorage`、`SessionStore`，产品 profile 另注入 `SettingsService`、`ModelSelectionHost` |
+| `AgentsPlugin` | `AgentIndex`：目录逻辑、Session 准入、经 loader 创建与关闭 Agent、默认及恢复 Agent 装载入口；进程 builder | `AgentIndex` | `AgentDirectory`、`Loader`；`--database` 另注入 `SqliteStorage`、`SessionStore`，产品 profile 另注入 `SettingsService`；受保护 profile 每次调用时读取 `ModelSelectionHost`，不依赖其提供方（方法合同 §3.2） |
 | `AgentScope`（`agent` 实例中的行） | 一个 `Agent`（Session 建在同一 Agent 实例里）与承载监听的子插件 `Sessions`；`AgentHost`（agent、agentId、default、trace 归档）；apply 登记进目录 | 经 `AgentDirectory` 登记 | `AgentDirectory`、`Loader`；`TimelineStore` 由已配置的 AgentBuilder 传入 |
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |
-| `ConnectionPlugin` | 连接索引、连接/请求/字节许可、连接读写任务 | `ConnectionHub` | `ServerControl` |
-| `RpcPlugin` | 已受理命令的任务集合 | `apply` 向 `ConnectionHub` 注册 `RpcService`，effect 注销后排空命令 | `AgentIndex`、`ConnectionHub`、`ServerControl`；产品 profile 另加实际开放的管理服务 |
+| `ConnectionPlugin` | Connection index, admission limits and transport tasks | `ConnectionHub` | `ServerControl` |
+| `RpcPlugin` | Built-in commands, per-call routing of contributed methods and reply drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`; reads `ManagementMethods` providers and, in the product profile, Provider per call without depending on them |
+| Management contributions | Owner-specific declarations, wire validation, business calls and their accepted calls, provided by the business plugin itself | Named `ManagementMethods` services; an owner's unload interrupts its `Report` calls and waits for its `Drain` calls, without reloading Rpc | Each owner's existing business dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
 `AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算，最后排空 trace 归档。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算并排空归档，再关闭 Agent 实例；effect 幂等重复这两步。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
@@ -105,14 +150,22 @@ rutis root
 
 ### 配置发布与 MCP
 
-本节描述本分支实现的来源优先配置模型；它是 issue #3 可编辑层方案的替代提案，尚待维护者对齐（[ADR 001](../../adr/001-harness-foundation.md#configuration-and-lifecycle)）。
+Native v13 settings retain plain business payloads in `settings_documents` with
+source-local CAS and lazy atomic import, as described by
+[ADR 004](../../adr/004-loader-plugin-management.md). Generic SettingsService
+persists BusinessDocument values; MCP owns its types in `mcp/config.rs`, and
+Skills owns its SkillSettingsHost implementation. Successful persistence precedes
+invalidation; no unsaved loader intent, configuration namespace or flush exists.
+Project files and MCP's user-local project enablement record retain separate authority.
+Business updates do not reload owners or Rpc. Structural editable configuration
+remains separate issue #3 work.
 
 | 项 | 约定 |
 | --- | --- |
-| 来源与写入 | 每个来源一个持久化权威与写入路径：管理操作指明目标来源并按修订 CAS，不回写合成视图。用户 MCP/Skill 首次读取时原子导入 SQLite，失败保留原文件并可重试；工作区 `.mcp.json` 保持文件权威 |
-| 发布 | 来源写入成功后，宿主发布协调器在插件 apply/dispose 之外把合成配置发布到根 loader（无可编辑层）；写入应答只证明持久化，不证明 loader 已采用或旧代已结算 |
-| MCP 代次 | 稳定行身份由规范化工作区（或用户作用域）与服务器 ID 哈希得到，代次后缀是瞬态的。用户来源的旧代行在最后一个绑定释放后退役；项目来源在配置变化、禁用或失去执行批准时退役，即使仍有保留绑定。显式断开移除该来源与服务器的全部代次并等待 loader 清理，清理错误单独报告 |
-| 项目 MCP 批准 | 宿主本地批准绑定规范工作区、服务器 ID 与有效配置指纹；未批准的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现。每次连接操作复查当前来源与批准；撤销拒绝经保留绑定的新调用、取消并等待已受理的代次工作、关闭传输后才确认。文件根授权、FullAccess 工具权限与 Session 恢复都不授予批准（AGENTS 规则 11） |
+| Sources and writes | Native user MCP/Skill documents import independently on first successful source read; plain v13 payloads and import provenance commit atomically. SQLite then owns that source, with native:source:N CAS tokens. Originals remain intact. Project `.mcp.json` remains file-authoritative with content CAS |
+| Publication | Settings notifications update Session discovery automatically. New bindings use new instances; a persistence acknowledgement does not guarantee discovery, adoption or cleanup |
+| MCP generations | Connections are not shared across Sessions. The declared `SessionLoader` service creates nested instances using private immutable values, never secret-bearing loader options or mutable templates. Bindings keep a superseded generation while its entry stays enabled, until release or Session close; disabling or removing the entry retires its generations in every Session even with bindings; a generation no lease uses closes even while current. Disconnect drains every affected Session instance; cleanup failures are reported separately |
+| 项目 MCP 启用 | 没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）：已配置的服务器启用即运行。项目条目默认禁用，项目文件（包括其 `enabled` 字段）不能启用自己；用户经 `mcp.set_enabled` 在本地记录 `mcp-projects` 中按规范工作区与服务器 ID 启用。未启用的项目条目不启动 stdio、不连接 HTTP/SSE，包括自动发现；停用或经 `mcp.remove` 删除时先撤回记录，不依赖项目文件，并在各 Session 中关闭其运行代次后才返回（项目文件不可读时也一样：协调者把当前记录应用到上次读到的条目）；记录不可读时所有项目条目按禁用处理，用户条目不受影响。文件根授权、FullAccess 工具权限与 Session 恢复都不启用任何条目 |
 
 Session 与分支能力不向进程服务登记自己：RPC 经 `Session::service::<T>(branch)` 调用分支能力（如 [Approval](plugins/Approval.md)）。开发配置的 ModelProvider 已注入进程 resolver 与 `ModelHost`，每次请求解析当前连接，再调用 Aimux；Session 的 ConfiguredModelPlugin 只提供请求准备。产品 profile 的模型选择经 Provider 的 `ModelSelectionHost` 解析；managed provider 的凭据只以请求内租约交给模型请求。
 
@@ -120,7 +173,7 @@ Session 与分支能力不向进程服务登记自己：RPC 经 `Session::servic
 
 | 对象 | 建立与释放 |
 | --- | --- |
-| `SessionScopePlugin` | `Agent` 创建 Session 时载入；`apply` 以本实例键提供身份、配置、故障报告、`TimelineFactory` 与宿主值；Active 后 `Agent` 在其下载入 Session 能力；关闭 Session 即永久卸载该子树 |
+| `SessionScopePlugin` | `Agent` 创建 Session 时载入；`apply` 以本实例键提供身份、配置、故障报告、`TimelineFactory`、Session 生命周期 `SessionLifecycle`（Loading → Active → Closing → Closed：`Agent` 在 entries 锁内发布时 Active；关闭 token 取消即 Closing；关闭完成或装配失败时由运行时记录 Closed）与宿主值；Active 后 `Agent` 在其下载入 Session 能力；关闭 Session 即永久卸载该子树 |
 | `BranchScopePlugin` | `TimelineTree` 创建分支时在 SessionScope 下载入；`apply` 提供 Timeline、Dispatcher、分支身份与分支生命周期 `BranchLifecycle`（Loading → Active → Closing → Closed，只由 TimelineContext 推进）；Active 后在其下载入分支能力；分支结束即永久卸载该子树 |
 | `TimelineContext` | 分支能力全部 Active 后由 `TimelineFactory::build` 建立并启动分发，`TimelineTree` 持有；关闭时先结算、再卸载 BranchScope 子树、最后关闭 Timeline。不作为分支服务提供，能力不经它取依赖 |
 | 能力 Plugin | 每个作用域实例一组；随作用域子树卸载 |
@@ -131,6 +184,8 @@ Session 与分支能力不向进程服务登记自己：RPC 经 `Session::servic
 Session 与 Timeline 在结构图中分别由 `SessionScopePlugin` 和 `BranchScopePlugin` 表示；Timeline 是后者提供并管理的服务，不另建 `TimelinePlugin`。`TimelineTreePlugin` 管分支目录和创建，创建关系不等于 BranchScope 注入 TimelineTree。
 
 `SessionConfig.collaboration_role: Leader | Member` 是 Session 创建时确定的协作角色，缺省 `Leader`，创建后不变。只有 `CollaborationPlugin` 创建成员 Session 时写入 `Member`；`session.create` 不接受该字段。
+
+`SessionConfig.interactive: bool` 表示 Session 有可交互的对象，能回答它的提问和审批，在创建时由 `session.create` 的 `interactive` 参数确定（缺省 `true`），创建后不变。装配从不读取它；关心它的 Session 部件经 `InSession<SessionConfig>` 或 `Session::config()` 读取（[Session 访问 A.3](../../design/contracts/session-access.md#a3-sessionconfig-fields)）。
 
 Session 能力向 `ToolRegistry` 贡献工具的方式见[工具贡献](tool-contributions.md)。
 
@@ -204,7 +259,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ## RPC 接线
 
-- **协议处理**：解码、hello 与版本协商、v1/v2 错误映射与事件过滤按 App Server 协议合同执行；handler 只调用 `RpcService` 持有的类型化服务。
+- **Protocol handling**: envelope decoding, hello/version negotiation, v1/v2 error mapping and event filtering follow the App Server contract. Built-in calls use RpcService; a contributed management call is looked up per call among the active `ManagementMethods` providers, whose owners validate concrete DTOs ([management methods](../../design/appserver/management-methods.md)). The local v3 entry serves management; WebSocket does not. Management methods have no notification channel.
 - **`session.create`**：App Server 解析工作目录、显式或默认模型与准入（产品 profile 经 `ProviderService`），再由 `Agent` 创建 Session。
 - **无 Session 的管理请求**：使用进程 `ProviderService` 与账号服务（Codex/Grok OAuth、`ManagedProviders`），不创建隐藏 Session。
 - **WS**：账号与 provider 管理只经本地传输（Unix socket / Windows named pipe）开放，WS 不开放账号与配置方法。
@@ -234,11 +289,13 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ## rutis
 
-设计基准为 crates.io [rutis 0.10.0](https://github.com/arcships/rutis/releases/tag/v0.10.0)（`ea487b2982f34e9807adca1e75c671cb7c522568`）。接口依据为该提交的[服务与事件键](https://github.com/arcships/rutis/blob/ea487b2982f34e9807adca1e75c671cb7c522568/crates/rutis/src/key.rs)、[事件总线](https://github.com/arcships/rutis/blob/ea487b2982f34e9807adca1e75c671cb7c522568/crates/rutis/src/bus.rs)、[同步派发](https://github.com/arcships/rutis/blob/ea487b2982f34e9807adca1e75c671cb7c522568/crates/rutis/src/bus/sync.rs)与[严格读取](https://github.com/arcships/rutis/blob/ea487b2982f34e9807adca1e75c671cb7c522568/crates/rutis/src/ctx.rs)。
+设计基准为 crates.io [rutis 0.11.0](https://github.com/arcships/rutis/releases/tag/v0.11.0)。核心服务、事件与生命周期接口沿用 0.10.0 的合同；接口依据见 [0.11.0 源码](https://github.com/arcships/rutis/tree/v0.11.0/crates/rutis/src)。
 
 0.5.0 → 0.9.1 的内核变化不改变本文合同：错误、诊断记录与 `EventOptions` 标为 `#[non_exhaustive]`；`RuntimeDiagnostics::event_backlogs` 报告同键 `emit` 积压；根关闭先取消子树再排空实例事件，根 `dispose()` 与 `shutdown()` 并发时共享关闭结果；新增 `TypedPlugin`、`Ctx::dispose_self`、`Ctx::view`、`ServiceChanged`。`apply` 显式返回 `InjectUnsatisfied` 且本代有失败的严格读取时回到 Pending；项目代码不返回该错误，`require` 失败仍是 `ServiceRead`。
 
 0.9.1 → 0.10.0：`rutis` 与 `rutis-loader` 无不兼容变化；内核修复失败插件只在依赖变化时重试（rutis #327），loader 同时创建作用域插件与能力时，失败的能力不再被提供者激活时的重复通知再次装载。
+
+0.10.0 → 0.11.0：核心与 loader 的合同不变。bridge 支持宿主声明固定事件名、通过 `Process::emit` 投递给 leaf 插件；TypeScript 的 `ctx.on` / `ctx.emit` 使用运行时进程内的同一事件总线。新增跨语言值类型使 `session::Value` 非穷尽；JSON 数据边界仍由现有消费者的 `json()` 校验，未增加产品值类型。C4 的具体广播绑定按 [#168](https://github.com/arcships/dim/issues/168) 评审和验收。
 
 | 能力 | 接口 |
 | --- | --- |
@@ -299,10 +356,10 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 重载 | 随之重载 | 结果 |
 | --- | --- | --- |
 | `ServerControl` | Connection、Rpc、Transport | 连接断开，监听器重绑；Session 与协议 instanceId 保留；不提供显式 restart |
-| `Provider` | Rpc、Agents 及其实际下游 | Session 历史保留；新请求使用新一代服务；Aimux 不依赖 Provider |
-| `Agents` | Rpc、Collaboration 及依赖协作服务的 Session 能力 | 只替换目录逻辑：Agent、Session、serverInstanceId 与连接保留；依赖协作服务的能力按能力重载协议重载，进行中的协作请求以 `capability reloading` 失败结算，对成员只发出停止、不等其结算；窗口期请求得到 `service_reloading` |
+| `Provider` | 其实际下游；不含 Rpc 与 Agents | 二者每次调用时读取 Provider 与 `ModelSelectionHost`：重载期间 `provider.*` 返回 `service_reloading`（Rpc 按 loader 行状态区分重载中与未启用），`session.create`、`session.model.update` 与成员创建得到可重试错误；连接保持；Session 历史保留；Aimux 不依赖 Provider |
+| `Agents` | Rpc、Collaboration 及依赖协作服务的 Session 能力 | 只替换目录逻辑：Agent、Session、serverInstanceId 与连接保留；依赖协作服务的能力按能力重载协议重载，进行中的协作请求以 `capability reloading` 失败结算，对成员只发出停止、不等其结算；重载结算只作用于本 Session 持有的资源：只有成员关系仍以本 Session 为 leader 时才停止该成员，分叉复制来的请求不停止源 Session 的成员，守护进程重启后关系不存在，也不停止任何成员（[#127](https://github.com/arcships/dim/issues/127)）；窗口期请求得到 `service_reloading` |
 | `Connection` | Rpc、Transport | 连接断开，监听器重绑；Session 保留，client 重新 attach |
-| `Rpc` | — | 已受理命令排空后卸载；等待中的命令（`session.idle`）以 `service_reloading` 结束；未决审批属于各分支的 Approval，不随 Rpc 重载；窗口期请求得到 `service_reloading` |
+| `Rpc` | — | 已受理命令排空后卸载，被打断的管理调用也等其操作结算；等待中的命令（`session.idle`）以 `service_reloading` 结束；未决审批属于各分支的 Approval，不随 Rpc 重载；窗口期请求（含 `hello` 与管理方法）得到 `service_reloading`。管理方法提供方的重载不重载 Rpc |
 
 ## 迁移
 

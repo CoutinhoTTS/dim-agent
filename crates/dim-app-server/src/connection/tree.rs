@@ -1,7 +1,7 @@
 use super::*;
-use crate::tree_protocol as wire;
+use crate::{agents::Lookup, tree_protocol as wire};
 use dim_agent_runtime::BranchOptions;
-use dim_agent_types::{BranchSource, EventKind};
+use dim_agent_types::BranchSource;
 
 impl Connection {
     pub(super) async fn submit(&self, rpc: &RpcService, params: Submit) -> Result<Reply, RpcError> {
@@ -60,38 +60,22 @@ impl Connection {
     ) -> Result<Reply, RpcError> {
         let session = self.session(rpc, &params.session_id)?;
         let branch = params.branch_id.as_deref().expect("validated branchId");
-        let through = session.sequence(branch).map_err(RpcError::from)?;
-        let mut after = 0;
-        let mut found = None;
-        // ponytail: O(n) native scan; add a store-owned index only if lookup latency requires it.
-        while after < through {
-            let events = session
-                .local_page(branch, after, 256, through)
+        Ok(Reply::InputLookup(
+            match crate::agents::find_input(&session, branch, &params.submission_id)
                 .await
-                .map_err(RpcError::from)?;
-            after = events
-                .last()
-                .ok_or_else(|| RpcError::wire(-32603, "Published input page is missing"))?
-                .sequence;
-            for event in events {
-                if matches!(&event.kind, EventKind::InputMessage(data)
-                    if data.submission_id.as_deref() == Some(&params.submission_id))
-                {
-                    if found.is_some() {
-                        return Err(RpcError::app(
-                            -32000,
-                            "submission_ambiguous",
-                            "Submission identity belongs to multiple inputs",
-                        ));
-                    }
-                    found = Some(event);
+                .map_err(RpcError::from)?
+            {
+                Lookup::Accepted(event) => InputLookupResult::Accepted { event },
+                Lookup::Unknown => InputLookupResult::Unknown,
+                Lookup::Ambiguous => {
+                    return Err(RpcError::app(
+                        -32000,
+                        "submission_ambiguous",
+                        "Submission identity belongs to multiple inputs",
+                    ));
                 }
-            }
-        }
-        Ok(Reply::InputLookup(match found {
-            Some(event) => InputLookupResult::Accepted { event },
-            None => InputLookupResult::Unknown,
-        }))
+            },
+        ))
     }
 
     pub(super) async fn history(

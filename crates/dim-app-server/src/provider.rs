@@ -1,18 +1,21 @@
 //! Product catalog, static connections and model selection. OAuth plugins own
 //! managed credentials; this plugin owns provider configuration and SQLite records.
+mod auxiliary;
 mod drivers;
 mod legacy;
+pub(crate) mod management;
 mod new_api;
 mod preferences;
 mod remote;
 mod secrets;
 pub use legacy::ImportResult;
 pub use preferences::ModelPreferences;
+pub use secrets::ProviderSecret;
 use secrets::StaticCredential;
-pub use secrets::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
 
 use crate::{
     codex_oauth::OpenAICodexOAuthService,
+    credentials::CredentialsHost,
     grok_oauth::GrokOAuthService,
     managed_oauth,
     managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
@@ -660,7 +663,7 @@ pub struct ProviderService {
     oauth: Arc<ManagedProviders>,
     codex: Arc<OpenAICodexOAuthService>,
     grok: Arc<GrokOAuthService>,
-    secret_host: Option<Arc<ProviderSecretHost>>,
+    secret_host: Option<Arc<CredentialsHost>>,
     bundled: Arc<BundledCatalog>,
     client: Client,
     stop: CancellationToken,
@@ -1704,12 +1707,9 @@ impl ProviderService {
             let protocol = model
                 .endpoint
                 .ok_or_else(|| failure("Missing model protocol"))?;
-            if protocol == ModelProtocol::Bedrock
-                && (preferences.reasoning_effort.is_some() || preferences.service_tier.is_some())
-            {
-                return Err(failure("Model preferences are not supported by Bedrock"));
-            }
-            let config = preferences.configure(model, protocol).map_err(failure)?;
+            let config = preferences
+                .configure(model, protocol, &model.config)
+                .map_err(failure)?;
             return Ok(ModelSelection {
                 provider_id: id.clone(),
                 model_id: model.id.clone(),
@@ -1731,6 +1731,41 @@ impl ProviderService {
         } else {
             "No available model"
         }))
+    }
+
+    /// Applies supplied preferences to the adopted model without reselecting defaults.
+    pub async fn apply_preferences(
+        self: &Arc<Self>,
+        current: &dim_agent_types::ModelConfiguration,
+        preferences: ModelPreferences,
+        cancel: &CancellationToken,
+    ) -> Result<ModelSelection, HostError> {
+        self.check(cancel)?;
+        let catalog = self
+            .catalog_for(current.provider_id.clone(), cancel)
+            .await?
+            .ok_or_else(|| failure("Provider is unavailable"))?;
+        let model = catalog
+            .selectable(&current.model_id)
+            .ok_or_else(|| failure("Model is unavailable"))?;
+        let protocol = model
+            .endpoint
+            .ok_or_else(|| failure("Missing model protocol"))?;
+        let base = current.config.clone().unwrap_or_default();
+        let config = preferences
+            .configure(model, protocol, &base)
+            .map_err(failure)?;
+        Ok(ModelSelection {
+            provider_id: current.provider_id.clone(),
+            model_id: current.model_id.clone(),
+            capability_snapshot: current.capability_snapshot.clone(),
+            config: if config == base {
+                current.config.clone()
+            } else {
+                Some(config)
+            },
+            metadata: current.metadata.clone(),
+        })
     }
 }
 struct ProductResolver(Arc<ProviderService>);
@@ -1800,12 +1835,7 @@ impl ResolveModelConnection for ProductResolver {
                 }
                 let credential = self
                     .0
-                    .credential(
-                        &request.provider_id,
-                        &record.credential,
-                        &record.auth,
-                        &cancel,
-                    )
+                    .credential(&record.credential, &record.auth, &cancel)
                     .await?;
                 let mut headers = record.headers;
                 let mut bearer = None;
@@ -2113,7 +2143,7 @@ pub struct ProviderPlugin {
     secret_host: bool,
 }
 impl ProviderPlugin {
-    /// The supplying plugin must provide ProviderSecretHost before activation.
+    /// The supplying plugin must provide `CredentialsHost` before activation.
     pub fn with_secret_host() -> Self {
         Self { secret_host: true }
     }
@@ -2124,7 +2154,8 @@ impl TypedPlugin for ProviderPlugin {
         Arc<ManagedProviders>,
         Arc<OpenAICodexOAuthService>,
         Arc<GrokOAuthService>,
-        When<Arc<ProviderSecretHost>>,
+        When<Arc<CredentialsHost>>,
+        Arc<ModelHost>,
     );
     fn name(&self) -> &str {
         "Provider"
@@ -2132,7 +2163,7 @@ impl TypedPlugin for ProviderPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (db, oauth, codex, grok, When(secret_host)): Self::Deps,
+        (db, oauth, codex, grok, When(secret_host), host): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(ProviderService {
@@ -2172,6 +2203,11 @@ impl TypedPlugin for ProviderPlugin {
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver))?;
+            ctx.provide(AuxiliaryModelHost(Arc::new(auxiliary::AuxiliaryModel {
+                owner: service.clone(),
+                host,
+            })))?;
+            management::provide(ctx, service.clone())?;
             ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
             Ok(Effect::Done)
         })
@@ -2179,6 +2215,6 @@ impl TypedPlugin for ProviderPlugin {
 }
 impl Capability for ProviderPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        ((), (), (), (), self.secret_host.then_some(()))
+        ((), (), (), (), self.secret_host.then_some(()), ())
     }
 }

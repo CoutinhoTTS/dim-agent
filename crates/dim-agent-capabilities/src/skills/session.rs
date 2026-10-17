@@ -7,7 +7,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     BranchLifecycle, BranchScope, Capability, ConfigureControl, ConfigureUpdate, InBranch,
-    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionScope, scoped,
+    InSession, KeysOf, PromptSourceTarget, SessionConfig, SessionLifecycle, SessionLoader,
+    SessionScope, scoped,
 };
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
@@ -124,51 +125,120 @@ impl SkillsPlugin {
     }
 }
 impl TypedPlugin for SkillsPlugin {
-    type Deps = (Arc<SkillsCatalog>, InSession<SessionConfig>);
+    type Deps = (
+        Arc<SkillsCatalog>,
+        InSession<SessionConfig>,
+        InSession<SessionLoader>,
+        InSession<super::content::Contributions>,
+        InSession<SessionLifecycle>,
+    );
     fn name(&self) -> &str {
         "Skills"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (catalog, InSession(config)): Self::Deps,
+        (
+            catalog,
+            InSession(config),
+            InSession(loader),
+            InSession(contributions),
+            InSession(session),
+        ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let cwd = PathBuf::from(&config.cwd);
             let lifecycle = ctx.cancellation_token();
-            let failed = |error: super::SkillsError| CordisError::PluginFailed(Box::new(error));
-            let mut changes = catalog.subscribe().map_err(failed)?;
-            let initial = catalog
-                .query(Some(&cwd))
-                .await
-                .map(|view| Arc::new(SkillView::from_catalog(&view)));
-            let skills = Arc::new(SessionSkills::new(initial));
+            // Listen before the first query, so no later change goes unseen.
+            let (wake, mut changes) = watch::channel(());
+            ctx.events()
+                .on(ctx, &super::catalog_changes(), super::Wake(wake))?;
+            let contents = Arc::new(tokio::sync::Mutex::new(super::content::Contents::new(
+                self.scope,
+                contributions,
+            )));
             let tasks = TaskTracker::new();
-            let owner = skills.clone();
-            let stopped = lifecycle.clone();
-            tasks.spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = stopped.cancelled() => return,
-                        changed = changes.changed() => if changed.is_err() { return },
-                    }
-                    owner.replace(
-                        catalog
-                            .query(Some(&cwd))
-                            .await
-                            .map(|view| Arc::new(SkillView::from_catalog(&view))),
-                    );
-                }
-            });
+            let cleanup = contents.clone();
+            let joined = tasks.clone();
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
-                        tasks.close();
-                        tasks.wait().await;
-                        Ok(())
+                        joined.close();
+                        joined.wait().await;
+                        cleanup
+                            .lock()
+                            .await
+                            .close()
+                            .await
+                            .map_err(|error| CordisError::PluginFailed(Box::new(error)))
                     })
                 }))
             })?;
+            // Apply can be dropped on cancellation. The tracked task still settles
+            // creation and rolls it back before the disposer finishes joining.
+            let initial = tasks
+                .spawn({
+                    let (contents, catalog, cwd, context, loader, stopped) = (
+                        contents.clone(),
+                        catalog.clone(),
+                        cwd.clone(),
+                        ctx.clone(),
+                        loader.clone(),
+                        lifecycle.clone(),
+                    );
+                    async move {
+                        contents
+                            .lock()
+                            .await
+                            .update(catalog.query(Some(&cwd)).await, &context, &loader, &stopped)
+                            .await
+                    }
+                })
+                .await
+                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+            let skills = Arc::new(SessionSkills::new(initial));
+            let owner = skills.clone();
+            let stopped = lifecycle.clone();
+            let context = ctx.clone();
+            tasks.spawn(async move {
+                // Replacing instances during assembly would race Session readiness.
+                // The receiver keeps changes announced meanwhile for the first update.
+                tokio::select! {
+                    _ = stopped.cancelled() => return,
+                    published = session.activated() => if !published { return },
+                }
+                loop {
+                    // Closing wins over a change that arrived at the same time.
+                    tokio::select! {
+                        biased;
+                        _ = stopped.cancelled() => return,
+                        _ = session.closing() => return,
+                        changed = changes.changed() => if changed.is_err() { return },
+                    }
+                    // A closing Session creates no more instances: cancel the
+                    // update, but await it so no partial instance is abandoned.
+                    let cancel = stopped.child_token();
+                    let update = async {
+                        let view = catalog.query(Some(&cwd)).await;
+                        contents
+                            .lock()
+                            .await
+                            .update(view, &context, &loader, &cancel)
+                            .await
+                    };
+                    tokio::pin!(update);
+                    let view = tokio::select! {
+                        biased;
+                        _ = session.closing() => {
+                            cancel.cancel();
+                            let _ = update.await;
+                            return;
+                        }
+                        view = &mut update => view,
+                    };
+                    owner.replace(view);
+                }
+            });
             ctx.provide_as(
                 self.scope.named_key::<ToolContribution>("skill"),
                 Arc::new(ToolContribution {

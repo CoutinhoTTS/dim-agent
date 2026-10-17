@@ -72,12 +72,24 @@ const SOURCES: [&str; 6] = [
     DATE,
 ];
 
-/// The explicit refresh of every source this capability provides.
+/// Refreshes dynamic sources without replacing adopted System entries.
 pub fn refresh_update() -> ConfigureUpdate {
     ConfigureUpdate {
-        sources: targets(SOURCES),
+        sources: targets(CHECKED),
         model: None,
     }
+}
+
+/// The Session System entry used by both creation and explicit profile adoption.
+pub fn session_entry(body: String, scope: PromptScope) -> Option<PromptEntry> {
+    (!body.trim().is_empty()).then(|| PromptEntry {
+        source: SESSION.into(),
+        version: sha256_version(&body),
+        body,
+        scope,
+        delivery: PromptDelivery::System,
+        order: 50,
+    })
 }
 
 /// Mirrors TS `formatCurrentDate`.
@@ -173,7 +185,7 @@ fn xml_tag(name: &str, value: &str) -> String {
 
 /// The runtime environment (TS `renderRuntimeEnvironment`): one tag per
 /// line, values escaped; the date is its own source.
-fn environment(platform: &HostPlatform, cwd: &str) -> String {
+fn environment(platform: &HostPlatform, shell: &ShellStatus, cwd: &str) -> String {
     let os = match platform.os {
         Os::Macos => "darwin",
         Os::Linux => "linux",
@@ -183,7 +195,7 @@ fn environment(platform: &HostPlatform, cwd: &str) -> String {
         xml_tag("cwd", cwd),
         xml_tag("home", &platform.home.to_string_lossy()),
     ];
-    match &platform.shell {
+    match shell {
         ShellStatus::Available(ExecShellRuntime {
             executable_path,
             edition,
@@ -322,7 +334,11 @@ impl LoadPrompt for Sources {
                     (body, PromptDelivery::Context, order)
                 }
                 ENVIRONMENT => (
-                    Some(environment(&self.platform, &self.config.cwd)),
+                    Some(environment(
+                        &self.platform,
+                        &self.platform.exec_shell().await,
+                        &self.config.cwd,
+                    )),
                     PromptDelivery::State,
                     200,
                 ),
@@ -331,12 +347,12 @@ impl LoadPrompt for Sources {
                     PromptDelivery::State,
                     210,
                 ),
-                SESSION => (
-                    (!self.config.system_prompt.trim().is_empty())
-                        .then(|| self.config.system_prompt.clone()),
-                    PromptDelivery::System,
-                    50,
-                ),
+                SESSION => {
+                    return Ok(session_entry(
+                        self.config.system_prompt.clone(),
+                        target.scope,
+                    ));
+                }
                 other => {
                     return Err(HostError::failed(format!("unknown prompt source: {other}")));
                 }

@@ -2,6 +2,8 @@
 
 Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [Transport, Connection changes](../overview.md#b2-app-server-process-plugins), [multiple nodes](../overview.md#63-multiple-nodes), [common constraints](../overview.md#62-constraints), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (authentication, disconnection and TLS trade-offs with [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
 
+> **P3: redesign with rutis' existing capabilities.** rutis is an external dependency; the requirements this document raises to rutis are withdrawn ([principles §4 rule 8](../../architecture/rust-agent/principles.md)).
+
 RemoteGateway opens an authenticated entry on Transport's WebSocket for phones and the Web workspace: pairing by QR code or pairing code, per-device tokens with rotation and revocation, and the Web workspace static assets. Paired devices speak the existing App Server protocol; the entry serves only Session methods of the [methods](../contracts/session-boundary.md) contract (Rpc's Session built-ins and every `sessionMethods` service), so devices may call every Session method, including `session.permission.update` and `shell.*` (decision E3), and never a management method: `managementMethods` and Rpc's management built-ins are never served to paired remote devices. The entry is the product UI plane and never carries the rutis link plane between nodes.
 
 ## 1. Structure
@@ -158,7 +160,7 @@ Every race between remote and local clients is decided by Timeline sequence insi
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Phone and terminal answer the same approval or question | First consumed fact decides; second fails | Approval, Questions |
+| Phone and terminal answer the same approval or question | Approval: first consumed fact decides; question: first accepted `session.question.respond` decides; second fails | Approval, Questions |
 | Phone `session.permission.update` races terminal | Two `permission/changed` facts; later sequence wins | Permission |
 | Phone withdraws an input (`session.input.withdraw`) as it is applied | `input/applied` before `input/withdraw`: `notHeld`, nothing written, consumed normally; `input/withdraw` first: `input/deleted`, never applied | InputQueue |
 | Disconnect with a pending approval | Stays pending; replayed on re-attach; no timeout (A14) | Approval |
@@ -185,7 +187,7 @@ Details: [Appendix A](#appendix-a-interface-details).
 
 ## 7. Security
 
-Every paired device can call every Session method on every Session of the host: submitting input, answering approvals and questions, stopping turns, `session.permission.update`, `session.exec.stop`, `session.model.update`, `session.mcp*` and creating Sessions in any authorized directory (decision E3, A12). This widens today's local-only execution Session methods and is recorded in the [compatibility table](#a3-protocol-and-compatibility-on-the-remote-entry). The permission preset changed remotely is Session configuration (decision E4): a Timeline fact inherited by child branches and reset to the default on fork. The entry never grants management: pairing, revocation and configuration are management methods, and `daemon.shutdown` is an Rpc built-in; none of them is served to paired devices. Authentication stays minimal ([overview multiple nodes](../overview.md#63-multiple-nodes)): one bearer token per device, hashed at rest, rotated by the device, revoked locally; pairing codes are short-lived, single-use and rate-limited. Cookies are `HttpOnly`, `Secure`, `SameSite=Strict` with a same-origin `Origin` check. Tokens never appear in URLs, logs, diagnostics or Timeline. The entry never accepts rutis link frames or exports services.
+Every paired device can call every Session method on every Session of the host: submitting input, answering approvals and questions, stopping turns, `session.permission.update`, `session.exec.stop`, `session.model.update`, `session.mcp*` and creating Sessions in any authorized directory (decision E3, A12). This widens today's local-only execution Session methods and is recorded in the [compatibility table](#a3-protocol-and-compatibility-on-the-remote-entry). The permission preset changed remotely is Session configuration (decision E4): a Timeline fact inherited by child branches and copied with the facts on fork ([#26](https://github.com/arcships/dim/issues/26)). The entry never grants management: pairing, revocation and configuration are management methods, and `daemon.shutdown` is an Rpc built-in; none of them is served to paired devices. Authentication stays minimal ([overview multiple nodes](../overview.md#63-multiple-nodes)): one bearer token per device, hashed at rest, rotated by the device, revoked locally; pairing codes are short-lived, single-use and rate-limited. Cookies are `HttpOnly`, `Secure`, `SameSite=Strict` with a same-origin `Origin` check. Tokens never appear in URLs, logs, diagnostics or Timeline. The entry never accepts rutis link frames or exports services.
 
 ## 8. Rule check
 
@@ -212,6 +214,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 ## 9. Requirements raised to mechanism owners
 
 ### 9.1 Call-scoped requests from provider to caller
+
+Withdrawn: rutis is an external dependency, so no requirement is raised to it. RemoteGateway and Transport solve authentication and handling with dim-side services.
 
 | Item | Content |
 | --- | --- |
@@ -312,8 +316,8 @@ RemoteGateway has no start or stop method and never writes its own `enabled` fie
 | Remote `session.permission.update` vs terminal update | sequence | Later `permission/changed` is current; tool admissions use the policy consumed at admission | Permission, Approval |
 | Remote `session.exec.stop` vs exec completion | sequence | Earlier terminal fact wins | WorkspaceTools exec owner |
 | Compaction or child cut around a remote input | — | As any input ([session access](../contracts/session-access.md)) | ContextPreparation, InputQueue |
-| Fork after a remote permission change | — | Fork resets the preset to default (E4) | SessionStore |
-| Question answered from two devices | first `question/answered` | First accepted | Questions |
+| Fork after a remote permission change | — | The fork copies the preset with the facts (E4, #26) | SessionStore |
+| Question answered from two devices | first accepted `session.question.respond` | First accepted; second `question_already_answered` | Questions |
 | Disconnect while an approval is pending | — | Stays pending; replayed on re-attach (A14) | Approval |
 | Disconnect after `session.submit` admitted, reply lost | input committed | Reconnect, `session.input_lookup` by `submissionId` | Client |
 | Revocation while a device's request runs | admitted < revoke | Connection closed; command continues; reply lost | Rpc |

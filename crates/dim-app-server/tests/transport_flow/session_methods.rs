@@ -1,0 +1,647 @@
+use super::*;
+use dim_agent_capabilities::methods::{Interruption, MethodDecl, SessionMethods};
+
+/// Methods contract A.1: assembly fails for a recorded Session namespace that
+/// could shadow a built-in or share a name with a configured management
+/// namespace; one under `session` that does neither loads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_namespaces_overlapping_builtins_or_management_fail_assembly() {
+    for (namespace, reason) in [
+        ("session", "invalid Session namespace session"),
+        ("session.mcp", "invalid Session namespace session.mcp"),
+        (
+            "session.permission",
+            "invalid Session namespace session.permission",
+        ),
+        (
+            "session.create.draft",
+            "invalid Session namespace session.create.draft",
+        ),
+        ("agent.notes", "invalid Session namespace agent.notes"),
+        ("Shell", "invalid Session namespace Shell"),
+    ] {
+        let error = try_launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+            builder.session_methods(namespace);
+        })
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{namespace} loaded"));
+        assert!(error.to_string().contains(reason), "{namespace}: {error}");
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::path::PathBuf::from("/tmp").join(format!("ds-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for namespace in ["mcp", "account.codex.device"] {
+        let error = try_launch_with(
+            Arc::new(MockTools),
+            ServerConfig {
+                product_home: Some(home.clone()),
+                target_home: Some(home.join("rust")),
+                ..Default::default()
+            },
+            |builder| {
+                builder.session_methods(namespace);
+            },
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{namespace} loaded"));
+        assert!(
+            error.to_string().contains(&format!(
+                "Session namespace {namespace} overlaps management namespace"
+            )),
+            "{namespace}: {error}"
+        );
+    }
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        builder.session_methods("session.echo");
+    })
+    .await;
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Contributes the `notes` Session methods from outside App Server, as any
+/// plugin does: it records its namespace on the assembly and provides
+/// `SessionMethods` from a child plugin, which a test restarts to reload the
+/// provider alone. Rpc never names it.
+#[derive(Clone, Default)]
+struct Notes(Arc<NotesState>);
+#[derive(Default)]
+struct NotesState {
+    /// The provider of each Session, most recent last.
+    views: std::sync::Mutex<Vec<rutis::FiberView>>,
+    /// Holds the next provider start until notified.
+    hold: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// `notes.wait` started, and later settled after its token fired.
+    entered: tokio::sync::Notify,
+    settled: tokio::sync::Notify,
+    /// Releases a held `notes.stream`; then it reports whether its token
+    /// fired.
+    release: tokio::sync::Notify,
+    streamed: tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    /// `notes.flood` sent all its progress.
+    flooded: tokio::sync::Notify,
+}
+impl Notes {
+    fn install(&self, builder: &mut AgentBuilder) {
+        builder.session_methods("notes");
+        let notes = self.clone();
+        builder.session_plugin(move |scope| NotesOwner {
+            scope: *scope,
+            notes: notes.clone(),
+        });
+    }
+    /// The next provider start waits until the returned gate is notified.
+    fn hold_next(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.0.hold.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+    /// Restarts the provider of the most recently created Session.
+    async fn restart(&self) {
+        let view = self.0.views.lock().unwrap().last().cloned().unwrap();
+        view.restart().await.unwrap();
+    }
+}
+struct NotesOwner {
+    scope: dim_agent_runtime::SessionScope,
+    notes: Notes,
+}
+impl TypedPlugin for NotesOwner {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "NotesOwner"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let view = ctx.plugin(capability_plugin(NotesProvider {
+                scope: self.scope,
+                notes: self.notes.clone(),
+            }));
+            (&view).await.map_err(|error| {
+                rutis::CordisError::PluginFailed(format!("Notes provider failed: {error}").into())
+            })?;
+            self.notes.0.views.lock().unwrap().push(view);
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for NotesOwner {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+struct NotesProvider {
+    scope: dim_agent_runtime::SessionScope,
+    notes: Notes,
+}
+impl TypedPlugin for NotesProvider {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "Notes"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let hold = self.notes.0.hold.lock().unwrap().take();
+            if let Some(gate) = hold {
+                gate.notified().await;
+            }
+            let state = self.notes.0.clone();
+            SessionMethods::provide(
+                ctx,
+                &self.scope,
+                "notes",
+                vec![
+                    MethodDecl::new("notes.echo", false, Interruption::Drain),
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("notes.wait", true, Interruption::Report)
+                    },
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("notes.stream", false, Interruption::Drain)
+                    },
+                    MethodDecl {
+                        progress: true,
+                        ..MethodDecl::new("notes.flood", false, Interruption::Drain)
+                    },
+                ],
+                Arc::new(move |method, params, cancel, progress| {
+                    let state = state.clone();
+                    Box::pin(async move {
+                        match method.as_str() {
+                            // Undeclared progress never reaches the caller.
+                            "notes.echo" => progress.send(json!("undeclared")),
+                            "notes.wait" => {
+                                state.entered.notify_one();
+                                cancel.cancelled().await;
+                                // After the interrupted reply: dropped.
+                                progress.send(json!("after the reply"));
+                                state.settled.notify_one();
+                            }
+                            // `count` notices of `bytes` bytes each, at once.
+                            "notes.flood" => {
+                                let text = "x".repeat(params["bytes"].as_u64().unwrap() as usize);
+                                for step in 0..params["count"].as_u64().unwrap() {
+                                    progress.send(json!({"step": step, "text": text.as_str()}));
+                                }
+                                state.flooded.notify_one();
+                            }
+                            _ => {
+                                for step in 0..3 {
+                                    progress.send(json!({"step": step}));
+                                }
+                                if params["hold"] == true {
+                                    state.release.notified().await;
+                                    progress.send(json!({"step": 3}));
+                                    if let Some(streamed) = state.streamed.lock().await.take() {
+                                        let _ = streamed.send(cancel.is_cancelled());
+                                    }
+                                }
+                            }
+                        }
+                        Ok(json!({"method": method, "params": params}))
+                    })
+                }),
+            )?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for NotesProvider {
+    fn keys(&self) -> KeysOf<Self> {}
+}
+fn app_error(reply: &Value) -> &str {
+    reply["error"]["data"]["appError"]
+        .as_str()
+        .unwrap_or_default()
+}
+
+/// Methods contract A.1 and Appendix C: Rpc routes a name inside a recorded
+/// Session namespace through the Session its `sessionId` names; every other
+/// name is `unknown_method` before its params are read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributed_session_methods_dispatch_through_the_session_they_name() {
+    let notes = Notes::default();
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        notes.install(builder)
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    // The provider receives the params as sent, `sessionId` included.
+    let params = json!({"sessionId": sid, "branchId": "main", "text": "hi"});
+    let reply = client.rpc("notes.echo", params.clone()).await;
+    assert_eq!(
+        reply["result"],
+        json!({"method": "notes.echo", "params": params})
+    );
+    // `session.methods` lists a Session's methods; `hello` announces it.
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.methods"))
+    );
+    assert_eq!(
+        client
+            .rpc("session.methods", json!({"sessionId": sid}))
+            .await["result"],
+        json!({"methods": [
+            {"name": "notes.echo", "mutating": false},
+            {"name": "notes.flood", "mutating": false},
+            {"name": "notes.stream", "mutating": false},
+            {"name": "notes.wait", "mutating": true},
+            {"name": "session.agent.update", "mutating": true},
+            {"name": "session.input.withdraw", "mutating": true},
+        ]})
+    );
+    // This profile serves Session methods to every transport, as built-ins.
+    let mut remote = Client::new_version(&server, true, 3).await;
+    assert_ok(&remote.rpc("notes.echo", json!({"sessionId": sid})).await);
+
+    // Outside every recorded namespace, or outside the grammar, a name is
+    // unknown whatever its params.
+    for (method, params) in [
+        ("other.echo", json!({"sessionId": sid})),
+        ("other.echo", json!([1])),
+        ("notes.Echo", json!({})),
+        ("session.notes", json!({"sessionId": sid})),
+    ] {
+        let reply = client.rpc(method, params).await;
+        assert_eq!(reply["error"]["code"], -32601, "{method}: {reply}");
+        assert_eq!(app_error(&reply), "unknown_method", "{method}");
+    }
+    // A candidate must name its Session.
+    for params in [json!({}), json!({"sessionId": 7}), json!([sid])] {
+        let reply = client.rpc("notes.echo", params).await;
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    }
+    // A listed namespace whose provider does not declare the name.
+    for method in ["notes", "notes.missing"] {
+        let reply = client.rpc(method, json!({"sessionId": sid})).await;
+        assert_eq!(app_error(&reply), "unknown_method", "{method}");
+    }
+    let unknown = client
+        .rpc(
+            "notes.echo",
+            json!({"sessionId": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await;
+    assert_eq!(app_error(&unknown), "session_closed");
+    // Session methods are protocol v3, and a Session belongs to the version
+    // that created it.
+    let mut v2 = Client::new_version(&server, false, 2).await;
+    for method in ["notes.echo", "session.methods"] {
+        let reply = v2.rpc(method, json!({"sessionId": sid})).await;
+        assert_eq!(app_error(&reply), "unknown_method", "{method}");
+    }
+    let created = v2.rpc("session.create", create(json!([]))).await;
+    let other = created["result"]["sessionId"].as_str().unwrap();
+    let reply = client.rpc("notes.echo", json!({"sessionId": other})).await;
+    assert_eq!(app_error(&reply), "session_protocol_version");
+
+    assert_ok(&client.rpc("session.close", json!({"sessionId": sid})).await);
+    let closed = client.rpc("notes.echo", json!({"sessionId": sid})).await;
+    assert_eq!(app_error(&closed), "session_closed");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A reloading provider affects only its namespace: admitted `Report` calls
+/// are interrupted, and a recorded namespace without an active provider is
+/// retryable until the next generation serves it. Closing the Session
+/// interrupts its calls the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
+    let notes = Notes::default();
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        notes.install(builder)
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let wait = client.send("notes.wait", json!({"sessionId": sid})).await;
+    notes.0.entered.notified().await;
+    let gate = notes.hold_next();
+    let restart = tokio::spawn({
+        let notes = notes.clone();
+        async move { notes.restart().await }
+    });
+    let interrupted = client.response(wait).await;
+    assert_eq!(app_error(&interrupted), "operation_interrupted");
+    notes.0.settled.notified().await;
+    let reloading = client.rpc("notes.echo", json!({"sessionId": sid})).await;
+    assert_eq!(reloading["error"]["code"], -32000);
+    assert_eq!(app_error(&reloading), "service_reloading");
+    // Rpc and the Session's built-ins are unaffected; the listing omits the
+    // namespace until its provider is active again.
+    assert_ok(&client.rpc("daemon.ping", json!({})).await);
+    assert_eq!(
+        client
+            .rpc("session.methods", json!({"sessionId": sid}))
+            .await["result"],
+        json!({"methods": [{"name": "session.agent.update", "mutating": true}, {"name": "session.input.withdraw", "mutating": true}]})
+    );
+    gate.notify_one();
+    restart.await.unwrap();
+    assert_ok(&client.rpc("notes.echo", json!({"sessionId": sid})).await);
+
+    let wait = client.send("notes.wait", json!({"sessionId": sid})).await;
+    notes.0.entered.notified().await;
+    let mut other = Client::new_version(&server, false, 3).await;
+    assert_ok(&other.rpc("session.close", json!({"sessionId": sid})).await);
+    assert_eq!(
+        app_error(&client.response(wait).await),
+        "operation_interrupted"
+    );
+    for method in ["notes.echo", "session.methods"] {
+        let closed = client.rpc(method, json!({"sessionId": sid})).await;
+        assert_eq!(app_error(&closed), "session_closed", "{method}");
+    }
+    // Progress sent after an interrupted reply never followed it.
+    assert!(
+        !client
+            .notices
+            .iter()
+            .any(|notice| notice["method"] == "management.progress"),
+        "{:?}",
+        client.notices
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Rpc acquires the Session through the index, which restores one that is
+/// not loaded, before it dispatches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_method_restores_an_unloaded_session() {
+    let directory = std::env::temp_dir().join(format!("dim-methods-{}", uuid::Uuid::new_v4()));
+    let config = ServerConfig {
+        database_path: Some(directory.join("dimcode.sqlite")),
+        ..Default::default()
+    };
+    let notes = Notes::default();
+    let (server, _) = launch_with(Arc::new(MockTools), config.clone(), |builder| {
+        notes.install(builder)
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
+        notes.install(builder)
+    })
+    .await;
+    assert!(agent.get_session(&sid).is_none());
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("notes.echo", json!({"sessionId": sid})).await);
+    assert!(agent.get_session(&sid).is_some());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Reads frames until the reply to `id`, returning the progress of `id`
+/// received before it.
+async fn progress_until_reply(client: &mut Client, id: u64) -> (Vec<Value>, Value) {
+    let mut progress = vec![];
+    loop {
+        let frame = client
+            .read(&format!("response {id} or management.progress"))
+            .await;
+        if frame["id"] == id {
+            return (progress, frame);
+        }
+        if frame["method"] == "management.progress" {
+            assert_eq!(frame["params"]["id"], id, "{frame}");
+            progress.push(frame["params"].clone());
+        }
+    }
+}
+
+/// Methods contract A.2 `progress`: a method that declares it sends progress
+/// on its call, which reaches the calling connection only and before the
+/// reply. Undeclared progress and progress after a disconnect are dropped,
+/// and a disconnect cancels nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn call_progress_reaches_only_the_caller_before_its_reply() {
+    let notes = Notes::default();
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        notes.install(builder)
+    })
+    .await;
+    let mut caller = Client::new_version(&server, false, 3).await;
+    let created = caller.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    // Another client of the same Session, subscribed to its notices.
+    let mut watcher = Client::new_version(&server, true, 3).await;
+    assert_ok(
+        &watcher
+            .rpc("session.attach", json!({"sessionId": sid}))
+            .await,
+    );
+
+    let id = caller.send("notes.stream", json!({"sessionId": sid})).await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert_eq!(
+        progress,
+        (0..3)
+            .map(|step| json!({"id": id, "method": "notes.stream", "data": {"step": step}}))
+            .collect::<Vec<_>>()
+    );
+    let id = caller.send("notes.echo", json!({"sessionId": sid})).await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert!(progress.is_empty(), "{progress:?}");
+
+    // The caller disconnects mid-call: the call continues, and its later
+    // progress and reply are dropped.
+    let (streamed, cancelled) = tokio::sync::oneshot::channel();
+    *notes.0.streamed.lock().await = Some(streamed);
+    let mut leaving = Client::new_version(&server, false, 3).await;
+    let id = leaving
+        .send("notes.stream", json!({"sessionId": sid, "hold": true}))
+        .await;
+    assert_eq!(
+        leaving.notice("management.progress").await["params"]["id"],
+        id
+    );
+    drop(leaving);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while caller.rpc("daemon.ping", json!({})).await["result"]["connections"] != 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the caller's connection closed");
+    notes.0.release.notify_one();
+    assert!(!cancelled.await.unwrap(), "a disconnect cancels nothing");
+    // No other connection received any of it.
+    assert_ok(&watcher.rpc("daemon.ping", json!({})).await);
+    for client in [&caller, &watcher] {
+        assert!(
+            !client
+                .notices
+                .iter()
+                .any(|notice| notice["method"] == "management.progress"),
+            "{:?}",
+            client.notices
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Methods contract A.2: progress is best effort. A caller that reads nothing
+/// while its call floods progress keeps its connection: the progress the
+/// connection cannot queue is dropped, what arrives keeps its order before the
+/// reply, and the reply arrives. A notice over the frame limit is dropped too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn progress_a_caller_cannot_take_is_dropped_and_its_reply_arrives() {
+    let notes = Notes::default();
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        notes.install(builder)
+    })
+    .await;
+    let mut caller = Client::new_version(&server, false, 3).await;
+    let created = caller.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    // 32 MiB of progress, far more than the connection queues for progress
+    // plus what its socket buffers. The caller reads only once all of it has
+    // been sent.
+    let count = 2048;
+    let id = caller
+        .send(
+            "notes.flood",
+            json!({"sessionId": sid, "count": count, "bytes": 16 * 1024}),
+        )
+        .await;
+    notes.0.flooded.notified().await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    let steps: Vec<u64> = progress
+        .iter()
+        .map(|progress| progress["data"]["step"].as_u64().unwrap())
+        .collect();
+    assert!(
+        !steps.is_empty() && steps.len() < count,
+        "{} of {count} arrived",
+        steps.len()
+    );
+    assert!(steps.windows(2).all(|pair| pair[0] < pair[1]), "{steps:?}");
+
+    // One notice over the 16 MiB frame limit is dropped alone; the connection
+    // keeps serving calls and their progress.
+    let id = caller
+        .send(
+            "notes.flood",
+            json!({"sessionId": sid, "count": 1, "bytes": 17 * 1024 * 1024}),
+        )
+        .await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert!(progress.is_empty());
+    let id = caller.send("notes.stream", json!({"sessionId": sid})).await;
+    let (progress, reply) = progress_until_reply(&mut caller, id).await;
+    assert_ok(&reply);
+    assert_eq!(progress.len(), 3, "{progress:?}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Session access A.4: InputQueue serves `session.input.withdraw` through
+/// `sessionMethods`; an applied or unknown input is `notHeld` and nothing
+/// is written, and v3 history shows the command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_withdraw_answers_through_the_session_and_writes_only_commands() {
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |_| {}).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create(json!([]))).await;
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let submitted = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": sid, "branchId": "main", "text": "hello"}),
+        )
+        .await;
+    let input_id = submitted["result"]["event"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId": sid, "branchId": "main"}),
+            )
+            .await,
+    );
+    for id in [input_id.as_str(), "unknown"] {
+        let reply = client
+            .rpc(
+                "session.input.withdraw",
+                json!({"sessionId": sid, "branchId": "main", "inputId": id, "reason": "changed my mind"}),
+            )
+            .await;
+        assert_eq!(
+            reply["result"],
+            json!({"status": "notHeld"}),
+            "{id}: {reply}"
+        );
+    }
+    for params in [
+        json!({"sessionId": sid, "branchId": "main"}),
+        json!({"sessionId": sid, "branchId": "main", "inputId": ""}),
+        json!({"sessionId": sid, "branchId": "main", "inputId": "x", "reason": "r".repeat(2049)}),
+        json!({"sessionId": sid, "branchId": "main", "inputId": "x", "extra": 1}),
+    ] {
+        let reply = client.rpc("session.input.withdraw", params).await;
+        assert!(reply.get("error").is_some(), "{reply}");
+    }
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId": sid, "branchId": "main", "after": 0, "limit": 100}),
+        )
+        .await;
+    let names: Vec<_> = history["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| {
+            event["name"]
+                .as_str()
+                .map(|name| format!("{}/{name}", event["type"].as_str().unwrap_or_default()))
+        })
+        .collect();
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| *name == "input/withdraw")
+            .count(),
+        2,
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|name| name == "input/deleted"),
+        "{names:?}"
+    );
+}

@@ -4,7 +4,7 @@ use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     file_storage::{FileStorage, FileStorageError, FileStoragePlugin},
     history::HistoryRenderer,
-    host::{ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
@@ -79,10 +79,12 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
             output_root: home.join("output"),
         },
     );
+    dim_app_server::permission_rules::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     // Neither the JS row ID nor its module path is registered in Builtins.
     let names = [
@@ -237,7 +239,9 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         .send("account.status", json!({"providerId":"terminate-runtime"}))
         .await;
     tokio::time::timeout(Duration::from_secs(5), async {
-        while storage.read(&path, &cancel).await.unwrap() != b"before-crash" {
+        while serde_json::from_slice::<Value>(&storage.read(&path, &cancel).await.unwrap()).unwrap()
+            != json!({"version":1,"text":"before-crash"})
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -267,16 +271,24 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
     })
     .await
     .expect("runtime loss must release the native transaction");
-    assert_eq!(lease.read(&cancel).await.unwrap(), b"before-crash");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&lease.read(&cancel).await.unwrap()).unwrap(),
+        json!({"version":1,"text":"before-crash"})
+    );
     lease
-        .replace(b"after-crash".to_vec(), None, &cancel)
+        .replace(
+            serde_json::to_vec(&json!({"version":1,"text":"after-crash"})).unwrap(),
+            None,
+            &cancel,
+        )
         .await
         .unwrap();
     drop(lease);
     probe.shutdown().await.unwrap();
     assert_eq!(
-        std::fs::read_to_string(home.join("fixture-state")).unwrap(),
-        "after-crash"
+        serde_json::from_slice::<Value>(&std::fs::read(home.join("fixture-state")).unwrap())
+            .unwrap(),
+        json!({"version":1,"text":"after-crash"})
     );
     assert!(
         prompt(&mut client, &server, &home, "static-fixture")
