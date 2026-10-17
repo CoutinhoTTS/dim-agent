@@ -89,7 +89,7 @@ The evaluator branch is not a Goal part. It is an ordinary child branch that Tim
 
 ## 4. Data and state
 
-Pursuit adds no event type. It reads three public facts besides Goal's own blocks: `branch/create` and `branch/create-failed` on the working branch, whose source is `host` with `operation_id` `goal:evaluate:<T>`, and, on the evaluator branch, its `turn/end` and the final `step/text` of that turn. Goal's writes carry `claim="C"` and `evaluation="T"` attributes in their markers so the fold can tell what they settle.
+Pursuit adds no event type. It reads three public facts besides Goal's own blocks: `branch/create` and `branch/create-failed` on the working branch, whose source is `host` with `operation_id` `goal:evaluate:<T>`, and, on the evaluator branch, its `turn/end`, the `step/model-start` of that turn's last model request, and the `step/text` deltas of that request. Goal's writes carry `claim="C"` and `evaluation="T"` attributes in their markers so the fold can tell what they settle.
 
 Additions to Goal's fold ([Goal §2](Goal.md#2-data-and-state)), over the working branch's local events:
 
@@ -127,10 +127,11 @@ A `turn/end` cancelled by an interrupt is handled by the `stop/interrupt` row th
 
 1. `settings.read {source: "goal", scope: "user"}` (S8b) for `evaluationTimeoutSeconds` and `maxContinuations`; the task uses this document to its end.
 2. Create the evaluator: `S:TreeCommands.branch(parent = this branch, at = the cut turn/end, {source: host {operation_id: "goal:evaluate:T"}, prompt}, admission)`, the prompt in §9. TimelineTree writes `branch/create` on the working branch and opens the child, whose first input is the prompt (Queue). Creation failure is recorded by TimelineTree as `branch/create-failed`, which the row above settles.
-3. Observe: await the evaluator's `idle()` under the timeout, then read its local events: the latest `turn/end` and the final `step/text` of that turn. On timeout, interrupt the evaluator and treat it as failed.
-4. Parse at this boundary: the last non-empty line of the final text, `DONE: <summary>`, `CONTINUE: <feedback>` or `BLOCKED: <reason>`. Any other text counts as `continue` with the whole text as feedback (truncated to 2000 characters, Goal A10). A `turn/end` that is `failed` or `cancelled`, or no completed turn, is a failed evaluation.
-5. Recheck over consumed state ([time bus §4](../../architecture/rust-agent/time-bus.md)): `C` is still `pending` and `T` is still its `trigger`. If not, write nothing.
-6. Write the verdict (§5.2), then `close()` the evaluator.
+3. Observe: await the evaluator's `idle()` under the timeout, then read its local events: the latest `turn/end` and its `turn_id`. On timeout, interrupt the evaluator and treat it as failed.
+4. Reassemble the final reply: take the last `step/model-start` of that turn; its `request_id` is the final model request. Concatenate, in sequence order, the `delta` of every `step/text` with that `turn_id` and `request_id`. `step/text` is a delta that Output flushes at size and time boundaries, so a single record is not a reply and a verdict line may span several records. Earlier requests of the turn (replies before a tool cycle) and `step/thinking` are not part of the reply. This is the same concatenation the history projection already does; no new event or core API is needed.
+5. Parse at this boundary: the last non-empty line of the reassembled reply, `DONE: <summary>`, `CONTINUE: <feedback>` or `BLOCKED: <reason>`. Any other text counts as `continue` with the whole text as feedback (truncated to 2000 characters, Goal A10). A `turn/end` that is `failed` or `cancelled`, or no completed turn, is a failed evaluation.
+6. Recheck over consumed state ([time bus §4](../../architecture/rust-agent/time-bus.md)): `C` is still `pending` and `T` is still its `trigger`. If not, write nothing.
+7. Write the verdict (§5.2), then `close()` the evaluator.
 
 Cancelling the task (rows above, or unload) cancels the admission or the observation, interrupts and closes the evaluator if it was created, and writes nothing; the cancelling row writes what the claim needs. At most one task runs per branch: a new evaluation only starts after its predecessor's claim or trigger is superseded, which cancels the predecessor.
 
@@ -253,7 +254,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 No business meaning in core | No change to Timeline, Dispatcher, TimelineTree or Loop: a host-sourced branch with an `operation_id` is an existing contract, and the verdict is ordinary input |
 | §4.5 Batch | Decisions follow consumed events in sequence order; the task rechecks over consumed state before writing; each verdict is one input, whose status block comes after its continuation block |
 | §4.6 Context only from handed-off events | The worker sees the verdict only through Goal's adopted inputs; the evaluator's reply stays on its own branch |
-| §4.7 Public events and services only | Goal reads public `branch/create`, `branch/create-failed`, `turn/*`, `stop/interrupt`, `step/text` and its own blocks, and calls `TreeCommands`, `Branch` and `settings` |
+| §4.7 Public events and services only | Goal reads public `branch/create`, `branch/create-failed`, `turn/*`, `stop/interrupt`, `step/model-start`, `step/text` and its own blocks, and calls `TreeCommands`, `Branch` and `settings` |
 | §4.8 Requirements to mechanism owners | R1 and R2 in §14 |
 | §4.9 Only facts later decisions use enter the Timeline | No new event type; the verdict writes are both model context and the settlement facts later decisions read; the evaluation in flight is derived from TimelineTree's facts; timers and tasks stay out |
 | §1 Capability and App Server boundary | No new Capability; Goal's existing parts gain two Session-scoped dependencies; nothing in App Server |
@@ -301,6 +302,7 @@ Flow tests through `session.goal.*`, `goal_update` and Timeline events, with a f
 10. The evaluator branch has no goal, makes no claim and starts no evaluator; its policy equals the working branch's at the cut.
 11. Compaction after a verified completion and after a reopen: the latest `goal:status` block in the context matches `get`.
 12. Changing `evaluationTimeoutSeconds` applies from the next evaluation without reloading Goal.
+13. Verdict independent of flush boundaries: the evaluator's turn has a tool cycle whose earlier reply text ends with `DONE: early`, and its final request streams `... \nDONE:` and ` all checks pass` as separate `step/text` records; the verdict is `done` with summary `all checks pass`. The same with `BLOCKED:` split across records yields `blocked`.
 
 ## 16. Open questions
 

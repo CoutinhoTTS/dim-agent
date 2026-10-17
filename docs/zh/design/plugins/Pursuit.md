@@ -89,7 +89,7 @@ flowchart LR
 
 ## 4. 数据与状态
 
-Pursuit 不新增事件类型。除 Goal 自己的块外，它读三类公开事实：工作分支上的 `branch/create` 和 `branch/create-failed`（来源为 `host`，`operation_id` 为 `goal:evaluate:<T>`），以及评审分支上的 `turn/end` 和该回合最后的 `step/text`。Goal 的写入在标记里带 `claim="C"` 与 `evaluation="T"` 属性，让折叠知道它们了结的是什么。
+Pursuit 不新增事件类型。除 Goal 自己的块外，它读三类公开事实：工作分支上的 `branch/create` 和 `branch/create-failed`（来源为 `host`，`operation_id` 为 `goal:evaluate:<T>`），以及评审分支上的 `turn/end`、该回合最后一次模型请求的 `step/model-start` 和该请求的 `step/text` 增量。Goal 的写入在标记里带 `claim="C"` 与 `evaluation="T"` 属性，让折叠知道它们了结的是什么。
 
 对 Goal 折叠（[Goal §2](Goal.md#2-数据与状态)）的补充，基于工作分支的本地事件：
 
@@ -127,10 +127,11 @@ Goal 的分支部分在 Dispatcher 处理函数消费事件时做决策，只用
 
 1. 调用 `settings.read {source: "goal", scope: "user"}`（S8b）取得 `evaluationTimeoutSeconds` 和 `maxContinuations`；任务全程使用这份文档。
 2. 创建评审分支：`S:TreeCommands.branch(parent = 本分支, at = 切点 turn/end, {source: host {operation_id: "goal:evaluate:T"}, prompt}, admission)`，提示词见第 9 节。TimelineTree 在工作分支上写 `branch/create` 并打开子分支，其首输入是提示词（Queue）。创建失败由 TimelineTree 记为 `branch/create-failed`，由上表对应行了结。
-3. 观察：在超时内等待评审分支 `idle()`，然后读取其本地事件：最近的 `turn/end` 和该回合最后的 `step/text`。超时则中断评审分支，按失败处理。
-4. 在这个边界解析：最后文本的最后一个非空行 `DONE: <summary>`、`CONTINUE: <feedback>` 或 `BLOCKED: <reason>`。其他文本按 `continue` 处理，整段文本作为反馈（截断到 2000 字符，Goal A10）。`turn/end` 为 `failed` 或 `cancelled`，或没有已完成的回合，是评审失败。
-5. 基于已消费状态复查（[时间总线 §4](../../../architecture/rust-agent/time-bus.md)）：`C` 仍待裁决，且 `T` 仍是它的 `trigger`。否则不写。
-6. 写入裁决（5.2），然后 `close()` 评审分支。
+3. 观察：在超时内等待评审分支 `idle()`，然后读取其本地事件：最近的 `turn/end` 及其 `turn_id`。超时则中断评审分支，按失败处理。
+4. 重组最后的回复：取该回合最后一条 `step/model-start`，其 `request_id` 即最后一次模型请求。按序号顺序拼接所有 `turn_id` 和 `request_id` 都匹配的 `step/text` 的 `delta`。`step/text` 是 Output 按大小和时间边界刷出的增量，单条记录不是完整回复，裁决行可能跨越多条记录。该回合更早的请求（工具调用之前的回复）和 `step/thinking` 不属于这条回复。这与 history 投影已有的拼接相同，不需要新事件或核心 API。
+5. 在这个边界解析：重组后回复的最后一个非空行 `DONE: <summary>`、`CONTINUE: <feedback>` 或 `BLOCKED: <reason>`。其他文本按 `continue` 处理，整段文本作为反馈（截断到 2000 字符，Goal A10）。`turn/end` 为 `failed` 或 `cancelled`，或没有已完成的回合，是评审失败。
+6. 基于已消费状态复查（[时间总线 §4](../../../architecture/rust-agent/time-bus.md)）：`C` 仍待裁决，且 `T` 仍是它的 `trigger`。否则不写。
+7. 写入裁决（5.2），然后 `close()` 评审分支。
 
 取消任务（上表各行或卸载）会取消准入或观察，若评审分支已创建则中断并关闭它，不写任何东西；由触发取消的那一行写声明需要的结果。每个分支至多运行一个任务：只有前一个任务的声明或触发被取代后才会开始新评审，而取代会取消前一个任务。
 
@@ -253,7 +254,7 @@ Settings 在使用时读取（5.1 第 1 步），所以修改从下一次评审�
 | §4.4 核心机制不带业务含义 | Timeline、Dispatcher、TimelineTree、Loop 都不改：带 `operation_id` 的 host 来源分支是已有合同，裁决是普通输入 |
 | §4.5 批次 | 决策按序号跟随已消费事件；任务写入前基于已消费状态复查；每个裁决是一条输入，其中状态块排在续跑块之后 |
 | §4.6 上下文只来自交接后的事件 | 干活的模型只通过 Goal 被采用的输入看到裁决；评审的回复留在它自己的分支上 |
-| §4.7 只通过公开事件和服务交互 | Goal 读取公开的 `branch/create`、`branch/create-failed`、`turn/*`、`stop/interrupt`、`step/text` 和自己的块，调用 `TreeCommands`、`Branch` 和 `settings` |
+| §4.7 只通过公开事件和服务交互 | Goal 读取公开的 `branch/create`、`branch/create-failed`、`turn/*`、`stop/interrupt`、`step/model-start`、`step/text` 和自己的块，调用 `TreeCommands`、`Branch` 和 `settings` |
 | §4.8 向机制所有者提需求 | 第 14 节的 R1 和 R2 |
 | §4.9 只有后续决策要用的事实进 Timeline | 没有新事件类型；裁决写入既是模型上下文，也是后续决策读取的了结事实；进行中的评审由 TimelineTree 的事实推导；计时器和任务不进 Timeline |
 | §1 Capability 与 App Server 边界 | 不新增 Capability；Goal 已有部分增加两个 Session 级依赖；App Server 中没有任何改动 |
@@ -301,6 +302,7 @@ Settings 在使用时读取（5.1 第 1 步），所以修改从下一次评审�
 10. 评审分支没有目标，不做声明，也不启动评审；其策略等于工作分支在切点处的策略。
 11. 核实完成后和重新打开后压缩：上下文中最新的 `goal:status` 块与 `get` 一致。
 12. 修改 `evaluationTimeoutSeconds` 从下一次评审起生效，不重载 Goal。
+13. 裁决不受刷出边界影响：评审回合中有一次工具调用，其之前的回复文本以 `DONE: early` 结尾，最后一次请求把 `... \nDONE:` 和 ` all checks pass` 作为两条 `step/text` 记录流出；裁决为 `done`，摘要为 `all checks pass`。`BLOCKED:` 跨记录拆分时同样得到 `blocked`。
 
 ## 16. 待对齐问题
 
