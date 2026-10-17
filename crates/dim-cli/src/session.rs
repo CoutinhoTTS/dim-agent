@@ -268,11 +268,13 @@ pub async fn chat(
                     let result = {
                         let operation = configure(client, &session_id, text, &mut display);
                         tokio::pin!(operation);
-                        tokio::select! {
-                            result = &mut operation => result,
-                            _ = interrupts.recv() => {
-                                println!("\nWaiting for configuration result before accepting more input.");
-                                operation.await
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = interrupts.recv() => {
+                                    println!("\nWaiting for configuration result before accepting more input.");
+                                }
+                                result = &mut operation => break result,
                             }
                         }
                     };
@@ -291,7 +293,7 @@ pub async fn chat(
                     continue;
                 }
                 Some("/export") => {
-                    let result = async {
+                    let operation = async {
                         let text = text.as_deref().expect("plain export command");
                         let rest = text.trim_start().strip_prefix("/export").expect("export command").trim_start();
                         let (format, path) = rest.split_once(char::is_whitespace)
@@ -299,7 +301,17 @@ pub async fn chat(
                             .ok_or("Usage: /export <markdown|json> PATH\nPATH is relative to the CLI current directory; ~ is literal.")?;
                         let path = path.trim_start();
                         export::write(client, &session_id, format.parse()?, Some(std::path::Path::new(path))).await
-                    }.await;
+                    };
+                    tokio::pin!(operation);
+                    let result = loop {
+                        tokio::select! {
+                            biased;
+                            _ = interrupts.recv() => {
+                                println!("\nWaiting for export result before accepting more input.");
+                            }
+                            result = &mut operation => break result,
+                        }
+                    };
                     if let Err(error) = result {
                         display.record(&format!("Error: {error}"))?;
                     }

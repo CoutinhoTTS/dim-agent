@@ -902,10 +902,16 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     let workspace = home.0.join("workspace");
     fs::create_dir_all(cli_dir.join("~")).unwrap();
     fs::create_dir(&workspace).unwrap();
-    let daemon = home.daemon(|wire| {
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.start(false);
-        for _ in 0..2 {
+        for index in 0..2 {
             let history = wire.read("session.history");
+            if index == 0 {
+                entered.send(()).unwrap();
+                wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
             wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         }
         let history = wire.read("session.history");
@@ -925,6 +931,12 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     terminal.until("Export format must be markdown or json");
     terminal.until("\n> ");
     terminal.write(b"/export json ~/Session notes.json\n");
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..2 {
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        terminal.until("Waiting for export result");
+    }
+    release.send(()).unwrap();
     terminal.until("Exported JSON: ~/Session notes.json");
     terminal.until("\n> ");
     terminal.write(b"/export json ~/Session notes.json\n");
@@ -1204,6 +1216,7 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
             "shift\nenter\nworks",
             "after malformed UTF-8",
             "standalone\rCR\r",
+            "e\u{301}ok",
             "resized draft",
         ] {
             let submit = wire.read("session.submit");
@@ -1249,6 +1262,11 @@ fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
     terminal.paste("standalone\rCR\r");
     terminal.until("[Paste 1: 1 lines]");
     terminal.raw(b"\r");
+    terminal.until("\n> ");
+    terminal.raw(
+        "e\u{301}\x1b[200~p\n\x1b[201~👩‍💻🇨🇳\x1b[D\x7f\x1b[D\x1b[3~\x1b[H\x1b[C\x1b[3~ok\r"
+            .as_bytes(),
+    );
     terminal.until("\n> ");
     let size = libc::winsize {
         ws_row: 6,
@@ -1909,6 +1927,8 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.until("\n> ");
     terminal.write(b"/reasoning high\n");
     wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for configuration result");
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     terminal.until("Waiting for configuration result");
     release.send(()).unwrap();

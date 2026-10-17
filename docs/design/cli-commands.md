@@ -197,7 +197,10 @@ opened to change their permissions.
 No output file is created after a history error. A write failure is reported
 and may leave a partial newly created file; no success message is printed.
 Export-to-stdout failures return a nonzero code. Interactive export errors
-return to the input prompt and never become model input.
+return to the input prompt and never become model input. During an admitted
+interactive export, Ctrl+C reports that the CLI is waiting for the result and
+continues consuming further interrupts until the operation settles. Those
+interrupts do not become an exit or draft-clear action at the next prompt.
 
 ## Implementation and verification
 

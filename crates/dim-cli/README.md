@@ -98,12 +98,18 @@ At the idle interactive prompt:
 Exported Markdown: Session notes.md
 > /export json events.json
 Exported JSON: events.json
+> /export json slow.json
+^C
+Waiting for export result before accepting more input.
+Exported JSON: slow.json
 > /exit
 $
 ```
 
 `/export` reads the format and treats the remaining path literally, including
-spaces. Errors return to the prompt. `/exit` takes no arguments. Slash commands
+spaces. Ctrl+C during an admitted export waits for its result; further interrupts
+keep waiting and do not exit the next prompt. Configuration commands use the same
+settlement rule. Errors return to the prompt. `/exit` takes no arguments. Slash commands
 in exec or redirected input remain literal model input.
 See [CLI commands and exports](../../docs/design/cli-commands.md).
 
