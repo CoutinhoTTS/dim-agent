@@ -210,10 +210,13 @@ Earlier entries: before=405. Read one in full: entry=<n>.
 
 ## 8. 安全与权限
 
-- **风险类别 `session`。** Permission 在 read-only 与 workspace-write 预设下直接允许，无需询问（[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)），与 `wait` 相同。它只读调用方分支自身已发布的历史，而这些内容本模型已经读过。不涉及文件、进程或网络。
-- **不新增数据外发。** 内容发往的 provider 和模型，与压缩前接收它的相同。
+- **风险类别 `session`。** Permission 在 read-only 与 workspace-write 预设下直接允许，无需询问（[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)），与 `wait` 相同。它只读调用方分支自身已发布的历史，这些内容已经进入过本分支的模型上下文。不涉及文件、进程或网络。
+- **信任边界：分支当前配置的模型。** 查询结果发往调用时分支所配置的 provider 和模型，它们不一定是最初接收这些内容的那一个。分支可以在压缩之后采纳另一个模型（`session.agent.update` 与模型选择在现有分支上采纳新模型；[configuration.rs](../../../../crates/dim-app-server/src/agents/configuration.rs)、[context_preparation.rs](../../../../crates/dim-agent-capabilities/src/context_preparation.rs)）。此后，一次查询可能把摘要未保留的原文发给新的 provider，包括用户之前粘贴的秘密。
+  - 这与没有该工具时分支已有的边界相同：切换模型后，下一个请求会把整个投影上下文发给新的 provider，包括原样保留的轮次、摘要和键控基线。在分支上采纳一个模型，本来就会把该分支的上下文披露给它。HistoryLookup 把这种披露扩展到切点之前的条目，每次一个有界的调用，且只在模型请求时发生。
+  - 没有“同一接收方”的保证。用户如果必须让早期内容不被另一个 provider 看到，应为该 provider 新开一个 Session，而不是在分支上切换模型。客户端和文档中关于切换模型的文字应说明：分支历史（包括压缩之前的部分）对新模型可见。
+  - 否决的方案：拒绝返回在另一个 provider 配置期间放置的条目。工具可以从固定的历史中折叠 `context/configured` 并据此过滤，但这会在一次普通的模型切换后挡住主要用例，而原样保留的轮次和摘要仍然会发给新的 provider。它只给出部分保证，并不是真正的边界。
 - **不可信内容。** 旧条目可能包含抓取的网页或注入的文本。外层包装把结果标为记录而非指令，与 `<dim-summary>` 一样；转义防止条目闭合包装。重读这类内容的风险与首次读取时相同。
-- **不新增秘密。** 用户之前粘贴的秘密可能再次出现，但只会回到已经接收过它的模型。除工具调用和结果事实外，没有内容进入 tracing。
+- **Tracing。** 除工具调用和结果事实外，没有内容进入 tracing。
 
 ## 9. 规则检查
 
@@ -255,6 +258,7 @@ Earlier entries: before=405. Read one in full: entry=<n>.
 | 限制 | 每个结果 10,000 字符；20 行、10 条匹配、8,000 字符的读取；暂定（#128） |
 | 格式 | 转义后、带角色标签的文本，包在 `<dim-history>` 中；不含原始 JSON、图片或 thinking |
 | 风险类别 | `session` |
+| 信任边界 | 调用时分支所配置的模型；切换模型后没有“同一接收方”的保证（§8） |
 | 发现 | 只靠声明；不改摘要提示词或 replacement |
 | 装配 | 只在启用压缩的产品 profile 中；`--models` 与 mock profile 不装 |
 | 状态与写入 | 无 |

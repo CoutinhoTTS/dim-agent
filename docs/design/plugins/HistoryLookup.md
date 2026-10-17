@@ -275,21 +275,39 @@ Rejected alternatives:
 - **No other branch or Session.** The branch comes from `ToolExecutionContext.branch_id`, not from
   the model's input.
 - **No images and no thinking.** Images render as `[image]`; thinking is left out (§3.4).
-- **No cache or index.** Each call reads and projects the pinned history (§10 Q2).
+- **No cache or index.** Each call reads and projects the pinned history (§11 Q2).
 
 ## 8. Security and permission
 
 - **Risk `session`.** Permission allows it under the read-only and workspace-write presets without
   asking ([permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)), as for
-  `wait`. It reads only the calling branch's own published history, which this model has already
-  read. It touches no file, process or network.
-- **No new data egress.** The content goes to the same provider and model that received it before
-  compaction.
+  `wait`. It reads only the calling branch's own published history, which already entered a model
+  context on this branch. It touches no file, process or network.
+- **Trust boundary: the model configured on the branch now.** A lookup result is sent to the
+  provider and model the branch is configured with at the time of the call, which need not be the
+  ones that first received the content. A branch can adopt another model after a compaction
+  (`session.agent.update` and model selection adopt it on the existing branch;
+  [configuration.rs](../../../crates/dim-app-server/src/agents/configuration.rs),
+  [context_preparation.rs](../../../crates/dim-agent-capabilities/src/context_preparation.rs)).
+  After that, a lookup can send the new provider original text that the summary left out,
+  including secrets the user pasted earlier.
+  - This is the boundary that already applies to the branch without the tool: after a model
+    switch, the next request sends the new provider the whole projected context, including the
+    retained turns verbatim, the summary and the keyed baseline. Adopting a model on a branch
+    therefore already discloses that branch's context to it. HistoryLookup extends the disclosure
+    to the entries before the cut, one bounded call at a time, when the model asks for them.
+  - There is no same-recipient guarantee. A user who must keep earlier content from another
+    provider starts a new Session for that provider instead of switching the model on the branch.
+    Client and documentation text on model switching should say that the branch history,
+    including what lies before a compaction, is available to the new model.
+  - Rejected: refusing entries placed while another provider was configured. The tool could fold
+    `context/configured` from the pinned history and filter on it, but this would block the main
+    use case after an ordinary model switch, while the verbatim retained turns and the summary
+    still cross to the new provider. It would give a partial guarantee, not a real boundary.
 - **Untrusted content.** Old entries can contain fetched pages or injected text. The wrapper marks
   the result as a record, not instructions, as `<dim-summary>` does, and escaping keeps entries
   from closing it. Re-reading such content carries the same risk it carried when first read.
-- **No secrets added.** Secrets the user pasted earlier can come back, but only to the model that
-  already received them. Nothing goes to tracing beyond the tool call and result facts.
+- **Tracing.** Nothing goes to tracing beyond the tool call and result facts.
 
 ## 9. Rule check
 
@@ -336,6 +354,7 @@ None. Considered and not needed:
 | Limits | 10,000 characters per result; 20 lines, 10 matches, 8,000-character reads; provisional (#128) |
 | Format | Escaped, role-labelled text in a `<dim-history>` wrapper; no raw JSON, images or thinking |
 | Risk | `session` |
+| Trust boundary | The model configured on the branch at the time of the call; no same-recipient guarantee after a model switch (§8) |
 | Discovery | Declaration only; no change to the summary prompt or replacement |
 | Assembly | Product profile only, where compaction is active; not in `--models` or mock profiles |
 | State and writes | None |
