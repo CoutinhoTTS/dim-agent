@@ -155,7 +155,8 @@ export interface ToolDefinition {
   description: string;
   inputSchema: JsonSchema;
   source: 'static' | 'builtin' | 'extension' | 'dynamic';
-  /** Required and nonempty for a foreign contribution. */
+  /** Nonempty; Permission recognises read_filesystem, write_filesystem, execute_process,
+   * network and session. Other strings are unclassified. */
   risk: string;
   metadata?: ToolMetadata;
   fileChanges?: {

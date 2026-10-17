@@ -1,8 +1,10 @@
 # TypeScript plugin authoring
 
-Dim loads trusted JavaScript/TypeScript plugins through rutis. Use `@arcships/rutis`
-0.10.0 for the plugin shape and type-only imports from `dimcode/plugin` for Dim's
-implemented named services. These declarations add no runtime wrapper or service.
+Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/rutis`
+to the host's pinned runtime: 0.10.0 on main before the dependency upgrade
+[#173](https://github.com/arcships/dim/pull/173), or 0.11.0 with that upgrade.
+Use type-only imports from `dimcode/plugin` for Dim's implemented named services.
+These declarations add no runtime wrapper or service.
 The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts).
 The pinned rutis 0.10 declarations have an optional/required `Plugin.inject`
 inheritance conflict under TypeScript 6.0.3. Consumer examples use `skipLibCheck`;
@@ -39,8 +41,9 @@ cleanup. Business input consumption and background work start after publication,
 as required by [the architecture rules](architecture/rust-agent/principles.md).
 An injected dependency becoming available is not Session publication. Do not
 start a timer or task from `apply` and assume that the Session is ready. The
-current rutis TypeScript `Context` has `use`, `provide` and `effect`; it has no
-`activated()` method. C4 owns the Session binding rather than a plugin inventing
+rutis 0.10 TypeScript `Context` has `use`, `provide` and `effect`; rutis 0.11 also
+has leaf event APIs such as `ctx.on`. Neither supplies Dim Session activation;
+there is no `activated()` method. C4 owns the Session binding rather than a plugin inventing
 a second readiness mechanism.
 
 State shared by one Session belongs to its Session part; a branch's work and
@@ -249,7 +252,11 @@ ToolRegistry samples active providers once at branch initialization; a provider
 that becomes active later is available after the next registry/Session reload.
 
 `declaration` is synchronous and must not start asynchronous work. Its name matches
-the tool key and its Permission risk is nonempty. `execute` receives the neutral
+the tool key and its Permission risk is nonempty. Permission recognises
+`read_filesystem`, `write_filesystem`, `execute_process`, `network` and `session`.
+Any other string (including `read`) is unclassified: without a tool-specific policy
+override it is denied under read-only and requires approval under workspace-write. Use the exact category for the tool's
+actual effects. `execute` receives the neutral
 `ToolCall`: `sessionId`, `branchId`, `turnId`, `callId`, `arguments` and `config`.
 This is distinct from the native `{id, name, input}` call. Validate model-supplied
 arguments at the tool's external-input boundary. `config` is the creation-time
@@ -277,9 +284,20 @@ JavaScript row unloads: `report` replies with interruption, while `drain` preser
 the provider's reply. No business task in this example runs during `apply`.
 
 Native Session broadcast remains [#168](https://github.com/arcships/dim/issues/168)
-work, waiting for a rutis release with leaf events and the binding contract.
-The tool/method binding does not expose `ctx.on`, a Session activation method,
-branch Dispatcher access or a replacement polling mechanism.
+work. rutis 0.11 supplies leaf events, but the Dim Session binding in
+[#174](https://github.com/arcships/dim/pull/174) is a proposal awaiting approval and
+implementation. A runtime `ctx.on` API alone does not deliver Dim Session records.
+The implemented tool/method binding supplies no Session activation method,
+branch Dispatcher access or replacement polling mechanism.
+
+With rutis 0.11, integer values beyond ±(2^53−1) cross into TypeScript as `bigint`,
+including integers nested in model-supplied tool arguments or event data. Ordinary
+Dim sequence and millisecond timestamp values remain within the safe-number range.
+`JSON.stringify` throws on `bigint`; do not stringify an unchecked argument object
+or coerce every integer to `number`. At the tool's external-input boundary, validate
+against its actual schema and explicitly choose a lossless representation when
+sending such a value to a JSON-only API. This transport behavior does not make the
+pending Session-event binding available.
 
 ## Packaging and trust
 
