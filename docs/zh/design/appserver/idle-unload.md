@@ -259,19 +259,19 @@ R1 之后 `unload_if_idle()` 内部：
 | 卸载期间的 Agent 关闭或进程关闭 | 不经过闸门 | 加入已在进行的释放，并发关闭共享同一流程（生命周期 §5） | 运行时 |
 | 检查轮次期间 Agents 索引重载 | 旧一代正在停止 | 检查停止；进行中的释放在旧一代的清理返回前完成；新一代重新标记 | Agents |
 | S 卸载期间的 `session.list`、`session.summaries` 或 Collaboration 的 `agent` 读取 | 先找到已装载的 S，随后 S 被释放 | 对已装载实例的读取因 S 被释放而失败，改读存储（D8）；调用不会失败，也不会漏掉 S | Agents、Rpc |
-| 已卸载成员的 Collaboration Team 状态 | — | `idle`，与任何可用的 Session 一样 | Collaboration |
+| 已卸载成员的 Collaboration Team 状态 | 任意 | `idle`，与任何可用的 Session 一样 | Collaboration |
 | 对已卸载成员的 Collaboration 请求 | leader 的工具调用 | `lookup` 恢复成员；`SessionRestored` 让 Collaboration 重新观察它；关系保留 | Collaboration |
-| 临时 Agent 的最后一个 Session 被卸载 | — | Agent 保留：Collaboration 只在业务关闭后才关闭它 | Collaboration |
-| C4 leaf 观察者 | — | 丢弃正在卸载的 Session 的记录；恢复后得到新通道 | C4 |
+| 临时 Agent 的最后一个 Session 被卸载 | 任意 | Agent 保留：Collaboration 只在业务关闭后才关闭它 | Collaboration |
+| C4 leaf 观察者 | 任意 | 丢弃正在卸载的 Session 的记录；恢复后得到新通道 | C4 |
 | 卸载期间的 C6 通知 | 没有监听者 | 丢弃，与任何没有 attach 客户端的 Session 一样；之后 attach 的客户端经 `session.list` 读取当前状态（[C6](https://github.com/arcships/dim/pull/85)） | C6 |
-| 卸载前已受理的 S5b `setTitle` | — | 照常由 SessionStore 结算；如果那时 S 已卸载，其通知被丢弃 | SessionStore |
+| 卸载前已受理的 S5b `setTitle` | 任意 | 照常由 SessionStore 结算；如果那时 S 已卸载，其通知被丢弃 | SessionStore |
 | 无人观察的启动 Session 有待处理的审批 | turn 未闭合 | 永不卸载；Scheduler 或 Workflow 用 `stop` 结束这次运行 | 运行时 |
 | 按 S2 §6.4 第 2 项被扣住的 Queue 输入（Loop 在 `input/applied` 与 `stop/interrupt` 之间重载） | Loop 空闲 | 卸载可以进行；恢复从历史重建 InputQueue 和 Loop，像重启后一样决定这些被扣住的输入 | InputQueue、Loop |
 | 分叉一个已卸载的源 | `fork` acquire 它 | 源被恢复；源和分叉若不再使用，各自在 `G` 之后卸载 | Agents（S5c） |
-| 恢复时的检查 | — | 与重启后相同：项目授权、存储的 Agent 可用。重启后无法装载的 Session，卸载后同样无法装载 | Agents |
-| Session 部件按代保存的内存（ShellInput 用过的 `runId`、SessionTitle 的尝试次数、MCP 连接、TypeScript 部件状态） | — | 与重启后一样被重置；各所有者的设计已经覆盖重载 | 所有者 |
-| 故障或正在关闭的 Session | — | `unload_if_idle()` 拒绝；由监督者或关闭结束它 | 运行时 |
-| 没有原生存储的宿主 | — | 不运行检查；运行时无法恢复内存中的 Session | Agents |
+| 恢复时的检查 | 任意 | 与重启后相同：项目授权、存储的 Agent 可用。重启后无法装载的 Session，卸载后同样无法装载 | Agents |
+| Session 部件按代保存的内存（ShellInput 用过的 `runId`、SessionTitle 的尝试次数、MCP 连接、TypeScript 部件状态） | 任意 | 与重启后一样被重置；各所有者的设计已经覆盖重载 | 所有者 |
+| 故障或正在关闭的 Session | 任意 | `unload_if_idle()` 拒绝；由监督者或关闭结束它 | 运行时 |
+| 没有原生存储的宿主 | 任意 | 不运行检查；运行时无法恢复内存中的 Session | Agents |
 
 ## 8. Agents 负责线的改动
 

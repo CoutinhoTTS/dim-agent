@@ -291,19 +291,19 @@ run.
 | Agent close or process shutdown during an unload | Not gated | Joins the release already under way, as concurrent closes share one flow (lifecycle §5) | Runtime |
 | Agents index reload during a pass | Old generation stopping | The pass stops; a release under way finishes before the old generation's cleanup returns; the next generation marks again | Agents |
 | `session.list`, `session.summaries` or a Collaboration `agent` read while S unloads | S found loaded, then released | The loaded read fails as S is released; the store is read instead (D8); the call never fails and never drops S | Agents, Rpc |
-| Collaboration Team status of an unloaded member | — | `idle`, as for any available Session | Collaboration |
+| Collaboration Team status of an unloaded member | Any | `idle`, as for any available Session | Collaboration |
 | Collaboration request to an unloaded member | Leader tool call | `lookup` restores the member; `SessionRestored` lets Collaboration watch it again; relations kept | Collaboration |
-| Last Session of a temporary Agent unloaded | — | The Agent stays: Collaboration closes it only after a business close | Collaboration |
-| C4 leaf observers | — | Drop records of an unloading Session; a restore gets a fresh channel | C4 |
+| Last Session of a temporary Agent unloaded | Any | The Agent stays: Collaboration closes it only after a business close | Collaboration |
+| C4 leaf observers | Any | Drop records of an unloading Session; a restore gets a fresh channel | C4 |
 | C6 notice while unloaded | No listener | Dropped, as for any Session without an attached client; a client that attaches reads current state through `session.list` ([C6](https://github.com/arcships/dim/pull/85)) | C6 |
-| S5b `setTitle` admitted before an unload | — | Settled by SessionStore regardless; its notice is dropped if S is unloaded by then | SessionStore |
+| S5b `setTitle` admitted before an unload | Any | Settled by SessionStore regardless; its notice is dropped if S is unloaded by then | SessionStore |
 | Pending approval in a launched Session nobody watches | Turn open | Never unloaded; Scheduler or Workflow ends the run with `stop` | Runtime |
 | Queue inputs left held by S2 §6.4 item 2 (Loop reload between `input/applied` and `stop/interrupt`) | Loop idle | The unload may proceed; the restore rebuilds InputQueue and Loop from history, which decides the held inputs as after a restart | InputQueue, Loop |
 | Fork of an unloaded source | `fork` acquires it | The source is restored; source and fork are each unloaded after `G` if unused | Agents (S5c) |
-| Restore checks | — | As after a restart: project authorization, stored Agent available. A Session that would not load after a restart does not load after an unload | Agents |
-| Per-generation memory of Session parts (ShellInput's used `runId`s, SessionTitle's attempt count, MCP connections, TypeScript part state) | — | Reset, as after a restart; each owner's design already covers a reload | Owners |
-| Faulted or closing Session | — | `unload_if_idle()` refuses; the supervisor or the close ends it | Runtime |
-| Host without a native store | — | No pass runs; the runtime cannot restore an in-memory Session | Agents |
+| Restore checks | Any | As after a restart: project authorization, stored Agent available. A Session that would not load after a restart does not load after an unload | Agents |
+| Per-generation memory of Session parts (ShellInput's used `runId`s, SessionTitle's attempt count, MCP connections, TypeScript part state) | Any | Reset, as after a restart; each owner's design already covers a reload | Owners |
+| Faulted or closing Session | Any | `unload_if_idle()` refuses; the supervisor or the close ends it | Runtime |
+| Host without a native store | Any | No pass runs; the runtime cannot restore an in-memory Session | Agents |
 
 ## 8. Agents lane changes
 
