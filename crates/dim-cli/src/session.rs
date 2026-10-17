@@ -242,8 +242,7 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                         tokio::pin!(operation);
                         tokio::select! {
                             result = &mut operation => result,
-                            signal = tokio::signal::ctrl_c() => {
-                                signal?;
+                            _ = interrupts.recv() => {
                                 println!("\nWaiting for configuration result before accepting more input.");
                                 operation.await
                             }
