@@ -423,7 +423,9 @@ async fn a_session_method_restores_an_unloaded_session() {
 async fn progress_until_reply(client: &mut Client, id: u64) -> (Vec<Value>, Value) {
     let mut progress = vec![];
     loop {
-        let frame = client.read().await;
+        let frame = client
+            .read(&format!("response {id} or management.progress"))
+            .await;
         if frame["id"] == id {
             return (progress, frame);
         }
