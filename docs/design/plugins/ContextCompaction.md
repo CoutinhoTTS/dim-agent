@@ -460,7 +460,10 @@ How the summary is produced:
 - **Cut-off replies.** A reply that stops at `max_tokens` (thinking can use most of the
   allowance) is not a summary. Its chunk is halved at the entry separator nearest the middle (or
   at a character boundary) and folded half by half; a chunk still cut off below 2 KiB fails the
-  compaction, so no record keeps a cut-off text (#169).
+  compaction, so no record keeps a cut-off text (#169). Each half carries the summary of the one
+  before it, so its whole request is checked against the budget again before the call; a half
+  that no longer fits is halved too, keeping all of its text, and when the carried summary and
+  envelope do not fit without any transcript the compaction fails without sending the request.
 - **Diagnostics.** The summary object (`kind: "summary"`, `summaryChars`,
   `estimatedSummaryTokens`, `chunkCount`, `compactedToolPayloadCount`, `droppedMessageCount`);
   ContextPolicy fills the common part.

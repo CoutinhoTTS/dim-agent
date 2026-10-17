@@ -324,7 +324,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - **输出。** 丢弃 thinking 输出。工具停止或空文本算失败。
 - **记录文本。** 按角色标注的文本：工具调用写名称和输入，工具结果写文本，图片写 `[image]`。
 - **分块。** 一次调用的输入预算为 `context_window − output_tokens`，用 `count_tokens` 对整个摘要请求（系统提示、携带的摘要、外层格式和本块）计数，与其他所有请求的计数方式相同，不另设按字符计的规则。更长的记录分块折叠：每次调用拿到当前摘要和能放下的条目。单条放不下的，按字节在 UTF-8 字符边界上从中间截断，截断标记计入预算，并计入 `compactedToolPayloadCount`。
-- **被截断的回复。** 停在 `max_tokens` 的回复（思考可能用掉大部分额度）不算摘要。该块在最接近中间的条目分隔处（或字符边界）一分为二，逐半折叠；小于 2 KiB 仍被截断时压缩失败，任何记录都不会保留被截断的文本（#169）。
+- **被截断的回复。** 停在 `max_tokens` 的回复（思考可能用掉大部分额度）不算摘要。该块在最接近中间的条目分隔处（或字符边界）一分为二，逐半折叠；小于 2 KiB 仍被截断时压缩失败，任何记录都不会保留被截断的文本（#169）。每一半都携带前一半的摘要，所以调用前会再次按预算检查它的整个请求；不再放得下的一半继续一分为二，文本全部保留；携带的摘要与包装在没有任何转录内容时也放不下，则压缩失败，不发送该请求。
 - **诊断。** 摘要对象（`kind: "summary"`、`summaryChars`、`estimatedSummaryTokens`、`chunkCount`、`compactedToolPayloadCount`、`droppedMessageCount`）；公共部分由 ContextPolicy 填写。
 
 ### 5.3 一条压缩路径（ContextPolicy）

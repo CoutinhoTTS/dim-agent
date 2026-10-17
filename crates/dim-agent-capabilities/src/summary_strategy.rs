@@ -138,6 +138,9 @@ impl SummaryStrategy {
     /// `max_tokens` (thinking can use most of the allowance) is not a
     /// summary: the chunk is halved and folded piece by piece, and below
     /// `MIN_CHUNK_BYTES` the compaction fails rather than keep a cut-off text.
+    /// Each piece inherits the summary of the one before it, so every
+    /// request is checked against the input budget again and a piece that
+    /// no longer fits is halved too.
     async fn fold(
         &self,
         input: &CompactionInput,
@@ -148,6 +151,15 @@ impl SummaryStrategy {
     ) -> Result<String, HostError> {
         let mut pending = vec![chunk];
         while let Some(piece) = pending.pop() {
+            if !fits(input, summary.as_deref(), &piece) {
+                let (first, second) = split_half(&piece);
+                if first.is_empty() || second.is_empty() || !fits(input, summary.as_deref(), "") {
+                    return Err(no_fit());
+                }
+                pending.push(second.to_owned());
+                pending.push(first.to_owned());
+                continue;
+            }
             *calls += 1;
             match self
                 .summarize(input, summary.as_deref(), &piece, cancel)
@@ -235,6 +247,10 @@ fn fits(input: &CompactionInput, earlier: Option<&str>, chunk: &str) -> bool {
         <= input.model.context_window() - input.model.output_tokens()
 }
 
+fn no_fit() -> HostError {
+    HostError::failed("The summarizer request does not fit the model window")
+}
+
 /// The longest middle truncation of `line` whose request fits: the start and
 /// the end are kept on UTF-8 character boundaries around a marker.
 fn truncate_to_fit(
@@ -244,9 +260,7 @@ fn truncate_to_fit(
 ) -> Result<String, HostError> {
     let (mut low, mut high) = (0, line.len());
     if !fits(input, earlier, &truncate_middle(line, 0)) {
-        return Err(HostError::failed(
-            "The summarizer request does not fit the model window",
-        ));
+        return Err(no_fit());
     }
     // The largest kept byte count whose request fits.
     while low < high {
@@ -286,13 +300,14 @@ async fn collect(mut stream: ModelStream) -> Result<(String, bool), HostError> {
 const MIN_CHUNK_BYTES: usize = 2048;
 
 /// Two halves of `chunk`, split at the entry separator nearest its middle,
-/// or at a character boundary when it holds one entry.
+/// or at a character boundary when it holds one entry. A half is empty only
+/// when `chunk` is a single character.
 fn split_half(chunk: &str) -> (&str, &str) {
     let middle = chunk.len() / 2;
     let at = chunk
         .match_indices("\n\n")
         .map(|(index, _)| index)
-        .filter(|&index| index > 0)
+        .filter(|&index| index > 0 && index + 2 < chunk.len())
         .min_by_key(|&index| index.abs_diff(middle));
     match at {
         Some(index) => (&chunk[..index], &chunk[index + 2..]),
