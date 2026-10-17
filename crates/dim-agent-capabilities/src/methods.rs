@@ -4,8 +4,9 @@
 //! `SessionMethods` (Session scope) build on, so the two cannot diverge.
 use dim_agent_runtime::{AgentError, SessionScope};
 use rutis::{BoxFuture, CordisError, Ctx, Effect};
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use rutis_bridge::session::{HostDispatch, Value as BridgeValue, settle};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     ops::Deref,
@@ -25,17 +26,19 @@ pub struct RpcError {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorData {
-    pub app_error: &'static str,
+    pub app_error: String,
 }
 impl RpcError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::app(-32602, "invalid_params", message)
     }
-    pub fn app(code: i32, app_error: &'static str, message: impl Into<String>) -> Self {
+    pub fn app(code: i32, app_error: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
-            data: Some(ErrorData { app_error }),
+            data: Some(ErrorData {
+                app_error: app_error.into(),
+            }),
         }
     }
     pub fn wire(code: i32, message: impl Into<String>) -> Self {
@@ -168,22 +171,24 @@ impl Progress {
 /// How the provider replies to an admitted call that an unload interrupts:
 /// `Report` replies `operation_interrupted` at once and settles afterwards;
 /// `Drain` replies with the call's own result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Interruption {
     Report,
     Drain,
 }
 
 /// One declared method. Serialized as the listing entry `{name, mutating}`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MethodDecl {
     /// Full wire name inside the provider's namespace.
     pub name: String,
     pub mutating: bool,
-    #[serde(skip)]
+    #[serde(skip_serializing)]
     pub interruption: Interruption,
     /// Whether the caller receives the progress the provider sends.
-    #[serde(skip)]
+    #[serde(skip_serializing)]
     pub progress: bool,
 }
 impl MethodDecl {
@@ -349,6 +354,28 @@ pub struct Accepted {
 /// reading this service by namespace (`Session::session_named_service`), and
 /// never names its provider.
 pub struct SessionMethods(Arc<MethodProvider>);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum DirectReply {
+    Value,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum ForeignReply {
+    Value {
+        kind: DirectReply,
+        #[serde(default)]
+        value: Value,
+    },
+    Error {
+        code: i32,
+        #[serde(rename = "appError")]
+        app_error: String,
+        message: String,
+    },
+}
 impl Deref for SessionMethods {
     type Target = MethodProvider;
     fn deref(&self) -> &MethodProvider {
@@ -356,6 +383,84 @@ impl Deref for SessionMethods {
     }
 }
 impl SessionMethods {
+    /// Binds one foreign generation inside its original row, after its
+    /// cleanup is registered, so C1 drains before the row unloads.
+    pub async fn provide_foreign(
+        ctx: &Ctx,
+        scope: &SessionScope,
+        namespace: &str,
+        service: Arc<dyn HostDispatch>,
+    ) -> Result<Arc<Self>, CordisError> {
+        let declarations = service
+            .invoke("describe", BridgeValue::List(vec![]))
+            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+        let cancelled = ctx.cancellation_token();
+        let declarations = tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("Session method binding cancelled".into())),
+            declarations = settle(declarations) => declarations,
+        }
+            .and_then(|value| value.json())
+            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+        let declarations: Vec<MethodDecl> = serde_json::from_value(declarations)
+            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+        Self::provide(
+            ctx,
+            scope,
+            namespace,
+            declarations,
+            Arc::new(move |method, params, cancel, progress| {
+                let service = service.clone();
+                Box::pin(async move {
+                    let _finish = cancel.clone().drop_guard();
+                    let cancelled = BridgeValue::future(async move {
+                        cancel.cancelled().await;
+                        Ok(BridgeValue::Undefined)
+                    });
+                    let progress = BridgeValue::callback(move |args| {
+                        let [data]: [BridgeValue; 1] = args.list()?.try_into().map_err(|_| {
+                            rutis_bridge::session::Error::Value(
+                                "progress needs one argument".into(),
+                            )
+                        })?;
+                        progress.send(data.json()?);
+                        Ok(BridgeValue::Undefined)
+                    });
+                    let call = json!({"callId": uuid::Uuid::new_v4().to_string(), "method": method, "params": params});
+                    let reply = async {
+                        let value = service.invoke(
+                            "call",
+                            BridgeValue::List(vec![call.into(), cancelled, progress]),
+                        )?;
+                        settle(value).await?.json()
+                    }
+                    .await;
+                    let reply = reply
+                        .and_then(|value| {
+                            serde_json::from_value::<ForeignReply>(value).map_err(|error| {
+                                rutis_bridge::session::Error::Value(error.to_string())
+                            })
+                        })
+                        .map_err(|error| {
+                            tracing::warn!(%error, "foreign Session method failed");
+                            RpcError::wire(-32603, "Session method binding failed")
+                        })?;
+                    match reply {
+                        ForeignReply::Value {
+                            kind: DirectReply::Value,
+                            value,
+                        } => Ok(value),
+                        ForeignReply::Error {
+                            code,
+                            app_error,
+                            message,
+                        } => Err(RpcError::app(code, app_error, message)),
+                    }
+                })
+            }),
+        )
+    }
+
     /// Provides the methods of `namespace` for this Session, from the
     /// provider's `apply` after its own effects. Assembly records the
     /// namespace with `AgentBuilder::session_methods`, which Rpc checks

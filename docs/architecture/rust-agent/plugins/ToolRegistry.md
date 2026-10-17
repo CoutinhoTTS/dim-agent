@@ -10,6 +10,7 @@ registry, exposing snapshots and rutis change events for branch adoption and pin
 | --- | --- |
 | `S:ToolHost` | Host definitions and execution handlers. |
 | `S:SessionConfig` | Select enabled fixed tool names. |
+| `S:SessionIdentity` | Supply the owning Session id in a foreign tool's neutral call. |
 | `S:Diagnostics` | Report configured optional tools that are unavailable at attachment. |
 
 ## Events and lifetime
@@ -43,6 +44,20 @@ and change notifications. Already bound requests retain their handlers.
 Registry refresh is neither a durable configuration save nor permission
 authorization; a new tool is not model-visible until adoption.
 
+Named foreign tools use `toolContribution:<name>` through the existing bridge's
+instance key. The same first read decodes their synchronous `declaration()` as
+`ToolDefinition`, checks identity/risk, and retains that generation's handler.
+The handler also retains the original row context's existing cancellation token,
+published under the same tool service name and Session instance as a typed native
+key. Row cancellation rejects later executions through that handler and ends its
+in-flight native wait; the old table never selects a replacement generation.
+TypeScript effects still own settlement of the JavaScript work.
+Malformed declarations are omitted with an attach diagnostic. Execution maps the
+native call/context and Session configuration to the neutral A.5 request, then
+decodes `ToolResult` once. Each call's cancellation Promise uses a child of the
+batch token, so finishing its lease cannot cancel another call in that batch.
+Row cancellation ends the affected call's lease without cancelling the batch token.
+
 Initial attachment and adoption satisfy
 [Session boundary A.5](../../../design/contracts/session-boundary.md#a5-tool-contribution)
 through ToolBinding initialization and the existing Prompt / BranchOpening path,
@@ -59,6 +74,10 @@ exercises the configured real-tool registry.
 immediate first requests, Pending providers, restoration, provider replacement
 and request snapshots. A queued source notification whose emitter closes still
 reaches branch adoption, while another Session keeps its own source version.
+The real Node/Rpc flows in
+[session_typescript.rs](../../../../crates/dim-app-server/tests/transport_flow/session_typescript.rs)
+cover the foreign first-read boundary, restore, Pending/disabled parts, malformed declarations
+and results, and cancellation without cancelling sibling tools in the same batch.
 
 ## Rule check
 
@@ -91,7 +110,7 @@ and adoption use existing ToolBinding and Prompt contracts.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:Diagnostics`、`S:SessionConfig`、`S:ToolHost` |
+| 注入 | `S:Diagnostics`、`S:SessionConfig`、`S:SessionIdentity`、`S:ToolHost` |
 | 提供 | `S:ToolRegistry`、`S:ToolSourcesView` |
 | 被注入于 | `PrepareModelHost`、`ToolBinding` |
 <!-- /generated -->
