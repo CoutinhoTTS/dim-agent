@@ -6,15 +6,15 @@ SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 Se
 
 ## 0. 已交付机制与 Ready 前置
 
-C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89 和
-Settings #166/#175/#177 已交付。SessionTitle 尚未实现，设计尚未 Ready。
+C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89、
+Settings #166/#175/#177 和 C6 通知 #85 已交付。SessionTitle 尚未实现，设计尚未 Ready。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
 | 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing 和自身 session.event。完整广播实现 #180 仍待复审/手动合并；#63/#168 保持打开。 |
 | 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不依赖拟议的 C5 绑定。 |
 | 配置 | 沿用具名 Settings、原行来源声明及变更事件。读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档；A12 提议来源作用域/文件。 |
-| 元数据/通知 | S5b #60/#96 负责 metadata/setTitle/列表字段；C6 #49/#85 负责通知与 Rpc 转发。两份 PR 仍是空草稿；A.2 是拟议合同，不是现有服务。Ready 前确认名称、模式、取消/交接和错误。 |
+| 元数据/通知 | S5b #60/#96 负责 metadata/setTitle/列表字段，PR 仍是空草稿；A.2 中的 metadata 与 setTitle 是它的拟议合同，不是现有服务。C6 #49/#85 交付通用通知：SessionStore 提交后调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（[Session 广播通知](../appserver/session-notices.md)）。Ready 前与 S5b 确认名称、模式、取消/交接和错误。 |
 | 辅助请求 | Provider 已实现 AuxiliaryModelHost，S4 已给出 auxiliaryModel.complete 中立合同，但尚无具名 HostDispatch/catalog 绑定。用普通 C4 注入绑定既有所有者操作；凭据仍归 Provider。 |
 | 确认 | 实施前确认 A1–A12 和所有者绑定。文档 CI 不表示运行时验收。 |
 
@@ -222,9 +222,9 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- |
 | 被哪条规则挡住 | 原则 §4 第 9 条和第 4 条：SessionStore 标题这样的进程级状态不能进 Timeline，但客户端需要实时看到标题变更；Session 广播目前只承载 `Event`、`Fence`、`Closed` 记录（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)）。 |
 | 考虑过的现有机制 | `session/titled` Timeline 事件（把进程状态放进 Timeline；总体设计 §7 已否决）；客户端轮询 `session.list`（不能实时更新）；标题专用频道（业务专用端口，违反第 8 条）。 |
-| 需要的通用能力 | Session 广播频道上的通知记录 `{source, kind, data}`，由该 Session 进程级状态的所有者在变更提交后发出；不带业务含义。标题通知就是这条记录，`source: "SessionStore"`、`kind: "title"`、`data: {sessionId, title, titleSource, revision}`；线上形式以这条记录为准。 |
+| 需要的通用能力 | Session 广播频道上的通知记录 `{source, kind, data}`，由该 Session 进程级状态的所有者在变更提交后发出；不带业务含义。标题通知就是这条记录，`source: "SessionStore"`、`kind: "title"`、`data: {sessionId, title, titleSource, revision}`。Rpc 把这条记录原样转发为 `session.notice`，并加上频道的 `sessionId`（[C6 D4](../appserver/session-notices.md#10-决定)）。 |
 | 对序号、批次、中断、重载的影响 | 没有序号，不属于批次；不重放：重新订阅的客户端通过所有者的查询（`session.list`）读取当前状态；不受中断影响；发出方重载只会让通知停止。 |
-| 由谁实现，对应 issue | 运行时 C6 [#49](https://github.com/arcships/dim/issues/49)，草稿 [#85](https://github.com/arcships/dim/pull/85)；尚未实现。Rpc 把记录原样转发给已订阅的客户端，这是 App Server 入口的改动，和 SessionStore 补充一起列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
+| 由谁实现，对应 issue | 运行时 C6 [#49](https://github.com/arcships/dim/issues/49)，在 [#85](https://github.com/arcships/dim/pull/85) 实现：记录、`session_broadcast::notify` 和 Rpc 的 `session.notice`（[Session 广播通知](../appserver/session-notices.md)）。SessionStore 发出标题通知仍是它的补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
 
 #4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
 
@@ -338,7 +338,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 问题 | 描述 |
 | --- | --- |
 | Session 列表字段 | `SessionSummary` 中的 `title`/`titleSource` 是一项 Rpc 协议变更，需记录到 overview |
-| 具名绑定 | C4 观察、S2 历史、Settings 已有交付路径；S5b 元数据/C6 通知及 S4 辅助模型具名绑定仍待 Ready，合同归其所有者；不新增 Core 需求 |
+| 具名绑定 | C4 观察、S2 历史、Settings 和 C6 通知已有交付路径；S5b 元数据及 S4 辅助模型具名绑定仍待 Ready，合同归其所有者；不新增 Core 需求 |
 
 ## 附录 G. Rust 绑定
 

@@ -33,5 +33,6 @@
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
 - [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
+- [Session broadcast notices](design/appserver/session-notices.md) (C6)（[中文](zh/design/appserver/session-notices.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)
