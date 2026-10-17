@@ -889,10 +889,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         for (document, code) in [
             (json!({"maxResults": 8}), "conflict"),
             (json!({"maxResults": 0}), "invalid_document"),
-            (
-                json!({"searchService": {"kind": "web", "secretRef": ""}}),
-                "invalid_document",
-            ),
             (json!({"searchService": {"kind": "web"}}), "user_only_field"),
             (json!([]), "invalid_document"),
         ] {

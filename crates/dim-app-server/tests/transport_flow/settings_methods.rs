@@ -165,11 +165,6 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     for (document, revision, code) in [
         (json!({"maxResults": 8}), &first, "conflict"),
         (json!({"maxResults": 0}), &second, "invalid_document"),
-        (
-            json!({"searchService": {"secretRef": ""}}),
-            &second,
-            "invalid_document",
-        ),
     ] {
         let rejected = owner(&mut client, &session, "update", write(revision, document)).await;
         assert_eq!(rejected["ok"], false, "{rejected}");
@@ -327,10 +322,6 @@ async fn node_settings_clients_and_declaration_boundaries() {
         ),
         (
             json!({"source":"example","scope":"user","expectedRevision":second,"document":{"maxResults":0}}),
-            "invalid_params",
-        ),
-        (
-            json!({"source":"example","scope":"user","expectedRevision":second,"document":{"searchService":{"secretRef":""}}}),
             "invalid_params",
         ),
         (

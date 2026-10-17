@@ -37,13 +37,6 @@ export interface Settings {
   projects(request: Record<string, never>): SettingsResult<{ projects: { root: number; cwd: string }[] }>;
 }
 
-export type CredentialsResult = { ok: true; value: { value: string } } |
-  { ok: false; error: { code: 'not_found' | 'failed' | 'cancelled'; message: string } };
-/** Process service `credentials`; requires an explicitly supplied secret store. */
-export interface Credentials {
-  resolve(request: { owner: string; reference: string }): Promise<CredentialsResult>;
-}
-
 export interface ModelId { providerId: string; modelId: string }
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
 export interface PermissionPolicy {

@@ -1,8 +1,8 @@
 # Settings service
 
-Status: Design approved; Rust side implemented (S8b part 1, §12); declarations on C4 rows and
-the TypeScript owner path implemented (part 2, §12); event delivery to TypeScript parts implemented
-(part 3, §12); a product `credentials` provider is not chosen (§10 question 4). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
+Status: Design approved; implemented. Rust side (S8b part 1, §12), declarations on C4 rows and
+the TypeScript owner path (part 2), event delivery to TypeScript parts (part 3). The shared
+`credentials` service is withdrawn (§1.2). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
 Builds on S8a ([#54](https://github.com/arcships/dim/issues/54), PR [#90](https://github.com/arcships/dim/pull/90));
 implementation depends on C4 ([#63](https://github.com/arcships/dim/issues/63)).
 Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:
@@ -25,9 +25,8 @@ There are two write paths. A client write (`settings.update`) may change any fie
 (the `settings` service) may not change a user-only field. A write the owner makes on behalf of
 its tool is an owner write, so it is rejected when it changes a user-only field.
 
-Credentials are `*Ref` fields holding opaque strings. One process service,
-`credentials.resolve(owner, reference)`, resolves them. Provider's `secretRef` resolver is replaced
-by it, and Provider's AWS case goes through it too (§4.4).
+Settings gives no field a meaning. A secret is an ordinary field of its owner's document, and
+the owner decides whether and how to store, encrypt or look it up (§1.2).
 
 `BusinessDocument` stays the Rust binding and is unchanged. Rust sources keep their owners'
 management methods. F2's `permission.rules`/`permission.set_rules` stay (§8.1).
@@ -41,9 +40,29 @@ No new plugin, no Timeline event, no change to Timeline, Dispatcher, rutis or as
 - No generic client access to Rust sources (`mcp`, `mcp-projects`, `skills`, `permission`).
   Their validation is Rust code that Settings cannot run on client JSON.
 - No source discovery method and no settings UI. See §10.
-- No secret store. Today no public plugin provides one (§4.4, §10).
-- MCP's inline tokens, `env` and `headers` stay where they are (ADR 004 D4). Moving them to
-  references is not part of S8.
+- No secret store, credential service or field-name rule (§1.2).
+- MCP's inline tokens, `env` and `headers` stay where they are (ADR 004 D4).
+
+### 1.2 Decision: secrets belong to their owner
+
+Whether a plugin keeps a secret, and how it stores or encrypts it, is that plugin's business,
+in Rust or TypeScript. Infrastructure does not turn one owner's need into a shared service
+(principles §4 rule 8). The existing owners already work this way: MCP OAuth keeps its tokens in
+its own 0600 `FileStorage` record ([MCP OAuth](mcp-oauth.md)), MCP keeps inline tokens in its
+source, and Provider keeps inline credentials and its own optional `secretRef` host.
+
+An earlier revision of this design added a process service `credentials.resolve(owner,
+reference)`, required `*Ref` fields to be non-empty strings, and moved Provider's secret host onto
+that service. No product plugin provided the service, so every owner that used a reference
+depended on a store nobody owned. That service and the `*Ref` rule are withdrawn:
+
+- A secret is an ordinary document field. The owner's schema states its rules (for example
+  `minLength`). A field meant for the user only is declared in `userOnly` and kept in the user
+  file, not a project file, so it is not committed with a project.
+- An owner that wants a keychain or encryption implements it inside its own plugin and keeps
+  only what it chooses in its document.
+- Provider keeps its own `ProviderSecretHost` / `ResolveProviderSecret` (`provider/secrets.rs`),
+  as before S8b. It is Provider's extension point, not a shared contract.
 
 ## 2. Structure
 
@@ -63,18 +82,10 @@ No new plugin, no Timeline event, no change to Timeline, Dispatcher, rutis or as
         | read/update/projects          | settings.read / settings.update
         |                               |
   TypeScript owner (rutis runtime row)  Rpc  <--  local client
-        |
-        | resolve(owner, reference)
-        v
-  `credentials` (provided by the host secret store owner, if any)
-        ^
-        | resolve(owner = "provider", reference)
-  Provider (existing)
 ```
 
-Dependencies point to the core. Settings depends on no plugin and names no owner. Provider keeps
-its configuration-gated dependency on the secret store (it changes type, not shape). A
-TypeScript owner depends on `settings` (and on `credentials` only if it has `*Ref` fields).
+Dependencies point to the core. Settings depends on no plugin and names no owner. A TypeScript
+owner depends on `settings`.
 
 ## 3. Data and state
 
@@ -101,7 +112,7 @@ other place for it.
           "properties": {
             "kind": { "type": "string" },
             "endpoint": { "type": "string" },
-            "secretRef": { "type": "string" }
+            "apiKey": { "type": "string", "minLength": 1 }
           },
           "required": ["kind"]
         },
@@ -136,8 +147,8 @@ Rust documents:
   `oneOf`), the same reach as serde's `#[serde(default)]` on nested structs.
 - **When**: on every write, and when reading a persisted file or native row. A missing file is
   `{}` with defaults applied. The written and returned document is the filled one.
-- **Validation**: after defaults, against the schema. Then every member whose name ends in `Ref`
-  must be a non-empty string.
+- **Validation**: after defaults, against the schema. Settings applies no rule of its own to
+  member names or values (§1.2).
 - Consumers use the document as delivered. They do not validate again or add defaults. A rule
   that JSON Schema cannot express (such as a CIDR) is the owner's diagnostic at use time.
 
@@ -189,46 +200,19 @@ and only that package is written against it. This is the trust model of in-proce
 ### 4.3 Management methods `settings.*` (client path)
 
 Namespace `settings`, provided through `managementMethods` by `SettingsMethods`, a process part
-that depends on Settings (§4.6). They are never served to paired devices (overview §6.2 rule 9).
+that depends on Settings (§4.5). They are never served to paired devices (overview §6.2 rule 9).
 
 | Method | Request | Reply | Errors |
 | --- | --- | --- | --- |
 | `settings.read` | `{source, scope}` | `{revision, document}` | invalid params (bad scope), `settings_unknown_source`, `settings_failed` |
-| `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | invalid params (bad scope, schema violation, empty `*Ref`), `settings_unknown_source`, `settings_conflict`, `settings_unsynced`, `settings_failed` |
+| `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | invalid params (bad scope, schema violation), `settings_unknown_source`, `settings_conflict`, `settings_unsynced`, `settings_failed` |
 
 - Only declared sources are served. A Rust source (for example `mcp`) is `settings_unknown_source`.
   Its owner's methods stay the way to change it.
 - A client write may change user-only fields. There is no other difference from the owner path.
 - `closed` maps to the existing retryable reloading error.
 
-### 4.4 Service `credentials`
-
-Process scope, no instance key, provided by the plugin that owns the host secret store.
-
-| Method | Mode | Request | Reply |
-| --- | --- | --- | --- |
-| `resolve` | async | `{owner, reference}` | `{value: string}` |
-
-- `owner` is the id of the plugin whose document holds the reference: the package `id`, or
-  `"provider"` for Provider. The store may keep references per owner.
-- `reference` is the opaque string from a `*Ref` field. One spelling everywhere: a member named
-  `secretRef` or `<name>Ref` whose value is a non-empty string. Dim never parses it.
-- Errors: `not_found`, `failed`, `cancelled`. Messages never contain a value. A consumer reports
-  its own message, as Provider does today ("Provider secret lookup failed").
-- Values are resolved per use and never written to Settings, the Timeline or a reply.
-
-**Provider.** Provider's `ResolveProviderSecret` (`provider/secrets.rs`) is replaced by this
-service. A `{"secretRef": "..."}` credential resolves with `owner = "provider"`. For a token,
-`value` is the token. For AWS Bedrock auth, `value` is the JSON text
-`{"accessKeyId", "secretAccessKey", "sessionToken"?}`, which Provider parses into its existing
-`AwsCredentials` at that boundary and validates as today. So the AWS case needs no second resolver.
-Inline credentials (`ProviderSecret::Token`/`Aws`) are unchanged.
-
-Today no product plugin provides a secret store. `ProviderPlugin::default` has no secret host, and
-a `secretRef` fails with "No provider secret store configured". Only tests provide one. S8b keeps
-that state; it defines the contract and moves the test store to it.
-
-### 4.5 Events
+### 4.4 Events
 
 Unchanged channels and names from S8a. The payloads become serializable data:
 
@@ -267,7 +251,7 @@ question 2):
 Reading at use time remains valid for owners that do not need to react to changes (F2's
 Permission does).
 
-### 4.6 Rust binding
+### 4.5 Rust binding
 
 In `dim-app-server::settings` (S8a types, changed only where noted):
 
@@ -312,12 +296,11 @@ impl SettingsService {
 - The file and native paths are shared with `BusinessDocument`, keyed by source name instead of
   `D::NAMESPACE`. CAS, the gate, leases, the unsynced case and `publish` stay as they are.
 - `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope` and
-  `Document(message)`. A written document that breaks the schema, is not an object or has an empty
-  `*Ref` is `Document` with the validator's message (the instance path, never the value); the
+  `Document(message)`. A written document that breaks the schema or is not an object is `Document` with the validator's message (the instance path, never the value); the
   client path maps it to invalid params. A persisted document that breaks the schema stays
   `Invalid` (`invalid_document` / `settings_failed`).
 - The `settings` service is a `HostDispatch` under `host_key("settings")`, and assembly registers
-  `settings` and `credentials` in the `ServiceCatalog`, as `pluginFiles` is done today. Replies use
+  `settings` in the `ServiceCatalog`, as `pluginFiles` is done today. Replies use
   the envelope of `sessions`: `{ok: true, value}` or `{ok: false, error: {code, message}}`.
 - The `ManagementMethods` for `settings` come from `SettingsMethods`, a process part that depends
   on Settings (module `settings_methods`), the way PermissionRules owns `permission`. Settings
@@ -325,17 +308,6 @@ impl SettingsService {
   management owner (methods contract §3.2), and the module boundary keeps Settings persistence
   infrastructure (ADR 004 D4, `xtask check`). Assembly lists the `SettingsMethods` row as the
   owner of `settings`.
-- Credentials: `pub trait ResolveCredential { fn resolve(&self, owner: String, reference: String,
-  cancel: CancellationToken) -> BoxFuture<'_, Result<String, CredentialError>>; }` (with
-  `CredentialError::{NotFound, Failed, Cancelled}`, since `HostError` has no not-found case) and
-  `pub struct CredentialsHost(pub Arc<dyn ResolveCredential>)` replace `ResolveProviderSecret` and
-  `ProviderSecretHost`, in `dim-app-server::credentials`. Provider's `Deps` change from
-  `When<Arc<ProviderSecretHost>>` to `When<Arc<CredentialsHost>>`, behind the same configuration
-  switch. A Rust store calls `CredentialsHost::provide`, which also provides
-  `host_key("credentials")` for TypeScript consumers. For AWS Bedrock auth Provider treats a value
-  that is a JSON object as AWS credentials and any other value as a bearer token, as inline
-  Bedrock credentials allow both.
-
 ## 5. Flows
 
 ### 5.1 Owner reads and updates
@@ -347,7 +319,7 @@ impl SettingsService {
    |                         |                          | defaults, schema check   |
    |<-- {revision r1, document} -------------------------|                          |
    | update {web, "user", r1, doc'} ->| update_declared(Owner)                       |
-   |                         |                          | defaults, schema, *Ref   |
+   |                         |                          | defaults, schema         |
    |                         |                          | user-only diff vs current|
    |                         |                          |   differs: user_only_field
    |                         |                          | CAS r1 ------------------>| replace
@@ -369,17 +341,7 @@ document it replaces.
    | update {web, "user", r3, doc with another searchService} -> user_only_field, nothing written
 ```
 
-### 5.3 Credential use
-
-```
- TS owner (at use time)       credentials (store)
-   | read {web, "user"} -> document.searchService.secretRef = "web-search"
-   | resolve {owner: "web", reference: "web-search"} ----->|
-   |<-- {value} | not_found | failed                        |
-   | use value for this call only; never stored or logged
-```
-
-### 5.4 Declaration boundary
+### 5.3 Declaration boundary
 
 ```
  assembly reads each Session TypeScript row's `settings` (owner = row id)
@@ -400,7 +362,7 @@ than drop them.
 | --- | --- | --- |
 | `unknown_source` / `settings_unknown_source` | Not a declared source (including Rust sources) | No |
 | `invalid_scope` / invalid params | Project scope for a source without `projectFile`, or a root not authorized | After authorizing the project |
-| `invalid_document` / invalid params | Schema violation, a non-object document, or an empty `*Ref` | No; nothing written |
+| `invalid_document` / invalid params | Schema violation or a non-object document | No; nothing written |
 | `invalid_document` / `settings_failed` | The persisted file or row is invalid (on read) | After the user repairs it |
 | `user_only_field` | An owner write changes a user-only field | No; the user changes it through the client |
 | `conflict` / `settings_conflict` | Stale `expectedRevision` | Read and retry |
@@ -418,8 +380,8 @@ than drop them.
 - Project files keep their own authority (ADR 001). A declared project file is read only for an
   authorized root, as for Rust sources. Settings is not a security setting, and no Settings
   document confers approval (ADR 003).
-- Documents hold references, not secrets. Resolved values exist only inside the consumer's call.
-  Error messages and validator messages carry paths, never values.
+- Error messages and validator messages carry paths, never values. A secret in a document is the
+  owner's to protect (§1.2): keep it in the user file and in `userOnly`.
 - Settings documents never enter the Timeline. Replay and fork do not restore or widen them.
 
 ## 8. Relationship to existing parts
@@ -429,17 +391,16 @@ than drop them.
 | S8a Settings | Supplement: declared sources, the named service, the `settings` namespace, serializable event payloads. `BusinessDocument`, CAS, native rows and channels are unchanged |
 | MCP, Skills | Unchanged. Their sources stay Rust documents with their own management methods |
 | Permission rules (F2) | Unchanged; see §8.1 |
-| Provider | `ResolveProviderSecret` is replaced by `credentials` (§4.4). The secret store stays optional by configuration, as today |
+| Provider | Unchanged. Its inline credentials and its own optional `ProviderSecretHost` stay (§1.2) |
 | ADR 004 D4 | It says Settings publishes no management methods until S8b. S8b adds the `settings` namespace, limited to declared sources. ADR 004 is updated with the implementation |
-| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). Its Session runtime declares the two Settings event names and `SessionNodeRows` forwards them (§4.5) |
+| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). Its Session runtime declares the two Settings event names and `SessionNodeRows` forwards them (§4.4) |
 | PluginManager (P3) | When it produces C4 rows from its package boundary, it produces their `settings` member too |
 | Rpc | Unchanged; it dispatches the new namespace like any owner's |
 | Timeline, Dispatcher, rutis, loader | Unchanged |
 
 Public additions: the `settings` service, the `settings` management namespace (two methods), the
-`credentials` service (replacing a Rust-only trait), the `settings` member of a C4 row, and the JSON
-shapes of the two existing events. Each one is needed for a non-Rust owner to read, write and be
-told about its source, for a client to edit it, and for a reference to resolve.
+`settings` member of a C4 row, and the JSON shapes of the two existing events. Each one is needed
+for a non-Rust owner to read, write and be told about its source, and for a client to edit it.
 
 ### 8.1 Decision: keep `permission.rules`/`permission.set_rules`
 
@@ -458,21 +419,21 @@ F2 left open whether to fold its methods into `settings.read/update`. They stay:
 | Rule | Answer |
 | --- | --- |
 | Principles §1 (one event bus) | Notification stays on the rutis event bus with S8a's events. No `subscribe`, no watch channel, no second bus. TypeScript delivery uses C4's binding of the same events |
-| Principles §3 (dependency direction) | Settings depends on no plugin. Owners depend on Settings. Provider's store dependency keeps its shape. No core part depends on an optional plugin |
+| Principles §3 (dependency direction) | Settings depends on no plugin. Owners depend on Settings. No core part depends on an optional plugin |
 | §4 rule 1 (command events) | Not used. Settings is process configuration written through its owner's typed write (overview §6.2 rule 2) |
 | §4 rule 2 (handover) | Not applicable; no handover between modules |
 | §4 rule 3 (before callback) | Not used |
 | §4 rule 4 (core has no business meaning) | Settings validates against declared schemas and names no owner |
 | §4 rule 5 (batches) | No Timeline writes |
 | §4 rule 6 (context) | Nothing enters model context. A tool's view of settings is its owner's business |
-| §4 rule 7 (public interfaces only) | Owners use the `settings` service; clients use management methods; consumers use `credentials` |
+| §4 rule 7 (public interfaces only) | Owners use the `settings` service; clients use management methods |
 | §4 rule 8 (infrastructure unchanged) | No change to Timeline, Dispatcher, event envelope, rutis, loader, Agent assembly or Session facade. Existing `HostDispatch`, `ServiceCatalog`, `managementMethods` and rutis events are used as they are |
 | §4 rule 9 (only needed facts in Timeline) | No event is added; settings are not Timeline facts |
 | ADR 002 D1 (scope) | Settings is a process plugin; the sources outlive Sessions |
 | ADR 002 D2 (no wiring modules) | No new plugin. The service and methods live in Settings, the owner of the data |
-| ADR 002 D3 (dependencies) | No new optional dependency. Provider's existing configuration-gated store dependency changes type only |
+| ADR 002 D3 (dependencies) | No new optional dependency |
 | ADR 002 D4 (configuration) | Business configuration in the owner's named source, read at use time, changed with notification, no reload |
-| ADR 002 D5 (language-neutral) | §4.1–§4.5 are the contract; §4.6 is the Rust binding |
+| ADR 002 D5 (language-neutral) | §4.1–§4.4 are the contract; §4.5 is the Rust binding |
 
 Requirements raised to mechanism owners: none. S8b uses C4's TypeScript binding when it lands
 (§10 question 2); that is a dependency on C4's planned work, not a new requirement on dim runtime
@@ -485,14 +446,13 @@ or rutis.
    row's `settings` member, next to `provides` (§3.1).
 2. ~~**How a TypeScript part listens to rutis events.**~~ Settled with rutis 0.11 leaf events
    (#173): the Session runtime declares the two event names and `SessionNodeRows` forwards them
-   (§4.5). The Session broadcast binding (#168, #174) is separate and does not carry them.
+   (§4.4). The Session broadcast binding (#168, #174) is separate and does not carry them.
 3. **Packages installed while running.** Declarations are Settings factory configuration, so a
    runtime install (PluginManager, P3) would reload Settings and its dependents (MCP, Skills).
    ADR 002 D3 accepts reloads after structural operations, but whether this one is acceptable is
    decided with PluginManager. Today TypeScript packages are loaded only at startup.
-4. **Which plugin provides `credentials` in the product.** No public plugin does today. The
-   choice (an OS keychain plugin, a private package) and how an owner that needs it behaves when
-   it is absent are not decided here.
+4. ~~**Which plugin provides `credentials` in the product.**~~ Withdrawn with the service: each
+   owner handles its own secrets (§1.2).
 5. **Source discovery for a settings UI.** A generic `/settings` page would need the declared
    sources and their schemas (for example a `settings.sources` method). Nothing requires it for
    S8b; it is decided with the CLI settings design.
@@ -508,31 +468,28 @@ through C4's path):
 1. A TypeScript test package declares source `example` (user file, project file, schema with a
    `default`, one user-only pointer). Its first `read` returns the default document with revision
    `missing`. An `update` with that revision stores the document and returns a new revision. A
-   stale revision fails with `conflict`. A schema violation or an empty `*Ref` fails and writes
-   nothing.
+   stale revision fails with `conflict`. A schema violation fails and writes nothing.
 2. A client `settings.update` changes the user-only field. The owner's next `update` that changes
    it fails with `user_only_field`; one that keeps it succeeds.
 3. A Rust listener on `settings_changes("example")` receives `{source, scope, revision}` after
    each successful write on both paths, and none after a rejected one. The payload serializes to
-   the §4.5 JSON shape.
+   the §4.4 JSON shape.
 4. Native profile: the user scope persists in row `user/example`; existing v13 rows are unchanged.
    Project scope on an unauthorized root fails with `invalid_scope`.
 5. `settings.read` of `mcp` returns `settings_unknown_source`. A row declaring `mcp`, two
    packages declaring the same source, or a malformed entry fails assembly.
-6. With a test `credentials` store: the TypeScript owner resolves the `*Ref` from its document,
-   and Provider resolves a `secretRef` token and an AWS JSON value through the same store. No
-   value appears in replies, errors or traces.
+6. ~~Credential references through a shared `credentials` store.~~ Withdrawn (§1.2).
 7. A paired-device connection is not served `settings.read`.
 
 ## 12. Implementation status
 
-**Part 1 (Rust side, S8b-1).** Implemented without C4: serializable event payloads (§4.5), declared
+**Part 1 (Rust side, S8b-1).** Implemented without C4: serializable event payloads (§4.4), declared
 sources with schema validation, defaults and user-only fields (§3.1–§3.4), the `settings` service
-(§4.2), the `settings.*` methods (§4.3) and the `credentials` contract with Provider moved onto it
-(§4.4). Declarations came from an embedder list until part 2 moved them onto C4 rows. No product plugin provides `credentials` yet (§10 question 4): the contract,
-its `HostDispatch` and Provider's consumer exist, and only tests supply a store.
+(§4.2) and the `settings.*` methods (§4.3). Declarations came from an embedder list until part 2
+moved them onto C4 rows. Part 1 also shipped the `credentials` service and the `*Ref` rule; both
+are removed and Provider's own secret host restored (§1.2).
 
-Corrections made against the code (reflected in §4.3 and §4.6):
+Corrections made against the code (reflected in §4.3 and §4.5):
 
 - The client methods are owned by a separate process part, `SettingsMethods`, not by Settings
   (methods contract §3.2; ADR 004 D4 boundary). This is the only new plugin row; the §2 diagram's
@@ -542,37 +499,27 @@ Corrections made against the code (reflected in §4.3 and §4.6):
   item 5); Settings alone only learns Rust names on first use.
 - `SettingsError` has `InvalidScope` and `Document(message)` besides the two named variants, so
   the client path can tell invalid params from a persisted failure.
-- `ResolveCredential` returns `CredentialError` (`not_found`, `failed`, `cancelled`) instead of
-  `HostError`, which cannot express `not_found`. The service reply envelope is the one of
-  `sessions`.
+- The service reply envelope is the one of `sessions`.
 
 Acceptance (§11) covered by Rust flow tests (`settings_flow.rs`, `provider_flow.rs`), with the
-owner calling the `settings` service through its `HostDispatch`: item 1, item 2, item 3, item 4,
-item 5, item 6 for Provider (token and AWS JSON through one store) and for the
-`credentials.resolve` service shape, and item 7.
+owner calling the `settings` service through its `HostDispatch`: items 1–5 and 7.
 
 **Part 2 (S8b-2).** Implemented on C4's path:
 
-- Declarations are the `settings` member of a Session TypeScript row (§3.1, §5.4, §10 question 1),
+- Declarations are the `settings` member of a Session TypeScript row (§3.1, §5.3, §10 question 1),
   parsed into `SourceDeclaration` with the row id as owner. `ServerConfig::settings_sources` is
   removed: the plugin declares its own settings, and the embedder no longer lists them separately.
 - `transport_flow/settings_methods.rs` runs a TypeScript owner (`runtime/fixtures/settings-owner.*`)
   in the Node runtime. Item 1 (default document, CAS, stale revision, invalid documents), item 2
-  (user-only field: client may, owner may not) and item 3 (a Rust listener sees one §4.5 change per
+  (user-only field: client may, owner may not) and item 3 (a Rust listener sees one §4.4 change per
   successful write on either path, none for a rejected one) pass through its Session methods, which
   call `settings` from TypeScript. The client path (§4.3, item 7) and the declaration boundary
   (item 5: a Rust source name, a second declaration by another package, a malformed entry) run in
   the same file. These are `node_` flows, run by CI's Node step.
 
 **Part 3 (S8b-3).** `settings.changed` / `settings.project_authorized` reach TypeScript parts
-(§4.5, §10 question 2). `transport_flow/settings_methods.rs` checks that the owner fixture's
+(§4.4, §10 question 2). `transport_flow/settings_methods.rs` checks that the owner fixture's
 `ctx.on` listeners receive the three `example` changes of item 3 in commit order, and the
 authorization of a project created after the part loaded.
 
-Still open:
-
-- The TypeScript half of item 6. A TypeScript owner can inject `credentials` only when a
-  process part provides it, and the App Server has no such part or embedder input yet: that is
-  §10 question 4. A Session-scoped test store is not the contract (§4.4 is process scope), and a
-  row that injects an absent service stays Pending. The Provider half and the service shape are
-  covered (part 1).
+Nothing remains open for S8b.

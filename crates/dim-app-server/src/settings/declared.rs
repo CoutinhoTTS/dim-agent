@@ -66,7 +66,7 @@ impl Declared {
             .map_err(|error| format!("default document is invalid: {error}"))?;
         Ok(declared)
     }
-    /// Defaults, then the schema, then the `*Ref` rule (§3.2).
+    /// Defaults, then the schema (§3.2).
     fn prepare(&self, mut document: Value) -> std::result::Result<Value, String> {
         if !document.is_object() {
             return Err("document must be an object".into());
@@ -75,9 +75,6 @@ impl Declared {
         if let Some(error) = self.validator.iter_errors(&document).next() {
             return Err(format!("{}: {}", error.instance_path(), error.masked()));
         }
-        empty_reference(&document, &mut String::new()).map_or(Ok(()), |path| {
-            Err(format!("{path}: reference must be a non-empty string"))
-        })?;
         Ok(document)
     }
     /// An owner write fails at the first user-only member it changes.
@@ -126,30 +123,6 @@ fn fill(schema: &Value, value: &mut Value) {
             fill(property, member);
         }
     }
-}
-/// The path of the first `<name>Ref` member that is not a non-empty string.
-fn empty_reference(value: &Value, path: &mut String) -> Option<String> {
-    let length = path.len();
-    let found = match value {
-        Value::Object(members) => members.iter().find_map(|(name, member)| {
-            path.truncate(length);
-            path.push('/');
-            path.push_str(&name.replace('~', "~0").replace('/', "~1"));
-            if name.len() > 3 && name.ends_with("Ref") && member.as_str().is_none_or(str::is_empty)
-            {
-                return Some(path.clone());
-            }
-            empty_reference(member, path)
-        }),
-        Value::Array(items) => items.iter().enumerate().find_map(|(index, item)| {
-            path.truncate(length);
-            path.push_str(&format!("/{index}"));
-            empty_reference(item, path)
-        }),
-        _ => None,
-    };
-    path.truncate(length);
-    found
 }
 /// Whether an RFC 6901 pointer names an object member through `properties`.
 fn reachable(schema: &Value, pointer: &str) -> bool {

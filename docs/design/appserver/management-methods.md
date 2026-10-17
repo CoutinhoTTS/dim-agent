@@ -191,8 +191,8 @@ belong to the Session event contract and rutis link work; neither is implemented
 
 Declaration-driven method discovery and cross-language plugin method declarations
 remain deferred: assembly lists the Rust owner namespaces and their rows
-explicitly. Generic
-credential references/resolution are future work. D4 keeps business documents in
+explicitly. There is no generic credential service; each owner handles its
+own secrets. D4 keeps business documents in
 their source, not editable loader rows; see [ADR 004](../../adr/004-loader-plugin-management.md).
 
 Transport flows cover actual owner methods, hello features, an owner reload

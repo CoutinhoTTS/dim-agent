@@ -17,7 +17,6 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
-| Resolve a credential reference | `credentials`, process | Host dispatch implemented; no product plugin provides a secret store. Inject only when the embedding host supplies one. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
 | Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is tracked by #168; branch bindings remain C5 work. |
 
@@ -101,7 +100,7 @@ After an uncertain external outcome, use that system's reconciliation contract
 before retrying. Full semantics and fixed storage error codes are in
 [trusted plugin storage](../crates/dim-app-server/README.md#trusted-plugin-storage).
 
-## Business configuration and credentials
+## Business configuration
 
 Declare `inject: ['settings']` and obtain `ctx.use<Settings>('settings')`.
 Settings owns business documents; loader rows hold structural configuration.
@@ -175,19 +174,16 @@ emitted after commit. In the Session TypeScript runtime, register
 listeners during `apply`, filter changes by source and read the current document
 when needed; event payloads contain no document. Reading at use time remains valid
 for owners that do not need notifications. See the
-[event contract](design/appserver/settings-service.md#45-events); no separate
+[event contract](design/appserver/settings-service.md#44-events); no separate
 subscription service or polling loop is needed.
 
-When the embedding host supplies a secret store, declare `credentials` as a
-dependency and use `ctx.use<Credentials>('credentials').resolve({owner, reference})`.
-For a TypeScript source, `owner` is its declaring row's `id` (`web` above);
-the Rust Provider uses `provider`. `reference` is the opaque
-nonempty string from a `*Ref` field. Check `CredentialsResult`: success is
-`{ok: true, value: {value: string}}`; failure has `code` and `message`, without
-`retryable`. Resolve per use and keep values out of Settings, tool results,
-terminal replies, history and diagnostics. No product store is provided by Dim;
-these types do not make one available. See the
-[Settings service contract](design/appserver/settings-service.md#4-interfaces).
+Dim provides no credential service. A secret such as an API key is your
+plugin's business: keep it as an ordinary field of your source, or store and
+encrypt it yourself. A field the user fills in belongs in `userFile` (not
+`projectFile`) and in `userOnly`; state its rules in the schema (for example
+`minLength`). Keep values out of tool results, terminal replies, history and
+diagnostics. See
+[settings-service §1.2](design/appserver/settings-service.md#12-decision-secrets-belong-to-their-owner).
 
 ## Driving Sessions
 
