@@ -5,6 +5,7 @@ use crate::{
     display::{self, Display, Event, Progress},
     export,
     input::Input,
+    mcp,
 };
 use dim_agent_types::{
     ApprovalCallData, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
@@ -236,6 +237,19 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                 continue;
             }
             match text.split_whitespace().next() {
+                Some("/mcp") => {
+                    // MCP owns interrupts until its command finishes draining.
+                    drop(interrupts);
+                    let result = mcp::command(client, options, reader, &session_id, &text).await;
+                    #[cfg(unix)]
+                    { interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?; }
+                    #[cfg(windows)]
+                    { interrupts = tokio::signal::windows::ctrl_c()?; }
+                    if let Err(error) = result {
+                        display.record(&format!("Error: {}", mcp::error(error)))?;
+                    }
+                    continue;
+                }
                 Some("/effort" | "/reasoning" | "/fast" | "/agent") => {
                     let result = {
                         let operation = configure(client, &session_id, &text, &mut display);
@@ -861,6 +875,26 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             let notice: Progress = decode(params, &method)?;
             if notice.session_id == session_id && notice.branch_id == "main" {
                 display.progress(notice)?;
+            }
+        }
+        "session.mcp.state" => {
+            let state: mcp::State = decode(params, &method)?;
+            if state.session_id == session_id {
+                let required: std::collections::HashSet<_> = state
+                    .servers
+                    .into_iter()
+                    .filter(|server| server.state == "auth_required")
+                    .map(|server| server.id)
+                    .collect();
+                for id in &required {
+                    if display.mcp_auth_required.contains(id) {
+                        continue;
+                    }
+                    display.record(&format!(
+                        "MCP {id:?}: sign-in required. Run mcp login {id:?} or /mcp login {id:?}."
+                    ))?;
+                }
+                display.mcp_auth_required = required;
             }
         }
         "session.closed" if params["sessionId"].as_str() == Some(session_id) => {
