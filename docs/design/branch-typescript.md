@@ -1,9 +1,9 @@
 # Branch TypeScript binding
 
-Contract preparation for [C5 / #64](https://github.com/arcships/dim/issues/64), the branch portion of
-[#4](https://github.com/arcships/dim/issues/4). The native behavior below exists; its foreign binding
-is not implemented or Ready. Implementation requires full C4 acceptance and confirmation of the
-binding decisions in this document.
+Proposed contract for [C5 / #64](https://github.com/arcships/dim/issues/64), the branch portion of
+[#4](https://github.com/arcships/dim/issues/4). The native operations exist; the foreign binding is
+not implemented. The declaration, reference binding and lifecycle choices below require architecture
+confirmation. Implementation also requires full C4 acceptance.
 
 ## Scope and ownership
 
@@ -31,11 +31,123 @@ The part must declare every dependency, including load-order dependencies. Missi
 the existing Pending behavior. A consumer cannot obtain a sibling branch's Dispatcher or mutable
 state; communication with another branch uses its validated input and does not wait for its work.
 
+## Structural declaration and row placement
+
+The existing `SessionTypeScriptConfig.rows` contains ordinary package rows. A row with exactly one
+`branchPart:<part>` service is a branch part; `<part>` is non-empty and `bind` is its only method,
+declared `async`. Its declaration determines placement, so there is no new `scope` setting:
+
+```json
+{
+  "id": "goal-state",
+  "name": "/absolute/goal/branch.ts",
+  "provides": {"branchPart:goal": {"bind": "async"}},
+  "config": {}
+}
+```
+
+The module imports this same declaration's `provides` dictionary. The host keeps current C4
+tool/method/event rows in the Session group and appends branch parts to the existing nested
+`BRANCH_GROUP` returned by `AgentBuilder::install`. It does not create another group or tree.
+The existing runtime process, anchor, structural options, `inject`, `isolate` and disablement
+continue to apply. Existing Settings declarations are discovered once from the configured rows,
+before placement; they are not registered again for each branch instance.
+
+Reject mixed branchPart and Session service families, duplicate part identities in a branch,
+empty identities and other bind modes at the structural boundary. Preserve C4's same-module
+declaration equality and online metadata checks. A package with both Session and branch parts
+uses separate entry modules. Register each `branchPart:<part>` with the existing catalog under
+`BRANCH_GROUP`; its instances cannot collide across branches or Sessions.
+
+## Original-row binding
+
+Reuse C4's original `BoundFactory` / `BoundRow` path. For a branch part, the scoped factory obtains
+the existing Session and branch instance keys from `Build`. Its declared dependencies are the
+original foreign row's dependencies plus branch Timeline, Dispatcher, TimelineIdentity and
+BranchLifecycle, and Session TreeCommands. No native part depends on the foreign row.
+
+After applying the original row, register its foreign cleanup immediately and wait for its
+`branchPart:<part>` projection through the existing service-change path. Invoke
+`bind(binding)` once and await its null result before that row finishes loading. Failure follows
+ordinary row failure/cleanup; it does not add a Session readiness phase or change Pending rules.
+
+`binding` is a bridge record with the following named fields. Function and Promise references use
+released rutis `Value::Record`, `Value::callback` and `Value::future`; they are not JSON handles.
+The native functions capture this original row's `Ctx`, scoped services and cancellation token.
+Structural `config` still reaches the original `apply` unchanged and is not replaced by binding data.
+
+| Field | Value and owner |
+| --- | --- |
+| `identity` | `{sessionId, branchId}` from this branch's TimelineIdentity. |
+| `dispatcher` | The named operations below, bound to this branch and original row context. |
+| `branch` | A `BranchRef` for this branch: `{id, input}`. The input function uses `TreeCommands::get(id)` and then native `Branch::input`; it does not create a replacement facade. |
+| `treeCommands` | Named operations on this Session's existing TreeCommands. |
+| `timeline` | Read-only named operations on this branch's Timeline for reconstruction. |
+| `activated` | `Promise<boolean>`: existing BranchLifecycle activation, false if closing or original-row cancellation wins before activation. |
+| `closing` | `Promise<void>`: resolves at existing branch closing or original-row cancellation, whichever comes first. |
+
+The original row provides `branchPart:<part>.bind`; it does not inject that service or the fields
+of its own binding. Ordinary declared `ctx.use` dependencies retain the loader's existing behavior.
+These owner-sensitive native functions are passed by reference rather than installed as shared
+`ctx.use` services: shared `HostDispatch::invoke(method, args)` has no caller-row `Ctx` argument,
+whereas native `Dispatcher::subscribe` requires the registering context. Capturing it in the
+existing row factory keeps subscription removal on that row without a registry or another plugin.
+This named-reference form is a C5 contract choice requiring confirmation, not an implemented
+general-purpose native service lookup.
+
+### Operations, data and errors
+
+`Reply<T>` uses the existing named-service envelope: `{ok:true,value:T}` or
+`{ok:false,error:{code,message}}`, as Settings and S2 do. A value may contain bridge references.
+The notation below describes this proposed binding, not methods already exported by the runtime.
+
+| Named operation | Mode | Request / value in `Reply` | Native operation |
+| --- | --- | --- | --- |
+| `dispatcher.subscribe(keys, handler)` | sync | String key array and callback reference; null value. No separate unsubscribe method. | `Dispatcher::subscribe(originalCtx, partName, keys, handler)` |
+| `branch.input(data)` / `BranchRef.input(data)` | sync | Native `InputMessageData`; committed `AgentEvent` value. | Native Branch facade |
+| `treeCommands.get(id)` | sync | Branch id; `BranchRef` value with `id` and input function. | `TreeCommands::get` |
+| `treeCommands.list()` | sync | No arguments; native `TimelineInfo[]`. | `TreeCommands::list` |
+| `treeCommands.branch(parent, at, options, signal?)` | async | Native parent id, cutoff and `BranchOptions`, optional bridge AbortSignal; `BranchRef` value. | `TreeCommands::branch` with existing admission cancellation |
+| `timeline.committed()` | sync | No arguments; native committed sequence. | `Timeline::committed` |
+| `timeline.history({through})` | async | Required cutoff; native `AgentEvent[]`, including the ancestor prefix. | `Timeline::history(Some(through))` |
+| `timeline.local({start, through})` | async | Required inclusive local bounds; native `AgentEvent[]`. | `Timeline::local(start..=through)` |
+
+The event callback returns void or `Promise<void>`; bridge undefined/null represents unit. Await
+the actual callback result before completing native handling. Callback exceptions, transport
+failure and invalid non-unit replies follow the native Dispatcher failure path, not a successful
+`Reply` or a warning. `bind` is async because state reconstruction may read Timeline history; it
+returns null after registration/reconstruction, never after waiting for activation.
+
+Parse request data once at this foreign boundary and call the existing owner directly. Native
+`InputMessageData`, `BranchOptions`, `TimelineInfo` and `AgentEvent` keep their serde field names;
+in particular this does not use S2's raw-block or publication-receipt shapes. Sequences retain
+rutis' integer representation (`number` or `bigint` in TypeScript); do not coerce them through Number.
+
+| Error code | Source |
+| --- | --- |
+| `invalid_params` | Boundary request decoding or a missing/non-function callback; native operation not invoked. |
+| `invalid_input` | Native `AgentError::InvalidInput`, including Dispatcher key validation. |
+| `unknown_branch` | Native `AgentError::UnknownBranch`. |
+| `closed` | Native Closed, or a reference whose original row has ended. |
+| `cancelled` | Native Cancelled. |
+| `reloading` | Native Reloading. |
+| `failed` | Other native failures, with the native diagnostic message. |
+
+Codes classify the returned failure; they do not grant retry or prove that a write/creation did
+not commit. Bridge loss remains an unknown outcome. Setup failure fails the original row through
+its existing loading path. A retained reference cannot act through a successor row: every exported
+native function checks its original row cancellation, and cleanup releases its references.
+
+The async creation call passes original-row and call cancellation to native admission using the
+existing bridge cancellation and CancellationToken path. TimelineTree retains its own cancellation
+and terminal-fact decisions. There is no retry, branch deletion or fabricated completion on loss.
+No arbitrary Timeline append, dynamic event declaration, before callback or extra facade method
+is exported by this C5 subset.
+
 ## Native contracts to preserve
 
-The table describes native operations, not an already available TypeScript API. Wire names,
-declarations and binding placement remain explicit decisions below. Native serde types remain the
-single definitions of data; the language boundary does not introduce renamed fields or defaults.
+The table describes the existing native operations behind the proposed binding. Native serde types
+remain the single definitions of data; the language boundary adds no field aliases or defaults.
 
 | Operation | Existing contract |
 | --- | --- |
@@ -76,18 +188,19 @@ hide that outcome with retries, a replacement branch or another readiness phase.
 These are native flow constraints. The opening/activation cycle is a control-flow inference from
 the existing source, not a reproduced C5 runtime failure.
 
-## Decisions required before Ready
+## Confirmation and implementation gates
 
-| Decision | Required result using existing mechanisms |
+| Gate | Required result |
 | --- | --- |
-| Structural row placement | Define how ordinary rows enter the existing branch group, preserve current C4 Session rows and share the existing language runtime. Do not add another assembly tree or per-row process. |
-| Named declarations and native dependency mapping | Define the language-neutral names, method modes, request/reply forms and native error mapping for the C5 subset. Required native dependencies must be known before the original row loads; do not create a self-dependency on a service first published during that row's own apply. |
-| Original-row subscription ownership | Show how a named subscribe call retains the original row's `Ctx` and callback lifetime. `Dispatcher::subscribe` requires that context; the released bridge's shared-service lease is not proof of caller-row cleanup. |
-| Startup, reconstruction and closing | Specify the exact use of existing history, activation, closing, effects and opening receipts, including a row reload while a callback or owned task is active. Do not add a replay queue, lifecycle manager or hot attachment rule. |
-| Branch input and creation calls | Bind the native facade/TreeCommands operations directly, with existing cancellation. State when a branch handle is obtainable and retain committed-versus-published acknowledgement semantics. |
+| Architecture confirmation | Confirm declaration-based branch placement, original-row async bind, named function/Promise references and the operation/error subset above. This document does not make them accepted APIs. |
+| C4 | Complete full #63/#168 implementation review and merge before C5 implementation. |
+| Original-row cleanup | Verify existing effect ordering closes admission, settles accepted callbacks/tasks and removes subscriptions before foreign unload. Do not return success merely because a reference was cancelled. |
+| Startup and recovery | Bind may register subscriptions and reconstruct local state. Background business work starts only after activated=true; closing ends it. During a row reload, its own reconstruction/live-consumption sequence uses a fixed committed cutoff and local cursor, as native owners do. No shared replay queue or lock is introduced. |
+| Acceptance | Implement the confirmed binding and pass the real cross-language flows below. Documentation CI is not this acceptance. |
 
-No wire example is presented as callable until these choices are complete. The native owners remain
-authoritative; an unimplemented Goal, Hook or other plugin design does not supply missing bindings.
+The native owners remain authoritative. Opening receipts retain their existing native contract;
+no new opening receipt protocol is part of this subset. An unimplemented Goal, Hook or other
+plugin design does not supply additional bindings or change the native ordering rules.
 
 ## Verification required for delivery
 
@@ -108,8 +221,14 @@ Extend the nearest public flow tests rather than testing private binding helpers
 
 ## Impact and rule check
 
-Current deliverable: this contract preparation and its documentation index entry. No runtime,
-protocol, dependency, event format, persistence format or generated graph changes.
+Current deliverable: the proposed binding contract and its documentation index entry. No runtime,
+dependency, event format, persistence format or generated graph changes are implemented.
+
+The proposed implementation belongs to the existing App Server language boundary: row classification,
+scoped factory dependencies and reference binding in `session_typescript.rs`, and insertion into the
+existing branch group in `lib.rs`. It reuses App Server's current bridge dependency and does not
+add bridge dependencies or foreign business behavior to the native runtime. Business state and work
+stay in the TypeScript row. Existing native types and methods remain unchanged.
 
 | Rule | Application |
 | --- | --- |
@@ -119,7 +238,7 @@ protocol, dependency, event format, persistence format or generated graph change
 | §4 rule 4 | Native Timeline/Dispatcher semantics remain independent of plugin business behavior. |
 | §4 rule 5 | Existing batches and per-event order are preserved; no bridge batch acknowledgement is invented. |
 | §4 rule 6 | Model context changes only through adopted inputs and tool results. |
-| §4 rule 7 | Use public named bindings of the existing services, not private state or another branch's services. |
+| §4 rule 7 | Proposed named references call existing public services; no private state or another branch's Dispatcher. |
 | §4 rule 8 | Reuse current assembly, Timeline, Dispatcher, facades and rutis. Named exposure is the existing #4/#64 task, not a new core mechanism request. |
 | §4 rule 9 | No event type, notification fact or persistence format is added. |
 | §1 | Business state and tasks belong to the branch part; App Server owns assembly and foreign transport. |
@@ -127,15 +246,15 @@ protocol, dependency, event format, persistence format or generated graph change
 | ADR 002 D2 | No forwarding, subscription aggregation or registration Capability. Bind on the original row. |
 | ADR 002 D3 | Dependencies point to this branch or enclosing scopes; native core does not depend on an optional foreign part. |
 | ADR 002 D4 | Structural placement uses loader rows; business settings do not change assembly. |
-| ADR 002 D5 | Native methods, data, errors and cancellation need language-neutral declarations before implementation. |
+| ADR 002 D5 | The proposed declaration, method modes, native payloads, error data and reference cancellation are language-neutral and require confirmation before implementation. |
 
 ## Requirements raised to mechanism owners
 
 No new mechanism request. #4/#64 already owns exposing existing runtime services to foreign parts.
 Current scoped factories/catalog keys, Dispatcher subscriptions, Timeline reads, native facades,
-bridge references and effects are the mechanisms to evaluate for that binding. The unresolved
-items above are binding decisions within C5; they do not establish a missing core capability or
-authorize a change to native event, publication, dependency-wait or lifecycle semantics.
+bridge references and effects supply the binding mechanisms. The proposal adds only the C5 foreign
+declaration/reference contract. It does not establish a missing core capability or authorize a
+change to native event, publication, dependency-wait or lifecycle semantics.
 
 ## Source references
 
