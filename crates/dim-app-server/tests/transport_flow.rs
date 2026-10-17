@@ -87,6 +87,9 @@ mod shell_input;
 #[path = "transport_flow/deletion.rs"]
 mod deletion;
 
+#[path = "transport_flow/notices.rs"]
+mod notices;
+
 #[path = "transport_flow/fork.rs"]
 mod fork;
 

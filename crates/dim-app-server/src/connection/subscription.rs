@@ -1,5 +1,6 @@
 //! A connection's subscription to one Session: a listener on the Session
-//! broadcast channel, pending approval replay, branch states and the end.
+//! broadcast channel, pending approval replay, branch states, owners' notices
+//! and the end.
 use super::*;
 use crate::{agents::AgentHost, tree_protocol as wire};
 use dim_agent_capabilities::session_broadcast::{SessionBroadcastEvent, session_channel};
@@ -7,7 +8,7 @@ use dim_agent_runtime::{BranchStatus, ModelProgress};
 use dim_agent_types::{AgentEvent, EventKind};
 use futures_util::{StreamExt, future::BoxFuture as Pending, stream::FuturesUnordered};
 use rutis::{Disposer, EventKey, Listener};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::atomic::AtomicBool};
 use tokio::sync::{mpsc, watch};
 
 /// Replacing, detaching or closing ends the subscription and its listener.
@@ -209,6 +210,9 @@ struct Forward {
     connection: Weak<Connection>,
     session_id: String,
     generation: u64,
+    /// `Closed` was seen: the subscription forwards no later notice, so
+    /// `session.closed` stays its last Session notification.
+    ended: AtomicBool,
     watched: Arc<Mutex<HashSet<String>>>,
     signals: mpsc::UnboundedSender<Signal>,
     delivery: Arc<Delivery>,
@@ -221,8 +225,25 @@ impl Listener<SessionBroadcastEvent> for Forward {
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         match record {
             SessionBroadcastEvent::Closed => {
+                self.ended.store(true, Ordering::Relaxed);
                 self.acknowledge(u64::MAX);
                 let _ = self.signals.send(Signal::Closed);
+            }
+            // v3 only: the v1 and v2 notification sets are frozen.
+            SessionBroadcastEvent::Notice(notice) => {
+                if !self.ended.load(Ordering::Relaxed)
+                    && let Some(connection) = self.connection.upgrade()
+                    && connection.protocol_version() >= 3
+                {
+                    connection.notify(
+                        &self.session_id,
+                        self.generation,
+                        Notification::Notice(wire::ForwardedNotice {
+                            session_id: self.session_id.clone(),
+                            notice: notice.clone(),
+                        }),
+                    );
+                }
             }
             SessionBroadcastEvent::Fence { recipient, token } => {
                 if recipient == &self.delivery.recipient {
@@ -412,6 +433,7 @@ impl Connection {
                     connection: Arc::downgrade(self),
                     session_id: session_id.clone(),
                     generation,
+                    ended: AtomicBool::new(false),
                     watched: watched.clone(),
                     signals,
                     delivery: delivery.clone(),

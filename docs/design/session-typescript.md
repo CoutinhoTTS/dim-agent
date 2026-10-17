@@ -340,8 +340,8 @@ flag, generic event service, per-row emitter or deduplication state.
 
 `Fence` and `Closed` stay native. Foreign lifetime ends through closing and row
 effects, with no additional end frame or fabricated `AgentEvent`. C6 retains notice/Rpc ownership:
-its proposed `{source, kind, data}` notice records are not `Event` records and
-are not forwarded to leaf parts here. SessionTitle observes `input/applied`;
+its `{source, kind, data}` `Notice` records ([Session broadcast notices](appserver/session-notices.md))
+are not `Event` records and are not forwarded to leaf parts here. SessionTitle observes `input/applied`;
 its stored title notice reaches clients through C6/Rpc, not this TS binding.
 
 Process-level `settings.changed` and `settings.project_authorized` are outside

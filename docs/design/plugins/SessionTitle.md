@@ -6,15 +6,15 @@ SessionTitle is a Session plugin that gives an interactive leader Session a titl
 
 ## 0. Delivered mechanisms and Ready gates
 
-C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89 and
-Settings #166/#175/#177 are delivered. SessionTitle is not implemented or Ready.
+C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89,
+Settings #166/#175/#177 and C6 notices #85 are delivered. SessionTitle is not implemented or Ready.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
 | Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then its own session.event records. Full broadcast implementation #180 still needs re-review/manual merge; #63/#168 remain open. |
 | History | Use the implemented process sessions.history service, not private TimelineTree reads or proposed C5 bindings. |
 | Configuration | Existing named Settings, row source declarations and change events. Read settings.read({source:"session-title",scope:"user"}) and use its validated/defaulted document directly. A12 proposes source scope/file. |
-| Metadata/notice | S5b #60/#96 owns metadata/setTitle/list fields; C6 #49/#85 owns notices and Rpc forwarding. Both PRs remain empty drafts. A.2 is their proposed contract, not an available service. Confirm name/modes/cancellation/handover/errors before Ready. |
+| Metadata/notice | S5b #60/#96 owns metadata/setTitle/list fields and remains an empty draft; A.2's metadata and setTitle are its proposed contract, not an available service. C6 #49/#85 delivers the generic notice: after its commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` ([Session broadcast notices](../appserver/session-notices.md)). Confirm name/modes/cancellation/handover/errors with S5b before Ready. |
 | Auxiliary request | Provider implements AuxiliaryModelHost. S4's auxiliaryModel.complete neutral contract is documented, but its named HostDispatch/catalog binding is absent. Bind the existing owner operation through ordinary C4 injection; credentials stay with Provider. |
 | Confirmation | Confirm A1–A12 and owner bindings before implementation. Documentation CI is not runtime acceptance. |
 
@@ -227,9 +227,9 @@ The first input's text is sent to the model in the `session-title` source; unset
 | --- | --- |
 | Blocked by | Principles §4 rules 9 and 4: process-level state such as the SessionStore title must not enter the Timeline, yet clients must see title changes live; the Session broadcast carries only `Event`, `Fence` and `Closed` records ([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)). |
 | Existing mechanisms considered | A `session/titled` Timeline event (puts process state on the Timeline; rejected in overview §7); client polling of `session.list` (no live update); a title-specific channel (a business-specific port, rule 8). |
-| Generic capability | A notice record `{source, kind, data}` on a Session's broadcast channel, emitted by the owner of process-level state about that Session after a committed change; no business meaning. The title notice is this record with `source: "SessionStore"`, `kind: "title"`, `data: {sessionId, title, titleSource, revision}`; that record is the wire form. |
+| Generic capability | A notice record `{source, kind, data}` on a Session's broadcast channel, emitted by the owner of process-level state about that Session after a committed change; no business meaning. The title notice is this record with `source: "SessionStore"`, `kind: "title"`, `data: {sessionId, title, titleSource, revision}`. Rpc forwards that record unchanged as `session.notice`, adding the channel's `sessionId` ([C6 D4](../appserver/session-notices.md#10-decisions)). |
 | Effect on sequence, batch, interrupt, reload | No sequence number and no batch; not replayed: a client that resubscribes reads current state through the owner's query (`session.list`); interrupts do not apply; a reload of the emitter only stops notices. |
-| Owner and issue | Runtime C6 [#49](https://github.com/arcships/dim/issues/49), draft [#85](https://github.com/arcships/dim/pull/85); not implemented. Rpc forwarding of the record to subscribed clients unchanged is an App Server entry change listed with the SessionStore supplement in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
+| Owner and issue | Runtime C6 [#49](https://github.com/arcships/dim/issues/49), implemented in [#85](https://github.com/arcships/dim/pull/85): the record, `session_broadcast::notify` and Rpc's `session.notice` ([Session broadcast notices](../appserver/session-notices.md)). SessionStore's emission of the title notice remains its supplement in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 
 #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
 
@@ -343,7 +343,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | Question | Description |
 | --- | --- |
 | Session list fields | `title`/`titleSource` in `SessionSummary` are an Rpc protocol change to record in the overview |
-| Named bindings | C4 observation, S2 history and Settings are delivered paths. S5b metadata/C6 notices and S4's named auxiliary binding remain before Ready; their owners keep their contracts. No new Core request |
+| Named bindings | C4 observation, S2 history, Settings and C6 notices are delivered paths. S5b metadata and S4's named auxiliary binding remain before Ready; their owners keep their contracts. No new Core request |
 
 ## Appendix G. Rust binding
 
