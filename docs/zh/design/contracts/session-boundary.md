@@ -1,8 +1,8 @@
 # 方法与工具贡献
 
-状态：草案。总体设计：[总览 §3 集成](../overview.md#3-基于现有机制的集成)、[附录 B Rpc 与 ToolRegistry](../overview.md#附录-b-现有插件的补充)；规则：[ADR 002](../../adr/002-plugin-scope.md) D2、D3、D5。阶段：P0。语言：语言中立合同；Rust 绑定见[附录 F](#附录-f-rust-绑定)。提议中的 [C4 绑定](../../../design/session-typescript.md) 定义非 Rust 装配和语言边界子集，目前尚未实现。
+状态：草案。总体设计：[总览 §3 集成](../overview.md#3-基于现有机制的集成)、[附录 B Rpc 与 ToolRegistry](../overview.md#附录-b-现有插件的补充)；规则：[ADR 002](../../adr/002-plugin-scope.md) D2、D3、D5。阶段：P0。语言：语言中立合同；Rust 绑定见[附录 F](#附录-f-rust-绑定)。[C4 绑定](../../../design/session-typescript.md) 已实现非 Rust Session 工具和方法子集；原生广播仍待定。
 
-本合同以 ADR 002 D5 的语言中立形式定义三个具名服务。每个服务由服务名、作用域和实例 key 标识；其方法接收并返回可序列化数据；错误是数据；取消是一个协议动作。任何语言的插件都可以通过在其 `provides`（loader 行）中声明来提供它们，消费方按名称和作用域收集。它们建立在运行时已有的机制之上：按作用域收集的具名服务，以及 Rpc 现有的经 Session 分发（与如今的 `approval.respond` 相同）。实现状态：`managementMethods`（#14）、`sessionMethods`（C1）与 `toolContribution` 接入规则（C3）已通过附录 F 的 Rust 绑定实现；`callChannel` 只实现了逐次调用的 `progress`（C1）。`callChannel` 的其余部分以及基于 `provides` 的注册（#4）都未实现，`ConnectionEntry {name, deviceId}`、按 `deviceId` 路由和导出的 rutis 链接也未实现（提议在 P3 随 RemoteGateway 实现）。
+本合同以 ADR 002 D5 的语言中立形式定义三个具名服务。每个服务由服务名、作用域和实例 key 标识；其方法接收并返回可序列化数据；错误是数据；取消是一个协议动作。任何语言的插件都可以通过在其 `provides`（loader 行）中声明来提供它们，消费方按名称和作用域收集。它们建立在运行时已有的机制之上：按作用域收集的具名服务，以及 Rpc 现有的经 Session 分发（与如今的 `approval.respond` 相同）。实现状态：`managementMethods`（#14）、`sessionMethods`（C1）与 `toolContribution` 接入规则（C3）已通过附录 F 的 Rust 绑定实现；`callChannel` 只实现了逐次调用的 `progress`（C1）。C4 嵌入入口还从 `provides` 推导 Session 工具和命名空间，并绑定中立 DTO 子集。`callChannel` 的其余部分及通用插件安装尚未实现，`ConnectionEntry {name, deviceId}`、按 `deviceId` 路由和导出的 rutis 链接也未实现（提议在 P3 随 RemoteGateway 实现）。
 
 | 服务 | 作用域 | Key | 提供方 | 收集方 |
 | --- | --- | --- | --- | --- |
@@ -183,7 +183,7 @@ sequenceDiagram
 
 已撤回：rutis 是外部依赖，不向它提需求。Rpc 用 rutis 现有的能力（按 key 读取、已配置的 `Owners` 和 `loader.get(row)`，§3.2）分发管理方法；`hello.features` 怎么列出它们，是 Rpc 自己的设计。
 
-非 Rust 插件提供的具名服务依赖 #4，其五项说明见 [Session 访问 §9](session-access.md#9-向机制所有者提出的需求)。
+外来 Session 服务的已实现子集见 [C4](../../../design/session-typescript.md)；通用插件安装仍由其所有者推进。
 
 ## 附录 A. 接口细节
 
@@ -191,7 +191,7 @@ sequenceDiagram
 
 ### A.1 方法贡献
 
-`sessionMethods`（Session，key 为命名空间）与 `managementMethods`（进程，key 为命名空间）具有相同的两个方法。这一语言中立形式尚未实现；两者已实现的 Rust 绑定见附录 F。
+`sessionMethods`（Session，key 为命名空间）与 `managementMethods`（进程，key 为命名空间）具有相同的两个方法。C4 已实现附录 F 所述的 Session 子集；管理方法保留原生绑定。
 
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
@@ -217,7 +217,7 @@ sequenceDiagram
 { "code": -32000, "appError": "string", "message": "string" }
 ```
 
-目前已实现（附录 F）：`MethodDecl.name`、`MethodDecl.mutating`，以及作为仅 Rust 字段的 `interruption` 与 `progress`。`notifications`、`reply`、`callId`、`origin` 和 `handedOff` 未实现。
+目前已实现（附录 F）：`MethodDecl.name`、`MethodDecl.mutating`、`interruption` 与 `progress`；C4 从外来 Session 声明解码这些字段，并提供新的 `callId`。`notifications`、`reply`、`origin` 和 `handedOff` 未实现。
 
 取消与中断：调用由提供方自己回复，不由 Rpc 回复。有两种情况会中断已受理的调用：提供方这一代卸载，以及受理该调用的 Rpc 装载卸载。任一发生时，处理函数的取消令牌都会触发，`drain` 调用也不例外。随后 `report` 调用立即回复 `operation_interrupted`（操作可能已经提交），之后再结算；`drain` 调用回复自己的结果。提供方的卸载等待它受理的每个调用，包括 `report` 调用。调用方断开不会取消任何东西。
 
@@ -421,7 +421,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 
 ## 附录 F. Rust 绑定
 
-上述语言中立服务映射到 Rust 如下。`toolContribution` 绑定及其首次读取时的接入规则已实现（C3）。`managementMethods`（#14）与 `sessionMethods`（C1）的绑定已实现，它们是一个子集，尚未满足 ADR 002 D5：语言中立的 `describe`/`call` 形式、`MethodCall`/`MethodReply` 以及 `progress` 之外的 `callChannel` 都未实现，也只有 Rust 插件能提供它们。#4 落地后，非 Rust 插件将通过 rutis-bridge（`TypeKey::named`、配合 `dyn HostDispatch` 的 `host_key(name)`）按名称提供服务。
+上述服务映射到下列既有原生所有者。C3 保留首次读取时的工具接入规则。[C4 绑定](../../../design/session-typescript.md) 在 `host_key_in("toolContribution:<tool>", session_instance)` 和 `host_key_in("sessionMethods:<namespace>", session_instance)` 接受 Session 的 `dyn HostDispatch` 服务。ToolRegistry 只解码一次声明，并保留该代处理器。原 loader 行将中立方法 DTO 绑定到 C1 的受理、进度、Report/Drain，先结束已受理调用再清理外来行。宿主从该行的 `RowSchema.provides` 推导名称，不向 Session facade 增加任意服务查找。管理方法（#14）保留原生绑定。连接通知、交接、origin 和原生 Session 广播不在已实现的 C4 子集内。
 
 | 语言中立服务 | Rust 类型与 key | Rust 装配中的注册 | 收集 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -443,10 +443,10 @@ pub enum Interruption { Report, Drain }
 pub struct MethodDecl {
     pub name: String,
     pub mutating: bool,
-    #[serde(skip)]
-    pub interruption: Interruption, // 仅 Rust；不序列化
-    #[serde(skip)]
-    pub progress: bool,             // 仅 Rust；不序列化
+    #[serde(skip_serializing)]
+    pub interruption: Interruption, // 外来声明必填
+    #[serde(skip_serializing)]
+    pub progress: bool,             // 外来声明必填
 }
 impl MethodProvider { // 一代提供方：声明、处理函数、已受理的调用
     pub fn new(ctx: &Ctx, namespace: &str, declarations: Vec<MethodDecl>, handler: Handler)
@@ -469,6 +469,6 @@ impl ManagementMethods { // Deref<Target = MethodProvider>
 
 `Progress` 按调用绑定 A.2 的 `progress`，而不是通过 `callChannel` 进程服务：Rpc 给每个已受理调用一个 sink，把 `management.progress {id, method, data}` 写到发起调用的连接；受理逻辑只在方法声明了 `progress` 时把它交给处理函数，并在交出回复之前关闭它。sink 在连接上按进度自己的额度排队，所以进度不会占用回复和持久通知的空间。管理方法走同一路径；目前没有管理方法声明 `progress`。
 
-未实现：语言中立的 `describe`/`call` 绑定（接收 `MethodCall`、返回 `MethodReply` 或 `MethodError` 的提供方）、`callChannel` 的连接通知与最终回复交接，以及声明字段 `notifications` 和 `reply`。它们的结构见 A.1 与 A.2；Rust 名称在实现时确定。
+C4 的 Session `describe`/`call` 绑定接受上列必填声明字段、`{callId, method, params}`、取消 Promise 及逐次调用的进度回调；解码 `{kind:"value", value}` 或拥有自身字符串的 `{code, appError, message}` 错误。不支持的声明/回复字段及损坏数据在此边界失败。尚未实现：对应的外来管理方法绑定、`callChannel` 的连接通知/最终回复交接、`origin`、`notifications` 与 `reply` 声明字段。
 
-`ToolContribution` 与 `ToolHandler` 是 `dim-agent-capabilities/src/tool_registry.rs` 中的现有类型；#4 落地后，生成的绑定把来自其他语言的具名工具服务包装为 `ToolHandler`。
+`ToolContribution` 与 `ToolHandler` 保留原生类型。C4 在既有首次读取位置解码外来同步声明，并将其异步 execute 服务包装为 `ToolHandler`。每次执行派生自己的子取消令牌，单个工具正常完成不会取消同批其他工具。

@@ -459,7 +459,7 @@ async fn put(
         .unwrap()
 }
 /// `(JSON-RPC code, appError)` of a failed put.
-fn rejected(reply: Result<Value, RpcError>) -> (i32, &'static str) {
+fn rejected(reply: Result<Value, RpcError>) -> (i32, String) {
     let error = reply.expect_err("the put was rejected");
     (error.code, error.data.unwrap().app_error)
 }
@@ -476,7 +476,7 @@ async fn an_unload_during_a_put_answers_service_reloading_and_stores_nothing() {
     unloading.cancel();
     assert_eq!(
         rejected(put(&methods, &sid, unloading).await),
-        (-32000, "service_reloading")
+        (-32000, "service_reloading".into())
     );
     assert_eq!(home.owned(&sid), 0);
     assert_eq!(home.entries(), Vec::<String>::new());
@@ -501,7 +501,7 @@ async fn a_session_record_gone_before_the_commit_answers_session_closed() {
         .unwrap();
     assert_eq!(
         rejected(put(&methods, &sid, CancellationToken::new()).await),
-        (-32000, "session_closed")
+        (-32000, "session_closed".into())
     );
     assert_eq!(home.owned(&sid), 0);
     assert_eq!(home.entries(), Vec::<String>::new());
@@ -519,7 +519,7 @@ async fn an_inactive_node_storage_answers_node_unavailable() {
     let (sid, methods) = contract.session().await;
     assert_eq!(
         rejected(put(&methods, &sid, CancellationToken::new()).await),
-        (-32000, "node_unavailable")
+        (-32000, "node_unavailable".into())
     );
     assert_eq!(home.owned(&sid), 0);
     assert!(!home.files().exists());
