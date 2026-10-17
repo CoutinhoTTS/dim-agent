@@ -44,6 +44,20 @@ export interface Credentials {
   resolve(request: { owner: string; reference: string }): Promise<CredentialsResult>;
 }
 
+export type TitleSource = 'auto' | 'manual';
+export interface Title { text: string; source: TitleSource }
+/** `revision` counts committed title writes; 0 means never written. */
+export interface SessionMetadataSnapshot { revision: number; title: Title | null }
+export type SessionMetadataResult<T> = { ok: true; value: T } |
+  { ok: false; error: { code: 'conflict' | 'not_found' | 'storage'; message: string } };
+/** Process service `sessionMetadata`, provided by SessionStore. `setTitle` is handed over
+ * when the host receives it: a lost reply neither cancels nor undoes it, so read again. */
+export interface SessionMetadata {
+  read(request: { sessionId: string }): Promise<SessionMetadataResult<SessionMetadataSnapshot>>;
+  setTitle(request: { sessionId: string; expectedRevision: number; title: Title | null }):
+    Promise<SessionMetadataResult<{ revision: number }>>;
+}
+
 export interface ModelId { providerId: string; modelId: string }
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
 export interface PermissionPolicy {

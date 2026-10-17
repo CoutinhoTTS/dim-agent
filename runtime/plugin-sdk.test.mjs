@@ -31,10 +31,11 @@ test('packed plugin service types compile the author guide and enforce the publi
   });
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Credentials, CredentialsResult, Sessions, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Credentials, CredentialsResult, Sessions, SessionMetadata, SessionMetadataResult, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const credentials: Credentials;
 declare const sessions: Sessions;
+declare const metadata: SessionMetadata;
 declare const files: FileScope;
 declare const tool: ToolContribution;
 declare const methods: SessionMethodsContribution;
@@ -60,6 +61,15 @@ void sessions.withdraw({ ...at, inputId: 'input' });
 void sessions.stop(at);
 void sessions.idle(at);
 void sessions.delete({ sessionId: at.sessionId });
+void metadata.read({ sessionId: at.sessionId });
+const titled: Promise<SessionMetadataResult<{ revision: number }>> = metadata.setTitle({
+  sessionId: at.sessionId, expectedRevision: 0, title: { text: 'Notebook', source: 'manual' } });
+void titled;
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1, title: null });
+// @ts-expect-error an omitted title is not a clear.
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1 });
+// @ts-expect-error a title's source is auto or manual.
+void metadata.setTitle({ sessionId: at.sessionId, expectedRevision: 1, title: { text: 'x', source: 'user' } });
 const quiesced: null = files.quiesce();
 const closed: Promise<null> = files.close();
 const transaction: Promise<FileResult<FileResult<string | null>>> = files.withLock('notebook/state', file => file.read());
