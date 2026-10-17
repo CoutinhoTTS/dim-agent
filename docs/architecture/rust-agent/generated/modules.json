@@ -11660,6 +11660,13 @@
     },
     {
       "from": "dim_app_server::connection",
+      "to": "dim_app_server::storage::metadata",
+      "references": [
+        "path crate::storage::TitleFields::default"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection",
       "to": "dim_app_server::tree_protocol",
       "references": [
         "path crate::tree_protocol::BarrierResult"
@@ -13521,6 +13528,13 @@
     },
     {
       "from": "dim_app_server::protocol",
+      "to": "dim_app_server::storage::metadata",
+      "references": [
+        "path crate::storage::TitleFields"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
       "to": "dim_app_server::tree_protocol",
       "references": [
         "path crate::tree_protocol::ApprovalCancelled",
@@ -15132,6 +15146,7 @@
         "path Titles",
         "path Titles::new",
         "path metadata::Dispatch",
+        "path metadata::decode",
         "use super::metadata",
         "use super::metadata::Titles"
       ]
