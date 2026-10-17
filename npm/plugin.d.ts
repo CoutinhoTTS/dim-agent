@@ -21,6 +21,28 @@ export interface PluginFiles {
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export interface JsonObject { [key: string]: JsonValue }
 
+/** Project roots are process-local numbers, not durable identities. */
+export type SettingsScope = 'user' | { project: number };
+export interface SettingsSnapshot { revision: string; document: JsonObject }
+export type SettingsErrorCode = 'unknown_source' | 'invalid_scope' | 'invalid_document' |
+  'user_only_field' | 'conflict' | 'unsynced' | 'failed' | 'closed' | 'cancelled';
+export type SettingsResult<T> = { ok: true; value: T } |
+  { ok: false; error: { code: SettingsErrorCode; message: string } };
+
+/** Process service `settings`; only host-declared sources are available. */
+export interface Settings {
+  read(request: { source: string; scope: SettingsScope }): Promise<SettingsResult<SettingsSnapshot>>;
+  update(request: { source: string; scope: SettingsScope; expectedRevision: string; document: JsonObject }): Promise<SettingsResult<SettingsSnapshot>>;
+  projects(request: Record<string, never>): SettingsResult<{ projects: { root: number; cwd: string }[] }>;
+}
+
+export type CredentialsResult = { ok: true; value: { value: string } } |
+  { ok: false; error: { code: 'not_found' | 'failed' | 'cancelled'; message: string } };
+/** Process service `credentials`; requires an explicitly supplied secret store. */
+export interface Credentials {
+  resolve(request: { owner: string; reference: string }): Promise<CredentialsResult>;
+}
+
 export interface ModelId { providerId: string; modelId: string }
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
 export interface PermissionPolicy {

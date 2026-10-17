@@ -31,12 +31,27 @@ test('packed plugin service types compile the author guide and enforce the publi
   });
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Sessions, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Credentials, CredentialsResult, Sessions, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution } from 'dimcode/plugin';
+declare const settings: Settings;
+declare const credentials: Credentials;
 declare const sessions: Sessions;
 declare const files: FileScope;
 declare const tool: ToolContribution;
 declare const methods: SessionMethodsContribution;
 const at = { sessionId: 'session', branchId: 'main' };
+void settings.read({ source: 'web', scope: 'user' });
+void settings.update({ source: 'web', scope: { project: 1 }, expectedRevision: 'opaque', document: { maxResults: 10 } });
+const projects: SettingsResult<{ projects: { root: number; cwd: string }[] }> = settings.projects({});
+const secret: Promise<CredentialsResult> = credentials.resolve({ owner: 'web', reference: 'opaque' });
+void projects; void secret;
+// @ts-expect-error the project scope contains the process-local root number.
+void settings.read({ source: 'web', scope: { project: '/workspace' } });
+// @ts-expect-error CAS requires the revision the owner read.
+void settings.update({ source: 'web', scope: 'user', document: {} });
+// @ts-expect-error Settings documents are JSON objects.
+void settings.update({ source: 'web', scope: 'user', expectedRevision: 'opaque', document: [] });
+// @ts-expect-error credentials require an owner and an opaque reference.
+void credentials.resolve({ secretRef: 'opaque' });
 void sessions.launch({ cwd: '/workspace', policy: { preset: 'read-only' } });
 void sessions.input({ ...at, submissionId: 'notebook:unique', mode: 'queue', rawBlocks: [{ text: 'notebook' }], content: [] });
 void sessions.lookup({ ...at, submissionId: 'notebook:unique' });

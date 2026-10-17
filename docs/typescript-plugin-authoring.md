@@ -15,7 +15,8 @@ This does not disable checking a plugin's calls against the service interfaces.
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
-| Read/update business configuration | Settings business sources | Rust sources exist; S8b's named TypeScript contract is not implemented on main. |
+| Read/update business configuration | `settings`, process | Named owner service implemented; sources must be registered by the embedding host. Manifest loading and TypeScript event delivery remain S8b work. |
+| Resolve a credential reference | `credentials`, process | Host dispatch implemented; no product plugin provides a secret store. Inject only when the embedding host supplies one. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
 | Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is tracked by #168; branch bindings remain C5 work. |
 
@@ -97,6 +98,54 @@ Native storage locking and durability do not make remote side effects atomic.
 After an uncertain external outcome, use that system's reconciliation contract
 before retrying. Full semantics and fixed storage error codes are in
 [trusted plugin storage](../crates/dim-app-server/README.md#trusted-plugin-storage).
+
+## Business configuration and credentials
+
+Declare `inject: ['settings']` and obtain `ctx.use<Settings>('settings')`.
+Settings owns business documents; loader rows hold structural configuration.
+The embedding host must register each source through `ServerConfig.settings_sources`
+or `SettingsPlugin::declare`. Reading package manifest declarations is not
+implemented. Rust sources such as `mcp` are not served by this named API.
+
+`read` and `update` are asynchronous and return `SettingsResult<SettingsSnapshot>`.
+`projects({})` is synchronous and returns the same envelope around
+`{projects: [{root, cwd}]}`. Scope is `'user'` or `{project: root}`; root numbers
+belong to this process and must not be persisted as project identities.
+
+This request example assumes the host has registered the
+[Web source declaration](design/appserver/settings-service.md#31-source-declaration):
+
+```ts
+import type { Settings } from 'dimcode/plugin';
+
+declare const settings: Settings;
+const current = await settings.read({ source: 'web', scope: 'user' });
+if (!current.ok) throw new Error(current.error.code);
+const updated = await settings.update({
+  source: 'web', scope: 'user', expectedRevision: current.value.revision,
+  document: { ...current.value.document, maxResults: 10 },
+});
+if (!updated.ok) throw new Error(updated.error.code);
+```
+
+An update compares the opaque revision and validates the complete document after
+defaults. Owner writes cannot change user-only fields; local client
+`settings.update` is the separate path allowed to change them. `conflict` requires
+reading the current snapshot before deciding what to write. `unsynced` means the
+write is already installed and announced; read before retrying. Dropping a call
+cancels its wait, but does not undo a committed write. Native Settings events are
+emitted after commit; their TypeScript delivery is not yet bound. Read at use time
+until that binding lands; no subscription API or polling loop is added here.
+
+When the embedding host supplies a secret store, declare `credentials` as a
+dependency and use `ctx.use<Credentials>('credentials').resolve({owner, reference})`.
+`owner` is the package id (`provider` for Provider); `reference` is the opaque
+nonempty string from a `*Ref` field. Check `CredentialsResult`: success is
+`{ok: true, value: {value: string}}`; failure has `code` and `message`, without
+`retryable`. Resolve per use and keep values out of Settings, tool results,
+terminal replies, history and diagnostics. No product store is provided by Dim;
+these types do not make one available. See the
+[Settings service contract](design/appserver/settings-service.md#4-interfaces).
 
 ## Driving Sessions
 
