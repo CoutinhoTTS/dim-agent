@@ -40,8 +40,14 @@ fails explicitly. Environment filtering/tree termination are execution mechanics
 not an OS sandbox or permission policy.
 
 The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exercises
-Seatbelt and Landlock wrappers through these existing process and PTY APIs. It
-does not install product isolation; the host-local policy remains open.
+Seatbelt, Landlock and bubblewrap wrappers through these existing process and PTY APIs. It
+does not install product isolation. The proposed host-local policy, consumer
+integration and platform acceptance are in the [F5 product design](../../../design/host-platform-isolation.md).
+The proposed policy is configurable and enabled by default for model exec/background work and
+persistent shells on macOS/Linux. A missing file uses system-read/workspace-write defaults;
+local configuration can change roots, network/environment and disable isolation. User ShellInput
+commands remain ordinary spawn. BackgroundExec retains its existing live process/tree; no
+namespace PID registry is introduced. Unsupported Windows preserves ordinary execution.
 
 ## Command construction
 
