@@ -441,7 +441,7 @@ async fn enablement_changes_the_list_and_loading() {
             &env.root,
             &settings_changes(SOURCE),
             std::sync::Arc::new(SettingsChanged {
-                source: SOURCE,
+                source: SOURCE.into(),
                 scope: SettingsScope::User,
                 revision,
             }),

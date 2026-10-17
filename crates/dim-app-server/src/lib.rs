@@ -5,6 +5,7 @@ pub mod codex_oauth;
 pub mod collaboration;
 mod connection;
 mod control;
+pub mod credentials;
 pub mod grok_oauth;
 mod managed_oauth;
 pub mod managed_provider;
@@ -18,6 +19,7 @@ pub mod protocol;
 pub mod provider;
 pub mod session_typescript;
 pub mod settings;
+pub mod settings_methods;
 mod skills_management;
 pub mod storage;
 mod trace;
@@ -59,6 +61,9 @@ pub struct ServerConfig {
     pub session_execution: bool,
     pub model_catalog: Option<Arc<dim_agent_aimux::AimuxModels>>,
     pub file_roots: Vec<PathBuf>,
+    /// Settings sources declared by non-Rust owners. Package manifests will
+    /// supply them (settings-service §5.4); until then the embedder does.
+    pub settings_sources: Vec<settings::SourceDeclaration>,
     pub session_defaults: SessionConfig,
     pub hello_timeout: Duration,
     pub write_timeout: Duration,
@@ -80,6 +85,7 @@ impl Default for ServerConfig {
             session_execution: true,
             model_catalog: None,
             file_roots: vec![],
+            settings_sources: vec![],
             session_defaults: SessionConfig::default(),
             hello_timeout: Duration::from_secs(5),
             write_timeout: Duration::from_secs(10),
@@ -462,6 +468,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     service_catalog.register_shared("managedProvider");
     service_catalog.register_shared("pluginFiles");
     service_catalog.register_shared("sessions");
+    service_catalog.register_shared("settings");
+    service_catalog.register_shared("credentials");
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_capability(&mut builtins, move || control.clone())];
@@ -589,8 +597,17 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             settings::SettingsPlugin::native(home_root, vec![])
         } else {
             settings::SettingsPlugin::new(home_root, vec![])
-        };
+        }
+        .reserve::<mcp::config::McpSettings>()
+        .reserve::<mcp::config::McpProjectEnablement>()
+        .reserve::<skills_management::SkillDocument>()
+        .reserve::<permission_rules::PermissionSettings>()
+        .declare(config.settings_sources.clone());
         rows.push(register_capability(&mut builtins, move || settings.clone()));
+        rows.push(owner(
+            "settings",
+            register_capability(&mut builtins, || settings_methods::SettingsMethodsPlugin),
+        ));
     }
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
