@@ -75,6 +75,8 @@ mod session_methods;
 
 #[path = "transport_flow/session_typescript.rs"]
 mod session_typescript;
+#[path = "transport_flow/settings_methods.rs"]
+mod settings_methods;
 
 #[path = "transport_flow/sessions.rs"]
 mod sessions;
