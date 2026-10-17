@@ -317,7 +317,7 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 5. A titled Session is never regenerated; clearing allows regeneration at the next adopted input, still from the first adopted input's text.
 6. Rename of an unloaded Session loads it through Rpc and succeeds.
 7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title.
-8. Reload during generation writes nothing; the next input generates. Three failures stop attempts.
+8. Reload before store handover cancels generation without writing; the next adopted input may trigger. Reload after admission leaves settlement to SessionStore; reread metadata after a lost reply without repeating the write. Three failures stop attempts.
 9. Invalid rename inputs return `invalid_params`.
 10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
 
@@ -336,7 +336,6 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | A9 | Generation waits for adoption (`input/applied`); a deleted input never titles the Session | Maintainer decision | Deleted text could reach the auxiliary model |
 | A10 | "User input" means operator input: in an interactive leader Session it is the input with `user` content, since Collaboration, Goal and ShellInput write raw blocks only (Scheduler and Workflow inputs carry `user` content but run in non-interactive Sessions, which SessionTitle does not title) | Judgment | Source-written inputs could title a Session |
 | A11 | SessionStore announces title changes with a Session broadcast notice; a client that is not subscribed sees the change at its next `session.list` | Principles §4 rule 9 | Clients poll `session.list` |
-
 | A12 | Proposed user-only source file session-title.json, no project merge; confirm before implementation | One process business document, existing S8b row source mechanism | Different source/scope requires explicit confirmation |
 
 ## Appendix F. Open questions

@@ -312,7 +312,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 5. 已有标题的 Session 从不重新生成；清除后在下一条被采用的输入时允许重新生成，仍取第一条被采用的输入的文本。
 6. 对未加载 Session 的重命名经 Rpc 加载它并成功。
 7. 子分支输入与不含 `user` 内容的输入从不触发；只含图片的第一条输入不产生标题。
-8. 生成期间重载不写入任何内容；下一条输入触发生成。三次失败后停止尝试。
+8. 存储交接前重载取消生成且不写入，下一条被采用的输入可触发；接纳后重载由 SessionStore 结算，回复丢失后重读元数据，不重复写入。三次失败后停止尝试。
 9. 无效的重命名输入返回 `invalid_params`。
 10. 在被应用前撤回（`session.input.withdraw`）的第一条输入不产生标题，也不发给辅助模型；下一条被采用的输入用它自己的文本产生标题。
 
@@ -331,7 +331,6 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | A9 | 生成等待输入被采用（`input/applied`）；被删除的输入从不产生标题 | 维护者决定 | 被删除的文本可能发给辅助模型 |
 | A10 | “用户输入”指操作者输入：在交互式 leader Session 中，即带 `user` 内容的输入，因为 Collaboration、Goal 和 ShellInput 只写 raw 块（Scheduler 与 Workflow 的输入带 `user` 内容，但运行在非交互 Session 中，SessionTitle 不为其命名） | 判断 | 来源写入的输入可能为 Session 命名 |
 | A11 | SessionStore 用 Session 广播通知宣布标题变更；未订阅的客户端在下一次 `session.list` 时看到变更 | 原则 §4 第 9 条 | 客户端轮询 `session.list` |
-
 | A12 | 提议仅用户作用域文件 session-title.json，不合并项目来源；实施前确认 | 一份进程业务文档，既有 S8b 原行来源机制 | 不同来源/作用域须明确确认 |
 
 ## 附录 F. 待对齐问题
