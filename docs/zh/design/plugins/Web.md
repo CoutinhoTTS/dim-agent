@@ -230,7 +230,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
 }
 ```
 
-插件声明 `inject: ["settings", "credentials"]`，apply 只登记工具和资源清理；`declaration()` 同步返回，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:{user:true}})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；只在需要 secretRef 时调用 `credentials.resolve({owner:"web", reference})`。不重复校验或填充已交付的文档。
+插件声明 `inject: ["settings", "credentials"]`，apply 只登记工具和资源清理；`declaration()` 同步返回，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；只在需要 secretRef 时调用 `credentials.resolve({owner:"web", reference})`。不重复校验或填充已交付的文档。
 
 本方案先使用 `web.json` 用户来源，不声明 projectFile，不发明用户/项目合并规则（A16，待设计评审确认）。私有主机例外由客户端写入；Web 没有写配置工具。包的安装与 loader 可编辑意图保持 PluginManager 的职责。
 

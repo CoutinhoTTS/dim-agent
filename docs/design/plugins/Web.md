@@ -230,7 +230,7 @@ The package ships this declaration as one JSON file: the module imports its `pro
 }
 ```
 
-The plugin declares `inject: ["settings", "credentials"]`; apply registers tools and cleanup only. Synchronous `declaration()` performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:{user:true}})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and uses `credentials.resolve({owner:"web", reference})` only when a secretRef is needed. The delivered document is neither revalidated nor filled by Web.
+The plugin declares `inject: ["settings", "credentials"]`; apply registers tools and cleanup only. Synchronous `declaration()` performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:"user"})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and uses `credentials.resolve({owner:"web", reference})` only when a secretRef is needed. The delivered document is neither revalidated nor filled by Web.
 
 This proposal starts with the `web.json` user source, declares no projectFile and invents no user/project merge rule (A16, subject to design review). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
 
