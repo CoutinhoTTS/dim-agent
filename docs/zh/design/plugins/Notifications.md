@@ -40,7 +40,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `Notifications` | Session（仅启用时安装） | 其所在 Session 的 Session 广播、TimelineTree、`SessionConfig`；进程服务 Settings 业务来源与凭据解析器、SessionStore 标题元数据；监听（不依赖）Scheduler 的 `scheduled_run_outcomes` 事件 | `toolContribution` key `notify`（风险 `outbound_message`）和 `sessionMethods` key `notifications`（`notifications.test`），在其 `provides` 中声明；触发名 `turn.completed`、`turn.failed`、`approval.pending`、`question.pending`、`schedule.ended`；业务文档 `notifications` |
 
-Session 广播、TimelineTree 和 `SessionConfig` 是既有的类型化服务；Settings 业务来源、凭据解析器和 SessionStore 标题元数据是补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。把这些服务按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言按名称监听 Scheduler 的事件是对 rutis 的需求，见 [Scheduler §9.1](Scheduler.md#91-跨语言的命名进程事件)。运行结果以事件通知到达，而非依赖（[ADR 002 D2](../../adr/002-plugin-scope.md)）：没有 Scheduler 时 `schedule.ended` 触发不起作用。Settings 或 SessionStore 重载会重载 Notifications，并经 `notify` 重载 ToolRegistry 及其依赖方；这是可接受的（[D3](../../adr/002-plugin-scope.md)）。`notifications` 文档属于业务配置（[D4](../../adr/002-plugin-scope.md)）：使用时读取，从不触发重载。
+Session 广播、TimelineTree 和 `SessionConfig` 是既有的类型化服务；Settings 业务来源、凭据解析器和 SessionStore 标题元数据是补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。把这些服务按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言按名称监听 Scheduler 的事件是对 rutis 的需求，见 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。运行结果以事件通知到达，而非依赖（[ADR 002 D2](../../adr/002-plugin-scope.md)）：没有 Scheduler 时 `schedule.ended` 触发不起作用。Settings 或 SessionStore 重载会重载 Notifications，并经 `notify` 重载 ToolRegistry 及其依赖方；这是可接受的（[D3](../../adr/002-plugin-scope.md)）。`notifications` 文档属于业务配置（[D4](../../adr/002-plugin-scope.md)）：使用时读取，从不触发重载。
 
 ## 2. 数据与状态
 
@@ -197,7 +197,7 @@ sequenceDiagram
 | 原则 §4 第 5 条（读完整个批次） | 每次检查在延迟后读取固定前缀，读到触发事件所在批次的末尾。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 事件触发的消息不向上下文添加内容；`notify` 的结果只以 `step/tool-result` 事实进入。 |
 | 原则 §4 第 7 条（只用公开事件和服务） | 使用 Session 广播、固定前缀读取、Settings、凭据解析器、SessionStore 标题元数据和 Scheduler 公开的事件通知。 |
-| 原则 §4 第 8 条（向机制所有者提需求） | 没有自己对运行时或 rutis 的需求。#4（按名字获取服务）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言的命名进程事件（Scheduler 的事件）写在 [Scheduler §9.1](Scheduler.md#91-跨语言的命名进程事件)。所用的 Settings 和 SessionStore 补充列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
+| 原则 §4 第 8 条（向机制所有者提需求） | 没有自己对运行时或 rutis 的需求。#4（按名字获取服务）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言的命名进程事件（Scheduler 的事件）写在 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。所用的 Settings 和 SessionStore 补充列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Notifications 不写事件；投递记录只是诊断。 |
 | 原则 §1（Capability 与 App Server 边界） | Notifications 是放在自己插件包中的 Session Capability；`notifications.test` 是 Session 方法，不是管理方法。 |
 | ADR 002 D1（作用域跟随状态） | Session 作用域：触发属于 Session；未加载 Session 的运行结果通知丢失，这是可接受的（A16）。 |
@@ -208,7 +208,7 @@ sequenceDiagram
 
 ## 9. 向机制所有者提出的需求
 
-没有自己的需求。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；监听 `scheduled_run_outcomes` 需要的跨语言命名进程事件写在 [Scheduler §9.1](Scheduler.md#91-跨语言的命名进程事件)。Settings 业务来源、凭据解析器和 SessionStore 标题元数据是补充，列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。
+没有自己的需求。#4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；监听 `scheduled_run_outcomes` 需要的跨语言命名进程事件写在 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。Settings 业务来源、凭据解析器和 SessionStore 标题元数据是补充，列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。
 
 ## 附录 A. 接口细节
 
@@ -362,7 +362,7 @@ notifications.defaultChannel: string?   // used by `notify` without `channel`
 | --- | --- |
 | 入站操作 | 从 Slack/飞书回答审批或问题不在范围内 |
 | 无 Session 的运行 | 在启动 Session 之前失败的运行不报告（A12） |
-| 按名称获取服务 | TypeScript 实现需要 Session 广播、固定前缀读取、SessionStore 元数据、Settings 按名称暴露（[#4](https://github.com/arcships/dim/issues/4)，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)），以及按名称获取 Scheduler 的事件（[Scheduler §9.1](Scheduler.md#91-跨语言的命名进程事件)） |
+| 按名称获取服务 | TypeScript 实现需要 Session 广播、固定前缀读取、SessionStore 元数据、Settings 按名称暴露（[#4](https://github.com/arcships/dim/issues/4)，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)），以及按名称获取 Scheduler 的事件（[Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)） |
 
 ## 附录 G. Rust 绑定
 
