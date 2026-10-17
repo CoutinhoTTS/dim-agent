@@ -1,8 +1,7 @@
 # TypeScript plugin authoring
 
 Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/rutis`
-to the host's pinned runtime: 0.10.0 on main before the dependency upgrade
-[#173](https://github.com/arcships/dim/pull/173), or 0.11.0 with that upgrade.
+to the host's pinned runtime: main uses 0.11.0; older hosts may still use 0.10.0.
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.
 These declarations add no runtime wrapper or service.
 The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts).
@@ -17,7 +16,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
-| Read/update business configuration | `settings`, process | Named owner service implemented; sources must be registered by the embedding host. Manifest loading and TypeScript event delivery remain S8b work. |
+| Read/update business configuration | `settings`, process | Owner read/write implemented; declare sources in the C4 row's `settings` member. TypeScript event delivery remains S8b work. |
 | Resolve a credential reference | `credentials`, process | Host dispatch implemented; no product plugin provides a secret store. Inject only when the embedding host supplies one. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
 | Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is tracked by #168; branch bindings remain C5 work. |
@@ -106,17 +105,50 @@ before retrying. Full semantics and fixed storage error codes are in
 
 Declare `inject: ['settings']` and obtain `ctx.use<Settings>('settings')`.
 Settings owns business documents; loader rows hold structural configuration.
-The embedding host must register each source through `ServerConfig.settings_sources`
-or `SettingsPlugin::declare`. Reading package manifest declarations is not
-implemented. Rust sources such as `mcp` are not served by this named API.
+Declare each source in the `settings` member of its C4 row, next to `provides`,
+through `ServerConfig.session_typescript.rows`. The package keeps one JSON source
+declaration and hands that same file to the host; the TypeScript module does not
+repeat it. There is no separate package manifest or `ServerConfig.settings_sources`.
+
+For example, this row declares a user-scoped Web source:
+
+```json
+{
+  "id": "web",
+  "name": "/absolute/path/to/web.ts",
+  "provides": {
+    "toolContribution:web_fetch": { "declaration": "sync", "execute": "async" }
+  },
+  "settings": [{
+    "source": "web",
+    "userFile": "web.json",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "maxResults": { "type": "integer", "minimum": 1, "default": 5 }
+      },
+      "additionalProperties": false
+    }
+  }]
+}
+```
+
+Each entry requires `source`, `userFile` and `schema`; optional `projectFile`
+adds project scope and `userOnly` lists protected member JSON Pointers. The row's
+`id` supplies the owner; do not put `owner` in the entry. Unknown fields, malformed
+entries, duplicate source claims and claims on Rust sources fail assembly. Rust
+sources such as `mcp` are not served by this named API. See the
+[source declaration contract](design/appserver/settings-service.md#31-source-declaration)
+and the working [owner fixture](../runtime/fixtures/settings-owner.ts), its
+[provides declaration](../runtime/fixtures/settings-owner.json) and
+[Settings declaration](../runtime/fixtures/settings-owner.settings.json).
 
 `read` and `update` are asynchronous and return `SettingsResult<SettingsSnapshot>`.
 `projects({})` is synchronous and returns the same envelope around
 `{projects: [{root, cwd}]}`. Scope is `'user'` or `{project: root}`; root numbers
 belong to this process and must not be persisted as project identities.
 
-This request example assumes the host has registered the
-[Web source declaration](design/appserver/settings-service.md#31-source-declaration):
+For a row declaring the Web source above:
 
 ```ts
 import type { Settings } from 'dimcode/plugin';
@@ -142,7 +174,8 @@ until that binding lands; no subscription API or polling loop is added here.
 
 When the embedding host supplies a secret store, declare `credentials` as a
 dependency and use `ctx.use<Credentials>('credentials').resolve({owner, reference})`.
-`owner` is the package id (`provider` for Provider); `reference` is the opaque
+For a TypeScript source, `owner` is its declaring row's `id` (`web` above);
+the Rust Provider uses `provider`. `reference` is the opaque
 nonempty string from a `*Ref` field. Check `CredentialsResult`: success is
 `{ok: true, value: {value: string}}`; failure has `code` and `message`, without
 `retryable`. Resolve per use and keep values out of Settings, tool results,
@@ -284,15 +317,18 @@ JavaScript row unloads: `report` replies with interruption, while `drain` preser
 the provider's reply. No business task in this example runs during `apply`.
 
 Native Session broadcast remains [#168](https://github.com/arcships/dim/issues/168)
-work. rutis 0.11 supplies leaf events, but the Dim Session binding in
-[#174](https://github.com/arcships/dim/pull/174) is a proposal awaiting approval and
-implementation. A runtime `ctx.on` API alone does not deliver Dim Session records.
+work. rutis 0.11 supplies leaf events, but the proposed Dim Session binding in
+[#174](https://github.com/arcships/dim/pull/174) is not implemented.
+A runtime `ctx.on` API alone does not deliver Dim Session records.
 The implemented tool/method binding supplies no Session activation method,
 branch Dispatcher access or replacement polling mechanism.
 
 With rutis 0.11, integer values beyond ±(2^53−1) cross into TypeScript as `bigint`,
 including integers nested in model-supplied tool arguments or event data. Ordinary
 Dim sequence and millisecond timestamp values remain within the safe-number range.
+The SDK's `JsonValue` describes JSON-only values and does not model this bridge
+`bigint` case; a declared `JsonValue` is not proof that incoming tool data can be
+JSON-encoded unchanged.
 `JSON.stringify` throws on `bigint`; do not stringify an unchecked argument object
 or coerce every integer to `number`. At the tool's external-input boundary, validate
 against its actual schema and explicitly choose a lossless representation when

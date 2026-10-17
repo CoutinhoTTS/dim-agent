@@ -18,6 +18,7 @@ export interface PluginFiles {
   open(): Promise<FileScope>;
 }
 
+/** JSON-only; rutis 0.11 may deliver bigint in incoming tool data beyond this type. */
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export interface JsonObject { [key: string]: JsonValue }
 
@@ -29,7 +30,7 @@ export type SettingsErrorCode = 'unknown_source' | 'invalid_scope' | 'invalid_do
 export type SettingsResult<T> = { ok: true; value: T } |
   { ok: false; error: { code: SettingsErrorCode; message: string } };
 
-/** Process service `settings`; only host-declared sources are available. */
+/** Process service `settings`; TypeScript sources are declared in their C4 row. */
 export interface Settings {
   read(request: { source: string; scope: SettingsScope }): Promise<SettingsResult<SettingsSnapshot>>;
   update(request: { source: string; scope: SettingsScope; expectedRevision: string; document: JsonObject }): Promise<SettingsResult<SettingsSnapshot>>;
