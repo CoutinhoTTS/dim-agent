@@ -485,6 +485,8 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | 问题 | 说明 |
 | --- | --- |
 | 对 active 的空闲目标 `edit` | `edit` 是 Append（A1），在空闲分支上不开始工作；用户用 resume 重新开始。如果用户需要，可以加一条规则：Goal 消费 `edit` 时开始续跑 |
+| 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个完成声明，由评审分支检查。该设计被接受后再修订本文档 |
+| A11 与 fork 设计 | 已合入的 [fork 设计](../appserver/session-deletion-and-fork.md)以 `branch/resume` 打开 fork 出的 `main` 并复制其事件，而不是像 A11 假设的那样在复制的事实之后写 `branch/start`（[Pursuit §16](Pursuit.md#16-待对齐问题)） |
 
 ## 附录 G. Rust 绑定
 

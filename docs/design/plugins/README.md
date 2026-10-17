@@ -13,7 +13,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 (implemented) |
 | [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |
 | [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:objective` and `goal:status` blocks, continuation | P2 |
-| [Pursuit](Pursuit.md) (deferred, alternative to Goal) | — | `session.pursuit.*` | pursuit facts `pursuit/*`, evaluator branches, continuation | Deferred |
+| [Pursuit](Pursuit.md) (evaluator judge mode of Goal) | — | `judge` on `session.goal.set` | claims judged by evaluator branches, verdict writes | M2 |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2 |
 | [ContextCompaction](ContextCompaction.md) (supplements to Loop and ContextPreparation) | — | `ContextModelHost`, summary `CompactionStrategyHost`, `session.context.*` | `context/compact` command and compaction step in Loop; K-turn cut and usage query in ContextPreparation | P2 |
 | [Hooks](Hooks.md) | — | hook documents, runner, `hooks.catalog` | tool advice, permission requests, prompt holds, post-tool, Stop and Session-start hooks | M2 |
@@ -32,4 +32,4 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | --- | --- |
 | Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
 | Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Hooks, Scheduler, Workflow |
-| Branch Capabilities | Questions, Goal, Hooks; Pursuit (deferred) |
+| Branch Capabilities | Questions, Goal (with Pursuit), Hooks |
