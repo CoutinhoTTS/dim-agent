@@ -198,6 +198,16 @@ impl RunningServer {
     pub fn diagnostics(&self) -> rutis::RuntimeDiagnostics {
         self.root.diagnostics()
     }
+    /// Emits a Session notice from the process root, standing in for an
+    /// owner of process-level state after its commit. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn notify(
+        &self,
+        session_id: &str,
+        notice: dim_agent_capabilities::session_broadcast::SessionNotice,
+    ) {
+        dim_agent_capabilities::session_broadcast::notify(&self.root, session_id, notice);
+    }
     pub async fn join(mut self) -> Result<ShutdownReason> {
         self.task.take().expect("server task").await?
     }

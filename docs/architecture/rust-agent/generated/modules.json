@@ -9881,6 +9881,14 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities::session_broadcast",
+      "references": [
+        "path dim_agent_capabilities::session_broadcast::SessionNotice",
+        "path dim_agent_capabilities::session_broadcast::notify"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_capabilities::workspace_tools",
       "references": [
         "path dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default"
