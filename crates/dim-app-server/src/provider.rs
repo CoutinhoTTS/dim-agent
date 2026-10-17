@@ -1706,12 +1706,9 @@ impl ProviderService {
             let protocol = model
                 .endpoint
                 .ok_or_else(|| failure("Missing model protocol"))?;
-            if protocol == ModelProtocol::Bedrock
-                && (preferences.reasoning_effort.is_some() || preferences.service_tier.is_some())
-            {
-                return Err(failure("Model preferences are not supported by Bedrock"));
-            }
-            let config = preferences.configure(model, protocol).map_err(failure)?;
+            let config = preferences
+                .configure(model, protocol, &model.config)
+                .map_err(failure)?;
             return Ok(ModelSelection {
                 provider_id: id.clone(),
                 model_id: model.id.clone(),
@@ -1733,6 +1730,41 @@ impl ProviderService {
         } else {
             "No available model"
         }))
+    }
+
+    /// Applies supplied preferences to the adopted model without reselecting defaults.
+    pub async fn apply_preferences(
+        self: &Arc<Self>,
+        current: &dim_agent_types::ModelConfiguration,
+        preferences: ModelPreferences,
+        cancel: &CancellationToken,
+    ) -> Result<ModelSelection, HostError> {
+        self.check(cancel)?;
+        let catalog = self
+            .catalog_for(current.provider_id.clone(), cancel)
+            .await?
+            .ok_or_else(|| failure("Provider is unavailable"))?;
+        let model = catalog
+            .selectable(&current.model_id)
+            .ok_or_else(|| failure("Model is unavailable"))?;
+        let protocol = model
+            .endpoint
+            .ok_or_else(|| failure("Missing model protocol"))?;
+        let base = current.config.clone().unwrap_or_default();
+        let config = preferences
+            .configure(model, protocol, &base)
+            .map_err(failure)?;
+        Ok(ModelSelection {
+            provider_id: current.provider_id.clone(),
+            model_id: current.model_id.clone(),
+            capability_snapshot: current.capability_snapshot.clone(),
+            config: if config == base {
+                current.config.clone()
+            } else {
+                Some(config)
+            },
+            metadata: current.metadata.clone(),
+        })
     }
 }
 struct ProductResolver(Arc<ProviderService>);

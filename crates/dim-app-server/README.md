@@ -386,7 +386,7 @@ Public API-key, provider, native subscription and transport flows do not need No
 cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test model_catalog_flow --test transport_flow
 ```
 
-One separately enabled test loads a neutral SDK plugin through the actual rutis Node runtime. It covers normalized catalog selection, HTTP 401 recovery, lease release, secret-free replies/history and a runtime crash followed by an API-key request. It does not require a private account package:
+The separately enabled Node flows load public SDK fixtures through the actual rutis runtime. They cover managed-provider recovery and C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries. They do not require a private account package:
 
 ```sh
 npm ci --prefix runtime --ignore-scripts
@@ -394,10 +394,41 @@ DIM_TEST_NODE="$(command -v node)" \
 DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
 DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs" \
   cargo test --locked -p dim-app-server --test transport_flow \
-  node_managed_provider_recovers_credentials_and_failure_is_local -- --ignored
+  node_ -- --ignored
 ```
 
 The [C4 Session TypeScript spike](../../docs/design/session-typescript-spike.md)
 has a separate executable probe for per-Session loader rows, named service and
 broadcast isolation, cancellation, unload and cross-process call measurements.
 It installs no production capability bridge or Session RPC methods.
+
+## Session TypeScript embedding
+
+`ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
+runtime package and anchor paths, plus ordinary loader rows. Tool names and Session method
+namespaces come from each row's existing `RowSchema.provides` dictionary; use one shared JSON
+file in the host and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md).
+
+The [public embedding example](examples/session_typescript.rs) starts the real server with offline
+mock model/tools, a protected Unix socket and a fresh temporary SQLite/trace home, then calls it
+through JSON-RPC. It removes that home after shutdown and never uses the product home:
+
+```sh
+npm ci --prefix runtime --ignore-scripts
+cargo run --locked -p dim-app-server --example session_typescript -- \
+  "$(command -v node)" "$PWD/runtime/node_modules/@arcships/rutis-runtime"
+```
+
+After process reconciliation, existing startup readiness waits for the configured runtime's
+`RuntimeRows` catalog publication. The SDK refreshes its legal offline placeholder with the
+online declaration before publishing that catalog; the online `provides` must match the host
+snapshot. Each Session row then remains Loading until all its declared tool/method services are
+projected and its C1 methods are bound. Tool declarations are still read only at the first
+ToolRegistry read. Ordinary create/restore flows exercise the immediate first request, including
+a tool-only module without a test-only required dependency.
+
+Rows remain optional: a row genuinely Pending on a missing dependency does not delay native
+Session use; its methods may report `service_reloading` and its tools stay omitted until reload
+if absent at the first registry read. Successful submit/idle replies certify native processing,
+not execution of an omitted tool; the example prints durable history to show the actual result.
+Session broadcast and autonomous background work are outside this implemented binding subset.

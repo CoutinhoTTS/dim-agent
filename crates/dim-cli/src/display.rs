@@ -52,7 +52,13 @@ pub struct Event {
     pub sequence: u64,
     pub content: EventContent,
 }
+#[derive(Deserialize)]
+pub struct Configuration {
+    pub provider_id: String,
+    pub model_id: String,
+}
 pub enum EventContent {
+    Configuration(Configuration),
     Input(InputMessageData),
     TurnEnd(TurnEndData),
     Text(TextData),
@@ -81,6 +87,9 @@ impl<'de> Deserialize<'de> for Event {
             ));
         }
         let content = match (wire.r#type.as_str(), wire.name.as_str()) {
+            ("context", "configured") => EventContent::Configuration(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
             ("input", "message") => EventContent::Input(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
@@ -128,6 +137,8 @@ struct TextPosition {
 }
 
 pub struct Display {
+    pub mcp_auth_required: HashSet<String>,
+    pub model: Option<Configuration>,
     pub json: bool,
     pub cursor: u64,
     pub failed: bool,
@@ -142,6 +153,8 @@ pub struct Display {
 impl Display {
     pub fn new(interactive: bool, json: bool) -> Self {
         Self {
+            mcp_auth_required: HashSet::new(),
+            model: None,
             json,
             cursor: 0,
             failed: false,
@@ -224,6 +237,9 @@ impl Display {
         }
         self.cursor = event.sequence;
         match event.content {
+            EventContent::Configuration(data) => {
+                self.model = Some(data);
+            }
             EventContent::Input(data) if history => {
                 if let Some(user) = data.user {
                     let text = user

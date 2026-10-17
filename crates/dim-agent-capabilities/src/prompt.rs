@@ -21,6 +21,23 @@ use uuid::Uuid;
 type Key = (String, PromptScope);
 type LoadedPrompts = Vec<(PromptSourceTarget, Option<PromptEntry>)>;
 
+fn validate_entry(target: &PromptSourceTarget, entry: &PromptEntry) -> Result<()> {
+    if entry.source != target.source || entry.scope != target.scope {
+        return Err(AgentError::InvalidInput(format!(
+            "prompt source {} returned a different identity",
+            target.source
+        )));
+    }
+    if entry.delivery == PromptDelivery::System
+        && !matches!(entry.scope, PromptScope::Branch { .. })
+    {
+        return Err(AgentError::InvalidInput(
+            "system prompts require branch scope".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct InitialPromptConfiguration(pub Option<ConfigureUpdate>);
 
 /// Rules and state enter the model context as inputs written with the change.
@@ -124,6 +141,7 @@ impl Prompt {
         &self,
         id: String,
         update: ConfigureUpdate,
+        loaded: Option<LoadedPrompts>,
         reply: Option<oneshot::Sender<Result<ConfigureOutcome>>>,
     ) -> Result<()> {
         Self::validate_update(&update)?;
@@ -142,7 +160,7 @@ impl Prompt {
                 update,
                 cancel: self.lifecycle.child_token(),
                 started: false,
-                loaded: None,
+                loaded: loaded.map(Ok),
                 waiting_through: None,
                 reply,
             },
@@ -213,19 +231,7 @@ impl Prompt {
                 Ok(value) => value,
             };
             if let Some(entry) = &value {
-                if entry.source != target.source || entry.scope != target.scope {
-                    return Err(AgentError::InvalidInput(format!(
-                        "prompt source {} returned a different identity",
-                        target.source
-                    )));
-                }
-                if entry.delivery == PromptDelivery::System
-                    && !matches!(entry.scope, PromptScope::Branch { .. })
-                {
-                    return Err(AgentError::InvalidInput(
-                        "system prompts require branch scope".into(),
-                    ));
-                }
+                validate_entry(target, entry)?;
             }
             loaded.push((target.clone(), value));
         }
@@ -239,7 +245,7 @@ impl Prompt {
     }
 
     fn start(self: &Arc<Self>, id: &str) -> Result<()> {
-        let (update, cancel) = {
+        let (update, cancel, loaded) = {
             let mut state = self.state.lock().unwrap();
             let Some(pending) = state.pending.get(id) else {
                 return Ok(());
@@ -278,7 +284,7 @@ impl Prompt {
                     "configure request consumed twice",
                 ));
             }
-            (update, cancel)
+            (update, cancel, pending.loaded.take())
         };
         let owner = self.clone();
         let id = id.to_owned();
@@ -286,6 +292,8 @@ impl Prompt {
             // A started load settles through its own cancellation.
             let result = if cancel.is_cancelled() {
                 Err(AgentError::Cancelled("prompt load".into()))
+            } else if let Some(loaded) = loaded {
+                loaded
             } else {
                 owner.load(&update, cancel.clone()).await
             };
@@ -523,6 +531,47 @@ impl Prompt {
             self.finish(&id, Ok(ConfigureOutcome::Adopted));
         }
     }
+
+    /// Adopts frozen source values and an optional model through the existing
+    /// configure command. Each entry has its target's source and scope.
+    pub async fn configure_loaded(
+        self: Arc<Self>,
+        model: Option<ModelSelection>,
+        sources: Vec<(PromptSourceTarget, Option<PromptEntry>)>,
+    ) -> Result<ConfigureOutcome> {
+        for (target, entry) in &sources {
+            if let Some(entry) = entry {
+                validate_entry(target, entry)?;
+            }
+        }
+        let update = ConfigureUpdate {
+            sources: sources.iter().map(|(target, _)| target.clone()).collect(),
+            model,
+        };
+        self.submit(update, Some(sources)).await
+    }
+
+    async fn submit(
+        &self,
+        update: ConfigureUpdate,
+        loaded: Option<LoadedPrompts>,
+    ) -> Result<ConfigureOutcome> {
+        let id = Uuid::new_v4().to_string();
+        let (send, receive) = oneshot::channel();
+        self.timeline.append_registered(
+            EventKind::PromptConfigureRequest(PromptConfigureControlData { operation_id: id })
+                .into(),
+            |event| {
+                let EventKind::PromptConfigureRequest(data) = &event.kind else {
+                    unreachable!("before preserves event kind")
+                };
+                self.register(data.operation_id.clone(), update, loaded, Some(send))
+            },
+        )?;
+        receive
+            .await
+            .map_err(|_| AgentError::fault("Prompt", "configure operation ended without result"))?
+    }
 }
 
 impl ConfigureControl for Prompt {
@@ -530,23 +579,7 @@ impl ConfigureControl for Prompt {
         self: Arc<Self>,
         update: ConfigureUpdate,
     ) -> BoxFuture<'static, Result<ConfigureOutcome>> {
-        Box::pin(async move {
-            let id = Uuid::new_v4().to_string();
-            let (send, receive) = oneshot::channel();
-            self.timeline.append_registered(
-                EventKind::PromptConfigureRequest(PromptConfigureControlData { operation_id: id })
-                    .into(),
-                |event| {
-                    let EventKind::PromptConfigureRequest(data) = &event.kind else {
-                        unreachable!("before preserves event kind")
-                    };
-                    self.register(data.operation_id.clone(), update, Some(send))
-                },
-            )?;
-            receive.await.map_err(|_| {
-                AgentError::fault("Prompt", "configure operation ended without result")
-            })?
-        })
+        Box::pin(async move { self.submit(update, None).await })
     }
 }
 

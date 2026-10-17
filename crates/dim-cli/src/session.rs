@@ -5,8 +5,11 @@ use crate::{
     display::{self, Display, Event, Progress},
     export,
     input::Input,
+    mcp,
 };
-use dim_agent_types::{ApprovalCallData, ModelId};
+use dim_agent_types::{
+    ApprovalCallData, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +32,11 @@ struct History {
     through: u64,
     next_after: u64,
     done: bool,
+}
+
+#[derive(Deserialize)]
+struct Configured {
+    outcome: String,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +170,11 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value, method: &str) -> Result<
 }
 
 pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
+    // Keep the listener registered while prompts and RPC responses alternate.
+    #[cfg(unix)]
+    let mut interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(windows)]
+    let mut interrupts = tokio::signal::windows::ctrl_c()?;
     let interactive = options.prompt.is_none() && !matches!(options.action, Action::Exec);
     let mut input = if interactive {
         Some(Input::new()?)
@@ -202,18 +215,18 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
         }).await?;
         display.failed = false;
         display.muted = false;
-        let mut code = wait_turn(client, &session_id, None, &mut display, &mut input).await?;
+        let mut code = wait_turn(client, &session_id, None, &mut display, &mut input, &mut interrupts).await?;
         if code != 0 || interactive && input.is_none() {
             return Ok(code);
         }
         if let Some(prompt) = &options.prompt {
-            return wait_turn(client, &session_id, Some(prompt), &mut display, &mut input).await;
+            return wait_turn(client, &session_id, Some(prompt), &mut display, &mut input, &mut interrupts).await;
         }
         loop {
             let reader = input.as_mut().expect("interactive input");
             reader.prompt("\n> ")?;
             let text = tokio::select! {
-                signal = tokio::signal::ctrl_c() => { signal?; println!(); break; }
+                _ = interrupts.recv() => { println!(); break; }
                 line = reader.line() => line?,
             };
             let Some(text) = text else {
@@ -224,6 +237,36 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                 continue;
             }
             match text.split_whitespace().next() {
+                Some("/mcp") => {
+                    // MCP owns interrupts until its command finishes draining.
+                    drop(interrupts);
+                    let result = mcp::command(client, options, reader, &session_id, &text).await;
+                    #[cfg(unix)]
+                    { interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?; }
+                    #[cfg(windows)]
+                    { interrupts = tokio::signal::windows::ctrl_c()?; }
+                    if let Err(error) = result {
+                        display.record(&format!("Error: {}", mcp::error(error)))?;
+                    }
+                    continue;
+                }
+                Some("/effort" | "/reasoning" | "/fast" | "/agent") => {
+                    let result = {
+                        let operation = configure(client, &session_id, &text, &mut display);
+                        tokio::pin!(operation);
+                        tokio::select! {
+                            result = &mut operation => result,
+                            _ = interrupts.recv() => {
+                                println!("\nWaiting for configuration result before accepting more input.");
+                                operation.await
+                            }
+                        }
+                    };
+                    if let Err(error) = result {
+                        display.record(&format!("Error: {error}"))?;
+                    }
+                    continue;
+                }
                 Some("/exit") => {
                     if text.trim() == "/exit" {
                         break;
@@ -248,7 +291,7 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                 _ => {}
             }
             display.failed = false;
-            code = wait_turn(client, &session_id, Some(&text), &mut display, &mut input).await?;
+            code = wait_turn(client, &session_id, Some(&text), &mut display, &mut input, &mut interrupts).await?;
             if input.is_none() {
                 break;
             }
@@ -315,12 +358,176 @@ pub async fn read_history(
     }
 }
 
+async fn configure(
+    client: &mut Client,
+    session_id: &str,
+    text: &str,
+    display: &mut Display,
+) -> Result<()> {
+    let words: Vec<_> = text.split_whitespace().collect();
+    let command = words[0];
+    if words.len() > 2 {
+        return Err(format!("Usage: {command} [VALUE]").into());
+    }
+    let value = words.get(1).copied();
+    if command == "/agent" {
+        if let Some(agent_id) = value {
+            let result: Configured = client
+                .typed(
+                    "session.agent.update",
+                    json!({"sessionId":session_id,"branchId":"main","agentId":agent_id}),
+                )
+                .await?;
+            display.record(&format!(
+                "Agent prompt/model configuration {}; Session tools unchanged.",
+                result.outcome
+            ))?;
+        } else {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Agent {
+                agent_id: String,
+                name: String,
+                description: String,
+            }
+            let agents: Vec<Agent> = client.typed("agent.list", json!({})).await?;
+            display.record("ID\tNAME\tDESCRIPTION")?;
+            for agent in agents {
+                display.record(&format!(
+                    "{}\t{}\t{}",
+                    agent.agent_id, agent.name, agent.description
+                ))?;
+            }
+            return Ok(());
+        }
+    } else {
+        display.cursor = read_history(client, session_id, display.cursor, |value| {
+            display.event(serde_json::from_value(value)?, true)
+        })
+        .await?;
+        display.failed = false;
+        let model = display
+            .model
+            .as_ref()
+            .ok_or("The adopted model is unavailable")?;
+        #[derive(Deserialize)]
+        struct Snapshot {
+            catalog: Option<Catalog>,
+        }
+        #[derive(Deserialize)]
+        struct Catalog {
+            models: Vec<CatalogModel>,
+        }
+        #[derive(Deserialize)]
+        struct CatalogModel {
+            id: String,
+            capabilities: ModelCapabilities,
+            metadata: Option<Preferences>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Preferences {
+            reasoning: Option<ModelReasoning>,
+            service_tier: Option<ModelServiceTier>,
+        }
+        let snapshot: Snapshot = client
+            .typed("provider.catalog", json!({"providerId":model.provider_id}))
+            .await?;
+        let catalog = snapshot
+            .catalog
+            .ok_or("Model preference catalog is unavailable")?;
+        let catalog_model = catalog
+            .models
+            .into_iter()
+            .find(|entry| entry.id == model.model_id)
+            .ok_or("The adopted model is absent from the catalog")?;
+        let metadata = catalog_model
+            .metadata
+            .ok_or("This model does not advertise preference choices")?;
+        let preference = if command == "/fast" {
+            metadata
+                .service_tier
+                .as_ref()
+                .filter(|tier| {
+                    tier.supported
+                        && ["priority", "default"]
+                            .iter()
+                            .all(|value| tier.options.iter().any(|option| option == value))
+                })
+                .ok_or("This model does not advertise priority/default service tiers")?;
+            match value {
+                Some("on") => Some(json!({"serviceTier":"priority"})),
+                Some("off") => Some(json!({"serviceTier":"default"})),
+                Some(_) => return Err("Usage: /fast [on|off]".into()),
+                None => {
+                    display.record("Service tier choices: on (priority), off (default)")?;
+                    None
+                }
+            }
+        } else {
+            let reasoning = metadata
+                .reasoning
+                .as_ref()
+                .filter(|reasoning| reasoning.supported && catalog_model.capabilities.reasoning)
+                .ok_or("This model does not advertise reasoning preferences")?;
+            let mut choices = reasoning.effort_options.clone().unwrap_or_default();
+            if reasoning.off.is_some() && !choices.iter().any(|choice| choice == "none") {
+                choices.push("none".into());
+            }
+            if let Some(value) = value {
+                if !choices.iter().any(|choice| choice == value) {
+                    return Err("Reasoning effort is not advertised by this model".into());
+                }
+                Some(json!({"reasoningEffort":value}))
+            } else {
+                display.record(&format!(
+                    "Reasoning effort choices: {}",
+                    if choices.is_empty() {
+                        "unavailable".into()
+                    } else {
+                        choices.join(", ")
+                    }
+                ))?;
+                None
+            }
+        };
+        if let Some(preference) = preference {
+            let result: Configured = client
+                .typed(
+                    "session.model.update",
+                    json!({"sessionId":session_id,"branchId":"main","modelPreferences":preference}),
+                )
+                .await?;
+            display.record(&format!(
+                "{} configuration {}: {}",
+                if command == "/fast" {
+                    "Service tier"
+                } else {
+                    "Reasoning effort"
+                },
+                result.outcome,
+                value.expect("preference value")
+            ))?;
+        } else {
+            return Ok(());
+        }
+    }
+    display.cursor = read_history(client, session_id, display.cursor, |value| {
+        display.event(serde_json::from_value(value)?, true)
+    })
+    .await?;
+    display.failed = false;
+    Ok(())
+}
+
 async fn wait_turn(
     client: &mut Client,
     session_id: &str,
     prompt: Option<&str>,
     display: &mut Display,
     input: &mut Option<Input>,
+    #[cfg(unix)] interrupts: &mut tokio::signal::unix::Signal,
+    #[cfg(windows)] interrupts: &mut tokio::signal::windows::CtrlC,
 ) -> Result<i32> {
     let mut shell = None;
     let mut submit = match prompt {
@@ -395,8 +602,11 @@ async fn wait_turn(
             event
         } else {
             tokio::select! {
-                signal = tokio::signal::ctrl_c(), if (stop.is_none() && settled.is_none()) || shell.is_some() => {
-                    signal?;
+                _ = interrupts.recv() => {
+                    if (stop.is_some() || settled.is_some()) && shell.is_none() {
+                        display.record("[stopping] Still waiting for resource settlement")?;
+                        continue;
+                    }
                     if !display.json { println!(); }
                     if let Some(run) = shell.as_mut().filter(|run| !prompted && !run.stopping) {
                         run.stop = Some(client.send("shell.stop", json!({"sessionId":session_id,"runId":run.run_id})).await?);
@@ -665,6 +875,26 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             let notice: Progress = decode(params, &method)?;
             if notice.session_id == session_id && notice.branch_id == "main" {
                 display.progress(notice)?;
+            }
+        }
+        "session.mcp.state" => {
+            let state: mcp::State = decode(params, &method)?;
+            if state.session_id == session_id {
+                let required: std::collections::HashSet<_> = state
+                    .servers
+                    .into_iter()
+                    .filter(|server| server.state == "auth_required")
+                    .map(|server| server.id)
+                    .collect();
+                for id in &required {
+                    if display.mcp_auth_required.contains(id) {
+                        continue;
+                    }
+                    display.record(&format!(
+                        "MCP {id:?}: sign-in required. Run mcp login {id:?} or /mcp login {id:?}."
+                    ))?;
+                }
+                display.mcp_auth_required = required;
             }
         }
         "session.closed" if params["sessionId"].as_str() == Some(session_id) => {
