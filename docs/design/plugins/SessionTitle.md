@@ -18,8 +18,7 @@ Settings #166/#175/#177 are delivered. SessionTitle is not implemented or Ready.
 | Auxiliary request | Provider implements AuxiliaryModelHost. S4's auxiliaryModel.complete neutral contract is documented, but its named HostDispatch/catalog binding is absent. Bind the existing owner operation through ordinary C4 injection; credentials stay with Provider. |
 | Confirmation | Confirm A1–A12 and owner bindings before implementation. Documentation CI is not runtime acceptance. |
 
-C7 #50 is already unnecessary (#86). The product credential-store decision in #118 does not block
-this package: S4 owns its own credential/connection resolution. Once named bindings exist, missing
+C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resolution. Once named bindings exist, missing
 required providers keep the whole row Pending under existing rules, including rename; native
 Session use continues. No optional lookup or alternate rename path.
 
