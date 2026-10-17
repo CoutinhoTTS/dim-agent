@@ -221,6 +221,18 @@ threshold = B − reserve
   automatic trigger, which is when its cost is predictable
   ([prompt-caching](https://code.claude.com/docs/en/prompt-caching#compacting-the-conversation)).
 
+### 5.4 What the reserve is for, and the summarizer's generation length [Code, Maintainer review]
+
+The trigger decides how large the context is when a compaction starts, and the compaction is itself a model call whose output (summary plus any thinking) is bounded by `max_tokens`. F1 already plans around that bound:
+- `ProductSummaryStrategy` packs the history into chunks that each fit `context_window − output_tokens` with `count_tokens` on the whole summarizer request.
+- It folds the chunks one by one, carrying the previous summary.
+
+So a compaction does not need the context to leave room for itself: the context may run close to full and the summarizer still splits by the model's available generation length. The trigger reserve therefore only protects the **next ordinary request**: its output allowance, which already includes thinking, plus the estimation headroom of §6. The 16,000-token floor in §3.3 is estimation headroom, not space for the compaction call.
+
+Two related points, decided in review:
+- **Mechanism defect, fixed separately in #169.** A summarizer reply stopped at `max_tokens` is accepted as a complete summary today (`summary_strategy.rs` `collect`). Thinking can use most of the allowance, so a truncated summary may silently replace history. A `max_tokens` stop must not complete. Split the chunk and retry, and fail at the minimum size. The dead zone of §4.1 is fixed in the same issue.
+- **Configuration and prompt, not mechanism (#170).** Whether summarizer requests think (inherit, off or low, where the model allows) is a strategy setting. A target summary length is an instruction in the summary prompt. Both are settled by a summary-quality evaluation, not by adding constraints in code.
+
 ## 6. Estimation error
 
 ### 6.1 Whole samples [Measured]
