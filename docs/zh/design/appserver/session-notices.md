@@ -74,7 +74,7 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice);
 | 依赖 | 无。`notify` 是共享总线上的函数：所有者不必声明对 SessionBroadcast、Rpc、Agents 或任何可选插件的依赖，也不需要生命周期钩子；无论它们存在、缺失还是在重载，行为都一样（[ADR 002](../../adr/002-plugin-scope.md) D3）。 |
 | 顺序 | 每个 Session 只有一条频道，所以每个监听方都按发出顺序收到通知和 `Event` 记录。所有者若是对经广播观察到的事件作出反应，它发出的通知排在该事件的记录之后，客户端也就先看到事件、再看到通知。并发的变更按 `notify` 的调用顺序到达监听方：需要让客户端看到提交顺序的所有者，在自己的提交串行化范围内调用 `notify`，或依靠修订号。 |
 | 重载 | 所有者卸载或重载期间不发出任何通知，恢复后也不重放。Session 能力的重载不影响 `notify`，它不经过 SessionBroadcast 插件。 |
-| 非 Rust 所有者 | 没有绑定。唯一已计划的发出方 SessionStore 是 Rust；TypeScript 所有者需要按 [#4](https://github.com/arcships/dim/issues/4) 的具名服务规则另做绑定。 |
+| 非 Rust 所有者 | 没有绑定。SessionTitle 需要的发出方 SessionStore 是 Rust。ExternalAgent 重设计草稿（[#145](https://github.com/arcships/dim/issues/145)，P3，TypeScript 优先）计划由 TypeScript Session 部件发出 `externalAgent.*` 通知；该部件需要按 [#4](https://github.com/arcships/dim/issues/4) 的具名服务规则另做绑定，由 ExternalAgent 在细化到 Ready 时提出（[路线图 §2](../../../design/roadmap.md#2-排期原则) 第 5 条）。 |
 
 例如 SessionStore 的 `setTitle`（S5b）提交新的修订号后调用
 `notify(&ctx, session_id, SessionNotice { source: "SessionStore".into(), kind: "title".into(), data })`，其中 `data` 是 SessionTitle A.2 给出的形状。
