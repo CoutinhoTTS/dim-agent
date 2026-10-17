@@ -1262,6 +1262,65 @@ fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_read
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn clipboard_uri_lists_fall_back_to_text_and_reject_mixed_file_groups() {
+    let home = Home::new();
+    let bin = home.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let helper = bin.join("wl-paste");
+    fs::write(
+        &helper,
+        r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/uri-list\ntext/plain;charset=utf-8\n'
+elif [ "$3" = "text/uri-list" ]; then
+  /bin/cat "$DIM_CLIPBOARD_TEST_URIS"
+else
+  printf 'https://example.invalid/copied'
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let uris = home.0.join("uris");
+    fs::write(&uris, "# copied link\nhttps://example.invalid/copied\n").unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for text in ["https://example.invalid/copied", "kept"] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .env("PATH", &bin)
+        .env("WAYLAND_DISPLAY", "fixture")
+        .env("DIM_CLIPBOARD_TEST_URIS", &uris);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"\x16");
+    terminal.until("https://example.invalid/copied");
+    terminal.write(b"\n");
+    terminal.editor();
+    fs::write(
+        &uris,
+        "file:///tmp/copied\nhttps://example.invalid/copied\n",
+    )
+    .unwrap();
+    terminal.write(b"kept\x16");
+    terminal.until("Clipboard file URL is not local");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
 fn interactive_file_sources_preserve_order_bytes_and_the_local_resume_base() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let home = Home::new();
@@ -1276,7 +1335,7 @@ fn interactive_file_sources_preserve_order_bytes_and_the_local_resume_base() {
     let note = local.join("space note.md");
     fs::write(&first, &png).unwrap();
     fs::write(&second, &jpeg).unwrap();
-    fs::write(&note, "reference contents stay local").unwrap();
+    fs::write(&note, "P1 ordinary text reference contents stay local").unwrap();
     let expected_note = note.canonicalize().unwrap();
     let other = second.clone();
     let daemon = home.daemon(move |wire| {
@@ -1317,6 +1376,7 @@ fn interactive_file_sources_preserve_order_bytes_and_the_local_resume_base() {
     terminal.until("[Image 2: other image.bin]");
     terminal.write(b" done\n");
     terminal.editor();
+    fs::write(&note, "BM ordinary text is still a path reference").unwrap();
     terminal.paste("space note.md");
     terminal.until("[File: space note.md]");
     terminal.write(b"\n");

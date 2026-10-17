@@ -109,8 +109,10 @@ Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain t
 macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
 X11. Missing or failed clipboard access reports an inline error and retains the draft.
 The CLI reads only on that action and never changes the clipboard. A terminal that
-intercepts Ctrl+V uses its ordinary paste event instead. During a pending read, editing
-continues; Enter asks you to wait for insertion, and Ctrl+C clears the draft and cancels the reader.
+intercepts Ctrl+V uses its ordinary paste event instead. Linux reads remain pending while
+editing continues; Enter asks you to wait for insertion, and Ctrl+C clears the draft and
+cancels the reader. macOS and Windows read and convert clipboard data synchronously;
+editing and cancellation resume after that read returns.
 See the [attachment input contract](../../docs/design/cli-attachment-input.md) for native
 acceptance evidence; cross-compilation alone does not establish platform behavior.
 

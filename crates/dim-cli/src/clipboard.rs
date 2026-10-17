@@ -404,8 +404,18 @@ pub async fn read() -> Result<Source> {
             {
                 return Err("Clipboard file list has an invalid action".into());
             }
-            let files = lines
+            let entries = lines
                 .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect::<Vec<_>>();
+            if format == "text/uri-list"
+                && !entries
+                    .iter()
+                    .any(|value| url::Url::parse(value).is_ok_and(|url| url.scheme() == "file"))
+            {
+                continue;
+            }
+            let files = entries
+                .into_iter()
                 .map(|value| {
                     file_url(value).ok_or_else(|| "Clipboard file URL is not local".into())
                 })

@@ -129,8 +129,12 @@ when `WAYLAND_DISPLAY` is set and otherwise `xclip` with the CLIPBOARD selection
 utilities must be installed on the CLI's machine; they are not bundled or installed automatically.
 All are read only after Ctrl+V. No shell evaluates pasted paths or clipboard data. The Linux
 reader is the editor's owned, cancellable subprocess; Ctrl+C clears the draft and releases it.
-Editing remains available during the read, and the result inserts at the current cursor.
-Enter while a clipboard read is pending asks the user to wait without submitting input.
+On Linux, editing remains available during the read, and the result inserts at the current
+cursor. Enter while that read is pending asks the user to wait without submitting input.
+macOS and Windows clipboard reads, pixel decoding and PNG encoding run synchronously;
+input editing and cancellation resume when the read returns. A Linux `text/uri-list`
+containing no `file:` URI falls through to image/text selection. A file list mixing local
+files with other URIs is rejected atomically.
 
 Read and validate image files at insertion so an accepted item retains the captured bytes even
 if the original changes later. Clipboard pixel data is encoded once as PNG, after checking its
@@ -279,12 +283,14 @@ complete model output while a terminal reader pauses. Windows input uses virtual
 record reader. Its ConPTY flow exercises Unicode/grapheme editing, arrow/delete input,
 bracketed paste boundaries and raw Ctrl+C clearing through the real console. It reuses the
 workspace's portable-pty version as a Windows-only development dependency. Native clipboard checks
-use a unique AppKit pasteboard, an isolated Xvfb/X11 desktop and a private Windows window station.
+use a unique AppKit pasteboard and a private Windows window station.
 The Windows boundary flow runs on the disposable Windows CI job; its execution must pass before
-claiming that platform's clipboard acceptance. Isolated Xvfb/X11 and headless Sway/Wayland checks
-cover actual xclip and wl-paste reads of PNG, file lists and exact text plus rejected, oversized
-and unavailable data. The Linux binary flows
-cover raw-key cancellation, reader reaping and source failure without losing the draft. The
+claiming that platform's clipboard acceptance. Linux runtime acceptance with actual `xclip`
+and `wl-paste` remains pending a recorded manual run in isolated Xvfb/X11 and headless
+Sway/Wayland sessions, including date, commit and utility versions. The required cases are
+PNG, file lists, exact text, rejected/oversized input and unavailable data. Linux binary flows
+using a fixture `wl-paste` cover URI selection, raw-key cancellation, reader reaping and source
+failure without losing the draft; they do not establish native desktop acceptance. The
 production App Server/model/history flow also submits selected images and a file reference
 outside the Session workspace, then reads that file through the real tool. Wayland and Windows
 runtime results must be reported separately from compilation. No App Server, core, protocol, assembly, persisted format or

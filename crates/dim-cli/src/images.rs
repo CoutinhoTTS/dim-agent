@@ -41,13 +41,18 @@ pub fn file(path: &Path) -> Result<ContentBlock> {
     }
     let mut bytes = Vec::new();
     (&mut file).take(32).read_to_end(&mut bytes)?;
-    let image_intent = image::guess_format(&bytes).is_ok()
-        || path.extension().is_some_and(|extension| {
-            image::ImageFormat::from_extension(extension).is_some()
-                || extension.to_str().is_some_and(|s| {
-                    matches!(s.to_ascii_lowercase().as_str(), "svg" | "heic" | "heif")
-                })
-        });
+    let image_intent = matches!(
+        image::guess_format(&bytes),
+        Ok(image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::WebP
+            | image::ImageFormat::Gif)
+    ) || path.extension().is_some_and(|extension| {
+        image::ImageFormat::from_extension(extension).is_some()
+            || extension
+                .to_str()
+                .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "svg" | "heic" | "heif"))
+    });
     if !image_intent {
         return Ok(ContentBlock::Text {
             text: path.to_str().ok_or("File paths must be UTF-8")?.into(),
