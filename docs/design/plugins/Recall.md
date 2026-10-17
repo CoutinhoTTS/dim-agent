@@ -316,7 +316,7 @@ configured. Rejected:
   10, principles §4 rule 6).
 - **No raw events and no machinery.** Only what §3 tells.
 - **No other branch or Session.** The branch comes from `ToolExecutionContext.branch_id`.
-- **No cache.** Each call reads the pinned history (§13 Q2).
+- **No cache.** Each call reads the pinned history (§13).
 
 ## 10. Security and permission
 
@@ -363,7 +363,7 @@ type change.
 None. Considered and not needed: a paged history read on the facade (the selection needs the whole
 prefix anyway) and a per-branch tool declaration (§7).
 
-## 13. Decisions and open questions
+## 13. Decisions
 
 | Item | Decision |
 | --- | --- |
@@ -378,13 +378,8 @@ prefix anyway) and a per-branch tool declaration (§7).
 | Risk | `session` |
 | Assembly | Product profile only; not in `--models` or mock profiles |
 | State, writes, type changes | None |
-
-Open questions for the maintainer:
-
-- **Q1. Need.** Implement now and measure use from `step/tool-call` facts named `recall`, with
-  post-compaction "exact wording" cases added to #170's evaluation set; or wait for #170.
-- **Q2. Cost.** Each call reads and walks the whole pinned history. If that proves slow on long
-  histories, the first step is a cache keyed by branch and head inside the tool.
+| Cost | No cache: each call reads and walks the pinned history. A cache keyed by branch and head inside the tool is added only if a measurement shows the need; the facade does not change |
+| Delivery | Milestone M2 (#129); implementation follows the M2 plan |
 
 ## 14. Acceptance (flow tests)
 
