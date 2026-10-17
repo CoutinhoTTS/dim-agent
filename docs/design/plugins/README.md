@@ -16,7 +16,7 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | [Pursuit](Pursuit.md) (deferred, alternative to Goal) | — | `session.pursuit.*` | pursuit facts `pursuit/*`, evaluator branches, continuation | Deferred |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2 |
 | [ContextCompaction](ContextCompaction.md) (supplements to Loop and ContextPreparation) | — | `ContextModelHost`, summary `CompactionStrategyHost`, `session.context.*` | `context/compact` command and compaction step in Loop; K-turn cut and usage query in ContextPreparation | P2 |
-| [HistoryLookup](HistoryLookup.md) | — | `history_lookup` tool (reads the calling branch's history before the latest compaction cut) | — | M2 (#129) |
+| [Recall](Recall.md) | — | `recall` tool (recalls the calling branch's history before the latest compaction cut: index, search, open) | — | M2 (#129) |
 | [Hooks](Hooks.md) | — | rules, Session-start hooks | before callbacks, post-tool and turn-end hooks | To be designed |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
@@ -32,5 +32,5 @@ A plugin is split by the owner of its state. Process parts are process plugins; 
 | Scope | Parts |
 | --- | --- |
 | Process plugins | Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway; AcpGateway is not a process plugin: it is a client in the CLI process |
-| Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, HistoryLookup, Hooks, Scheduler, Workflow |
+| Session Capabilities | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Recall, Hooks, Scheduler, Workflow |
 | Branch Capabilities | Questions, Goal, Hooks; Pursuit (deferred) |
