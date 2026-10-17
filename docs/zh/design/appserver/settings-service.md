@@ -1,7 +1,7 @@
 # Settings 服务
 
-状态：设计已通过评审；Rust 侧已实现（S8b 第 1 部分，§12），清单加载和 TypeScript 投递待做
-（第 2 部分，C4 之后）。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
+状态：设计已通过评审；Rust 侧已实现（S8b 第 1 部分，§12）；C4 行上的声明和 TypeScript 所有者
+路径已实现（第 2 部分，§12）；向 TypeScript 部分投递事件待做。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
 基于 S8a（[#54](https://github.com/arcships/dim/issues/54)，PR [#90](https://github.com/arcships/dim/pull/90)）；
 实现依赖 C4（[#63](https://github.com/arcships/dim/issues/63)）。
 总体设计：[§6.4 配置](../overview.md#64-约定)。作用域：
@@ -10,7 +10,7 @@
 
 ## 1. 摘要
 
-Settings 为不是用 Rust 写的插件提供业务来源。这类插件在包清单里声明自己的每个来源：来源名、
+Settings 为不是用 Rust 写的插件提供业务来源。这类插件在自己 C4 行的 `settings` 成员里、紧挨着 `provides` 声明自己的每个来源：来源名、
 文件、JSON Schema（含 `default` 值）和仅限用户的字段。随后 Settings 在 JSON 文档上提供三样东西：
 
 - 进程服务 `settings`，供所有者使用：`read`、`update`（按 revision 做 CAS）和 `projects`；
@@ -47,7 +47,7 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在包�
  |  Settings（现有插件）                                                   |
  |   SettingsService                                                       |
  |     BusinessDocument 来源（Rust 所有者，不变）                          |
- |     声明的来源（来自包清单）：schema、默认值、文件、仅限用户的指针      |
+ |     声明的来源（来自 C4 行的 settings）：schema、默认值、文件、仅限用户的指针 |
  |   具名服务 `settings`（HostDispatch）  <-- 所有者写入                   |
  |   managementMethods `settings`          <-- 客户端写入                  |
  |   在 settings/<source> 上发出 settings.changed，                        |
@@ -73,7 +73,10 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在包�
 
 ### 3.1 来源声明
 
-拥有来源的包在清单里列出它们：
+拥有来源的 TypeScript 包在 C4 结构化输入（`ServerConfig.session_typescript.rows`，
+[Session TypeScript 部分](../../../design/session-typescript.md#host-input-and-declaration-discovery)）中自己那一行的
+`settings` 成员里列出它们，与 `provides` 并列。和 `provides` 一样，包只维护一份 JSON 声明，把同一个
+文件交给宿主，不维护两份。C4 不引入包清单，所以没有别的位置放它。
 
 ```json
 "settings": [
@@ -102,16 +105,16 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在包�
 ]
 ```
 
-| 字段 | 规则（在宿主读取清单处检查一次） |
+| 字段 | 规则（在宿主装配这些行时检查一次） |
 | --- | --- |
 | `source` | `[a-z0-9_-]`，与 Rust 来源相同。在进程内所有来源中唯一：重复声明，或声明的名字与 Rust 来源相同，装配失败 |
 | `userFile` | 规则同 `BusinessDocument::USER_FILE`（home 根目录下的普通文件名） |
 | `projectFile` | 可选，规则同 `PROJECT_FILE`。存在即表示该来源也有项目作用域。这就是"允许的作用域"声明 |
 | `schema` | JSON Schema（draft 2020-12）。必须能编译，根必须是 `type: object` |
 | `userOnly` | 指向对象成员的 JSON Pointer（RFC 6901）。每个都必须能经 `properties` 到达 |
-| 所有者 | 同一清单中的包 `id`，不写在条目里 |
+| 所有者 | 声明它的那一行的 `id`，不写在条目里 |
 
-默认文档是应用默认值（§3.2）后的 `{}`。它必须通过 schema 校验，否则清单被拒绝。因此文件缺失时
+默认文档是应用默认值（§3.2）后的 `{}`。它必须通过 schema 校验，否则装配失败。因此文件缺失时
 读到的总是合法文档。
 
 ### 3.2 文档、校验与默认值
@@ -165,7 +168,7 @@ Settings 在内存中保存编译后的声明，由其工厂配置构建。此�
 - 错误（§6）：`unknown_source`、`invalid_scope`、`invalid_document`、`user_only_field`、
   `conflict`、`unsynced`、`failed`、`closed`、`cancelled`。
 
-该服务不识别调用方。所有权来自清单：每个来源只有一个所有者，只有那个包针对它编写。这是进程内
+该服务不识别调用方。所有权来自声明它的行：每个来源只有一个所有者，只有那个包针对它编写。这是进程内
 插件的信任模型（AGENTS.md 规则 11）：依赖声明不是沙箱。
 
 ### 4.3 管理方法 `settings.*`（客户端路径）
@@ -241,7 +244,7 @@ pub struct SettingsChanged { pub source: String,           // 原为 &'static st
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAuthorized { pub root: usize, pub cwd: PathBuf }   // + Serialize/Deserialize
 
-/// 一个清单条目，在宿主读取清单处解析并检查。
+/// C4 行的一个 `settings` 条目，在宿主装配这些行时解析。
 pub struct SourceDeclaration { pub owner: String, pub source: String, pub user_file: String,
                                pub project_file: Option<String>, pub schema: serde_json::Value,
                                pub user_only: Vec<String> }
@@ -258,7 +261,8 @@ impl SettingsService {
 ```
 
 - `SettingsPlugin::new`/`native` 把声明作为工厂配置接收（`.declare(Vec<SourceDeclaration>)`），
-  与 `project_roots` 并列；App Server 装配传入 `ServerConfig::settings_sources`。`apply` 检查每个
+  与 `project_roots` 并列；App Server 装配传入 Session TypeScript 行的条目，每条以行 id 为所有者，
+  并且不把 `settings` 交给 loader。`apply` 检查每个
   声明（§3.1），用 `jsonschema`（已经通过 vendored aimux 在 `Cargo.lock` 中）编译其 schema，并把
   每个声明的名字记入现有的 `claims` 表。之后若有 Rust 类型使用已声明的来源名，会得到现有的
   "belongs to another document type" 错误。装配还预留它注册的 Rust 来源的名字
@@ -330,17 +334,19 @@ impl SettingsService {
    | 值只用于本次调用；从不保存或记录
 ```
 
-### 5.4 清单边界
+### 5.4 声明边界
 
 ```
- 装配读取包清单
-   -> 解析 `settings` 条目，检查名字、文件、指针
+ 装配读取每个 Session TypeScript 行的 `settings`（所有者 = 行 id）
+   -> 解析条目（拒绝未知字段），从交给 loader 的行中去掉 `settings`
+   -> 检查名字、文件、指针
    -> 编译 schema；检查应用默认值后的 {} 合法
    -> SettingsPlugin 工厂配置（声明）
  Settings apply：登记每个声明的名字；提供 `settings`、`settings.*`
 ```
 
-无效声明使装配失败，消息中带包 id 和来源名，与现在的无效清单相同。
+无效声明使装配失败，消息中带行 id 和来源名，与现在的无效行相同。声明的来源需要 product 或
+target home；没有时装配失败，而不是丢弃它们。
 
 ## 6. 错误
 
@@ -377,13 +383,13 @@ impl SettingsService {
 | 权限规则（F2） | 不变；见 §8.1 |
 | Provider | `ResolveProviderSecret` 被 `credentials` 取代（§4.4）。密钥存储仍按配置可选，与现在相同 |
 | ADR 004 D4 | 它写明 S8b 之前 Settings 不发布管理方法。S8b 新增 `settings` 命名空间，仅限声明的来源。ADR 004 随实现更新 |
-| C4（TypeScript 桥接） | 提供 TypeScript 部分的包加载，以及把 rutis 事件投递给它们的绑定。S8b 的实现等待它 |
-| PluginManager（P3） | 其清单设计中还没有 `settings` 条目；见 §10 第 1 条 |
+| C4（TypeScript 桥接） | 它的行就是结构化输入；S8b 在 `provides` 旁加上 `settings` 成员（§3.1）。把 rutis 事件投递给 TypeScript 部分的绑定仍归 C4（§10 第 2 条） |
+| PluginManager（P3） | 它从自己的包边界生成 C4 行时，同时生成行的 `settings` 成员 |
 | Rpc | 不变；像分派任何所有者的命名空间一样分派新命名空间 |
 | Timeline、Dispatcher、rutis、loader | 不变 |
 
 新增的公开内容：`settings` 服务、`settings` 管理命名空间（两个方法）、`credentials` 服务（取代
-一个只有 Rust 的 trait）、清单中的 `settings` 条目，以及两个现有事件的 JSON 形态。每一项都是
+一个只有 Rust 的 trait）、C4 行的 `settings` 成员，以及两个现有事件的 JSON 形态。每一项都是
 必需的：让非 Rust 所有者读写自己的来源并获知变更，让客户端编辑它，让引用得以解析。
 
 ### 8.1 决定：保留 `permission.rules`/`permission.set_rules`
@@ -422,9 +428,8 @@ C4 既定工作的依赖，不是对 dim 运行时或 rutis 的新需求。
 
 ## 10. 待决问题
 
-1. **哪个清单承载 `settings` 条目。** 清单 schema 1 是固定的托管 provider 格式。schema 2 是
-   PluginManager 的设计，尚未实现。C4 尚未决定 TypeScript 部分如何打包。本文定义条目的形态；
-   放在哪里随 C4 的加载路径决定。
+1. ~~**哪个清单承载 `settings` 条目。**~~ 已随 C4 的加载路径定下：C4 不引入包清单，它的行承载包的
+   结构化声明。条目就是行的 `settings` 成员，与 `provides` 并列（§3.1）。
 2. **TypeScript 部分如何监听 rutis 事件。** rutis 0.10 的 `definePlugin` 上下文只有 `use`、
    `provide` 和 `effect`。rutis-bridge 能把 rutis 事件发进 Node 运行时（`EmitToCordis` 配合挂载的
    `emits`），但只适用于挂载的 Cordis 插件。C4 spike 把事件订阅列为未决的绑定项。S8b 只需要该
@@ -454,8 +459,8 @@ TypeScript 行）：
    `{source, scope, revision}`，被拒绝的写入后收不到。载荷序列化为 §4.5 的 JSON 形态。
 4. 原生配置：用户作用域保存在 `user/example` 行；现有 v13 行不变。未授权根上的项目作用域以
    `invalid_scope` 失败。
-5. `settings.read` 读 `mcp` 返回 `settings_unknown_source`。清单声明 `mcp`，或两个包声明同一来源，
-   装配失败。
+5. `settings.read` 读 `mcp` 返回 `settings_unknown_source`。行声明 `mcp`、两个包声明同一来源，或条目
+   格式错误，装配失败。
 6. 使用测试 `credentials` 存储：TypeScript 所有者解析其文档中的 `*Ref`，Provider 经同一存储解析
    `secretRef` token 和 AWS JSON 值。回复、错误和 trace 中都不出现值。
 7. 已配对设备的连接得不到 `settings.read`。
@@ -464,8 +469,8 @@ TypeScript 行）：
 
 **第 1 部分（Rust 侧，S8b-1）。** 不依赖 C4 已实现：可序列化的事件载荷（§4.5）、带 schema 校验、
 默认值和仅限用户字段的声明来源（§3.1–§3.4）、`settings` 服务（§4.2）、`settings.*` 方法（§4.3），
-以及 `credentials` 契约，Provider 已迁到该契约上（§4.4）。在读取清单之前，声明来自
-`ServerConfig::settings_sources` / `SettingsPlugin::declare`。目前没有产品插件提供 `credentials`
+以及 `credentials` 契约，Provider 已迁到该契约上（§4.4）。第 2 部分把声明移到 C4 行之前，
+声明来自嵌入方单独给的列表。目前没有产品插件提供 `credentials`
 （§10 第 4 条）：契约、它的 `HostDispatch` 和 Provider 这一使用方都已存在，只有测试提供存储。
 
 对照代码所做的修正（已反映到 §4.3 和 §4.6）：
@@ -474,18 +479,34 @@ TypeScript 行）：
   ADR 004 D4 的边界）。这是唯一新增的插件行；§2 图中的 `managementMethods settings` 位于这一部分。
   §9 中 ADR 002 D2 的回答对它同样成立，与 PermissionRules 一样：它是 Settings 数据的客户端路径，
   不是接线模块。
-- 装配时预留 Rust 来源的名字，使声明 Rust 来源的清单在装配时失败（§11 第 5 条）；仅靠 Settings
+- 装配时预留 Rust 来源的名字，使声明 Rust 来源的声明在装配时失败（§11 第 5 条）；仅靠 Settings
   只能在首次使用时得知 Rust 来源名。
 - `SettingsError` 除两个指定变体外还有 `InvalidScope` 和 `Document(message)`，使客户端路径能区分
   参数无效与已持久化文档的失败。
 - `ResolveCredential` 返回 `CredentialError`（`not_found`、`failed`、`cancelled`），而不是无法表达
   `not_found` 的 `HostError`。服务回复的信封与 `sessions` 相同。
 
-§11 验收中由 Rust 流程测试（`settings_flow.rs`、`transport_flow/settings_methods.rs`、
-`provider_flow.rs`）覆盖的部分，所有者经 `settings` 服务的 `HostDispatch` 调用：第 1、2、3、4、5 条，
+§11 验收中由 Rust 流程测试（`settings_flow.rs`、`provider_flow.rs`）覆盖的部分，所有者经 `settings` 服务的 `HostDispatch` 调用：第 1、2、3、4、5 条，
 第 6 条中 Provider 的部分（token 和 AWS JSON 经同一存储）以及 `credentials.resolve` 服务形态，
 第 7 条。
 
-**第 2 部分（C4 之后）。** 从包清单读取 `settings` 条目（§5.4，§10 第 1 条）；用经 C4 路径加载的
-TypeScript 测试包运行第 1–3 条和第 6 条的 TypeScript 部分；经 C4 对 rutis 事件的绑定把
-`settings.changed` / `settings.project_authorized` 投递给 TypeScript 部分（§4.5，§10 第 2 条）。
+**第 2 部分（S8b-2）。** 已在 C4 路径上实现：
+
+- 声明是 Session TypeScript 行的 `settings` 成员（§3.1、§5.4、§10 第 1 条），解析为
+  `SourceDeclaration`，以行 id 为所有者。`ServerConfig::settings_sources` 已移除：插件自己声明自己的
+  设置，嵌入方不再单独列出。
+- `transport_flow/settings_methods.rs` 在 Node 运行时中运行一个 TypeScript 所有者
+  （`runtime/fixtures/settings-owner.*`）。第 1 条（默认文档、CAS、过期修订、无效文档）、第 2 条
+  （仅限用户字段：客户端可以改，所有者不可以）和第 3 条（Rust 监听方在任一路径每次成功写入后收到
+  一次 §4.5 变更，被拒绝的写入没有）经它的 Session 方法通过，这些方法从 TypeScript 调用
+  `settings`。客户端路径（§4.3、第 7 条）和声明边界（第 5 条：Rust 来源名、另一个包重复声明、
+  条目格式错误）在同一文件中运行。它们是 `node_` 流程，由 CI 的 Node 步骤运行。
+
+仍未完成：
+
+- 第 6 条的 TypeScript 部分。只有某个进程部分提供 `credentials` 时，TypeScript 所有者才能注入它，
+  而 App Server 目前没有这样的部分或嵌入方输入：这就是 §10 第 4 条。Session 作用域的测试存储不是
+  契约（§4.4 是进程作用域），注入缺失服务的行会一直处于 Pending。Provider 部分和服务形态已覆盖
+  （第 1 部分）。
+- 把 `settings.changed` / `settings.project_authorized` 投递给 TypeScript 部分（§4.5，§10 第 2 条），
+  随 C4 的 leaf 事件绑定（[#174](https://github.com/arcships/dim/pull/174)）。

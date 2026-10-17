@@ -61,9 +61,6 @@ pub struct ServerConfig {
     pub session_execution: bool,
     pub model_catalog: Option<Arc<dim_agent_aimux::AimuxModels>>,
     pub file_roots: Vec<PathBuf>,
-    /// Settings sources declared by non-Rust owners. Package manifests will
-    /// supply them (settings-service §5.4); until then the embedder does.
-    pub settings_sources: Vec<settings::SourceDeclaration>,
     pub session_defaults: SessionConfig,
     pub hello_timeout: Duration,
     pub write_timeout: Duration,
@@ -85,7 +82,6 @@ impl Default for ServerConfig {
             session_execution: true,
             model_catalog: None,
             file_roots: vec![],
-            settings_sources: vec![],
             session_defaults: SessionConfig::default(),
             hello_timeout: Duration::from_secs(5),
             write_timeout: Duration::from_secs(10),
@@ -592,7 +588,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             register_capability(&mut builtins, provider::ProviderPlugin::default),
         ));
     }
-    if let Some(home_root) = execution_root.or(product_root) {
+    let settings_sources = config
+        .session_typescript
+        .as_ref()
+        .map(session_typescript::settings_sources)
+        .transpose()?
+        .unwrap_or_default();
+    let settings_root = execution_root.or(product_root);
+    if settings_root.is_none() && !settings_sources.is_empty() {
+        return Err(ServerError::Configuration(
+            "settings sources need a product or target home".into(),
+        ));
+    }
+    if let Some(home_root) = settings_root {
         let settings = if native_home.is_some() {
             settings::SettingsPlugin::native(home_root, vec![])
         } else {
@@ -602,7 +610,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .reserve::<mcp::config::McpProjectEnablement>()
         .reserve::<skills_management::SkillDocument>()
         .reserve::<permission_rules::PermissionSettings>()
-        .declare(config.settings_sources.clone());
+        .declare(settings_sources);
         rows.push(register_capability(&mut builtins, move || settings.clone()));
         rows.push(owner(
             "settings",

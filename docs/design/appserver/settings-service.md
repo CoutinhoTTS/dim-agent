@@ -1,7 +1,7 @@
 # Settings service
 
-Status: Design approved; Rust side implemented (S8b part 1, §12), manifest loading and
-TypeScript delivery pending (part 2, after C4). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
+Status: Design approved; Rust side implemented (S8b part 1, §12); declarations on C4 rows and
+the TypeScript owner path implemented (part 2, §12); event delivery to TypeScript parts pending. Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
 Builds on S8a ([#54](https://github.com/arcships/dim/issues/54), PR [#90](https://github.com/arcships/dim/pull/90));
 implementation depends on C4 ([#63](https://github.com/arcships/dim/issues/63)).
 Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:
@@ -11,8 +11,8 @@ Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:
 ## 1. Summary
 
 Settings serves sources owned by plugins that are not written in Rust. Such a plugin declares each
-source in its package manifest: the source name, its files, a JSON Schema (with `default`
-values) and its user-only fields. Settings then offers three things over JSON documents:
+source next to its `provides`, in the `settings` member of its C4 row: the source name, its files,
+a JSON Schema (with `default` values) and its user-only fields. Settings then offers three things over JSON documents:
 
 - the process service `settings`, which the owner uses: `read`, `update` (CAS on the revision)
   and `projects`;
@@ -52,7 +52,7 @@ No new plugin, no Timeline event, no change to Timeline, Dispatcher, rutis or as
  |  Settings (existing plugin)                                             |
  |   SettingsService                                                       |
  |     BusinessDocument sources (Rust owners, unchanged)                   |
- |     declared sources (from package manifests): schema, defaults,        |
+ |     declared sources (from C4 rows' `settings`): schema, defaults,      |
  |       files, user-only pointers                                         |
  |   named service `settings` (HostDispatch)  <-- owner writes             |
  |   managementMethods `settings`             <-- client writes            |
@@ -79,7 +79,12 @@ TypeScript owner depends on `settings` (and on `credentials` only if it has `*Re
 
 ### 3.1 Source declaration
 
-Each package that owns sources lists them in its manifest:
+Each TypeScript package that owns sources lists them in the `settings` member of its row in
+C4's structural input (`ServerConfig.session_typescript.rows`,
+[Session TypeScript parts](../session-typescript.md#host-input-and-declaration-discovery)),
+next to `provides`. As with `provides`, the package keeps one JSON declaration and hands that
+same file to the host; it is not maintained twice. C4 adds no package manifest, so there is no
+other place for it.
 
 ```json
 "settings": [
@@ -108,17 +113,17 @@ Each package that owns sources lists them in its manifest:
 ]
 ```
 
-| Field | Rule (checked once, where the host reads the manifest) |
+| Field | Rule (checked once, where the host assembles the rows) |
 | --- | --- |
 | `source` | `[a-z0-9_-]`, as for Rust sources. Unique among all sources of the process: a second declaration, or a declaration naming a Rust source, fails assembly |
 | `userFile` | Same rule as `BusinessDocument::USER_FILE` (a plain filename in the home root) |
 | `projectFile` | Optional, same rule as `PROJECT_FILE`. Present means the source also has project scope. This is the "allowed scopes" declaration |
 | `schema` | JSON Schema (draft 2020-12). It must compile, and its root must be `type: object` |
 | `userOnly` | JSON Pointers (RFC 6901) to object members. Each must name a member reachable through `properties` |
-| owner | The package `id` from the same manifest. Not written in the entry |
+| owner | The `id` of the row that declares it. Not written in the entry |
 
 The default document is `{}` with defaults applied (§3.2). It must be valid against the schema,
-or the manifest is rejected. So a missing file always reads as a valid document.
+or assembly fails. So a missing file always reads as a valid document.
 
 ### 3.2 Documents, validation and defaults
 
@@ -176,7 +181,7 @@ Process scope, no instance key, provided by Settings.
 - Errors (§6): `unknown_source`, `invalid_scope`, `invalid_document`, `user_only_field`,
   `conflict`, `unsynced`, `failed`, `closed`, `cancelled`.
 
-The service has no caller identity. Ownership comes from the manifest: each source has one owner,
+The service has no caller identity. Ownership comes from the declaring row: each source has one owner,
 and only that package is written against it. This is the trust model of in-process plugins
 (AGENTS.md rule 11): dependency declarations are not a sandbox.
 
@@ -255,7 +260,7 @@ pub struct SettingsChanged { pub source: String,           // was &'static str
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAuthorized { pub root: usize, pub cwd: PathBuf }   // + Serialize/Deserialize
 
-/// One manifest entry, parsed and checked where the host reads the manifest.
+/// One `settings` entry of a C4 row, parsed where the host assembles the rows.
 pub struct SourceDeclaration { pub owner: String, pub source: String, pub user_file: String,
                                pub project_file: Option<String>, pub schema: serde_json::Value,
                                pub user_only: Vec<String> }
@@ -272,8 +277,9 @@ impl SettingsService {
 ```
 
 - `SettingsPlugin::new`/`native` take the declarations as factory configuration
-  (`.declare(Vec<SourceDeclaration>)`), next to `project_roots`; App Server assembly passes
-  `ServerConfig::settings_sources`. `apply` checks each declaration (§3.1), compiles its schema with
+  (`.declare(Vec<SourceDeclaration>)`), next to `project_roots`; App Server assembly passes the
+  entries of the Session TypeScript rows, each with its row id as owner, and does not hand
+  `settings` to the loader. `apply` checks each declaration (§3.1), compiles its schema with
   `jsonschema` (already in `Cargo.lock` through the vendored aimux) and records each declared name
   in the existing `claims` map. A Rust type that later names a declared source fails with the
   existing "belongs to another document type". Assembly also reserves the names of the Rust sources
@@ -350,18 +356,20 @@ document it replaces.
    | use value for this call only; never stored or logged
 ```
 
-### 5.4 Manifest boundary
+### 5.4 Declaration boundary
 
 ```
- assembly reads package manifest
-   -> parse `settings` entries, check names, files, pointers
+ assembly reads each Session TypeScript row's `settings` (owner = row id)
+   -> parse entries (unknown fields rejected), drop `settings` from the loader row
+   -> check names, files, pointers
    -> compile schema; check that {} with defaults is valid
    -> SettingsPlugin factory configuration (declarations)
  Settings apply: claims each declared name; provides `settings`, `settings.*`
 ```
 
-An invalid declaration fails assembly with the package id and source in the message, like an
-invalid manifest today.
+An invalid declaration fails assembly with the row id and source in the message, like an invalid
+row today. Declared sources need a product or target home; without one, assembly fails rather
+than drop them.
 
 ## 6. Errors
 
@@ -400,13 +408,13 @@ invalid manifest today.
 | Permission rules (F2) | Unchanged; see §8.1 |
 | Provider | `ResolveProviderSecret` is replaced by `credentials` (§4.4). The secret store stays optional by configuration, as today |
 | ADR 004 D4 | It says Settings publishes no management methods until S8b. S8b adds the `settings` namespace, limited to declared sources. ADR 004 is updated with the implementation |
-| C4 (TypeScript bridge) | Provides package loading for TypeScript parts and the binding that delivers rutis events to them. S8b's implementation waits for it |
-| PluginManager (P3) | Its manifest design has no `settings` entry yet; see §10 question 1 |
+| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). The binding that delivers rutis events to TypeScript parts is still C4's (§10 question 2) |
+| PluginManager (P3) | When it produces C4 rows from its package boundary, it produces their `settings` member too |
 | Rpc | Unchanged; it dispatches the new namespace like any owner's |
 | Timeline, Dispatcher, rutis, loader | Unchanged |
 
 Public additions: the `settings` service, the `settings` management namespace (two methods), the
-`credentials` service (replacing a Rust-only trait), the manifest `settings` entry, and the JSON
+`credentials` service (replacing a Rust-only trait), the `settings` member of a C4 row, and the JSON
 shapes of the two existing events. Each one is needed for a non-Rust owner to read, write and be
 told about its source, for a client to edit it, and for a reference to resolve.
 
@@ -449,10 +457,9 @@ or rutis.
 
 ## 10. Open questions
 
-1. **Which manifest carries the `settings` entry.** Manifest schema 1 is the fixed managed-provider
-   format. Schema 2 is PluginManager's design and is not implemented. C4 has not chosen how
-   TypeScript parts are packaged. The entry's shape is defined here; its home is decided with C4's
-   loading path.
+1. ~~**Which manifest carries the `settings` entry.**~~ Settled with C4's loading path: C4 adds no
+   package manifest, and its rows carry the package's structural declarations. The entry is the
+   row's `settings` member, next to `provides` (§3.1).
 2. **How a TypeScript part listens to rutis events.** rutis 0.10's `definePlugin` context offers
    only `use`, `provide` and `effect`. rutis-bridge can emit a rutis event into the Node runtime
    (`EmitToCordis` with a mount's `emits`), but only for mounted Cordis plugins. The C4 spike lists
@@ -489,8 +496,8 @@ through C4's path):
    the §4.5 JSON shape.
 4. Native profile: the user scope persists in row `user/example`; existing v13 rows are unchanged.
    Project scope on an unauthorized root fails with `invalid_scope`.
-5. `settings.read` of `mcp` returns `settings_unknown_source`. A manifest declaring `mcp`, or two
-   packages declaring the same source, fails assembly.
+5. `settings.read` of `mcp` returns `settings_unknown_source`. A row declaring `mcp`, two
+   packages declaring the same source, or a malformed entry fails assembly.
 6. With a test `credentials` store: the TypeScript owner resolves the `*Ref` from its document,
    and Provider resolves a `secretRef` token and an AWS JSON value through the same store. No
    value appears in replies, errors or traces.
@@ -501,8 +508,7 @@ through C4's path):
 **Part 1 (Rust side, S8b-1).** Implemented without C4: serializable event payloads (§4.5), declared
 sources with schema validation, defaults and user-only fields (§3.1–§3.4), the `settings` service
 (§4.2), the `settings.*` methods (§4.3) and the `credentials` contract with Provider moved onto it
-(§4.4). Declarations come from `ServerConfig::settings_sources` / `SettingsPlugin::declare` until
-manifests are read. No product plugin provides `credentials` yet (§10 question 4): the contract,
+(§4.4). Declarations came from an embedder list until part 2 moved them onto C4 rows. No product plugin provides `credentials` yet (§10 question 4): the contract,
 its `HostDispatch` and Provider's consumer exist, and only tests supply a store.
 
 Corrections made against the code (reflected in §4.3 and §4.6):
@@ -519,12 +525,30 @@ Corrections made against the code (reflected in §4.3 and §4.6):
   `HostError`, which cannot express `not_found`. The service reply envelope is the one of
   `sessions`.
 
-Acceptance (§11) covered by Rust flow tests (`settings_flow.rs`, `transport_flow/settings_methods.rs`,
-`provider_flow.rs`), with the owner calling the `settings` service through its `HostDispatch`:
-item 1, item 2, item 3, item 4, item 5, item 6 for Provider (token and AWS JSON through one store)
-and for the `credentials.resolve` service shape, and item 7.
+Acceptance (§11) covered by Rust flow tests (`settings_flow.rs`, `provider_flow.rs`), with the
+owner calling the `settings` service through its `HostDispatch`: item 1, item 2, item 3, item 4,
+item 5, item 6 for Provider (token and AWS JSON through one store) and for the
+`credentials.resolve` service shape, and item 7.
 
-**Part 2 (after C4).** Reading the `settings` entries from package manifests (§5.4, §10 question 1);
-running items 1–3 and the TypeScript half of item 6 with a TypeScript test package loaded through
-C4's path; delivering `settings.changed` / `settings.project_authorized` to TypeScript parts through
-C4's binding of rutis events (§4.5, §10 question 2).
+**Part 2 (S8b-2).** Implemented on C4's path:
+
+- Declarations are the `settings` member of a Session TypeScript row (§3.1, §5.4, §10 question 1),
+  parsed into `SourceDeclaration` with the row id as owner. `ServerConfig::settings_sources` is
+  removed: the plugin declares its own settings, and the embedder no longer lists them separately.
+- `transport_flow/settings_methods.rs` runs a TypeScript owner (`runtime/fixtures/settings-owner.*`)
+  in the Node runtime. Item 1 (default document, CAS, stale revision, invalid documents), item 2
+  (user-only field: client may, owner may not) and item 3 (a Rust listener sees one §4.5 change per
+  successful write on either path, none for a rejected one) pass through its Session methods, which
+  call `settings` from TypeScript. The client path (§4.3, item 7) and the declaration boundary
+  (item 5: a Rust source name, a second declaration by another package, a malformed entry) run in
+  the same file. These are `node_` flows, run by CI's Node step.
+
+Still open:
+
+- The TypeScript half of item 6. A TypeScript owner can inject `credentials` only when a
+  process part provides it, and the App Server has no such part or embedder input yet: that is
+  §10 question 4. A Session-scoped test store is not the contract (§4.4 is process scope), and a
+  row that injects an absent service stays Pending. The Provider half and the service shape are
+  covered (part 1).
+- Delivering `settings.changed` / `settings.project_authorized` to TypeScript parts (§4.5, §10
+  question 2), with C4's leaf-event binding ([#174](https://github.com/arcships/dim/pull/174)).
