@@ -2,7 +2,8 @@
 
 Status: Implemented in roadmap item S5b ([#60](https://github.com/arcships/dim/issues/60),
 [#96](https://github.com/arcships/dim/pull/96)), after C6 ([#49](https://github.com/arcships/dim/issues/49),
-[#85](https://github.com/arcships/dim/pull/85)); the implementation follows this design without changes. Requirement: [SessionTitle](../plugins/SessionTitle.md) §2, §4 and
+[#85](https://github.com/arcships/dim/pull/85)); the implementation follows this design. Review refined when a write
+is admitted and how unload settles it (§6, D14). Requirement: [SessionTitle](../plugins/SessionTitle.md) §2, §4 and
 [A.2](../plugins/SessionTitle.md#a2-depended-on-shapes-owners-define-them). Overview:
 [Appendix B.2](../overview.md#b2-app-server-process-plugins), SessionStore and Rpc rows. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) process scope, inside the existing SessionStore plugin, with three Rpc list
@@ -17,8 +18,8 @@ channel ([C6](session-notices.md)), and Rpc shows the title in protocol v3 Sessi
 - **Data.** A revision counter (0 means never written) and either no title or a title `{text, source}` with source
   `auto` or `manual`. Clearing keeps the counter, so a revision never repeats.
 - **Write.** `setTitle {sessionId, expectedRevision, title | null}` commits revision `expectedRevision + 1` or fails
-  `conflict`, `not_found` or `storage`. The call is the handover: once called, SessionStore settles the write itself,
-  and dropping the call only loses the reply.
+  `conflict`, `not_found` or `storage`. The call is the handover: SessionStore admits the write when called, unless it
+  is closing, and settles it itself; dropping the call only loses the reply.
 - **Notice.** After each commit, `{source: "SessionStore", kind: "title", data: {title, titleSource,
   titleRevision}}`, in commit order.
 - **Lists.** Protocol v3 `session.list` and `session.summaries` entries carry `title`, `titleSource` and
@@ -99,7 +100,7 @@ protocol version.
 | --- | --- | --- |
 | `not_found` | The store holds no record of the Session: never created, deleted, or rolled back. A stored Session that is closed or not loaded is found | Unchanged |
 | `conflict` | `expectedRevision` is not the current revision | Unchanged, no notice. Read again |
-| `storage` | The transaction failed, or SessionStore was closing before the write started (§6) | Unchanged, no notice |
+| `storage` | The transaction failed, or the call arrived after SessionStore started closing (§6) | Unchanged, no notice |
 
 ### 4.2 Rust
 
@@ -111,11 +112,12 @@ The named service decodes requests, calls them and encodes replies; it adds no r
 ```text
  caller                  SessionStore                                     SQLite             Session channel
  ------                  -----------------------------------------------  -----------------  ---------------
- setTitle(S, r, T) ----> start the write task   <== handover (the call)
-                           |  (dropping the call from here on only
-                           |   loses the reply)
-                           |  acquire the title writer (one write at a time)
-                           |  SessionStore closing? -> storage, nothing written
+ setTitle(S, r, T) ----> SessionStore closing? -> storage at once, nothing written
+                         admit: start the write task   <== handover (the call)
+                           |  (SessionStore owns the task; dropping the
+                           |   call from here on only loses the reply)
+                           |  wait for its turn at the title writer
+                           |  (one write at a time)
                            +-- BEGIN IMMEDIATE ---------------------------> revision of S
                            |                                                 no Session: not_found, rollback
                            |                                                 revision != r: conflict, rollback
@@ -124,13 +126,13 @@ The named service decodes requests, calls them and encodes replies; it adds no r
                            |  committed only:
                            |    notify(S, {SessionStore, title,
                            |      {title, titleSource, titleRevision: r+1}}) -------------------> Notice
-                           |  release the title writer
+                           |  end its turn
  <---- {revision: r+1} ----+
 ```
 
-`notify` runs after the commit and before the title writer admits the next write, so the notices of one Session
-reach its channel in commit order. It never runs under the SQLite connection lock: listener code does not run under
-the database lock (the rule in [timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)).
+`notify` runs after the commit and before the next write takes its turn, so the notices of one Session reach its
+channel in commit order. It never runs under the SQLite connection lock: listener code does not run under the database
+lock (the rule in [timeline.rs](../../../crates/dim-app-server/src/storage/timeline.rs)).
 
 ## 6. Handover, cancellation and settlement
 
@@ -139,10 +141,10 @@ This settles the boundary that SessionTitle §0 left to S5b.
 | Point | Rule |
 | --- | --- |
 | Before the call | The caller's own work. Cancelling it before the call writes nothing |
-| The call | The handover is SessionStore receiving the call: `setTitle` starts the write task before it returns. In Rust `set_title` is a plain function that starts the task and returns a future of the reply. The named service calls it inside `invoke`, so a JavaScript call is handed over once the host receives it |
+| The call | The handover is SessionStore receiving the call: before it returns, `setTitle` admits the write and starts it as SessionStore's own task, or, once SessionStore is closing, fails `storage` without writing. In Rust `set_title` is a plain function that does this and returns a future of the reply. That future only awaits the task, so dropping it detaches the reply, never the write. The named service calls it inside `invoke`, so a JavaScript call is handed over once the host receives it |
 | After the call | SessionStore settles the write itself: it commits and announces, or fails and writes nothing. Dropping the call, unloading the calling row or losing the reply neither cancels nor undoes it. `setTitle` has no cancel action |
 | Lost reply | The caller reads with `read`. It does not repeat the write blindly: a repeat at the old revision fails `conflict`, and one at the new revision would be a second change ([SessionTitle Appendix C](../plugins/SessionTitle.md#appendix-c-errors-and-recovery)) |
-| SessionStore unload | Its disposer acquires the title writer before the store stops writing. A write already admitted commits and announces first; a write still waiting fails `storage` and writes nothing. Nothing is retried after a reload |
+| SessionStore unload | Its disposer first stops admission: from then on a call fails `storage` at once and writes nothing. It then waits until every admitted write, the one in its turn and those waiting for theirs, has committed and announced or failed. Only then does it close Session files and the Timeline writer, and SqliteStorage, which unloads after SessionStore, closes the connection. The notices follow C6 delivery: once the Session is no longer loaded, nobody listens and they are dropped. Nothing is retried after a reload |
 
 Rejected: a cancel action that works until the transaction starts. It would only move the uncertainty, since a caller
 that drops the call still has to read to learn the outcome; and a JavaScript caller cannot cancel a host call in rutis
@@ -211,7 +213,7 @@ Rpc never calls `setTitle` and gains no method. How each error reaches clients:
 | Scenario | Outcome |
 | --- | --- |
 | Two writes with the same expected revision | The first to commit wins; the other fails `conflict` and announces nothing |
-| Writes to different Sessions | Admitted one at a time by the one title writer; each commits in its own transaction |
+| Writes to different Sessions | Run one at a time by the one title writer; each commits in its own transaction |
 | `setTitle` and `session.delete` | The store's write transactions order them: a commit first is removed by the delete; a delete first makes the write `not_found` |
 | `setTitle` and `session.fork` | Independent: the fork copies no title |
 | `setTitle` and Timeline appends | Independent rows; each uses its own transaction on the one store connection |
@@ -325,7 +327,8 @@ None. S5b uses C6's `notify`, the existing service catalog and `HostDispatch`, a
 4. `read` and `setTitle` of a Session that was never created, or was deleted: `not_found`.
 5. A failed transaction (a disposable store with a failing trigger): `storage`, no notice, state unchanged; the next
    write at the same revision commits.
-6. A dropped `setTitle` call still commits and announces once (handover, §6).
+6. A `setTitle` call whose caller awaits the reply and then drops it, while the write is held before its transaction,
+   still commits and announces exactly once (handover, §6).
 7. v3 `session.list` and `session.summaries` carry `title`, `titleSource`, `titleRevision`; v2 lists do not.
 8. A title survives a restart and can be read and written while its Session is not loaded; a fork starts untitled at
    revision 0; a delete removes the row.
@@ -335,10 +338,14 @@ None. S5b uses C6's `notify`, the existing service catalog and `HostDispatch`, a
 10. A TypeScript Session row running in Node injects `sessionMetadata`, reads and sets the title, and the attached
     client receives the notice (`node_` test, run by CI's Node step).
 11. A `setTitle` request without `title` is rejected; the plugin SDK type check covers the call shapes.
+12. Unload: writes admitted before SessionStore starts closing, one in its turn and one waiting for it, commit and
+    reply with their revisions while shutdown waits for them; a call after closing starts fails `storage` at once and
+    is not in the store after a restart (§6).
 
-Tests: items 1 to 8 and 10 are in [titles.rs](../../../crates/dim-app-server/tests/transport_flow/titles.rs), through
+Tests: items 1 to 8, 10 and 12 are in [titles.rs](../../../crates/dim-app-server/tests/transport_flow/titles.rs), through
 the `sessionMetadata` service as a Session part injects it and the [session-metadata
-fixture](../../../runtime/fixtures/session-metadata.ts); item 9 is `a_v15_store_upgrades_in_place_once`,
+fixture](../../../runtime/fixtures/session-metadata.ts); items 6 and 12 hold the write with
+`storage::testing::hold_title_write` (feature `testing`); item 9 is `a_v15_store_upgrades_in_place_once`,
 `a_v13_store_upgrades_in_place_once`, `the_daemon_reports_a_v13_upgrade_on_stderr_once` and the refusal cases in
 [storage_flow.rs](../../../crates/dim-app-server/tests/storage_flow.rs); item 11 is the malformed calls in titles.rs and
 [plugin-sdk.test.mjs](../../../runtime/plugin-sdk.test.mjs). S5c's delete tests count the `session_metadata` rows.
@@ -349,8 +356,8 @@ fixture](../../../runtime/fixtures/session-metadata.ts); item 9 is `a_v15_store_
 | --- | --- | --- | --- |
 | D1 | Table `session_metadata`, native format v16 | A field in `agent_sessions.config`; rows in `settings_documents`; columns on `agent_sessions` | §11 |
 | D2 | Revision 0 means no row; a clear keeps the row | Deleting the row on a clear | The counter must never repeat (§3) |
-| D3 | The call is the handover; `set_title` starts the write when called | A cancel action until the transaction starts | §6: it moves the uncertainty without removing it, and JavaScript cannot cancel a host call |
-| D4 | One process-wide title writer; `notify` inside it, after the commit | Per-Session locks; `notify` under the database lock; relying on the revision alone | Titles are written rarely, so one writer costs nothing and also gives unload its settlement point. Listener code never runs under the database lock. The revision alone would let clients see notices out of order |
+| D3 | The call is the handover; `set_title` admits and starts the write when called | A cancel action until the transaction starts | §6: it moves the uncertainty without removing it, and JavaScript cannot cancel a host call |
+| D4 | One process-wide title writer; `notify` inside it, after the commit | Per-Session locks; `notify` under the database lock; relying on the revision alone | Titles are written rarely, so one writer costs nothing. Listener code never runs under the database lock. The revision alone would let clients see notices out of order |
 | D5 | Notice `data` is `{title, titleSource, titleRevision}` | A.2's `{sessionId, title, titleSource, revision}` | The channel already names the Session (C6 D4); one field set for list entries and notices lets clients merge without mapping |
 | D6 | `titleRevision` in v3 list entries | `title` and `titleSource` only | Without it a client cannot order a list reply against a notice (§8) |
 | D7 | List fields for protocol v3 only | All protocol versions | v1 and v2 are frozen and receive no title notices |
@@ -360,6 +367,7 @@ fixture](../../../runtime/fixtures/session-metadata.ts); item 9 is `a_v15_store_
 | D11 | SessionStore stores text as given | Validating length and characters | SessionTitle owns the title rules and validates them; checking again would duplicate the contract |
 | D12 | SessionStore itself provides `sessionMetadata` | A part that never reloads | SessionStore reloads only with SqliteStorage (§12) |
 | D13 | The same text written again commits a new revision | Treating it as a no-op | SessionTitle Appendix B expects a duplicate rename to rewrite; a no-op would need its own reply |
+| D14 | Admission at the call; unload stops admission, then waits for every admitted write | Admitting a write when it takes its turn, and failing the writes still waiting at unload (the first implementation) | That left a handed-over write without a definite admission: whether it ran depended on whether its task reached the title writer before the disposer did, and a call that arrived during unload was neither refused nor admitted until the write in progress ended. Admitting at the call makes both the handover and the refusal immediate. Titles are written rarely, so waiting for the admitted ones is short. Session files' puts are admitted the same way |
 
 ## Appendix A. Rust binding
 
@@ -381,7 +389,8 @@ pub enum MetadataError { Conflict, NotFound, Storage(String) }
 
 impl SessionStore {
     pub async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
-    /// Starts the write when called: the call is the handover. Dropping the
+    /// Admits and starts the write when called, or fails `Storage` once
+    /// SessionStore is closing: the call is the handover. Dropping the
     /// returned future loses only the reply.
     pub fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
         -> impl Future<Output = Result<u64, MetadataError>> + Send + 'static;

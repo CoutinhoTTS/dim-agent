@@ -1812,6 +1812,13 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::metadata::testing",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::metadata",
+      "file": "crates/dim-app-server/src/storage/metadata.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_app_server::storage::sqlite",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -14715,6 +14722,13 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::metadata::testing",
+      "references": [
+        "use metadata::testing"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
@@ -14964,6 +14978,14 @@
       "references": [
         "path AgentError",
         "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::metadata",
+      "to": "dim_app_server::storage::metadata::testing",
+      "references": [
+        "mod testing",
+        "path testing::pause"
       ]
     },
     {

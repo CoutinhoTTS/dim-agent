@@ -1,13 +1,13 @@
 # SessionStore 标题元数据
 
-状态：已在路线图 S5b 实现（[#60](https://github.com/arcships/dim/issues/60)，[#96](https://github.com/arcships/dim/pull/96)），在 C6（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）之后；实现与本设计一致，没有改动。需求：[SessionTitle](../plugins/SessionTitle.md) §2、§4 与 [A.2](../plugins/SessionTitle.md#a2-依赖的形状由所有者定义)。总览：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 Rpc 行。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，在既有 SessionStore 插件内，外加三个 Rpc 列表字段。使用方：SessionTitle（P4，TypeScript 优先）。
+状态：已在路线图 S5b 实现（[#60](https://github.com/arcships/dim/issues/60)，[#96](https://github.com/arcships/dim/pull/96)），在 C6（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）之后；实现与本设计一致。评审细化了写入何时被接纳、卸载如何了结它（§6、D14）。需求：[SessionTitle](../plugins/SessionTitle.md) §2、§4 与 [A.2](../plugins/SessionTitle.md#a2-依赖的形状由所有者定义)。总览：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 Rpc 行。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，在既有 SessionStore 插件内，外加三个 Rpc 列表字段。使用方：SessionTitle（P4，TypeScript 优先）。
 
 ## 1. 概要
 
 SessionStore 为每个 Session 保存一个标题和一个按 Session 计数的修订号。标题只能通过 `setTitle` 修改，这是一次带修订号检查的写入。每次变更提交后，SessionStore 在该 Session 的广播频道上宣布新标题（[C6](session-notices.md)），Rpc 在协议 v3 的 Session 列表里显示标题。
 
 - **数据。** 一个修订号计数（0 表示从未写过），以及无标题或标题 `{text, source}`，`source` 为 `auto` 或 `manual`。清除时保留计数，所以修订号不会重复。
-- **写入。** `setTitle {sessionId, expectedRevision, title | null}` 提交修订号 `expectedRevision + 1`，或者失败为 `conflict`、`not_found`、`storage`。调用即交接：一旦调用，写入由 SessionStore 自己了结，放弃调用只会丢掉回复。
+- **写入。** `setTitle {sessionId, expectedRevision, title | null}` 提交修订号 `expectedRevision + 1`，或者失败为 `conflict`、`not_found`、`storage`。调用即交接：除非 SessionStore 正在关闭，它在收到调用时接纳写入，并由自己了结；放弃调用只会丢掉回复。
 - **通知。** 每次提交后发出 `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}`，按提交顺序。
 - **列表。** 协议 v3 的 `session.list` 与 `session.summaries` 条目带 `title`、`titleSource`、`titleRevision`。
 - **绑定。** 进程服务 `sessionMetadata`（`read`、`setTitle`）由 SessionStore 提供，经既有服务目录到达 TypeScript，与 `sessions`、`settings` 相同。
@@ -76,7 +76,7 @@ SessionStore 为每个 Session 保存一个标题和一个按 Session 计数的�
 | --- | --- | --- |
 | `not_found` | 存储里没有该 Session 的记录：从未创建、已删除或已回滚。已关闭或未装载但已存储的 Session 能找到 | 不变 |
 | `conflict` | `expectedRevision` 不是当前修订号 | 不变，没有通知。重新读取 |
-| `storage` | 事务失败，或写入开始前 SessionStore 已在关闭（§6） | 不变，没有通知 |
+| `storage` | 事务失败，或调用在 SessionStore 开始关闭之后到达（§6） | 不变，没有通知 |
 
 ### 4.2 Rust
 
@@ -87,10 +87,11 @@ Rust 使用方用 `ctx.get::<SessionStore>()` 取得 `SessionStore`，调用 `me
 ```text
  调用方                  SessionStore                                     SQLite             Session 频道
  ------                  -----------------------------------------------  -----------------  ---------------
- setTitle(S, r, T) ----> 启动写入任务           <== 交接（调用本身）
-                           |  （从这里起放弃调用只会丢掉回复）
-                           |  取得标题写入者（一次一个写入）
-                           |  SessionStore 正在关闭？ -> storage，不写入
+ setTitle(S, r, T) ----> SessionStore 正在关闭？ -> 立即 storage，不写入
+                         接纳：启动写入任务     <== 交接（调用本身）
+                           |  （任务归 SessionStore 所有；从这里起
+                           |   放弃调用只会丢掉回复）
+                           |  等待轮到它使用标题写入者（一次一个写入）
                            +-- BEGIN IMMEDIATE ---------------------------> 读 S 的修订号
                            |                                                 没有 Session：not_found，回滚
                            |                                                 修订号 != r：conflict，回滚
@@ -99,11 +100,11 @@ Rust 使用方用 `ctx.get::<SessionStore>()` 取得 `SessionStore`，调用 `me
                            |  仅在已提交时：
                            |    notify(S, {SessionStore, title,
                            |      {title, titleSource, titleRevision: r+1}}) -------------------> Notice
-                           |  释放标题写入者
+                           |  结束它的轮次
  <---- {revision: r+1} ----+
 ```
 
-`notify` 在提交之后、标题写入者接纳下一个写入之前运行，所以同一 Session 的通知按提交顺序到达它的频道。它从不在 SQLite 连接锁内运行：监听方代码不在数据库锁内运行（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的规则）。
+`notify` 在提交之后、下一个写入轮到之前运行，所以同一 Session 的通知按提交顺序到达它的频道。它从不在 SQLite 连接锁内运行：监听方代码不在数据库锁内运行（[timeline.rs](../../../../crates/dim-app-server/src/storage/timeline.rs) 的规则）。
 
 ## 6. 交接、取消与了结
 
@@ -112,10 +113,10 @@ Rust 使用方用 `ctx.get::<SessionStore>()` 取得 `SessionStore`，调用 `me
 | 时点 | 规则 |
 | --- | --- |
 | 调用之前 | 调用方自己的工作。在调用前取消，不写入任何东西 |
-| 调用 | 交接点是 SessionStore 收到调用：`setTitle` 在返回之前就启动写入任务。Rust 的 `set_title` 是普通函数，启动任务后返回回复的 future。命名服务在 `invoke` 里调用它，所以 JavaScript 的调用在宿主收到时即完成交接 |
+| 调用 | 交接点是 SessionStore 收到调用：`setTitle` 在返回之前接纳写入，并把它作为 SessionStore 自己的任务启动；SessionStore 一旦开始关闭，则失败为 `storage`，不写入。Rust 的 `set_title` 是普通函数，做完这些后返回回复的 future。这个 future 只等待该任务，所以放弃它只会断开回复，不会断开写入。命名服务在 `invoke` 里调用它，所以 JavaScript 的调用在宿主收到时即完成交接 |
 | 调用之后 | 写入由 SessionStore 自己了结：提交并宣布，或者失败且不写入。放弃调用、卸载调用方的行或丢失回复，都不会取消或撤销它。`setTitle` 没有取消动作 |
 | 回复丢失 | 调用方用 `read` 读取。不要盲目重复写入：按旧修订号重复会得到 `conflict`，按新修订号重复则是第二次变更（[SessionTitle 附录 C](../plugins/SessionTitle.md#附录-c-错误与恢复)） |
-| SessionStore 卸载 | 它的清理在存储停止写入前取得标题写入者。已被接纳的写入先提交并宣布；仍在等待的写入失败为 `storage`，不写入。重载后不重试 |
+| SessionStore 卸载 | 它的清理先停止接纳：此后的调用立即失败为 `storage`，不写入。然后它等待每个已接纳的写入（正在执行的和仍在等待轮次的）提交并宣布或失败。之后它才关闭 Session 文件和 Timeline 写入线程；SqliteStorage 在 SessionStore 之后卸载，再关闭连接。这些通知按 C6 投递：Session 不再装载时无人监听，通知被丢弃。重载后不重试 |
 
 不采用：在事务开始前都有效的取消动作。它只是转移了不确定性，放弃调用的一方仍然要读取才能知道结果；而且 JavaScript 调用方在 rutis 里无法取消宿主调用（[sessions §2](sessions-service.md#2-spike-结论) 第 5 条）。
 
@@ -172,7 +173,7 @@ Rpc 从不调用 `setTitle`，也不新增方法。各错误到达客户端的�
 | 场景 | 结果 |
 | --- | --- |
 | 两次写入带相同的预期修订号 | 先提交的胜出；另一次失败为 `conflict`，不宣布 |
-| 写入不同 Session | 由唯一的标题写入者逐个接纳；各自在自己的事务里提交 |
+| 写入不同 Session | 由唯一的标题写入者逐个执行；各自在自己的事务里提交 |
 | `setTitle` 与 `session.delete` | 由存储的写事务排序：先提交的会被删除移除；先删除则写入得到 `not_found` |
 | `setTitle` 与 `session.fork` | 互不影响：分叉不复制标题 |
 | `setTitle` 与 Timeline 追加 | 不同的行；各自在同一存储连接上使用自己的事务 |
@@ -271,14 +272,15 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 3. 清除（`null`）提交一个没有标题的修订号，并宣布 null。
 4. 读写从未创建或已删除的 Session：`not_found`。
 5. 事务失败（一次性库上的失败触发器）：`storage`，没有通知，状态不变；之后按同一修订号写入能提交。
-6. 被放弃的 `setTitle` 调用仍然提交并宣布一次（交接，§6）。
+6. 调用方等待回复后又放弃它，而写入停在事务之前：该 `setTitle` 仍然提交，并且恰好宣布一次（交接，§6）。
 7. v3 的 `session.list` 与 `session.summaries` 带 `title`、`titleSource`、`titleRevision`；v2 的列表不带。
 8. 标题在重启后保留，Session 未装载时也能读写；分叉从无标题、修订号 0 开始；删除移除该行。
 9. 空库建为 v16。一次性的 v15 与 v13 库原地升级为精确的 v16 结构，所有业务行不变，并报告一次升级；标记不符的 v16 结构、升级到一半的库与更旧的结构被拒绝并保留。
 10. 在 Node 中运行的 TypeScript Session 行注入 `sessionMetadata`，读写标题，附加的客户端收到通知（`node_` 测试，由 CI 的 Node 步骤运行）。
 11. 缺少 `title` 的 `setTitle` 请求被拒绝；插件 SDK 类型检查覆盖调用形状。
+12. 卸载：SessionStore 开始关闭之前已接纳的写入（一个正在执行，一个在等待轮次）提交并回复各自的修订号，关闭过程等待它们；关闭开始之后的调用立即失败为 `storage`，重启后存储里没有它（§6）。
 
-测试：第 1 至 8 项与第 10 项在 [titles.rs](../../../../crates/dim-app-server/tests/transport_flow/titles.rs)，经由 Session 部件注入的 `sessionMetadata` 服务和 [session-metadata 夹具](../../../../runtime/fixtures/session-metadata.ts)；第 9 项是 [storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once`、`the_daemon_reports_a_v13_upgrade_on_stderr_once` 与拒绝用例；第 11 项是 titles.rs 中格式错误的调用和 [plugin-sdk.test.mjs](../../../../runtime/plugin-sdk.test.mjs)。S5c 的删除测试也统计 `session_metadata` 的行。
+测试：第 1 至 8 项、第 10 项与第 12 项在 [titles.rs](../../../../crates/dim-app-server/tests/transport_flow/titles.rs)，经由 Session 部件注入的 `sessionMetadata` 服务和 [session-metadata 夹具](../../../../runtime/fixtures/session-metadata.ts)；第 6 项与第 12 项用 `storage::testing::hold_title_write`（`testing` 特性）让写入停住；第 9 项是 [storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once`、`the_daemon_reports_a_v13_upgrade_on_stderr_once` 与拒绝用例；第 11 项是 titles.rs 中格式错误的调用和 [plugin-sdk.test.mjs](../../../../runtime/plugin-sdk.test.mjs)。S5c 的删除测试也统计 `session_metadata` 的行。
 
 ## 17. 决定
 
@@ -286,8 +288,8 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 | --- | --- | --- | --- |
 | D1 | 表 `session_metadata`，原生格式 v16 | `agent_sessions.config` 里的字段；`settings_documents` 的行；`agent_sessions` 的新列 | §11 |
 | D2 | 修订号 0 表示没有行；清除保留该行 | 清除时删除行 | 计数绝不能重复（§3） |
-| D3 | 调用即交接；`set_title` 被调用时就启动写入 | 事务开始前有效的取消动作 | §6：它只转移不确定性，并不消除它；JavaScript 也无法取消宿主调用 |
-| D4 | 一个进程级的标题写入者；`notify` 在它之内、提交之后运行 | 按 Session 加锁；在数据库锁内 `notify`；只依赖修订号 | 标题写得很少，一个写入者没有代价，还给卸载提供了了结点。监听方代码从不在数据库锁内运行。只依赖修订号会让客户端看到乱序的通知 |
+| D3 | 调用即交接；`set_title` 被调用时就接纳并启动写入 | 事务开始前有效的取消动作 | §6：它只转移不确定性，并不消除它；JavaScript 也无法取消宿主调用 |
+| D4 | 一个进程级的标题写入者；`notify` 在它之内、提交之后运行 | 按 Session 加锁；在数据库锁内 `notify`；只依赖修订号 | 标题写得很少，一个写入者没有代价。监听方代码从不在数据库锁内运行。只依赖修订号会让客户端看到乱序的通知 |
 | D5 | 通知 `data` 为 `{title, titleSource, titleRevision}` | A.2 的 `{sessionId, title, titleSource, revision}` | 频道已经代表 Session（C6 D4）；列表条目和通知用同一组字段，客户端合并时无需映射 |
 | D6 | v3 列表条目带 `titleRevision` | 只带 `title` 与 `titleSource` | 没有它，客户端无法给列表回复和通知排序（§8） |
 | D7 | 列表字段只用于协议 v3 | 所有协议版本 | v1 与 v2 已冻结，也收不到标题通知 |
@@ -297,6 +299,7 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 | D11 | SessionStore 原样保存文本 | 校验长度和字符 | 标题规则属于 SessionTitle，由它校验；再查一次会重复合同 |
 | D12 | 由 SessionStore 自己提供 `sessionMetadata` | 一个永不重载的部件 | SessionStore 只随 SqliteStorage 重载（§12） |
 | D13 | 再次写入相同文本也提交新修订号 | 当作空操作 | SessionTitle 附录 B 期望重复重命名会重写；空操作需要自己的回复 |
+| D14 | 在调用时接纳；卸载先停止接纳，再等待每个已接纳的写入 | 写入轮到时才接纳，卸载时让仍在等待的写入失败（最初的实现） | 那样已交接的写入没有确定的接纳点：它能否执行，取决于它的任务和清理谁先到达标题写入者；卸载期间到达的调用，在当前写入结束前既不被拒绝也不被接纳。调用时接纳让交接和拒绝都立即确定。标题写得很少，等待已接纳的写入很短。Session 文件的写入也这样接纳 |
 
 ## 附录 A. Rust 绑定
 
@@ -318,7 +321,8 @@ pub enum MetadataError { Conflict, NotFound, Storage(String) }
 
 impl SessionStore {
     pub async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
-    /// 被调用时就启动写入：调用即交接。放弃返回的 future 只丢掉回复。
+    /// 被调用时就接纳并启动写入；SessionStore 正在关闭时失败为 `Storage`：
+    /// 调用即交接。放弃返回的 future 只丢掉回复。
     pub fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
         -> impl Future<Output = Result<u64, MetadataError>> + Send + 'static;
 }

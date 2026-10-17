@@ -5,7 +5,10 @@
 //! disposable native stores.
 use super::deletion::{Store, session, turn};
 use super::*;
-use dim_app_server::session_typescript::SessionTypeScriptConfig;
+use dim_app_server::{
+    session_typescript::SessionTypeScriptConfig, storage::testing::hold_title_write,
+};
+use futures_util::FutureExt;
 use rutis::{DepKey, Keyed};
 use rutis_bridge::session::{HostDispatch, Reply};
 use std::sync::OnceLock;
@@ -47,23 +50,32 @@ impl Metadata {
     }
     /// The reply envelope.
     async fn call(&self, method: &str, request: Value) -> Value {
-        match self.start(method, request).unwrap() {
-            rutis_bridge::session::Value::Reference(reply) if reply.is_future() => {
-                reply.wait_async().await.unwrap().json().unwrap()
-            }
-            reply => panic!("sessionMetadata replies asynchronously: {:?}", reply.json()),
-        }
+        envelope(self.start(method, request).unwrap()).await
+    }
+    /// Starts a call and awaits its envelope in a task of its own, as a
+    /// client awaits a reply.
+    fn spawn(&self, method: &str, request: Value) -> tokio::task::JoinHandle<Value> {
+        tokio::spawn(envelope(self.start(method, request).unwrap()))
     }
     async fn read(&self, session: &str) -> Value {
         self.call("read", json!({"sessionId": session})).await
     }
     async fn set(&self, session: &str, expected: u64, title: Value) -> Value {
-        self.call(
-            "setTitle",
-            json!({"sessionId": session, "expectedRevision": expected, "title": title}),
-        )
-        .await
+        self.call("setTitle", set_request(session, expected, title))
+            .await
     }
+}
+/// Awaits a started call's reply future: the envelope.
+async fn envelope(reply: rutis_bridge::session::Value) -> Value {
+    match reply {
+        rutis_bridge::session::Value::Reference(reply) if reply.is_future() => {
+            reply.wait_async().await.unwrap().json().unwrap()
+        }
+        reply => panic!("sessionMetadata replies asynchronously: {:?}", reply.json()),
+    }
+}
+fn set_request(session: &str, expected: u64, title: Value) -> Value {
+    json!({"sessionId": session, "expectedRevision": expected, "title": title})
 }
 fn ok(value: Value) -> Value {
     json!({"ok": true, "value": value})
@@ -302,8 +314,8 @@ async fn concurrent_title_writers_announce_every_commit_in_revision_order() {
 }
 
 /// §16 items 5 and 6: a failed transaction reports `storage`, writes and
-/// announces nothing; a call dropped after the handover still commits and
-/// announces once.
+/// announces nothing; a call whose reply is dropped while the write is in
+/// progress still commits and announces once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failed_writes_announce_nothing_and_dropped_calls_still_settle() {
     for _ in 0..3 {
@@ -347,15 +359,24 @@ async fn failed_writes_announce_nothing_and_dropped_calls_still_settle() {
             .execute_batch("DROP TRIGGER fail_title_insert; DROP TRIGGER fail_title_update")
             .unwrap();
 
-        // The reply is dropped right after the handover.
-        drop(
-            metadata
-                .start(
-                    "setTitle",
-                    json!({"sessionId": sid, "expectedRevision": 1, "title": title("Dropped", "manual")}),
-                )
-                .unwrap(),
-        );
+        // The client awaits the reply future, then drops it while the
+        // write is held before its transaction.
+        let mut held = hold_title_write(&sid);
+        let reply = metadata
+            .start("setTitle", set_request(&sid, 1, title("Dropped", "manual")))
+            .unwrap();
+        let (polled, awaiting) = tokio::sync::oneshot::channel();
+        let waiting = tokio::spawn(async move {
+            let mut reply = std::pin::pin!(envelope(reply));
+            assert!(reply.as_mut().now_or_never().is_none());
+            polled.send(()).unwrap();
+            reply.await
+        });
+        held.arrived().await;
+        awaiting.await.unwrap();
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        drop(held);
         let settled = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let read = metadata.read(&sid).await;
@@ -379,6 +400,81 @@ async fn failed_writes_announce_nothing_and_dropped_calls_still_settle() {
             ]
         );
         drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+/// §16 item 12: unload. Writes admitted before SessionStore starts closing,
+/// one in its turn and one waiting for it, commit and reply before SQLite
+/// closes; a call after closing starts fails `storage` at once and writes
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_settles_admitted_title_writes_and_refuses_later_ones() {
+    for _ in 0..3 {
+        let store = Store::new();
+        let (server, agent, metadata) = serve_titles(&store).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let sid = session(&mut client).await;
+        drop((client, agent));
+
+        let mut held = hold_title_write(&sid);
+        let running = metadata.spawn("setTitle", set_request(&sid, 0, title("Running", "auto")));
+        held.arrived().await;
+        let waiting = metadata.spawn("setTitle", set_request(&sid, 1, title("Waiting", "manual")));
+        server.shutdown();
+        let stopped = tokio::spawn(server.join());
+
+        // Probes name no stored Session, so they write nothing either way.
+        // Admitted, they wait behind the held write and then fail
+        // `not_found`; once SessionStore is closing they fail at once, so the
+        // first probe to finish shows that closing has started.
+        let missing = || set_request("missing", 0, title("Probe", "auto"));
+        let mut probes = vec![];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !probes.iter().any(tokio::task::JoinHandle::is_finished) {
+                probes.push(metadata.spawn("setTitle", missing()));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("SessionStore refuses calls once it is closing");
+        let late = tokio::time::timeout(
+            Duration::from_secs(10),
+            metadata.set(&sid, 2, title("Late", "manual")),
+        )
+        .await
+        .expect("a call after closing starts fails at once");
+        assert_eq!(code(&late), "storage");
+        assert!(!running.is_finished() && !waiting.is_finished());
+        assert!(!stopped.is_finished(), "shutdown waits for admitted writes");
+
+        drop(held);
+        assert_eq!(running.await.unwrap(), ok(json!({"revision": 1})));
+        assert_eq!(waiting.await.unwrap(), ok(json!({"revision": 2})));
+        // The probes started before closing settle; every later one was
+        // refused.
+        let mut codes = vec![];
+        for probe in probes {
+            codes.push(code(&probe.await.unwrap()).to_owned());
+        }
+        let admitted = codes.iter().take_while(|code| *code == "not_found").count();
+        assert!(admitted < codes.len(), "{codes:?}");
+        assert!(
+            codes[admitted..].iter().all(|code| code == "storage"),
+            "{codes:?}"
+        );
+        stopped.await.unwrap().unwrap();
+
+        let (server, agent, metadata) = serve_titles(&store).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        // Another Session gives the test its consumer part.
+        session(&mut client).await;
+        assert_eq!(
+            metadata.read(&sid).await,
+            ok(json!({"revision": 2, "title": title("Waiting", "manual")}))
+        );
+        drop((client, agent));
         server.shutdown();
         server.join().await.unwrap();
     }

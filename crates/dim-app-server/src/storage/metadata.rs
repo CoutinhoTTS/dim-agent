@@ -13,7 +13,8 @@ use rutis::Ctx;
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value as RpcValue};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio_util::task::TaskTracker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,29 +115,70 @@ impl From<rusqlite::Error> for MetadataError {
     }
 }
 
-/// SessionStore's title writer. One write runs at a time, process-wide, and
-/// announces its commit before the next starts, so the notices of a Session
-/// follow commit order.
+/// SessionStore's title writer. A `setTitle` is admitted when it is called
+/// and runs as SessionStore's own task, which `close` waits for. One write
+/// runs at a time, process-wide, and announces its commit before the next
+/// starts, so the notices of a Session follow commit order.
 #[derive(Clone)]
-pub(super) struct Titles {
+pub(super) struct Titles(Arc<TitleWriter>);
+struct TitleWriter {
     db: Arc<SqliteStorage>,
     /// SessionStore's context, which announces commits.
     ctx: Ctx,
-    /// Held by the write in progress; false once SessionStore is closing.
-    writer: Arc<tokio::sync::Mutex<bool>>,
+    /// Orders each admission against `close`.
+    admission: Mutex<()>,
+    /// The admitted writes; closed once SessionStore is closing.
+    writes: TaskTracker,
+    /// Held by the write in progress: one runs at a time.
+    turn: tokio::sync::Mutex<()>,
 }
 impl Titles {
     pub(super) fn new(db: Arc<SqliteStorage>, ctx: Ctx) -> Self {
-        Self {
+        Self(Arc::new(TitleWriter {
             db,
             ctx,
-            writer: Arc::new(tokio::sync::Mutex::new(true)),
-        }
+            admission: Mutex::new(()),
+            writes: TaskTracker::new(),
+            turn: tokio::sync::Mutex::new(()),
+        }))
     }
-    /// Waits for the write in progress to commit and announce; writes still
-    /// waiting then fail `storage` without writing.
+    /// Stops admitting writes, then waits until every admitted write, the
+    /// one in progress and those waiting for their turn, has committed and
+    /// announced or failed.
     pub(super) async fn close(&self) {
-        *self.writer.lock().await = false;
+        {
+            let _admission = self.0.admission.lock().unwrap();
+            self.0.writes.close();
+        }
+        self.0.writes.wait().await;
+    }
+}
+impl TitleWriter {
+    async fn settle(
+        self: Arc<Self>,
+        session_id: String,
+        expected_revision: u64,
+        title: Option<Title>,
+    ) -> Result<u64, MetadataError> {
+        let _turn = self.turn.lock().await;
+        #[cfg(feature = "testing")]
+        testing::pause(&session_id).await;
+        let (id, written) = (session_id.clone(), title.clone());
+        let revision = self
+            .db
+            .run(move |connection| Ok(write(connection, &id, expected_revision, written.as_ref())))
+            .await??;
+        let data = TitleFields::from(SessionMetadata { revision, title });
+        notify(
+            &self.ctx,
+            &session_id,
+            SessionNotice {
+                source: "SessionStore".into(),
+                kind: "title".into(),
+                data: serde_json::to_value(data).expect("title fields are JSON"),
+            },
+        );
+        Ok(revision)
     }
 }
 
@@ -145,47 +187,37 @@ impl SessionStore {
     pub async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError> {
         let id = session_id.to_owned();
         self.titles
+            .0
             .db
             .run(move |connection| Ok(read(connection, &id)))
             .await?
     }
     /// Commits `title` as revision `expected_revision + 1` and announces it.
-    /// The call is the handover: the write starts before this returns, and
-    /// dropping the returned future loses only the reply.
+    /// The call is the handover: unless SessionStore is closing, it admits
+    /// the write and starts it as SessionStore's own task before returning.
+    /// The returned future only awaits that task, and dropping it detaches
+    /// the reply, never the write.
     pub fn set_title(
         &self,
         session_id: &str,
         expected_revision: u64,
         title: Option<Title>,
     ) -> impl Future<Output = Result<u64, MetadataError>> + Send + 'static {
-        let Titles { db, ctx, writer } = self.titles.clone();
-        let session_id = session_id.to_owned();
-        let task = ctx.handle().clone().spawn(async move {
-            let open = writer.lock_owned().await;
-            if !*open {
-                return Err(MetadataError::Storage("SessionStore is closed".into()));
+        let titles = &self.titles.0;
+        let admitted = {
+            let _admission = titles.admission.lock().unwrap();
+            if titles.writes.is_closed() {
+                Err(MetadataError::Storage("SessionStore is closing".into()))
+            } else {
+                let write = titles
+                    .clone()
+                    .settle(session_id.to_owned(), expected_revision, title);
+                Ok(titles.writes.spawn_on(write, titles.ctx.handle()))
             }
-            let (id, written) = (session_id.clone(), title.clone());
-            let revision = db
-                .run(move |connection| {
-                    Ok(write(connection, &id, expected_revision, written.as_ref()))
-                })
-                .await??;
-            let data = TitleFields::from(SessionMetadata { revision, title });
-            notify(
-                &ctx,
-                &session_id,
-                SessionNotice {
-                    source: "SessionStore".into(),
-                    kind: "title".into(),
-                    data: serde_json::to_value(data).expect("title fields are JSON"),
-                },
-            );
-            drop(open);
-            Ok(revision)
-        });
+        };
         async move {
-            task.await
+            admitted?
+                .await
                 .map_err(|error| MetadataError::Storage(error.to_string()))?
         }
     }
@@ -326,6 +358,55 @@ impl HostDispatch for Dispatch {
             _ => Err(Error::Value(format!(
                 "unknown sessionMetadata method {method}"
             ))),
+        }
+    }
+}
+
+/// Holds a title write for race flow tests. Feature `testing` only;
+/// production builds have no hook.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    type Hold = (String, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
+
+    /// Holds the next admitted `setTitle` of a Session in its turn, before
+    /// its transaction, until this is dropped.
+    pub struct HeldWrite {
+        arrived: oneshot::Receiver<()>,
+        _release: oneshot::Sender<()>,
+    }
+    impl HeldWrite {
+        /// Resolves once the held write has arrived.
+        pub async fn arrived(&mut self) {
+            let _ = (&mut self.arrived).await;
+        }
+    }
+
+    pub fn hold_title_write(session_id: &str) -> HeldWrite {
+        let (arrive, arrived) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        HOLDS
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), arrive, released));
+        HeldWrite {
+            arrived,
+            _release: release,
+        }
+    }
+
+    pub(super) async fn pause(session_id: &str) {
+        let hold = {
+            let mut holds = HOLDS.lock().unwrap();
+            let index = holds.iter().position(|(held, ..)| held == session_id);
+            index.map(|index| holds.swap_remove(index))
+        };
+        if let Some((_, arrive, released)) = hold {
+            let _ = arrive.send(());
+            let _ = released.await;
         }
     }
 }
