@@ -505,7 +505,8 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/session_broadcast.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "tracing::warn"
       ]
     },
     {
@@ -11730,6 +11731,7 @@
         "path SessionBroadcastEvent::Closed",
         "path SessionBroadcastEvent::Event",
         "path SessionBroadcastEvent::Fence",
+        "path SessionBroadcastEvent::Notice",
         "path session_channel",
         "use dim_agent_capabilities::session_broadcast::SessionBroadcastEvent",
         "use dim_agent_capabilities::session_broadcast::session_channel"
@@ -11832,6 +11834,7 @@
         "path Notification::Closed",
         "path Notification::Event",
         "path Notification::ModelProgress",
+        "path Notification::Notice",
         "path Notification::State",
         "path Notification::TreeApprovalCancelled",
         "path Notification::TreeApprovalRequest",
@@ -11851,6 +11854,7 @@
         "path wire::ApprovalRequest",
         "path wire::BranchState::new",
         "path wire::EventNotice",
+        "path wire::ForwardedNotice",
         "path wire::ModelProgressNotice::new",
         "path wire::ProductEvent::new",
         "path wire::StateNotice",
@@ -13505,6 +13509,7 @@
         "path crate::tree_protocol::BarrierResult",
         "path crate::tree_protocol::CreateResult",
         "path crate::tree_protocol::EventNotice",
+        "path crate::tree_protocol::ForwardedNotice",
         "path crate::tree_protocol::HistoryResult",
         "path crate::tree_protocol::ModelProgressNotice",
         "path crate::tree_protocol::StateNotice"
@@ -14191,6 +14196,7 @@
         "path SessionBroadcastEvent::Closed",
         "path SessionBroadcastEvent::Event",
         "path SessionBroadcastEvent::Fence",
+        "path SessionBroadcastEvent::Notice",
         "use dim_agent_capabilities::session_broadcast::SessionBroadcastEvent"
       ]
     },
@@ -15222,6 +15228,14 @@
       "references": [
         "path SqliteStorage",
         "use crate::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_app_server::tree_protocol",
+      "to": "dim_agent_capabilities::session_broadcast",
+      "references": [
+        "path SessionNotice",
+        "use dim_agent_capabilities::session_broadcast::SessionNotice"
       ]
     },
     {
