@@ -1,5 +1,5 @@
 //! Structural Session rows; runtime and native bindings share each row's owner.
-use crate::{Result, ServerError};
+use crate::{Result, ServerError, settings::SourceDeclaration};
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::valid_tool_name};
 use dim_agent_runtime::{AgentBuilder, SESSION_GROUP, SessionScope};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
@@ -24,6 +24,36 @@ pub struct SessionTypeScriptConfig {
     pub js_runtime: PathBuf,
     pub anchor: PathBuf,
     pub rows: Vec<Value>,
+}
+
+/// The rows' `settings` entries (settings-service §3.1, §5.4): a row's
+/// package declares its sources next to `provides`, and the row id is their
+/// owner. Settings checks and compiles each declaration when it applies.
+pub(crate) fn settings_sources(config: &SessionTypeScriptConfig) -> Result<Vec<SourceDeclaration>> {
+    let mut sources = Vec::new();
+    for row in &config.rows {
+        let Some(entries) = row.get("settings") else {
+            continue;
+        };
+        let owner = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ServerError::Configuration("Session TypeScript row requires id".into())
+            })?;
+        let entries: Vec<SourceDeclaration> =
+            serde_json::from_value(entries.clone()).map_err(|error| {
+                ServerError::Configuration(format!(
+                    "settings of Session TypeScript row {owner}: {error}"
+                ))
+            })?;
+        sources.extend(entries.into_iter().map(|mut entry| {
+            entry.owner = owner.to_owned();
+            entry
+        }));
+    }
+    Ok(sources)
 }
 
 pub(crate) struct Parts {
@@ -134,7 +164,18 @@ impl Parts {
             runtime,
             rows_runtime,
             resolver,
-            rows: config.rows.clone(),
+            // `settings` is the host's input to Settings, not a loader field.
+            rows: config
+                .rows
+                .iter()
+                .cloned()
+                .map(|mut row| {
+                    if let Value::Object(fields) = &mut row {
+                        fields.remove("settings");
+                    }
+                    row
+                })
+                .collect(),
         })
     }
 }

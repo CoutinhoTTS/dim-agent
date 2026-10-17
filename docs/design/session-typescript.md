@@ -40,8 +40,9 @@ runtime is shared across the rows and Sessions. Its runtime name differs from an
 no private account manifest or account service is required by this entry.
 
 Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `inject` and `isolate`
-semantics. The only C4 row metadata is `provides`, with **exactly the existing
-`rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel tool/namespace list:
+semantics. The C4 row metadata is `provides`, with **exactly the existing
+`rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel tool/namespace list,
+and, only for a package that owns Settings sources, `settings` (below):
 
 ```json
 {
@@ -58,6 +59,12 @@ semantics. The only C4 row metadata is `provides`, with **exactly the existing
 The empty configuration above means this particular part has no structural options. Business
 settings belong to the owning plugin's Settings source, not to this object.
 
+A package that owns Settings sources declares them in a second structural member, `settings`, an
+array of the entries defined in [settings-service §3.1](appserver/settings-service.md#31-source-declaration).
+The host passes them to Settings with the row id as owner and does not hand `settings` to the
+loader. A source is process state, so it belongs to one row: a second row declaring the same
+source fails assembly, as two packages would. Rows without `settings` are unchanged.
+
 `toolContribution:<tool>` and `sessionMethods:<namespace>` encode the existing neutral service
 identity and key as one bridge service name. The colon separates the family from the complete
 key; the namespace keeps its dots. The catalog registers each full name as a shared service in
@@ -65,11 +72,12 @@ key; the namespace keeps its dots. The catalog registers each full name as a sha
 existing `AgentBuilder::session_tool` / `session_methods` during assembly. Authors do not make
 these Rust calls and do not separately maintain arrays of tool names and namespaces.
 
-This is structural input, not a new package manifest or persistence format. No filename, package
-schema, version field, content discovery or integrity scheme is introduced. A package may import
-one JSON declaration into its TypeScript `provides` and give that same declaration to the host;
-the two sides must not be separately hand-maintained. A future PluginManager can produce these
-rows from its package boundary. Its proposed schema 2 is not assumed to be available, and the
+`provides` and `settings` are structural input, not a new package manifest or persistence format.
+No filename, package schema, version field, content discovery or integrity scheme is introduced.
+A package may import one JSON declaration into its TypeScript `provides` and give that same
+declaration to the host; the two sides must not be separately hand-maintained. Its `settings`
+entries are likewise one JSON file the package ships and the host is given; the TypeScript code
+does not repeat them. A future PluginManager can produce these rows from its package boundary. Its proposed schema 2 is not assumed to be available, and the
 private managed-provider schema 1 is not accepted here.
 
 The static declaration is necessary because `RuntimeResolver` can describe a module only after

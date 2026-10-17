@@ -5,19 +5,23 @@ use super::*;
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value as RpcValue, host_key};
 use serde_json::{Value, json};
 
-/// One `settings` entry of a package manifest (§3.1). Until manifests are
-/// read (C4), the composition root registers declarations directly.
-#[derive(Clone, Debug)]
+/// One `settings` entry of a TypeScript row (§3.1), declared by the row's
+/// package next to its `provides`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceDeclaration {
-    /// The package id of the manifest; not written in the entry.
+    /// The id of the row that declares it; not written in the entry.
+    #[serde(skip)]
     pub owner: String,
     pub source: String,
     pub user_file: String,
     /// Present when the source also has project scope.
+    #[serde(default)]
     pub project_file: Option<String>,
     /// JSON Schema (draft 2020-12) whose root is `type: object`.
     pub schema: Value,
     /// JSON Pointers to members reachable through `properties`.
+    #[serde(default)]
     pub user_only: Vec<String>,
 }
 

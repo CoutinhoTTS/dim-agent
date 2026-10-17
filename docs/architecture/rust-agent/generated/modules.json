@@ -10059,7 +10059,8 @@
       "references": [
         "mod session_typescript",
         "path session_typescript::Parts::new",
-        "path session_typescript::SessionTypeScriptConfig"
+        "path session_typescript::SessionTypeScriptConfig",
+        "path session_typescript::settings_sources"
       ]
     },
     {
@@ -10070,13 +10071,6 @@
         "path settings",
         "path settings::SettingsPlugin::native",
         "path settings::SettingsPlugin::new"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::settings::declared",
-      "references": [
-        "path settings::SourceDeclaration"
       ]
     },
     {
@@ -14148,6 +14142,14 @@
       "to": "dim_app_server::methods",
       "references": [
         "path crate::methods::SessionNamespaces::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
       ]
     },
     {
