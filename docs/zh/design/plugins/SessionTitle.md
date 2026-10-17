@@ -6,15 +6,15 @@ SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 Se
 
 ## 0. 已交付机制与 Ready 前置
 
-C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89 和
-Settings #166/#175/#177 已交付。SessionTitle 尚未实现，设计尚未 Ready。
+C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89、
+Settings #166/#175/#177、C6 通知 #85 和 S5b 标题元数据 #96 已交付。SessionTitle 尚未实现，设计尚未 Ready。
 
 | 边界 | 当前合同与 Ready 决策 |
 | --- | --- |
 | 观察 | 沿用 C4 原行 sessionEvents bind、创建配置、closing 和自身 session.event。完整广播实现 #180 仍待复审/手动合并；#63/#168 保持打开。 |
 | 历史 | 使用已实现的进程 sessions.history，不读取私有 TimelineTree，也不依赖拟议的 C5 绑定。 |
 | 配置 | 沿用具名 Settings、原行来源声明及变更事件。读取 settings.read({source:"session-title",scope:"user"})，直接使用已校验并补默认值的文档；A12 提议来源作用域/文件。 |
-| 元数据/通知 | S5b #60/#96 负责 metadata/setTitle/列表字段；C6 #49/#85 负责通知与 Rpc 转发。两份 PR 仍是空草稿；A.2 是拟议合同，不是现有服务。Ready 前确认名称、模式、取消/交接和错误。 |
+| 元数据/通知 | S5b #60/#96 定义进程服务 `sessionMetadata`（`read` 与 `setTitle`，都是异步）、它的错误 `conflict`/`not_found`/`storage`、交接点，以及 v3 列表字段 `title`/`titleSource`/`titleRevision`（[标题元数据](../appserver/session-title-metadata.md)）；A.2 复述该合同。每次提交后 SessionStore 调用 `session_broadcast::notify`，Rpc 把记录以 `session.notice {sessionId, source, kind, data}` 转发给已附加的 v3 客户端（C6 #49/#85，[Session 广播通知](../appserver/session-notices.md)）。Ready 评审采用 S5b 的名称、模式、交接和错误。 |
 | 辅助请求 | Provider 已实现 AuxiliaryModelHost，S4 已给出 auxiliaryModel.complete 中立合同，但尚无具名 HostDispatch/catalog 绑定。用普通 C4 注入绑定既有所有者操作；凭据仍归 Provider。 |
 | 确认 | 实施前确认 A1–A12 和所有者绑定。文档 CI 不表示运行时验收。 |
 
@@ -37,8 +37,8 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 时，从该快照最新 ContextConfiguredData.settings 读取 providerId/modelId。没有被采用的
 模型即本次 model_unavailable，不改用 Provider 当前默认模型。
 
-setTitle 交接前取消则不写入；所有者接纳后由 SessionStore 完成自己的原子操作，回复丢失
-不授权重复或撤销。Ready 前与 S5b 明确此边界，不增加回滚或协调机制。
+setTitle 交接前取消则不写入。交接点就是 setTitle 调用本身：此后由 SessionStore 完成自己的
+原子操作，回复丢失不授权重复或撤销（[S5b §6](../appserver/session-title-metadata.md#6-交接取消与了结)）。不增加回滚或协调机制。
 
 ## 1. 结构
 
@@ -70,9 +70,9 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | C4 Session 观察/配置绑定；进程 sessions 历史、Settings 和必需的标题元数据/AuxiliaryModel 绑定（尚未实现，绑定可用后提供者缺失使整行 Pending） | 一份 provides 声明 sessionMethods key session.rename 和 sessionEvents bind；Settings 来源 session-title |
+| `SessionTitle` | Session | C4 Session 观察/配置绑定；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 AuxiliaryModel 绑定（尚未实现，绑定可用后提供者缺失使整行 Pending） | 一份 provides 声明 sessionMethods key session.rename 和 sessionEvents bind；Settings 来源 session-title |
 
-依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；标题元数据/通知及元数据/辅助具名绑定保留 §0 所有者前置。包在普通行的 settings 成员中声明来源，与 provides 并列。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载包（D4）。
+依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；S5b 提供标题元数据，C6 提供通知；辅助模型具名绑定保留 §0 所有者前置。包在普通行的 settings 成员中声明来源，与 provides 并列。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载包（D4）。
 
 ## 2. 数据与状态
 
@@ -187,8 +187,8 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | 设置或清除手动标题 |
 | `session-title` 来源：`enabled`、`maxLength`、`model` | 业务配置（Settings 来源） | 关闭生成；标题长度；生成标题用的模型（未设置：Session 的模型） |
-| `session.list`/`session.summaries` 中的 `title`、`titleSource` | 从 SessionStore 读取的 Rpc 协议字段 | 展示 |
-| 标题通知 `{sessionId, title, titleSource, revision}` | SessionStore 发出的 Session 广播通知（通用记录，§9；SessionStore 补充） | 已订阅的客户端实时更新标题 |
+| v3 `session.list`/`session.summaries` 中的 `title`、`titleSource`、`titleRevision` | 从 SessionStore 读取的 Rpc 协议字段（[S5b §8](../appserver/session-title-metadata.md#8-session-列表)） | 展示；修订号用于给列表和通知排序 |
+| 标题通知，`data: {title, titleSource, titleRevision}` | SessionStore 发出的 Session 广播通知（C6 记录，§9；[S5b §7](../appserver/session-title-metadata.md#7-标题通知)） | 已订阅的客户端实时更新标题 |
 
 ## 7. 安全
 
@@ -222,9 +222,9 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- |
 | 被哪条规则挡住 | 原则 §4 第 9 条和第 4 条：SessionStore 标题这样的进程级状态不能进 Timeline，但客户端需要实时看到标题变更；Session 广播目前只承载 `Event`、`Fence`、`Closed` 记录（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)）。 |
 | 考虑过的现有机制 | `session/titled` Timeline 事件（把进程状态放进 Timeline；总体设计 §7 已否决）；客户端轮询 `session.list`（不能实时更新）；标题专用频道（业务专用端口，违反第 8 条）。 |
-| 需要的通用能力 | Session 广播频道上的通知记录 `{source, kind, data}`，由该 Session 进程级状态的所有者在变更提交后发出；不带业务含义。标题通知就是这条记录，`source: "SessionStore"`、`kind: "title"`、`data: {sessionId, title, titleSource, revision}`；线上形式以这条记录为准。 |
+| 需要的通用能力 | Session 广播频道上的通知记录 `{source, kind, data}`，由该 Session 进程级状态的所有者在变更提交后发出；不带业务含义。标题通知就是这条记录，`source: "SessionStore"`、`kind: "title"`、`data: {title, titleSource, titleRevision}`（[S5b §7](../appserver/session-title-metadata.md#7-标题通知)）。Rpc 把这条记录原样转发为 `session.notice`，并加上频道的 `sessionId`（[C6 D4](../appserver/session-notices.md#10-决定)），所以 `data` 不重复它。 |
 | 对序号、批次、中断、重载的影响 | 没有序号，不属于批次；不重放：重新订阅的客户端通过所有者的查询（`session.list`）读取当前状态；不受中断影响；发出方重载只会让通知停止。 |
-| 由谁实现，对应 issue | 运行时 C6 [#49](https://github.com/arcships/dim/issues/49)，草稿 [#85](https://github.com/arcships/dim/pull/85)；尚未实现。Rpc 把记录原样转发给已订阅的客户端，这是 App Server 入口的改动，和 SessionStore 补充一起列在[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)。 |
+| 由谁实现，对应 issue | 运行时 C6 [#49](https://github.com/arcships/dim/issues/49)，在 [#85](https://github.com/arcships/dim/pull/85) 实现：记录、`session_broadcast::notify` 和 Rpc 的 `session.notice`（[Session 广播通知](../appserver/session-notices.md)）。SessionStore 发出标题通知（[S5b](../appserver/session-title-metadata.md)，即[总体设计附录 B.2](../overview.md#b2-app-server-进程插件) 中的补充）。 |
 
 #4（运行时类型化服务按名字暴露给非 Rust 部分）写在 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)。
 
@@ -244,9 +244,9 @@ revision 检查就是复检：手动标题总是胜出。
 
 | 服务 | 方法 | 类型 | 请求 | 回复与错误 |
 | --- | --- | --- | --- | --- |
-| SessionStore 元数据（补充） | `metadata` | 异步 | `{sessionId}` | `{revision, title?: {text, source: "auto" \| "manual"}}`；错误 `not_found`、`storage` |
-| SessionStore 元数据（补充） | `setTitle` | 异步 | `{sessionId, expectedRevision, title: {text, source} \| null}` | 新的 `revision`；错误 `conflict`、`not_found`、`storage`。提交后 SessionStore 发出标题通知 |
-| SessionStore（补充） | 标题通知 | Session 广播通知（通用记录，§9） | — | 在该 Session 的广播频道上发出 `{source: "SessionStore", kind: "title", data: {sessionId, title, titleSource, revision}}`；没有序号，不重放 |
+| SessionStore `sessionMetadata`（S5b） | `read` | 异步 | `{sessionId}` | `{revision, title: {text, source: "auto" \| "manual"} \| null}`；错误 `not_found`、`storage`（[S5b §4](../appserver/session-title-metadata.md#4-操作)） |
+| SessionStore `sessionMetadata`（S5b） | `setTitle` | 异步 | `{sessionId, expectedRevision, title: {text, source} \| null}` | `{revision}`；错误 `conflict`、`not_found`、`storage`。调用即交接；提交后 SessionStore 发出标题通知 |
+| SessionStore（S5b） | 标题通知 | Session 广播通知（C6 记录，§9） | — | 在该 Session 的广播频道上发出 `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}`；没有序号，不重放 |
 | Provider `AuxiliaryModel` | `complete` | 异步 | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: 文本}], maxOutputTokens}}`（[设计](../appserver/auxiliary-model.md)） | `{text, stopReason, usage}`；错误作为数据。由取消请求或丢弃调用取消 |
 
 ### A.3 配置
@@ -260,7 +260,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 监听 | C4 原行声明 `sessionEvents:<part>` `bind(sync)`，订阅自身 session.event，筛选 main input/applied，登记自持任务后返回；closing/原行清理结束自持工作 |
 | 资格 | C4 创建快照：`interactive !== false && collaborationRole === "leader"`；原生省略值表示 true |
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
-| 检查 | `metadata(session)`：已有任何标题则跳过；记下 revision `r` |
+| 检查 | `sessionMetadata.read({sessionId})`：已有任何标题则跳过；记下 revision `r` |
 | 读取 | 既有 sessions.history 以 atLeast=N 固定已发布 T >= N，再按 through=T 分页（S2 A.5）。选取第一条有 user 内容且 input/applied 的操作者输入；没有该输入/文本则不生成（A8/A10） |
 | 生成 | `complete({model: 来源中的 model，否则为前缀中最新 context/configured 的模型, request})`，30 s 预算（A4）。规范化：取第一行，去除引号与末尾标点，折叠空白，在 `maxLength` 处截断 |
 | 写入 | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`；`conflict` 或 `not_found` 时丢弃 |
@@ -337,8 +337,8 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 | 问题 | 描述 |
 | --- | --- |
-| Session 列表字段 | `SessionSummary` 中的 `title`/`titleSource` 是一项 Rpc 协议变更，需记录到 overview |
-| 具名绑定 | C4 观察、S2 历史、Settings 已有交付路径；S5b 元数据/C6 通知及 S4 辅助模型具名绑定仍待 Ready，合同归其所有者；不新增 Core 需求 |
+| Session 列表字段 | 已由 S5b 解决：v3 条目中的 `title`、`titleSource`、`titleRevision`，记录在总览 B.2 |
+| 具名绑定 | C4 观察、S2 历史、Settings、C6 通知和 S5b 的 `sessionMetadata` 已有交付路径；S4 辅助模型具名绑定仍待 Ready，合同归其所有者；不新增 Core 需求 |
 
 ## 附录 G. Rust 绑定
 
@@ -349,10 +349,10 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 生成任务 | 在 `ctx.effect` 下派生 |
 
 ```rust
-// SessionStore metadata supplement
+// SessionStore metadata (S5b; named service `sessionMetadata`)
 async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
-async fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
-    -> Result<u64, MetadataError>;                       // Conflict | NotFound | Storage; emits the title notice after commit
+fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
+    -> impl Future<Output = Result<u64, MetadataError>>; // Conflict | NotFound | Storage; the call is the handover
 pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
 pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
 // Provider AuxiliaryModel

@@ -1,4 +1,5 @@
 //! Version 2 product views of the Session broadcast; positions are branch sequences.
+use dim_agent_capabilities::session_broadcast::SessionNotice;
 use dim_agent_runtime::{BranchStatus, ModelProgress, TimelineInfo};
 use dim_agent_types::{AgentEvent, ApprovalCallData, BranchSource, EventKind};
 use serde::Serialize;
@@ -153,6 +154,15 @@ pub struct StateNotice {
     pub session_id: String,
     #[serde(flatten)]
     pub state: BranchState,
+}
+/// v3 `session.notice`: an owner's Session notice with its fields unchanged.
+/// No sequence and no replay (design: appserver/session-notices.md).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardedNotice {
+    pub session_id: String,
+    #[serde(flatten)]
+    pub notice: Arc<SessionNotice>,
 }
 /// The branch's model output not yet written to the Timeline (ADR agent-029).
 /// Display state: no sequence, never persisted, each notice replaces the last.

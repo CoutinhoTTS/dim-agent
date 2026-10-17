@@ -76,7 +76,8 @@ impl rutis::PatternListener<SessionBroadcastEvent> for SessionEvents {
                         .send
                         .send(SessionDelivery::Closed(session_id.to_owned()));
                 }
-                SessionBroadcastEvent::Fence { .. } => {}
+                // Leaf parts observe events only; notices stay with Rpc (C6).
+                SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {}
             }
         }
         Box::pin(async { Ok(None) })

@@ -6,15 +6,15 @@ SessionTitle is a Session plugin that gives an interactive leader Session a titl
 
 ## 0. Delivered mechanisms and Ready gates
 
-C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89 and
-Settings #166/#175/#177 are delivered. SessionTitle is not implemented or Ready.
+C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89,
+Settings #166/#175/#177, C6 notices #85 and S5b title metadata #96 are delivered. SessionTitle is not implemented or Ready.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
 | Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then its own session.event records. Full broadcast implementation #180 still needs re-review/manual merge; #63/#168 remain open. |
 | History | Use the implemented process sessions.history service, not private TimelineTree reads or proposed C5 bindings. |
 | Configuration | Existing named Settings, row source declarations and change events. Read settings.read({source:"session-title",scope:"user"}) and use its validated/defaulted document directly. A12 proposes source scope/file. |
-| Metadata/notice | S5b #60/#96 owns metadata/setTitle/list fields; C6 #49/#85 owns notices and Rpc forwarding. Both PRs remain empty drafts. A.2 is their proposed contract, not an available service. Confirm name/modes/cancellation/handover/errors before Ready. |
+| Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). The Ready review adopts S5b's names, modes, handover and errors. |
 | Auxiliary request | Provider implements AuxiliaryModelHost. S4's auxiliaryModel.complete neutral contract is documented, but its named HostDispatch/catalog binding is absent. Bind the existing owner operation through ordinary C4 injection; credentials stay with Provider. |
 | Confirmation | Confirm A1–A12 and owner bindings before implementation. Documentation CI is not runtime acceptance. |
 
@@ -41,9 +41,10 @@ supplies text. With model=null, the latest ContextConfiguredData.settings in tha
 providerId/modelId; without an adopted model, the attempt fails model_unavailable rather than
 using Provider's current default.
 
-Cancellation before setTitle handover stops work without writing. Once the owner accepts the
-mutation, SessionStore settles its own atomic operation; a lost reply does not authorize repeating
-or undoing it. Confirm that boundary with S5b before Ready. No rollback or coordination mechanism.
+Cancellation before setTitle handover stops work without writing. The handover is the setTitle call
+itself: from then on SessionStore settles its own atomic operation, and a lost reply does not authorize
+repeating or undoing it ([S5b §6](../appserver/session-title-metadata.md#6-handover-cancellation-and-settlement)). No rollback or
+coordination mechanism.
 
 ## 1. Structure
 
@@ -75,9 +76,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | C4 Session observation/configuration binding; process sessions history, Settings and required title metadata/AuxiliaryModel bindings (not implemented; absent providers keep the row Pending after binding is available) | sessionMethods key session.rename and sessionEvents bind from one provides dictionary; Settings source session-title |
+| `SessionTitle` | Session | C4 Session observation/configuration binding; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and the required AuxiliaryModel binding (not implemented; absent providers keep the row Pending after binding is available) | sessionMethods key session.rename and sessionEvents bind from one provides dictionary; Settings source session-title |
 
-Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; title metadata/notices and named metadata/auxiliary bindings retain §0's owner gates. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
+Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; the named auxiliary binding retains §0's owner gate. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
 
 ## 2. Data and state
 
@@ -192,8 +193,8 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 | --- | --- | --- |
 | `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | Set or clear a manual title |
 | `session-title` source: `enabled`, `maxLength`, `model` | Business configuration (Settings source) | Turn generation off; title length; model for titles (unset: the Session's model) |
-| `title`, `titleSource` in `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore | Display |
-| Title notice `{sessionId, title, titleSource, revision}` | Session broadcast notice emitted by SessionStore (generic record, §9; SessionStore supplement) | Live title update for subscribed clients |
+| `title`, `titleSource`, `titleRevision` in v3 `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore ([S5b §8](../appserver/session-title-metadata.md#8-session-lists)) | Display; the revision orders a list against notices |
+| Title notice, `data: {title, titleSource, titleRevision}` | Session broadcast notice emitted by SessionStore (C6 record, §9; [S5b §7](../appserver/session-title-metadata.md#7-the-title-notice)) | Live title update for subscribed clients |
 
 ## 7. Security
 
@@ -227,9 +228,9 @@ The first input's text is sent to the model in the `session-title` source; unset
 | --- | --- |
 | Blocked by | Principles §4 rules 9 and 4: process-level state such as the SessionStore title must not enter the Timeline, yet clients must see title changes live; the Session broadcast carries only `Event`, `Fence` and `Closed` records ([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)). |
 | Existing mechanisms considered | A `session/titled` Timeline event (puts process state on the Timeline; rejected in overview §7); client polling of `session.list` (no live update); a title-specific channel (a business-specific port, rule 8). |
-| Generic capability | A notice record `{source, kind, data}` on a Session's broadcast channel, emitted by the owner of process-level state about that Session after a committed change; no business meaning. The title notice is this record with `source: "SessionStore"`, `kind: "title"`, `data: {sessionId, title, titleSource, revision}`; that record is the wire form. |
+| Generic capability | A notice record `{source, kind, data}` on a Session's broadcast channel, emitted by the owner of process-level state about that Session after a committed change; no business meaning. The title notice is this record with `source: "SessionStore"`, `kind: "title"`, `data: {title, titleSource, titleRevision}` ([S5b §7](../appserver/session-title-metadata.md#7-the-title-notice)). Rpc forwards that record unchanged as `session.notice`, adding the channel's `sessionId` ([C6 D4](../appserver/session-notices.md#10-decisions)), so `data` does not repeat it. |
 | Effect on sequence, batch, interrupt, reload | No sequence number and no batch; not replayed: a client that resubscribes reads current state through the owner's query (`session.list`); interrupts do not apply; a reload of the emitter only stops notices. |
-| Owner and issue | Runtime C6 [#49](https://github.com/arcships/dim/issues/49), draft [#85](https://github.com/arcships/dim/pull/85); not implemented. Rpc forwarding of the record to subscribed clients unchanged is an App Server entry change listed with the SessionStore supplement in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
+| Owner and issue | Runtime C6 [#49](https://github.com/arcships/dim/issues/49), implemented in [#85](https://github.com/arcships/dim/pull/85): the record, `session_broadcast::notify` and Rpc's `session.notice` ([Session broadcast notices](../appserver/session-notices.md)). SessionStore emits the title notice ([S5b](../appserver/session-title-metadata.md), the supplement in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
 
 #4 (typed services by name for non-Rust parts) is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners).
 
@@ -249,9 +250,9 @@ Served through `sessionMethods` (Session, key `session.rename`): `describe(): as
 
 | Service | Method | Kind | Request | Reply and errors |
 | --- | --- | --- | --- | --- |
-| SessionStore metadata (supplement) | `metadata` | async | `{sessionId}` | `{revision, title?: {text, source: "auto" \| "manual"}}`; errors `not_found`, `storage` |
-| SessionStore metadata (supplement) | `setTitle` | async | `{sessionId, expectedRevision, title: {text, source} \| null}` | New `revision`; errors `conflict`, `not_found`, `storage`. After a commit SessionStore emits the title notice |
-| SessionStore (supplement) | title notice | Session broadcast notice (generic record, §9) | — | `{source: "SessionStore", kind: "title", data: {sessionId, title, titleSource, revision}}` on the Session's broadcast channel; no sequence number, not replayed |
+| SessionStore `sessionMetadata` (S5b) | `read` | async | `{sessionId}` | `{revision, title: {text, source: "auto" \| "manual"} \| null}`; errors `not_found`, `storage` ([S5b §4](../appserver/session-title-metadata.md#4-operations)) |
+| SessionStore `sessionMetadata` (S5b) | `setTitle` | async | `{sessionId, expectedRevision, title: {text, source} \| null}` | `{revision}`; errors `conflict`, `not_found`, `storage`. The call is the handover; after a commit SessionStore emits the title notice |
+| SessionStore (S5b) | title notice | Session broadcast notice (C6 record, §9) | — | `{source: "SessionStore", kind: "title", data: {title, titleSource, titleRevision}}` on the Session's broadcast channel; no sequence number, not replayed |
 | Provider `AuxiliaryModel` | `complete` | async | `{model: {providerId, modelId}, request: {system, messages: [{role: "user", content: text}], maxOutputTokens}}` ([design](../appserver/auxiliary-model.md)) | `{text, stopReason, usage}`; errors as data. Cancelled by a cancel request or by dropping the call |
 
 ### A.3 Configuration
@@ -265,7 +266,7 @@ Settings source `session-title`, one document: `enabled: bool` default `true`; `
 | Listen | Original C4 row declares `sessionEvents:<part>` `bind(sync)`, subscribes its own session.event, filters main input/applied, registers an owned task and returns; closing/row cleanup ends owned work |
 | Eligibility | C4 creation snapshot: `interactive !== false && collaborationRole === "leader"`; native omission means true |
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
-| Check | `metadata(session)`: skip if any title exists; keep revision `r` |
+| Check | `sessionMetadata.read({sessionId})`: skip if any title exists; keep revision `r` |
 | Read | Existing sessions.history with atLeast=N fixes published T >= N, then through=T pages (S2 A.5). Select the first operator input with user content and input/applied; no such input/text means no title (A8/A10) |
 | Generate | `complete({model: the source's model, else the model of the latest context/configured in the prefix, request})`, 30 s budget (A4). Normalized: first line, quotes and trailing punctuation removed, whitespace collapsed, cut at `maxLength` |
 | Write | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
@@ -342,8 +343,8 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 
 | Question | Description |
 | --- | --- |
-| Session list fields | `title`/`titleSource` in `SessionSummary` are an Rpc protocol change to record in the overview |
-| Named bindings | C4 observation, S2 history and Settings are delivered paths. S5b metadata/C6 notices and S4's named auxiliary binding remain before Ready; their owners keep their contracts. No new Core request |
+| Session list fields | Resolved by S5b: `title`, `titleSource` and `titleRevision` in v3 entries, recorded in overview B.2 |
+| Named bindings | C4 observation, S2 history, Settings, C6 notices and S5b's `sessionMetadata` are delivered paths. S4's named auxiliary binding remains before Ready; its owner keeps its contract. No new Core request |
 
 ## Appendix G. Rust binding
 
@@ -354,10 +355,10 @@ Flow tests through `session.create`/`session.submit`, `session.rename`, `session
 | Generation task | Spawned under `ctx.effect` |
 
 ```rust
-// SessionStore metadata supplement
+// SessionStore metadata (S5b; named service `sessionMetadata`)
 async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
-async fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
-    -> Result<u64, MetadataError>;                       // Conflict | NotFound | Storage; emits the title notice after commit
+fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
+    -> impl Future<Output = Result<u64, MetadataError>>; // Conflict | NotFound | Storage; the call is the handover
 pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
 pub struct Title { pub text: String, pub source: TitleSource }   // Auto | Manual
 // Provider AuxiliaryModel

@@ -28,7 +28,7 @@ impl Listener<SessionBroadcastEvent> for Forward {
                 let _ = self.sender.send(Some(event.clone()));
             }
             SessionBroadcastEvent::Event { .. } => {}
-            SessionBroadcastEvent::Fence { .. } => {}
+            SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {}
             SessionBroadcastEvent::Closed => {
                 let _ = self.sender.send(None);
             }
@@ -142,7 +142,9 @@ impl Listener<SessionBroadcastEvent> for Collect {
                 Some((branch_id.clone(), event.clone()))
             }
             SessionBroadcastEvent::Closed => None,
-            SessionBroadcastEvent::Fence { .. } => return Box::pin(async { Ok(None) }),
+            SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {
+                return Box::pin(async { Ok(None) });
+            }
         });
         self.1.notify_waiters();
         Box::pin(async { Ok(None) })
