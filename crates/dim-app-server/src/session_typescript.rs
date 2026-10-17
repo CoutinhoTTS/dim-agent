@@ -1,11 +1,14 @@
 //! Structural Session rows; runtime and native bindings share each row's owner.
-use crate::{Result, ServerError, settings::SourceDeclaration};
+use crate::{
+    Result, ServerError,
+    settings::{ProjectAuthorized, SettingsChanged, SourceDeclaration, project_authorizations},
+};
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::valid_tool_name};
 use dim_agent_runtime::{AgentBuilder, SESSION_GROUP, SessionScope};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, Plugin, PluginFactory, TypeKey};
 use rutis_bridge::{
-    runtime::{LocalRuntime, Stdio},
-    session::{HostDispatch, host_key_in},
+    runtime::{LocalRuntime, Process, Stdio},
+    session::{HostDispatch, Value as RpcValue, host_key_in},
 };
 use rutis_loader::{LoaderError, Resolved, Resolver, RuntimeResolver, ServiceCatalog};
 use serde_json::{Map, Value};
@@ -14,6 +17,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Local Node runtime arguments and ordinary loader rows, with a
@@ -24,6 +28,76 @@ pub struct SessionTypeScriptConfig {
     pub js_runtime: PathBuf,
     pub anchor: PathBuf,
     pub rows: Vec<Value>,
+}
+
+/// Settings events the Session runtime's parts receive with `ctx.on`
+/// (settings-service §4.5), each with its JSON payload as the one argument.
+const SETTINGS_EVENTS: [&str; 2] = [SettingsChanged::NAME, ProjectAuthorized::NAME];
+
+/// Queues one Settings event for the runtime and returns: other listeners on
+/// a Settings channel never wait for Node.
+struct Enqueue(mpsc::UnboundedSender<(&'static str, Value)>);
+impl Enqueue {
+    fn send<E: rutis::Event<Value = ()> + serde::Serialize>(
+        &self,
+        event: &E,
+    ) -> BoxFuture<'static, std::result::Result<Option<()>, CordisError>> {
+        let payload = serde_json::to_value(event).expect("Settings event payloads serialize");
+        let _ = self.0.send((E::NAME, payload));
+        Box::pin(async { Ok(None) })
+    }
+}
+impl rutis::PatternListener<SettingsChanged> for Enqueue {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        _: rutis::EventKey<SettingsChanged>,
+        event: &'a SettingsChanged,
+    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
+        self.send(event)
+    }
+}
+impl rutis::Listener<ProjectAuthorized> for Enqueue {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        event: &'a ProjectAuthorized,
+    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
+        self.send(event)
+    }
+}
+
+/// Forwards Settings' committed changes of every source, and newly
+/// authorized projects, to the Session runtime's parts (settings-service
+/// §4.5). The listeners only queue; one task emits in commit order and ends
+/// with the rows part. A failed delivery is that listener's diagnostic and
+/// does not stop later events.
+pub(crate) fn forward_settings_events(
+    ctx: &Ctx,
+    process: Arc<Process>,
+) -> std::result::Result<(), CordisError> {
+    let (send, mut queue) = mpsc::unbounded_channel();
+    ctx.events().on_pattern(
+        ctx,
+        rutis::EventPattern::<SettingsChanged>::prefix("settings/"),
+        Enqueue(send.clone()),
+    )?;
+    ctx.events()
+        .on(ctx, &project_authorizations(), Enqueue(send))?;
+    let task = tokio::spawn(async move {
+        while let Some((name, payload)) = queue.recv().await {
+            if let Err(error) = process.emit(name, vec![RpcValue::from(payload)]).await {
+                tracing::warn!(event = name, %error, "Settings event delivery to TypeScript parts failed");
+            }
+        }
+    });
+    ctx.effect(move || {
+        Effect::Disposer(Box::new(move || {
+            task.abort();
+            Ok(())
+        }))
+    })?;
+    Ok(())
 }
 
 /// The rows' `settings` entries (settings-service §3.1, §5.4): a row's
@@ -151,6 +225,7 @@ impl Parts {
             LocalRuntime::node(&config.js_runtime, &config.anchor)
                 .interpreter(config.node.clone())
                 .named("session-node")
+                .emits(SETTINGS_EVENTS)
                 .stdin(Stdio::Null)
                 .stdout(Stdio::Null)
                 .stderr(Stdio::Null),
