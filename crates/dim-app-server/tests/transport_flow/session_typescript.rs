@@ -518,12 +518,14 @@ async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
             .unwrap()
             .view
             .unwrap();
-        assert_eq!(
-            view.state().state,
-            rutis::FiberState::Failed,
-            "{bad}: {:?}",
-            view.state()
-        );
+        let mut state = view.watch();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.borrow().state != rutis::FiberState::Failed {
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{bad}: {error}; {:?}", view.state()));
         assert_eq!(
             client
                 .rpc("session.observer.status", json!({"sessionId":id}))
