@@ -134,7 +134,7 @@ C4 叶子部件收不到通知。`SessionNodeRows` 只把 `Event` 记录转发�
 流程测试位于 [notices.rs](../../../../crates/dim-app-server/tests/transport_flow/notices.rs)，经 IPC 和 WebSocket 运行：
 
 1. 一个 Session 级测试所有者经广播观察到 `input/applied` 后调用 `notify`。两个已附加的 v3 客户端各收到一条 `session.notice`，`source`、`kind`、`data` 保持原样，并排在该事件的 `session.event` 之后。已附加的 v2 客户端收到同样的事件，但没有通知。
-2. 一个进程级的所有者替身（`RunningServer::notify`，feature `testing`）发出通知，已附加的客户端收到。客户端 detach 期间、或 Session 已关闭并卸载时发出的通知从不送达；重新附加的客户端只收到 attach 之后发出的通知。
+2. 一个进程级的所有者替身（`RunningServer::notify`，feature `testing`）发出通知，已附加的客户端收到。客户端 detach 期间或 Session 已卸载时发出的通知从不送达；重新附加的客户端只收到 attach 之后发出的通知。`session.close` 回复之后（因而在 `Closed` 之后）发出的通知，不会在 `session.closed` 之前到达客户端。
 
 ## 10. 决定
 

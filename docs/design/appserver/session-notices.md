@@ -155,8 +155,9 @@ WebSocket:
    attached v3 clients receives one `session.notice`, with `source`, `kind` and `data` unchanged and after that
    event's `session.event`. An attached v2 client receives the same events and no notice.
 2. A process-level stand-in for an owner (`RunningServer::notify`, feature `testing`) emits notices. The attached
-   client receives them. A notice emitted while the client is detached, or while the Session is closed and unloaded,
-   is never delivered, and a re-attached client receives only notices emitted after the attach.
+   client receives them. A notice emitted while the client is detached or the Session is unloaded is never
+   delivered, and a re-attached client receives only notices emitted after the attach. A notice emitted after the
+   `session.close` reply, and so after `Closed`, does not reach the client before `session.closed`.
 
 ## 10. Decisions
 
