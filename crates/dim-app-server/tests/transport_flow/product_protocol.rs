@@ -1,6 +1,124 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_management_preserves_live_intent_and_separates_save_acknowledgement() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::path::PathBuf::from("/tmp").join(format!("dc-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let native = home.join("rust");
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(native.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut legacy = Client::new_version(&server, false, 2).await;
+    let mut remote = Client::new_version(&server, true, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("mcp.save"))
+    );
+    assert!(
+        !remote
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("mcp.save"))
+    );
+    assert_eq!(
+        legacy.rpc("mcp.catalog", json!({})).await["error"]["code"],
+        -32601
+    );
+    assert_eq!(
+        remote.rpc("mcp.catalog", json!({})).await["error"]["data"]["appError"],
+        "local_transport_required"
+    );
+    let before = client.rpc("mcp.catalog", json!({"cwd":home})).await;
+    assert_ok(&before);
+    let mut edit = json!({"source":"user", "id":"private", "expectedVersion":before["result"]["userRevision"],
+        "configuration":{"command":"never-start-this-fixture","enabled":false,"env":{"TOKEN":"secret-never-return"}}});
+    let mut wrong_source = edit.clone();
+    wrong_source["expectedVersion"] = before["result"]["projectRevision"].clone();
+    assert_eq!(
+        client.rpc("mcp.save", wrong_source).await["error"]["data"]["appError"],
+        "mcp_settings_conflict"
+    );
+    assert_ok(&client.rpc("mcp.save", edit.clone()).await);
+    let saved = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&saved);
+    assert_ne!(
+        saved["result"]["userRevision"],
+        before["result"]["userRevision"]
+    );
+    assert_eq!(saved["result"]["servers"][0]["id"], "private");
+    assert_eq!(saved["result"]["servers"][0]["enabled"], false);
+    assert!(!saved.to_string().contains("secret-never-return"));
+    assert_eq!(
+        client.rpc("mcp.save", edit.clone()).await["error"]["data"]["appError"],
+        "mcp_settings_conflict"
+    );
+    edit["expectedVersion"] = saved["result"]["userRevision"].clone();
+    edit["configuration"]["enabled"] = json!(true);
+    // Failed persistence is not an applied-but-unsaved edit: both the source
+    // revision and its prior document remain authoritative.
+    let fault = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
+    fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON settings_documents BEGIN SELECT RAISE(ABORT, 'secret-never-return'); END").unwrap();
+    let failed = client.rpc("mcp.save", edit.clone()).await;
+    assert_eq!(failed["error"]["data"]["appError"], "mcp_settings_read");
+    assert!(!failed.to_string().contains("secret-never-return"));
+    let unchanged = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&unchanged);
+    assert_eq!(
+        unchanged["result"]["userRevision"],
+        saved["result"]["userRevision"]
+    );
+    assert_eq!(unchanged["result"]["servers"], saved["result"]["servers"]);
+    fault.execute_batch("DROP TRIGGER fail_save").unwrap();
+    drop(fault);
+    server.shutdown();
+    server.join().await.unwrap();
+    // Restart reads committed source state, not an in-memory loader edit or a
+    // rewritten legacy file. The failed edit must not become durable later.
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(native),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let restored = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&restored);
+    assert_eq!(
+        restored["result"]["userRevision"],
+        saved["result"]["userRevision"]
+    );
+    assert_eq!(restored["result"]["servers"], saved["result"]["servers"]);
+    // The unchanged revision remains usable for a successful retry.
+    assert_ok(&client.rpc("mcp.save", edit).await);
+    let retried = client.rpc("mcp.catalog", json!({})).await;
+    assert_ok(&retried);
+    assert_ne!(
+        retried["result"]["userRevision"],
+        saved["result"]["userRevision"]
+    );
+    assert_eq!(retried["result"]["servers"][0]["enabled"], true);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconnect_locates_a_published_submission_without_resubmitting() {
     for ws in [false, true] {
         let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
@@ -530,8 +648,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             loop {
                 // Prompt delivered the current view's list, which names the
                 // Skill or not. The Session follows the catalog after the
-                // RPC returns, so its view may still be the one created from
-                // the broken skills.json.
+                // RPC returns, so its view may still contain the previous list.
                 let Ok(view) = session
                     .service::<dim_agent_capabilities::skills::SkillsBranch>("main")
                     .unwrap()
@@ -593,7 +710,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         "---\nname: product-check\ndescription: Product fixture\n---\nProduct skill body\n",
     )
     .unwrap();
-    std::fs::write(home.join("skills.json"), b"{broken").unwrap();
+    std::fs::write(home.join("skills.json"), br#"{"disabledSkillIds":[]}"#).unwrap();
+    std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"docs":{"type":"http","url":"https://example.invalid/private-secret","headers":{"Authorization":"private-secret"},"enabled":true}}}).to_string()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install_local_execution(
         &mut builder,
@@ -602,6 +720,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             output_root: native.join("outputs"),
         },
     );
+    dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     let server = serve(
         builder,
@@ -628,73 +747,38 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     .unwrap();
     // A shared daemon must authorize a workspace opened after startup. Catalog
     // reads preserve intent and never expose connection configuration secrets.
-    std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"docs":{"type":"http","url":"https://example.invalid/private-secret","headers":{"Authorization":"private-secret"},"enabled":true}}}).to_string()).unwrap();
     std::fs::write(work.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":["private-secret"],"env":{"TOKEN":"private-secret"},"enabled":false}},"extension":"preserved"}).to_string()).unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     for method in [
         "mcp.catalog",
         "mcp.set_enabled",
         "mcp.disconnect",
-        "mcp.approve",
-        "mcp.revoke",
         "session.mcp",
         "session.mcp.refresh",
     ] {
         assert!(client.features.as_array().unwrap().contains(&json!(method)));
     }
+    // ADR 003: no host-local approval methods or catalog approval state.
+    for (method, params) in [
+        (
+            "mcp.approve",
+            json!({"cwd":work,"id":"docs","approvalToken":"any"}),
+        ),
+        ("mcp.revoke", json!({"cwd":work,"id":"docs"})),
+    ] {
+        assert!(!client.features.as_array().unwrap().contains(&json!(method)));
+        assert_eq!(
+            client.rpc(method, params).await["error"]["data"]["appError"],
+            "unknown_method"
+        );
+    }
     let catalog = client.rpc("mcp.catalog", json!({"cwd":work})).await;
     assert_ok(&catalog);
-    let token = catalog["result"]["servers"][0]["approvalToken"].clone();
-    assert_eq!(token.as_str().unwrap().len(), 64);
     assert_eq!(
         catalog["result"]["servers"],
-        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio","approval":"required","approvalToken":token}])
+        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio"}])
     );
     assert!(!catalog.to_string().contains("private-secret"));
-    assert_eq!(
-        client
-            .rpc(
-                "mcp.approve",
-                json!({"cwd":work,"id":"docs","approvalToken":"stale"})
-            )
-            .await["error"]["data"]["appError"],
-        "mcp_settings_conflict"
-    );
-    assert_eq!(
-        client
-            .rpc("mcp.approve", json!({"id":"docs","approvalToken":token}))
-            .await["error"]["data"]["appError"],
-        "invalid_params"
-    );
-    assert_ok(
-        &client
-            .rpc(
-                "mcp.approve",
-                json!({"cwd":work,"id":"docs","approvalToken":token}),
-            )
-            .await,
-    );
-    assert_eq!(
-        client.rpc("mcp.catalog", json!({"cwd":work})).await["result"]["servers"][0]["approval"],
-        "approved"
-    );
-    assert_ok(
-        &client
-            .rpc("mcp.revoke", json!({"cwd":work,"id":"docs"}))
-            .await,
-    );
-    assert_eq!(
-        client.rpc("mcp.catalog", json!({"cwd":work})).await["result"]["servers"][0]["approval"],
-        "required"
-    );
-    assert_ok(
-        &client
-            .rpc(
-                "mcp.approve",
-                json!({"cwd":work,"id":"docs","approvalToken":token}),
-            )
-            .await,
-    );
     let revision = catalog["result"]["projectRevision"].clone();
     assert_eq!(client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":"stale","enabled":true})).await["error"]["data"]["appError"], "mcp_settings_conflict");
     assert_eq!(
@@ -720,11 +804,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         ("session.list", json!({})),
         ("skills.catalog", json!({})),
         ("mcp.catalog", json!({})),
-        (
-            "mcp.approve",
-            json!({"cwd":work,"id":"docs","approvalToken":token}),
-        ),
-        ("mcp.revoke", json!({"cwd":work,"id":"docs"})),
         ("session.mcp", json!({"sessionId":"remote"})),
         (
             "session.permission.get",
@@ -738,13 +817,26 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     }
     let entry = |id: &str, max: u64| {
         let caps = dim_agent_types::ModelCapabilities {
+            reasoning: true,
             context_window: 32000,
             max_output_tokens: max,
             ..Default::default()
         };
-        json!({"modelId":id,"displayName":id,"status":"active","capabilities":caps})
+        json!({"modelId":id,"displayName":id,"status":"active","capabilities":caps,
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}},
+                "serviceTier":{"supported":true,"options":["priority","default"]}}})
     };
     assert_ok(&client.rpc("provider.save",json!({"provider":{"providerId":"public-fixture","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"},"models":[entry("alpha",2048),entry("beta",4096)],"enabled":true}})).await);
+    // Select the model as a user would; the no-selection fallback costs
+    // seconds in a debug build and is covered by provider_flow.
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":"public-fixture","modelId":"alpha"}),
+            )
+            .await,
+    );
     let created = client.rpc("session.create", json!({"cwd":work})).await;
     assert_ok(&created);
     assert_eq!(created["result"]["model"]["modelId"], "alpha");
@@ -819,11 +911,14 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             break;
         }
     }
-    assert_eq!(client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":revision,"enabled":false})).await["error"]["data"]["appError"], "mcp_settings_conflict");
-    assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":enabled["result"]["projectRevision"],"enabled":false})).await);
+    // The choice is recorded for the user; the project file and its revision
+    // do not change, so the same revision disables it again.
+    assert_eq!(enabled["result"]["projectRevision"], revision);
+    assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":revision,"enabled":false})).await);
     let saved: Value =
         serde_json::from_slice(&std::fs::read(work.join(".mcp.json")).unwrap()).unwrap();
     assert_eq!(saved["extension"], "preserved");
+    assert_eq!(saved["mcpServers"]["docs"]["enabled"], false);
     mcp_disabled(&mut client).await;
     // A damaged external file reports its error rather than an empty catalog;
     // optional MCP failures leave ordinary workspace tools available.
@@ -836,12 +931,9 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             .rpc("session.mcp.refresh", json!({"sessionId":sid}))
             .await,
     );
-    assert_eq!(
-        client.rpc("session.skills", branch.clone()).await["error"]["data"]["appError"],
-        "skills_unavailable"
-    );
-    assert_eq!(std::fs::read(home.join("skills.json")).unwrap(), b"{broken");
-    std::fs::write(home.join("skills.json"), br#"{"disabledSkillIds":[]}"#).unwrap();
+    // After import, even corrupt legacy user files cannot replace loader intent.
+    std::fs::write(home.join("skills.json"), b"{broken").unwrap();
+    assert_ok(&client.rpc("session.skills", branch.clone()).await);
     assert_ok(&client.rpc("skills.refresh", json!({"cwd":work})).await);
     let skills = client.rpc("skills.catalog", json!({"cwd":work})).await;
     assert_ok(&skills);
@@ -962,6 +1054,174 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             .model_id,
         "beta"
     );
+
+    use dim_agent_capabilities::prompt_state::PromptSnapshot;
+    let adopted = || {
+        session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .configuration
+            .unwrap()
+    };
+    let original = adopted();
+    for preferences in [
+        json!({"reasoningEffort":"high"}),
+        json!({"serviceTier":"priority"}),
+        json!({"reasoningEffort":"none"}),
+        json!({"reasoningEffort":"low"}),
+    ] {
+        assert_ok(
+            &client
+                .rpc(
+                    "session.model.update",
+                    json!({"sessionId":sid,"branchId":"main","modelPreferences":preferences}),
+                )
+                .await,
+        );
+        assert_eq!(adopted().tools, original.tools);
+        if preferences["reasoningEffort"] == "none" {
+            assert!(adopted().config.unwrap().reasoning.is_none());
+        }
+    }
+    let selected = adopted();
+    let config = selected.config.as_ref().unwrap();
+    assert_eq!(config.max_tokens, Some(4096.));
+    assert_eq!(
+        config.reasoning.as_ref().unwrap().effort.as_deref(),
+        Some("low")
+    );
+    let options = config
+        .provider_options
+        .as_ref()
+        .unwrap()
+        .openai_compatible
+        .as_ref()
+        .unwrap();
+    assert_eq!(options.service_tier.as_deref(), Some("priority"));
+    assert!(options.thinking.is_none());
+    assert_eq!(client.rpc("session.model.update", json!({"sessionId":sid,"branchId":"main","modelPreferences":{"reasoningEffort":"low"}})).await["result"]["outcome"], "unchanged");
+    assert_eq!(adopted(), selected);
+    for fields in [
+        json!({}),
+        json!({"modelPreferences":{}}),
+        json!({"providerId":"public-fixture"}),
+        json!({"modelId":"beta"}),
+        json!({"providerId":null,"modelId":null}),
+        json!({"modelPreferences":{"reasoningEffort":"unsupported"}}),
+    ] {
+        let mut request = branch.clone();
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(
+            client
+                .rpc("session.model.update", request)
+                .await
+                .get("error")
+                .is_some()
+        );
+        assert_eq!(adopted(), selected);
+    }
+    let invalid_profile = client.rpc("agent.create", json!({"profile":{"name":"Unavailable model","description":"",
+        "systemPrompt":"Must not be adopted.","tools":[],"model":{"providerId":"public-fixture","modelId":"missing"}}})).await;
+    assert_ok(&invalid_profile);
+    assert!(client.rpc("session.agent.update", json!({"sessionId":sid,"branchId":"main","agentId":invalid_profile["result"]["agentId"]})).await.get("error").is_some());
+    assert_eq!(adopted(), selected);
+    assert!(
+        !session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .system
+            .contains("Must not be adopted.")
+    );
+    let profile = client.rpc("agent.create", json!({"profile":{"name":"Reviewer","description":"F3 fixture",
+        "systemPrompt":"Profile review instructions.","tools":[],"model":{"providerId":"public-fixture","modelId":"alpha"}}})).await;
+    assert_ok(&profile);
+    let profile_id = profile["result"]["agentId"].clone();
+    let update = json!({"sessionId":sid,"branchId":"main","agentId":profile_id});
+    assert_eq!(
+        client.rpc("session.agent.update", update.clone()).await["result"]["outcome"],
+        "adopted"
+    );
+    assert_eq!(adopted().model_id, "alpha");
+    assert_eq!(adopted().config.as_ref().unwrap().max_tokens, Some(2048.));
+    assert_eq!(adopted().tools, original.tools);
+    assert_eq!(
+        client.rpc("session.permission.get", branch.clone()).await["result"],
+        changed["result"]
+    );
+    assert!(server.agent().unwrap().get_session(&sid).is_some());
+    assert_eq!(
+        client.rpc("session.agent.update", update).await["result"]["outcome"],
+        "unchanged"
+    );
+    let before = adopted();
+    let prompt_only = client
+        .rpc(
+            "agent.create",
+            json!({"profile":{"name":"Prompt only","description":"",
+        "systemPrompt":"Prompt-only instructions.","tools":[]}}),
+        )
+        .await;
+    assert_ok(&prompt_only);
+    assert_ok(&client.rpc("session.agent.update", json!({"sessionId":sid,"branchId":"main","agentId":prompt_only["result"]["agentId"]})).await);
+    assert_eq!(adopted(), before);
+    assert_ok(&client.rpc("session.prompt.refresh", branch.clone()).await);
+    assert!(
+        session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .system
+            .contains("Prompt-only instructions.")
+    );
+    let empty = client
+        .rpc(
+            "agent.create",
+            json!({"profile":{"name":"Empty","description":"","systemPrompt":"","tools":[]}}),
+        )
+        .await;
+    assert_ok(&empty);
+    assert_ok(
+        &client
+            .rpc(
+                "session.agent.update",
+                json!({"sessionId":sid,"branchId":"main","agentId":empty["result"]["agentId"]}),
+            )
+            .await,
+    );
+    assert!(
+        !session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .entries
+            .keys()
+            .any(|(source, _)| source == dim_agent_capabilities::prompt_sources::SESSION)
+    );
+    let before = adopted();
+    assert_eq!(
+        client
+            .rpc(
+                "session.agent.update",
+                json!({"sessionId":sid,"branchId":"main","agentId":"unknown"})
+            )
+            .await["error"]["data"]["appError"],
+        "agent_unknown"
+    );
+    assert_eq!(
+        client
+            .rpc(
+                "session.agent.update",
+                json!({"sessionId":sid,"branchId":"other","agentId":profile_id})
+            )
+            .await["error"]["code"],
+        -32602
+    );
+    assert_eq!(adopted(), before);
 
     // A locked database delays owner publication. Rpc reload cancels its
     // response wait while the admitted Permission change remains owned.
@@ -1186,6 +1446,9 @@ impl TypedPlugin for ModelHostOwner {
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let view = ctx.plugin(capability_plugin(ModelHostPlugin(self.scope)));
+            (&view).await.map_err(|error| {
+                rutis::CordisError::PluginFailed(format!("Model host failed: {error}").into())
+            })?;
             self.views.lock().unwrap().push(view);
             Ok(rutis::Effect::Done)
         })
@@ -1227,7 +1490,7 @@ async fn model_progress_follows_a_reloaded_provider() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
         history::HistoryRenderer,
-        host::{ContextModelHost, IdentityContext, PrepareContextHost},
+        host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
     };
     let cells = ProgressCells::default();
     let captured = cells.clone();
@@ -1239,6 +1502,7 @@ async fn model_progress_follows_a_reloaded_provider() {
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new)
         .session_plugin(move |scope| ModelHostOwner {
             scope: *scope,

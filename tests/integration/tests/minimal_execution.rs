@@ -5,10 +5,12 @@
 #![cfg(unix)]
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    file_storage::FileStoragePlugin,
     history::HistoryRenderer,
     host::*,
-    host_platform::{EXEC_SHELL_UNAVAILABLE, HostPlatform, ShellStatus, resolve_shell},
+    host_platform::{HostPlatform, HostPlatformConfig, HostPlatformPlugin, resolve_shell},
     model_provider::ModelProviderPlugin,
+    permission::{CommandRulesHost, NoCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
@@ -127,20 +129,15 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
-    let mut platform = HostPlatform::current(ShellStatus::Unavailable {
-        code: EXEC_SHELL_UNAVAILABLE,
-        reason: String::new(),
-    })
-    .unwrap();
+    let mut env: Vec<_> = std::env::vars_os().collect();
+    env.retain(|(key, _)| key != "SHELL");
+    env.push(("SHELL".into(), "/bin/bash".into()));
+    let mut platform = HostPlatform::current(resolve_shell(Ok(None), &env).await).unwrap();
     platform.env.extend(
         extra
             .iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value))),
     );
-    let mut env = platform.env.clone();
-    env.retain(|(key, _)| key != "SHELL");
-    env.push(("SHELL".into(), "/bin/bash".into()));
-    platform.shell = resolve_shell(Ok(None), &env).await;
     platform
 }
 
@@ -153,10 +150,13 @@ struct Harness {
 
 impl Harness {
     async fn new(mut platform: HostPlatform) -> Self {
-        let cwd = scratch("cwd");
         platform.home = scratch("home");
         let root = Ctx::root_with(tokio::runtime::Handle::current());
         let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        Self::with_platform(root, view).await
+    }
+    async fn with_platform(root: Ctx, view: rutis::FiberView) -> Self {
+        let cwd = scratch("cwd");
         wait_active(
             &root,
             &[view],
@@ -181,6 +181,8 @@ impl Harness {
             .session_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_plugin(DefaultPrepareModelPlugin::new);
         dim_agent_capabilities::defaults::install_minimal_execution(
             &mut builder,
@@ -392,6 +394,103 @@ async fn close_settles_every_admitted_shell_task() {
         );
     }
     harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_persistent_shells_and_environment_refresh_use_current_preferences() {
+    let home = scratch("shell-config");
+    let config = home.join("exec-shell.json");
+    let set_shell = |shell: &str| {
+        std::fs::write(
+            &config,
+            json!({"version":1,"executablePath":shell}).to_string(),
+        )
+        .unwrap()
+    };
+    set_shell("/bin/bash");
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+        home.clone(),
+    ])));
+    (&storage).await.unwrap();
+    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
+        HostPlatformConfig {
+            exec_shell_file: Some((0, "exec-shell.json".into())),
+        },
+    )));
+    let harness = Harness::with_platform(root, view).await;
+    let session = harness.session().await;
+    let alternate = if Path::new("/bin/zsh").is_file() {
+        "/bin/zsh"
+    } else {
+        "/usr/bin/bash"
+    };
+    // The first shell is created after the service and Session were published.
+    set_shell(alternate);
+    session
+        .configure(
+            dim_agent_capabilities::prompt_sources::refresh_update(),
+            "main",
+        )
+        .await
+        .unwrap();
+    harness
+        .run(
+            &session,
+            &[("execute", json!({"command":"printf 'selected=%s' \"$0\""}))],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    assert!(text(results(&events).last().unwrap()).contains(&format!("selected={alternate}")));
+    let environment = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(input) => input.blocks.iter().find_map(|block| match block {
+                InputBlock::Raw { text, .. }
+                    if text.contains("<dim-state source=\"dim/environment/context\">") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        environment.contains(&format!("<shell>{alternate}</shell>")),
+        "{environment}"
+    );
+    // Editing the preference does not replace a running shell.
+    set_shell("/bin/bash");
+    harness
+        .run(
+            &session,
+            &[("execute", json!({"command":"printf 'retained=%s' \"$0\""}))],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    assert!(
+        text(results(&local_events(&session).await).last().unwrap())
+            .contains(&format!("retained={alternate}"))
+    );
+    harness
+        .run(&session, &[("execute", json!({"command":"exit 7"}))])
+        .await;
+    session.idle("main").await.unwrap();
+    // A replacement shell reads the current preference, without a Session reload.
+    harness
+        .run(
+            &session,
+            &[("execute", json!({"command":"printf 'reset=%s' \"$0\""}))],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    assert!(text(results(&events).last().unwrap()).contains("reset=/bin/bash"));
+    harness.shutdown().await;
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

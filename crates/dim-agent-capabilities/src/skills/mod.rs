@@ -2,10 +2,13 @@
 //! per-Session view, its list as a prompt source and the `skill` tool, and
 //! the per-branch adoption of list changes (`SkillsBranch`).
 mod catalog;
+mod content;
 mod discovery;
 mod session;
 
-pub use catalog::{MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin};
+pub use catalog::{
+    CatalogChanged, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin, catalog_changes,
+};
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
 use dim_agent_runtime::AgentBuilder;
@@ -19,6 +22,12 @@ use std::{
 /// plugin registered by the composition root.
 pub fn install(builder: &mut AgentBuilder) {
     builder
+        .session_extension::<content::ContentConfig, _>(
+            content::GROUP,
+            "SkillContent",
+            content::ContentPlugin::new,
+        )
+        .session_plugin(content::ContributionsPlugin::new)
         .session_plugin(SkillsPlugin::new)
         .session_tool("skill")
         .session_prompt_source(session::INSTRUCTIONS_SOURCE)
@@ -100,6 +109,21 @@ pub struct RefreshTarget {
     pub project: Option<PathBuf>,
 }
 
+/// Wakes its owner's task on each event it listens to. rutis awaits one
+/// channel's listeners in turn, so the owner works in its own task, never in
+/// the listener; wakes coalesce and the owner rereads current state.
+struct Wake(tokio::sync::watch::Sender<()>);
+impl<E: rutis::Event<Value = ()>> rutis::Listener<E> for Wake {
+    fn call<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        _: &'a E,
+    ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
+        self.0.send_replace(());
+        Box::pin(async { Ok(None) })
+    }
+}
+
 /// What a Session's model may see and load. `version` digests every Skill's
 /// identity and body, so a body-only change is a new view.
 #[derive(Debug)]
@@ -121,19 +145,10 @@ pub struct SkillSummary {
 const METADATA_BUDGET_CHARS: usize = 4000;
 
 impl SkillView {
-    pub(crate) fn from_catalog(view: &CatalogView) -> Self {
-        let mut skills = BTreeMap::new();
-        let mut disabled = BTreeSet::new();
-        for entry in &view.entries {
-            if entry.status != SkillStatus::Active {
-                continue;
-            }
-            if entry.enabled {
-                skills.insert(entry.definition.name.clone(), entry.definition.clone());
-            } else {
-                disabled.insert(entry.definition.name.clone());
-            }
-        }
+    pub(crate) fn from_contributions(
+        skills: BTreeMap<String, Arc<SkillDefinition>>,
+        disabled: BTreeSet<String>,
+    ) -> Self {
         let list = (!skills.is_empty()).then(|| render_skill_metadata(&skills));
         let identity = serde_json::json!({
             "skills": skills.values().map(|skill| serde_json::json!([

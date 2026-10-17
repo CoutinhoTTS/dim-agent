@@ -2,10 +2,14 @@
 //! belong to Skills; this port has no filesystem or app-server dependency.
 use rutis::BoxFuture;
 use std::{collections::BTreeSet, sync::Arc};
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-/// Opaque persistent revision, not a process-local notification counter.
+/// The Settings source holding Skill enablement. A host whose storage changes
+/// outside the catalog announces each write as `settings.changed` on
+/// `settings_changes(SOURCE)`; the catalog reads `skills()` again after each.
+pub const SOURCE: &str = "skills";
+
+/// Opaque source revision, not a notification counter.
 pub type SettingsVersion = String;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,14 +47,9 @@ pub trait SkillSettings: Send + Sync + 'static {
         enabled: bool,
         cancel: CancellationToken,
     ) -> BoxFuture<'static, Result<SettingsVersion, SkillSettingsError>>;
-
-    /// Subscribe before reading `skills()`, then read again after notifications.
-    /// Starts at `unread`, then carries committed Skill revisions; use skills()
-    /// for the authoritative version. Notifications may coalesce. Does not
-    /// watch writes by other processes.
-    fn changes(&self) -> watch::Receiver<SettingsVersion>;
 }
 
-/// Process service supplied by the product Settings plugin. Consumers declare
-/// this key in `injects()`; they never depend on the concrete storage owner.
+/// Storage port supplied to the catalog by its embedding host. A standalone
+/// catalog plugin injects this service; a host mounting the catalog may pass it
+/// privately without publishing a separate service or adapter plugin.
 pub struct SkillSettingsHost(pub Arc<dyn SkillSettings>);

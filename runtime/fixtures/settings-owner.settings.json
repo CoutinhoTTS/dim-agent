@@ -1,0 +1,19 @@
+[
+  {
+    "source": "example",
+    "userFile": "example.json",
+    "projectFile": "example.project.json",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "searchService": {
+          "type": "object",
+          "properties": {"kind": {"type": "string"}, "secretRef": {"type": "string"}}
+        },
+        "maxResults": {"type": "integer", "minimum": 1, "default": 5}
+      },
+      "additionalProperties": false
+    },
+    "userOnly": ["/searchService"]
+  }
+]

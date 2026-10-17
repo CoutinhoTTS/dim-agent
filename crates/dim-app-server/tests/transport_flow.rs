@@ -52,6 +52,9 @@ mod collaboration;
 #[path = "transport_flow/native_storage.rs"]
 mod native_storage;
 
+#[path = "transport_flow/compaction.rs"]
+mod compaction;
+
 #[path = "transport_flow/barrier.rs"]
 mod barrier;
 
@@ -60,6 +63,32 @@ mod product_protocol;
 
 #[path = "transport_flow/summaries.rs"]
 mod summaries;
+
+#[path = "transport_flow/management.rs"]
+mod management;
+
+#[path = "transport_flow/permission_rules.rs"]
+mod permission_rules;
+
+#[path = "transport_flow/session_methods.rs"]
+mod session_methods;
+
+#[path = "transport_flow/session_typescript.rs"]
+mod session_typescript;
+#[path = "transport_flow/settings_methods.rs"]
+mod settings_methods;
+
+#[path = "transport_flow/sessions.rs"]
+mod sessions;
+
+#[path = "transport_flow/shell_input.rs"]
+mod shell_input;
+
+#[path = "transport_flow/deletion.rs"]
+mod deletion;
+
+#[path = "transport_flow/fork.rs"]
+mod fork;
 
 enum Transport {
     Unix(BufReader<UnixStream>),
@@ -137,7 +166,7 @@ impl Client {
             Transport::Ws(stream) => stream.send(Message::Text(text.into())).await.unwrap(),
         }
     }
-    async fn read(&mut self) -> Value {
+    async fn read(&mut self, expected: &str) -> Value {
         tokio::time::timeout(Duration::from_secs(10), async {
             match &mut self.transport {
                 Transport::Unix(stream) => {
@@ -159,14 +188,14 @@ impl Client {
             }
         })
         .await
-        .expect("response deadline")
+        .unwrap_or_else(|error| panic!("deadline waiting for {expected}: {error}"))
     }
     async fn response(&mut self, id: u64) -> Value {
         if let Some(index) = self.notices.iter().position(|v| v["id"] == id) {
             return self.notices.remove(index);
         }
         loop {
-            let value = self.read().await;
+            let value = self.read(&format!("response {id}")).await;
             if value["id"] == id {
                 return value;
             }
@@ -182,7 +211,7 @@ impl Client {
             return self.notices.remove(index);
         }
         loop {
-            let value = self.read().await;
+            let value = self.read(&format!("notice {method}")).await;
             if value["method"] == method {
                 return value;
             }
@@ -202,9 +231,19 @@ async fn launch_with_agent(
 /// `launch_with_agent` with extra capabilities installed after the defaults.
 async fn launch_with(
     tools: Arc<dyn ToolDriver>,
-    mut config: ServerConfig,
+    config: ServerConfig,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> (RunningServer, dim_agent_runtime::Agent) {
+    let server = try_launch_with(tools, config, extra).await.unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+/// `launch_with`, returning the assembly error instead of panicking.
+async fn try_launch_with(
+    tools: Arc<dyn ToolDriver>,
+    mut config: ServerConfig,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> dim_app_server::Result<RunningServer> {
     config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
         "dim-server-test-{}/server.sock",
         uuid::Uuid::new_v4()
@@ -216,9 +255,7 @@ async fn launch_with(
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     dim_app_server::collaboration::install(&mut builder);
     extra(&mut builder);
-    let server = serve(builder, config).await.unwrap();
-    let agent = server.agent().unwrap();
-    (server, agent)
+    serve(builder, config).await
 }
 /// Provides the Session `ToolHost` from a child plugin; restarting it reloads
 /// ToolRegistry and every capability downstream of it.
@@ -353,8 +390,12 @@ async fn trace_preserves_initialization_rollback_and_never_overwrites_evidence()
         let directory =
             std::env::temp_dir().join(format!("dim-trace-rollback-{}", uuid::Uuid::new_v4()));
         let path = directory.join("failed.jsonl");
-        // Missing TimelineTreeControl fails after the per-create Trace plugin is ready.
-        let builder = AgentBuilder::new(AgentConfig::default());
+        // Session services become ready before a missing branch dependency rolls them back.
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::install(&mut builder);
+        defaults::mock_hosts(&mut builder);
+        builder.timeline_plugin(|_| UnreadyCapability(true));
+        builder.startup_timeout(Duration::from_secs(1));
         let server = serve(
             builder,
             ServerConfig {
@@ -1168,7 +1209,7 @@ async fn handshake_errors_and_trace_are_real_transport_boundaries() {
     client
         .raw(json!({"jsonrpc":"2.0","id":-1.5,"method":"daemon.ping"}))
         .await;
-    let negative_id = client.read().await;
+    let negative_id = client.read("response -1.5").await;
     assert_eq!(negative_id["id"], json!(-1.5));
     assert_ok(&negative_id);
     let unknown = client.rpc("unknown", json!({})).await;
@@ -1322,7 +1363,10 @@ impl dim_agent_capabilities::host::ModelDriver for LargeModel {
 async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
     use dim_agent_capabilities::{
         adapters::DefaultPrepareModelPlugin,
-        host::{ContextModelHost, IdentityContext, ModelHost, PrepareContextHost},
+        host::{
+            CompactionStrategyHost, ContextModelHost, IdentityContext, ModelHost,
+            PrepareContextHost,
+        },
     };
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
@@ -1333,6 +1377,7 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
         .session_value(Arc::new(ModelHost(Arc::new(LargeModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let socket =
@@ -1471,7 +1516,7 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
         let attach = client
             .send("session.attach", json!({"sessionId":session.id()}))
             .await;
-        let reply = client.read().await;
+        let reply = client.read(&format!("response {attach}")).await;
         assert_eq!(reply["id"], attach, "the reply precedes every notification");
         assert_eq!(reply["result"], json!({}));
         assert_eq!(
@@ -1948,6 +1993,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         let skill = work.join(".agents/skills/review");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "---\nname: review\ndescription: Review changes\n---\nInspect changes.\n").unwrap();
+        std::fs::write(home.join("skills.json"), json!({"disabledSkillIds":["user:absent"],"future":{"keep":7}}).to_string()).unwrap();
         std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"disabled-fixture":{"command":"never-run-this-test-command","enabled":false}}}).to_string()).unwrap();
         std::fs::write(&configuration, json!({"defaultModel":{"providerId":"local","modelId":"native-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"native-model","config":{"maxTokens":4096}},{"id":"alternate","config":{"maxTokens":1536}}]}]}).to_string()).unwrap();
         for restart in [false, true] {
@@ -1991,23 +2037,76 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         let hello = client.rpc("hello", json!({"protocolVersion":3,"clientKind":"other"})).await;
         assert_ok(&hello);
         let features = hello["result"]["features"].as_array().unwrap();
-        for method in dim_app_server::protocol::LOCAL_EXECUTION_METHODS.into_iter().chain(dim_app_server::protocol::MCP_METHODS) {
+        for method in dim_app_server::protocol::LOCAL_EXECUTION_METHODS.into_iter().chain([
+            "skills.catalog", "skills.set_enabled", "skills.refresh",
+            "mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove",
+            "mcp.disconnect",
+        ]) {
             assert!(features.contains(&json!(method)), "{method}: {features:?}");
+        }
+        for method in ["mcp.approve", "mcp.revoke"] {
+            assert!(!features.contains(&json!(method)), "{method}: {features:?}");
         }
         assert!(!features.contains(&json!("account.providers")));
         assert_eq!(client.rpc("account.providers", json!({})).await["error"]["code"], -32601);
+        // Contributed methods validate params at the owner, not at decoding.
+        for method in [
+            "skills.catalog", "skills.set_enabled", "skills.refresh",
+            "mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove",
+            "mcp.disconnect",
+        ] {
+            let invalid = client.rpc(method, json!({"unexpected":true})).await;
+            assert_eq!(invalid["error"]["code"], -32602, "{method}: {invalid}");
+            assert_eq!(invalid["error"]["data"]["appError"], "invalid_params", "{method}: {invalid}");
+        }
         let catalog = client.rpc("skills.catalog", json!({"cwd":work})).await;
         assert_ok(&catalog);
         let review = catalog["result"]["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == "review").unwrap();
         assert_eq!(review["enabled"], !restart);
+        let database = rusqlite::Connection::open(home.join("dimcode.sqlite")).unwrap();
+        let read_skills = || database.query_row("SELECT version, document FROM settings_documents WHERE source='user/skills'", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).unwrap();
+        let before = read_skills();
+        let persisted: Value = serde_json::from_str(&before.1).unwrap();
+        assert_eq!(persisted["future"], json!({"keep":7}));
+        assert!(persisted["disabledSkillIds"].as_array().unwrap().contains(&json!("user:absent")));
         assert_ok(&client.rpc("skills.set_enabled", json!({"cwd":work,"id":review["id"],"enabled":false})).await);
+        let saved = read_skills();
+        let persisted: Value = serde_json::from_str(&saved.1).unwrap();
+        assert_eq!(persisted["future"], json!({"keep":7}));
+        assert!(persisted["disabledSkillIds"].as_array().unwrap().contains(&json!("user:absent")));
+        assert!(persisted["disabledSkillIds"].as_array().unwrap().contains(&review["id"]));
+        if restart { assert_eq!(saved, before, "a no-op does not rewrite the native document"); }
+        assert_ok(&client.rpc("skills.set_enabled", json!({"cwd":work,"id":review["id"],"enabled":false})).await);
+        assert_eq!(read_skills(), saved, "repeated no-op preserves revision and bytes");
+        assert!(client.rpc("skills.set_enabled", json!({"cwd":work,"id":"missing-skill","enabled":false})).await.get("error").is_some());
+        assert_eq!(read_skills(), saved, "an unknown skill cannot change settings");
         let catalog = client.rpc("mcp.catalog", json!({"cwd":work})).await;
         assert_ok(&catalog);
         assert_eq!(catalog["result"]["servers"][0]["enabled"], false);
         assert!(!catalog.to_string().contains("never-run-this-test-command"));
         let expected = catalog["result"]["userRevision"].clone();
+        // ADR 003 D3: a project entry starts disabled; enabling it is the
+        // user's native record, never a project file edit, and survives restart.
+        let project = work.join("enable-fixture");
+        let enablement = || database.query_row("SELECT document FROM settings_documents WHERE source='user/mcp-projects'", [], |row| row.get::<_, String>(0)).ok();
+        let local = |catalog: &Value| catalog["result"]["servers"].as_array().unwrap().iter().find(|entry| entry["id"] == "local").cloned();
         if restart {
-            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http","approval":"notRequired","approvalToken":null}]));
+            let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":true,"transport":"stdio"})));
+        } else {
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join(".mcp.json"), json!({"mcpServers":{"local":{"command":"never-run-this-test-command","enabled":true}}}).to_string()).unwrap();
+            let original = std::fs::read(project.join(".mcp.json")).unwrap();
+            let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":false,"transport":"stdio"})));
+            assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":project,"id":"local","source":"project","expectedVersion":listed["result"]["projectRevision"],"enabled":true})).await);
+            assert_eq!(std::fs::read(project.join(".mcp.json")).unwrap(), original);
+            let workspace = std::fs::canonicalize(&project).unwrap();
+            let record: Value = serde_json::from_str(&enablement().unwrap()).unwrap();
+            assert_eq!(record, json!({"enabled":{(workspace.to_str().unwrap()):["local"]}}));
+        }
+        if restart {
+            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http"}]));
             assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"managed-fixture","expectedVersion":expected})).await);
             let empty = client.rpc("mcp.catalog", json!({})).await;
             assert_ok(&empty);
@@ -2090,3 +2189,111 @@ async fn model_configuration_errors_exit_before_listening() {
 
 #[path = "transport_flow/managed_provider.rs"]
 mod managed_provider;
+
+#[test]
+fn contributed_management_methods_decode_with_unvalidated_raw_params() {
+    use dim_app_server::protocol::{Call, decode};
+    let methods = [
+        "account.providers",
+        "account.status",
+        "account.recover",
+        "account.login.begin",
+        "account.login.browser.begin",
+        "account.login.browser.complete",
+        "account.login.status",
+        "account.login.cancel",
+        "account.logout",
+        "account.codex.status",
+        "account.codex.recover",
+        "account.codex.login.browser.begin",
+        "account.codex.login.browser.complete",
+        "account.codex.login.status",
+        "account.codex.login.cancel",
+        "account.codex.logout",
+        "account.grok.status",
+        "account.grok.recover",
+        "account.grok.login.begin",
+        "account.grok.login.status",
+        "account.grok.login.cancel",
+        "account.grok.logout",
+        "provider.catalog",
+        "provider.refresh",
+        "provider.models.set_enabled",
+        "provider.models.edit",
+        "provider.models.reset",
+        "provider.selection",
+        "provider.select",
+        "provider.list",
+        "provider.save",
+        "provider.delete",
+        "provider.import_legacy",
+        "mcp.catalog",
+        "mcp.set_enabled",
+        "mcp.save",
+        "mcp.remove",
+        "mcp.disconnect",
+        "mcp.approve",
+        "mcp.revoke",
+        "skills.catalog",
+        "skills.set_enabled",
+        "skills.refresh",
+    ];
+    assert_eq!(methods.len(), 43);
+    for method in methods {
+        for params in [json!({"unexpected":true}), json!([1]), Value::Null] {
+            let request = decode(
+                &serde_json::to_vec(&json!({
+                    "jsonrpc":"2.0", "id":1, "method":method, "params":params,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            match request.call {
+                Call::Contributed {
+                    method: routed,
+                    params: raw,
+                } => {
+                    assert_eq!(routed, method);
+                    assert_eq!(raw, params);
+                }
+                other => panic!("{method} decoded as {other:?}"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    for version in [1, 2, 3] {
+        let mut client = Client::new_version(&server, false, version).await;
+        for method in [
+            "account.providers",
+            "provider.save",
+            "mcp.save",
+            "skills.set_enabled",
+        ] {
+            let result = client.rpc(method, json!({"unexpected":true})).await;
+            assert_eq!(
+                result["error"]["code"], -32601,
+                "v{version} {method}: {result}"
+            );
+            assert_eq!(result["error"]["data"]["appError"], "unknown_method");
+        }
+        let created = client.rpc("session.create", create(json!([]))).await;
+        assert_ok(&created);
+        assert_ok(
+            &client
+                .rpc(
+                    "session.close",
+                    json!({"sessionId":created["result"]["sessionId"]}),
+                )
+                .await,
+        );
+    }
+    let mut remote = Client::new_version(&server, true, 3).await;
+    let result = remote.rpc("mcp.save", json!({"unexpected":true})).await;
+    assert_eq!(result["error"]["data"]["appError"], "unknown_method");
+    server.shutdown();
+    server.join().await.unwrap();
+}

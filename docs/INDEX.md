@@ -1,10 +1,13 @@
 # Documentation
 
 - [CLI feature list](feature-list.md)
+- [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
+- [Development plan and priorities](design/roadmap.md)（中文）
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
+- [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
@@ -12,8 +15,23 @@
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
 - [Native CLI contract](../crates/dim-cli/README.md)
+- [CLI commands, conversation export and JSONL execution](design/cli-commands.md)
+- [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
+- [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
+- [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
+- [C4 Session TypeScript binding design](design/session-typescript.md)
+- [C5 branch TypeScript binding contract (proposed)](design/branch-typescript.md)
+- [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
+- [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
+- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md) (proposed)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
+- [Management methods](design/appserver/management-methods.md)
+- [Settings service](design/appserver/settings-service.md) (S8b design approved; implementation pending)（[中文](zh/design/appserver/settings-service.md)）
+- [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
+- [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
+- [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
+- [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

@@ -2,7 +2,11 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3。语言：由提供方执行的类别优先使用 TypeScript；OCR 依赖 OCR 运行时组件（[overview 附录 C](../overview.md)）。
 
-Modality 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：任务与提供方连接在各 Session 间共享），是九个类别非对话式多模态工作的唯一入口：图像、视频、语音、音乐、音频、3D 资产、动作、实时和 OCR。它按类别报告可用性及原因，按 Modality 自有的用途 key 解析默认模型，运行异步任务（提交、状态、等待、取消）并通过 `pluginFiles`（扩展）保存，并持有绑定到发起客户端连接的实时连接。提供方适配器内置于 Modality，或由适配器插件（任意语言）以命名进程服务 `modalityAdapter` 提供；OCR 通过控制节点或某个已配置节点的 HostPlatform 运行。它的方法是一个 `managementMethods` 服务（key `modality`）：关于宿主的进程插件方法，由 Rpc 收集进方法表，从不提供给已配对的远程设备。Modality 的设置（含每节点 OCR 组件路径）是业务配置，存放在它自己的 Settings 业务来源中，经 Settings 类型化操作写入，在使用时读取。它没有 Session 或分支部分：不写任何 Timeline 事件，也不提供模型可见的工具。
+> **按任务查找适配器（[#40](https://github.com/arcships/dim/issues/40)）。** Modality 在任务需要时查找该类别的适配器，而不是把所有适配器都作为依赖收集；缺少某个适配器只让该类别不可用。
+
+> **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
+
+Modality 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：任务与提供方连接在各 Session 间共享），是九个类别非对话式多模态工作的唯一入口：图像、视频、语音、音乐、音频、3D 资产、动作、实时和 OCR。它按类别报告可用性及原因，按它自己的 `modality` 设置文档解析默认模型，运行异步任务（提交、状态、等待、取消）并通过 `pluginFiles`（扩展）保存，并持有绑定到发起客户端连接的实时连接。提供方适配器内置于 Modality，或由适配器插件（任意语言）以命名进程服务 `modalityAdapter` 提供；OCR 通过控制节点或某个已配置节点的 HostPlatform 运行。它的方法是一个 `managementMethods` 服务（key `modality`）：关于宿主的进程插件方法，由 Rpc 收集进方法表，从不提供给已配对的远程设备。Modality 的设置（含每节点 OCR 组件路径）是业务配置，存放在它自己的 Settings 业务来源中，经 Settings 类型化操作写入，在使用时读取。它没有 Session 或分支部分：不写任何 Timeline 事件，也不提供模型可见的工具。
 
 ## 1. 结构
 
@@ -12,7 +16,7 @@ flowchart LR
     Mod["Modality：目录、任务、实时、<br/>内置适配器"]:::new
     AdPlug["适配器插件<br/>modalityAdapter 服务"]
     Rpc["Rpc 方法表<br/>收集 managementMethods"]
-    Prov["Provider：用途策略、<br/>连接解析"]
+    Prov["Provider：模型选择、<br/>连接解析"]
     Set["Settings 业务来源 modality"]
     Store["pluginFiles（扩展），含二进制"]
   end
@@ -24,7 +28,7 @@ flowchart LR
   Mod -->|"收集"| AdPlug
   Mod -->|"每个 OCR 任务"| HP
   HP --> OCR
-  Mod -->|"按 modality 用途 key 解析"| Prov
+  Mod -->|"校验模型、解析连接"| Prov
   Mod -->|"记录、输入、结果"| Store
   Mod -->|"使用时读取"| Set
   Rpc -->|"modality.* managementMethods"| Mod
@@ -36,11 +40,11 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Modality` | 进程（控制节点） | Provider 的用途选择、用途策略写入路径与非对话连接解析；`pluginFiles`（扩展：UTF-8 与二进制）；Settings 业务来源 `modality`；全部 `modalityAdapter` 服务；控制节点及每个已配置 OCR 节点的 HostPlatform；诊断 | `modalityTasks` 进程服务；`managementMethods` key `modality`（`modality.*`），由 Rpc 收集 |
+| `Modality` | 进程（控制节点） | Provider 的模型选择（`ModelSelectionHost`）与非对话连接解析；`pluginFiles`（扩展：UTF-8 与二进制）；Settings 业务来源 `modality`；全部 `modalityAdapter` 服务；控制节点及每个已配置 OCR 节点的 HostPlatform；诊断 | `modalityTasks` 进程服务；`managementMethods` key `modality`（`modality.*`），由 Rpc 收集 |
 | 适配器插件 | 进程 | 各自的提供方依赖 | `modalityAdapter` 服务，key 为适配器名，在插件的 `provides` 中声明 |
 
-**依赖的契约：**[方法](../contracts/session-boundary.md)契约（收集进 Rpc 方法表的 `managementMethods`、每次调用的进度接收器、绑定连接的通知）；Provider 的按用途策略存储，含其唯一写入路径与非对话连接解析（[overview 附录 B.2](../overview.md)）；`pluginFiles`（扩展），含二进制原子替换与格式版本（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；带隔离的 HostPlatform spawn（[HostPlatform](../../../architecture/rust-agent/plugins/HostPlatform.md)，隔离补充见 [overview 附录 B.1](../overview.md)）。
-**此处定义的契约：**类别与操作标识符；用途 key `modality.<category>` 与 `modality.<category>.<operation>`（对 Provider 不透明）；`modalityAdapter` 与 `modalityTasks` 服务（[语言中立](../../adr/002-plugin-scope.md)，A.2 与 A.3；Rust 绑定见附录 G）；`modality` 设置文档及其 schema；任务记录与结果格式（格式版本 1）；`modality.*` 方法与 `modality.realtime.event` 通知。Provider 对模态一无所知；Modality 在内置适配器之外不了解任何提供方特有语义。
+**依赖的契约：**[方法](../contracts/session-boundary.md)契约（收集进 Rpc 方法表的 `managementMethods`、每次调用的进度接收器、绑定连接的通知）；Provider 的模型选择（`ResolveModelSelection::resolve`，拒绝不可选的显式模型；[AuxiliaryModel](../appserver/auxiliary-model.md)）与非对话连接解析（[overview 附录 B.2](../overview.md)）；`pluginFiles`（扩展），含二进制原子替换与格式版本（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；带隔离的 HostPlatform spawn（[HostPlatform](../../../architecture/rust-agent/plugins/HostPlatform.md)，隔离补充见 [overview 附录 B.1](../overview.md)）。
+**此处定义的契约：**类别与操作标识符；`modality` 设置文档中的默认值 key `modality.<category>` 与 `modality.<category>.<operation>`（Modality 自有；Provider 不持有任何 key）；`modalityAdapter` 与 `modalityTasks` 服务（[语言中立](../../adr/002-plugin-scope.md)，A.2 与 A.3；Rust 绑定见附录 G）；`modality` 设置文档及其 schema；任务记录与结果格式（格式版本 1）；`modality.*` 方法与 `modality.realtime.event` 通知。Provider 对模态一无所知；Modality 在内置适配器之外不了解任何提供方特有语义。
 
 ## 2. 数据与状态
 
@@ -51,11 +55,8 @@ flowchart TB
     In["tasks/id/input/：内联输入文件（二进制）"]
     Res["tasks/id/result/：结果文件（二进制）"]
   end
-  subgraph PROV["Provider 存储"]
-    Pol["按用途 key modality.* 的策略"]
-  end
   subgraph SET["Settings 业务来源 modality"]
-    Cfg["每节点 OCR 组件路径，<br/>并发与保留上限"]
+    Cfg["按 key modality.* 的默认模型，<br/>每节点 OCR 组件路径，<br/>并发与保留上限"]
   end
   subgraph MEM["Modality 内存（不持久化）"]
     Idx["client_task_id 索引"]
@@ -66,12 +67,12 @@ flowchart TB
   Mod["Modality"] -->|"在每任务锁下原子替换"| Rec
   Mod --> In
   Mod --> Res
-  Mod -->|"modality.configure 经 Provider 写入路径"| Pol
+  Mod -->|"modality.configure 经 Settings 所有者写入（CAS）"| Cfg
   Rec -->|"apply 时重建"| Idx
   Cfg -->|"使用时读取"| Mod
 ```
 
-任务记录是唯一的持久状态；索引在 `apply` 时从记录重建，非终态记录由启动规则（§4）结算。运行中的工作与实时连接从不重建。默认值只存在于 Provider。Modality 设置（含每节点 OCR 组件路径）是业务配置（[ADR 002 D4](../../adr/002-plugin-scope.md)），按 Modality 声明的 schema 经 Settings 类型化操作写入业务来源 `modality`：变更是带通知的数据更新，下次使用时读取，从不触发重载（A16）。适配器插件集合是 loader 行中的结构性配置；“已配置节点”指宿主已经通过 rutis 链路导入的对端节点（链路配置，结构性，不属于 Modality），OCR 用哪个节点由调用方按任务指定。没有 Timeline 状态，没有 `StateCell`；竞争写入的顺序由每任务锁下的记录 `revision` 决定。
+任务记录是唯一的持久状态；索引在 `apply` 时从记录重建，非终态记录由启动规则（§4）结算。运行中的工作与实时连接从不重建。Modality 设置（含按 key 的默认模型与每节点 OCR 组件路径）是业务配置（[ADR 002 D4](../../adr/002-plugin-scope.md)），按 Modality 声明的 schema 经 Settings 类型化操作写入业务来源 `modality`：变更是带通知的数据更新，下次使用时读取，从不触发重载（A16）。适配器插件集合是 loader 行中的结构性配置；“已配置节点”指宿主已经通过 rutis 链路导入的对端节点（链路配置，结构性，不属于 Modality），OCR 用哪个节点由调用方按任务指定。没有 Timeline 状态，没有 `StateCell`；竞争写入的顺序由每任务锁下的记录 `revision` 决定。
 
 ## 3. 流程
 
@@ -87,7 +88,7 @@ sequenceDiagram
   participant S as Process storage
   C->>R: modality.task.submit，带内联文件
   R->>D: 调用
-  D->>P: 为 modality.image 解析模型，再解析连接
+  D->>P: 校验模型（显式，或设置中 modality.image 的默认值），解析连接
   D->>S: 写入 queued 记录 rev 1 与输入文件
   D-->>C: task
   D->>S: 写入 running 及已解析的执行方
@@ -146,7 +147,7 @@ sequenceDiagram
 
 ### 3.4 Capability 列表与默认模型
 
-`dimcode modality` 调用 `modality.capabilities` 并列出全部九个类别。每个不可用的类别或操作都按维度显示原因，例如“not in this build”“OCR component not installed”“no adapter”“not configured”“no adapter for the configured model”（决策 E16）。最后一项由 Modality 已采纳的业务配置（用途策略，或显式模型及其 Provider 连接）对照其收集到的适配器得出。不隐藏任何内容，也没有 `--all`。`dimcode modality set-default image <provider>/<model>` 调用 `modality.configure`，它先校验有适配器为该操作提供该模型，再调用 Provider 针对 `modality.image` 的唯一用途策略写入路径。
+`dimcode modality` 调用 `modality.capabilities` 并列出全部九个类别。每个不可用的类别或操作都按维度显示原因，例如“not in this build”“OCR component not installed”“no adapter”“not configured”“no adapter for the configured model”（决策 E16）。最后一项由 Modality 已采纳的业务配置（`modality` 设置文档中的默认值或显式模型，及其 Provider 连接）对照其收集到的适配器得出。不隐藏任何内容，也没有 `--all`。`dimcode modality set-default image <provider>/<model>` 调用 `modality.configure`，它先校验该模型可经 Provider 选择、且有适配器为该操作提供该模型，再经所有者写入（Settings CAS）把 `modality.image` 写入 Modality 自己的 `modality` 设置文档。
 
 ## 4. 时序与冲突
 
@@ -191,12 +192,12 @@ sequenceDiagram
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
 | `modality.capabilities` | 管理方法 | 每个类别与操作，含可用性原因和默认模型 |
-| `modality.configure` | 管理方法 | 先校验，再经 Provider 的用途策略写入路径设置或清除默认值 |
+| `modality.configure` | 管理方法 | 先校验，再在 Modality 的 `modality` 设置文档中设置或清除默认值（所有者写入，Settings CAS） |
 | `modality.task.submit/status/list/wait/cancel/result` | 管理方法 | 任务生命周期；分块二进制结果取回 |
 | `modality.realtime.open/send/close`、`modality.realtime.event` | 管理方法及绑定连接的通知 | 实时连接 |
 | `modalityTasks` | 进程服务，无 key | 与任务方法相同的操作，供其他进程插件使用 |
 | `modalityAdapter` | 进程服务，key 为适配器名，由 Modality 收集 | 由提供方执行的类别 |
-| `modality` 设置文档 | 业务配置（Settings 来源，schema 由 Modality 声明，经 Settings 类型化操作写入） | 每节点 OCR 组件路径、上限；使用时读取 |
+| `modality` 设置文档 | 业务配置（Settings 来源，schema 由 Modality 声明，经 Settings 类型化操作写入） | 按 key 的默认模型、每节点 OCR 组件路径、上限；使用时读取 |
 | `dimcode modality`、`image`、`video`、`speech`、`music`、`audio`、`asset`、`motion`、`ocr`、`realtime` | CLI | 方法的薄客户端 |
 
 详见附录 A。
@@ -215,15 +216,15 @@ sequenceDiagram
 
 | 规则 | 本文如何符合 |
 | --- | --- |
-| §4.1 改别的模块拥有的状态时写指令事件 | Modality 只改自己的任务记录；默认模型经 Provider 的类型化用途策略写入路径设置，这是所有者对无 Timeline 进程状态的公开写入操作。 |
+| §4.1 改别的模块拥有的状态时写指令事件 | Modality 只改自己的任务记录；默认模型是 Modality 自己的业务配置，经 Settings 对其 `modality` 来源的类型化所有者写入（CAS）设置，不涉及 Timeline。 |
 | §4.2 交接后不能撤回 | 不适用：Modality 不向其他模块交接 Timeline 对象；任务终态在其锁下只决定一次。 |
 | §4.3 只用 before 回调在写入前干预 | 不适用：Modality 不注册 before 回调，也不在 Session 或 RPC 入口加检查；它只校验自己方法的参数。 |
-| §4.4 核心机制不带业务含义 | Modality 不要求 Timeline、Dispatcher 或 Rpc 做任何改动；用途 key 对 Provider 不透明。 |
+| §4.4 核心机制不带业务含义 | Modality 不要求 Timeline、Dispatcher 或 Rpc 做任何改动；Provider 不持有任何按使用方划分的 key；Modality 显式传入模型。 |
 | §4.5 决定前读完整个批次 | 不适用：Modality 不读任何 Timeline 事件。 |
 | §4.6 模型上下文只含交接后被读取的事件 | Modality 不写任何模型可见内容；结果只作为其他插件拥有的普通输入进入模型。 |
 | §4.7 插件之间只通过公开事件和服务交互 | Modality 只通过公开服务使用 Provider、Settings、`pluginFiles`、HostPlatform 与 `modalityAdapter`。 |
 | §4.8 向机制所有者提通用需求 | 节点离线的需求已作为 [#5](https://github.com/arcships/dim/issues/5) 向 rutis 提出（§9）。 |
-| §4.9 只有后续决定要用的事实才进 Timeline | Modality 不写 Timeline 事件；任务记录留在 `pluginFiles`，默认模型在 Provider，设置在它的 Settings 业务来源中。 |
+| §4.9 只有后续决定要用的事实才进 Timeline | Modality 不写 Timeline 事件；任务记录留在 `pluginFiles`，默认模型与其他设置在它的 Settings 业务来源中。 |
 | §1 Capability 与 App Server 边界 | Modality 是进程插件，不是 Capability；业务代码在它自己的包中，App Server 只收集它的 `managementMethods`。 |
 | ADR 002 D1 作用域跟随状态所有者 | 任务与提供方连接在各 Session 间共享，因此 Modality 是进程作用域。 |
 | ADR 002 D2 不设接线模块 | 适配器按服务名与作用域收集；没有接线模块。 |
@@ -238,13 +239,13 @@ sequenceDiagram
 | 从对端节点导入的服务在链路断开期间保持登记，调用以 `node_unavailable` 直接失败 | rutis，[#5](https://github.com/arcships/dim/issues/5) | 见 [ExternalAgent](ExternalAgent.md) §9；Modality 需要它，使离线的 OCR 节点只让自己的任务失败，不重载 Modality，也不使其变为 Pending |
 | 运行时服务按名字暴露给非 Rust 插件 | 运行时，[#4](https://github.com/arcships/dim/issues/4) | 见 [session access](../contracts/session-access.md) §9；只有 Modality 的 TypeScript 实现需要它 |
 
-Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `pluginFiles` 补充是对其他插件的改动，列在 [overview 附录 B.2](../overview.md)。
+Provider 补充（非对话连接）、Settings 业务来源和 `pluginFiles` 补充是对其他插件的改动，列在 [overview 附录 B.2](../overview.md)。
 
 ## 附录 A. 接口细节
 
 ### A.1 类别与操作
 
-| 类别 | CLI | 操作 | 输入 | 结果 | 执行方 | 用途 key |
+| 类别 | CLI | 操作 | 输入 | 结果 | 执行方 | 默认值 key |
 | --- | --- | --- | --- | --- | --- | --- |
 | `image` | `image` | `generate`、`edit`（图像，可选 mask）、`enhance`（`upscale`、`restore`、`denoise`、`sharpen`、`remove_background`、`colorize`） | 提示词、文件 | 图像文件 | Provider | `modality.image` |
 | `video` | `video` | `generate`、`edit`、`enhance` | 提示词、文件 | 视频文件 | Provider | `modality.video` |
@@ -276,7 +277,7 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 
 `Job` 为 `{ task_id, category, operation, model, params, files: [{ name, media_type, path }], work_dir }`。`ResolvedConnection` 是 Provider 非对话连接解析返回的数据形态（`kind`、`provider_id`、`model`、端点与凭据材料），每次调用传入，从不存储或记录日志。
 
-`available` 在不重载的情况下报告运行时可用性（例如提供方端点不可达）。若用途策略（或显式模型）对应的 Provider 连接类型没有任何已收集的适配器提供，则报告为“no adapter for the configured model”，其提交以 `unavailable` 失败。OCR 不是适配器：对每个任务，Modality 使用目标节点的 HostPlatform（缺失或不可用：`node_unavailable`），探测 `modality` 设置文档为该节点给出的 OCR 组件路径，并在那里 spawn 它；离线的对端节点使调用以 `node_unavailable` 失败，且不发生任何重载（§3.2）。带已存储 `remote_handle` 的 `wait` 必须能在新一代中工作；不返回句柄的适配器无法恢复。
+`available` 在不重载的情况下报告运行时可用性（例如提供方端点不可达）。若已配置的默认值（或显式模型）对应的 Provider 连接类型没有任何已收集的适配器提供，则报告为“no adapter for the configured model”，其提交以 `unavailable` 失败。OCR 不是适配器：对每个任务，Modality 使用目标节点的 HostPlatform（缺失或不可用：`node_unavailable`），探测 `modality` 设置文档为该节点给出的 OCR 组件路径，并在那里 spawn 它；离线的对端节点使调用以 `node_unavailable` 失败，且不发生任何重载（§3.2）。带已存储 `remote_handle` 的 `wait` 必须能在新一代中工作；不返回句柄的适配器无法恢复。
 
 ### A.3 方法
 
@@ -285,7 +286,7 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
 | `modality.capabilities` | `{}` | `{ categories: [{ category, available, reasons, operations: [{ operation, available, reasons: [{ dimension: "build" \| "platform" \| "runtime" \| "adapter" \| "configuration", detail }], params_schema?, default_model? }] }] }`；每个类别都出现 |
-| `modality.configure` | `{ category, operation?, model: "<provider>/<model>" \| null }` | 校验有可用适配器提供该模型，然后经 Provider 的写入路径为该 key 写入或清除策略 |
+| `modality.configure` | `{ category, operation?, model: "<provider>/<model>" \| null }` | 校验该模型可经 Provider 选择且有可用适配器提供，然后在 `modality` 设置文档中为该 key 写入或清除默认值（所有者写入，Settings CAS） |
 | `modality.task.submit` | `{ category, operation, params, files?: [{ name, media_type, data_base64 } \| { node_path }], model?, node?, client_task_id? }` | `{ task }`；已存在的 `client_task_id` 返回已有任务 |
 | `modality.task.status` | `{ task_id }` | `{ task }` |
 | `modality.task.list` | `{ state?, category?, limit? (≤100), after? }` | `{ tasks, next? }`，最新在前 |
@@ -297,7 +298,7 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 | `modality.realtime.close` | `{ connection_id }` | `{}` |
 | `modality.realtime.event` | 通知 `{ connection_id, event }` | 仅发往发起连接 |
 
-边界校验：每次提交文件至多 100 MiB，每个内联文件至多 25 MiB（A5）；按操作检查媒体类型；`node_path` 仅用于宿主执行的操作；`node` 仅用于宿主执行的类别，默认控制节点（A15）。模型选择：显式 `model`，否则用途策略，否则 `no_default_model`；解析出的模型固定在记录中。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
+边界校验：每次提交文件至多 100 MiB，每个内联文件至多 25 MiB（A5）；按操作检查媒体类型；`node_path` 仅用于宿主执行的操作；`node` 仅用于宿主执行的类别，默认控制节点（A15）。模型选择：显式 `model`，否则 `modality` 设置文档中的默认值，否则 `no_default_model`；解析出的模型固定在记录中。每个类别至多 4 个运行中任务；其余按提交顺序保持 `queued`（A6）。
 
 ### A.4 任务记录（`pluginFiles`（扩展），格式版本 1）
 
@@ -344,7 +345,7 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 | 取消 | 标记已请求；取消本地令牌（中止 HTTP，或通过 HostPlatform 终止组件的进程树）；有句柄时调用 `cancel_remote`；释放资源；然后写入 `cancelled`（含 `remote_cancel`） |
 | 卸载（自身重载、适配器重载、Provider 重载） | disposer 取消本地工作，终止 OCR 进程，关闭实时连接，为宿主任务和无句柄的提供方任务写入 `interrupted`；有句柄的任务保持 `running` |
 | 启动（每次 `apply`） | `queued` → `interrupted`（之后从不启动，A11）；`running` 宿主任务 → `interrupted`；有句柄且其适配器已收集的 `running` 提供方任务 → 继续 `wait`（仅观察，A12）；否则 `interrupted`“did not survive recovery” |
-| 配置变更 | 设置或用途策略变更：数据更新与通知，下次使用时读取；重新计算可用性；已有任务保留其已解析的执行方；不重载 |
+| 配置变更 | `modality` 设置变更（含默认值）：数据更新与通知，下次使用时读取；重新计算可用性；已有任务保留其已解析的执行方；不重载 |
 
 ## 附录 B. 完整冲突表
 
@@ -375,7 +376,7 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 | --- | --- |
 | `invalid_input` | 未知类别或操作、参数或文件违规 |
 | `unavailable` | 类别或操作不可用；附带来自 `modality.capabilities` 的 `reasons` |
-| `no_default_model` | 无显式模型，且该用途 key 无策略 |
+| `no_default_model` | 无显式模型，且 `modality` 设置文档中该 key 无默认值 |
 | `node_unavailable` | 请求的节点未配置或其 HostPlatform 不可用 |
 | `provider_error` | 适配器或提供方失败；消息已去除秘密 |
 | `executor_error` | OCR 组件失败或产生无效输出 |
@@ -390,24 +391,24 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 通过 `modality.*` 方法进行流程测试，使用一个假适配器插件（可控的句柄、延迟、取消支持）和两个节点上的假 OCR 组件：
 
 1. `modality.capabilities` 列出全部九个类别，并按维度给出原因；CLI 显示每个类别，不可用项附原因；没有 `--all`。
-2. `configure` 经 Provider 的写入路径写入；不带 `model` 的提交使用它；默认值变更后任务保留其模型。
+2. `configure` 经 Settings 所有者写入写入 `modality` 设置文档；不带 `model` 的提交使用它；默认值变更后任务保留其模型。
 3. 提交、状态、列表、等待（终态与超时，收到进度）、分块二进制结果且 `sha256` 匹配。
 4. 并发上限使某类别的第五个任务排队。
 5. 启动前、运行中（本地中止、远端取消、不支持）以及对终态任务的取消；取消与完成竞争只产生一个终态。
 6. 重复 `client_task_id` 返回同一任务。
 7. 重启：宿主任务 `interrupted`；有句柄的提供方任务恢复且不发生第二次 `submit`；无句柄的 `interrupted`；`queued` 的 `interrupted`。
-8. 重载适配器插件会重载 Modality；其带句柄任务通过轮询恢复；移除该适配器且用途策略指向其模型时，`modality.capabilities` 报告“no adapter for the configured model”。
+8. 重载适配器插件会重载 Modality；其带句柄任务通过轮询恢复；移除该适配器且已配置的默认值指向其模型时，`modality.capabilities` 报告“no adapter for the configured model”。
 9. 在控制节点和第二个节点上运行 OCR；该节点离线时只有其任务以 `node_unavailable` 失败，且不重载 Modality 或 Rpc。
 10. 实时：事件只到达发起连接；断开连接和空闲超时时关闭。
 11. 任何 Session 中都不出现 Timeline 事件、工具声明或输入。
-12. 修改 `modality` 设置文档（OCR 路径、上限）在下次使用时生效，无需重载 Modality。
+12. 修改 `modality` 设置文档（默认模型、OCR 路径、上限）在下次使用时生效，无需重载 Modality。
 
 ## 附录 E. 假设
 
 | # | 假设 | 依据 | 若被否决的影响 |
 | --- | --- | --- | --- |
 | A2 | 保留 30 天或 200 个终态任务 | 判断 | 磁盘占用不同 |
-| A3 | 用途 key 按类别划分，speech 按操作划分，并支持按操作覆盖 | Overview §4；判断 | 合成与转写共用一个默认值 |
+| A3 | 默认值 key 按类别划分，speech 按操作划分，并支持按操作覆盖 | Overview §4；判断 | 合成与转写共用一个默认值 |
 | A4 | 操作参数由适配器声明，在提交时校验 | 判断 | 每个操作固定 schema |
 | A5 | 每个内联文件 25 MiB，每次提交 100 MiB | 判断 | 上限改变 |
 | A6 | 每个类别至多 4 个运行中任务 | 判断 | 采用其他并发度 |
@@ -420,7 +421,7 @@ Provider 补充（用途策略、非对话连接）、Settings 业务来源和 `
 | A13 | 无模型可见工具 | 决策 E16；功能清单只定义了 CLI 命令 | 必须设计 Session 级工具贡献 |
 | A14 | OCR 组件以输入读权限且无网络的方式运行 | 判断；overview 隔离补充 | 隔离更弱 |
 | A15 | OCR 在控制节点上运行，除非调用方指定已配置节点 | Modality 没有 Session | 由 Session 派生的默认节点需要 Session 参数 |
-| A16 | Modality 设置（每节点 OCR 组件路径、并发与保留上限）是 Settings 业务来源 `modality` 中的业务配置 | ADR 002 D4；该路径按任务读取，不改变已装载的行 | 路径变更会作为结构性 loader 字段重载 Modality |
+| A16 | Modality 设置（按 key 的默认模型、每节点 OCR 组件路径、并发与保留上限）是 Settings 业务来源 `modality` 中的业务配置 | ADR 002 D4；该路径按任务读取，不改变已装载的行 | 路径变更会作为结构性 loader 字段重载 Modality |
 | A17 | 适配器是由 Modality 收集的命名进程服务 `modalityAdapter`；适配器重载会重载 Modality；Rpc 按调用查找 Modality，不随之重载 | ADR 002 D2、D3、D5 | 适配器只能内置于 Modality |
 
 ## 附录 F. 待对齐问题

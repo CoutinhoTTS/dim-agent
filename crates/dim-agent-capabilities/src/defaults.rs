@@ -7,7 +7,7 @@ use crate::{
     host::*,
     input_queue::InputQueuePlugin,
     model_provider::ModelProviderPlugin,
-    permission::PermissionPlugin,
+    permission::{CommandRulesHost, NoCommandRules, PermissionPlugin},
     prompt::{InitialPromptConfiguration, PromptPlugin},
     session_broadcast::{SessionBroadcastEndPlugin, SessionBroadcastPlugin},
     timeline_tree::{TimelineTreePlugin, TreeTimelinePlugin},
@@ -49,13 +49,14 @@ fn install_profile(
 ) {
     builder
         .session_value(Arc::new(PromptHost(host)))
-        .session_value(Arc::new(InitialPromptConfiguration(initial)));
+        .session_value(Arc::new(InitialPromptConfiguration(initial)))
+        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
     install_with_prompt_capability(builder, model);
 }
 
 /// Installs the same capabilities without binding `PromptHost` or
 /// `InitialPromptConfiguration`: a Session capability such as PromptSources
-/// provides both.
+/// provides both. The host binds `CommandRulesHost`.
 pub fn install_with_prompt_capability(
     builder: &mut AgentBuilder,
     model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
@@ -80,6 +81,8 @@ fn install_with_prompt_capability_and_branch(
     builder
         .session_plugin(SessionBroadcastEndPlugin::new)
         .session_plugin(TimelineTreePlugin::new)
+        .session_plugin(crate::input_queue::InputMethodsPlugin::new)
+        .session_methods(crate::input_queue::INPUT_METHODS)
         .session_tool_registry(ToolRegistryPlugin::new)
         .timeline_plugin(SessionBroadcastPlugin::new)
         .timeline_plugin(TreeTimelinePlugin::new)
@@ -99,7 +102,8 @@ fn install_with_prompt_capability_and_branch(
 
 /// Product profile of the minimal execution assembly: only `execute` as the
 /// local tool, with Skills and prompt sources. No workspace tools, no wait,
-/// no branch tool. See `docs/design/appserver/minimal-execution.md`.
+/// no branch tool. The host binds `CommandRulesHost`. See
+/// `docs/design/appserver/minimal-execution.md`.
 pub fn install_minimal_execution(
     builder: &mut AgentBuilder,
     model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
@@ -114,7 +118,8 @@ pub fn install_minimal_execution(
 /// Product profile of the local execution and context capabilities. The
 /// composition root also registers the process plugins `HostPlatformPlugin`,
 /// `FileWriteCoordinatorPlugin`, and `SkillsCatalogPlugin`, plus the product
-/// `SkillSettingsHost`. A new Session adopts `SessionConfig.model` with its prompt sources.
+/// `SkillSettingsHost`, and binds the Session `CommandRulesHost`. A new
+/// Session adopts `SessionConfig.model` with its prompt sources.
 pub fn install_local_execution(
     builder: &mut AgentBuilder,
     model: fn(&dim_agent_runtime::BranchScope) -> ModelProviderPlugin,
@@ -123,6 +128,7 @@ pub fn install_local_execution(
     install_with_prompt_capability(builder, model);
     crate::workspace_tools::install(builder, workspace);
     crate::wait::install(builder);
+    crate::shell_input::install(builder);
     crate::prompt_sources::install(builder);
     crate::skills::install(builder);
 }
@@ -146,6 +152,7 @@ pub fn mock_model_hosts_with_history(builder: &mut AgentBuilder, history: Histor
         .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_plugin(DefaultPrepareModelPlugin::new);
 }
 pub fn mock_hosts(builder: &mut AgentBuilder) {

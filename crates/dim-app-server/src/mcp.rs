@@ -1,20 +1,29 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
+mod auth;
+pub mod config;
+pub(crate) mod management;
 mod publication;
+#[cfg(feature = "testing")]
+pub use auth::testing;
+pub use auth::{McpAuth, McpAuthError};
 pub mod server;
 mod session;
-pub use publication::{McpApplication, McpPublication};
+pub use publication::{McpApplication, McpOwner, McpPublication};
 pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState, install};
 
-use crate::settings::{
-    McpServerSettings, SettingsDocument, SettingsError, SettingsService, SettingsSource,
-};
+use crate::settings::{SettingsError, SettingsScope, SettingsService};
+use config::{McpProjectEnablement, McpServerSettings, McpSettings};
+use dim_agent_capabilities::file_storage::FileStorage;
 use dim_agent_runtime::{Capability, KeysOf};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use server::{McpServer, McpServerError};
 use std::{
     collections::BTreeMap,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -22,20 +31,18 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub enum McpError {
     #[error(transparent)]
     Settings(#[from] SettingsError),
-    #[error("MCP operations require a user or authorized project source")]
-    InvalidSource,
     #[error("empty MCP server id")]
     InvalidId,
     #[error("MCP server is not configured in this source")]
     UnknownServer,
     #[error("MCP server is disabled")]
     Disabled,
-    #[error("Project MCP execution requires approval of the current configuration")]
-    ApprovalRequired,
     #[error("MCP server Plugin could not be loaded")]
     Unavailable,
     #[error(transparent)]
     Server(#[from] McpServerError),
+    #[error(transparent)]
+    Auth(#[from] McpAuthError),
     #[error("MCP directory is closed")]
     Closed,
     #[error("MCP operation cancelled")]
@@ -45,27 +52,15 @@ pub enum McpError {
 }
 pub type Result<T> = std::result::Result<T, McpError>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum McpApproval {
-    NotRequired,
-    Required,
-    Approved,
-}
-
 /// Server-side configuration, including secrets. Not a wire or logging type.
+/// For a project entry, the configuration is effective: its enablement comes
+/// from the user's record (`config::effective`).
 #[derive(Clone)]
 pub struct McpServerEntry {
-    pub source: SettingsSource,
+    pub source: SettingsScope,
     pub configuration: McpServerSettings,
-    pub approval: McpApproval,
-    pub approval_token: Option<String>,
 }
 impl McpServerEntry {
-    pub fn executable(&self) -> bool {
-        self.enabled() && self.approval != McpApproval::Required
-    }
-
     pub fn enabled(&self) -> bool {
         match &self.configuration {
             McpServerSettings::Stdio { enabled, .. }
@@ -93,25 +88,16 @@ pub enum McpChange {
 pub struct McpConnection {
     service: Arc<McpServer>,
     released: tokio::sync::watch::Sender<()>,
-    authorization: Option<(Arc<publication::Publication>, String)>,
+    withdrawn: Arc<AtomicBool>,
 }
 impl McpConnection {
-    async fn authorize(&self, cancel: &CancellationToken) -> server::Result<()> {
-        if let Some((publication, reference)) = &self.authorization {
-            publication
-                .check(reference.clone(), cancel)
-                .await
-                .map_err(|error| match error {
-                    McpError::Cancelled => McpServerError::Cancelled,
-                    McpError::Closed => McpServerError::Closed,
-                    _ => McpServerError::ApprovalRequired,
-                })?;
-        }
-        Ok(())
-    }
-
     pub fn state(&self) -> server::McpServerState {
         self.service.state()
+    }
+    /// The generation was retired because its entry was disabled or removed,
+    /// not because the connection failed.
+    pub fn withdrawn(&self) -> bool {
+        self.withdrawn.load(Ordering::SeqCst)
     }
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<server::McpServerState> {
         self.service.subscribe()
@@ -119,8 +105,11 @@ impl McpConnection {
     pub fn tool_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.service.tool_changes()
     }
+    /// Changes when the server's OAuth credential changes; `None` without OAuth.
+    pub fn credential_changes(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.service.credential_changes()
+    }
     pub async fn tools(&self, cancel: &CancellationToken) -> server::Result<Vec<server::McpTool>> {
-        self.authorize(cancel).await?;
         self.service.tools(cancel).await
     }
     pub async fn call(
@@ -129,7 +118,6 @@ impl McpConnection {
         arguments: dim_agent_types::JsonObject,
         cancel: &CancellationToken,
     ) -> server::Result<dim_agent_types::ToolResult> {
-        self.authorize(cancel).await?;
         self.service.call(name, arguments, cancel).await
     }
 }
@@ -149,17 +137,20 @@ pub struct McpService {
     tasks: TaskTracker,
 }
 impl McpService {
-    /// Acquire a connection owner for the effective source. Initialization is
-    /// lazy, outside Plugin apply; user sources are shared across projects.
+    /// Acquire a generation in an explicit owner's loader subtree.
     pub async fn server(
         self: &Arc<Self>,
+        instance_owner: McpOwner,
         project: Option<usize>,
         id: String,
         cancel: &CancellationToken,
     ) -> Result<Arc<McpConnection>> {
         let owner = self.clone();
         self.run(cancel, move |_, cancel| async move {
-            owner.publication.acquire(project, id, &cancel).await
+            owner
+                .publication
+                .acquire(instance_owner, project, id, &cancel)
+                .await
         })
         .await
     }
@@ -168,13 +159,10 @@ impl McpService {
     /// Old handles remain closed; a later server() creates a new generation.
     pub async fn disconnect(
         self: &Arc<Self>,
-        source: SettingsSource,
+        source: SettingsScope,
         id: String,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        if source == SettingsSource::Skills {
-            return Err(McpError::InvalidSource);
-        }
         let owner = self.clone();
         self.run(cancel, move |_, cancel| async move {
             owner.publication.disconnect(source, id, &cancel).await
@@ -182,48 +170,8 @@ impl McpService {
         .await
     }
 
-    pub fn application(&self, source: SettingsSource) -> McpApplication {
+    pub fn application(&self, source: SettingsScope) -> McpApplication {
         self.publication.application(source)
-    }
-
-    /// Only trusted host management may grant execution. The token identifies
-    /// the exact effective project configuration the caller reviewed.
-    pub async fn approve(
-        self: &Arc<Self>,
-        project: usize,
-        id: String,
-        token: String,
-        cancel: &CancellationToken,
-    ) -> Result<()> {
-        let owner = self.clone();
-        self.run(cancel, move |_, cancel| async move {
-            owner
-                .publication
-                .approval(
-                    SettingsSource::ProjectMcp(project),
-                    id,
-                    Some(token),
-                    &cancel,
-                )
-                .await
-        })
-        .await
-    }
-
-    pub async fn revoke(
-        self: &Arc<Self>,
-        project: usize,
-        id: String,
-        cancel: &CancellationToken,
-    ) -> Result<()> {
-        let owner = self.clone();
-        self.run(cancel, move |_, cancel| async move {
-            owner
-                .publication
-                .approval(SettingsSource::ProjectMcp(project), id, None, &cancel)
-                .await
-        })
-        .await
     }
 
     /// Project ids are host-authorized FileStorage indices, never client paths.
@@ -242,45 +190,35 @@ impl McpService {
                 project_revision: None,
                 servers: BTreeMap::new(),
             };
-            for source in std::iter::once(SettingsSource::UserMcp)
-                .chain(project.map(SettingsSource::ProjectMcp))
+            // An unreadable record lists project entries as disabled; the
+            // project application reports it. User entries are unaffected.
+            let enablement = match project {
+                Some(_) => settings
+                    .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
+                    .await
+                    .map(|snapshot| snapshot.document)
+                    .unwrap_or_default(),
+                None => McpProjectEnablement::default(),
+            };
+            for source in
+                std::iter::once(SettingsScope::User).chain(project.map(SettingsScope::Project))
             {
-                let snapshot = settings.read(source, &cancel).await?;
+                let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
                 match source {
-                    SettingsSource::UserMcp => catalog.user_revision = snapshot.revision,
-                    SettingsSource::ProjectMcp(_) => {
+                    SettingsScope::User => catalog.user_revision = snapshot.revision,
+                    SettingsScope::Project(_) => {
                         catalog.project_revision = Some(snapshot.revision);
                     }
-                    SettingsSource::Skills => unreachable!("only MCP sources are selected"),
                 }
-                let SettingsDocument::Mcp(document) = snapshot.document else {
-                    unreachable!("MCP sources decode to MCP documents")
-                };
+                let document = snapshot.document;
                 for (id, configuration) in document.mcp_servers {
-                    let configuration = settings.mcp_effective(source, configuration)?;
-                    let (approval, approval_token) =
-                        if matches!(source, SettingsSource::ProjectMcp(_)) {
-                            let token = settings.mcp_fingerprint(source, &id, &configuration)?;
-                            let approved =
-                                settings.mcp_approved(source, &id, &token, &cancel).await?;
-                            (
-                                if approved {
-                                    McpApproval::Approved
-                                } else {
-                                    McpApproval::Required
-                                },
-                                Some(token),
-                            )
-                        } else {
-                            (McpApproval::NotRequired, None)
-                        };
+                    let configuration =
+                        config::effective(&settings, source, &id, configuration, &enablement)?;
                     catalog.servers.insert(
                         id,
                         McpServerEntry {
                             source,
                             configuration,
-                            approval,
-                            approval_token,
                         },
                     );
                 }
@@ -290,56 +228,83 @@ impl McpService {
         .await
     }
 
+    /// One source's entry, with its effective configuration, whether or not
+    /// another source shadows it.
+    pub async fn entry(
+        &self,
+        source: SettingsScope,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<McpServerEntry> {
+        self.run(cancel, move |settings, cancel| async move {
+            let configuration = settings
+                .read::<McpSettings>(source, &cancel)
+                .await?
+                .document
+                .mcp_servers
+                .remove(&id)
+                .ok_or(McpError::UnknownServer)?;
+            let enablement = match source {
+                SettingsScope::User => McpProjectEnablement::default(),
+                SettingsScope::Project(_) => settings
+                    .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
+                    .await
+                    .map(|snapshot| snapshot.document)
+                    .unwrap_or_default(),
+            };
+            Ok(McpServerEntry {
+                source,
+                configuration: config::effective(
+                    &settings,
+                    source,
+                    &id,
+                    configuration,
+                    &enablement,
+                )?,
+            })
+        })
+        .await
+    }
+
     /// Mutate exactly one persisted source, not the merged effective view.
     /// Concurrent edits fail CAS rather than overwriting another server.
+    /// Returns the revision of `source` after the change.
+    ///
+    /// A project entry's enablement is the user's record (ADR 003 D3), never
+    /// project files. Enabling checks `expected` against the project source and
+    /// that the entry exists there. Disabling or removing first withdraws the
+    /// record without depending on the project file, so an entry the user
+    /// turned off stays off even if the file is unreadable. Disabling or
+    /// removing returns once the publisher has retired the entry's generations
+    /// in every Session.
     pub async fn update(
         &self,
-        source: SettingsSource,
+        source: SettingsScope,
         expected: String,
         id: String,
         change: McpChange,
         cancel: &CancellationToken,
     ) -> Result<String> {
-        if source == SettingsSource::Skills {
-            return Err(McpError::InvalidSource);
-        }
         if id.trim().is_empty() {
             return Err(McpError::InvalidId);
         }
-        self.run(cancel, move |settings, cancel| async move {
-            let snapshot = settings.read(source, &cancel).await?;
-            if snapshot.revision != expected {
-                return Err(SettingsError::Conflict.into());
-            }
-            let SettingsDocument::Mcp(mut document) = snapshot.document else {
-                unreachable!("MCP sources decode to MCP documents")
-            };
-            match change {
-                McpChange::Put(configuration) => {
-                    document.mcp_servers.insert(id, configuration);
-                }
-                McpChange::Remove => {
-                    document
-                        .mcp_servers
-                        .remove(&id)
-                        .ok_or(McpError::UnknownServer)?;
-                }
-                McpChange::SetEnabled(value) => {
-                    let configuration = document
-                        .mcp_servers
-                        .get_mut(&id)
-                        .ok_or(McpError::UnknownServer)?;
-                    let (McpServerSettings::Stdio { enabled, .. }
-                    | McpServerSettings::Remote { enabled, .. }) = configuration;
-                    *enabled = Some(value);
-                }
-            }
-            Ok(settings
-                .update(source, &expected, SettingsDocument::Mcp(document), &cancel)
-                .await?
-                .revision)
-        })
-        .await
+        let withdraws = matches!(change, McpChange::SetEnabled(false) | McpChange::Remove);
+        let publication = self.publication.clone();
+        let revision = self
+            .run(cancel, move |settings, cancel| async move {
+                write(&settings, source, expected, id, change, &cancel).await
+            })
+            .await?;
+        if withdraws {
+            // The write is committed. A closed publisher has retired every
+            // generation, and an interrupted caller reads the outcome.
+            let _ = self
+                .run(cancel, move |_, cancel| async move {
+                    publication.settle(&cancel).await
+                })
+                .await;
+        }
+        Ok(revision)
     }
 
     // Admission and draining belong to this Plugin. Settings still owns the
@@ -377,19 +342,119 @@ impl McpService {
     }
 }
 
-pub struct McpPlugin;
+/// Writes one change to its source and returns the source's revision.
+async fn write(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    expected: String,
+    id: String,
+    change: McpChange,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let project = matches!(source, SettingsScope::Project(_));
+    if project && matches!(change, McpChange::SetEnabled(false) | McpChange::Remove) {
+        set_project_enabled(settings, source, &id, false, cancel).await?;
+        if matches!(change, McpChange::SetEnabled(false)) {
+            return Ok(settings
+                .read::<McpSettings>(source, cancel)
+                .await
+                .map_or(expected, |snapshot| snapshot.revision));
+        }
+    }
+    let snapshot = settings.read::<McpSettings>(source, cancel).await?;
+    if snapshot.revision != expected {
+        return Err(SettingsError::Conflict.into());
+    }
+    let mut document = snapshot.document;
+    if project && matches!(change, McpChange::SetEnabled(true)) {
+        if !document.mcp_servers.contains_key(&id) {
+            return Err(McpError::UnknownServer);
+        }
+        set_project_enabled(settings, source, &id, true, cancel).await?;
+        return Ok(snapshot.revision);
+    }
+    match change {
+        McpChange::Put(configuration) => {
+            document.mcp_servers.insert(id, configuration);
+        }
+        McpChange::Remove => {
+            document
+                .mcp_servers
+                .remove(&id)
+                .ok_or(McpError::UnknownServer)?;
+        }
+        McpChange::SetEnabled(value) => {
+            let configuration = document
+                .mcp_servers
+                .get_mut(&id)
+                .ok_or(McpError::UnknownServer)?;
+            let (McpServerSettings::Stdio { enabled, .. }
+            | McpServerSettings::Remote { enabled, .. }) = configuration;
+            *enabled = Some(value);
+        }
+    }
+    Ok(settings
+        .update(source, &expected, document, cancel)
+        .await?
+        .revision)
+}
+
+/// Records the user's enablement of one project entry. Toggles of different
+/// entries commute, so a lost race on the shared record is retried rather
+/// than reported as a conflict the caller cannot observe.
+async fn set_project_enabled(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    id: &str,
+    enabled: bool,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let workspace = config::workspace(settings, source)?;
+    loop {
+        let current = settings
+            .read::<McpProjectEnablement>(SettingsScope::User, cancel)
+            .await?;
+        let mut record = current.document;
+        if !record.set(&workspace, id, enabled) {
+            return Ok(());
+        }
+        match settings
+            .update(SettingsScope::User, &current.revision, record, cancel)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(SettingsError::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// The directory, its management methods and the OAuth credential authority,
+/// whose store `mcp-oauth.json` lives in the home root.
+pub struct McpPlugin {
+    home_root: usize,
+}
+impl McpPlugin {
+    pub fn new(home_root: usize) -> Self {
+        Self { home_root }
+    }
+}
 impl TypedPlugin for McpPlugin {
-    type Deps = (Arc<SettingsService>, Arc<publication::Publication>);
+    type Deps = (
+        Arc<SettingsService>,
+        Arc<publication::Publication>,
+        Arc<FileStorage>,
+    );
     fn name(&self) -> &str {
         "Mcp"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings, publication): Self::Deps,
+        (settings, publication, files): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            publication.bind(settings.clone());
+            let auth = McpAuth::new(files, self.home_root).map_err(CordisError::PluginFailed)?;
             let service = Arc::new(McpService {
                 settings,
                 publication,
@@ -397,7 +462,7 @@ impl TypedPlugin for McpPlugin {
                 gate: Mutex::new(()),
                 tasks: TaskTracker::new(),
             });
-            let owner = service.clone();
+            let (owner, closing) = (service.clone(), auth.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
@@ -406,10 +471,14 @@ impl TypedPlugin for McpPlugin {
                             owner.tasks.close();
                         }
                         owner.tasks.wait().await;
+                        // Token requests already sent are settled first.
+                        closing.close().await;
                         Ok(())
                     })
                 }))
             })?;
+            management::provide(ctx, service.clone(), service.settings.clone(), auth.clone())?;
+            ctx.provide_as(TypeKey::of::<McpAuth>(), auth)?;
             ctx.provide_as(TypeKey::of::<McpService>(), service)?;
             Ok(Effect::Done)
         })
@@ -417,6 +486,6 @@ impl TypedPlugin for McpPlugin {
 }
 impl Capability for McpPlugin {
     fn keys(&self) -> KeysOf<Self> {
-        ((), ())
+        ((), (), ())
     }
 }

@@ -1,253 +1,35 @@
-use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
-use dim_agent_capabilities::skill_settings::{SkillSettingsError, SkillSettingsHost};
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin, wait_active};
-use dim_app_server::settings::{
-    SettingsDocument, SettingsError, SettingsPlugin, SettingsService, SettingsSource,
+use dim_agent_capabilities::file_storage::{
+    FileLease, FilePath, FileStorage, FileStorageError, FileStoragePlugin,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
-use serde_json::json;
-use std::{
-    fs,
-    sync::{Arc, OnceLock},
-    time::Duration,
+use dim_agent_runtime::{capability_plugin, wait_active};
+use dim_app_server::{
+    settings::{
+        BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
+        SettingsPlugin, SettingsScope, SettingsService, SourceDeclaration, Writer,
+        project_authorizations, settings_changes,
+    },
+    storage::SqliteStoragePlugin,
 };
+use rutis::Ctx;
+use rutis_bridge::session::{HostDispatch, Value as RpcValue, host_key};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value as Json, json};
+use std::{fs, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-struct Capture(Arc<OnceLock<(Arc<SettingsService>, Arc<FileStorage>)>>);
-
-#[tokio::test]
-async fn native_user_sources_import_once_and_keep_workspace_file_authority() {
-    use dim_app_server::storage::SqliteStoragePlugin;
-    let home = std::env::temp_dir().join(format!("dim-native-settings-{}", uuid::Uuid::new_v4()));
-    let a = home.join("a");
-    let b = home.join("b");
-    fs::create_dir_all(&a).unwrap();
-    fs::create_dir_all(&b).unwrap();
-    let home = home.canonicalize().unwrap();
-    let a = a.canonicalize().unwrap();
-    let b = b.canonicalize().unwrap();
-    let database = home.join("settings.sqlite");
-    let legacy = br#"{"mcpServers":{},"marker":"original"}"#;
-    fs::write(home.join("mcp.json"), legacy).unwrap();
-    fs::write(home.join("skills.json"), b"broken").unwrap();
-    fs::write(a.join(".mcp.json"), br#"{"mcpServers":{},"marker":"a"}"#).unwrap();
-    fs::write(b.join(".mcp.json"), br#"{"mcpServers":{},"marker":"b"}"#).unwrap();
-    let cancel = CancellationToken::new();
-    let mut saved = None;
-    for restarted in [false, true] {
-        let root = Ctx::root().unwrap();
-        // Swap runtime indices across process restarts: identity belongs to the
-        // authorized workspace, not an index persisted by a previous process.
-        let roots = if restarted {
-            vec![home.clone(), b.clone(), a.clone()]
-        } else {
-            vec![home.clone(), a.clone(), b.clone()]
-        };
-        let views = [
-            root.plugin(capability_plugin(FileStoragePlugin::new(roots))),
-            root.plugin(capability_plugin(SqliteStoragePlugin::new(
-                database.clone(),
-            ))),
-            root.plugin(capability_plugin(SettingsPlugin::native(0, vec![1, 2]))),
-        ];
-        wait_active(&root, &views, Duration::from_secs(5), &cancel)
-            .await
-            .unwrap();
-        let settings = root.get::<SettingsService>().unwrap();
-        let source_a = SettingsSource::ProjectMcp(settings.project_root(&a).unwrap());
-        let source_b = SettingsSource::ProjectMcp(settings.project_root(&b).unwrap());
-        let current_a = settings.read(source_a, &cancel).await.unwrap();
-        let current_b = settings.read(source_b, &cancel).await.unwrap();
-        assert!(current_a.document != current_b.document);
-        assert!(
-            matches!(&current_b.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "b")
-        );
-        if restarted {
-            let current = settings
-                .read(SettingsSource::UserMcp, &cancel)
-                .await
-                .unwrap();
-            assert!(saved.as_ref() == Some(&current));
-            let skills = root
-                .get::<SkillSettingsHost>()
-                .unwrap()
-                .0
-                .skills(cancel.clone())
-                .await
-                .unwrap();
-            assert_eq!(skills.disabled, ["review".to_owned()].into());
-            assert!(
-                matches!(&current_a.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "a-updated")
-            );
-        } else {
-            assert!(matches!(
-                settings.read(SettingsSource::Skills, &cancel).await,
-                Err(SettingsError::Invalid(_))
-            ));
-            assert_eq!(fs::read(home.join("skills.json")).unwrap(), b"broken");
-            fs::write(
-                home.join("skills.json"),
-                br#"{"disabledSkillIds":[],"custom":"retain"}"#,
-            )
-            .unwrap();
-            let skills = root.get::<SkillSettingsHost>().unwrap().0.clone();
-            let snapshot = skills.skills(cancel.clone()).await.unwrap();
-            skills
-                .clone()
-                .update_skills(snapshot.version, "review".into(), false, cancel.clone())
-                .await
-                .unwrap();
-            assert_eq!(
-                fs::read(home.join("skills.json")).unwrap(),
-                br#"{"disabledSkillIds":[],"custom":"retain"}"#
-            );
-
-            let fault = rusqlite::Connection::open(&database).unwrap();
-            fault.execute_batch("CREATE TRIGGER fail_import BEFORE INSERT ON settings_documents BEGIN SELECT RAISE(ABORT, 'secret-not-for-diagnostics'); END").unwrap();
-            let error = settings
-                .read(SettingsSource::UserMcp, &cancel)
-                .await
-                .err()
-                .unwrap();
-            assert!(matches!(error, SettingsError::Persistence));
-            assert!(!error.to_string().contains("secret-not-for-diagnostics"));
-            assert_eq!(fs::read(home.join("mcp.json")).unwrap(), legacy);
-            fault.execute_batch("DROP TRIGGER fail_import").unwrap();
-            // Failed imports must not switch authority or seed an empty row.
-            fs::write(
-                home.join("mcp.json"),
-                br#"{"mcpServers":{},"marker":"repaired"}"#,
-            )
-            .unwrap();
-            let current = settings
-                .read(SettingsSource::UserMcp, &cancel)
-                .await
-                .unwrap();
-            assert!(
-                matches!(&current.document, SettingsDocument::Mcp(doc) if doc.extra["marker"] == "repaired")
-            );
-            let mut changed = settings.subscribe();
-            let mut next = current.document.clone();
-            let SettingsDocument::Mcp(doc) = &mut next else {
-                unreachable!()
-            };
-            doc.extra.insert("marker".into(), json!("native"));
-            fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON settings_documents BEGIN SELECT RAISE(ABORT, 'save failed'); END").unwrap();
-            assert!(matches!(
-                settings
-                    .update(
-                        SettingsSource::UserMcp,
-                        &current.revision,
-                        next.clone(),
-                        &cancel
-                    )
-                    .await,
-                Err(SettingsError::Persistence)
-            ));
-            assert!(
-                settings
-                    .read(SettingsSource::UserMcp, &cancel)
-                    .await
-                    .unwrap()
-                    == current
-            );
-            assert!(!changed.has_changed().unwrap());
-            fault.execute_batch("DROP TRIGGER fail_save").unwrap();
-            let (first, second) = tokio::join!(
-                settings.update(
-                    SettingsSource::UserMcp,
-                    &current.revision,
-                    next.clone(),
-                    &cancel
-                ),
-                settings.update(SettingsSource::UserMcp, &current.revision, next, &cancel),
-            );
-            let winner = match (first, second) {
-                (Ok(snapshot), Err(SettingsError::Conflict))
-                | (Err(SettingsError::Conflict), Ok(snapshot)) => snapshot,
-                _ => panic!("exactly one same-revision update must win"),
-            };
-            assert!(changed.has_changed().unwrap());
-            changed.borrow_and_update();
-            assert!(
-                settings
-                    .read(SettingsSource::UserMcp, &cancel)
-                    .await
-                    .unwrap()
-                    == winner
-            );
-            saved = Some(winner);
-            assert_eq!(
-                fs::read(home.join("mcp.json")).unwrap(),
-                br#"{"mcpServers":{},"marker":"repaired"}"#
-            );
-            // A source that has switched to SQLite no longer rereads legacy data,
-            // even when the old file becomes malformed or disappears.
-            fs::write(home.join("mcp.json"), b"ignored legacy edit").unwrap();
-            fs::remove_file(home.join("skills.json")).unwrap();
-            let mut document_a = current_a.document.clone();
-            let SettingsDocument::Mcp(doc) = &mut document_a else {
-                unreachable!()
-            };
-            doc.extra.insert("marker".into(), json!("a-updated"));
-            settings
-                .update(source_a, &current_a.revision, document_a, &cancel)
-                .await
-                .unwrap();
-            assert!(settings.read(source_b, &cancel).await.unwrap() == current_b);
-            assert!(
-                fs::read_to_string(a.join(".mcp.json"))
-                    .unwrap()
-                    .contains("a-updated")
-            );
-            fs::write(a.join(".mcp.json"), b"broken workspace").unwrap();
-            assert!(matches!(
-                settings.read(source_a, &cancel).await,
-                Err(SettingsError::Invalid(_))
-            ));
-            fs::write(
-                a.join(".mcp.json"),
-                br#"{"mcpServers":{},"marker":"a-updated"}"#,
-            )
-            .unwrap();
-            drop(fault);
-        }
-        root.shutdown().await.unwrap();
-        assert!(matches!(
-            settings.read(SettingsSource::UserMcp, &cancel).await,
-            Err(SettingsError::Closed)
-        ));
-    }
-    fs::remove_dir_all(home).unwrap();
-}
-
-impl TypedPlugin for Capture {
-    type Deps = (Arc<SettingsService>, Arc<FileStorage>);
-    fn name(&self) -> &str {
-        "SettingsTest"
-    }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        services: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            assert!(self.0.set(services).is_ok());
-            Ok(Effect::Done)
-        })
-    }
-}
-impl Capability for Capture {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), ())
-    }
-}
-
 struct ProcessSettings(
-    tokio::sync::watch::Sender<Option<(Arc<SettingsService>, Arc<rutis_loader::Loader>)>>,
+    tokio::sync::watch::Sender<
+        Option<(
+            std::sync::Arc<SettingsService>,
+            std::sync::Arc<rutis_loader::Loader>,
+        )>,
+    >,
 );
-impl TypedPlugin for ProcessSettings {
-    type Deps = (Arc<SettingsService>, Arc<rutis_loader::Loader>);
+impl rutis::TypedPlugin for ProcessSettings {
+    type Deps = (
+        std::sync::Arc<SettingsService>,
+        std::sync::Arc<rutis_loader::Loader>,
+    );
     fn name(&self) -> &str {
         "test.process-settings"
     }
@@ -255,46 +37,100 @@ impl TypedPlugin for ProcessSettings {
         &'a self,
         _: &'a Ctx,
         services: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             self.0.send_replace(Some(services));
-            Ok(Effect::Done)
+            Ok(rutis::Effect::Done)
         })
     }
 }
-impl Capability for ProcessSettings {
-    fn keys(&self) -> KeysOf<Self> {
+impl dim_agent_runtime::Capability for ProcessSettings {
+    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {
         ((), ())
     }
+}
+
+/// Records every event of one rutis channel, in delivery order.
+struct Log<E>(std::sync::Arc<tokio::sync::watch::Sender<Vec<E>>>);
+impl<E> Clone for Log<E> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<E: rutis::Event<Value = ()> + Clone> rutis::Listener<E> for Log<E> {
+    fn call<'a>(
+        &'a self,
+        _: &'a Ctx,
+        event: &'a E,
+    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
+        self.0.send_modify(|log| log.push(event.clone()));
+        Box::pin(async { Ok(None) })
+    }
+}
+fn listen<E: rutis::Event<Value = ()> + Clone>(
+    root: &Ctx,
+    key: &rutis::EventKey<E>,
+) -> tokio::sync::watch::Receiver<Vec<E>> {
+    let log = Log(std::sync::Arc::new(tokio::sync::watch::Sender::new(
+        Vec::new(),
+    )));
+    root.events().on(root, key, log.clone()).unwrap();
+    log.0.subscribe()
+}
+/// Waits until the channel has delivered an event matching `seen`.
+async fn saw<E: Clone>(
+    changes: &mut tokio::sync::watch::Receiver<Vec<E>>,
+    seen: impl Fn(&E) -> bool,
+) {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|log| log.iter().any(&seen)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+/// Takes the lease once its holder releases it; retry policy belongs to the consumer.
+async fn lock_when_free(
+    files: &Arc<FileStorage>,
+    path: &FilePath,
+    cancel: &CancellationToken,
+) -> FileLease {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match files.lock(path, cancel).await {
+                Err(FileStorageError::Locked) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
+                lease => return lease.unwrap(),
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+fn change(scope: SettingsScope, revision: &str) -> impl Fn(&SettingsChanged) -> bool + '_ {
+    move |c| c.source == "example" && c.scope == scope && c.revision == revision
 }
 
 #[tokio::test]
 async fn server_reload_preserves_project_root_identity_and_settings() {
     use dim_agent_capabilities::defaults;
     use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
-    use dim_app_server::{ServerConfig, serve};
+    use dim_app_server::{ServerConfig, mcp::config::McpSettings, serve};
 
     tokio::time::timeout(Duration::from_secs(10), async {
-        let home = std::env::temp_dir().join(format!("dim-server-roots-{}", uuid::Uuid::new_v4()));
+        let home = home();
         let project_a = home.join("project-a");
         let project_b = home.join("project-b");
-        fs::create_dir_all(&project_a).unwrap();
-        fs::create_dir_all(&project_b).unwrap();
-        let (home, project_a, project_b) = (
-            home.canonicalize().unwrap(),
-            project_a.canonicalize().unwrap(),
-            project_b.canonicalize().unwrap(),
-        );
-        fs::write(
-            project_a.join(".mcp.json"),
-            br#"{"mcpServers":{},"project":"a"}"#,
-        )
-        .unwrap();
-        fs::write(
-            project_b.join(".mcp.json"),
-            br#"{"mcpServers":{},"project":"b"}"#,
-        )
-        .unwrap();
+        for (project, marker) in [(&project_a, "a"), (&project_b, "b")] {
+            fs::create_dir(project).unwrap();
+            fs::write(
+                project.join(".mcp.json"),
+                serde_json::json!({"mcpServers":{},"project":marker}).to_string(),
+            )
+            .unwrap();
+        }
         let (capture, mut services) = tokio::sync::watch::channel(None);
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
@@ -310,8 +146,9 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
         )
         .await
         .unwrap();
-        let agent = server.agent().unwrap();
-        let _session = agent
+        let _session = server
+            .agent()
+            .unwrap()
             .create_session(SessionConfig::default())
             .await
             .unwrap();
@@ -322,16 +159,15 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
             .await
             .unwrap();
         let expected = settings
-            .read(SettingsSource::ProjectMcp(root_a), &cancel)
+            .read::<McpSettings>(SettingsScope::Project(root_a), &cancel)
             .await
             .unwrap();
-
         loader.restart("FileStorage").await.unwrap();
         let current = services
             .wait_for(|value| {
                 value
                     .as_ref()
-                    .is_some_and(|(current, _)| !Arc::ptr_eq(current, &settings))
+                    .is_some_and(|(current, _)| !std::sync::Arc::ptr_eq(current, &settings))
             })
             .await
             .unwrap()
@@ -339,30 +175,32 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
             .unwrap()
             .0
             .clone();
+        assert!(matches!(
+            settings
+                .read::<McpSettings>(SettingsScope::Project(root_a), &cancel)
+                .await,
+            Err(SettingsError::Closed)
+        ));
         assert_eq!(current.project_root(&project_a), Some(root_a));
         let root_b = current
             .authorize_project(project_b.clone(), &cancel)
             .await
             .unwrap();
-        assert_ne!(
-            root_a, root_b,
-            "a new project must not reuse an authorized root"
-        );
-        assert!(
-            current
-                .read(SettingsSource::ProjectMcp(root_a), &cancel)
-                .await
-                .unwrap()
-                .document
-                == expected.document
-        );
+        assert_ne!(root_a, root_b);
         assert_eq!(
             current.authorize_project(project_a, &cancel).await.unwrap(),
             root_a
         );
         assert!(
             current
-                .read(SettingsSource::ProjectMcp(root_b), &cancel)
+                .read::<McpSettings>(SettingsScope::Project(root_a), &cancel)
+                .await
+                .unwrap()
+                == expected
+        );
+        assert!(
+            current
+                .read::<McpSettings>(SettingsScope::Project(root_b), &cancel)
                 .await
                 .unwrap()
                 .document
@@ -378,9 +216,8 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
 
 #[tokio::test]
 async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
-    let home = std::env::temp_dir().join(format!("dim-settings-late-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&home).unwrap();
-    let home = home.canonicalize().unwrap();
+    use dim_app_server::mcp::config::McpSettings;
+    let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
         root.plugin(capability_plugin(FileStoragePlugin::new(vec![
@@ -396,27 +233,34 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let project = home.join("later");
     fs::create_dir(&project).unwrap();
     assert_eq!(settings.project_root(&project), None);
+    let mut authorized = listen(&root, &project_authorizations());
     let (first, same) = tokio::join!(
         settings.authorize_project(project.clone(), &cancel),
         settings.authorize_project(project.clone(), &cancel)
     );
     let project_root = first.unwrap();
     assert_eq!(project_root, same.unwrap());
-    assert_eq!(settings.project_root(&project), Some(project_root));
-    let source = SettingsSource::ProjectMcp(project_root);
-    let snapshot = settings.read(source, &cancel).await.unwrap();
+    // Authorizing the same directory twice announces it once. Events of one
+    // channel arrive in emit order, so a later authorization is a barrier.
+    let barrier = home.join("barrier");
+    fs::create_dir(&barrier).unwrap();
+    settings
+        .authorize_project(barrier.clone(), &cancel)
+        .await
+        .unwrap();
+    saw(&mut authorized, |a: &ProjectAuthorized| a.cwd == barrier).await;
+    let announced: Vec<_> = authorized
+        .borrow()
+        .iter()
+        .filter(|a| a.cwd == project)
+        .map(|a| a.root)
+        .collect();
+    assert_eq!(announced, [project_root]);
+    let scope = SettingsScope::Project(project_root);
+    let snapshot = settings.read::<McpSettings>(scope, &cancel).await.unwrap();
+    let document = serde_json::from_value::<McpSettings>(serde_json::json!({"mcpServers":{"late":{"command":"node","enabled":false}},"future":{"keep":7}})).unwrap();
     let saved = settings
-        .update(
-            source,
-            &snapshot.revision,
-            SettingsDocument::Mcp(
-                serde_json::from_value(
-                    json!({"mcpServers":{"late":{"command":"node","enabled":false}}}),
-                )
-                .unwrap(),
-            ),
-            &cancel,
-        )
+        .update(scope, &snapshot.revision, document, &cancel)
         .await
         .unwrap();
     let cancelled = CancellationToken::new();
@@ -445,123 +289,392 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
                 .unwrap(),
             project_root
         );
-        assert!(current.read(source, &cancel).await.unwrap().document == saved.document);
+        assert!(current.read::<McpSettings>(scope, &cancel).await.unwrap() == saved);
     }
     root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();
 }
 
-#[test]
-fn cancellation_in_the_file_worker_preserves_the_settings_contract() {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .max_blocking_threads(1)
-        .build()
-        .unwrap()
-        .block_on(async {
-            let home = std::env::temp_dir().join(format!("dim-settings-{}", uuid::Uuid::new_v4()));
-            fs::create_dir(&home).unwrap();
-            let home = home.canonicalize().unwrap();
-            let root = Ctx::root().unwrap();
-            let views = vec![
-                root.plugin(capability_plugin(FileStoragePlugin::new(vec![
-                    home.clone(),
-                ]))),
-                root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-            ];
-            let cancel = CancellationToken::new();
-            wait_active(&root, &views, Duration::from_secs(5), &cancel)
-                .await
-                .unwrap();
-            let settings = root.get::<SettingsService>().unwrap();
-
-            // Hold the only file worker so cancellation happens after admission
-            // but before the actual read, not in SettingsService's entry check.
-            let (release, held) = std::sync::mpsc::channel();
-            let blocker = tokio::task::spawn_blocking(move || held.recv().unwrap());
-            let pending = settings.read(SettingsSource::UserMcp, &cancel);
-            tokio::pin!(pending);
-            assert!(futures_util::poll!(&mut pending).is_pending());
-            cancel.cancel();
-            release.send(()).unwrap();
-            blocker.await.unwrap();
-            let result = pending.await;
-            root.shutdown().await.unwrap();
-            fs::remove_dir_all(home).unwrap();
-            assert!(matches!(result, Err(SettingsError::Cancelled)));
-        });
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct Document {
+    value: String,
+}
+impl BusinessDocument for Document {
+    const NAMESPACE: &'static str = "example";
+    const USER_FILE: &'static str = "example.json";
+    const PROJECT_FILE: Option<&'static str> = Some(".example.json");
+    fn validate(&self) -> Result<()> {
+        if self.value == "invalid" {
+            Err(SettingsError::Invalid("invalid example"))
+        } else {
+            Ok(())
+        }
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct Other {
+    value: String,
+}
+impl BusinessDocument for Other {
+    const NAMESPACE: &'static str = "other";
+    const USER_FILE: &'static str = "other.json";
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+fn home() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("dim-settings-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&path).unwrap();
+    path.canonicalize().unwrap()
 }
 
 #[tokio::test]
-async fn settings_persist_cas_cancel_and_reload_through_plugins() {
-    let home = std::env::temp_dir().join(format!("dim-settings-{}", uuid::Uuid::new_v4()));
+async fn native_import_plain_v13_cas_failure_and_restart() {
+    let home = home();
+    let database = home.join("settings.sqlite");
+    let original = br#"{"value":"original"}"#;
+    fs::write(home.join("example.json"), original).unwrap();
+    fs::write(home.join("other.json"), b"broken").unwrap();
+    let cancel = CancellationToken::new();
+    let mut saved = None;
+    for restarted in [false, true] {
+        let root = Ctx::root().unwrap();
+        let views = vec![
+            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+                home.clone(),
+            ]))),
+            root.plugin(capability_plugin(SqliteStoragePlugin::new(
+                database.clone(),
+            ))),
+            root.plugin(capability_plugin(SettingsPlugin::native(0, vec![]))),
+        ];
+        wait_active(&root, &views, Duration::from_secs(5), &cancel)
+            .await
+            .unwrap();
+        let settings = root.get::<SettingsService>().unwrap();
+        let mut changes = listen(&root, &settings_changes("example"));
+        assert!(changes.borrow_and_update().is_empty());
+        let current = settings
+            .read::<Document>(SettingsScope::User, &cancel)
+            .await
+            .unwrap();
+        assert!(!changes.has_changed().unwrap());
+        let db = rusqlite::Connection::open(&database).unwrap();
+        if restarted {
+            assert_eq!(Some(current), saved);
+        } else {
+            assert_eq!(current.revision, "native:user/example:1");
+            assert_eq!(current.document.value, "original");
+            let (body, imported): (String, String) = db.query_row("SELECT document, imported_revision FROM settings_documents WHERE source='user/example'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Document>(&body).unwrap(),
+                current.document
+            );
+            assert_eq!(imported.len(), 64);
+            assert_eq!(fs::read(home.join("example.json")).unwrap(), original);
+            // A corrupt optional source does not block plugin assembly or another namespace.
+            assert!(matches!(
+                settings.read::<Other>(SettingsScope::User, &cancel).await,
+                Err(SettingsError::Invalid(_))
+            ));
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM settings_documents WHERE source='user/other'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            fs::write(home.join("other.json"), br#"{"value":"repaired"}"#).unwrap();
+            let other = settings
+                .read::<Other>(SettingsScope::User, &cancel)
+                .await
+                .unwrap();
+            settings
+                .update(
+                    SettingsScope::User,
+                    &other.revision,
+                    Other::default(),
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            assert!(!changes.has_changed().unwrap());
+            db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON settings_documents BEGIN SELECT RAISE(ABORT, 'save failed'); END").unwrap();
+            let next = Document {
+                value: "saved".into(),
+            };
+            assert!(matches!(
+                settings
+                    .update(
+                        SettingsScope::User,
+                        &current.revision,
+                        next.clone(),
+                        &cancel
+                    )
+                    .await,
+                Err(SettingsError::Persistence)
+            ));
+            assert_eq!(
+                settings
+                    .read::<Document>(SettingsScope::User, &cancel)
+                    .await
+                    .unwrap(),
+                current
+            );
+            assert!(!changes.has_changed().unwrap());
+            db.execute_batch("DROP TRIGGER fail_save").unwrap();
+            let (a, b) = tokio::join!(
+                settings.update(
+                    SettingsScope::User,
+                    &current.revision,
+                    next.clone(),
+                    &cancel
+                ),
+                settings.update(SettingsScope::User, &current.revision, next, &cancel)
+            );
+            let winner = match (a, b) {
+                (Ok(value), Err(SettingsError::Conflict))
+                | (Err(SettingsError::Conflict), Ok(value)) => value,
+                result => panic!("unexpected CAS: {result:?}"),
+            };
+            saw(&mut changes, change(SettingsScope::User, &winner.revision)).await;
+            assert_eq!(winner.revision, "native:user/example:2");
+            saved = Some(winner);
+            fs::write(home.join("example.json"), b"ignored malformed legacy data").unwrap();
+            // Explicitly seed the historical v13 payload-only contract and token.
+            db.execute("INSERT INTO settings_documents(source,version,document,imported_revision) VALUES ('user/mcp',7,'{\"mcpServers\":{},\"extension\":\"v13\"}','missing')", []).unwrap();
+            let compat = settings
+                .read::<dim_app_server::mcp::config::McpSettings>(SettingsScope::User, &cancel)
+                .await
+                .unwrap();
+            assert_eq!(compat.revision, "native:user/mcp:7");
+            assert!(compat.document.mcp_servers.is_empty());
+            assert_eq!(compat.document.extra["extension"], "v13");
+            assert_eq!(
+                db.query_row(
+                    "SELECT imported_revision FROM settings_documents WHERE source='user/example'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                imported
+            );
+        }
+        root.shutdown().await.unwrap();
+        assert!(matches!(
+            settings
+                .read::<Document>(SettingsScope::User, &cancel)
+                .await,
+            Err(SettingsError::Closed)
+        ));
+    }
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() {
+    let home = home();
     let project = home.join("project");
-    fs::create_dir_all(&project).unwrap();
-    let home = fs::canonicalize(home).unwrap();
-    let project = fs::canonicalize(project).unwrap();
+    let second = home.join("second");
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(&second).unwrap();
     let root = Ctx::root().unwrap();
-    let captured = Arc::new(OnceLock::new());
     let views = vec![
         root.plugin(capability_plugin(FileStoragePlugin::new(vec![
             home.clone(),
             project.clone(),
+            second.clone(),
         ]))),
-        root.plugin(capability_plugin(SettingsPlugin::new(0, vec![1]))),
-        root.plugin(capability_plugin(Capture(captured.clone()))),
+        root.plugin(capability_plugin(SettingsPlugin::new(0, vec![1, 2]))),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
         .await
         .unwrap();
-    let (settings, files) = captured.get().unwrap();
-    let mut changed = settings.subscribe();
+    let settings = root.get::<SettingsService>().unwrap();
+    let files = root.get::<FileStorage>().unwrap();
+    let mut changes = listen(&root, &settings_changes("example"));
     let empty = settings
-        .read(SettingsSource::UserMcp, &cancel)
+        .read::<Document>(SettingsScope::User, &cancel)
         .await
         .unwrap();
     assert_eq!(empty.revision, "missing");
-    let document = SettingsDocument::Mcp(serde_json::from_value(json!({
-        "mcpServers": {
-            "local": { "command": "node", "args": ["server.mjs"], "enabled": false },
-            "remote": { "type": "http", "url": "https://example.test/mcp", "headers": {"Authorization": "private"} },
-            "events": { "type": "sse", "url": "https://example.test/sse" }
-        }, "future": {"keep": null}
-    })).unwrap());
-    // Two consumers using the same version cannot overwrite one another.
+    let document = Document {
+        value: "saved".into(),
+    };
     let (a, b) = tokio::join!(
         settings.update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             &empty.revision,
             document.clone(),
             &cancel
         ),
         settings.update(
-            SettingsSource::UserMcp,
+            SettingsScope::User,
             &empty.revision,
             document.clone(),
             &cancel
         )
     );
+    let saved = match (a, b) {
+        (Ok(value), Err(SettingsError::Conflict)) | (Err(SettingsError::Conflict), Ok(value)) => {
+            value
+        }
+        result => panic!("unexpected file CAS: {result:?}"),
+    };
+    saw(&mut changes, change(SettingsScope::User, &saved.revision)).await;
+    assert_eq!(settings.project_path(1).unwrap(), project);
+    assert_eq!(settings.project_sources().len(), 2);
     assert!(matches!(
-        (&a, &b),
-        (Ok(_), Err(SettingsError::Conflict)) | (Err(SettingsError::Conflict), Ok(_))
+        settings
+            .read::<Document>(SettingsScope::Project(0), &cancel)
+            .await,
+        Err(SettingsError::Invalid(_))
     ));
-    assert_eq!(*changed.borrow_and_update(), 1);
-    let current = settings
-        .read(SettingsSource::UserMcp, &cancel)
+    let a = settings
+        .read::<Document>(SettingsScope::Project(1), &cancel)
         .await
         .unwrap();
-    assert!(current.document == document);
+    let b = settings
+        .read::<Document>(SettingsScope::Project(2), &cancel)
+        .await
+        .unwrap();
+    // The user write above; counted below, behind a barrier.
+    let before = 1;
+    let project_saved = settings
+        .update(
+            SettingsScope::Project(1),
+            &a.revision,
+            document.clone(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    // Each write is announced once, with its own scope and revision.
+    saw(
+        &mut changes,
+        change(SettingsScope::Project(1), &project_saved.revision),
+    )
+    .await;
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&fs::read(home.join("mcp.json")).unwrap())
-            .unwrap()["future"],
-        json!({"keep":null})
+        settings
+            .read::<Document>(SettingsScope::Project(2), &cancel)
+            .await
+            .unwrap(),
+        b
     );
+    let other_saved = settings
+        .update(
+            SettingsScope::Project(2),
+            &b.revision,
+            Document {
+                value: "other project".into(),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    saw(
+        &mut changes,
+        change(SettingsScope::Project(2), &other_saved.revision),
+    )
+    .await;
+    // One source's events arrive in emit order, so the last write is a
+    // barrier: one event per write, none from the conflicting writer.
+    assert_eq!(changes.borrow().len(), before + 2);
+    assert_eq!(
+        settings
+            .read::<Document>(SettingsScope::Project(1), &cancel)
+            .await
+            .unwrap()
+            .revision,
+        project_saved.revision
+    );
+    assert!(!changes.has_changed().unwrap());
+    fs::write(project.join(".example.json"), b"corrupt").unwrap();
+    assert!(matches!(
+        settings
+            .read::<Document>(SettingsScope::Project(1), &cancel)
+            .await,
+        Err(SettingsError::Invalid(_))
+    ));
+    fs::write(project.join(".example.json"), br#"{"value":"repaired"}"#).unwrap();
+    assert_eq!(
+        settings
+            .read::<Document>(SettingsScope::Project(1), &cancel)
+            .await
+            .unwrap()
+            .document
+            .value,
+        "repaired"
+    );
+    fs::write(home.join("example.json"), br#"{"value":"external"}"#).unwrap();
+    assert!(matches!(
+        settings
+            .update(
+                SettingsScope::User,
+                &saved.revision,
+                document.clone(),
+                &cancel
+            )
+            .await,
+        Err(SettingsError::Conflict)
+    ));
+    let current = settings
+        .read::<Document>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let path = files.path(0, "example.json").unwrap();
+    let lock = files.lock(&path, &cancel).await.unwrap();
+    let stopped = CancellationToken::new();
+    let update = settings.update(
+        SettingsScope::User,
+        &current.revision,
+        document.clone(),
+        &stopped,
+    );
+    tokio::pin!(update);
+    tokio::select! { result = &mut update => panic!("unexpected {result:?}"), _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
+    stopped.cancel();
+    assert!(matches!(update.await, Err(SettingsError::Cancelled)));
+    assert!(!changes.has_changed().unwrap());
+    // Dropping the caller does not discard admitted work or its commit notification.
+    {
+        let update = settings.update(
+            SettingsScope::User,
+            &current.revision,
+            document.clone(),
+            &cancel,
+        );
+        tokio::pin!(update);
+        tokio::select! { result = &mut update => panic!("unexpected {result:?}"), _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
+    }
+    // Nothing can commit while the test holds the lease.
+    let before = changes.borrow().len();
+    drop(lock);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        changes.wait_for(|log| log.len() > before),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let saved = settings
+        .read::<Document>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        changes.borrow().last().map(|c| c.revision.as_str()),
+        Some(saved.revision.as_str())
+    );
+    assert_eq!(saved.document, document);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            fs::metadata(home.join("mcp.json"))
+            fs::metadata(home.join("example.json"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -569,352 +682,384 @@ async fn settings_persist_cas_cancel_and_reload_through_plugins() {
             0o600
         );
     }
-    // External changes invalidate the disk revision, not just an in-memory counter.
-    fs::write(
-        home.join("mcp.json"),
-        br#"{"mcpServers":{},"external":true}"#,
-    )
-    .unwrap();
-    assert!(matches!(
-        settings
-            .update(
-                SettingsSource::UserMcp,
-                &current.revision,
-                document.clone(),
-                &cancel
-            )
-            .await,
-        Err(SettingsError::Conflict)
-    ));
-    assert!(!changed.has_changed().unwrap());
-    assert!(matches!(
-        settings.read(SettingsSource::ProjectMcp(0), &cancel).await,
-        Err(SettingsError::Invalid(_))
-    ));
-    let project_snapshot = settings
-        .read(SettingsSource::ProjectMcp(1), &cancel)
-        .await
-        .unwrap();
-    settings
-        .update(
-            SettingsSource::ProjectMcp(1),
-            &project_snapshot.revision,
-            document,
-            &cancel,
-        )
-        .await
-        .unwrap();
-    assert!(project.join(".mcp.json").exists());
-
-    let skill = settings
-        .read(SettingsSource::Skills, &cancel)
-        .await
-        .unwrap();
-    let document = SettingsDocument::Skills(
-        serde_json::from_value(json!({"disabledSkillIds":["project:a","user:b"]})).unwrap(),
-    );
-    // Cancellation while waiting on another process's lease must not save anything.
-    let lock = files
-        .lock(&files.path(0, "skills.json").unwrap(), &cancel)
-        .await
-        .unwrap();
-    let stopped = CancellationToken::new();
-    let update = settings.update(
-        SettingsSource::Skills,
-        &skill.revision,
-        document.clone(),
-        &stopped,
-    );
-    tokio::pin!(update);
-    tokio::select! {
-        result = &mut update => panic!("unexpected early completion: {}", result.is_ok()),
-        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-    }
-    stopped.cancel();
-    assert!(matches!(update.await, Err(SettingsError::Cancelled)));
-    assert!(!home.join("skills.json").exists());
-    drop(lock);
-    // Dropping a waiter does not drop the admitted update or its notification.
-    changed.borrow_and_update();
-    let lock = files
-        .lock(&files.path(0, "skills.json").unwrap(), &cancel)
-        .await
-        .unwrap();
+    // Unload cancels lease waiters and drains them before releasing ownership.
+    // The event is published under the writer's lease, so it may still be held.
+    let lock = lock_when_free(&files, &path, &cancel).await;
     {
         let update = settings.update(
-            SettingsSource::Skills,
-            &skill.revision,
-            document.clone(),
+            SettingsScope::User,
+            &saved.revision,
+            Document::default(),
             &cancel,
         );
         tokio::pin!(update);
-        tokio::select! {
-            _ = &mut update => panic!("update must wait for lease"),
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-        }
+        tokio::select! { result = &mut update => panic!("unexpected {result:?}"), _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
     }
+    views[1].dispose().await.unwrap();
     drop(lock);
-    tokio::time::timeout(Duration::from_secs(3), changed.changed())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
+    assert!(!changes.has_changed().unwrap());
+    assert!(matches!(
         settings
-            .read(SettingsSource::Skills, &cancel)
-            .await
-            .unwrap()
-            .document
-            == document
-    );
-    fs::write(home.join("skills.json"), b"broken").unwrap();
-    assert!(matches!(
-        settings.read(SettingsSource::Skills, &cancel).await,
-        Err(SettingsError::Invalid(_))
-    ));
-    root.shutdown().await.unwrap();
-    assert!(matches!(
-        settings.read(SettingsSource::UserMcp, &cancel).await,
+            .update(
+                SettingsScope::User,
+                &saved.revision,
+                Document::default(),
+                &cancel
+            )
+            .await,
         Err(SettingsError::Closed)
     ));
+    let view = root.plugin(capability_plugin(SettingsPlugin::new(0, vec![1, 2])));
+    wait_active(&root, &[view], Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let fresh = root.get::<SettingsService>().unwrap();
+    assert_eq!(
+        fresh
+            .read::<Document>(SettingsScope::User, &cancel)
+            .await
+            .unwrap(),
+        saved
+    );
+    root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();
 }
 
-struct SkillConsumer(Arc<OnceLock<Arc<SkillSettingsHost>>>);
-impl TypedPlugin for SkillConsumer {
-    type Deps = Arc<SkillSettingsHost>;
-    fn name(&self) -> &str {
-        "SkillSettingsTest"
-    }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        host: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            assert!(self.0.set(host).is_ok());
-            Ok(Effect::Done)
-        })
-    }
-}
-impl Capability for SkillConsumer {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-
 #[tokio::test]
-async fn skill_settings_port_preserves_data_and_owns_cas_notifications_and_shutdown() {
-    let home = std::env::temp_dir().join(format!("dim-skill-settings-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&home).unwrap();
-    let home = fs::canonicalize(home).unwrap();
-    let path = home.join("skills.json");
-    fs::write(
-        &path,
-        br#"{"disabledSkillIds":["user:a","user:absent"],"future":{"keep":7}}"#,
-    )
-    .unwrap();
+async fn business_documents_reject_escaping_filenames() {
+    let home = home();
     let root = Ctx::root().unwrap();
-    let captured = Arc::new(OnceLock::new());
     let views = vec![
         root.plugin(capability_plugin(FileStoragePlugin::new(vec![
             home.clone(),
         ]))),
         root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-        root.plugin(capability_plugin(SkillConsumer(captured.clone()))),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
         .await
         .unwrap();
-    let port = &captured.get().unwrap().0;
     let settings = root.get::<SettingsService>().unwrap();
-    let files = root.get::<FileStorage>().unwrap();
-    let mut changed = port.changes();
-    let initial = port.skills(cancel.clone()).await.unwrap();
-    assert_eq!(*changed.borrow_and_update(), "unread");
-    assert_eq!(
-        initial.disabled,
-        ["user:a".into(), "user:absent".into()].into()
-    );
-
-    let mcp = settings
-        .read(SettingsSource::UserMcp, &cancel)
-        .await
-        .unwrap();
-    settings
-        .update(
-            SettingsSource::UserMcp,
-            &mcp.revision,
-            mcp.document,
-            &cancel,
-        )
-        .await
-        .unwrap();
-    assert!(!changed.has_changed().unwrap());
-
-    // No-op is not a rewrite or notification, but stale no-ops still conflict.
-    let original = fs::read(&path).unwrap();
-    assert_eq!(
-        port.clone()
-            .update_skills(
-                initial.version.clone(),
-                "user:a".into(),
-                false,
-                cancel.clone()
-            )
-            .await
-            .unwrap(),
-        initial.version
-    );
-    assert_eq!(fs::read(&path).unwrap(), original);
-    assert!(!changed.has_changed().unwrap());
-    let enabled = port
-        .clone()
-        .update_skills(
-            initial.version.clone(),
-            "user:a".into(),
-            true,
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    assert_ne!(enabled, initial.version);
-    assert_eq!(*changed.borrow_and_update(), enabled);
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap(),
-        json!({"disabledSkillIds":["user:absent"],"future":{"keep":7}})
-    );
-    assert!(matches!(
-        port.clone()
-            .update_skills(initial.version, "user:a".into(), true, cancel.clone())
-            .await,
-        Err(SkillSettingsError::Conflict)
-    ));
-
-    // Two different edits based on one revision must not silently lose an ID.
-    let (a, b) = tokio::join!(
-        port.clone()
-            .update_skills(enabled.clone(), "user:b".into(), false, cancel.clone()),
-        port.clone()
-            .update_skills(enabled, "user:c".into(), false, cancel.clone())
-    );
-    let (version, winner, loser) = match (a, b) {
-        (Ok(version), Err(SkillSettingsError::Conflict)) => (version, "user:b", "user:c"),
-        (Err(SkillSettingsError::Conflict), Ok(version)) => (version, "user:c", "user:b"),
-        result => panic!("unexpected concurrent result: {result:?}"),
-    };
-    let current = port.skills(cancel.clone()).await.unwrap();
-    assert_eq!(current.version, version);
-    assert_eq!(*changed.borrow_and_update(), version);
-    assert_eq!(
-        current.disabled,
-        ["user:absent".into(), winner.into()].into()
-    );
-
-    // The general Settings writer and the narrow port share the same revision.
-    let mut snapshot = settings
-        .read(SettingsSource::Skills, &cancel)
-        .await
-        .unwrap();
-    let SettingsDocument::Skills(document) = &mut snapshot.document else {
-        panic!("expected Skills")
-    };
-    document.disabled_skill_ids.push(loser.into());
-    let saved = settings
-        .update(SettingsSource::Skills, &version, snapshot.document, &cancel)
-        .await
-        .unwrap();
-    assert_eq!(*changed.borrow_and_update(), saved.revision);
-    assert!(matches!(
-        port.clone()
-            .update_skills(version, winner.into(), true, cancel.clone())
-            .await,
-        Err(SkillSettingsError::Conflict)
-    ));
-
-    // Cancellation while waiting for the file lease cannot commit or notify.
-    let lock = files
-        .lock(&files.path(0, "skills.json").unwrap(), &cancel)
-        .await
-        .unwrap();
-    let stopped = CancellationToken::new();
-    let update =
-        port.clone()
-            .update_skills(saved.revision.clone(), winner.into(), true, stopped.clone());
-    tokio::pin!(update);
-    tokio::select! {
-        result = &mut update => panic!("unexpected early result: {result:?}"),
-        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-    }
-    stopped.cancel();
-    assert!(matches!(update.await, Err(SkillSettingsError::Cancelled)));
-    drop(lock);
-    assert_eq!(
-        port.skills(cancel.clone()).await.unwrap().version,
-        saved.revision
-    );
-    assert!(!changed.has_changed().unwrap());
-    assert!(matches!(
-        port.clone()
-            .update_skills(saved.revision.clone(), "  ".into(), false, cancel.clone())
-            .await,
-        Err(SkillSettingsError::Invalid(_))
-    ));
-
-    // Disposal drains an admitted edit even when its original waiter is gone.
-    let lock = files
-        .lock(&files.path(0, "skills.json").unwrap(), &cancel)
-        .await
-        .unwrap();
-    {
-        let update =
-            port.clone()
-                .update_skills(saved.revision.clone(), winner.into(), true, cancel.clone());
-        tokio::pin!(update);
-        tokio::select! {
-            result = &mut update => panic!("unexpected early result: {result:?}"),
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+    #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+    struct BadPath;
+    impl BusinessDocument for BadPath {
+        const NAMESPACE: &'static str = "bad";
+        const USER_FILE: &'static str = "../escape.json";
+        fn validate(&self) -> Result<()> {
+            Ok(())
         }
     }
-    views[1].dispose().await.unwrap();
-    drop(lock);
-    assert!(!changed.has_changed().unwrap());
     assert!(matches!(
-        port.skills(cancel.clone()).await,
-        Err(SkillSettingsError::Closed)
+        settings.read::<BadPath>(SettingsScope::User, &cancel).await,
+        Err(SettingsError::Invalid(_))
     ));
-    assert!(matches!(
-        port.clone()
-            .update_skills(saved.revision.clone(), winner.into(), true, cancel.clone())
-            .await,
-        Err(SkillSettingsError::Closed)
-    ));
-
-    let new_capture = Arc::new(OnceLock::new());
-    views[2].dispose().await.unwrap();
-    let reloaded = vec![
-        root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-        root.plugin(capability_plugin(SkillConsumer(new_capture.clone()))),
-    ];
-    wait_active(&root, &reloaded, Duration::from_secs(5), &cancel)
+    // A namespace or file belongs to the first document type that used it.
+    #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+    struct SameNamespace;
+    impl BusinessDocument for SameNamespace {
+        const NAMESPACE: &'static str = "example";
+        const USER_FILE: &'static str = "same-namespace.json";
+        fn validate(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+    struct SameFile;
+    impl BusinessDocument for SameFile {
+        const NAMESPACE: &'static str = "same-file";
+        const USER_FILE: &'static str = "example.json";
+        fn validate(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    settings
+        .read::<Document>(SettingsScope::User, &cancel)
         .await
         .unwrap();
-    let port = &new_capture.get().unwrap().0;
-    assert_eq!(*port.changes().borrow(), "unread");
-    assert_eq!(
-        port.skills(cancel.clone()).await.unwrap().disabled,
-        ["user:absent".into(), "user:b".into(), "user:c".into()].into()
-    );
-    fs::write(&path, b"broken").unwrap();
-    assert!(matches!(
-        port.skills(cancel.clone()).await,
-        Err(SkillSettingsError::Invalid(_))
-    ));
-    assert!(matches!(
-        port.clone()
-            .update_skills(saved.revision, "user:b".into(), true, cancel)
-            .await,
-        Err(SkillSettingsError::Invalid(_))
-    ));
-    assert_eq!(fs::read(&path).unwrap(), b"broken");
+    for result in [
+        settings
+            .read::<SameNamespace>(SettingsScope::User, &cancel)
+            .await
+            .map(drop),
+        settings
+            .read::<SameFile>(SettingsScope::User, &cancel)
+            .await
+            .map(drop),
+    ] {
+        assert!(matches!(result, Err(SettingsError::Invalid(_))));
+    }
+    settings
+        .read::<Document>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
     root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// The source the acceptance flows declare (settings-service §11): user and
+/// project files, a schema with a `default`, one user-only member.
+fn declaration(source: &str) -> SourceDeclaration {
+    SourceDeclaration {
+        owner: "example-package".into(),
+        source: source.into(),
+        user_file: format!("{source}.json"),
+        project_file: Some(format!(".{source}.json")),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "searchService": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "secretRef": {"type": "string"}
+                    },
+                    "required": ["kind"]
+                },
+                "maxResults": {"type": "integer", "minimum": 1, "default": 5}
+            },
+            "additionalProperties": false
+        }),
+        user_only: vec!["/searchService".into()],
+    }
+}
+/// One call of the owner service `settings`, as any language makes it.
+async fn owner_call(dispatch: &Arc<dyn HostDispatch>, method: &str, request: Json) -> Json {
+    match dispatch
+        .invoke(method, RpcValue::List(vec![request.into()]))
+        .unwrap()
+    {
+        RpcValue::Reference(reply) if reply.is_future() => {
+            reply.wait_async().await.unwrap().json().unwrap()
+        }
+        value => value.json().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn declared_source_owner_and_client_writes_in_both_profiles() {
+    for native in [false, true] {
+        let home = home();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+        let root = Ctx::root().unwrap();
+        let settings_plugin = if native {
+            SettingsPlugin::native(0, vec![])
+        } else {
+            SettingsPlugin::new(0, vec![])
+        };
+        let mut views = vec![root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+            home.clone(),
+        ])))];
+        if native {
+            views.push(root.plugin(capability_plugin(SqliteStoragePlugin::new(
+                home.join("settings.sqlite"),
+            ))));
+        }
+        views.push(root.plugin(capability_plugin(
+            settings_plugin.declare(vec![declaration("example")]),
+        )));
+        let cancel = CancellationToken::new();
+        wait_active(&root, &views, Duration::from_secs(5), &cancel)
+            .await
+            .unwrap();
+        let settings = root.get::<SettingsService>().unwrap();
+        let owner = root
+            .get_as::<dyn HostDispatch>(host_key("settings"))
+            .unwrap();
+        let mut changes = listen(&root, &settings_changes("example"));
+        let user = json!({"source": "example", "scope": "user"});
+
+        // The first read is the default document.
+        let first = owner_call(&owner, "read", user.clone()).await;
+        assert_eq!(first["ok"], true);
+        assert_eq!(first["value"]["document"], json!({"maxResults": 5}));
+        let first = first["value"]["revision"].as_str().unwrap().to_owned();
+        let initial = if native {
+            "native:user/example:1"
+        } else {
+            "missing"
+        };
+        assert_eq!(first, initial);
+        let update = |revision: &str, document: Json| json!({"source": "example", "scope": "user", "expectedRevision": revision, "document": document});
+        let saved = owner_call(&owner, "update", update(&first, json!({"maxResults": 7}))).await;
+        assert_eq!(saved["value"]["document"], json!({"maxResults": 7}));
+        let second = saved["value"]["revision"].as_str().unwrap().to_owned();
+        assert_ne!(second, first);
+        // Rejected writes change nothing and announce nothing.
+        for (document, code) in [
+            (json!({"maxResults": 8}), "conflict"),
+            (json!({"maxResults": 0}), "invalid_document"),
+            (
+                json!({"searchService": {"kind": "web", "secretRef": ""}}),
+                "invalid_document",
+            ),
+            (json!({"searchService": {"kind": "web"}}), "user_only_field"),
+            (json!([]), "invalid_document"),
+        ] {
+            let revision = if code == "conflict" { &first } else { &second };
+            let rejected = owner_call(&owner, "update", update(revision, document)).await;
+            assert_eq!(rejected["ok"], false);
+            assert_eq!(rejected["error"]["code"], code, "{rejected}");
+        }
+        assert_eq!(
+            owner_call(&owner, "read", user.clone()).await["value"]["revision"],
+            second.as_str()
+        );
+        // A client write may change the user-only member; the owner may then
+        // keep it, but not change it.
+        let service = json!({"kind": "web", "secretRef": "web-search"});
+        let third = settings
+            .update_declared(
+                "example",
+                SettingsScope::User,
+                &second,
+                json!({"maxResults": 7, "searchService": service}),
+                Writer::Client,
+                &cancel,
+            )
+            .await
+            .unwrap()
+            .revision;
+        let changed = owner_call(
+            &owner,
+            "update",
+            update(&third, json!({"searchService": {"kind": "other"}})),
+        )
+        .await;
+        assert_eq!(changed["error"]["code"], "user_only_field");
+        let kept = owner_call(
+            &owner,
+            "update",
+            update(&third, json!({"searchService": service})),
+        )
+        .await;
+        let stored = json!({"maxResults": 5, "searchService": service});
+        assert_eq!(kept["value"]["document"], stored);
+        let fourth = kept["value"]["revision"].as_str().unwrap().to_owned();
+        // One event per committed write, in commit order, on both paths.
+        saw(&mut changes, change(SettingsScope::User, &fourth)).await;
+        let announced: Vec<_> = changes
+            .borrow()
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect();
+        assert_eq!(
+            announced,
+            [&second, &third, &fourth].map(
+                |revision| json!({"source": "example", "scope": "user", "revision": revision})
+            )
+        );
+        if native {
+            let db = rusqlite::Connection::open(home.join("settings.sqlite")).unwrap();
+            let body: String = db
+                .query_row(
+                    "SELECT document FROM settings_documents WHERE source='user/example'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Json>(&body).unwrap(), stored);
+            assert!(!home.join("example.json").exists());
+        } else {
+            let file = fs::read(home.join("example.json")).unwrap();
+            assert_eq!(serde_json::from_slice::<Json>(&file).unwrap(), stored);
+        }
+
+        // Project scope needs an authorized root; `projects` lists them.
+        let unauthorized = owner_call(
+            &owner,
+            "read",
+            json!({"source": "example", "scope": {"project": 99}}),
+        )
+        .await;
+        assert_eq!(unauthorized["error"]["code"], "invalid_scope");
+        let mut authorized = listen(&root, &project_authorizations());
+        let project_root = settings
+            .authorize_project(project.clone(), &cancel)
+            .await
+            .unwrap();
+        saw(&mut authorized, |a: &ProjectAuthorized| {
+            a.root == project_root
+        })
+        .await;
+        let listed = json!({"root": project_root, "cwd": project});
+        assert_eq!(
+            serde_json::to_value(&authorized.borrow()[0]).unwrap(),
+            listed
+        );
+        assert_eq!(
+            owner_call(&owner, "projects", json!({})).await,
+            json!({"ok": true, "value": {"projects": [listed]}})
+        );
+        let in_project = owner_call(
+            &owner,
+            "read",
+            json!({"source": "example", "scope": {"project": project_root}}),
+        )
+        .await;
+        assert_eq!(
+            in_project["value"],
+            json!({"revision": "missing", "document": {"maxResults": 5}})
+        );
+
+        // Only declared sources are served, and a Rust type cannot take one.
+        let mcp = owner_call(&owner, "read", json!({"source": "mcp", "scope": "user"})).await;
+        assert_eq!(mcp["error"]["code"], "unknown_source");
+        assert!(matches!(
+            settings
+                .read::<Document>(SettingsScope::User, &cancel)
+                .await,
+            Err(SettingsError::Invalid(
+                "settings source belongs to another document type"
+            ))
+        ));
+        root.shutdown().await.unwrap();
+        assert_eq!(
+            owner_call(&owner, "read", user).await["error"]["code"],
+            "closed"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn invalid_or_conflicting_declarations_fail_assembly() {
+    let mut unreachable = declaration("example");
+    unreachable.user_only = vec!["/searchService/missing".into()];
+    let mut invalid_default = declaration("example");
+    invalid_default.schema["properties"]["maxResults"]["default"] = json!(0);
+    let mut escaping = declaration("example");
+    escaping.user_file = "../example.json".into();
+    let cases = [
+        SettingsPlugin::new(0, vec![])
+            .reserve::<dim_app_server::mcp::config::McpSettings>()
+            .declare(vec![declaration("mcp")]),
+        SettingsPlugin::new(0, vec![])
+            .declare(vec![declaration("example"), declaration("example")]),
+        SettingsPlugin::new(0, vec![]).declare(vec![unreachable]),
+        SettingsPlugin::new(0, vec![]).declare(vec![invalid_default]),
+        SettingsPlugin::new(0, vec![]).declare(vec![escaping]),
+    ];
+    let home = home();
+    for plugin in cases {
+        let root = Ctx::root().unwrap();
+        let views = vec![
+            root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+                home.clone(),
+            ]))),
+            root.plugin(capability_plugin(plugin)),
+        ];
+        let error = wait_active(
+            &root,
+            &views,
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("example-package"), "{error}");
+        root.shutdown().await.unwrap();
+    }
     fs::remove_dir_all(home).unwrap();
 }

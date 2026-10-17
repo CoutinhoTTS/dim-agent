@@ -15,6 +15,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use dim_agent_capabilities::methods::RpcError;
 use dim_agent_runtime::{Capability, KeysOf, When};
 use futures_util::{
     SinkExt, StreamExt,
@@ -662,15 +663,22 @@ async fn run_connection(
                 {
                     // Recording the instance under the handler lock orders this
                     // hello against a generation change, which closes stale ones.
-                    let instance = hub.with_rpc(|rpc| {
-                        let instance = rpc.index.server_instance_id().to_owned();
-                        connection
-                            .instance
-                            .set(instance.clone())
-                            .expect("first handshake");
-                        instance
-                    });
-                    let instance_id = match instance {
+                    let instance = hub
+                        .with_rpc(|rpc| {
+                            // An unloading load admits no hello: the client
+                            // retries it against the next load.
+                            if rpc.stopping.is_cancelled() {
+                                return Err(RpcError::reloading());
+                            }
+                            let instance = rpc.index.server_instance_id().to_owned();
+                            connection
+                                .instance
+                                .set(instance.clone())
+                                .expect("first handshake");
+                            Ok((instance, rpc.owners.listed(&rpc.ctx)))
+                        })
+                        .and_then(|instance| instance);
+                    let (instance_id, methods) = match instance {
                         Ok(instance) => instance,
                         Err(error) => {
                             let _ = connection
@@ -679,10 +687,6 @@ async fn run_connection(
                             continue;
                         }
                     };
-                    connection
-                        .version
-                        .set(params.protocol_version)
-                        .expect("first handshake");
                     let _ = connection.sender.send(
                         Outbound::result(
                             request.id,
@@ -705,15 +709,21 @@ async fn run_connection(
                                             "session.history",
                                             "session.input_lookup",
                                             "session.create",
+                                            "session.delete",
                                             "session.model.progress",
+                                            "session.methods",
                                         ]);
-                                    }
-                                    if local && hub.config().product_home.is_some() {
-                                        features.extend(MANAGEMENT_METHODS);
+                                        if hub.config().database_path.is_some() {
+                                            features.push("session.fork");
+                                        }
                                     }
                                     if local && hub.config().local_execution() {
                                         features.extend(LOCAL_EXECUTION_METHODS);
-                                        features.extend(MCP_METHODS);
+                                    }
+                                    let mut features: Vec<String> =
+                                        features.into_iter().map(str::to_owned).collect();
+                                    if local {
+                                        features.extend(methods);
                                     }
                                     features
                                 }),
@@ -721,6 +731,12 @@ async fn run_connection(
                         ),
                         false,
                     );
+                    // Publish notification eligibility only after the hello reply
+                    // has entered this connection's ordered outbound queue.
+                    connection
+                        .version
+                        .set(params.protocol_version)
+                        .expect("first handshake");
                     hello = true;
                 }
                 Call::Hello(_) => {

@@ -19,6 +19,23 @@ Reload publishes new source handles; PromptSourcesBranch checks mutable sources.
 Instructions come from the public AGENTS.md search logic, not private agent
 documentation. Sources must be loaded then adopted by Prompt before reaching
 model context. Polling does not guarantee immediate visibility of file changes.
+The environment source reads `HostPlatform::exec_shell()` on each load, so the
+existing refresh/adoption flow also picks up exec shell preference changes.
+Explicit refresh, like periodic checks, refreshes only instructions, environment
+and date. Base and Session System entries stay adopted. Profile adoption uses
+`session_entry` to construct or revoke the same `dim/session` entry as creation.
+
+## Rule check
+
+§1 and ADR 002 D1–D3: the existing Session source retains its owner, dependencies
+and lifecycle; no wiring module is added. §4 rules 1–6 and 9: the existing prompt
+refresh and adoption path is unchanged, with no new events or context path.
+§4 rule 7 and ADR 002 D4: shell data comes from HostPlatform's public read-at-use
+API, not its private source. ADR 002 D5: no new service or wire contract is added.
+
+## Requirements raised to mechanism owners
+
+None (§4 rule 8). Existing source refresh and adoption cover shell changes.
 
 ## Tests
 

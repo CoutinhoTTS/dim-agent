@@ -1,8 +1,12 @@
 mod local_support;
 
 use dim_agent_capabilities::{
-    skill_settings::SkillSettings,
-    skills::{RefreshTarget, SkillIssue, SkillStatus, SkillsBranch, SkillsError},
+    settings::{SettingsChanged, SettingsScope, settings_changes},
+    skill_settings::{SOURCE, SkillSettings},
+    skills::{
+        CatalogChanged, RefreshTarget, SkillIssue, SkillStatus, SkillsBranch, SkillsError,
+        catalog_changes,
+    },
 };
 use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
@@ -354,22 +358,48 @@ async fn skill_loads_the_latest_view_after_queue_and_steer_interleave() {
     env.agent.close().await.unwrap();
 }
 
+/// The latest version announced on the catalog channel.
+struct Announced(tokio::sync::watch::Sender<u64>);
+impl rutis::Listener<CatalogChanged> for Announced {
+    fn call<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        changed: &'a CatalogChanged,
+    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
+        self.0.send_replace(changed.version);
+        Box::pin(async { Ok(None) })
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enablement_changes_the_list_and_loading() {
     let dirs = Dirs::new();
     let layout = layout(&dirs);
     let env = env(&dirs, Options::default()).await;
+    let (announced, mut seen) = tokio::sync::watch::channel(0);
+    env.root
+        .events()
+        .on(&env.root, &catalog_changes(), Announced(announced))
+        .unwrap();
     let session = env.session(&layout.cwd, "").await.unwrap();
     run(&session, "first").await;
     let b = format!("workspace:{}:b", layout.project.to_string_lossy());
 
     let before = view_version(&session);
-    let (entry, _) = env
+    let (entry, version) = env
         .catalog()
         .set_enabled(&b, false, Some(&layout.cwd))
         .await
         .unwrap();
     assert!(!entry.enabled);
+    // Sessions follow the catalog's announcement of the version it reports.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        seen.wait_for(|seen| *seen == version),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let persisted = env
         .settings
         .skills(Default::default())
@@ -393,6 +423,36 @@ async fn enablement_changes_the_list_and_loading() {
     wait_view_change(&session, &before).await;
     assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-1"));
 
+    // Another writer of the Skills source: Sessions follow the write once
+    // Settings announces it, not before.
+    let before = view_version(&session);
+    let current = env.settings.skills(Default::default()).await.unwrap();
+    let revision = env
+        .settings
+        .clone()
+        .update_skills(current.version, b.clone(), false, Default::default())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(view_version(&session), before);
+    env.root
+        .events()
+        .emit(
+            &env.root,
+            &settings_changes(SOURCE),
+            std::sync::Arc::new(SettingsChanged {
+                source: SOURCE.into(),
+                scope: SettingsScope::User,
+                revision,
+            }),
+        )
+        .unwrap();
+    wait_view_change(&session, &before).await;
+    assert_eq!(
+        result_text(&load(&env, &session, "b").await),
+        "Skill is disabled: b"
+    );
+
     assert_eq!(
         env.catalog()
             .set_enabled("user:missing", false, Some(&layout.cwd))
@@ -401,10 +461,9 @@ async fn enablement_changes_the_list_and_loading() {
         SkillsError::UnknownSkill("user:missing".into())
     );
 
-    // An empty view clears the list.
+    // An empty view clears the list; `b` is already disabled.
     for id in [
         "user:a".to_owned(),
-        b,
         format!("workspace:{}:nested/d", layout.project.to_string_lossy()),
     ] {
         let before = view_version(&session);
@@ -490,9 +549,6 @@ impl SkillSettings for SlowFirstResponse {
             Ok(version)
         })
     }
-    fn changes(&self) -> tokio::sync::watch::Receiver<String> {
-        self.inner.changes()
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -563,7 +619,7 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
     root.shutdown().await.unwrap();
 }
 
-/// Fails the settings reads that follow a write, `fail_after_write` times.
+/// Fails the next `failing` settings reads; a write fails its read-back.
 struct FailingReads {
     inner: std::sync::Arc<dim_agent_capabilities::skills::MemorySkillSettings>,
     failing: std::sync::atomic::AtomicUsize,
@@ -606,18 +662,13 @@ impl SkillSettings for FailingReads {
         std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
     > {
         Box::pin(async move {
-            // The write's read-back and its notification's read both fail.
-            // Armed before the write publishes its notification, so the
-            // listener cannot read before the faults are in place.
-            self.failing.store(2, std::sync::atomic::Ordering::SeqCst);
+            // The write's read-back fails.
+            self.failing.store(1, std::sync::atomic::Ordering::SeqCst);
             self.inner
                 .clone()
                 .update_skills(expected, id, enabled, cancel)
                 .await
         })
-    }
-    fn changes(&self) -> tokio::sync::watch::Receiver<String> {
-        self.inner.changes()
     }
 }
 
@@ -695,6 +746,18 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
     .unwrap();
     assert!(skills.list().unwrap().iter().any(|skill| skill.name == "b"));
     assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-1"));
+    assert_eq!(
+        env.agent
+            .diagnostics()
+            .unwrap()
+            .plugins
+            .iter()
+            .filter(
+                |plugin| plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+            )
+            .count(),
+        3
+    );
 
     // A later source failure also blocks the previously consumed Skill body.
     settings.failing.store(usize::MAX, Ordering::SeqCst);
@@ -716,6 +779,11 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
     let result = load(&env, &session, "b").await;
     assert_eq!(result.is_error, Some(true));
     assert!(!result_text(&result).contains("BODY-B-1"));
+    assert!(
+        env.agent.diagnostics().unwrap().plugins.iter().all(
+            |plugin| plugin.name != "SkillContent" || plugin.state != rutis::FiberState::Active
+        )
+    );
     env.agent.close().await.unwrap();
 }
 
@@ -755,15 +823,7 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
         matches!(failed, Err(SkillsError::SettingsSync(_))),
         "{failed:?}"
     );
-    // Reads work again once both faults are consumed: the next query
-    // catches up without a new change.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while settings.failing.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the listener read after the change");
+    // Reads work again: the next query catches up without a new change.
     let view = catalog.query(Some(&layout.cwd)).await.unwrap();
     let entry = view
         .entries
@@ -772,4 +832,236 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
         .unwrap();
     assert!(!entry.enabled);
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn content_instances_are_session_owned_and_only_changed_content_is_replaced() {
+    let dirs = Dirs::new();
+    let layout = layout(&dirs);
+    let env = env(&dirs, Options::default()).await;
+    let first = env.session(&layout.cwd, "").await.unwrap();
+    let second = env.session(&layout.cwd, "").await.unwrap();
+    let content_ids = || {
+        let snapshot = env.agent.diagnostics().unwrap();
+        let ids: std::collections::HashSet<_> = snapshot
+            .plugins
+            .iter()
+            .filter(|plugin| {
+                plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+            })
+            .map(|plugin| plugin.id)
+            .collect();
+        // Every actual content leaf has its own live contributed service binding.
+        assert_eq!(
+            snapshot
+                .bindings
+                .iter()
+                .filter(|binding| ids.contains(&binding.provider))
+                .count(),
+            ids.len()
+        );
+        ids
+    };
+    let original = content_ids();
+    assert_eq!(original.len(), 6); // a, b, d in each Session; shadowed/invalid files excluded.
+    let second_before = view_version(&second);
+    dirs.write(
+        &layout.project.join("b/SKILL.md"),
+        &skill_file("b", "project b", "BODY-B-2"),
+    );
+    refresh(&env, &first, &layout.cwd).await;
+    wait_view_change(&second, &second_before).await;
+    let refreshed = content_ids();
+    assert_eq!(refreshed.len(), 6);
+    assert_eq!(original.intersection(&refreshed).count(), 4);
+    assert!(result_text(&load(&env, &second, "b").await).contains("BODY-B-2"));
+
+    // An identical rescan must not recreate any content instance.
+    env.catalog()
+        .refresh(RefreshTarget {
+            user: true,
+            project: Some(layout.cwd.clone()),
+        })
+        .await
+        .unwrap();
+    run(&second, "unchanged").await;
+    assert_eq!(content_ids(), refreshed);
+
+    first.close().await.unwrap();
+    let surviving = content_ids();
+    assert_eq!(surviving.len(), 3);
+    assert!(surviving.is_subset(&refreshed));
+    assert!(result_text(&load(&env, &second, "b").await).contains("BODY-B-2"));
+    let b = format!("workspace:{}:b", layout.project.to_string_lossy());
+    let before = view_version(&second);
+    env.catalog()
+        .set_enabled(&b, false, Some(&layout.cwd))
+        .await
+        .unwrap();
+    wait_view_change(&second, &before).await;
+    let disabled = content_ids();
+    assert_eq!(disabled.len(), 2);
+    assert!(disabled.is_subset(&surviving));
+    assert_eq!(
+        result_text(&load(&env, &second, "b").await),
+        "Skill is disabled: b"
+    );
+    let before = view_version(&second);
+    env.catalog()
+        .set_enabled(&b, true, Some(&layout.cwd))
+        .await
+        .unwrap();
+    wait_view_change(&second, &before).await;
+    let enabled = content_ids();
+    assert_eq!(enabled.len(), 3);
+    assert_eq!(enabled.intersection(&surviving).count(), 2);
+    assert!(result_text(&load(&env, &second, "b").await).contains("BODY-B-2"));
+    second.close().await.unwrap();
+    assert!(content_ids().is_empty());
+    env.agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_changes_during_assembly_wait_for_session_publication() {
+    let dirs = Dirs::new();
+    let layout = layout(&dirs);
+    let hold = std::sync::Arc::new(AssemblyHold::default());
+    let env = env(
+        &dirs,
+        Options {
+            hold: Some(hold.clone()),
+            ..Options::default()
+        },
+    )
+    .await;
+    let active_content = || {
+        env.agent
+            .diagnostics()
+            .map(|snapshot| {
+                snapshot
+                    .plugins
+                    .into_iter()
+                    .filter(|plugin| {
+                        plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+                    })
+                    .map(|plugin| plugin.id)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default()
+    };
+    hold.arm();
+    let agent = env.agent.clone();
+    let cwd = layout.cwd.to_string_lossy().into_owned();
+    let creating = tokio::spawn(async move {
+        agent
+            .create_session(SessionConfig {
+                cwd,
+                tools: vec!["skill".into(), "gate".into()],
+                ..SessionConfig::default()
+            })
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), hold.entered.notified())
+        .await
+        .expect("assembly reached the hold");
+    // Skills applied with its initial instances while the Session is unpublished.
+    let mut initial = active_content();
+    for _ in 0..200 {
+        if initial.len() == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        initial = active_content();
+    }
+    assert_eq!(initial.len(), 3);
+
+    dirs.write(
+        &layout.project.join("b/SKILL.md"),
+        &skill_file("b", "project b", "BODY-B-2"),
+    );
+    env.catalog()
+        .refresh(RefreshTarget {
+            user: true,
+            project: Some(layout.cwd.clone()),
+        })
+        .await
+        .unwrap();
+    // Replacing an instance now would race the Session's readiness checks.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(active_content(), initial);
+
+    hold.release.notify_one();
+    let session = creating.await.unwrap().unwrap();
+    // Publication adopts the change seen during assembly: only `b` is replaced.
+    // Wait for the replacement to settle, not its first step.
+    let mut adopted = active_content();
+    for _ in 0..1000 {
+        if adopted != initial && adopted.len() == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        adopted = active_content();
+    }
+    assert_eq!(adopted.len(), 3);
+    assert_eq!(adopted.intersection(&initial).count(), 2);
+    // The branch adopts the replacement once it is active.
+    let mut body = String::new();
+    for _ in 0..100 {
+        body = result_text(&load(&env, &session, "b").await);
+        if body.contains("BODY-B-2") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(body.contains("BODY-B-2"), "{body}");
+    env.agent.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closing_session_creates_no_content_instances() {
+    let dirs = Dirs::new();
+    let layout = layout(&dirs);
+    let env = env(&dirs, Options::default()).await;
+    let session = env.session(&layout.cwd, "").await.unwrap();
+    let content = || {
+        env.agent
+            .diagnostics()
+            .unwrap()
+            .plugins
+            .into_iter()
+            .filter(|plugin| plugin.name == "SkillContent")
+            .map(|plugin| plugin.id)
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let before = content();
+    assert_eq!(before.len(), 3);
+    // A turn held in the gate keeps the close waiting for its branch to
+    // settle, with every Session capability still loaded.
+    env.model.push(Step::Tool("gate", serde_json::json!({})));
+    session
+        .submit("go".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    entered(&env).await;
+    let closing = session.close();
+    assert!(session.is_closing());
+    dirs.write(
+        &layout.project.join("b/SKILL.md"),
+        &skill_file("b", "project b", "BODY-B-2"),
+    );
+    env.catalog()
+        .refresh(RefreshTarget {
+            user: true,
+            project: Some(layout.cwd.clone()),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        content().is_subset(&before),
+        "a closing Session created content instances"
+    );
+    env.gate.release.notify_one();
+    closing.await.unwrap();
+    env.agent.close().await.unwrap();
 }

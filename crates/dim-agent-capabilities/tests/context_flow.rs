@@ -45,42 +45,58 @@ impl ContextModel for Context {
     fn count_tokens(&self, request: &ModelRequest) -> f64 {
         serde_json::to_vec(&request.messages).unwrap().len() as f64
     }
+}
+fn test_diagnostics() -> StrategyDiagnostics {
+    StrategyDiagnostics {
+        model_call_count: 1,
+        record: CompactionStrategyRecord {
+            kind: "test".into(),
+            details: JsonObject::new(),
+        },
+    }
+}
+/// The test strategy: the legal cut the retention rule allows, or a cut
+/// outside the fixed context (`foreign_cursor`), or one that separates the
+/// first tool call from its result (`foreign_cursor` with a 10,000 threshold).
+impl CompactionStrategy for Context {
+    fn name(&self) -> &str {
+        "test"
+    }
     fn compact(
         &self,
         input: CompactionInput,
         _: CancellationToken,
-    ) -> HostFuture<'_, ContextCompactionResult> {
+    ) -> HostFuture<'_, StrategyOutcome> {
         Box::pin(async move {
-            let diagnostics = serde_json::from_value(serde_json::json!({
-                "reason":"auto", "trigger":"provider_output_budget_exhausted",
-                "candidateMessageCount":input.history.len(), "inputMessageCount":input.history.len(), "retainedMessageCount":0,
-                "retainedTokenBudget":0,"retainedTokens":0,"serializedChars":100,"estimatedInputTokens":input.estimated_input_tokens,
-                "estimatedCompressedTokens":20,"estimatedPostCompactionTokens":20,"summaryInputBudget":1000,
-                "preflightInputTokens":100,"preflightOutputTokens":20,"compactedToolPayloadCount":0,"droppedMessageCount":0,
-                "chunkCount":1,"summaryChars":5,"estimatedSummaryTokens":5,"modelCallCount":1,"durationMs":1
-            })).unwrap();
-            Ok(ContextCompactionResult::Completed {
-                cursor: if self.foreign_cursor && self.threshold != Some(10_000.) {
-                    "foreign-history-entry".into()
-                } else if self.foreign_cursor {
-                    input
-                        .history
-                        .iter()
-                        .find(|entry| match &entry.message.content {
-                            MessageContent::Parts(parts) => parts
-                                .iter()
-                                .any(|part| matches!(part, MessagePart::ToolUse { .. })),
-                            MessageContent::Text(_) => false,
-                        })
-                        .unwrap()
-                        .id
-                        .clone()
-                } else {
-                    input.history.last().unwrap().id.clone()
-                },
-                summary: "short".into(),
-                diagnostics: Box::new(diagnostics),
-                context_baseline: Vec::new(),
+            let retain_from = if self.foreign_cursor && self.threshold != Some(10_000.) {
+                "foreign-history-entry".into()
+            } else if self.foreign_cursor {
+                let call = input
+                    .history
+                    .iter()
+                    .position(|entry| match &entry.message.content {
+                        MessageContent::Parts(parts) => parts
+                            .iter()
+                            .any(|part| matches!(part, MessagePart::ToolUse { .. })),
+                        MessageContent::Text(_) => false,
+                    })
+                    .unwrap();
+                input.history[call + 1].source.clone()
+            } else {
+                match input.cut() {
+                    Some(cut) => cut.retain_from.clone(),
+                    None => {
+                        return Ok(StrategyOutcome::Skipped {
+                            reason: "nothing_to_compact".into(),
+                            diagnostics: test_diagnostics(),
+                        });
+                    }
+                }
+            };
+            Ok(StrategyOutcome::Completed {
+                retain_from,
+                replacement: vec![dim_agent_capabilities::history::summary_message("short")],
+                diagnostics: test_diagnostics(),
             })
         })
     }
@@ -174,6 +190,7 @@ fn builder_with_context(
         .session_value(Arc::new(history))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context)))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
         .session_plugin(DefaultPrepareModelPlugin::new);
     defaults::install(&mut builder);
     builder
@@ -444,18 +461,18 @@ async fn foreign_compaction_cursor_fails_recovery_without_another_model_call() {
         assert_eq!(compacted[0].through, sources[1].through);
         assert!(matches!(
             &compacted[0].outcome,
-            ContextCompactionResult::Failed { error, .. } if error.contains("cursor is outside the request history")
+            ContextCompactionResult::Failed { error, .. } if error.contains("cut is outside the fixed context history")
         ));
         assert!(events.iter().any(|event| matches!(
             &event.kind,
             EventKind::ModelOutputEnd(data)
                 if data.request_id == sources[1].request_id
-                && matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("cursor is outside the request history"))
+                && matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("cut is outside the fixed context history"))
         )));
         assert!(matches!(
             &events.last().unwrap().kind,
             EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { error }, .. })
-                if error.contains("cursor is outside the request history")
+                if error.contains("cut is outside the fixed context history")
         ));
         assert!(!session.state("main").unwrap().closed);
         agent.close().await.unwrap();
@@ -491,7 +508,7 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
             EventKind::ContextCompaction(ContextCompactionData {
                 outcome: ContextCompactionResult::Failed { error, .. },
                 ..
-            }) if error == "Compaction cursor separates a tool call from its results or context."
+            }) if error == "Compaction cut separates a tool call from its results or context."
         )));
         assert_eq!(
             events
@@ -503,7 +520,7 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
         assert!(matches!(
             &events.last().unwrap().kind,
             EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { error }, .. })
-                if error == "Compaction cursor separates a tool call from its results or context."
+                if error == "Compaction cut separates a tool call from its results or context."
         ));
         agent.close().await.unwrap();
     })
@@ -577,13 +594,18 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
+    // The second turn compacts the first, which delivered the keyed block:
+    // the retained turns hold no cut, so the latest cut that keeps the
+    // current input is taken (#169).
     session.input(context_input(), "main").await.unwrap();
     session.idle("main").await.unwrap();
-    session
-        .submit("next".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
+    for text in ["next", "third"] {
+        session
+            .submit(text.into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
     let events = session.history("main", None).await.unwrap();
     let baseline = events
         .iter()
@@ -606,24 +628,35 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             _ => None,
         })
         .collect();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert!(requests.iter().all(|request| {
         request
             .messages
             .iter()
             .any(|message| message.as_ref() == &baseline[0].message)
     }));
-    let final_budget = events
+    // The budget of the request whose compaction first completed.
+    let compacted = events
         .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::ContextBudget(data) => Some(data),
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                request_id: Some(request_id),
+                outcome: ContextCompactionResult::Completed { .. },
+                ..
+            }) => Some(request_id.clone()),
             _ => None,
         })
-        .next_back()
         .unwrap();
-    assert_eq!(final_budget.baseline_source, BaselineSource::FullEstimate);
+    let budget = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextBudget(data) if data.request_id == compacted => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(budget.baseline_source, BaselineSource::FullEstimate);
     assert_eq!(
-        final_budget.estimated_input_tokens, 593.,
+        budget.estimated_input_tokens, 1219.,
         "budget is measured before the hook rewrites the committed baseline"
     );
     agent.close().await.unwrap();
@@ -638,11 +671,13 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
         .unwrap();
     forged_session.input(context_input(), "main").await.unwrap();
     forged_session.idle("main").await.unwrap();
-    forged_session
-        .submit("next".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    forged_session.idle("main").await.unwrap();
+    for text in ["next", "third"] {
+        forged_session
+            .submit(text.into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        forged_session.idle("main").await.unwrap();
+    }
     let forged_events = forged_session.history("main", None).await.unwrap();
     let rewritten_requests: Vec<_> = forged_events
         .iter()
@@ -651,13 +686,17 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             _ => None,
         })
         .collect();
-    assert_eq!(rewritten_requests.len(), 2);
-    assert!(rewritten_requests.iter().all(|request| {
-        request.messages.contains(&Arc::new(Message::text(
-            Role::User,
-            "host-selected baseline",
-        )))
-    }));
+    assert_eq!(rewritten_requests.len(), 3);
+    assert!(
+        rewritten_requests
+            .last()
+            .unwrap()
+            .messages
+            .contains(&Arc::new(Message::text(
+                Role::User,
+                "host-selected baseline",
+            )))
+    );
     assert!(matches!(
         &forged_events.last().unwrap().kind,
         EventKind::TurnEnd(TurnEndData {
@@ -674,6 +713,12 @@ mod checkpoint_projection;
 mod compaction_events;
 #[path = "context_flow/context_reads.rs"]
 mod context_reads;
+#[path = "context_flow/manual_compaction.rs"]
+mod manual_compaction;
+#[path = "context_flow/product_summary.rs"]
+mod product_summary;
+#[path = "context_flow/retention.rs"]
+mod retention;
 
 struct ExpandFinal {
     scope: BranchScope,
@@ -1154,11 +1199,16 @@ impl ContextModel for GatedContext {
     fn count_tokens(&self, request: &ModelRequest) -> f64 {
         self.0.count_tokens(request)
     }
+}
+impl CompactionStrategy for GatedContext {
+    fn name(&self) -> &str {
+        "test"
+    }
     fn compact(
         &self,
         input: CompactionInput,
         cancel: CancellationToken,
-    ) -> HostFuture<'_, ContextCompactionResult> {
+    ) -> HostFuture<'_, StrategyOutcome> {
         Box::pin(async move {
             if self.1.armed.swap(false, Ordering::SeqCst) {
                 self.1.entered.notify_one();
@@ -1185,7 +1235,8 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-        .session_value(Arc::new(ContextModelHost(Some(Arc::new(context)))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(context.clone())))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
         .session_plugin(DefaultPrepareModelPlugin::new);
     defaults::install(&mut builder);
     let agent = builder.build();
@@ -1193,11 +1244,14 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    session
-        .submit("x".repeat(500), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
+    // The third turn compacts the first.
+    for text in ["x".repeat(500), "y".repeat(500)] {
+        session
+            .submit(text, InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
     gate.armed.store(true, Ordering::SeqCst);
     session
         .submit("next".into(), InputMode::Queue, "main")
@@ -1256,5 +1310,66 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
             .any(|event| matches!(event.kind, EventKind::ModelCall(_))),
         "the stopped request still does not reach the model"
     );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
+    // Past the threshold within the first turn: the retained turns hold every
+    // cut, yet the request after the tool result compacts at the latest cut
+    // that keeps something, instead of skipping until overflow (#169).
+    let context = Context {
+        threshold: Some(200.),
+        ..Context::default()
+    };
+    let agent =
+        builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context).build();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["echo".into()],
+            permission_policy: dim_agent_runtime::PermissionPolicy {
+                preset: dim_agent_runtime::PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let command = format!("tool:echo {{\"text\":\"{}\"}}", "y".repeat(600));
+    session
+        .submit(command, InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count(),
+        1
+    );
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Completed { retain_from, .. },
+                ..
+            }) => Some(retain_from.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed.len(), 1, "the long turn compacted inside itself");
+    // The cut keeps something: the replacement never swallows the whole
+    // request outside budget recovery.
+    let last_call = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(last_call.messages.len() >= 2);
     agent.close().await.unwrap();
 }

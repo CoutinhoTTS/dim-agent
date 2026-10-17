@@ -18,20 +18,21 @@ pub(super) enum StaticCredential {
     },
 }
 
-/// Implemented by the plugin that owns the host secret store. The future must
-/// be cancellation-safe; it must not detach work or return secrets in errors.
-pub trait ResolveProviderSecret: Send + Sync + 'static {
-    fn resolve(
-        &self,
-        provider_id: String,
-        reference: String,
-        cancel: CancellationToken,
-    ) -> HostFuture<'_, ProviderSecret>;
-}
-
-pub struct ProviderSecretHost(pub Arc<dyn ResolveProviderSecret>);
+/// The owner Provider resolves `secretRef` references under (`credentials`).
+const OWNER: &str = "provider";
 
 impl ProviderSecret {
+    /// Parses a resolved value at Provider's boundary: for AWS Bedrock auth a
+    /// JSON object is `{accessKeyId, secretAccessKey, sessionToken?}`; any
+    /// other value is a token.
+    fn resolved(value: String, auth: &StaticAuth) -> Result<Self, HostError> {
+        if *auth == StaticAuth::AwsBedrock && value.trim_start().starts_with('{') {
+            return serde_json::from_str(&value)
+                .map(Self::Aws)
+                .map_err(|_| failure("Invalid AWS credential value"));
+        }
+        Ok(Self::Token(value))
+    }
     pub(super) fn validate(&self, auth: &StaticAuth) -> Result<(), HostError> {
         match (auth, self) {
             (StaticAuth::AwsBedrock, Self::Aws(credentials)) => {
@@ -73,7 +74,6 @@ impl ProviderSecret {
 impl ProviderService {
     pub(super) async fn credential(
         self: &Arc<Self>,
-        provider_id: &str,
         credential: &Option<StaticCredential>,
         auth: &StaticAuth,
         cancel: &CancellationToken,
@@ -92,11 +92,10 @@ impl ProviderService {
                 "No provider secret store configured",
             )
         })?;
-        let provider_id = provider_id.to_owned();
         let value = self.owned(cancel, move |cancel| Box::pin(async move {
             tokio::select! {
                 _ = cancel.cancelled() => Err(HostError::Cancelled("Secret lookup cancelled".into())),
-                result = host.0.resolve(provider_id, reference, cancel.clone()) => {
+                result = host.0.resolve(OWNER.into(), reference, cancel.clone()) => {
                     // Host diagnostics can contain values. Do not expose them
                     // through the model failure, trace or management protocol.
                     result.map_err(|_| failure("Provider secret lookup failed"))
@@ -104,6 +103,7 @@ impl ProviderService {
             }
         })).await?;
         self.check(cancel)?;
+        let value = ProviderSecret::resolved(value, auth)?;
         value.validate(auth)?;
         Ok(Some(value))
     }

@@ -10,6 +10,18 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  windows-cli:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify native Windows CLI boundaries
+        run: cargo test --locked -p dim-cli --bin dimcode
   verify:
     # PR runners must be isolated from release credentials and private networks.
     runs-on: [self-hosted, macOS, ARM64]
@@ -41,12 +53,13 @@ jobs:
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
           cargo test --locked -p dim-cli --test cli_flow -- --ignored
-      - name: Verify public Node provider bridge
+      - name: Verify public Node bindings
         shell: bash
         run: |
           set -euo pipefail
           npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
+          node --test runtime/plugin-sdk.test.mjs
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"
-          cargo test --locked -p dim-app-server --test transport_flow node_managed_provider_recovers_credentials_and_failure_is_local -- --ignored
+          cargo test --locked -p dim-app-server --test transport_flow node_ -- --ignored
