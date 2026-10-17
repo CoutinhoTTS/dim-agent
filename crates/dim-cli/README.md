@@ -14,6 +14,38 @@ history. Approval is denied, the turn is stopped and settled, and exec exits 3.
 Ctrl+C waits for settlement and exits 130. Further interrupts while settling
 keep waiting; they do not carry over to the next interactive prompt.
 
+`exec --image PATH` adds a local PNG, JPEG, WebP or GIF; repeat it for several
+images or omit text for an image-only request. Empty or whitespace-only text is
+omitted when images are present; other text is preserved exactly and comes first.
+Images retain argument order. Without `-p`, redirected stdin is read through EOF,
+including for image-only requests. Relative image paths use the invoking
+process's cwd, including with `--cwd` or `exec resume`; image URLs are not fetched.
+
+```text
+$ dimcode exec --image before.png --image after.png -p 'Compare these images'
+$ dimcode exec resume <session-id> --image screenshot.png --json > run.jsonl
+$ printf 'Describe this\n' | dimcode exec --image screenshot.png
+
+local files -> bounded read/header checks -> user.content -> session.submit
+```
+
+The CLI reads and checks all local images before connecting: at most 20 images,
+5 MiB of image-file bytes each, and 8000 pixels per side. Format comes from bytes,
+including when a filename has another extension. Invalid/truncated headers fail;
+pixels are not resized or rewritten. The `image` dependency enables only these
+four formats and reads dimensions without decoding pixels. Local symbolic links
+are followed, and file type is checked on the opened file. The combined base64
+size is checked before connecting; the final encoded request, including its JSON
+envelope and text, must still fit 16 MiB.
+
+An error reply to `session.submit` can follow an already queued input. The CLI
+reports uncertainty for publication failures and unclassified errors and exits
+without resending, even while the connection stays open. Known pre-commit input,
+Session, service and method rejections report their original error. Resume the
+printed Session handle to inspect an uncertain outcome. Interactive paste,
+draft editing, clipboard, path completion and drop insertion remain pending in
+the [attachment input contract](../../docs/design/cli-attachment-input.md).
+
 Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
 for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.
 Exports include main only; Markdown labels child branch requests and failures

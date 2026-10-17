@@ -1,7 +1,8 @@
 # CLI attachment input
 
-Status: proposed client interaction contract. The native CLI currently accepts one line per
-turn. The server interfaces are implemented: `attachment.put` (#102), image content blocks in
+Status: headless image input implemented; interactive attachment input pending. The native
+interactive CLI currently accepts one line per turn. The server interfaces are implemented:
+`attachment.put` (#102), image content blocks in
 `session.submit`, and ModelProvider's image handling (#92). This document defines the remaining
 CLI attachment work assigned in [roadmap #114](https://github.com/arcships/dim/issues/114).
 
@@ -189,8 +190,14 @@ error reply is not proof of rejection: v3 can commit the input and then return
 Session-handle diagnostic and exit behavior for these errors instead of offering a new send.
 Connection loss can also leave a put or submission outcome unknown and uses that same exit
 behavior. No automatic retry, lookup-based recovery or persistent local recovery store is added.
-Only a proven pre-commit rejection is safely resubmittable; an RPC error code alone does not
-establish that guarantee. Draft retention does not promise recovery after process exit.
+Only a proven pre-commit rejection is safely resubmittable. For v3 `session.submit`,
+`error.data.appError` values `invalid_params`, `session_invalid_input`, `session_closed`,
+`session_build_failed`, `service_reloading` and `unknown_method` are the server's explicit
+[pre-commit guarantee](../../crates/dim-app-server/README.md#session-submission-errors).
+They retain their ordinary error diagnostics; every other error, including `submission_unknown`
+and opaque publication/storage failures, retains the uncertain-outcome exit without resending.
+This does not promise that an unchanged rejected request will succeed or add automatic retry.
+Draft retention does not promise recovery after process exit.
 
 Recognized CLI commands run only from a plain single-line draft. Commands are not obtained by
 expanding paste or attachment markers. A recognized command with attached items reports a usage
@@ -248,9 +255,12 @@ without disconnect: the CLI reports uncertainty and exits without sending a seco
 All homes and images are disposable. Native clipboard calibration
 uses an isolated desktop session with fixture clipboard contents.
 
-This document changes no executable; product tests have not been run for the proposed editor.
-Implementation starts after design acceptance. No App Server, core, protocol, assembly, persisted
-format or capability change is required. No mechanism requirement is raised.
+Headless image flows cover supported formats, byte/order preservation, boundaries, local path
+resolution, combined encoded frames and uncertain error replies without resubmission. The
+existing actual CLI/App Server model flow checks the image in the model HTTP request and stored
+history after resume. The interactive editor and native clipboard remain unimplemented and
+unverified. No App Server, core, protocol, assembly, persisted format or capability change is
+required. No mechanism requirement is raised.
 
 ## Rule check and ablation
 

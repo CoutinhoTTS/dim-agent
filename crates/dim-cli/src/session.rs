@@ -8,7 +8,8 @@ use crate::{
     mcp,
 };
 use dim_agent_types::{
-    ApprovalCallData, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
+    ApprovalCallData, ContentBlock, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
+    UserInput,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -169,7 +170,11 @@ fn decode<T: serde::de::DeserializeOwned>(value: Value, method: &str) -> Result<
     serde_json::from_value(value).map_err(|_| format!("Invalid {method} notification").into())
 }
 
-pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
+pub async fn chat(
+    client: &mut Client,
+    options: &Options,
+    images: Vec<ContentBlock>,
+) -> Result<i32> {
     // Keep the listener registered while prompts and RPC responses alternate.
     #[cfg(unix)]
     let mut interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
@@ -215,12 +220,12 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
         }).await?;
         display.failed = false;
         display.muted = false;
-        let mut code = wait_turn(client, &session_id, None, &mut display, &mut input, &mut interrupts).await?;
+        let mut code = wait_turn(client, &session_id, None, Vec::new(), &mut display, &mut input, &mut interrupts).await?;
         if code != 0 || interactive && input.is_none() {
             return Ok(code);
         }
-        if let Some(prompt) = &options.prompt {
-            return wait_turn(client, &session_id, Some(prompt), &mut display, &mut input, &mut interrupts).await;
+        if options.prompt.is_some() || !images.is_empty() {
+            return wait_turn(client, &session_id, options.prompt.as_deref(), images, &mut display, &mut input, &mut interrupts).await;
         }
         loop {
             let reader = input.as_mut().expect("interactive input");
@@ -291,7 +296,7 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                 _ => {}
             }
             display.failed = false;
-            code = wait_turn(client, &session_id, Some(&text), &mut display, &mut input, &mut interrupts).await?;
+            code = wait_turn(client, &session_id, Some(&text), Vec::new(), &mut display, &mut input, &mut interrupts).await?;
             if input.is_none() {
                 break;
             }
@@ -524,19 +529,35 @@ async fn wait_turn(
     client: &mut Client,
     session_id: &str,
     prompt: Option<&str>,
+    images: Vec<ContentBlock>,
     display: &mut Display,
     input: &mut Option<Input>,
     #[cfg(unix)] interrupts: &mut tokio::signal::unix::Signal,
     #[cfg(windows)] interrupts: &mut tokio::signal::windows::CtrlC,
 ) -> Result<i32> {
     let mut shell = None;
-    let mut submit = match prompt {
-        Some(text) if input.is_some() && text.starts_with('!') => {
-            shell = start_shell(client, session_id, text, display).await?;
-            None
+    let mut submit = if let Some(text) = prompt
+        && input.is_some()
+        && text.starts_with('!')
+    {
+        shell = start_shell(client, session_id, text, display).await?;
+        None
+    } else if prompt.is_some() || !images.is_empty() {
+        let mut params = json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"mode":"queue"});
+        if images.is_empty() {
+            params["text"] = json!(prompt.expect("text submission"));
+        } else {
+            let content = prompt
+                .into_iter()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| ContentBlock::Text { text: text.into() })
+                .chain(images)
+                .collect();
+            params["user"] = json!(UserInput { content });
         }
-        Some(text) => Some(client.send("session.submit", json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"text":text,"mode":"queue"})).await?),
-        None => None,
+        Some(client.send("session.submit", params).await?)
+    } else {
+        None
     };
     let mut idle = if submit.is_none() {
         Some(
@@ -736,7 +757,12 @@ async fn wait_turn(
                 }
             }
             Message::Response { id, result } if Some(id) == submit => {
-                result?;
+                if let Err(error) = result {
+                    match error.data.as_ref().and_then(|data| data.get("appError")).and_then(Value::as_str) {
+                        Some("invalid_params" | "session_invalid_input" | "session_closed" | "session_build_failed" | "service_reloading" | "unknown_method") => return Err(error.into()),
+                        _ => return Err(format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again").into()),
+                    }
+                }
                 submit = None;
                 if stop.is_none() && settled.is_none() {
                     idle = Some(

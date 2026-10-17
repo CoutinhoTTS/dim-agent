@@ -2,6 +2,7 @@ mod args;
 mod client;
 mod display;
 mod export;
+mod images;
 mod input;
 mod login;
 mod mcp;
@@ -50,9 +51,10 @@ fn prepare() -> Result<Option<Options>> {
     }
     if matches!(options.action, Action::Exec)
         && options.prompt.is_none()
+        && options.images.is_empty()
         && std::io::stdin().is_terminal()
     {
-        return Err("exec requires --prompt TEXT or redirected stdin".into());
+        return Err("exec requires --prompt TEXT, --image PATH or redirected stdin".into());
     }
     if matches!(options.action, Action::Chat | Action::Exec)
         && options.prompt.is_none()
@@ -65,10 +67,12 @@ fn prepare() -> Result<Option<Options>> {
         if prompt.len() > 16 * 1024 * 1024 {
             return Err("stdin prompt exceeds 16 MiB".into());
         }
-        if prompt.trim().is_empty() {
+        if prompt.trim().is_empty() && options.images.is_empty() {
             return Err("Provide --prompt TEXT, piped stdin, or an interactive terminal".into());
         }
-        options.prompt = Some(prompt);
+        if !prompt.is_empty() {
+            options.prompt = Some(prompt);
+        }
     }
     Ok(Some(options))
 }
@@ -77,6 +81,7 @@ async fn run(options: Options) -> Result<i32> {
     if matches!(options.action, Action::DaemonStop) {
         return client::stop(&options).await;
     }
+    let images = images::load(&options.images)?;
     let mut client = client::connect(&options).await?;
     match &options.action {
         Action::Export {
@@ -251,7 +256,9 @@ async fn run(options: Options) -> Result<i32> {
             }
             Ok(0)
         }
-        Action::Chat | Action::Tui | Action::Exec => session::chat(&mut client, &options).await,
+        Action::Chat | Action::Tui | Action::Exec => {
+            session::chat(&mut client, &options, images).await
+        }
         Action::Help | Action::Version | Action::DaemonStop => unreachable!(),
     }
 }

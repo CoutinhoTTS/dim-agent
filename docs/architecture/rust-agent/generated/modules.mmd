@@ -183,10 +183,11 @@ flowchart LR
   m179["dim_cli::@bin:dimcode::client"]
   m180["dim_cli::@bin:dimcode::display"]
   m181["dim_cli::@bin:dimcode::export"]
-  m182["dim_cli::@bin:dimcode::input"]
-  m183["dim_cli::@bin:dimcode::login"]
-  m184["dim_cli::@bin:dimcode::mcp"]
-  m185["dim_cli::@bin:dimcode::session"]
+  m182["dim_cli::@bin:dimcode::images"]
+  m183["dim_cli::@bin:dimcode::input"]
+  m184["dim_cli::@bin:dimcode::login"]
+  m185["dim_cli::@bin:dimcode::mcp"]
+  m186["dim_cli::@bin:dimcode::session"]
   m0 -.-> m1
   m0 -.-> m2
   m0 --> m3
@@ -1430,6 +1431,7 @@ flowchart LR
   m177 --> m183
   m177 --> m184
   m177 --> m185
+  m177 --> m186
   m178 --> m177
   m178 --> m181
   m179 --> m177
@@ -1443,27 +1445,30 @@ flowchart LR
   m181 --> m177
   m181 --> m179
   m181 --> m180
-  m181 --> m185
+  m181 --> m186
+  m182 --> m99
   m182 --> m177
   m183 --> m177
-  m183 --> m178
-  m183 --> m179
-  m183 --> m180
-  m183 --> m182
   m184 --> m177
   m184 --> m178
   m184 --> m179
   m184 --> m180
-  m184 --> m182
   m184 --> m183
-  m185 --> m97
-  m185 --> m101
-  m185 --> m103
-  m185 --> m106
   m185 --> m177
   m185 --> m178
   m185 --> m179
   m185 --> m180
-  m185 --> m181
-  m185 --> m182
+  m185 --> m183
   m185 --> m184
+  m186 --> m97
+  m186 --> m99
+  m186 --> m101
+  m186 --> m103
+  m186 --> m106
+  m186 --> m177
+  m186 --> m178
+  m186 --> m179
+  m186 --> m180
+  m186 --> m181
+  m186 --> m183
+  m186 --> m185

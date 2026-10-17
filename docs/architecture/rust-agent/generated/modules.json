@@ -1917,6 +1917,15 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::images",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/images.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::input",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -15213,6 +15222,15 @@
     },
     {
       "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::images",
+      "references": [
+        "mod images",
+        "path images",
+        "path images::load"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
       "to": "dim_cli::@bin:dimcode::input",
       "references": [
         "mod input",
@@ -15384,6 +15402,27 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::images",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock",
+        "path ContentBlock::Image",
+        "path ImageSource",
+        "path ImageSourceType::Base64",
+        "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ImageSource",
+        "use dim_agent_types::ImageSourceType"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::images",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::input",
       "to": "dim_cli::@bin:dimcode",
       "references": [
@@ -15488,10 +15527,20 @@
     },
     {
       "from": "dim_cli::@bin:dimcode::session",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock",
+        "path ContentBlock::Text",
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::session",
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
-        "use dim_agent_types::ApprovalCallData"
+        "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::UserInput"
       ]
     },
     {
