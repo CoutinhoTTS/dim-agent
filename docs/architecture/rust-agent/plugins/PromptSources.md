@@ -21,6 +21,9 @@ documentation. Sources must be loaded then adopted by Prompt before reaching
 model context. Polling does not guarantee immediate visibility of file changes.
 The environment source reads `HostPlatform::exec_shell()` on each load, so the
 existing refresh/adoption flow also picks up exec shell preference changes.
+Explicit refresh, like periodic checks, refreshes only instructions, environment
+and date. Base and Session System entries stay adopted. Profile adoption uses
+`session_entry` to construct or revoke the same `dim/session` entry as creation.
 
 ## Rule check
 

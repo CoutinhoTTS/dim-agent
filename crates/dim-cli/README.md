@@ -137,8 +137,27 @@ spaces. Errors return to the prompt. `/exit` takes no arguments. Slash commands
 in exec or redirected input remain literal model input.
 See [CLI commands and exports](../../docs/design/cli-commands.md).
 
-Proposed model commands and atomic Agent configuration adoption are specified in
-[model configuration](../../docs/design/model-configuration.md); they are not implemented.
+At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
+reasoning effort, `/fast on|off` selects priority/default service tiers, and
+`/agent ID` adopts an Agent profile's prompt and optional model. Tools and
+permissions keep the current Session configuration. A profile with a model resets effort
+and service tier to that model's defaults; a prompt-only profile preserves them. Bare commands list choices;
+unsupported values leave the prompt usable. Commands in `--prompt` or piped input
+remain literal model input. See [model configuration](../../docs/design/model-configuration.md).
+
+```text
+> /effort high
+Reasoning effort configuration adopted: high
+> /fast off
+Service tier configuration adopted: off
+> /agent <agent-id>
+Agent prompt/model configuration adopted; Session tools unchanged.
+> _
+```
+
+Ctrl+C during a configuration command waits for its result before accepting
+another line, because adoption may already have committed. The client does not
+automatically retry uncertain commands.
 
 Build both native programs from the repository root:
 
@@ -185,7 +204,9 @@ The configuration references credentials by environment-variable name. The share
 
 ## MCP servers
 
-`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport and enablement.
+`mcp list` prints tab-separated rows: quoted and escaped ID, source, transport, enablement and
+authorization (`sign-in required`, `signed in`, `sign-in expired`, or `—` when absent).
+Missing scopes appear below the entry.
 It does not print commands, environment values, headers or credentials. `mcp enable ID` and
 `mcp disable ID` change the entry that `mcp list` shows for the workspace.
 
@@ -196,11 +217,11 @@ dimcode --home /path/to/isolated-home --model-config model.json --cwd /path/to/p
 ```
 
 ```text
-"docs"  project  stdio  disabled
+"docs"  project  stdio  disabled  -
                   |
              mcp enable docs
                   v
-"docs"  project  stdio  enabled
+"docs"  project  stdio  enabled   -
 ```
 
 A configured MCP server runs when it is enabled; there is no separate approval
@@ -216,6 +237,48 @@ stderr. A project entry still shadows a same-name user entry. Pass the ID's actu
 value, not its displayed escape spelling, and use the same `--home` and model profile as the daemon
 serving your workspace. See the
 [MCP configuration contract](../dim-app-server/README.md#mcp-configuration-management).
+
+For an enabled HTTP/SSE entry, run `mcp login ID` or idle `/mcp login ID`. The CLI shows the
+resource and authorization server host before opening the browser. It captures one callback
+on both loopback families when the configured port is free. While listening, you can also paste
+the full URL with hidden input. Unrelated paths and incomplete connections do not consume the
+listener. Busy ports, SSH and `--no-browser`
+use hidden pasted input. `--client-secret` prompts with echo disabled; it never accepts the
+secret as an argument. The daemon owns validation, token exchange and credential storage.
+
+```text
+> /mcp
+"docs"  project  http  enabled  sign-in required
+  Missing scopes: files:read
+> /mcp login --no-browser --client-secret docs
+Client secret (hidden):
+Resource: https://resource.example/mcp
+Authorization server: issuer.example
+Callback URL:
+Signed in to "docs".
+> /mcp logout docs
+Signed out of "docs". Revoked: true.
+```
+
+Browser capture uses this prompt, so remote terminals can paste without restarting:
+
+```text
+Waiting for the browser callback. You can also paste the full callback URL now; input is hidden.
+Callback URL: _
+```
+
+Use `mcp login ID --no-browser --client-secret` for the standalone command; flags can also precede ID. Slash-command
+flags precede the ID; its remaining text is the literal ID, including spaces. `/mcp` also
+shows the attached Session's server states and a sign-in hint for `auth_required`.
+Invalid callbacks can be pasted again. Ctrl+C, EOF or expiry stops waiting and prints the
+restart command. Expiry exits 1, cancellation exits 130, and a submitted operation that succeeds
+exits 0 even if waiting was interrupted. Once an RPC has been submitted, its reply is drained before another
+interactive command can run. A submitted exchange may complete successfully during that wait.
+Noninteractive input never starts sign-in; slash text in a headless prompt remains model input.
+`mcp logout ID` reports the daemon's `revoked` result. Credentials can be signed out before
+removing their entry through the existing configuration API; the CLI has no entry-removal command.
+
+See the [MCP OAuth contract](../../docs/design/appserver/mcp-oauth.md#13-requirements-raised-to-mechanism-owners).
 
 ## Scrollback and session recovery
 

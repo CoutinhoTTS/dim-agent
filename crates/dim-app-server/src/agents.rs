@@ -30,6 +30,10 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod configuration;
+pub(crate) use configuration::AgentsSessionPlugin;
+pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
+
 mod sessions;
 pub(crate) use sessions::{Lookup, find_input};
 
