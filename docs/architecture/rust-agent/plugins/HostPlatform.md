@@ -8,7 +8,7 @@ and tree-supervision primitives to local tools.
 
 | Service | Purpose |
 | --- | --- |
-| `P:FileStorage` | Read configured shell preference; enabled by xtask's shell-file configuration. |
+| `P:FileStorage` | Read configured shell or isolation policy; enabled when either supported file source is configured. |
 
 ## Events and lifetime
 
@@ -27,8 +27,9 @@ malformed or unreadable files return `EXEC_SHELL_CONFIG_INVALID`; an unavailable
 shell returns `EXEC_SHELL_UNAVAILABLE` without fallback. Resolution uses the
 captured service environment, never a caller's environment.
 
-When no shell file is configured the FileStorage dependency is disabled and
-`exec_shell()` returns the supplied initial snapshot. `HostPlatform::current`
+When no shell file is configured, `exec_shell()` returns the supplied initial snapshot.
+FileStorage is disabled only when neither supported file source is configured.
+`HostPlatform::current`
 constructs such a platform, with public facts that hosts/tests may customize;
 the preference source and shell snapshot are private. Callers use
 `exec_shell()` rather than mutating a snapshot. `persistent_shell().await` reads
@@ -36,18 +37,49 @@ the current preference before creating a persistent shell and keeps its existing
 supported-shell fallback rules. An already running shell is not restarted when
 the exec preference changes. Spawned process lifetime belongs to each
 caller/supervisor, not this plugin. An unavailable shell does not prevent publishing HostPlatform; exec
-fails explicitly. Environment filtering/tree termination are execution mechanics,
-not an OS sandbox or permission policy.
+fails explicitly. Raw spawn/PTY and tree termination are execution mechanics;
+model consumers prepare the local isolation policy before calling them.
 
 The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exercises
 Seatbelt, Landlock and bubblewrap wrappers through these existing process and PTY APIs. It
-does not install product isolation. The proposed host-local policy, consumer
-integration and platform acceptance are in the [F5 product design](../../../design/host-platform-isolation.md).
-The proposed policy is configurable and enabled by default for model exec/background work and
-persistent shells on macOS/Linux. A missing file uses system-read/workspace-write defaults;
+does not establish product acceptance. Host-local policy and native consumer acceptance are
+specified in the [F5 product design](../../../design/host-platform-isolation.md).
+The policy is configurable and enabled by default for model exec/background work and
+persistent shells on macOS/Linux. A missing file uses system-read/workspace-write defaults,
+plus the host-owned current branch output directory for persistent shells;
 local configuration can change roots, network/environment and disable isolation. User ShellInput
 commands remain ordinary spawn. BackgroundExec retains its existing live process/tree; no
 namespace PID registry is introduced. Unsupported Windows preserves ordinary execution.
+
+`HostPlatformConfig.isolation_file` identifies node-local `host-isolation.json` through
+FileStorage. Version 1 accepts enabled, network, readOnlyPaths, writablePaths and environment;
+the product design defines defaults and empty-list semantics. Unknown fields/versions,
+invalid roots or environment names and unreadable files return isolation_config_invalid.
+Missing files use defaults without writing a file. Windows does not load this unsupported
+source. Local edits affect the next model process, retaining the policy of an existing shell.
+
+The crate-local `prepare_isolated_process(spec, workspace, output_dir)` operation reads and validates the
+external file once, selects existing environment values and wraps the argv in Seatbelt or
+bubblewrap. The immutable Session workspace, not the command cwd, supplies default writes.
+ShellSession also supplies its owned output directory; WorkspaceTools supplies none. Explicit
+writablePaths fully replaces these defaults, including an empty list granting no directory writes.
+Disabled policy and Windows return the original spec. Ordinary user ShellInput does not call
+this operation. No process, task, lock, watcher or Timeline fact is added by preparation.
+
+For a persistent shell, background PIDs enter through the
+existing PTY marker. `PtyProcessTree::job_pid` uses portable-pty's foreground-group handle and
+Linux's namespace/session metadata to resolve the native host identity once. ShellSession stores
+the typed PID or the I/O failure and uses it directly on stop or shell exit. A bounded native
+stop waits for release before the cancelled terminal fact; the public signal helper is unchanged.
+The actual model flow verifies the selected job's TERM cleanup before stop replies, sibling
+survival, Session-close cleanup and exactly one terminal fact with isolation enabled or disabled.
+The same flow edits local policy while the shell runs and verifies that its startup filesystem
+boundary remains in force, with the ungranted home file readable only in the disabled control.
+It also checks a real terminal, window-size ioctls, occupying-command stop and the next usable
+shell call. Existing stop behavior may reset the shell if no completion marker arrives.
+macOS permits only the needed terminal ioctl commands and restricts enabled-network UNIX sockets
+to granted file trees. The native socket flow verifies denied ungranted sockets and actual
+delivery after an explicit path grant, alongside IPv4/IPv6 TCP/UDP controls.
 
 ## Command construction
 
@@ -79,7 +111,7 @@ path mapping (`EXEC_SHELL_PATH_MAPPING_FAILED`).
 
 ## Requirements raised to mechanism owners
 
-None (§4 rule 8). Existing FileStorage and process primitives cover S7.
+None (§4 rule 8). Existing FileStorage and process primitives cover S7 and F5.
 
 ## Tests
 
@@ -90,10 +122,21 @@ None (§4 rule 8). Existing FileStorage and process primitives cover S7.
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs):
 `exec_and_external_shell_callers_use_live_shell_preferences` exercises the real
 plugin, configuration edits, refusals, recovery and the shared builder alongside exec.
+`model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd` covers file
+grants, explicit read-only roots with empty writablePaths, preserved bytes/mode after denied
+writes/chmod, unreadable or invalid policy refusal and no fallback when runtime reads are
+ungranted. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
+admission when Linux has no bubblewrap on the captured PATH. `local_isolation_policy_controls_native_sockets` covers
+live IP and UNIX listeners under the local policy.
 [minimal_execution.rs](../../../../tests/integration/tests/minimal_execution.rs):
 `new_persistent_shells_and_environment_refresh_use_current_preferences` covers
 first spawn after an edit, adopted environment refresh, retention of a running
 shell and current selection after shell exit.
+`persistent_isolation_preserves_policy_and_job_control` covers the actual model path with
+default and explicit local grants, startup-policy retention, selected-job stop, TERM cleanup,
+sibling survival and Session close. It verifies sibling output denial under defaults and
+refuses background payloads when explicit writable roots omit the shell's output directory,
+including an empty list.
 
 <!-- generated:plugin HostPlatform — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

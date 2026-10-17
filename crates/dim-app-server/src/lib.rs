@@ -644,6 +644,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
                 dim_agent_capabilities::host_platform::HostPlatformConfig {
                     exec_shell_file: Some((home_root, "exec-shell.json".into())),
+                    isolation_file: Some((home_root, "host-isolation.json".into())),
                 },
             )
         }));
