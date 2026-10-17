@@ -35,6 +35,546 @@ fn fixture() -> SessionTypeScriptConfig {
     }
 }
 
+fn observers(lifecycle_file: &std::path::Path) -> SessionTypeScriptConfig {
+    let mut parts = fixture();
+    let root = parts.anchor.parent().unwrap().join("fixtures");
+    parts.rows = [
+        (
+            "observer",
+            "session-observer",
+            include_str!("../../../../runtime/fixtures/session-observer.json"),
+        ),
+        (
+            "second",
+            "session-observer-second",
+            include_str!("../../../../runtime/fixtures/session-observer-second.json"),
+        ),
+    ]
+    .into_iter()
+    .map(|(id, module, provides)| {
+        json!({
+            "id":id, "name":root.join(format!("{module}.ts")),
+            "provides":serde_json::from_str::<Value>(provides).unwrap(),
+            "config":{"lifecycleFile":lifecycle_file},
+        })
+    })
+    .collect();
+    parts
+}
+
+/// Drain real bootstrap broadcasts before publication so the loading-time
+/// sampling assertion does not depend on scheduler timing.
+struct DrainLoadingBroadcast(dim_agent_runtime::BranchScope);
+struct LoadingFence(Arc<tokio::sync::Notify>);
+impl rutis::Listener<dim_agent_capabilities::session_broadcast::SessionBroadcastEvent>
+    for LoadingFence
+{
+    fn call<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        record: &'a dim_agent_capabilities::session_broadcast::SessionBroadcastEvent,
+    ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
+        if matches!(record, dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence { recipient, .. } if recipient == "test.loading")
+        {
+            self.0.notify_one();
+        }
+        Box::pin(async { Ok(None) })
+    }
+}
+impl TypedPlugin for DrainLoadingBroadcast {
+    type Deps = (
+        InBranch<dim_agent_runtime::Dispatcher>,
+        InBranch<dim_agent_runtime::TimelineIdentity>,
+        InSession<dim_agent_runtime::SessionLifecycle>,
+    );
+    fn name(&self) -> &str {
+        "test.drain-loading-broadcast"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+        (InBranch(dispatcher), InBranch(identity), InSession(lifecycle)): Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async move {
+            let emitter = ctx.clone();
+            let channel =
+                dim_agent_capabilities::session_broadcast::session_channel(&identity.session_id);
+            let drained = Arc::new(tokio::sync::Notify::new());
+            ctx.events()
+                .on(ctx, &channel, LoadingFence(drained.clone()))?;
+            dispatcher.subscribe_all(ctx, self.name(), move |_| {
+                let emitter = emitter.clone();
+                let channel = channel.clone();
+                let lifecycle = lifecycle.clone();
+                let drained = drained.clone();
+                Box::pin(async move {
+                    if lifecycle.phase() == dim_agent_runtime::SessionPhase::Loading {
+                        emitter.events().emit(&emitter, &channel, Arc::new(
+                            dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence {
+                                recipient: "test.loading".into(), token: 0,
+                            }
+                        )).map_err(|error| dim_agent_runtime::AgentError::fault("bootstrap fence", error.to_string()))?;
+                        drained.notified().await;
+                    }
+                    Ok(())
+                })
+            })?;
+            Ok(rutis::Effect::Done)
+        })
+    }
+}
+impl Capability for DrainLoadingBroadcast {
+    fn keys(&self) -> KeysOf<Self> {
+        scoped::<Self::Deps, _>(&self.0)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
+    let home = std::env::temp_dir().join(format!(
+        "dm-c4-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let audit = home.join("observers.jsonl");
+    let (mut builder, _requests, _release) = setup();
+    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+    builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+    builder.timeline_plugin(|scope| DrainLoadingBroadcast(*scope));
+    let mut parts = observers(&audit);
+    parts.rows.extend(fixture().rows);
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::env::temp_dir().join(format!(
+                "dm-ts-{}/server.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ))),
+            database_path: Some(home.join("sessions.sqlite")),
+            trace_directory: home.join("trace"),
+            session_typescript: Some(parts),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = new_session(&mut client, json!(["echo"])).await;
+    let (scope, _, loader, _) = controls.recv().await.unwrap();
+    let second = new_session(&mut client, json!(["echo"])).await;
+    let first_session = server.agent().unwrap().get_session(&first).unwrap();
+    let first_after = first_session.sequence("main").unwrap();
+    let second_after = server
+        .agent()
+        .unwrap()
+        .get_session(&second)
+        .unwrap()
+        .sequence("main")
+        .unwrap();
+    let initial = client
+        .rpc("session.observer.status", json!({"sessionId":first}))
+        .await;
+    assert_ok(&initial);
+    assert_eq!(
+        initial["result"]["records"],
+        json!([]),
+        "loading-time observations are not replayed"
+    );
+    assert_eq!(initial["result"]["binding"]["sessionId"], first);
+    assert!(
+        initial["result"]["binding"]["config"]
+            .get("interactive")
+            .is_none()
+    );
+    assert_eq!(
+        initial["result"]["binding"]["config"]["collaborationRole"],
+        "leader"
+    );
+    let methods = client
+        .rpc("session.typescript.status", json!({"sessionId":first}))
+        .await;
+    assert_ok(&methods);
+    server.restart("Agents").await.unwrap();
+    for (namespace, before) in [("observer", &initial), ("typescript", &methods)] {
+        let after = client
+            .rpc(
+                &format!("session.{namespace}.status"),
+                json!({"sessionId":first}),
+            )
+            .await;
+        assert_ok(&after);
+        assert_eq!(
+            after["result"]["generation"], before["result"]["generation"],
+            "an index reload must not reload Session rows"
+        );
+    }
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":first}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.observer.arm", json!({"sessionId":first}))
+            .await,
+    );
+    submit(&mut client, &first, "held leaf").await;
+    assert_ok(
+        &client
+            .rpc("session.observer.entered", json!({"sessionId":first}))
+            .await,
+    );
+    assert!(
+        client
+            .notices
+            .iter()
+            .any(|notice| notice["method"] == "session.event"
+                && notice["params"]["event"]["type"] == "step"
+                && notice["params"]["event"]["name"] == "text"),
+        "native notifications/fence must pass the stalled leaf"
+    );
+    submit(&mut client, &second, "other session proceeds").await;
+    let second_session = server.agent().unwrap().get_session(&second).unwrap();
+    let second_through = second_session.sequence("main").unwrap();
+    let other = client
+        .rpc(
+            "session.observer.through",
+            json!({"sessionId":second,"sequence":second_through,"after":second_after}),
+        )
+        .await;
+    assert_ok(&other);
+    assert_eq!(other["result"]["pid"], initial["result"]["pid"]);
+    assert!(
+        other["result"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["sessionId"] == second)
+    );
+    assert_ok(
+        &client
+            .rpc("session.observer.release", json!({"sessionId":first}))
+            .await,
+    );
+    let through = first_session.sequence("main").unwrap();
+    let expected: Vec<Value> = first_session
+        .local("main", first_after + 1..)
+        .await
+        .unwrap()
+        .iter()
+        .map(|event| json!({"sessionId":first,"branchId":"main","event":event}))
+        .collect();
+    for namespace in ["observer", "second"] {
+        let observed = client
+            .rpc(
+                &format!("session.{namespace}.through"),
+                json!({"sessionId":first,"sequence":through,"after":first_after}),
+            )
+            .await;
+        assert_ok(&observed);
+        assert_eq!(observed["result"]["records"], json!(expected));
+    }
+    let child = first_session
+        .branch(
+            "main".into(),
+            through,
+            dim_agent_runtime::BranchOptions {
+                prompt: "child branch observation".into(),
+                source: dim_agent_types::BranchSource::Tool {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_id: "call".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    first_session.idle(&child).await.unwrap();
+    let child_history = first_session.local(&child, ..).await.unwrap();
+    let child_records = client
+        .rpc(
+            "session.observer.through",
+            json!({"sessionId":first,
+        "branchId":child,"sequence":first_session.sequence(&child).unwrap()}),
+        )
+        .await;
+    assert_ok(&child_records);
+    let actual_child: Vec<_> = child_records["result"]["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["branchId"] == child)
+        .cloned()
+        .collect();
+    let expected_child: Vec<_> = child_history
+        .iter()
+        .map(|event| json!({"sessionId":first,"branchId":child,"event":event}))
+        .collect();
+    assert_eq!(actual_child, expected_child);
+    let view = loader
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.id == "observer"
+                && entry.instance.as_ref().is_some_and(|instance| {
+                    instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                })
+        })
+        .unwrap()
+        .view
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), view.restart())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut state = view.watch();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.borrow().state != rutis::FiberState::Active {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let reloaded = client
+        .rpc("session.observer.status", json!({"sessionId":first}))
+        .await;
+    assert_ok(&reloaded);
+    assert_ne!(
+        reloaded["result"]["generation"],
+        initial["result"]["generation"]
+    );
+    assert_eq!(
+        reloaded["result"]["records"],
+        json!([]),
+        "completed emissions are not replayed"
+    );
+    let audit_rows = || {
+        std::fs::read_to_string(&audit)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        audit_rows()
+            .iter()
+            .any(|row| row["generation"] == initial["result"]["generation"]
+                && row["closed"] == true
+                && row["settled"] == true)
+    );
+    assert_ok(
+        &client
+            .rpc("session.observer.throw", json!({"sessionId":first}))
+            .await,
+    );
+    submit(&mut client, &first, "listener failure is local").await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.observer.through",
+                json!({"sessionId":first,"sequence":first_session.sequence("main").unwrap()}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.observer.arm", json!({"sessionId":first}))
+            .await,
+    );
+    submit(&mut client, &first, "close with queued observations").await;
+    assert_ok(
+        &client
+            .rpc("session.observer.entered", json!({"sessionId":first}))
+            .await,
+    );
+    let before_close = client
+        .rpc("session.observer.status", json!({"sessionId":first}))
+        .await;
+    assert_ok(&before_close);
+    assert_ok(
+        &client
+            .rpc("session.close", json!({"sessionId":first}))
+            .await,
+    );
+    assert!(
+        audit_rows()
+            .iter()
+            .any(|row| row["generation"] == reloaded["result"]["generation"]
+                && row["closed"] == true
+                && row["settled"] == true
+                && row["count"].as_u64().unwrap()
+                    == before_close["result"]["records"].as_array().unwrap().len() as u64)
+    );
+    submit(&mut client, &second, "survives the other Session close").await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.observer.through",
+                json!({"sessionId":second,"sequence":second_session.sequence("main").unwrap()}),
+            )
+            .await,
+    );
+    assert!(second_session.unload_if_idle().await.unwrap());
+    let restored = client
+        .rpc("session.observer.status", json!({"sessionId":second}))
+        .await;
+    assert_ok(&restored);
+    assert_ne!(
+        restored["result"]["generation"],
+        other["result"]["generation"]
+    );
+    assert_eq!(restored["result"]["records"], json!([]));
+    submit(&mut client, &second, "restored channel receives new facts").await;
+    let current = server.agent().unwrap().get_session(&second).unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.observer.through",
+                json!({"sessionId":second,"sequence":current.sequence("main").unwrap()}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.observer.arm", json!({"sessionId":second}))
+            .await,
+    );
+    submit(&mut client, &second, "shutdown with pending delivery").await;
+    assert_ok(
+        &client
+            .rpc("session.observer.entered", json!({"sessionId":second}))
+            .await,
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_broadcast_creation_config_and_bind_failures() {
+    let audit = std::env::temp_dir().join(format!("dim-c4-config-{}.jsonl", uuid::Uuid::new_v4()));
+    let (server, _requests, _) = start(ServerConfig {
+        session_typescript: Some(observers(&audit)),
+        ..Default::default()
+    })
+    .await;
+    for (interactive, role) in [
+        (true, dim_agent_runtime::CollaborationRole::Leader),
+        (false, dim_agent_runtime::CollaborationRole::Leader),
+        (true, dim_agent_runtime::CollaborationRole::Member),
+        (false, dim_agent_runtime::CollaborationRole::Member),
+    ] {
+        let session = server
+            .agent()
+            .unwrap()
+            .create_session(dim_agent_runtime::SessionConfig {
+                cwd: std::env::temp_dir().to_str().unwrap().into(),
+                tools: vec!["echo".into()],
+                interactive,
+                collaboration_role: role,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Native member Sessions have no client protocol owner; use public C1.
+        let status = session
+            .session_named_service::<SessionMethods>("session.observer")
+            .unwrap()
+            .accept(
+                "session.observer.status".into(),
+                json!({"sessionId":session.id()}),
+                CancellationToken::new(),
+                |_| {},
+            )
+            .unwrap()
+            .reply
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status["binding"]["config"], json!(session.config()));
+        assert_eq!(
+            status["eligible"],
+            interactive && role == dim_agent_runtime::CollaborationRole::Leader
+        );
+        session.close().await.unwrap();
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_file(&audit).unwrap();
+
+    for bad in ["throw", "value", "future"] {
+        let mut parts = observers(&audit);
+        parts.rows[0]["config"] = json!({"badBind":bad});
+        let (mut builder, mut requests, _) = setup();
+        let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+        builder.session_plugin(move |scope| ControlledGate(*scope, send.clone()));
+        let server = serve(
+            builder,
+            ServerConfig {
+                unix_path: Some(std::env::temp_dir().join(format!(
+                    "dm-ts-{}/server.sock",
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                ))),
+                session_typescript: Some(parts),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut client = Client::new_version(&server, false, 3).await;
+        let id = new_session(&mut client, json!(["echo"])).await;
+        let (scope, _, loader, _) = controls.recv().await.unwrap();
+        let view = loader
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.id == "observer"
+                    && entry.instance.as_ref().is_some_and(|instance| {
+                        instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                    })
+            })
+            .unwrap()
+            .view
+            .unwrap();
+        let mut state = view.watch();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.borrow().state != rutis::FiberState::Failed {
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{bad}: {error}; {:?}", view.state()));
+        assert_eq!(
+            client
+                .rpc("session.observer.status", json!({"sessionId":id}))
+                .await["error"]["data"]["appError"],
+            "service_reloading"
+        );
+        submit(&mut client, &id, "native continues after failed bind").await;
+        assert!(requests.recv().await.unwrap().contains(&"echo".into()));
+        let sequence = server
+            .agent()
+            .unwrap()
+            .get_session(&id)
+            .unwrap()
+            .sequence("main")
+            .unwrap();
+        assert_ok(
+            &client
+                .rpc(
+                    "session.second.through",
+                    json!({"sessionId":id,"sequence":sequence}),
+                )
+                .await,
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    std::fs::remove_file(audit).unwrap();
+}
+
 struct CheckedModel(tokio::sync::mpsc::UnboundedSender<Vec<String>>);
 impl ModelDriver for CheckedModel {
     fn invoke(
@@ -795,6 +1335,18 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     }
 
     for (change, expected) in [
+        (
+            json!({"sessionEvents:":{"bind":"sync"}}),
+            "invalid sessionEvents",
+        ),
+        (
+            json!({"sessionEvents:observer":{"bind":"async"}}),
+            "invalid sessionEvents",
+        ),
+        (
+            json!({"sessionEvents:observer":{"bind":"sync","other":"sync"}}),
+            "invalid sessionEvents",
+        ),
         (
             json!({"toolContribution:echo":{"declaration":"sync","execute":"async"}}),
             "collides",

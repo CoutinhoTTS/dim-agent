@@ -449,4 +449,12 @@ Rows remain optional: a row genuinely Pending on a missing dependency does not d
 Session use; its methods may report `service_reloading` and its tools stay omitted until reload
 if absent at the first registry read. Successful submit/idle replies certify native processing,
 not execution of an omitted tool; the example prints durable history to show the actual result.
-Session broadcast and autonomous background work are outside this implemented binding subset.
+A row can declare `"sessionEvents:<part>": {"bind":"sync"}` in the same `provides`
+dictionary. Its original row receives Session identity, the creation configuration and
+a closing Promise once its projection is visible. Register `ctx.on('session.event', ...)`
+there and filter by the supplied Session id. The payload is
+`{sessionId, branchId, event}`, with the existing native AgentEvent serialization.
+NodeRows' channel workers preserve order without delaying native client notifications
+or fences. Closing and row effects own cancellation/cleanup; reload and restore never
+replay completed observations. Apply/bind only register resources; autonomous startup
+work and critical ordered branch actions remain outside this observation contract.
