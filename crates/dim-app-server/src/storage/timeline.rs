@@ -2,6 +2,7 @@ use super::{
     SqliteStorage,
     codec::{self, ContentCache, WireEvent},
     files::{self, SessionFiles},
+    metadata::{self, Titles},
     sqlite::error,
 };
 use dim_agent_capabilities::host::SessionFilesHost;
@@ -12,6 +13,7 @@ use dim_agent_runtime::{
 use dim_agent_types::{BranchCreateAt, ContextCompactionResult, EventKind, RecoverySnapshot};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rutis::{CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis_bridge::session::{HostDispatch, host_key};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -183,6 +185,7 @@ impl SqliteTimelineStore {
             "timeline_events",
             "timeline_branches",
             "timeline_content",
+            "session_metadata",
             "session_owners",
             "agent_sessions",
         ] {
@@ -244,6 +247,8 @@ pub struct SessionStore {
     /// The file steps on the Session's resource node: Session files and the
     /// command output a delete removes.
     files: SessionFiles,
+    /// Title metadata (S5b): its one writer.
+    pub(super) titles: Titles,
 }
 impl SessionStore {
     /// `ctx` is SessionStore's own context, from which each file step reads
@@ -251,8 +256,13 @@ impl SessionStore {
     /// database directory.
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self {
         let timeline = SqliteTimelineStore::new(db.clone());
+        let titles = Titles::new(db.clone(), ctx.clone());
         let files = SessionFiles::new(db, ctx, files_root, timeline.sweep_files.clone());
-        Self { timeline, files }
+        Self {
+            timeline,
+            files,
+            titles,
+        }
     }
     pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
         self.timeline.clone()
@@ -604,8 +614,9 @@ impl SessionStore {
     }
 }
 
-/// The Session directory and the `sessionFiles` service. Session files live
-/// below the FileStorage root `files_root`, which is the database directory.
+/// The Session directory, the `sessionFiles` service and the
+/// `sessionMetadata` service. Session files live below the FileStorage root
+/// `files_root`, which is the database directory.
 pub struct SessionStorePlugin {
     files_root: usize,
 }
@@ -627,21 +638,28 @@ impl TypedPlugin for SessionStorePlugin {
         Box::pin(async move {
             let store = Arc::new(SessionStore::new(db, ctx.clone(), self.files_root));
             let files = store.files.clone();
-            let (timeline, owned_files) = (store.timeline.clone(), files.clone());
+            let (timeline, owned_files, titles) =
+                (store.timeline.clone(), files.clone(), store.titles.clone());
             ctx.effect(move || {
                 Effect::AsyncDisposer(Box::new(move || {
                     Box::pin(async move {
-                        // Puts settle before the native store stops writing.
+                        // Admitted title writes and puts settle before the
+                        // native store stops writing.
+                        titles.close().await;
                         owned_files.close().await;
                         timeline.close().await.map_err(Into::into)
                     })
                 }))
             })?;
             files.start();
-            ctx.provide_as(TypeKey::of::<SessionStore>(), store)?;
+            ctx.provide_as(TypeKey::of::<SessionStore>(), store.clone())?;
             ctx.provide_as(
                 TypeKey::of::<SessionFilesHost>(),
                 Arc::new(SessionFilesHost(Arc::new(files))),
+            )?;
+            ctx.provide_as::<dyn HostDispatch>(
+                host_key("sessionMetadata"),
+                Arc::new(metadata::Dispatch(store)),
             )?;
             Ok(Effect::Done)
         })

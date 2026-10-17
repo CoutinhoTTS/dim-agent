@@ -1,24 +1,26 @@
 # Rust 会话存储格式
 
-The current native format is **v15**, with source-owned `settings_documents`
-and SessionStore's Session-file rows. Startup requires the exact v15 SQL schema
-and a single format marker of 15 before writable PRAGMAs, or the exact v13
-schema with marker 13, which the same startup transaction upgrades in place to
-v15 ([S5a v15 decision](#s5a-v15-格式决定)). Older databases and the removed
-branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as v13 or v15. No migration API or startup
-option is provided. S5c (Session deletion and fork) keeps v15 unchanged
-([S5c decision](#s5c-格式决定)). v13 document bytes remain valid in v15.
+The current native format is **v16**, with source-owned `settings_documents`,
+SessionStore's Session-file rows and its title metadata. Startup requires the
+exact v16 SQL schema and a single format marker of 16 before writable PRAGMAs,
+or the exact v15 schema with marker 15, or the exact v13 schema with marker 13,
+which the same startup transaction upgrades in place to v16 one step after
+another ([S5a v15 decision](#s5a-v15-格式决定), [S5b v16 decision](#s5b-v16-格式决定)).
+Older databases and the removed branch-only v14 `user_configuration` format are
+unsupported and preserved, never migrated, downgraded or interpreted as v13, v15
+or v16. No migration API or startup option is provided. S5c (Session deletion and
+fork) kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes
+remain valid in v16.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v15 tables
+## Current v16 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 15)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 16)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills` or `user/mcp-projects`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -70,6 +72,10 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | `session_files.writer` | `TEXT` | 是 | 隐式 `NULL` | 写入未完成时是 SessionStore 代次 ID；提交或放弃后为 `NULL` |
 | `session_file_owners.session_id` | `TEXT` | 否 | — | 联合主键第 1 列；外键到 `agent_sessions(session_id)` |
 | `session_file_owners.file_id` | `TEXT` | 否 | — | 联合主键第 2 列；外键到 `session_files(file_id)` |
+| `session_metadata.session_id` | `TEXT` | 否 | — | 主键；外键到 `agent_sessions(session_id)`；每个 Session 至多一行，没有行表示修订号 0、没有标题（v16） |
+| `session_metadata.revision` | `INTEGER` | 否 | — | `CHECK(revision > 0)`；该 Session 已提交 `setTitle` 的次数，`setTitle` 的 CAS 修订号 |
+| `session_metadata.title` | `TEXT` | 是 | 隐式 `NULL` | 标题文本，原样保存；清除后为 `NULL`，行保留 |
+| `session_metadata.title_source` | `TEXT` | 是 | 隐式 `NULL` | `CHECK(title_source IN ('auto', 'manual'))`；表级 `CHECK((title IS NULL) = (title_source IS NULL))` |
 
 v1 的外键只约束上述表列；`info.parent`、`body` 中的内容哈希、before 轨迹和检查点位置都是 JSON 内关系，必须在存储读取边界校验。`timeline_content` 的地址是小写十六进制 `SHA-256(kind + NUL + body)`，其中 `body` 是写入的原始 JSON 字符串字节；同一内容只在同一 Session 内共享。创建 Session、owner 和 `main` 分支是同一事务；写入轮把事件、首次出现的内容、由 `branch/create` 生成的分支目录及分支 head 放在同一事务，提交后才发布。
 
@@ -203,7 +209,7 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件设计为下一版本作出的决定见下节。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件与 S5b 的标题元数据各自为下一版本作出的决定见下文。
 
 ### S5a v15 格式决定
 
@@ -252,7 +258,7 @@ ProjectionCheckpoint = {
   - 恰为 v16 的库直接打开。
   - 其他库（标记不符的 v15 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
 - **单向**：不做备份，与 S5a 相同（开发阶段的决定）。v15 守护进程以现有的"unsupported SQLite schema … preserved"错误拒绝升级后的库。升级日志沿用 S5a 的那一行，写明原版本：`Upgraded native store <path> from format v15 to v16; earlier dimcode versions cannot open it.`
-- **验证**：测试用 v15 结构的冻结副本和完整记录示例构建一次性 v15 库，升级后核对结构恰为 v16、业务行逐行不变；v13 库一次升级到 v16；从不打开用户已有的库（`storage_flow.rs`）。
+- **验证**：测试用 v15 结构的冻结副本和完整记录示例构建一次性 v15 库，升级后核对结构恰为 v16、业务行逐行不变、新表为空；v13 库一次升级到 v16；标记不符或升级到一半的 v15、v16 结构被拒绝并保留；从不打开用户已有的库（`storage_flow.rs` 的 `a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`）。
 
 ## 索引与实际查询
 
@@ -268,6 +274,7 @@ ProjectionCheckpoint = {
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
 | v15 主键 `session_file_owners` | `(session_id, file_id)` | put 写入 owner；fork 复制、删除和创建回滚按 Session 读取和删除 |
 | v15 `session_file_owners_by_file` | `(file_id)` | 清扫判断文件是否已无 owner |
+| v16 主键 `session_metadata` | `(session_id)` | `read`、`setTitle`、列表联结标题、删除与创建回滚按 Session 删除 |
 
 ## 分页查询
 
@@ -284,7 +291,7 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v15）
+## 完整记录示例（v16）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面两个 hash 可以按上文算法复核。
 
@@ -292,11 +299,12 @@ The example retains an old `dim/context-projection/v1` snapshot: the default v3
 interpreter bypasses that unchecked cache and restores from facts. Existing v13
 databases needed no migration for this snapshot interpreter change. `s1` owns
 one Session file, stored at `<db>.session-files/<file_id>/<name>`; its name and
-bytes live only on disk.
+bytes live only on disk. Its title was written twice; the second write is the
+current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 15}],
+  "agent_store_format": [{"version": 16}],
   "settings_documents": [],
   "providers": [],
   "provider_selections": [],
@@ -421,7 +429,8 @@ bytes live only on disk.
     "state": "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2},\"state\":{\"retain_from\":\"e2\",\"prompts\":{\"entries\":[],\"revision\":null,\"system_revision\":null,\"system\":\"\",\"turns\":[],\"tasks\":[]},\"delivered\":[],\"inputs\":[[\"e1\",{\"user\":{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}]],\"configuration\":null,\"output\":[],\"open_tools\":[],\"output_open\":false}}"
   }],
   "session_files": [{"file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90", "node": null, "writer": null}],
-  "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}]
+  "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}],
+  "session_metadata": [{"session_id": "s1", "revision": 2, "title": "Example conversation", "title_source": "manual"}]
 }
 ```
 

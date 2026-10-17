@@ -9,11 +9,11 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 15;
+const FORMAT: u32 = 16;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 15))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 16))",
     ),
     (
         "settings_documents",
@@ -91,31 +91,59 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "session_file_owners_by_file",
         "CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)",
     ),
+    (
+        "session_metadata",
+        "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
+    ),
 ];
-/// The entries v15 adds to the v13 schema. Their order creates the tables
-/// before the index.
-const V15_ADDITIONS: [&str; 3] = [
-    "session_files",
-    "session_file_owners",
-    "session_file_owners_by_file",
+/// The one-way upgrade steps, oldest first: the format a step starts from
+/// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
+/// tables before their indexes. An upgrade also replaces the marker table.
+const UPGRADES: [(u32, &[&str]); 2] = [
+    // S5a: Session files.
+    (
+        13,
+        &[
+            "session_files",
+            "session_file_owners",
+            "session_file_owners_by_file",
+        ],
+    ),
+    // S5b: title metadata.
+    (15, &["session_metadata"]),
 ];
-/// The v13 format marker table, the only v13 entry v15 replaces.
-const V13_FORMAT_TABLE: &str =
-    "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 13))";
+
+fn format_table(version: u32) -> String {
+    format!(
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}))"
+    )
+}
+/// The exact schema of a format this daemon opens or upgrades: `SCHEMA`
+/// without the entries of the steps from `version` on, with its marker.
+fn schema_of(version: u32) -> Vec<(&'static str, String)> {
+    SCHEMA
+        .iter()
+        .filter(|(name, _)| {
+            !UPGRADES
+                .iter()
+                .any(|(from, added)| *from >= version && added.contains(name))
+        })
+        .map(|&(name, sql)| match name {
+            "agent_store_format" => (name, format_table(version)),
+            _ => (name, sql.to_owned()),
+        })
+        .collect()
+}
 
 /// Whether `actual`, sorted by name, is exactly `expected`.
-fn same_schema<'a>(
-    actual: &[(String, String)],
-    expected: impl Iterator<Item = (&'a str, &'a str)>,
-) -> bool {
-    let mut expected: Vec<_> = expected.collect();
+fn same_schema(actual: &[(String, String)], mut expected: Vec<(&str, String)>) -> bool {
     expected.sort_unstable();
     actual.len() == expected.len()
         && actual
             .iter()
             .zip(expected)
             .all(|((name, sql), (expected_name, expected_sql))| {
-                name == expected_name && sql == expected_sql
+                name == expected_name && *sql == expected_sql
             })
 }
 
@@ -219,41 +247,39 @@ impl SqliteStorage {
                 path.display()
             ))
         };
-        let v13 = SCHEMA
-            .iter()
-            .filter(|(name, _)| !V15_ADDITIONS.contains(name))
-            .map(|&(name, sql)| match name {
-                "agent_store_format" => (name, V13_FORMAT_TABLE),
-                _ => (name, sql),
-            });
         let mut upgraded_from = None;
+        // The current format, or one an upgrade step starts from.
+        let known = || {
+            std::iter::once(FORMAT)
+                .chain(UPGRADES.iter().map(|(from, _)| *from))
+                .find(|version| same_schema(&actual, schema_of(*version)))
+        };
         if actual.is_empty() {
             for (_, sql) in SCHEMA {
                 tx.execute_batch(sql).map_err(storage)?;
             }
             tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                 .map_err(storage)?;
-        } else if same_schema(&actual, SCHEMA.iter().copied()) {
-            if versions()? != [i64::from(FORMAT)] {
+        } else if let Some(version) = known() {
+            if versions()? != [i64::from(version)] {
                 return Err(unsupported_version());
             }
-        } else if same_schema(&actual, v13) {
-            if versions()? != [13] {
-                return Err(unsupported_version());
-            }
-            // The one upgrade: replace the marker and add the Session-file
-            // tables. No business row is read or rewritten; a failure rolls
-            // back to the untouched v13 store.
-            tx.execute_batch("DROP TABLE agent_store_format")
-                .map_err(storage)?;
-            for (name, sql) in SCHEMA {
-                if *name == "agent_store_format" || V15_ADDITIONS.contains(name) {
-                    tx.execute_batch(sql).map_err(storage)?;
+            if version != FORMAT {
+                // Replace the marker, then add what each step from `version`
+                // on adds. No business row is read or rewritten; a failure
+                // rolls back to the untouched store.
+                tx.execute_batch("DROP TABLE agent_store_format")
+                    .map_err(storage)?;
+                tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
+                for (_, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
+                    for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
+                        tx.execute_batch(sql).map_err(storage)?;
+                    }
                 }
+                tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+                    .map_err(storage)?;
+                upgraded_from = Some(version);
             }
-            tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
-                .map_err(storage)?;
-            upgraded_from = Some(13);
         } else {
             return Err(storage(format!(
                 "unsupported SQLite schema at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",

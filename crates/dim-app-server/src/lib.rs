@@ -474,6 +474,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     service_catalog.register_shared("managedProvider");
     service_catalog.register_shared("pluginFiles");
     service_catalog.register_shared("sessions");
+    service_catalog.register_shared("sessionMetadata");
     service_catalog.register_shared("settings");
     service_catalog.register_shared("credentials");
     let mut node_resolver = None;

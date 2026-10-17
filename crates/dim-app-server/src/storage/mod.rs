@@ -1,8 +1,10 @@
 mod codec;
 mod files;
+mod metadata;
 mod sqlite;
 mod timeline;
 
+pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
 pub use sqlite::{SqliteStorage, SqliteStoragePlugin};
 pub use timeline::{SessionStore, SessionStorePlugin, SqliteTimelineStore};
 

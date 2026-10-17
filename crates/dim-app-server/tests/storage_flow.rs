@@ -123,7 +123,11 @@ const BUSINESS_TABLES: &[&str] = &[
     "timeline_snapshots",
     "session_files",
     "session_file_owners",
+    "session_metadata",
 ];
+/// The business tables each upgrade step adds: v15's, then v16's.
+const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
+const V16_TABLES: [&str; 1] = ["session_metadata"];
 /// Inserts the rows of `tables` from the complete record example in
 /// native-storage-format.md.
 fn insert_documented_records(connection: &Connection, tables: &[&str]) {
@@ -188,12 +192,28 @@ const V13_SCHEMA: &[&str] = &[
     "CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL",
     "CREATE INDEX timeline_tool_use_starts ON timeline_events(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'",
 ];
-/// What v15 adds to v13 besides the marker.
+/// What v15 adds to v13 besides the marker, frozen likewise.
 const V15_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)",
     "CREATE TABLE session_file_owners (session_id TEXT NOT NULL REFERENCES agent_sessions(session_id), file_id TEXT NOT NULL REFERENCES session_files(file_id), PRIMARY KEY (session_id, file_id))",
     "CREATE INDEX session_file_owners_by_file ON session_file_owners(file_id)",
 ];
+/// What v16 adds to v15 besides the marker.
+const V16_ADDITIONS: &[&str] = &[
+    "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
+];
+/// The exact schema of `version`, sorted: v13's, plus each later step's
+/// additions, with that version's marker.
+fn schema_of(version: u32) -> Vec<String> {
+    let mut statements: Vec<String> = V13_SCHEMA
+        .iter()
+        .chain(V15_ADDITIONS.iter().filter(|_| version >= 15))
+        .chain(V16_ADDITIONS.iter().filter(|_| version >= 16))
+        .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
+        .collect();
+    statements.sort();
+    statements
+}
 /// Builds a disposable v13 store, as a v13 daemon created it.
 fn v13_store(path: &std::path::Path) -> Connection {
     let connection = Connection::open(path).unwrap();
@@ -202,6 +222,19 @@ fn v13_store(path: &std::path::Path) -> Connection {
     }
     connection
         .execute("INSERT INTO agent_store_format VALUES (13)", [])
+        .unwrap();
+    connection
+}
+/// Builds a disposable v15 store, as a v15 daemon created it.
+fn v15_store(path: &std::path::Path) -> Connection {
+    let connection = Connection::open(path).unwrap();
+    for sql in V13_SCHEMA.iter().chain(V15_ADDITIONS) {
+        connection
+            .execute_batch(&sql.replace("(version = 13)", "(version = 15)"))
+            .unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (15)", [])
         .unwrap();
     connection
 }
@@ -858,6 +891,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         Empty,
         V13,
         V15,
+        V16,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -963,25 +997,38 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V13,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=99",
         ),
-        // A v15 schema requires marker 15; it is never read as v13.
+        // A v15 schema requires marker 15; it is never read as v13 or v16.
         (Base::V15, "DELETE FROM agent_store_format"),
         (
             Base::V15,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=13",
         ),
-        // A partly upgraded v13 store is neither format.
+        (
+            Base::V15,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=16",
+        ),
+        // A v16 schema requires marker 16; it is never read as v15.
+        (Base::V16, "DELETE FROM agent_store_format"),
+        (
+            Base::V16,
+            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=15",
+        ),
+        // A partly upgraded store is neither format.
         (
             Base::V13,
             "CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)",
         ),
         (Base::V15, "DROP INDEX session_file_owners_by_file"),
+        (Base::V15, V16_ADDITIONS[0]),
+        (Base::V16, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
             Base::Empty => {}
             // v1 to v13 used the same tables; only their markers differ.
             Base::V13 => drop(v13_store(&database.0)),
-            Base::V15 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V15 => drop(v15_store(&database.0)),
+            Base::V16 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -1015,65 +1062,76 @@ fn marker(connection: &Connection) -> Vec<i64> {
         .unwrap()
 }
 
-/// S5a's one-way upgrade: an exact v13 store becomes the exact v15 store in
-/// place, with every business row unchanged, and only that open reports it.
-#[tokio::test]
-async fn a_v13_store_upgrades_in_place_once() {
-    let mut v15: Vec<String> = V13_SCHEMA
-        .iter()
-        .chain(V15_ADDITIONS)
-        .map(|sql| sql.replace("(version = 13)", "(version = 15)"))
-        .collect();
-    v15.sort();
-
-    // An empty store is created at v15.
-    let fresh = Database::new();
-    let db = SqliteStorage::open(fresh.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), None);
-    db.close().await.unwrap();
-    let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), v15);
-    assert_eq!(marker(&connection), [15]);
-    drop(connection);
-
-    // A v13 store holding every documented business row.
-    let database = Database::new();
-    let connection = v13_store(&database.0);
+/// Upgrades the disposable `connection`'s store, built at `from` and holding
+/// every documented row of the tables it has, to the exact v16 store in place:
+/// every business row is unchanged, the added tables are empty, and only that
+/// open reports the upgrade.
+async fn upgrades_in_place_once(database: &Database, connection: Connection, from: u32) {
     connection
         .execute_batch("PRAGMA foreign_keys = ON")
         .unwrap();
-    let v13_tables = &BUSINESS_TABLES[..BUSINESS_TABLES.len() - 2];
-    insert_documented_records(&connection, v13_tables);
-    let before: Vec<_> = v13_tables
+    let added: Vec<&str> = V16_TABLES
         .iter()
-        .map(|table| rows(&connection, table))
+        .chain(V15_TABLES.iter().filter(|_| from < 15))
+        .copied()
         .collect();
+    let kept: Vec<&str> = BUSINESS_TABLES
+        .iter()
+        .filter(|table| !added.contains(table))
+        .copied()
+        .collect();
+    insert_documented_records(&connection, &kept);
+    let before: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert!(before.iter().filter(|rows| !rows.is_empty()).count() >= 7);
     drop(connection);
 
     let db = SqliteStorage::open(database.0.clone()).unwrap();
-    assert_eq!(db.upgraded_from(), Some(13));
+    assert_eq!(db.upgraded_from(), Some(from));
     let store = SqliteTimelineStore::new(db.clone());
     assert_eq!(store.branches("s1").await.unwrap().len(), 2);
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), v15);
-    assert_eq!(marker(&connection), [15]);
-    let after: Vec<_> = v13_tables
-        .iter()
-        .map(|table| rows(&connection, table))
-        .collect();
+    assert_eq!(schema(&connection), schema_of(16));
+    assert_eq!(marker(&connection), [16]);
+    let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
-    for table in ["session_files", "session_file_owners"] {
+    for table in added {
         assert!(rows(&connection, table).is_empty());
     }
     drop(connection);
 
-    // The upgraded store reopens as v15 and reports nothing.
+    // The upgraded store reopens as v16 and reports nothing.
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
+}
+
+/// An empty store is created at exactly v16; a v13 store takes S5a's and
+/// S5b's one-way steps in one open.
+#[tokio::test]
+async fn a_v13_store_upgrades_in_place_once() {
+    let fresh = Database::new();
+    let db = SqliteStorage::open(fresh.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+    let connection = Connection::open(&fresh.0).unwrap();
+    assert_eq!(schema(&connection), schema_of(16));
+    assert_eq!(marker(&connection), [16]);
+    drop(connection);
+
+    let database = Database::new();
+    let connection = v13_store(&database.0);
+    upgrades_in_place_once(&database, connection, 13).await;
+}
+
+/// S5b's one-way upgrade: an exact v15 store becomes the exact v16 store.
+#[tokio::test]
+async fn a_v15_store_upgrades_in_place_once() {
+    let database = Database::new();
+    let connection = v15_store(&database.0);
+    assert_eq!(schema(&connection), schema_of(15));
+    upgrades_in_place_once(&database, connection, 15).await;
 }
 
 /// The daemon names the one-way upgrade on stderr, where its default log
@@ -1119,7 +1177,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v15; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v16; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(
