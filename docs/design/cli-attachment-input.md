@@ -190,8 +190,14 @@ error reply is not proof of rejection: v3 can commit the input and then return
 Session-handle diagnostic and exit behavior for these errors instead of offering a new send.
 Connection loss can also leave a put or submission outcome unknown and uses that same exit
 behavior. No automatic retry, lookup-based recovery or persistent local recovery store is added.
-Only a proven pre-commit rejection is safely resubmittable; an RPC error code alone does not
-establish that guarantee. Draft retention does not promise recovery after process exit.
+Only a proven pre-commit rejection is safely resubmittable. For v3 `session.submit`,
+`error.data.appError` values `invalid_params`, `session_invalid_input`, `session_closed`,
+`session_build_failed`, `service_reloading` and `unknown_method` are the server's explicit
+[pre-commit guarantee](../../crates/dim-app-server/README.md#session-submission-errors).
+They retain their ordinary error diagnostics; every other error, including `submission_unknown`
+and opaque publication/storage failures, retains the uncertain-outcome exit without resending.
+This does not promise that an unchanged rejected request will succeed or add automatic retry.
+Draft retention does not promise recovery after process exit.
 
 Recognized CLI commands run only from a plain single-line draft. Commands are not obtained by
 expanding paste or attachment markers. A recognized command with attached items reports a usage

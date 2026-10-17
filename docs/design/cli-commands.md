@@ -141,7 +141,12 @@ and 130 for interruption. A transport failure does not retry a submission.
 Repeated `--image` arguments follow the headless attachment contract: text first,
 then validated original image bytes in argument order, with paths relative to the
 invoking process. An image-only invocation is valid. A submission error on a live
-connection also retains the existing diagnostic/exit path, because it can follow commit.
+connection keeps the uncertain-outcome diagnostic/exit path unless its `error.data.appError`
+is one of the six [guaranteed pre-commit rejections](../../crates/dim-app-server/README.md#session-submission-errors):
+`invalid_params`, `session_invalid_input`, `session_closed`, `session_build_failed`,
+`service_reloading` or `unknown_method`. Those retain their ordinary error diagnostics.
+Every other error, including `submission_unknown` and opaque publication/storage failures,
+can follow commit and must not trigger another send.
 
 In JSON mode, stdout contains one compact JSON-RPC notification per line using
 the daemon's existing `method` and `params`. Only notifications for the selected

@@ -33,6 +33,23 @@ these public capabilities. Protocol v3 advertises their management methods on lo
 Configured model changes validate against the supplied catalog and adopt that model's generation
 settings; model preferences requiring capability declarations are rejected rather than guessed.
 
+### Session submission errors
+
+For protocol v3 `session.submit`, `error.data.appError` values `invalid_params`,
+`session_invalid_input`, `session_closed`, `session_build_failed`,
+`service_reloading` and `unknown_method` guarantee that this request did not
+commit an input. They identify parameter/admission, Session acquisition or
+pre-commit input rejection; the server must not return this set after accepting
+the input. This guarantee is specific to `session.submit`, not a retry policy
+for other methods or an assertion that a rejected request will succeed unchanged.
+
+After commit, failure to confirm publication remains uncertain even on a live
+connection: `submission_unknown`, an opaque `-32603` publication/storage error,
+and every error outside the guaranteed set do not prove rejection. Transport
+loss is uncertain too. Clients retain the Session handle and must not blindly
+resubmit. The native CLI exits with its uncertain-outcome guidance; this does
+not add automatic retry or recovery. See the [CLI submission contract](../../docs/design/cli-attachment-input.md#submission-rejection-and-cancellation).
+
 ### Business settings
 
 SettingsService reads and updates generic `BusinessDocument` values with per-source
