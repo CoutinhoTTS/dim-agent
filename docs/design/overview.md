@@ -67,7 +67,7 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 
 | Plugin | Process | Session | Branch | Reason |
 | --- | --- | --- | --- | --- |
-| Questions | — | `ask_user` tool; `session.question.*` methods; in non-interactive Sessions `ask_user` answers that no one is available to answer | Pending questions, `question/*` facts, following Approval | A question belongs to a branch's turn |
+| Questions | — | `ask_user` tool; `session.question.*` methods; in non-interactive Sessions `ask_user` answers that no one is available to answer | Waiters of running `ask_user` calls; no events (the answer is the tool result) | A question belongs to a branch's turn |
 | Goal | — | `goal_update` tool and `session.goal.*` methods, which only write one `input/message` with `goal:objective` and/or `goal:status` keyed blocks | Goal state folded in sequence order from consumed goal change blocks; continuation decided by Goal when it consumes `turn/end`, `stop/interrupt` or `input/deleted` through the Dispatcher | A goal belongs to exactly one branch: the fold uses only that branch's own events, so child branches and forked Sessions start with no goal; continuation follows its events in order |
 | Hooks | — | Hook documents (user, imported Claude/Codex, project sources); runner; `hooks.catalog` | `toolAdvice` for Permission (`PreToolUse`); `PermissionRequest` answered through Approval; prompt hold and release with InputQueue (`UserPromptSubmit`); `PostToolUse`, `Stop`, `SessionStart`, `Notification` from the Dispatcher | Rules apply to a Session; execution happens in a branch |
 | ShellInput | — | `shell.*` Session methods; runs in the Session's workspace and writes its input | — | Commands belong to the Session |
@@ -158,7 +158,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 
 | Plugin | Scopes | Role | Phase | Language | Document |
 | --- | --- | --- | --- | --- | --- |
-| Questions | Session + branch | `ask_user`; pending questions and answers; `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) (needs redesign) |
+| Questions | Session + branch | `ask_user`; the answer is the tool result; `session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
 | ShellInput | Session | `!command` / `!!command` as `shell.run/stop/list` Session methods | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Session | `attachment.put` for large text; Session files | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Session | Title from the first adopted user input; `session.rename` | P1 | TypeScript first | [SessionTitle](plugins/SessionTitle.md) |
@@ -258,12 +258,12 @@ sequenceDiagram
   participant S as Session
   participant QS as Questions sessionMethods
   participant QB as Questions (branch)
-  participant TL as Timeline
+  participant H as ask_user handler
   CL->>Rpc: session.question.respond {sessionId, branchId, callId, answers}
   Rpc->>S: acquire, sessionMethods "session.question"
   Rpc->>QS: call
   QS->>QB: branch service on branchId, respond
-  QB->>TL: question/answered (rejected if after the covering stop/interrupt)
+  QB->>H: hand the answer to the waiting call (rejected if the call was cancelled)
   QS-->>CL: result
 ```
 
@@ -374,13 +374,10 @@ rutis nodes connect through links, export and import services, run plugins on th
 
 | Event | Writer | Why it is needed |
 | --- | --- | --- |
-| `question/asked {call_id, turn_id, request_id, questions}` | Questions (branch) | Pending state cannot be derived, because results publish only after the whole batch (precedent Approval) |
-| `question/answered {call_id, answers, declined}` | Questions (branch), through `session.question.respond` | Ordered against interrupts by sequence |
-| `question/cancelled {call_id, reason}` | Questions (branch) | Ends a pending question on interrupt, branch close or reload |
 | `input/withdraw {input_id, reason?}` | Clients (`session.input.withdraw`, provided by InputQueue), process callers (`sessions.withdraw`) | A command ordered against adoption by sequence; the optional `reason` (generic text, no business meaning) is what clients show for a deleted input |
 | `input/deleted {input_id}` | InputQueue | Result fact: the held input is never applied; queue state must be rebuildable |
 
-The three `question/*` rows are under review: Questions needs redesign ([Questions](plugins/Questions.md)), and they may be removed.
+Questions adds no events: a pending question is the `ask_user` `step/tool-call` without its `step/tool-result`, and the answer is the tool result ([Questions §2](plugins/Questions.md#2-data-and-state)).
 
 | Event not added | Used instead | Reason |
 | --- | --- | --- |
@@ -399,7 +396,7 @@ Prerequisites always land in an earlier phase than their consumers.
 | Phase | Content |
 | --- | --- |
 | P0 Foundation | `SessionConfig.interactive` set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; `toolContribution` in ToolRegistry; Settings business sources with change notification (S8a); the language-neutral `settings` service and credential resolver (S8b, with C4); `pluginFiles` (extended: binary, format version); Provider `AuxiliaryModel` (one model call outside any Session); SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
-| P1 Core interaction | Questions (needs redesign), ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
+| P1 Core interaction | Questions (redesigned, M2), ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
 | P2 Feature extension | Goal, Web, Scheduler, Workflow; ModelProvider `ModelCallScope`; Collaboration member approvals delivered to the leader as input; Mcp OAuth; production compaction host |
 | P3 External integration | ExternalAgent, AcpGateway, RemoteGateway with Transport `EntryHost` and `ConnectionEntry {name, deviceId}`, Modality; PluginManager; resource nodes (services looked up per call by `resourceNode`) |
 
@@ -570,7 +567,7 @@ One row per requirement to the runtime or rutis; changes to other plugins are in
 | Agent assembly collects named services from `provides` and installs optional parts per enabled plugin | Runtime | To be opened | All Session plugins | [session access §9](contracts/session-access.md#9-requirements-raised-to-mechanism-owners) |
 | Lookup of a keyed Session service by name (`sessionMethods` by namespace) and named `toolContribution` collection | Runtime | To be opened | Rpc, ToolRegistry | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Unload of a Session-scoped method provider waits for its `drain` calls | rutis lifecycle | To be opened | Rpc | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
-| Plugins register their own event types at runtime | Runtime | [#2](https://github.com/arcships/dim/issues/2) | No current consumer (Questions needs redesign) | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
+| Plugins register their own event types at runtime | Runtime | [#2](https://github.com/arcships/dim/issues/2) | No current consumer (the Questions redesign defines no events) | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Services imported over a rutis link stay registered while the link is down and each call fails with `node_unavailable` (processes on the node are ended by that node's own HostPlatform) | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent, Modality, ShellInput, Hooks, Attachments, Workflow, Scheduler, PluginManager, RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (Notifications withdrawn).** Named process events emitted and listened to across languages | rutis | To be opened | Scheduler, Notifications | [Scheduler §9](plugins/Scheduler.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** A provider sends requests back to the caller within one call (call-scoped requests) | rutis | To be opened | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-call-scoped-requests-from-provider-to-caller) |

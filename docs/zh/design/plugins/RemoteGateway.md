@@ -160,7 +160,7 @@ sequenceDiagram
 
 | 场景 | 结果 | 负责方 |
 | --- | --- | --- |
-| 手机与终端回答同一审批或问题 | 第一个被消费的事实决定；第二个失败 | Approval、Questions |
+| 手机与终端回答同一审批或问题 | 审批：第一个被消费的事实决定；问题：第一个被接受的 `session.question.respond` 决定；第二个失败 | Approval、Questions |
 | 手机 `session.permission.update` 与终端竞争 | 两个 `permission/changed` 事实；序号较后者生效 | Permission |
 | 手机在输入被应用时撤回该输入（`session.input.withdraw`） | `input/applied` 先于 `input/withdraw`：`notHeld`，不写入任何内容，正常消费；`input/withdraw` 在先：`input/deleted`，从不被应用 | InputQueue |
 | 带待处理审批断开连接 | 保持待处理；重新附着时重放；无超时（A14） | Approval |
@@ -317,7 +317,7 @@ RemoteGateway 没有启动或停止方法，也从不写自己的 `enabled` 字�
 | 远程 `session.exec.stop` 对 exec 完成 | 序号 | 较早的终态事实胜出 | WorkspaceTools exec 所有者 |
 | 远程输入附近的压缩或子分支切分 | — | 同任何输入（[session access](../contracts/session-access.md)） | ContextPreparation、InputQueue |
 | 远程权限变更后的 fork | — | fork 随事实一起复制预设（E4、#26） | SessionStore |
-| 两台设备回答同一问题 | 第一个 `question/answered` | 第一个被接受 | Questions |
+| 两台设备回答同一问题 | 第一个被接受的 `session.question.respond` | 第一个被接受；第二个 `question_already_answered` | Questions |
 | 审批待处理时断开连接 | — | 保持待处理；重新附着时重放（A14） | Approval |
 | `session.submit` 已准入后断开，回复丢失 | 输入已提交 | 重连后按 `submissionId` 调用 `session.input_lookup` | 客户端 |
 | 设备请求运行时被吊销 | 已准入 < 吊销 | 连接关闭；命令继续；回复丢失 | Rpc |
