@@ -153,6 +153,7 @@ flowchart LR
   p10 -->|"dim_agent_runtime::config::SessionIdentity@session"| p17
   p17 -->|"dim_agent_capabilities::host::ToolHost@session"| p16
   p10 -->|"dim_agent_runtime::config::SessionConfig@session"| p16
+  p10 -->|"dim_agent_runtime::config::SessionIdentity@session"| p16
   p10 -->|"dim_agent_runtime::diagnostics::Diagnostics@session"| p16
   p14 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p15
   p10 -->|"dim_agent_runtime::assembly::TimelineFactory@session"| p14

@@ -37,8 +37,27 @@ spaces. Errors return to the prompt. `/exit` takes no arguments. Slash commands
 in exec or redirected input remain literal model input.
 See [CLI commands and exports](../../docs/design/cli-commands.md).
 
-Proposed model commands and atomic Agent configuration adoption are specified in
-[model configuration](../../docs/design/model-configuration.md); they are not implemented.
+At the idle interactive prompt, `/effort VALUE` (alias `/reasoning`) changes
+reasoning effort, `/fast on|off` selects priority/default service tiers, and
+`/agent ID` adopts an Agent profile's prompt and optional model. Tools and
+permissions keep the current Session configuration. A profile with a model resets effort
+and service tier to that model's defaults; a prompt-only profile preserves them. Bare commands list choices;
+unsupported values leave the prompt usable. Commands in `--prompt` or piped input
+remain literal model input. See [model configuration](../../docs/design/model-configuration.md).
+
+```text
+> /effort high
+Reasoning effort configuration adopted: high
+> /fast off
+Service tier configuration adopted: off
+> /agent <agent-id>
+Agent prompt/model configuration adopted; Session tools unchanged.
+> _
+```
+
+Ctrl+C during a configuration command waits for its result before accepting
+another line, because adoption may already have committed. The client does not
+automatically retry uncertain commands.
 
 Build both native programs from the repository root:
 
@@ -258,7 +277,10 @@ The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overri
 
 On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dim-app-server --connect-pipe` bridge, which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 
-While waiting for a daemon it has just started, the CLI waits for the Unix socket to become private before connecting. An existing insecure endpoint is rejected without starting a daemon.
+The daemon startup wait allows a newly spawned, current-user Unix socket to become private
+before connecting. Existing insecure endpoints are rejected immediately. Wrong ownership,
+non-socket paths and peer-credential failures remain immediate errors; startup does not retry
+arbitrary permission errors.
 
 Noninteractive model text goes to stdout. Session handles, tool status and diagnostics go to stderr. Interactive per-tool approval requires a terminal; in noninteractive mode the operation is denied, the turn is stopped and settled, and exit code `3` is returned. Configuration/transport failures do not silently select a mock model or old core.
 

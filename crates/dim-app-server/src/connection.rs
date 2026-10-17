@@ -963,19 +963,58 @@ impl Connection {
                 if p.branch_id != "main" {
                     return Err(RpcError::invalid("Model updates only support main"));
                 }
-                if p.model_id.trim().is_empty() {
-                    return Err(RpcError::invalid("modelId must not be empty"));
-                }
-                let model = rpc
-                    .model_selection(
-                        Some(dim_agent_types::ModelId {
-                            provider_id: p.provider_id,
-                            model_id: p.model_id,
-                        }),
-                        Some(PathBuf::from(&session.config().cwd)),
-                        p.model_preferences,
-                    )
-                    .await?;
+                let model = match (p.provider_id, p.model_id) {
+                    (Some(provider_id), Some(model_id)) => {
+                        if provider_id.trim().is_empty() || model_id.trim().is_empty() {
+                            return Err(RpcError::invalid("Model target must not be empty"));
+                        }
+                        rpc.model_selection(
+                            Some(dim_agent_types::ModelId {
+                                provider_id,
+                                model_id,
+                            }),
+                            Some(PathBuf::from(&session.config().cwd)),
+                            p.model_preferences,
+                        )
+                        .await?
+                    }
+                    (None, None) => {
+                        if p.model_preferences == crate::provider::ModelPreferences::default() {
+                            return Err(RpcError::invalid("Supply at least one model preference"));
+                        }
+                        if rpc.config.product_home.is_none() {
+                            return Err(provider_error(
+                                dim_agent_capabilities::host::HostError::failed(
+                                    "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
+                                ),
+                            ));
+                        }
+                        // shortcut: concurrent clients may replace an older base; revisit with configuration patch semantics.
+                        let state = session
+                            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(
+                                &p.branch_id,
+                            )?
+                            .ok_or_else(RpcError::reloading)?;
+                        let current = state.configuration.ok_or_else(|| {
+                            RpcError::invalid(
+                                "No model configuration is adopted; supply providerId and modelId",
+                            )
+                        })?;
+                        let provider = rpc
+                            .ctx
+                            .get::<crate::provider::ProviderService>()
+                            .ok_or_else(RpcError::reloading)?;
+                        provider
+                            .apply_preferences(&current, p.model_preferences, &rpc.unloading)
+                            .await
+                            .map_err(provider_error)?
+                    }
+                    _ => {
+                        return Err(RpcError::invalid(
+                            "providerId and modelId must appear together",
+                        ));
+                    }
+                };
                 let id = dim_agent_types::ModelId {
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
@@ -1138,7 +1177,7 @@ impl Connection {
     }
 }
 
-fn configuration_outcome(
+pub(crate) fn configuration_outcome(
     outcome: dim_agent_runtime::ConfigureOutcome,
 ) -> Result<&'static str, RpcError> {
     match outcome {
@@ -1173,7 +1212,7 @@ fn skills_error(error: SkillsError) -> RpcError {
     RpcError::app(-32000, app, error.to_string())
 }
 
-fn provider_error(error: dim_agent_capabilities::host::HostError) -> RpcError {
+pub(crate) fn provider_error(error: dim_agent_capabilities::host::HostError) -> RpcError {
     let kind = match &error {
         dim_agent_capabilities::host::HostError::Cancelled(_) => "provider_cancelled",
         _ => "provider_failed",

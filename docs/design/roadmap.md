@@ -1,6 +1,6 @@
 # 开发计划与优先级
 
-Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[插件设计索引](plugins/README.md)、[ADR 001](../adr/001-harness-foundation.md) 实现状态，以及 [#21–#30](https://github.com/arcships/dim/issues/31) 的讨论结论。基线：`main` @ `25e369e`（2026-10-15）。
+Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[插件设计索引](plugins/README.md)、[ADR 001](../adr/001-harness-foundation.md) 实现状态，以及 [#21–#30](https://github.com/arcships/dim/issues/31) 的讨论结论。交付基线：`main` @ `e541e04`（2026-10-16）；PR 的实时状态见 [#114](https://github.com/arcships/dim/issues/114)。
 
 跟踪 issue：[#114](https://github.com/arcships/dim/issues/114)，每个工作项一个 issue 和一个 draft PR，各有唯一的负责人。
 
@@ -8,16 +8,31 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 ## 1. 现状
 
-总体设计 P0–P3 几乎全部未实现。已有、可直接扩展的基础：
+本轮大部分 Rust 前置机制已合入，包括 C1/C2/C3、S1/S2、S4、S5a/S5c、S6/S7、S8a、S10/S11、R1 和 E1/E2；C7、S3 已确认无需新增机制。TypeScript 桥接及其依赖的插件仍未完成，设计、spike 合入不表示产品实现完成。已有、可直接扩展的基础：
 
 | 已有 | 位置 | 对应工作项 |
 | --- | --- | --- |
 | 同步 `Timeline::before`（一个草稿进、一个草稿出，失败提交原草稿） | `dim-agent-runtime/src/core/timeline.rs` | 不变（[原则 §4 第 3 条](../architecture/rust-agent/principles.md)） |
-| `ToolContribution` / `SessionToolSource`，经 `AgentBuilder` 静态登记 | `dim-agent-capabilities/src/tool_registry.rs` | C3 |
+| `ToolContribution` / `SessionToolSource`，分支初始化时按名接入已 Active 的提供方 | `dim-agent-capabilities/src/tool_registry.rs` | C3（#82 已合入） |
 | Session 门面的 `history(branch, through)`：上限是已发布的头部，只读已发布的事件（内部 `Timeline::history` 才以已分配的头部为上限） | `dim-agent-runtime/src/agent.rs` | 不需要新接口：先取已发布的 head（`sequence`），再 `history(Some(head))`（#50） |
-| `PluginFilesPlugin`（UTF-8、锁） | `dim-app-server/src/plugin_files.rs` | S10 |
+| `PluginFilesPlugin`（UTF-8、锁、显式 v1 格式） | `dim-app-server/src/plugin_files.rs` | S10（#91、#135 已合入） |
 | Settings 业务来源（MCP/Skills），变更经 rutis 事件 `settings.changed` 通知（S8a 已改） | `dim-app-server/src/settings.rs`；事件合同在 `dim-agent-capabilities/src/settings.rs` | S8a |
-| 自动压缩事实；生产压缩宿主仍是 `ContextModelHost(None)` | `context_preparation.rs`、`main.rs` | 独立功能 |
+| 自动压缩事实、生产压缩宿主、`/compact` 和用量查询；显式 `--models` 配置无能力快照时不启用压缩 | `context_preparation.rs`、App Server `main.rs` | F1（#108 已合入） |
+
+当前交付范围：
+
+| 工作项 | 已合入 | 剩余范围 |
+| --- | --- | --- |
+| P1 ShellInput | 服务端 #101、CLI `!` / `!!` #155 | 本轮交付完成 |
+| P2 Attachments | 服务端 #102、CLI 设计 #154 | headless 图片 #160 in review；多行/大段粘贴、草稿标记、提交时上传和原生输入集成未完成 |
+| F6 CLI | 设计 #113、实现 #149、编码请求上限 #153 | 本轮交付完成 |
+| F3 模型参数 | 设计 #110 | `/effort`、`/fast`、`/agent` 实现 #148 in review |
+| F4 MCP OAuth | 服务端 #111 | CLI 登录与状态 #151 in review |
+| F5 OS 隔离 | spike #112 | 设计 #152 in review；产品执行集成未实现，用户 `!` / `!!` 不在隔离范围内 |
+| C4 Session 级 TS | spike #99、装配前置 #137、工具/方法设计 #141 | 工具/C1 实现 #150 in review；原生 Session 广播未实现，#156 是独立、未批准的候选设计 |
+| S8b、P5 Goal | 设计 #119、#105 | 实现仍分别等待 C4、C4/C5/S8b 等前置 |
+
+S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程测试修正 #157 已合入。独立 CLI 启动修复 #158 in review，不属于 F5 隔离或 P1 ShellInput 策略。以上记录交付范围；CI 和评审是否允许合并，以各 PR 当前提交的实时状态为准。
 
 相关 PR：
 
@@ -45,8 +60,8 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 ### 3.1 立即做（文档与对齐）
 
 1. ~~合入 #14、#16 并补 ADR 003 D3~~：已由 #14 完成（#16 关闭）。
-2. 契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8a Settings 业务源（§5.2）。核心部件（Session 装配、ToolRegistry）不硬依赖任何可选插件，可选插件没起来时只有它自己的功能不可用（#34），在契约里一并写明。
-3. 第一批插件设计复核到 Ready：ShellInput、Attachments，然后 Web、SessionTitle（§5.2）。
+2. ~~契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8a Settings 业务源~~：#79、#83、#84、#90 已合入。核心部件不硬依赖可选插件的约束继续适用（#34、ADR 002 D3）。
+3. ShellInput、Attachments 服务端与 CLI Attachments 设计已合入；Attachments CLI 按 §1 的剩余范围交付。Web、SessionTitle 在前置落地后复核到 Ready（§5.2）。
 4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
@@ -120,11 +135,11 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 
 | 批次 | eric8810（核心机制与契约） | yyhhyyyyyy（Rpc、Agents、存储、MCP） | zerob13（装配、TS 桥接、TS 插件、CLI、平台） |
 | --- | --- | --- | --- |
-| 1（现在） | A2 契约定稿、A3 Goal（已决定）、~~A4 权限类别~~（已完成） | S6 FileStorage、R1 Failed 错误码 | C3 工具接入、C4 spike、S7 argv 辅助、S10 pluginFiles |
-| 2 | S8a Settings 源（等 A2）、S4 AuxiliaryModel | C1 sessionMethods（等 A2）、C2 interactive、S5a Session 文件 | C4 TS 桥接（等 C3）、F5 隔离 spike |
-| 3 | S1 InputQueue 撤回（等 C1）、S8b Settings 服务（等 C4）、S11 图片占位、F2 权限命令规则 | C6 广播通知、P1 ShellInput（等 C1、S7）、S5b 标题、~~S3 活动句柄~~（不需要） | C5 分支级 TS（等 C4）、F6 CLI、F3 模型参数 |
-| 4 | F1 压缩宿主、P5 Goal（等 C5、S1、S8b） | S2 sessions（等 C2、S1）、P2 Attachments（等 S5a、S11）、S5c 删除和 fork、F4 MCP OAuth | P3 Web（等 C4、S8b）、P4 SessionTitle（等 C6、S4、S5b、S8b） |
-| 5 | — | — | P6 Scheduler、P7 Workflow（等 S2） |
+| 1 | ~~A2 契约定稿~~ #79、~~A3 Goal 决策~~ #80、~~A4 权限类别~~ #81 | ~~S6 FileStorage~~ #87、~~R1 Failed 错误码~~ #117 | ~~C3 工具接入~~ #82、~~C4 spike~~ #99、~~S7 argv 辅助~~ #88、~~S10 pluginFiles~~ #91/#135；C4 工具/方法实现 #150 in review，广播未实现 |
+| 2 | ~~S8a Settings 源~~ #90、~~S4 AuxiliaryModel~~ #89 | ~~C1 sessionMethods~~ #83、~~C2 interactive~~ #84、~~S5a Session 文件~~ #95 | ~~装配前置~~ #137；F5 spike #112 已合入，设计 #152 in review，产品实现未完成 |
+| 3 | ~~S1 InputQueue 撤回~~ #94、S8b 设计 #119 已合入（实现等 C4）、~~S11 图片占位~~ #92、~~F2 权限命令规则~~ #109 | C6 #85、S5b #96 仍为 Draft；~~P1 ShellInput 服务端~~ #101；~~S3 活动句柄~~（不需要） | C5 #100（等 C4）；~~P1 CLI~~ #155、~~F6 CLI~~ #149/#153；F3 实现 #148 in review |
+| 4 | ~~F1 压缩宿主~~ #108、P5 Goal 设计 #105 已合入（实现等 C4/C5/S8b） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | F4 CLI #151 in review；CLI Attachments 设计 #154 已合入，headless 图片 #160 in review，其余输入集成未完成；P3 Web #103、P4 SessionTitle #104 等前置 |
+| 5 | — | — | P6 Scheduler #106、P7 Workflow #107 仍为 Draft（S2 已合入，仍等 C4、S8b） |
 
 跨人的交接（都不在同一批文件上）：
 
@@ -190,7 +205,7 @@ flowchart LR
   S10 --> WF
 ```
 
-最早能交付的是 ShellInput 和 Attachments：只依赖 C1 和几个独立的小项。TypeScript 插件都卡在 C4，它是唯一的 L 级共用项，spike 应立即单独开始。Scheduler 和 Workflow 最晚，既要等 C4，也要等 S1 → S2。
+ShellInput 的服务端与 CLI 已合入；Attachments 服务端与 CLI 设计已合入，CLI 实现仍按 §1 分步交付。C4 spike 和装配前置已合入，工具/方法实现 #150 仍在评审，原生 Session 广播尚未实现；独立候选 #156 未获批准，不能据此把 C4 或下游 TS 插件标为完成。S1 → S2 已合入，Scheduler、Workflow 仍等待 C4 和 S8b；C6 → S5b → SessionTitle 也仍未完成。
 
 ## 5. 设计变更空间
 

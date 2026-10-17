@@ -262,6 +262,7 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
             {"name": "notes.flood", "mutating": false},
             {"name": "notes.stream", "mutating": false},
             {"name": "notes.wait", "mutating": true},
+            {"name": "session.agent.update", "mutating": true},
             {"name": "session.input.withdraw", "mutating": true},
         ]})
     );
@@ -351,7 +352,7 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
         client
             .rpc("session.methods", json!({"sessionId": sid}))
             .await["result"],
-        json!({"methods": [{"name": "session.input.withdraw", "mutating": true}]})
+        json!({"methods": [{"name": "session.agent.update", "mutating": true}, {"name": "session.input.withdraw", "mutating": true}]})
     );
     gate.notify_one();
     restart.await.unwrap();
@@ -422,7 +423,9 @@ async fn a_session_method_restores_an_unloaded_session() {
 async fn progress_until_reply(client: &mut Client, id: u64) -> (Vec<Value>, Value) {
     let mut progress = vec![];
     loop {
-        let frame = client.read().await;
+        let frame = client
+            .read(&format!("response {id} or management.progress"))
+            .await;
         if frame["id"] == id {
             return (progress, frame);
         }

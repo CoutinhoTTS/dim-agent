@@ -268,6 +268,7 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "/fast on");
         assert!(!submit["params"]["submissionId"].as_str().unwrap().is_empty());
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"model-request","textOffset":0,"text":"你\u{1b}[2J好"}));
         wire.reply(&submit, json!({"event":{}}));
@@ -282,7 +283,7 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     });
     let output = wait(
         home.command()
-            .args(["--prompt", "hello"])
+            .args(["--prompt", "/fast on"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1120,6 +1121,104 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
         terminal.transcript
     );
     assert!(!terminal.transcript.contains("never print me"));
+}
+
+#[test]
+fn interactive_configuration_commands_route_and_recover_without_submitting_commands() {
+    fn history(wire: &mut Wire) {
+        let request = wire.read("session.history");
+        let events = if request["params"]["after"].as_u64().unwrap() < 9 {
+            json!([{"sequence":9,"type":"context","name":"configured","data":{
+                "timeline":"main","revision":"configured","previous":null,"prompt":null,
+                "provider_id":"test","model_id":"model"}}])
+        } else {
+            json!([])
+        };
+        wire.reply(
+            &request,
+            json!({"events":events,"through":9,"nextAfter":9,"done":true}),
+        );
+    }
+    fn catalog(wire: &mut Wire) {
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities =
+            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &request,
+            json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]},
+                "serviceTier":{"supported":true,"options":["priority","default"]}}}]}}),
+        );
+    }
+    let home = Home::new();
+    let exported = home.0.join("configured.json");
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        history(wire);
+        catalog(wire);
+        history(wire);
+        catalog(wire);
+        let effort = wire.read("session.model.update");
+        assert_eq!(effort["params"], json!({"sessionId":"session","branchId":"main","modelPreferences":{"reasoningEffort":"high"}}));
+        entered.send(()).unwrap();
+        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+        wire.reply(&effort, json!({"outcome":"adopted","model":{"providerId":"test","modelId":"model"}}));
+        history(wire);
+        history(wire);
+        history(wire);
+        catalog(wire);
+        let fast = wire.read("session.model.update");
+        assert_eq!(fast["params"]["modelPreferences"], json!({"serviceTier":"default"}));
+        wire.send(json!({"jsonrpc":"2.0","id":fast["id"],"error":{"code":-32000,"message":"fixture preference rejection"}}));
+        let agents = wire.read("agent.list");
+        wire.reply(&agents, json!([{"agentId":"profile-id","name":"Reviewer","description":"Review changes"}]));
+        let agent = wire.read("session.agent.update");
+        assert_eq!(agent["params"], json!({"sessionId":"session","branchId":"main","agentId":"profile-id"}));
+        wire.reply(&agent, json!({"outcome":"adopted"}));
+        history(wire);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "after configuration");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":9}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"/effort\n");
+    terminal.until("Reasoning effort choices: high, low");
+    terminal.until("\n> ");
+    terminal.write(b"/reasoning high\n");
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for configuration result");
+    release.send(()).unwrap();
+    terminal.until("Reasoning effort configuration adopted: high");
+    terminal.until("\n> ");
+    terminal.write(format!("/export json {}\n", exported.display()).as_bytes());
+    terminal.until("Exported JSON:");
+    terminal.until("\n> ");
+    terminal.write(b"/fast off\n");
+    terminal.until("Error: fixture preference rejection");
+    terminal.until("\n> ");
+    terminal.write(b"/agent\n");
+    terminal.until("profile-id\tReviewer\tReview changes");
+    terminal.until("\n> ");
+    terminal.write(b"/agent profile-id\n");
+    terminal.until("Session tools unchanged.");
+    terminal.until("\n> ");
+    terminal.write(b"after configuration\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    let data: Value = serde_json::from_slice(&fs::read(exported).unwrap()).unwrap();
+    assert_eq!(data["through"], 9);
+    assert_eq!(data["events"][0]["data"]["model_id"], "model");
 }
 
 #[test]
@@ -2117,6 +2216,92 @@ fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
         daemon.join().unwrap();
         assert!(!terminal.transcript.contains("held-secret"));
     }
+}
+
+#[test]
+fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_sockets() {
+    let home = Home::new();
+    let server = home.0.join("server");
+    let started = home.0.join("server.started");
+    fs::write(
+        &server,
+        "#!/bin/sh\n: > \"$0.started\"\nwhile test -f \"$0\"; do sleep 0.01; done\n",
+    )
+    .unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = home.command();
+    command
+        .arg("--server")
+        .arg(&server)
+        .args(["models", "fixture"]);
+
+    let socket = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+    let rejected = command.output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("private socket"));
+    assert!(
+        !started.exists(),
+        "an existing insecure endpoint must not start a server"
+    );
+    drop(listener);
+    fs::remove_file(&socket).unwrap();
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "server was not started");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "startup must wait for a private endpoint"
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let (stream, _) = loop {
+        match listener.accept() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => break result.unwrap(),
+        }
+    };
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut wire = Wire(BufReader::new(stream));
+    let hello = wire.read("hello");
+    wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+    let catalog = wire.read("provider.catalog");
+    wire.reply(
+        &catalog,
+        json!({"catalog":{"models":[],"disabledModelIds":[]}}),
+    );
+    let output = wait(child);
+    fs::remove_file(&server).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

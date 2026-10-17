@@ -7,7 +7,9 @@ use crate::{
     input::Input,
     mcp,
 };
-use dim_agent_types::{ApprovalCallData, ModelId};
+use dim_agent_types::{
+    ApprovalCallData, ModelCapabilities, ModelId, ModelReasoning, ModelServiceTier,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -30,6 +32,11 @@ struct History {
     through: u64,
     next_after: u64,
     done: bool,
+}
+
+#[derive(Deserialize)]
+struct Configured {
+    outcome: String,
 }
 
 #[derive(Deserialize)]
@@ -243,6 +250,23 @@ pub async fn chat(client: &mut Client, options: &Options) -> Result<i32> {
                     }
                     continue;
                 }
+                Some("/effort" | "/reasoning" | "/fast" | "/agent") => {
+                    let result = {
+                        let operation = configure(client, &session_id, &text, &mut display);
+                        tokio::pin!(operation);
+                        tokio::select! {
+                            result = &mut operation => result,
+                            _ = interrupts.recv() => {
+                                println!("\nWaiting for configuration result before accepting more input.");
+                                operation.await
+                            }
+                        }
+                    };
+                    if let Err(error) = result {
+                        display.record(&format!("Error: {error}"))?;
+                    }
+                    continue;
+                }
                 Some("/exit") => {
                     if text.trim() == "/exit" {
                         break;
@@ -332,6 +356,168 @@ pub async fn read_history(
             return Ok(after);
         }
     }
+}
+
+async fn configure(
+    client: &mut Client,
+    session_id: &str,
+    text: &str,
+    display: &mut Display,
+) -> Result<()> {
+    let words: Vec<_> = text.split_whitespace().collect();
+    let command = words[0];
+    if words.len() > 2 {
+        return Err(format!("Usage: {command} [VALUE]").into());
+    }
+    let value = words.get(1).copied();
+    if command == "/agent" {
+        if let Some(agent_id) = value {
+            let result: Configured = client
+                .typed(
+                    "session.agent.update",
+                    json!({"sessionId":session_id,"branchId":"main","agentId":agent_id}),
+                )
+                .await?;
+            display.record(&format!(
+                "Agent prompt/model configuration {}; Session tools unchanged.",
+                result.outcome
+            ))?;
+        } else {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Agent {
+                agent_id: String,
+                name: String,
+                description: String,
+            }
+            let agents: Vec<Agent> = client.typed("agent.list", json!({})).await?;
+            display.record("ID\tNAME\tDESCRIPTION")?;
+            for agent in agents {
+                display.record(&format!(
+                    "{}\t{}\t{}",
+                    agent.agent_id, agent.name, agent.description
+                ))?;
+            }
+            return Ok(());
+        }
+    } else {
+        display.cursor = read_history(client, session_id, display.cursor, |value| {
+            display.event(serde_json::from_value(value)?, true)
+        })
+        .await?;
+        display.failed = false;
+        let model = display
+            .model
+            .as_ref()
+            .ok_or("The adopted model is unavailable")?;
+        #[derive(Deserialize)]
+        struct Snapshot {
+            catalog: Option<Catalog>,
+        }
+        #[derive(Deserialize)]
+        struct Catalog {
+            models: Vec<CatalogModel>,
+        }
+        #[derive(Deserialize)]
+        struct CatalogModel {
+            id: String,
+            capabilities: ModelCapabilities,
+            metadata: Option<Preferences>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Preferences {
+            reasoning: Option<ModelReasoning>,
+            service_tier: Option<ModelServiceTier>,
+        }
+        let snapshot: Snapshot = client
+            .typed("provider.catalog", json!({"providerId":model.provider_id}))
+            .await?;
+        let catalog = snapshot
+            .catalog
+            .ok_or("Model preference catalog is unavailable")?;
+        let catalog_model = catalog
+            .models
+            .into_iter()
+            .find(|entry| entry.id == model.model_id)
+            .ok_or("The adopted model is absent from the catalog")?;
+        let metadata = catalog_model
+            .metadata
+            .ok_or("This model does not advertise preference choices")?;
+        let preference = if command == "/fast" {
+            metadata
+                .service_tier
+                .as_ref()
+                .filter(|tier| {
+                    tier.supported
+                        && ["priority", "default"]
+                            .iter()
+                            .all(|value| tier.options.iter().any(|option| option == value))
+                })
+                .ok_or("This model does not advertise priority/default service tiers")?;
+            match value {
+                Some("on") => Some(json!({"serviceTier":"priority"})),
+                Some("off") => Some(json!({"serviceTier":"default"})),
+                Some(_) => return Err("Usage: /fast [on|off]".into()),
+                None => {
+                    display.record("Service tier choices: on (priority), off (default)")?;
+                    None
+                }
+            }
+        } else {
+            let reasoning = metadata
+                .reasoning
+                .as_ref()
+                .filter(|reasoning| reasoning.supported && catalog_model.capabilities.reasoning)
+                .ok_or("This model does not advertise reasoning preferences")?;
+            let mut choices = reasoning.effort_options.clone().unwrap_or_default();
+            if reasoning.off.is_some() && !choices.iter().any(|choice| choice == "none") {
+                choices.push("none".into());
+            }
+            if let Some(value) = value {
+                if !choices.iter().any(|choice| choice == value) {
+                    return Err("Reasoning effort is not advertised by this model".into());
+                }
+                Some(json!({"reasoningEffort":value}))
+            } else {
+                display.record(&format!(
+                    "Reasoning effort choices: {}",
+                    if choices.is_empty() {
+                        "unavailable".into()
+                    } else {
+                        choices.join(", ")
+                    }
+                ))?;
+                None
+            }
+        };
+        if let Some(preference) = preference {
+            let result: Configured = client
+                .typed(
+                    "session.model.update",
+                    json!({"sessionId":session_id,"branchId":"main","modelPreferences":preference}),
+                )
+                .await?;
+            display.record(&format!(
+                "{} configuration {}: {}",
+                if command == "/fast" {
+                    "Service tier"
+                } else {
+                    "Reasoning effort"
+                },
+                result.outcome,
+                value.expect("preference value")
+            ))?;
+        } else {
+            return Ok(());
+        }
+    }
+    display.cursor = read_history(client, session_id, display.cursor, |value| {
+        display.event(serde_json::from_value(value)?, true)
+    })
+    .await?;
+    display.failed = false;
+    Ok(())
 }
 
 async fn wait_turn(
