@@ -1,7 +1,8 @@
 # CLI attachment input
 
-Status: proposed client interaction contract. The native CLI currently accepts one line per
-turn. The server interfaces are implemented: `attachment.put` (#102), image content blocks in
+Status: client implementation covers multiline/paste drafts, native clipboard/file insertion,
+completion, dropped paths and headless images. Platform acceptance is recorded below. The server interfaces are implemented:
+`attachment.put` (#102), image content blocks in
 `session.submit`, and ModelProvider's image handling (#92). This document defines the remaining
 CLI attachment work assigned in [roadmap #114](https://github.com/arcships/dim/issues/114).
 
@@ -9,8 +10,8 @@ The [Attachments client contract](plugins/Attachments.md#a3-cli-contract) and
 [feature list](../feature-list.md#input-references-and-attachments) define the required sources:
 clipboard images/files, `@` file selection, pasted/dropped paths, multiline and large text,
 mixed attachments, marker removal and headless images. All enter through existing public RPC.
-The [native CLI contract](../../crates/dim-cli/README.md) describes the executable; this proposal
-does not establish an implemented editor or clipboard binding.
+The [native CLI contract](../../crates/dim-cli/README.md) describes the executable. The current
+editor holds ordered text, paste, file-reference and image items.
 
 ## Ownership and entry points
 
@@ -58,7 +59,9 @@ The composer stays in terminal scrollback. It redraws its own input and suggesti
 keeps the cursor in the draft. Image pixels are not rendered in the terminal. Markers show
 escaped file names or paste line counts; labels are presentation, not model content.
 Suggestions show the current directory's matching entries; `Tab` enters a selected directory
-or inserts a selected file. Typing path components narrows the search from the displayed base.
+or inserts a selected file. Up/Down selects a suggestion; Esc leaves its text in the draft.
+Typing path components narrows the search from the displayed base. Suggestions list UTF-8 names;
+the selected source must be an ordinary file before it can be inserted.
 Selection never submits the draft. A missing or unreadable directory produces an inline error.
 
 Text wraps at the available width; long labels truncate for display without changing paths.
@@ -73,12 +76,14 @@ display, while the submitted text and file bytes retain their original values.
 | --- | --- |
 | Enter while idle | Validate and submit the complete draft, including an image-only draft. An empty draft does nothing. |
 | `Ctrl+J`, or supported `Shift+Enter` | Insert a newline. |
-| Arrows, Home/End, Backspace/Delete | Edit text; a marker is one indivisible item and is removed as a whole. |
+| Arrows, Home/End, Backspace/Delete | Edit text; Home/End use logical line boundaries. A marker is one indivisible item and is removed as a whole. |
 | `@` followed by a path query | Show local file suggestions at the cursor. Esc closes suggestions before acting on the draft. |
 | Terminal paste | Insert at the cursor as one paste action when the terminal reports its boundaries. Embedded newlines do not submit. |
 | `Ctrl+V` reaching the CLI | Read clipboard file entries, image data or text and insert them at the cursor. |
 | `Ctrl+C` with an idle nonempty draft | Clear the draft and release its local image data. With an empty draft, use the existing exit behavior. |
 | `Ctrl+C` during a running turn | Keep the existing stop and settlement flow. |
+| `Ctrl+C` twice during terminal paste | Cancel the unfinished paste and retain the preceding draft, including when its closing delimiter is missing. This consecutive pair is reserved; a single Ctrl+C byte is literal paste content. |
+| EOF key | Exit only with an empty draft; otherwise keep editing. Ctrl+Z is an EOF key only on Windows. |
 
 Enable bracketed paste only while the composer owns input, and restore terminal modes and
 paste settings when it yields or exits. The Unix input path must receive paste bytes before
@@ -118,6 +123,18 @@ refer to the machine running the CLI. SSH does not confer access to the user's o
 When the terminal intercepts `Ctrl+V`, its ordinary paste event follows the terminal-paste path.
 If the OS clipboard component is unavailable, show that error and keep the draft. OSC 52 text
 copying does not provide an image/file clipboard-read channel.
+
+macOS uses AppKit's pasteboard; Windows uses Win32 clipboard formats. Linux uses `wl-paste`
+when `WAYLAND_DISPLAY` is set and otherwise `xclip` with the CLIPBOARD selection. These Linux
+utilities must be installed on the CLI's machine; they are not bundled or installed automatically.
+All are read only after Ctrl+V. No shell evaluates pasted paths or clipboard data. The Linux
+reader is the editor's owned, cancellable subprocess; Ctrl+C clears the draft and releases it.
+On Linux, editing remains available during the read, and the result inserts at the current
+cursor. Enter while that read is pending asks the user to wait without submitting input.
+macOS and Windows clipboard reads, pixel decoding and PNG encoding run synchronously;
+input editing and cancellation resume when the read returns. A Linux `text/uri-list`
+containing no `file:` URI falls through to image/text selection. A file list mixing local
+files with other URIs is rejected atomically.
 
 Read and validate image files at insertion so an accepted item retains the captured bytes even
 if the original changes later. Clipboard pixel data is encoded once as PNG, after checking its
@@ -189,8 +206,14 @@ error reply is not proof of rejection: v3 can commit the input and then return
 Session-handle diagnostic and exit behavior for these errors instead of offering a new send.
 Connection loss can also leave a put or submission outcome unknown and uses that same exit
 behavior. No automatic retry, lookup-based recovery or persistent local recovery store is added.
-Only a proven pre-commit rejection is safely resubmittable; an RPC error code alone does not
-establish that guarantee. Draft retention does not promise recovery after process exit.
+Only a proven pre-commit rejection is safely resubmittable. For v3 `session.submit`,
+`error.data.appError` values `invalid_params`, `session_invalid_input`, `session_closed`,
+`session_build_failed`, `service_reloading` and `unknown_method` are the server's explicit
+[pre-commit guarantee](../../crates/dim-app-server/README.md#session-submission-errors).
+They retain their ordinary error diagnostics; every other error, including `submission_unknown`
+and opaque publication/storage failures, retains the uncertain-outcome exit without resending.
+This does not promise that an unchanged rejected request will succeed or add automatic retry.
+Draft retention does not promise recovery after process exit.
 
 Recognized CLI commands run only from a plain single-line draft. Commands are not obtained by
 expanding paste or attachment markers. A recognized command with attached items reports a usage
@@ -215,15 +238,17 @@ $ printf '%s\n' 'Describe the screenshot' | dimcode exec --image screenshot.png
 
 ## Impact and verification
 
-Implement multiline and large paste handling first: bracketed paste, atomic markers,
-submit-time `attachment.put`, draft retention and headless `--image`. The encoded-request guard
-in #153 applies at the shared client boundary. Add the nonempty-draft `Ctrl+C` clear behavior
-to the CLI README and help with this implementation.
+Multiline and large pastes use bracketed boundaries, atomic markers, submit-time
+`attachment.put` and draft retention. Headless images use `--image`. The encoded-request guard
+in #153 applies at the shared client boundary. Nonempty-draft Ctrl+C clears the draft.
 
-Native clipboard images/files, `@` completion and dropped-path imports follow separately.
-Their implementation PR identifies any clipboard dependency and its license and records
-native calibration on each supported platform. Completion of the first step does not imply
-these insertion sources are available.
+Native clipboard images/files, `@` completion and dropped paths enter the same draft.
+Platform acceptance records native calibration and dependencies. No clipboard wrapper library is required:
+`objc2` and the Foundation/AppKit bindings (MIT) bind macOS, and the existing `windows-sys`
+dependency (MIT OR Apache-2.0) binds Windows. Linux invokes the installed system component.
+The existing image codec enables TIFF for macOS pixel data and BMP for Windows DIB data only;
+submitted image formats remain PNG, JPEG, WebP and GIF. The existing `url` crate parses local
+file URLs. Neither encoded clipboard images nor selected image files are re-encoded.
 
 | Area | Required client work |
 | --- | --- |
@@ -248,9 +273,34 @@ without disconnect: the CLI reports uncertainty and exits without sending a seco
 All homes and images are disposable. Native clipboard calibration
 uses an isolated desktop session with fixture clipboard contents.
 
-This document changes no executable; product tests have not been run for the proposed editor.
-Implementation starts after design acceptance. No App Server, core, protocol, assembly, persisted
-format or capability change is required. No mechanism requirement is raised.
+Headless image flows cover supported formats, byte/order preservation, boundaries, local path
+resolution, combined encoded frames and uncertain error replies without resubmission. The
+existing actual CLI/App Server model flow checks the image in the model HTTP request and stored
+history after resume. The paste flows cover literal CRLF, Unicode grapheme editing, atomic
+removal, command rejection before storage, UTF-8 and size limits, put rejection, interruption
+and drain, confirmed-path reuse and local encoded-frame rejection. The actual App Server/model
+flow stores a paste and reads its exact file through the real read tool.
+
+Native tmux calibration on macOS covers wrapped/multiline input, bracketed paste and viewport
+changes at 80x24, 40x10 and 15x6. The renderer accounts for previously painted lines reflowing
+when terminal width changes. Unix input owns a separately opened descriptor for the inherited
+terminal, so nonblocking reads cannot change stdout's status flags. The CLI flow also verifies
+complete model output while a terminal reader pauses. Windows input uses virtual-terminal mode with the existing console
+record reader. Its ConPTY flow exercises Unicode/grapheme editing, arrow/delete input,
+bracketed paste boundaries and raw Ctrl+C clearing through the real console. It reuses the
+workspace's portable-pty version as a Windows-only development dependency. Native clipboard checks
+use a unique AppKit pasteboard and a private Windows window station.
+The Windows boundary flow runs on the disposable Windows CI job; its execution must pass before
+claiming that platform's clipboard acceptance. Linux runtime acceptance with actual `xclip`
+and `wl-paste` remains pending a recorded manual run in isolated Xvfb/X11 and headless
+Sway/Wayland sessions, including date, commit and utility versions. The required cases are
+PNG, file lists, exact text, rejected/oversized input and unavailable data. Linux binary flows
+using a fixture `wl-paste` cover URI selection, raw-key cancellation, reader reaping and source
+failure without losing the draft; they do not establish native desktop acceptance. The
+production App Server/model/history flow also submits selected images and a file reference
+outside the Session workspace, then reads that file through the real tool. Wayland and Windows
+runtime results must be reported separately from compilation. No App Server, core, protocol, assembly, persisted format or
+capability change is required. No mechanism requirement is raised.
 
 ## Rule check and ablation
 
@@ -272,3 +322,6 @@ bytes without canonical-buffer truncation. Item data is necessary for ordered su
 atomic marker removal. A confirmed paste path is the actual result of a completed put, not a
 second upload registry. Temporary files, a client attachment store, preview RPC, upload manager,
 command registry, image-conversion service and new cancellation protocol are unnecessary.
+The editor keeps only the pending clipboard I/O future, so its existing raw-key loop can cancel
+the read; it starts no reader task or manager. Completion entries carry their path, label and
+directory flag from the filesystem listing rather than re-reading presentation fields.

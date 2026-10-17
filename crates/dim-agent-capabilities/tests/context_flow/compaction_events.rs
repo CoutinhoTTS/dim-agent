@@ -42,8 +42,9 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             .create_session(SessionConfig::default())
             .await
             .unwrap();
-        // Past the threshold from the first turn on, only the third turn
-        // has a turn to compact; the last two are kept.
+        // Past the threshold from the first turn on: the first has nothing
+        // to compact but its own input; the second compacts the first even
+        // though the retained turns hold no cut (#169).
         let original = "x".repeat(1_500);
         for input in [&original, "next", "third"] {
             session
@@ -61,7 +62,6 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             })
             .collect();
         assert!(matches!(compactions.as_slice(), [
-                ContextCompactionResult::Skipped { .. },
                 ContextCompactionResult::Skipped { .. },
                 ContextCompactionResult::Completed { replacement, .. },
             ] if *replacement == [dim_agent_capabilities::history::summary_message("short")]));

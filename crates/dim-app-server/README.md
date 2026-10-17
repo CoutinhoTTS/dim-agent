@@ -33,6 +33,23 @@ these public capabilities. Protocol v3 advertises their management methods on lo
 Configured model changes validate against the supplied catalog and adopt that model's generation
 settings; model preferences requiring capability declarations are rejected rather than guessed.
 
+### Session submission errors
+
+For protocol v3 `session.submit`, `error.data.appError` values `invalid_params`,
+`session_invalid_input`, `session_closed`, `session_build_failed`,
+`service_reloading` and `unknown_method` guarantee that this request did not
+commit an input. They identify parameter/admission, Session acquisition or
+pre-commit input rejection; the server must not return this set after accepting
+the input. This guarantee is specific to `session.submit`, not a retry policy
+for other methods or an assertion that a rejected request will succeed unchanged.
+
+After commit, failure to confirm publication remains uncertain even on a live
+connection: `submission_unknown`, an opaque `-32603` publication/storage error,
+and every error outside the guaranteed set do not prove rejection. Transport
+loss is uncertain too. Clients retain the Session handle and must not blindly
+resubmit. The native CLI exits with its uncertain-outcome guidance; this does
+not add automatic retry or recovery. See the [CLI submission contract](../../docs/design/cli-attachment-input.md#submission-rejection-and-cancellation).
+
 ### Business settings
 
 SettingsService reads and updates generic `BusinessDocument` values with per-source
@@ -193,7 +210,7 @@ The requesting connection hands only its final-response writer to the existing p
 
 ## Optional managed provider
 
-The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.10.0:
+The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.11.0:
 
 ```sh
 dim-app-server --product-home /absolute/product-home \
@@ -221,7 +238,7 @@ The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
 The host checks compatibility and confines the canonical entry path to the plugin directory. Release staging verifies download and file digests before loading or packaging code. An explicitly configured invalid or incompatible plugin fails startup. Without plugin configuration, no Node process starts.
 
-The ESM entry is a `definePlugin` export from `@arcships/rutis` 0.10.0. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
+The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.11.0 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'

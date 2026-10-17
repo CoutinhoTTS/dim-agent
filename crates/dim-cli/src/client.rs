@@ -41,6 +41,15 @@ pub struct RpcError {
     pub message: String,
     pub data: Option<Value>,
 }
+
+#[derive(Debug)]
+pub struct RequestTooLarge;
+impl std::fmt::Display for RequestTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("App Server request exceeds 16 MiB after JSON encoding")
+    }
+}
+impl std::error::Error for RequestTooLarge {}
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} (RPC {}", self.message, self.code)?;
@@ -169,7 +178,7 @@ impl Client {
             &json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params}),
         )?;
         if bytes.len() > FRAME_LIMIT {
-            return Err("App Server request exceeds 16 MiB after JSON encoding".into());
+            return Err(RequestTooLarge.into());
         }
         bytes.push(b'\n');
         self.write.write_all(&bytes).await?;
@@ -239,6 +248,10 @@ impl Client {
 
     pub async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.send(method, params).await?;
+        self.response(id).await
+    }
+
+    pub async fn response(&mut self, id: u64) -> Result<Value> {
         loop {
             match self.receive().await? {
                 Message::Response {

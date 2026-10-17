@@ -141,7 +141,6 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 | `checkpoint` | 上一次的 `{retain_from, replacement, context_baseline}`（由 `cursor` 与 `summary` 改来） |
 | `request`、`model` | 被压缩上下文所属的请求，及其 `ContextModel` 窗口事实（新） |
 | `retain_limit` | 最后 K 轮中最老那一轮第一个事件的 id；策略的 `retain_from` 必须在它或它之前（新；§5.3） |
-| `fallback` | 预算恢复时为 `true`：`retain_limit` 或之前没有合法的 `retain_from` 时，允许更晚的合法位置（新） |
 | `trigger` | `Threshold`、`ProviderOutputBudgetExhausted` 或 `Manual`（新） |
 | 各估算值、`provider_budget` | 现有 |
 
@@ -314,7 +313,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 `compact(input, cancel)`：
 
-1. **切点。** `retain_from` 是 `input.retain_limit` 或之前最晚的合法事件边界，通常就是 `retain_limit` 本身。有 `input.fallback` 而这样的边界不存在时，取最晚的合法边界。仍然没有，或它之前什么都没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。
+1. **切点。** `retain_from` 是 `input.retain_limit` 或之前最晚的合法事件边界，通常就是 `retain_limit` 本身。这样的边界不存在时（单个很长的轮次），取最晚的、仍保留内容的合法边界；预算恢复（`provider_budget`）时也可以取替换全部的边界（#169）。仍然没有，或它之前什么都没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。
 2. **摘要。** 对上一份替换内容（取自 `input.checkpoint`）加上由 `retain_from` 之前的事件放置的条目做摘要。
 3. **结果。** 返回 `Completed {retain_from, replacement: [summary_message(summary)], strategy: "summary", diagnostics}`。现有的 `summary_message` 包装会把文本标为数据并转义；它只在这里施加一次，随记录保存。
 
@@ -325,18 +324,19 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - **输出。** 丢弃 thinking 输出。工具停止或空文本算失败。
 - **记录文本。** 按角色标注的文本：工具调用写名称和输入，工具结果写文本，图片写 `[image]`。
 - **分块。** 一次调用的输入预算为 `context_window − output_tokens`，用 `count_tokens` 对整个摘要请求（系统提示、携带的摘要、外层格式和本块）计数，与其他所有请求的计数方式相同，不另设按字符计的规则。更长的记录分块折叠：每次调用拿到当前摘要和能放下的条目。单条放不下的，按字节在 UTF-8 字符边界上从中间截断，截断标记计入预算，并计入 `compactedToolPayloadCount`。
+- **被截断的回复。** 停在 `max_tokens` 的回复（思考可能用掉大部分额度）不算摘要。该块在最接近中间的条目分隔处（或字符边界）一分为二，逐半折叠；小于 2 KiB 仍被截断时压缩失败，任何记录都不会保留被截断的文本（#169）。每一半都携带前一半的摘要，所以调用前会再次按预算检查它的整个请求；不再放得下的一半继续一分为二，文本全部保留；携带的摘要与包装在没有任何转录内容时也放不下，则压缩失败，不发送该请求。
 - **诊断。** 摘要对象（`kind: "summary"`、`summaryChars`、`estimatedSummaryTokens`、`chunkCount`、`compactedToolPayloadCount`、`droppedMessageCount`）；公共部分由 ContextPolicy 填写。
 
 ### 5.3 一条压缩路径（ContextPolicy）
 
 `compact_step` 就是把 `ContextPolicy::prepare` 中现有的压缩部分抽出来：
 
-1. **保留界限。** `retain_limit` 是分支上最后 K 轮中最老那一轮的 `turn/start` 的 id（暂定 K = 2，#128），含正在进行的那一轮。不足 K 轮时没有可以在其之前压缩的界限，只有 `fallback` 允许切点。
+1. **保留界限。** `retain_limit` 是分支上最后 K 轮中最老那一轮的 `turn/start` 的 id（暂定 K = 2，#128），含正在进行的那一轮。不足 K 轮时没有可以在其之前压缩的界限，按 `CompactionInput::cut` 的退回规则取切点。
 2. **开始。** 追加 `context/compaction-start`，带调用方的 id、`command`、`through`、`trigger` 和 `strategy.name()`。
-3. **策略。** 调用 `strategy.compact`，传入 `retain_limit`、`fallback`（恢复时）和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`。
+3. **策略。** 调用 `strategy.compact`，传入 `retain_limit`、合法切点 `cuts` 和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`。
 4. **验收。** 对任何策略都检查：
    - `retain_from` 是固定上下文中的一个事件，并通过基于事件的合法性规则（§4.3）；
-   - `retain_from` 在 `retain_limit` 或之前，除非适用 `fallback`；
+   - `retain_from` 在 `retain_limit` 或之前；没有这样的合法切点时，它要保留内容，只有预算恢复时才能替换全部；
    - 投影后的请求比之前小，且低于窗口。
 
    任何一项不通过，结果变为 `failed`。
@@ -447,7 +447,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 | 情况 | Timeline 事实 | Loop 接下来做什么 | 客户端看到什么 |
 | --- | --- | --- | --- |
-| 策略错误或验收失败，turn 内的手动压缩 | 开始，然后是 `context/compaction {start, failed}` | 不压缩，继续该 turn（`next_model`）。下一个请求超过窗口时，由现有的预算恢复强制压缩（`fallback` 切点）；这次也失败的话，请求和 turn 失败 | 运行中，然后是 `failed`；回复 `compaction_failed` |
+| 策略错误或验收失败，turn 内的手动压缩 | 开始，然后是 `context/compaction {start, failed}` | 不压缩，继续该 turn（`next_model`）。下一个请求超过窗口时，由现有的预算恢复强制压缩（退回切点）；这次也失败的话，请求和 turn 失败 | 运行中，然后是 `failed`；回复 `compaction_failed` |
 | 同上，turn 外的手动压缩 | 开始，然后是 `failed` | 不再做别的（有输入在等时调用 `try_start`） | 运行中，然后是 `failed`；回复 `compaction_failed` |
 | 同上，自动压缩 | 开始，然后是 `failed` | 不变：请求不压缩继续；在恢复中则请求失败 | 运行中，然后是 `failed` |
 | 手动，无法构造请求（没有配置或快照） | 不带 `start` 的 `failed` | 同上 | 待处理，然后是 `failed` |
@@ -607,7 +607,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 项 | 实现 |
 | --- | --- |
 | 开始事实的触发值 | `trigger` 使用现有的 `CompactionTrigger`：`manual`、`threshold`、`provider_output_budget_exhausted`（§4.3 原写 `recovery`；§4.2 与验收 2 已用后者）。 |
-| 合法切点 | `CompactionInput` 另带 `cuts`：按顺序列出每个合法切点（`retain_from`、第一个保留条目、是否在 `retain_limit` 之内），由 ContextPolicy 按基于事件的有效性规则算出。候选为轮次开始、放置条目的事件，以及边界的最后一个事件（替换全部）。`CompactionInput::cut()` 返回限制内最晚的切点，在 `fallback` 下返回最晚的切点。策略可以返回任意 `retain_from`，策略层仍会校验。 |
+| 合法切点 | `CompactionInput` 另带 `cuts`：按顺序列出每个合法切点（`retain_from`、第一个保留条目、是否在 `retain_limit` 之内），由 ContextPolicy 按基于事件的有效性规则算出。候选为轮次开始、放置条目的事件，以及边界的最后一个事件（替换全部）。`CompactionInput::cut()` 返回限制内最晚的切点；限制内没有时，返回最晚的、仍保留内容的切点（预算恢复时可以是任意切点）。策略可以返回任意 `retain_from`，策略层仍会校验。 |
 | 采纳 | `compact_step` 在追加事实前校验策略结果，再采纳 Timeline 中间件处理后的已提交事实：投影、缩减检查和快照都使用已提交的 `retain_from`、`replacement` 与基线。已提交的切点无法投影时，本次准备失败，与此前已提交游标的行为一致。 |
 | 诊断 | 策略找不到切点（`skipped`）时省略 `retainFrom`；没有替换任何内容时省略 `estimatedOutputTokens`。 |
 | v1 | 生产代码中没有 v1 到原生的转换：冻结样本只按 v1 事件解码；`v1::EventRef` 对 `context/compact`、`context/compaction-start` 和变更后的 `context/compaction` 没有形式，因此 v1 连接不再收到压缩事实。旧的扁平诊断类型移入 v1 模块。 |
@@ -617,3 +617,4 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 原生存储示例 | [native-storage-format](../../../design/appserver/native-storage-format.md) 中的记录示例改用新记录和 v3 解释器。 |
 | 摘要预算 | 评审修正：分块与截断用窗口事实的 `count_tokens` 对整个摘要请求计数，对照 `context_window − output_tokens`（§5.2），以 CJK 为主的历史不再超出窗口；`product_summary.rs` 检查每个摘要请求。 |
 | 验收 | 验收 1、3、6（崩溃与重启）和 8 在二进制流程测试 `transport_flow/compaction.rs` 中运行。验收 2、4、5 以及 6 中的重载、中断和失败情形在 `dim-agent-capabilities/tests/context_flow`（`manual_compaction.rs` 和既有压缩测试）中运行。事实与快照之间的崩溃由 `compaction_events.rs` 的快照失败测试覆盖。 |
+| 死区与被截断的摘要 | #169：保留规则的退回不再依赖预算恢复，单个很长的轮次会在最晚的、仍保留内容的切点压缩；只有恢复时才能替换全部。`CompactionInput` 去掉了 `fallback`。停在 `max_tokens` 的摘要回复会对半重试，到最小块仍截断就失败，不再被保留。 |

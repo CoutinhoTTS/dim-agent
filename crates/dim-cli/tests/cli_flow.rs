@@ -298,6 +298,291 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "你好世界\n");
 }
 
+fn image_fixture(format: image::ImageFormat, width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(width, height)
+        .write_to(&mut bytes, format)
+        .unwrap();
+    bytes.into_inner()
+}
+
+#[test]
+fn exec_images_preserve_format_bytes_order_and_invoking_directory() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    for source in [
+        "images",
+        "prompt",
+        "empty",
+        "stdin",
+        "whitespace",
+        "whitespace_prompt",
+        "symlink",
+        "twenty",
+        "terminal",
+    ] {
+        let home = Home::new();
+        let workspace = home.0.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let mut images = Vec::new();
+        let mut paths = Vec::new();
+        for (index, (format, media_type)) in [
+            (image::ImageFormat::Png, "image/png"),
+            (image::ImageFormat::Jpeg, "image/jpeg"),
+            (image::ImageFormat::WebP, "image/webp"),
+            (image::ImageFormat::Gif, "image/gif"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = image_fixture(format, 1, if index == 0 { 8000 } else { 1 });
+            let path = format!("image {index}.txt");
+            fs::write(home.0.join(&path), &bytes).unwrap();
+            images.push(json!({"type":"image","source":{"type":"base64","mediaType":media_type,"data":STANDARD.encode(bytes)}}));
+            paths.push(path);
+        }
+        if source == "symlink" {
+            let link = home.0.join("linked.png");
+            std::os::unix::fs::symlink(home.0.join(&paths[0]), &link).unwrap();
+            paths[0] = link.to_str().unwrap().into();
+        }
+        if source == "twenty" {
+            images = images.iter().cycle().take(20).cloned().collect();
+            paths = paths.iter().cycle().take(20).cloned().collect();
+        }
+        let text = match source {
+            "prompt" => Some("compare /exit literally"),
+            "empty" => Some(""),
+            "stdin" => Some("stdin\r\nwith trailing newline\n"),
+            "whitespace" | "whitespace_prompt" => Some(" \t\n"),
+            _ => None,
+        };
+        let mut expected = Vec::new();
+        if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+            expected.push(json!({"type":"text","text":text}));
+        }
+        expected.extend(images);
+        let daemon = home.daemon(move |wire| {
+            wire.start(source == "prompt");
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["user"]["content"], json!(expected));
+            assert!(submit["params"].get("text").is_none());
+            assert_eq!(submit["params"]["mode"], "queue");
+            uuid::Uuid::parse_str(submit["params"]["submissionId"].as_str().unwrap()).unwrap();
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":30}));
+            wire.detach();
+        });
+        let mut command = home.command();
+        command
+            .current_dir(&home.0)
+            .args(["--cwd", workspace.to_str().unwrap(), "exec"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if source == "prompt" {
+            command.args(["resume", "session", "--json"]);
+        }
+        if matches!(source, "prompt" | "empty" | "whitespace_prompt") {
+            command.args(["-p", text.unwrap()]);
+        }
+        if matches!(source, "stdin" | "whitespace") {
+            command.stdin(Stdio::piped());
+        }
+        for path in paths {
+            command.arg("--image").arg(path);
+        }
+        let output = if source == "terminal" {
+            let (_terminal, child) = Terminal::launch(command);
+            wait(child)
+        } else {
+            let mut child = command.spawn().unwrap();
+            if matches!(source, "stdin" | "whitespace") {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(text.unwrap().as_bytes())
+                    .unwrap();
+            }
+            wait(child)
+        };
+        daemon.join().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn invalid_exec_images_fail_before_connecting_or_creating_home() {
+    let home = Home::new();
+    fs::remove_dir_all(home.0.join("rust")).unwrap();
+    let png = image_fixture(image::ImageFormat::Png, 1, 1);
+    let mut bad_crc = png.clone();
+    bad_crc[29] ^= 1;
+    let mut oversized = png.clone();
+    oversized.resize(5 * 1024 * 1024 + 1, 0);
+    let mut zero = image_fixture(image::ImageFormat::Gif, 1, 1);
+    zero[6..8].fill(0);
+    for (name, bytes, reason) in [
+        ("text", b"not an image".to_vec(), "PNG, JPEG, WebP or GIF"),
+        ("truncated", png[..8].to_vec(), "Invalid or truncated"),
+        (
+            "png_header_only",
+            png[..33].to_vec(),
+            "Invalid or truncated",
+        ),
+        ("jpeg", b"\xff\xd8\xff".to_vec(), "Invalid or truncated"),
+        ("gif", b"GIF89a".to_vec(), "Invalid or truncated"),
+        ("webp", b"RIFF\0\0\0\0WEBP".to_vec(), "Invalid or truncated"),
+        ("zero", zero, "dimensions"),
+        ("crc", bad_crc, "Invalid or truncated"),
+        (
+            "wide",
+            image_fixture(image::ImageFormat::Png, 8001, 1),
+            "8000",
+        ),
+        (
+            "tall",
+            image_fixture(image::ImageFormat::Gif, 1, 8001),
+            "8000",
+        ),
+        (
+            "jpeg_wide",
+            image_fixture(image::ImageFormat::Jpeg, 8001, 1),
+            "8000",
+        ),
+        (
+            "webp_tall",
+            image_fixture(image::ImageFormat::WebP, 1, 8001),
+            "8000",
+        ),
+        ("large", oversized, "5 MiB"),
+    ] {
+        let file = home.0.join(name);
+        fs::write(&file, bytes).unwrap();
+        let output = home
+            .command()
+            .arg("exec")
+            .arg("--image")
+            .arg(file)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(reason),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!home.0.join("rust").exists());
+    }
+    let fifo = home.0.join("fifo");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    for args in [
+        vec!["--image", "missing.png"],
+        vec!["tui", "--image", "missing.png"],
+        vec!["exec", "--image"],
+        vec!["exec", "--image", "missing.png"],
+        vec!["exec", "--image", "http://127.0.0.1:9/missing.png"],
+        vec!["exec", "--image", home.0.to_str().unwrap()],
+        vec!["exec", "--image", fifo.to_str().unwrap()],
+        std::iter::once("exec")
+            .chain(["--image", "missing.png"].repeat(21))
+            .collect(),
+    ] {
+        let output = home
+            .command()
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!home.0.join("rust").exists());
+    }
+}
+
+#[test]
+fn exec_images_check_the_combined_encoded_frame_before_sending() {
+    for size in [5 * 1024 * 1024, 4 * 1024 * 1024 - 3] {
+        let home = Home::new();
+        let early = size > 4 * 1024 * 1024;
+        let mut png = image_fixture(image::ImageFormat::Png, 1, 1);
+        png.resize(size, 0);
+        let image = home.0.join("large.png");
+        fs::write(&image, png).unwrap();
+        let daemon = if early {
+            fs::remove_dir_all(home.0.join("rust")).unwrap();
+            None
+        } else {
+            Some(home.daemon(|wire| {
+                wire.start(false);
+                wire.detach();
+            }))
+        };
+        let mut command = home.command();
+        command.arg("exec").stdin(Stdio::null());
+        for _ in 0..3 {
+            command.arg("--image").arg(&image);
+        }
+        let output = command.output().unwrap();
+        if let Some(daemon) = daemon {
+            daemon.join().unwrap();
+        } else {
+            assert!(!home.0.join("rust").exists());
+        }
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("16 MiB"));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn submit_errors_on_a_live_connection_exit_without_resending() {
+    for (app_error, uncertain) in [
+        (Some("submission_unknown"), true),
+        (Some("publication_failed"), true),
+        (None, true),
+        (Some("session_invalid_input"), false),
+        (Some("invalid_params"), false),
+    ] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.start(false);
+            let submit = wire.read("session.submit");
+            if uncertain {
+                wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"committed","sequence":9,"create_at":1,"type":"input","name":"message","data":{"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"once"}]},"mode":"queue"}}}));
+            }
+            wire.send(json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,"message":"Submission failed","data":app_error.map(|code| json!({"appError":code}))}}));
+            wire.detach();
+        });
+        let output = home
+            .command()
+            .args(["exec", "-p", "once"])
+            .output()
+            .unwrap();
+        daemon.join().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains("Submission failed"));
+        if uncertain {
+            assert!(diagnostic.contains("session: session"));
+            assert!(diagnostic.contains("input may already be queued"));
+            assert!(diagnostic.contains("instead of sending it again"));
+        } else {
+            assert!(!diagnostic.contains("input may already be queued"));
+            assert!(!diagnostic.contains("instead of sending it again"));
+        }
+    }
+}
+
 #[test]
 fn noninteractive_approval_denies_and_drains_outstanding_responses_before_detach() {
     let home = Home::new();
@@ -617,10 +902,16 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     let workspace = home.0.join("workspace");
     fs::create_dir_all(cli_dir.join("~")).unwrap();
     fs::create_dir(&workspace).unwrap();
-    let daemon = home.daemon(|wire| {
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.start(false);
-        for _ in 0..2 {
+        for index in 0..2 {
             let history = wire.read("session.history");
+            if index == 0 {
+                entered.send(()).unwrap();
+                wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
             wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         }
         let history = wire.read("session.history");
@@ -640,6 +931,12 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     terminal.until("Export format must be markdown or json");
     terminal.until("\n> ");
     terminal.write(b"/export json ~/Session notes.json\n");
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..2 {
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        terminal.until("Waiting for export result");
+    }
+    release.send(()).unwrap();
     terminal.until("Exported JSON: ~/Session notes.json");
     terminal.until("\n> ");
     terminal.write(b"/export json ~/Session notes.json\n");
@@ -798,6 +1095,10 @@ struct Terminal {
     consumed: usize,
 }
 impl Terminal {
+    fn editor(&mut self) {
+        self.until("\u{1b}[?2004h");
+        self.until("Ctrl+J: newline");
+    }
     fn launch(mut command: Command) -> (Self, Child) {
         let mut master = 0;
         let mut slave = 0;
@@ -814,6 +1115,12 @@ impl Terminal {
             0
         );
         let master = unsafe { fs::File::from_raw_fd(master) };
+        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0,
+        );
         let slave = unsafe { fs::File::from_raw_fd(slave) };
         command
             .stdin(slave.try_clone().unwrap())
@@ -850,14 +1157,786 @@ impl Terminal {
                 continue;
             }
             let mut bytes = [0u8; 4096];
-            let size = self.master.read(&mut bytes).unwrap();
-            assert!(size > 0, "Terminal closed before {expected}");
+            let size = match self.master.read(&mut bytes) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                result => result.unwrap(),
+            };
+            assert!(
+                size > 0,
+                "Terminal closed before {expected}: {}",
+                self.transcript
+            );
             self.transcript
                 .push_str(&String::from_utf8_lossy(&bytes[..size]));
         }
     }
     fn write(&mut self, bytes: &[u8]) {
-        self.master.write_all(bytes).unwrap();
+        // A terminal Enter sends CR; raw paste and Ctrl+J retain their own bytes.
+        self.raw(
+            &bytes
+                .iter()
+                .map(|&byte| if byte == b'\n' { b'\r' } else { byte })
+                .collect::<Vec<_>>(),
+        );
+    }
+    fn raw(&mut self, mut bytes: &[u8]) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !bytes.is_empty() {
+            assert!(Instant::now() < deadline, "Terminal did not accept input");
+            match self.master.write(bytes) {
+                Ok(0) => panic!("Terminal input closed"),
+                Ok(size) => bytes = &bytes[size..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut poll = libc::pollfd {
+                        fd: self.master.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    assert!(unsafe { libc::poll(&mut poll, 1, 100) } >= 0);
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+    fn paste(&mut self, text: &str) {
+        self.raw(b"\x1b[200~");
+        self.raw(text.as_bytes());
+        self.raw(b"\x1b[201~");
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_reader() {
+    let home = Home::new();
+    let bin = home.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let helper = bin.join("wl-paste");
+    fs::write(&helper, "#!/bin/sh\nif [ \"$1\" = \"--list-types\" ]; then\n  printf 'text/plain;charset=utf-8\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$$\" > \"$DIM_CLIPBOARD_TEST_PID\"\nexec /bin/sleep 300\n").unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let pid_file = home.0.join("reader.pid");
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for text in ["after cancel", "retained"] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .env("PATH", &bin)
+        .env("WAYLAND_DISPLAY", "fixture")
+        .env("DIM_CLIPBOARD_TEST_PID", &pid_file);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"kept\x16");
+    terminal.until("Reading clipboard");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "Clipboard reader was not started"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let pid = fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    terminal.write(b"\n");
+    terminal.until("Wait for clipboard insertion");
+    terminal.raw(b"\x03");
+    terminal.until("Ctrl+C: clear");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "Cancelled clipboard reader was not reaped"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    terminal.write(b"after cancel\n");
+    terminal.editor();
+    fs::remove_file(helper).unwrap();
+    terminal.write(b"retained\x16");
+    terminal.until("Cannot start wl-paste");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn clipboard_uri_lists_fall_back_to_text_and_reject_mixed_file_groups() {
+    let home = Home::new();
+    let bin = home.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let helper = bin.join("wl-paste");
+    fs::write(
+        &helper,
+        r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/uri-list\ntext/plain;charset=utf-8\n'
+elif [ "$3" = "text/uri-list" ]; then
+  /bin/cat "$DIM_CLIPBOARD_TEST_URIS"
+else
+  printf 'https://example.invalid/copied'
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let uris = home.0.join("uris");
+    fs::write(&uris, "# copied link\nhttps://example.invalid/copied\n").unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for text in ["https://example.invalid/copied", "kept"] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .env("PATH", &bin)
+        .env("WAYLAND_DISPLAY", "fixture")
+        .env("DIM_CLIPBOARD_TEST_URIS", &uris);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"\x16");
+    terminal.until("https://example.invalid/copied");
+    terminal.write(b"\n");
+    terminal.editor();
+    fs::write(
+        &uris,
+        "file:///tmp/copied\nhttps://example.invalid/copied\n",
+    )
+    .unwrap();
+    terminal.write(b"kept\x16");
+    terminal.until("Clipboard file URL is not local");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_file_sources_preserve_order_bytes_and_the_local_resume_base() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let local = home.0.join("local");
+    let invoking = home.0.join("invoking");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&invoking).unwrap();
+    let png = image_fixture(image::ImageFormat::Png, 1, 1);
+    let jpeg = image_fixture(image::ImageFormat::Jpeg, 1, 1);
+    let first = local.join("wrong.txt");
+    let second = local.join("other image.bin");
+    let note = local.join("space note.md");
+    fs::write(&first, &png).unwrap();
+    fs::write(&second, &jpeg).unwrap();
+    fs::write(&note, "P1 ordinary text reference contents stay local").unwrap();
+    let expected_note = note.canonicalize().unwrap();
+    let other = second.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(true);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["user"]["content"], json!([
+            {"type":"text","text":"Compare "},
+            {"type":"image","source":{"type":"base64","mediaType":"image/png","data":STANDARD.encode(png)}},
+            {"type":"text","text":expected_note.to_str().unwrap()},
+            {"type":"image","source":{"type":"base64","mediaType":"image/jpeg","data":STANDARD.encode(jpeg)}},
+            {"type":"text","text":" done"}
+        ]));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
+        for text in [expected_note.to_str().unwrap().to_owned(), "prefix wrong.txt suffix".into(), "https://example.invalid/image.png".into(), "file://remote/tmp/photo.png".into()] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
+        }
+        assert!(other.exists());
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .arg("--resume")
+        .arg("session")
+        .arg("--cwd")
+        .arg(&local)
+        .current_dir(&invoking);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"Compare ");
+    terminal.paste("'wrong.txt' space\\ note.md");
+    terminal.until("[File: space note.md]");
+    fs::write(&first, "changed after capture").unwrap();
+    terminal.paste(url::Url::from_file_path(&second).unwrap().as_str());
+    terminal.until("[Image 2: other image.bin]");
+    terminal.write(b" done\n");
+    terminal.editor();
+    fs::write(&note, "BM ordinary text is still a path reference").unwrap();
+    terminal.paste("space note.md");
+    terminal.until("[File: space note.md]");
+    terminal.write(b"\n");
+    terminal.editor();
+    for text in [
+        "prefix wrong.txt suffix",
+        "https://example.invalid/image.png",
+        "file://remote/tmp/photo.png",
+    ] {
+        terminal.paste(text);
+        terminal.write(b"\n");
+        terminal.editor();
+    }
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(terminal.transcript.contains("local files:"));
+    assert!(first.exists() && note.exists() && second.exists());
+}
+
+#[test]
+fn interactive_file_groups_reject_atomically_and_marker_removal_releases_capacity() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    fs::write(home.0.join("note.md"), "note").unwrap();
+    let broken = format!("broken-{}.png", "x".repeat(100));
+    fs::write(home.0.join(&broken), "not png").unwrap();
+    let png = image_fixture(image::ImageFormat::Png, 1, 1);
+    fs::write(home.0.join("one.png"), &png).unwrap();
+    let gif = image_fixture(image::ImageFormat::Gif, 1, 1);
+    fs::write(home.0.join("two.gif"), &gif).unwrap();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "kept");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 20);
+        for part in &content[..19] {
+            assert_eq!(part["source"]["data"], STANDARD.encode(&png));
+        }
+        assert_eq!(content[19]["source"]["mediaType"], "image/gif");
+        assert_eq!(content[19]["source"]["data"], STANDARD.encode(gif));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let mut command = home.command();
+    command.arg("--cwd").arg(&home.0);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"kept");
+    terminal.paste(&format!("note.md {broken}"));
+    terminal.until("PNG, JPEG, WebP or GIF");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.paste(&["one.png"; 20].join(" "));
+    terminal.until("[Image 20: one.png]");
+    terminal.paste("note.md two.gif");
+    terminal.until("at most 20 images");
+    terminal.raw(b"\x7f");
+    terminal.paste("two.gif");
+    terminal.until("[Image 20: two.gif]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(home.0.join("one.png").exists());
+    assert!(home.0.join("two.gif").exists());
+}
+
+#[test]
+fn interactive_file_completion_navigates_selects_and_dismisses_without_submitting() {
+    let home = Home::new();
+    let dir = home.0.join("docs a");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("a.md"), "a").unwrap();
+    fs::write(dir.join("b.md"), "b").unwrap();
+    let hostile = "bad\n\u{1b}[31m.txt";
+    fs::write(home.0.join(hostile), "safe").unwrap();
+    let expected = [
+        dir.join("b.md")
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        "literal @docs".into(),
+        "kept @missing/file".into(),
+        home.0
+            .join(hostile)
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        "delayed @docsfragmented\n/exit\n".into(),
+    ];
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        for text in expected {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let mut command = home.command();
+    command.arg("--cwd").arg(&home.0);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"@docs");
+    terminal.until("* docs a/");
+    terminal.raw(b"\t");
+    terminal.until("* a.md");
+    terminal.raw(b"\x1b[B");
+    terminal.until("* b.md");
+    terminal.raw(b"\t");
+    terminal.until("[File: b.md]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"literal @docs");
+    terminal.until("Esc: close suggestions");
+    terminal.raw(b"\x1b");
+    terminal.until("Enter: send");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"kept @missing/file");
+    terminal.until("No such file or directory");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"@bad");
+    terminal.until("bad\\n\\u{1b}[31m.txt");
+    terminal.raw(b"\t");
+    terminal.until("[File: bad\\n\\u{1b}[31m.txt]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"delayed @docs");
+    terminal.until("Esc: close suggestions");
+    terminal.raw(b"\x1b");
+    terminal.until("Enter: send");
+    terminal.raw(b"[200~fragmented\n/exit\n\x1b[201~");
+    terminal.until("[Paste 1: 2 lines]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("\u{1b}[31m"));
+}
+
+#[test]
+fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for expected in [
+            "one\ntwo",
+            "before start\r\n中\n/exit\nend\u{3}\n after",
+            "remove keep [Paste 1: 2 lines]",
+            "ABC",
+            "first\nZsecond",
+            "kept across EOF",
+            "shift\nenter\nworks",
+            "after malformed UTF-8",
+            "standalone\rCR\r",
+            "e\u{301}ok",
+            "resized draft",
+        ] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], expected);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.raw(b"one\ntwo");
+    terminal.until("two");
+    terminal.raw(b"\r");
+    terminal.until("\n> ");
+    terminal.until("Ctrl+C: clear");
+    terminal.raw(b"before ");
+    terminal.until("before ");
+    terminal.until("Ctrl+C: clear");
+    terminal.raw(b"\x1b[20");
+    terminal.raw("0~start\r\n中\n/exit\nend\u{3}\n\x1b[2".as_bytes());
+    terminal.raw(b"01~");
+    terminal.until("[Paste 1: 4 lines]");
+    terminal.raw(b" after\r");
+    terminal.until("\n> ");
+    terminal.raw("remove \x1b[200~discard\nme\x1b[201~\x7fe\u{301}👩‍💻🇨🇳\x1b[D\x7f\x1b[C\x7f\x7fkeep [Paste 1: 2 lines]\r".as_bytes());
+    terminal.until("\n> ");
+    terminal
+        .raw(b"A\x1b[200~x\n\x1b[201~B\x1b[200~y\n\x1b[201~C\x1b[H\x1b[C\x1b[3~\x1b[F\x1b[D\x7f\r");
+    terminal.until("\n> ");
+    terminal.raw(b"first\nsecond\x1b[H\x1b[A\x1b[BZ\x1b[F\r");
+    terminal.until("\n> ");
+    terminal.write(b"kept across EOF");
+    terminal.raw(b"\x04");
+    terminal.until("Draft retained; clear it before exiting");
+    terminal.raw(b"\x1a\r");
+    terminal.until("\n> ");
+    terminal.raw(b"shift\x1b[13;2uenter\x1b[27;2;13~works\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\xf0after malformed UTF-8\r");
+    terminal.until("\n> ");
+    terminal.paste("standalone\rCR\r");
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.raw(b"\r");
+    terminal.until("\n> ");
+    terminal.raw(
+        "e\u{301}\x1b[200~p\n\x1b[201~👩‍💻🇨🇳\x1b[D\x7f\x1b[D\x1b[3~\x1b[H\x1b[C\x1b[3~ok\r"
+            .as_bytes(),
+    );
+    terminal.until("\n> ");
+    let size = libc::winsize {
+        ws_row: 6,
+        ws_col: 15,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0
+    );
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGWINCH) }, 0);
+    terminal.raw(b"resized draft\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\x04");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(
+        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), &mut mode) },
+        0
+    );
+    assert_eq!(
+        mode.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG),
+        libc::ICANON | libc::ECHO | libc::ISIG,
+    );
+}
+
+#[test]
+fn interactive_output_survives_terminal_backpressure() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(12, "text", json!({"turn_id":"turn","request_id":"request","delta":format!("{}output complete", "x".repeat(512 * 1024))}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("Ctrl+J: newline");
+    terminal.write(b"continue\n");
+    // A slow terminal reader must not turn output backpressure into a CLI failure.
+    thread::sleep(Duration::from_millis(150));
+    terminal.until("output complete");
+    terminal.until("Ctrl+J: newline");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(terminal.transcript.contains(&"x".repeat(512 * 1024)));
+}
+
+#[test]
+fn interactive_commands_reject_attached_drafts_before_storing_or_executing() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "  !literaldo not execute\n");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    for prefix in [
+        "/exit ",
+        "/export markdown file ",
+        "!!echo ",
+        "/mcp login docs ",
+        "/effort high ",
+        "/reasoning low ",
+        "/fast on ",
+        "/agent profile ",
+    ] {
+        terminal.write(prefix.as_bytes());
+        terminal.paste(&"large text\n".repeat(2000));
+        terminal.until("[Paste 1: 2000 lines]");
+        terminal.write(b"\n");
+        terminal.until("Commands require plain single-line input");
+        terminal.raw(b"\x03");
+    }
+    terminal.write(b"  !literal");
+    terminal.paste("do not execute\n");
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_put_rejection_retains_confirmed_paths_without_uploading_again() {
+    let home = Home::new();
+    let first = "first\r\n".repeat(3000);
+    let second = "second\n".repeat(3000);
+    let expected = first.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let put = wire.read("attachment.put");
+        assert_eq!(put["params"]["text"], expected);
+        wire.reply(&put, json!({"attachmentId":"first","path":"/files/first.txt","bytes":expected.len()}));
+        let put = wire.read("attachment.put");
+        assert_eq!(put["params"]["text"], second);
+        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32000,"message":"storage failed","data":{"appError":"storage_failed"}}}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "[Pasted text: /files/first.txt (3000 lines)]");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
+        let put = wire.read("attachment.put");
+        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32601,"message":"unknown_method","data":{"appError":"unknown_method"}}}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "clean draft");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.paste(&first);
+    terminal.until("[Paste 1: 3000 lines]");
+    terminal.paste(&"second\n".repeat(3000));
+    terminal.until("[Paste 2: 3000 lines]");
+    terminal.write(b"\n");
+    terminal.until("Paste 2: storage failed");
+    terminal.raw(b"\x7f\r");
+    terminal.until("\n> ");
+    terminal.paste(&first);
+    terminal.until("[Paste 1: 3000 lines]");
+    terminal.write(b"\n");
+    terminal.until("unknown_method");
+    terminal.raw(b"\x03");
+    terminal.write(b"clean draft\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_cancellation_drains_the_put_and_reuses_its_confirmed_path() {
+    let home = Home::new();
+    let text = "cancelled upload\r\n".repeat(1100);
+    let (accepted, admitted) = std::sync::mpsc::channel();
+    let (release, drain) = std::sync::mpsc::channel();
+    let expected = text.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let put = wire.read("attachment.put");
+        assert_eq!(put["params"]["text"], expected);
+        accepted.send(()).unwrap();
+        drain.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.reply(
+            &put,
+            json!({"attachmentId":"drained","path":"/files/drained.txt","bytes":expected.len()}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            "[Pasted text: /files/drained.txt (1100 lines)]"
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.paste(&text);
+    terminal.until("[Paste 1: 1100 lines]");
+    terminal.write(b"\n");
+    admitted.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for the text attachment to settle");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Still waiting for the text attachment to settle");
+    release.send(()).unwrap();
+    terminal.until("Preparation cancelled");
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_encoding_rejection_keeps_confirmed_items_editable() {
+    let home = Home::new();
+    let path = format!("/files/{}.txt", "\"".repeat(4 * 1024 * 1024));
+    let expected = path.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        for _ in 0..2 {
+            let put = wire.read("attachment.put");
+            assert_eq!(put["params"]["text"], "x".repeat(16 * 1024 + 1));
+            // Large but valid wire strings force the final encoded frame over its limit.
+            wire.reply(
+                &put,
+                json!({"attachmentId":"stored","path":expected,"bytes":16*1024+1}),
+            );
+        }
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            format!("[Pasted text: {expected} (1 lines)]")
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    for index in [1, 2] {
+        terminal.paste(&"x".repeat(16 * 1024 + 1));
+        terminal.until(&format!("[Paste {index}: 1 lines]"));
+    }
+    terminal.write(b"\n");
+    terminal.until("exceeds 16 MiB after JSON encoding");
+    terminal.raw(b"\x7f\r");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_boundaries_reject_without_losing_the_existing_draft() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            format!("kept{}", "\0".repeat(16 * 1024))
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        let put = wire.read("attachment.put");
+        let text = put["params"]["text"].as_str().unwrap();
+        assert_eq!(text.len(), 10 * 1024 * 1024);
+        assert!(text.bytes().all(|byte| byte == b'x'));
+        wire.reply(
+            &put,
+            json!({"attachmentId":"maximum","path":"/files/max.txt","bytes":text.len()}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            "[Pasted text: /files/max.txt (1 lines)]"
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "after");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"kept");
+    terminal.raw(b"\x1b[200~unfinished\x03");
+    terminal.raw(b"\x03");
+    terminal.until("Paste cancelled; draft retained");
+    terminal.raw(b"\x1b[200~\xff\x1b[201~");
+    terminal.until("Paste must be UTF-8");
+    terminal.paste(&"x".repeat(10 * 1024 * 1024 + 1));
+    terminal.until("Paste exceeds 10 MiB");
+    terminal.paste(&"\0".repeat(16 * 1024));
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.paste(&"x".repeat(10 * 1024 * 1024));
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.paste(&"\0".repeat(3 * 1024 * 1024));
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.write(b"\n");
+    terminal.until("exceeds 16 MiB after JSON encoding");
+    terminal.raw(b"\x7f");
+    terminal.write(b"after\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains('\0'));
+    assert!(terminal.transcript.contains("\\0"));
+}
+
+#[test]
+fn interactive_put_uncertainty_exits_without_another_put_or_submission() {
+    for disconnect in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.start(false);
+            let put = wire.read("attachment.put");
+            if !disconnect {
+                wire.reply(
+                    &put,
+                    json!({"path":123,"attachmentId":"stored","bytes":20000}),
+                );
+                wire.detach();
+            }
+        });
+        let (mut terminal, child) = Terminal::launch(home.command());
+        terminal.until("\n> ");
+        terminal.paste(&"x".repeat(20000));
+        terminal.until("[Paste 1: 1 lines]");
+        terminal.write(b"\n");
+        terminal.until(if disconnect {
+            "App Server connection closed"
+        } else {
+            "Attachment outcome could not be confirmed"
+        });
+        assert_eq!(wait(child).status.code(), Some(1));
+        daemon.join().unwrap();
     }
 }
 
@@ -941,7 +2020,7 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
     assert!(terminal.transcript.contains("(output truncated)"));
     assert_eq!(terminal.transcript.matches("[shell recorded]").count(), 1);
     assert!(!terminal.transcript.contains("opaque-private"));
-    assert!(!terminal.transcript.contains('\u{1b}'));
+    assert!(!terminal.transcript.contains("\x1b[31m"));
     assert!(!terminal.transcript.contains('\u{202e}'));
 }
 
@@ -1031,7 +2110,7 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
             .transcript
             .contains("late progress must be ignored")
     );
-    assert!(!terminal.transcript.contains('\u{1b}'));
+    assert!(!terminal.transcript.contains("\x1b[31m"));
     assert!(!terminal.transcript.contains('\u{202e}'));
 }
 
@@ -1194,6 +2273,8 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.until("\n> ");
     terminal.write(b"/reasoning high\n");
     wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for configuration result");
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     terminal.until("Waiting for configuration result");
     release.send(()).unwrap();
@@ -1601,16 +2682,31 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn configured_api_key_model_uses_production_tools_and_restores_the_same_session() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let binary = std::env::var("DIM_TEST_APP_SERVER")
         .expect("Set DIM_TEST_APP_SERVER to the dim-app-server binary");
     let home = Home::new();
     let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let image = home.0.join("screenshot.dat");
+    let bytes = image_fixture(image::ImageFormat::Png, 1, 1);
+    fs::write(&image, &bytes).unwrap();
+    let image_data = STANDARD.encode(bytes);
+    let model_image = image_data.clone();
+    let outside = Home::new();
+    let reference = outside.0.join("outside reference.txt");
+    fs::write(&reference, "outside-attachment-marker\n").unwrap();
+    let model_reference = reference.clone();
+    let paste = format!(
+        "native-paste-reader-marker\r\n{}",
+        "中 e\u{301} text\r\n".repeat(2000)
+    );
+    let model_paste = paste.clone();
     fs::write(home.0.join("marker.txt"), "production-read-marker\n").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let model = thread::spawn(move || {
-        for phase in 0..3 {
+        for phase in 0..7 {
             let deadline = Instant::now() + Duration::from_secs(15);
             let stream = loop {
                 match listener.accept() {
@@ -1650,6 +2746,22 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             let mut bytes = vec![0; length];
             stream.read_exact(&mut bytes).unwrap();
             let request: Value = serde_json::from_slice(&bytes).unwrap();
+            if phase == 2 {
+                let user = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|message| message["role"] == "user")
+                    .unwrap();
+                assert_eq!(
+                    user["content"],
+                    json!([
+                        {"type":"text","text":"continue"},
+                        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}}
+                    ])
+                );
+            }
             let mut names: Vec<_> = request["tools"]
                 .as_array()
                 .unwrap()
@@ -1675,6 +2787,57 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     json!({"tool_calls":[{"index":0,"id":"read-call","type":"function","function":{"name":"read","arguments":"{\"path\":\"marker.txt\"}"}}]}),
                     Value::Null,
                 ) + &frame(json!({}), json!("tool_calls"))
+            } else if phase == 3 {
+                let user = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|message| message["role"] == "user")
+                    .unwrap();
+                let text = match &user["content"] {
+                    Value::String(text) => text.as_str(),
+                    Value::Array(parts) => {
+                        assert_eq!(parts.len(), 1);
+                        assert_eq!(parts[0]["type"], "text");
+                        parts[0]["text"].as_str().unwrap()
+                    }
+                    other => panic!("Unexpected user content: {other}"),
+                };
+                let path = text
+                    .strip_prefix("[Pasted text: ")
+                    .unwrap()
+                    .split_once(" (")
+                    .unwrap()
+                    .0;
+                assert_eq!(fs::read(path).unwrap(), model_paste.as_bytes());
+                frame(
+                    json!({"tool_calls":[{"index":0,"id":"paste-read","type":"function","function":{"name":"read","arguments":serde_json::to_string(&json!({"path":path})).unwrap()}}]}),
+                    Value::Null,
+                ) + &frame(json!({}), json!("tool_calls"))
+            } else if phase == 5 {
+                let user = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|message| message["role"] == "user")
+                    .unwrap();
+                let parts = user["content"].as_array().unwrap();
+                assert_eq!(parts[0], json!({"type":"text","text":"selected "}));
+                assert_eq!(
+                    parts[1],
+                    json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}})
+                );
+                assert!(
+                    user["content"]
+                        .to_string()
+                        .contains(model_reference.to_str().unwrap())
+                );
+                frame(
+                    json!({"tool_calls":[{"index":0,"id":"selected-read","type":"function","function":{"name":"read","arguments":serde_json::to_string(&json!({"path":model_reference})).unwrap()}}]}),
+                    Value::Null,
+                ) + &frame(json!({}), json!("tool_calls"))
             } else {
                 if phase == 1 {
                     assert!(
@@ -1686,14 +2849,37 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                         ),
                         "The real read result did not reach the model"
                     );
-                } else {
+                } else if phase == 2 {
                     let messages = request["messages"].to_string();
                     assert!(messages.contains("dim-shell-input"));
                     assert!(messages.contains("cli-recorded-marker"));
                     assert!(!messages.contains("cli-private-marker"));
+                } else if phase == 4 {
+                    assert!(
+                        request["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|message| {
+                                message["role"] == "tool"
+                                    && message["content"].as_str().is_some_and(|text| {
+                                        text.contains("native-paste-reader-marker")
+                                    })
+                            }),
+                        "The stored paste did not reach the model through read"
+                    );
+                } else {
+                    assert!(
+                        request["messages"].as_array().unwrap().iter().any(
+                            |message| message["role"] == "tool"
+                                && message["content"]
+                                    .as_str()
+                                    .is_some_and(|text| text.contains("outside-attachment-marker"))
+                        )
+                    );
                 }
                 frame(
-                    json!({"content":if phase == 1 {"read completed"} else {"session continued"}}),
+                    json!({"content":match phase {1 => "read completed", 2 => "session continued", 4 => "paste read completed", _ => "files read completed"}}),
                     json!("stop"),
                 )
             } + "data: [DONE]\n\n";
@@ -1749,6 +2935,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     ]);
     let (mut terminal, child) = Terminal::launch(interactive);
     terminal.until("\n> ");
+    terminal.until("Ctrl+J: newline");
     terminal.write(b"!printf cli-recorded-marker\n");
     terminal.until("[shell recorded] sequence:");
     terminal.until("\n> ");
@@ -1771,6 +2958,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             session,
             "--prompt",
             "continue",
+            "--image",
+            image.to_str().unwrap(),
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1784,6 +2973,35 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         String::from_utf8(output.stdout).unwrap(),
         "session continued\n"
     );
+    let mut interactive = home.command();
+    interactive.args([
+        "--server",
+        &binary,
+        "--model-config",
+        config.to_str().unwrap(),
+        "--cwd",
+        home.0.to_str().unwrap(),
+        "--resume",
+        session,
+    ]);
+    let (mut terminal, child) = Terminal::launch(interactive);
+    terminal.until("\n> ");
+    terminal.until("Ctrl+J: newline");
+    terminal.paste(&paste);
+    terminal.until("[Paste 1: 2001 lines]");
+    terminal.write(b"\n");
+    terminal.until("paste read completed");
+    terminal.editor();
+    terminal.write(b"selected ");
+    terminal.paste(image.to_str().unwrap());
+    terminal.until("[Image 1: screenshot.dat]");
+    terminal.paste(url::Url::from_file_path(&reference).unwrap().as_str());
+    terminal.until("[File: outside reference.txt]");
+    terminal.write(b"\n");
+    terminal.until("files read completed");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
     let exported = home
         .command()
         .args([
@@ -1807,6 +3025,28 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     let conversation: Value = serde_json::from_slice(&exported.stdout).unwrap();
     assert_eq!(conversation["sessionId"], session);
     assert_eq!(conversation["branchId"], "main");
+    assert!(conversation["events"].as_array().unwrap().iter().any(|event| {
+        event["type"] == "input" && event["name"] == "message"
+            && event["data"]["user"]["content"] == json!([
+                {"type":"text","text":"continue"},
+                {"type":"image","source":{"type":"base64","mediaType":"image/png","data":image_data}}
+            ])
+    }));
+    assert!(
+        conversation["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["user"]["content"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| {
+                            text.starts_with("[Pasted text: ") && text.ends_with(" (2001 lines)]")
+                        })
+            })
+    );
     assert_eq!(
         conversation["events"]
             .as_array()
@@ -1821,6 +3061,11 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         1
     );
     assert!(!conversation.to_string().contains("cli-private-marker"));
+    assert!(conversation["events"].as_array().unwrap().iter().any(|event| event["type"] == "input" && event["name"] == "message" && event["data"]["user"]["content"] == json!([
+        {"type":"text","text":"selected "},
+        {"type":"image","source":{"type":"base64","mediaType":"image/png","data":image_data}},
+        {"type":"text","text":reference.to_str().unwrap()}
+    ])));
     assert!(
         conversation["events"]
             .as_array()

@@ -440,9 +440,6 @@ pub struct CompactionInput {
     /// Every legal cut, in order; a strategy returns one of their
     /// `retain_from`.
     pub cuts: Vec<CompactionCut>,
-    /// Budget recovery: a cut after `retain_limit` is allowed when none lies
-    /// at or before it.
-    pub fallback: bool,
     pub trigger: CompactionTrigger,
     pub estimated_input_tokens: f64,
     pub baseline_source: BaselineSource,
@@ -459,14 +456,26 @@ pub struct CompactionCut {
     pub within_limit: bool,
 }
 impl CompactionInput {
-    /// The latest cut within the retention limit or, under recovery, the
-    /// latest cut when none is within it.
+    /// The latest cut within the retention limit or, when none is within it
+    /// (a single long turn), the latest cut that keeps something, so the
+    /// branch compacts instead of skipping until overflow. Only budget
+    /// recovery may replace everything, the latest input included.
     pub fn cut(&self) -> Option<&CompactionCut> {
         self.cuts
             .iter()
             .rev()
             .find(|cut| cut.within_limit)
-            .or_else(|| self.cuts.last().filter(|_| self.fallback))
+            .or_else(|| {
+                self.cuts
+                    .iter()
+                    .rev()
+                    .find(|cut| self.may_fall_back_to(cut))
+            })
+    }
+    /// Whether a cut outside the retention limit is allowed when none is
+    /// within it.
+    pub fn may_fall_back_to(&self, cut: &CompactionCut) -> bool {
+        self.provider_budget.is_some() || cut.entry < self.history.len()
     }
 }
 #[derive(Debug, Clone)]

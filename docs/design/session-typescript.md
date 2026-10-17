@@ -1,8 +1,9 @@
 # Session TypeScript parts
 
 Status: tool/method bindings implemented for [C4 #63](https://github.com/arcships/dim/issues/63).
-Native broadcast choices require owner alignment; broadcast implementation and full C4 acceptance
-remain pending. The [spike](session-typescript-spike.md)
+Native Session broadcast uses the rutis 0.11 leaf-event route tracked by
+[#168](https://github.com/arcships/dim/issues/168); its binding review, implementation and full
+C4 acceptance remain pending. The [spike](session-typescript-spike.md)
 establishes transport feasibility; its private service names and combined fixture are not this API.
 
 ## Scope and ownership
@@ -40,8 +41,9 @@ runtime is shared across the rows and Sessions. Its runtime name differs from an
 no private account manifest or account service is required by this entry.
 
 Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `inject` and `isolate`
-semantics. The only C4 row metadata is `provides`, with **exactly the existing
-`rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel tool/namespace list:
+semantics. The C4 row metadata is `provides`, with **exactly the existing
+`rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel tool/namespace list,
+and, only for a package that owns Settings sources, `settings` (below):
 
 ```json
 {
@@ -58,6 +60,12 @@ semantics. The only C4 row metadata is `provides`, with **exactly the existing
 The empty configuration above means this particular part has no structural options. Business
 settings belong to the owning plugin's Settings source, not to this object.
 
+A package that owns Settings sources declares them in a second structural member, `settings`, an
+array of the entries defined in [settings-service §3.1](appserver/settings-service.md#31-source-declaration).
+The host passes them to Settings with the row id as owner and does not hand `settings` to the
+loader. A source is process state, so it belongs to one row: a second row declaring the same
+source fails assembly, as two packages would. Rows without `settings` are unchanged.
+
 `toolContribution:<tool>` and `sessionMethods:<namespace>` encode the existing neutral service
 identity and key as one bridge service name. The colon separates the family from the complete
 key; the namespace keeps its dots. The catalog registers each full name as a shared service in
@@ -65,11 +73,12 @@ key; the namespace keeps its dots. The catalog registers each full name as a sha
 existing `AgentBuilder::session_tool` / `session_methods` during assembly. Authors do not make
 these Rust calls and do not separately maintain arrays of tool names and namespaces.
 
-This is structural input, not a new package manifest or persistence format. No filename, package
-schema, version field, content discovery or integrity scheme is introduced. A package may import
-one JSON declaration into its TypeScript `provides` and give that same declaration to the host;
-the two sides must not be separately hand-maintained. A future PluginManager can produce these
-rows from its package boundary. Its proposed schema 2 is not assumed to be available, and the
+`provides` and `settings` are structural input, not a new package manifest or persistence format.
+No filename, package schema, version field, content discovery or integrity scheme is introduced.
+A package may import one JSON declaration into its TypeScript `provides` and give that same
+declaration to the host; the two sides must not be separately hand-maintained. Its `settings`
+entries are likewise one JSON file the package ships and the host is given; the TypeScript code
+does not repeat them. A future PluginManager can produce these rows from its package boundary. Its proposed schema 2 is not assumed to be available, and the
 private managed-provider schema 1 is not accepted here.
 
 The static declaration is necessary because `RuntimeResolver` can describe a module only after
@@ -224,76 +233,43 @@ Session publication.
 
 ## Native Session broadcast
 
-Use rutis' existing node `Events` / Cordis `Link` path. Do not invoke a `notice` service to
-deliver broadcasts. Subscriptions are registered during row apply. Business consumption must
-wait for the existing `SessionLifecycle::activated()`, not merely the row becoming Active:
-row publication and Session publication are different. A subscriber does not delay Session
-publication. It does not replay missed events; the owning service's query supplies current state
-when its feature requires it. Order is the existing channel's order, not a total order between
-parallel branches; each event retains its branch sequence.
+The selected transport is rutis 0.11 leaf events, as required by
+[#168](https://github.com/arcships/dim/issues/168). The existing shared
+`LocalRuntime` declares a fixed event name with `emits`; the host uses
+`Process::emit`, and TypeScript leaf parts subscribe with `ctx.on`.
+This route needs no per-row link, peer identity, token or configuration replacement.
+The dependency upgrade makes these APIs available; the C4 binding is not implemented.
 
-Session broadcast owns the single serialization of its public record at the language boundary:
-an event carries `{branchId, event}` with the existing `AgentEvent` serde value, and the Session
-end is distinct from an event. Host `Fence` records stay observation machinery and are not
-business data. C4 does not define C6's `{source, kind, data}` notice or put UI notices into
-Timeline. C6 can extend its own record and reuse this binding; final notice/Rpc forwarding
-semantics remain [C6 #49/#85](https://github.com/arcships/dim/issues/49).
+The short binding contract must settle these owner-level details before implementation:
 
-The native `EventsPlugin` consumes `NodeEvent` JSON arguments, whereas the current broadcaster
-emits non-serializable `SessionBroadcastEvent`. A codec alone does not connect these two keys.
-The broadcast owner must define the sole neutral payload encoding; the native event projection
-must then consume it without making the broadcaster hard-depend on optional TypeScript transport.
-Neither a second emit nor saying both types use rutis proves that ownership/dispatch contract.
-This design does not select an App Server listener plugin or a forwarding service as that bridge.
-The exact owner-level native projection remains to be settled before broadcast implementation.
-The branch Dispatcher must not wait for Node I/O. No delivery registry, durable cursor,
-acknowledgment protocol or retry loop is added.
+| Boundary | Required behavior |
+| --- | --- |
+| Event name and data | One fixed name; payload `{sessionId, branchId, event}`. `event` is the existing `AgentEvent` serialization, without filtering or conversion. |
+| Session isolation | All rows share the runtime process's event bus. The binding checks `sessionId` before invoking that row's business listener; this is routing for trusted plugins, not a security sandbox. |
+| One delivery | Emit each native Session record once into the shared process. Several rows of one Session must not each re-emit the same record to every row. The projection's existing owner and lifetime must be explicit. |
+| Activation | Register during apply; business delivery waits for the existing `SessionLifecycle::activated()`, not row Active. Eligibility is checked when the native listener runs: a captured pre-activation emission whose callback runs after activation may be delivered. No replay for emissions without a registered listener. |
+| Order | Preserve native channel order and each event's branch sequence; no total order between parallel branches. The branch Dispatcher must not wait for Node I/O. |
+| Unload | End subscriptions with their original generation, settle accepted delivery and reject stale callbacks. No work is rebound to a replacement row. |
 
-### Transport choice requiring review
+Native `SessionBroadcastEvent` remains the source. Host `Fence` records are
+observation machinery and never business data. Its `Closed` record is distinct
+from an `AgentEvent`; its neutral end representation and the single Session-owned
+projection still require binding review. The event payload above does not silently
+encode closure as a fabricated Timeline event. C6 retains ownership of its
+`{source, kind, data}` notices and Rpc forwarding contract
+([C6 #49/#85](https://github.com/arcships/dim/issues/49)).
 
-The shared raw row runtime starts with `Mount::default()`: its event emission whitelist is fixed
-at startup, and it does not offer `events.forward`. A direct `Process::emit` or an `EventsPlugin`
-aimed at that endpoint cannot subscribe to a Session channel allocated later. This is a limit
-of that composition, not a missing rutis event feature or a request to change rutis.
-
-The measured existing route mounts a full native peer in the same Node process for each foreign
-row, binds that peer's `Events` input to only `session/<this Session id>`, and owns the Rust peer
-and event effects with the original row. Native delivery, dynamic names, independent unload and
-continued delivery to another row are proven. A retained remote object must reject calls after
-the part's effect begins unloading; a stale handle is not evidence of a live generation.
-
-This route is a **candidate requiring review**, with these costs and implementation conditions:
-
-- An additional loopback transport listener/link and a Node I/O worker per foreign row, in
-  addition to the shared raw runtime channel. No RSS, maximum Session count or throughput claim
-  follows from the measured transport success.
-- Connection settings, peer identities and channel names must be derived by assembly from the
-  Session instance, passed as structural runtime data, and cleaned up by that same row. They
-  cannot be user-maintained Session-id lists or a mutable central subscription manager.
-- Establish the native link and event subscription as part of that row's apply before publishing
-  its services; dispose subscriptions and settle the row's work on unload. Its real required
-  dependencies retain their normal audit and reload behavior.
-- The exact structural handoff to the native Cordis row and public end-record encoding must be
-  agreed with the broadcast owner before implementation. They are not inferred from the spike's
-  `notice` DTO, fixed fixture tokens or private `c4*` services.
-- The same-row factory can declare and obtain the existing scoped `SessionLifecycle` in native
-  apply, and row-owned delivery work can await `activated()`. Its actual native projection and
-  cancellation path must be demonstrated before claiming TS event consumption satisfies that
-  lifecycle. The small `definePlugin` context currently offers no named lifecycle binding.
-
-The tool and method bindings above do not depend on selecting a new event transport. C4's full
-acceptance does depend on native broadcast, so it cannot be reported complete while this choice
-or C6 integration requirements remain unresolved. No speculative core/transport capability is
-proposed as a workaround.
-
-The separate [native broadcast proposal (#156)](https://github.com/arcships/dim/pull/156)
-is unapproved and unimplemented; it does not change the accepted constraints above.
+The tool and method bindings do not depend on broadcast. Full C4 acceptance
+requires its actual isolation, activation, order and unload flows. No delivery
+registry, durable cursor, acknowledgment protocol, retry loop or core lifecycle
+API is added by the dependency upgrade.
 
 ## Lifetime and failure
 
 Loader owns generations and rows. Session closure stops branches before unloading Session
 parts. Each TS part immediately registers its acquired resources with its own `effect`, stops
 new work on disposal, releases I/O, settles accepted work and rejects retained service objects.
+A retained remote object must reject calls after the part's effect begins unloading.
 The native C1 effect drains while the Node part is still alive. Tool cancellation follows its
 existing turn owner and the original row's context cancellation; no work transfers to another
 generation.
@@ -302,7 +278,7 @@ The tool/method subset permits synchronous service/effect registration in TS app
 work driven by accepted calls after Session publication. It does not yet expose a neutral
 Session activation service for arbitrary autonomous TS background tasks. Such tasks must not be
 started from TS apply on the assumption that row Active means Session published. Native broadcast
-delivery's activation path is one of the explicit remaining contracts above; no new startup phase
+delivery's activation path remains part of the binding review above; no new startup phase
 or API is proposed to hide this distinction.
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).

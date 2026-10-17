@@ -203,7 +203,6 @@ ContextPreparation reports when it loads.
 | `checkpoint` | The previous `{retain_from, replacement, context_baseline}` (changed from `cursor` and `summary`) |
 | `request`, `model` | The request whose context is compacted, and its `ContextModel` window facts (new) |
 | `retain_limit` | Event id of the first event of the oldest of the last K turns; the strategy's `retain_from` must be at or before it (new; §5.3) |
-| `fallback` | `true` under budget recovery: a later legal `retain_from` is allowed when none lies at or before `retain_limit` (new) |
 | `trigger` | `Threshold`, `ProviderOutputBudgetExhausted` or `Manual` (new) |
 | estimates, `provider_budget` | Existing |
 
@@ -431,8 +430,9 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 `compact(input, cancel)`:
 
 1. **Cut.** `retain_from` is the latest valid event boundary at or before `input.retain_limit`,
-   normally `retain_limit` itself. With `input.fallback`, if none exists, it is the latest valid
-   boundary. If there is still none, or nothing lies before it: `Skipped {reason:
+   normally `retain_limit` itself. If none exists (a single long turn), it is the latest valid
+   boundary that keeps something; under budget recovery (`provider_budget`) it may also be the
+   boundary that replaces everything (#169). If there is still none, or nothing lies before it: `Skipped {reason:
    "nothing_to_compact"}`, with no model call.
 2. **Summary.** It summarizes the previous replacement (from `input.checkpoint`) plus the entries
    placed by events before `retain_from`.
@@ -457,6 +457,13 @@ How the summary is produced:
   longer transcript is folded in chunks: each call gets the running summary and as many entries
   as fit. An entry that does not fit alone is truncated in the middle by bytes on UTF-8 character
   boundaries, with the marker inside the budget, and counted in `compactedToolPayloadCount`.
+- **Cut-off replies.** A reply that stops at `max_tokens` (thinking can use most of the
+  allowance) is not a summary. Its chunk is halved at the entry separator nearest the middle (or
+  at a character boundary) and folded half by half; a chunk still cut off below 2 KiB fails the
+  compaction, so no record keeps a cut-off text (#169). Each half carries the summary of the one
+  before it, so its whole request is checked against the budget again before the call; a half
+  that no longer fits is halved too, keeping all of its text, and when the carried summary and
+  envelope do not fit without any transcript the compaction fails without sending the request.
 - **Diagnostics.** The summary object (`kind: "summary"`, `summaryChars`,
   `estimatedSummaryTokens`, `chunkCount`, `compactedToolPayloadCount`, `droppedMessageCount`);
   ContextPolicy fills the common part.
@@ -467,16 +474,18 @@ How the summary is produced:
 
 1. **Retention limit.** `retain_limit` is the id of the `turn/start` of the oldest of the last K
    turns on the branch (provisional K = 2, #128), the running turn included. If fewer than K
-   turns exist, there is no limit before which to compact, and only `fallback` allows a cut.
+   turns exist, there is no limit before which to compact, and the fallback cut of
+   `CompactionInput::cut` applies.
 2. **Start.** It appends `context/compaction-start` with the caller's ids, `command`,
    `through`, `trigger` and `strategy.name()`.
-3. **Strategy.** It calls `strategy.compact` with `retain_limit`, `fallback` (under recovery)
-   and `trigger`. If it is cancelled before the strategy returns, it appends the `cancelled`
+3. **Strategy.** It calls `strategy.compact` with `retain_limit`, the legal `cuts` and
+   `trigger`. If it is cancelled before the strategy returns, it appends the `cancelled`
    result for the start and returns `Cancelled`.
 4. **Validation.** For any strategy, it checks that:
    - `retain_from` is an event of the fixed context and passes the event-based validity rule
      (§4.3);
-   - `retain_from` is at or before `retain_limit`, unless `fallback` applies;
+   - `retain_from` is at or before `retain_limit`; or, when no legal cut is, it keeps
+     something, or replaces everything only under budget recovery;
    - the projected request is smaller than before and below the window.
 
    A failed check turns the outcome into `failed`.
@@ -623,7 +632,7 @@ time:
 
 | Case | Timeline facts | What the Loop does next | What the client sees |
 | --- | --- | --- | --- |
-| Strategy error or validation failure, manual inside a turn | start, then `context/compaction {start, failed}` | Continues the turn uncompacted (`next_model`). If the next request exceeds the window, the existing budget recovery forces a compaction (`fallback` cut); if that also fails, the request and the turn fail | Running, then `failed`; reply `compaction_failed` |
+| Strategy error or validation failure, manual inside a turn | start, then `context/compaction {start, failed}` | Continues the turn uncompacted (`next_model`). If the next request exceeds the window, the existing budget recovery forces a compaction (fallback cut); if that also fails, the request and the turn fail | Running, then `failed`; reply `compaction_failed` |
 | Same, manual outside a turn | start, then `failed` | Nothing more (`try_start` if an input is waiting) | Running, then `failed`; reply `compaction_failed` |
 | Same, automatic | start, then `failed` | Unchanged: the request continues uncompacted; under recovery the request fails | Running, then `failed` |
 | Manual, no request can be built (no configuration or snapshot) | `failed` without `start` | As above | Pending, then `failed` |
@@ -839,7 +848,7 @@ fix, the smallest choice was made and is recorded here.
 | Item | Implementation |
 | --- | --- |
 | Start trigger values | `trigger` uses the existing `CompactionTrigger`: `manual`, `threshold`, `provider_output_budget_exhausted` (§4.3 said `recovery`; §4.2 and acceptance 2 already used the latter). |
-| Legal cuts | `CompactionInput` also carries `cuts`: every legal cut in order (`retain_from`, the first kept entry, and whether it is within `retain_limit`), computed by ContextPolicy from the event-based validity rule. Candidates are turn starts, events that place entries, and the boundary's last event (which replaces everything). `CompactionInput::cut()` returns the latest cut within the limit or, under `fallback`, the latest cut. A strategy may return any `retain_from`; the policy still validates it. |
+| Legal cuts | `CompactionInput` also carries `cuts`: every legal cut in order (`retain_from`, the first kept entry, and whether it is within `retain_limit`), computed by ContextPolicy from the event-based validity rule. Candidates are turn starts, events that place entries, and the boundary's last event (which replaces everything). `CompactionInput::cut()` returns the latest cut within the limit or, when none is, the latest cut that keeps something (any cut under budget recovery). A strategy may return any `retain_from`; the policy still validates it. |
 | Adoption | `compact_step` validates the strategy's result before it appends the fact, then adopts the committed fact as Timeline middleware left it: the projection, the reduction check and the snapshot use the committed `retain_from`, `replacement` and baseline. A committed cut that cannot be projected fails the preparation, as a committed cursor did before. |
 | Diagnostics | `retainFrom` is absent when the strategy found no cut (`skipped`), and `estimatedOutputTokens` is absent when nothing was replaced. |
 | v1 | There is no v1-to-native conversion in production code: the frozen samples decode as v1 events only, and `v1::EventRef` has no form for `context/compact`, `context/compaction-start` or the changed `context/compaction`, so v1 connections no longer receive compaction facts. The old flat diagnostics type moved into the v1 module. |
@@ -849,3 +858,4 @@ fix, the smallest choice was made and is recorded here.
 | Native storage example | The record example in [native-storage-format](../appserver/native-storage-format.md) uses the changed record and the v3 interpreter. |
 | Summarizer budget | Review fix: chunk packing and truncation count the whole summarizer request with the window facts' `count_tokens` against `context_window − output_tokens` (§5.2), so CJK-heavy history no longer exceeds the window; `product_summary.rs` checks every summarizer request. |
 | Acceptance | Acceptance 1, 3, 6 (crash and restart) and 8 run in the binary flow test `transport_flow/compaction.rs`. Acceptance 2, 4, 5 and the reload, interrupt and failure cases of 6 run in `dim-agent-capabilities/tests/context_flow` (`manual_compaction.rs` and the existing compaction tests). The crash between fact and snapshot is covered by the snapshot-failure test in `compaction_events.rs`. |
+| Dead zone and cut-off summaries | #169: the retention fallback no longer depends on budget recovery, so a single long turn compacts at its latest cut that keeps something; only recovery may replace everything. `fallback` is removed from `CompactionInput`. A summarizer reply stopped at `max_tokens` is retried in halves and fails at the smallest chunk instead of being kept. |

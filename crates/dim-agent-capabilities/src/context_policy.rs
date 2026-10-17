@@ -276,7 +276,6 @@ impl ContextPolicy {
         let started = Instant::now();
         let retain_limit = retain_limit(&view.context);
         let cuts = legal_cuts(&view.context, &view.history, retain_limit.as_deref());
-        let fallback = step.provider_budget.is_some();
         let name = self.strategy.name().to_owned();
         let start = self
             .timeline
@@ -302,7 +301,6 @@ impl ContextPolicy {
                     model: model.clone(),
                     retain_limit: retain_limit.clone(),
                     cuts: cuts.clone(),
-                    fallback,
                     trigger: step.trigger,
                     estimated_input_tokens: estimate.input,
                     baseline_source: estimate.source,
@@ -356,7 +354,10 @@ impl ContextPolicy {
                         }
                     })
                     .and_then(|cut| {
-                        if cut.within_limit || (fallback && !within) {
+                        let recovery = step.provider_budget.is_some();
+                        if cut.within_limit
+                            || (!within && (recovery || cut.entry < view.history.len()))
+                        {
                             Ok(cut)
                         } else {
                             Err("Compaction cut lies inside the retained turns.")

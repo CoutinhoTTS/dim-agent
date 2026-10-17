@@ -14,6 +14,108 @@ history. Approval is denied, the turn is stopped and settled, and exec exits 3.
 Ctrl+C waits for settlement and exits 130. Further interrupts while settling
 keep waiting; they do not carry over to the next interactive prompt.
 
+`exec --image PATH` adds a local PNG, JPEG, WebP or GIF; repeat it for several
+images or omit text for an image-only request. Empty or whitespace-only text is
+omitted when images are present; other text is preserved exactly and comes first.
+Images retain argument order. Without `-p`, redirected stdin is read through EOF,
+including for image-only requests. Relative image paths use the invoking
+process's cwd, including with `--cwd` or `exec resume`; image URLs are not fetched.
+
+```text
+$ dimcode exec --image before.png --image after.png -p 'Compare these images'
+$ dimcode exec resume <session-id> --image screenshot.png --json > run.jsonl
+$ printf 'Describe this\n' | dimcode exec --image screenshot.png
+
+local files -> bounded read/header checks -> user.content -> session.submit
+```
+
+The CLI reads and checks all local images before connecting: at most 20 images,
+5 MiB of image-file bytes each, and 8000 pixels per side. Format comes from bytes,
+including when a filename has another extension. Invalid/truncated headers fail;
+pixels are not resized or rewritten. The `image` dependency enables only these
+four formats and reads dimensions without decoding pixels. Local symbolic links
+are followed, and file type is checked on the opened file. The combined base64
+size is checked before connecting; the final encoded request, including its JSON
+envelope and text, must still fit 16 MiB.
+
+An error reply to `session.submit` can follow an already queued input. The CLI
+reports uncertainty for publication failures and unclassified errors and exits
+without resending, even while the connection stays open. Known pre-commit input,
+Session, service and method rejections report their original error. Resume the
+printed Session handle to inspect an uncertain outcome.
+
+The idle prompt edits a multiline draft. Enter sends; Ctrl+J inserts a newline.
+Terminal bracketed paste inserts one group without submitting embedded newlines.
+Multiline pastes and pastes over 16 KiB appear as atomic markers:
+
+```text
+> Explain [Paste 1: 120 lines]
+  and compare with the current file.
+Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear
+Ctrl+C twice: cancel paste
+```
+
+Arrows move by grapheme or display row; Home/End select the logical line's ends.
+Backspace/Delete remove an entire marker. Ctrl+C clears a nonempty idle draft;
+with an empty draft it exits. An EOF key exits only when the draft is empty;
+otherwise the draft remains editable. Ctrl+Z is an EOF key only on Windows.
+If a paste never delivers its closing delimiter, press Ctrl+C twice to discard
+that paste while keeping the preceding draft. That consecutive pair is reserved
+inside bracketed paste; a single Ctrl+C byte remains literal paste content.
+Paste bytes are not newline-normalized. Line labels follow Rust str::lines():
+standalone CR is retained but is not a line separator.
+An external interrupt discards the current paste and clears the idle draft.
+Text wraps
+and scrolls with the terminal size, and draft control characters are escaped for
+display while the original text is retained. A terminal reporting zero geometry
+uses 80 columns and 24 rows for the missing dimensions.
+
+Pastes up to 16 KiB expand unchanged into input. Larger pastes, up to 10 MiB of
+UTF-8 each, call the existing attachment.put only on Enter. Confirmed paths are
+reused with the unchanged item after another put or local request encoding fails.
+Those errors keep the draft editable. Ctrl+C during a sent put waits for its
+reply, retains a confirmed path and sends no further put or model input.
+Connection loss or an uncertain submission reply exits without retrying.
+Recognized commands require plain single-line input; attached command drafts are
+retained before any put or execution.
+An ordinary single-line terminal paste is plain text, so a pasted command runs
+only after the user presses Enter. Text resembling a stored-paste reference is
+ordinary user text, not an authenticated attachment handle.
+
+Type `@` and a local path to see matching entries. Up/Down selects a suggestion;
+Tab enters a directory or inserts a file, and Esc closes suggestions without changing
+the draft. The displayed `local files` directory is the CLI's selected `--cwd`, including
+after resume. Paths outside that directory remain usable as explicit selections.
+
+```text
+local files: /work/project
+> Compare @docs/
+* guide.md
+  reference/
+Tab: select or enter directory   Esc: close suggestions
+
+> Compare [Image 1: screen.png] with [File: guide.md]
+Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear
+```
+
+A paste containing only existing file paths inserts files. Quotes, escaped spaces and
+local file URLs work; prose and HTTP links remain text. Supported image bytes produce
+image markers even with another filename extension. Other ordinary files produce path
+references, which the model can read with its existing tool. Image data is captured at
+insertion; removing a marker never deletes the original file. A rejected file group
+leaves the draft unchanged. File references retain separate ordered text content blocks.
+
+Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
+macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
+X11. Missing or failed clipboard access reports an inline error and retains the draft.
+The CLI reads only on that action and never changes the clipboard. A terminal that
+intercepts Ctrl+V uses its ordinary paste event instead. Linux reads remain pending while
+editing continues; Enter asks you to wait for insertion, and Ctrl+C clears the draft and
+cancels the reader. macOS and Windows read and convert clipboard data synchronously;
+editing and cancellation resume after that read returns.
+See the [attachment input contract](../../docs/design/cli-attachment-input.md) for native
+acceptance evidence; cross-compilation alone does not establish platform behavior.
+
 Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
 for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.
 Exports include main only; Markdown labels child branch requests and failures
@@ -28,12 +130,18 @@ At the idle interactive prompt:
 Exported Markdown: Session notes.md
 > /export json events.json
 Exported JSON: events.json
+> /export json slow.json
+^C
+Waiting for export result before accepting more input.
+Exported JSON: slow.json
 > /exit
 $
 ```
 
 `/export` reads the format and treats the remaining path literally, including
-spaces. Errors return to the prompt. `/exit` takes no arguments. Slash commands
+spaces. Ctrl+C during an admitted export waits for its result; further interrupts
+keep waiting and do not exit the next prompt. Configuration commands use the same
+settlement rule. Errors return to the prompt. `/exit` takes no arguments. Slash commands
 in exec or redirected input remain literal model input.
 See [CLI commands and exports](../../docs/design/cli-commands.md).
 
@@ -199,14 +307,19 @@ Allow once? [y/N]
 > _
 ```
 
-Input is one line per turn. Only `y` or `yes` permits a pending tool operation once; empty input or any other answer denies it. Tool status records and approval reasons are displayed without dumping arbitrary tool arguments or tool result bodies. Model and external text are filtered at the terminal boundary to remove control sequences.
+Only `y` or `yes` permits a pending tool operation once; empty input or any other answer denies it. Approval and account prompts retain their existing line input and echo behavior. Tool status records and approval reasons are displayed without dumping arbitrary tool arguments or tool result bodies. Model and external text are filtered at the terminal boundary to remove control sequences.
 
-The terminal keeps the scrollback. There is no alternate-screen interface, terminal UI dependency, multiline editor or client-side input queue. Ordinary text typed during execution is discarded with a message to wait for the prompt; pending typeahead is cleared before an approval prompt so it cannot accidentally approve an operation.
+The terminal keeps the scrollback. The draft editor uses the existing terminal
+input owner and restores terminal modes and bracketed-paste settings when it
+yields. It does not create an alternate screen or a client-side input queue.
+Ordinary text typed during execution is discarded with a message to wait for
+the prompt; pending typeahead is cleared before an approval prompt so it cannot
+accidentally approve an operation.
 
 Interactive `!command` runs in the Session's working directory through `shell.run` and records the command and bounded output for the next model request, without starting a turn. `!!command` keeps its output private to this caller. Both also work during model execution. The prefix must be the first character; leading whitespace
 keeps the line ordinary model input. An approval prompt owns its answer line. Commands use the daemon's shell/environment and null stdin. Progress streams under one header per run without adding newlines to partial chunks; the final bounded output is displayed again, including truncation and recording failures. Commands are never retried after an RPC or transport error. Piped or `--prompt` text keeps its literal meaning.
 
-While a turn is running, `Ctrl+C` requests stop and waits for the server's resource and output delivery barrier. A second interrupt does not skip settlement. Once the prompt returns, `Ctrl+C` or EOF exits. The client detaches; it does not delete the session or shut down a shared daemon.
+While a turn is running, `Ctrl+C` requests stop and waits for the server's resource and output delivery barrier. A second interrupt does not skip settlement. Once the prompt returns, Ctrl+C clears a nonempty draft or exits an empty one; EOF exits. The client detaches; it does not delete the session or shut down a shared daemon.
 
 During a shell run, the first `Ctrl+C` stops that run; a second stops the model turn. At an approval
 prompt, Ctrl+C stops the turn. If only command settlement remains, another interrupt prints its
@@ -333,6 +446,6 @@ DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs" \
   -- --ignored
 ```
 
-The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows console and named-pipe behavior still require native Windows acceptance; compiling another target is not a substitute for that check.
+The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows CI runs native clipboard and ConPTY editing flows; compiling another target is not a substitute for them. The named-pipe bridge still requires its separate native acceptance.
 
 Unix socket paths have an operating-system length limit, including the canonical home path. On macOS, `/var` resolves to `/private/var`, which adds bytes. Use a short isolated home such as `/tmp/dim-dev` for development/tests if the daemon reports `path must be shorter than SUN_LEN`; the CLI preserves that failure in `rust/daemon.log`.
