@@ -52,8 +52,8 @@ async fn keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired() 
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    // Compaction keeps the last two turns: the retirement of `b` is replaced
-    // from the fourth turn on.
+    // Compaction keeps a short tail: the retirement of `b` is replaced from
+    // the fourth turn on.
     let inputs = [
         vec![keyed("<live>a</live>", "a"), keyed("<live>b</live>", "b")],
         vec![context_block::retire("<ended>b</ended>".into(), "b".into())],
