@@ -212,7 +212,8 @@ Error: this model does not advertise priority/default service tiers.
 Enter submits a command; errors keep the prompt and Session. Ctrl+C/EOF keep the
 existing behavior for turns. Ctrl+C during configuration waits for its accepted
 operation's result before another line; the reply may describe an already adopted
-change. Lines wrap at terminal width and use existing escaping. No
+change. Further interrupts keep waiting and are consumed before returning to the
+editor rather than clearing or exiting the next draft. Lines wrap at terminal width and use existing escaping. No
 overlay, fullscreen UI, input queue or typeahead change. Command text does not
 become model input; headless prompt/stdin content keeps its literal meaning.
 

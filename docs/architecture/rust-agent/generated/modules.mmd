@@ -181,13 +181,14 @@ flowchart LR
   m177["dim_cli::@bin:dimcode"]
   m178["dim_cli::@bin:dimcode::args"]
   m179["dim_cli::@bin:dimcode::client"]
-  m180["dim_cli::@bin:dimcode::display"]
-  m181["dim_cli::@bin:dimcode::export"]
-  m182["dim_cli::@bin:dimcode::images"]
-  m183["dim_cli::@bin:dimcode::input"]
-  m184["dim_cli::@bin:dimcode::login"]
-  m185["dim_cli::@bin:dimcode::mcp"]
-  m186["dim_cli::@bin:dimcode::session"]
+  m180["dim_cli::@bin:dimcode::composer"]
+  m181["dim_cli::@bin:dimcode::display"]
+  m182["dim_cli::@bin:dimcode::export"]
+  m183["dim_cli::@bin:dimcode::images"]
+  m184["dim_cli::@bin:dimcode::input"]
+  m185["dim_cli::@bin:dimcode::login"]
+  m186["dim_cli::@bin:dimcode::mcp"]
+  m187["dim_cli::@bin:dimcode::session"]
   m0 -.-> m1
   m0 -.-> m2
   m0 --> m3
@@ -1426,49 +1427,57 @@ flowchart LR
   m177 --> m178
   m177 --> m179
   m177 -.-> m180
-  m177 --> m181
+  m177 -.-> m181
   m177 --> m182
   m177 --> m183
   m177 --> m184
   m177 --> m185
   m177 --> m186
+  m177 --> m187
   m178 --> m177
-  m178 --> m181
+  m178 --> m182
   m179 --> m177
   m179 --> m178
-  m180 --> m97
   m180 --> m99
   m180 --> m101
   m180 --> m177
+  m180 --> m179
+  m180 --> m181
+  m180 --> m184
+  m181 --> m97
   m181 --> m99
   m181 --> m101
   m181 --> m177
-  m181 --> m179
-  m181 --> m180
-  m181 --> m186
   m182 --> m99
+  m182 --> m101
   m182 --> m177
+  m182 --> m179
+  m182 --> m181
+  m182 --> m187
+  m183 --> m99
   m183 --> m177
   m184 --> m177
-  m184 --> m178
-  m184 --> m179
-  m184 --> m180
-  m184 --> m183
   m185 --> m177
   m185 --> m178
   m185 --> m179
-  m185 --> m180
-  m185 --> m183
+  m185 --> m181
   m185 --> m184
-  m186 --> m97
-  m186 --> m99
-  m186 --> m101
-  m186 --> m103
-  m186 --> m106
   m186 --> m177
   m186 --> m178
   m186 --> m179
-  m186 --> m180
   m186 --> m181
-  m186 --> m183
+  m186 --> m184
   m186 --> m185
+  m187 --> m97
+  m187 --> m99
+  m187 --> m101
+  m187 --> m103
+  m187 --> m106
+  m187 --> m177
+  m187 --> m178
+  m187 --> m179
+  m187 --> m180
+  m187 --> m181
+  m187 --> m182
+  m187 --> m184
+  m187 --> m186

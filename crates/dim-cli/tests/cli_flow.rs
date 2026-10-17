@@ -902,10 +902,16 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     let workspace = home.0.join("workspace");
     fs::create_dir_all(cli_dir.join("~")).unwrap();
     fs::create_dir(&workspace).unwrap();
-    let daemon = home.daemon(|wire| {
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.start(false);
-        for _ in 0..2 {
+        for index in 0..2 {
             let history = wire.read("session.history");
+            if index == 0 {
+                entered.send(()).unwrap();
+                wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
             wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         }
         let history = wire.read("session.history");
@@ -925,6 +931,12 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     terminal.until("Export format must be markdown or json");
     terminal.until("\n> ");
     terminal.write(b"/export json ~/Session notes.json\n");
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..2 {
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        terminal.until("Waiting for export result");
+    }
+    release.send(()).unwrap();
     terminal.until("Exported JSON: ~/Session notes.json");
     terminal.until("\n> ");
     terminal.write(b"/export json ~/Session notes.json\n");
@@ -1099,6 +1111,12 @@ impl Terminal {
             0
         );
         let master = unsafe { fs::File::from_raw_fd(master) };
+        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0,
+        );
         let slave = unsafe { fs::File::from_raw_fd(slave) };
         command
             .stdin(slave.try_clone().unwrap())
@@ -1135,14 +1153,444 @@ impl Terminal {
                 continue;
             }
             let mut bytes = [0u8; 4096];
-            let size = self.master.read(&mut bytes).unwrap();
-            assert!(size > 0, "Terminal closed before {expected}");
+            let size = match self.master.read(&mut bytes) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                result => result.unwrap(),
+            };
+            assert!(
+                size > 0,
+                "Terminal closed before {expected}: {}",
+                self.transcript
+            );
             self.transcript
                 .push_str(&String::from_utf8_lossy(&bytes[..size]));
         }
     }
     fn write(&mut self, bytes: &[u8]) {
-        self.master.write_all(bytes).unwrap();
+        // A terminal Enter sends CR; raw paste and Ctrl+J retain their own bytes.
+        self.raw(
+            &bytes
+                .iter()
+                .map(|&byte| if byte == b'\n' { b'\r' } else { byte })
+                .collect::<Vec<_>>(),
+        );
+    }
+    fn raw(&mut self, mut bytes: &[u8]) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !bytes.is_empty() {
+            assert!(Instant::now() < deadline, "Terminal did not accept input");
+            match self.master.write(bytes) {
+                Ok(0) => panic!("Terminal input closed"),
+                Ok(size) => bytes = &bytes[size..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let mut poll = libc::pollfd {
+                        fd: self.master.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    assert!(unsafe { libc::poll(&mut poll, 1, 100) } >= 0);
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+    fn paste(&mut self, text: &str) {
+        self.raw(b"\x1b[200~");
+        self.raw(text.as_bytes());
+        self.raw(b"\x1b[201~");
+    }
+}
+
+#[test]
+fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for expected in [
+            "one\ntwo",
+            "before start\r\n中\n/exit\nend\u{3}\n after",
+            "remove keep [Paste 1: 2 lines]",
+            "ABC",
+            "first\nZsecond",
+            "kept across EOF",
+            "shift\nenter\nworks",
+            "after malformed UTF-8",
+            "standalone\rCR\r",
+            "e\u{301}ok",
+            "resized draft",
+        ] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], expected);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.raw(b"one\ntwo");
+    terminal.until("two");
+    terminal.raw(b"\r");
+    terminal.until("\n> ");
+    terminal.until("Ctrl+C: clear");
+    terminal.raw(b"before ");
+    terminal.until("before ");
+    terminal.until("Ctrl+C: clear");
+    terminal.raw(b"\x1b[20");
+    terminal.raw("0~start\r\n中\n/exit\nend\u{3}\n\x1b[2".as_bytes());
+    terminal.raw(b"01~");
+    terminal.until("[Paste 1: 4 lines]");
+    terminal.raw(b" after\r");
+    terminal.until("\n> ");
+    terminal.raw("remove \x1b[200~discard\nme\x1b[201~\x7fe\u{301}👩‍💻🇨🇳\x1b[D\x7f\x1b[C\x7f\x7fkeep [Paste 1: 2 lines]\r".as_bytes());
+    terminal.until("\n> ");
+    terminal
+        .raw(b"A\x1b[200~x\n\x1b[201~B\x1b[200~y\n\x1b[201~C\x1b[H\x1b[C\x1b[3~\x1b[F\x1b[D\x7f\r");
+    terminal.until("\n> ");
+    terminal.raw(b"first\nsecond\x1b[H\x1b[A\x1b[BZ\x1b[F\r");
+    terminal.until("\n> ");
+    terminal.write(b"kept across EOF");
+    terminal.raw(b"\x04");
+    terminal.until("Draft retained; clear it before exiting");
+    terminal.raw(b"\x1a\r");
+    terminal.until("\n> ");
+    terminal.raw(b"shift\x1b[13;2uenter\x1b[27;2;13~works\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\xf0after malformed UTF-8\r");
+    terminal.until("\n> ");
+    terminal.paste("standalone\rCR\r");
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.raw(b"\r");
+    terminal.until("\n> ");
+    terminal.raw(
+        "e\u{301}\x1b[200~p\n\x1b[201~👩‍💻🇨🇳\x1b[D\x7f\x1b[D\x1b[3~\x1b[H\x1b[C\x1b[3~ok\r"
+            .as_bytes(),
+    );
+    terminal.until("\n> ");
+    let size = libc::winsize {
+        ws_row: 6,
+        ws_col: 15,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(terminal.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0
+    );
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGWINCH) }, 0);
+    terminal.raw(b"resized draft\r");
+    terminal.until("\n> ");
+    terminal.raw(b"\x04");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    let mut mode = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(
+        unsafe { libc::tcgetattr(terminal.master.as_raw_fd(), &mut mode) },
+        0
+    );
+    assert_eq!(
+        mode.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG),
+        libc::ICANON | libc::ECHO | libc::ISIG,
+    );
+}
+
+#[test]
+fn interactive_output_survives_terminal_backpressure() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(12, "text", json!({"turn_id":"turn","request_id":"request","delta":format!("{}output complete", "x".repeat(512 * 1024))}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("Ctrl+J: newline");
+    terminal.write(b"continue\n");
+    // A slow terminal reader must not turn output backpressure into a CLI failure.
+    thread::sleep(Duration::from_millis(150));
+    terminal.until("output complete");
+    terminal.until("Ctrl+J: newline");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(terminal.transcript.contains(&"x".repeat(512 * 1024)));
+}
+
+#[test]
+fn interactive_commands_reject_attached_drafts_before_storing_or_executing() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "  !literaldo not execute\n");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    for prefix in [
+        "/exit ",
+        "/export markdown file ",
+        "!!echo ",
+        "/mcp login docs ",
+        "/effort high ",
+        "/reasoning low ",
+        "/fast on ",
+        "/agent profile ",
+    ] {
+        terminal.write(prefix.as_bytes());
+        terminal.paste(&"large text\n".repeat(2000));
+        terminal.until("[Paste 1: 2000 lines]");
+        terminal.write(b"\n");
+        terminal.until("Commands require plain single-line input");
+        terminal.raw(b"\x03");
+    }
+    terminal.write(b"  !literal");
+    terminal.paste("do not execute\n");
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_put_rejection_retains_confirmed_paths_without_uploading_again() {
+    let home = Home::new();
+    let first = "first\r\n".repeat(3000);
+    let second = "second\n".repeat(3000);
+    let expected = first.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let put = wire.read("attachment.put");
+        assert_eq!(put["params"]["text"], expected);
+        wire.reply(&put, json!({"attachmentId":"first","path":"/files/first.txt","bytes":expected.len()}));
+        let put = wire.read("attachment.put");
+        assert_eq!(put["params"]["text"], second);
+        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32000,"message":"storage failed","data":{"appError":"storage_failed"}}}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "[Pasted text: /files/first.txt (3000 lines)]");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
+        let put = wire.read("attachment.put");
+        wire.send(json!({"jsonrpc":"2.0","id":put["id"],"error":{"code":-32601,"message":"unknown_method","data":{"appError":"unknown_method"}}}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "clean draft");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.paste(&first);
+    terminal.until("[Paste 1: 3000 lines]");
+    terminal.paste(&"second\n".repeat(3000));
+    terminal.until("[Paste 2: 3000 lines]");
+    terminal.write(b"\n");
+    terminal.until("Paste 2: storage failed");
+    terminal.raw(b"\x7f\r");
+    terminal.until("\n> ");
+    terminal.paste(&first);
+    terminal.until("[Paste 1: 3000 lines]");
+    terminal.write(b"\n");
+    terminal.until("unknown_method");
+    terminal.raw(b"\x03");
+    terminal.write(b"clean draft\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_cancellation_drains_the_put_and_reuses_its_confirmed_path() {
+    let home = Home::new();
+    let text = "cancelled upload\r\n".repeat(1100);
+    let (accepted, admitted) = std::sync::mpsc::channel();
+    let (release, drain) = std::sync::mpsc::channel();
+    let expected = text.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let put = wire.read("attachment.put");
+        assert_eq!(put["params"]["text"], expected);
+        accepted.send(()).unwrap();
+        drain.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.reply(
+            &put,
+            json!({"attachmentId":"drained","path":"/files/drained.txt","bytes":expected.len()}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            "[Pasted text: /files/drained.txt (1100 lines)]"
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.paste(&text);
+    terminal.until("[Paste 1: 1100 lines]");
+    terminal.write(b"\n");
+    admitted.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for the text attachment to settle");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Still waiting for the text attachment to settle");
+    release.send(()).unwrap();
+    terminal.until("Preparation cancelled");
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_encoding_rejection_keeps_confirmed_items_editable() {
+    let home = Home::new();
+    let path = format!("/files/{}.txt", "\"".repeat(4 * 1024 * 1024));
+    let expected = path.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        for _ in 0..2 {
+            let put = wire.read("attachment.put");
+            assert_eq!(put["params"]["text"], "x".repeat(16 * 1024 + 1));
+            // Large but valid wire strings force the final encoded frame over its limit.
+            wire.reply(
+                &put,
+                json!({"attachmentId":"stored","path":expected,"bytes":16*1024+1}),
+            );
+        }
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            format!("[Pasted text: {expected} (1 lines)]")
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    for index in [1, 2] {
+        terminal.paste(&"x".repeat(16 * 1024 + 1));
+        terminal.until(&format!("[Paste {index}: 1 lines]"));
+    }
+    terminal.write(b"\n");
+    terminal.until("exceeds 16 MiB after JSON encoding");
+    terminal.raw(b"\x7f\r");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_paste_boundaries_reject_without_losing_the_existing_draft() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            format!("kept{}", "\0".repeat(16 * 1024))
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        let put = wire.read("attachment.put");
+        let text = put["params"]["text"].as_str().unwrap();
+        assert_eq!(text.len(), 10 * 1024 * 1024);
+        assert!(text.bytes().all(|byte| byte == b'x'));
+        wire.reply(
+            &put,
+            json!({"attachmentId":"maximum","path":"/files/max.txt","bytes":text.len()}),
+        );
+        let submit = wire.read("session.submit");
+        assert_eq!(
+            submit["params"]["text"],
+            "[Pasted text: /files/max.txt (1 lines)]"
+        );
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "after");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"kept");
+    terminal.raw(b"\x1b[200~unfinished\x03");
+    terminal.raw(b"\x03");
+    terminal.until("Paste cancelled; draft retained");
+    terminal.raw(b"\x1b[200~\xff\x1b[201~");
+    terminal.until("Paste must be UTF-8");
+    terminal.paste(&"x".repeat(10 * 1024 * 1024 + 1));
+    terminal.until("Paste exceeds 10 MiB");
+    terminal.paste(&"\0".repeat(16 * 1024));
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.paste(&"x".repeat(10 * 1024 * 1024));
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.write(b"\n");
+    terminal.until("\n> ");
+    terminal.paste(&"\0".repeat(3 * 1024 * 1024));
+    terminal.until("[Paste 1: 1 lines]");
+    terminal.write(b"\n");
+    terminal.until("exceeds 16 MiB after JSON encoding");
+    terminal.raw(b"\x7f");
+    terminal.write(b"after\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains('\0'));
+    assert!(terminal.transcript.contains("\\0"));
+}
+
+#[test]
+fn interactive_put_uncertainty_exits_without_another_put_or_submission() {
+    for disconnect in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.start(false);
+            let put = wire.read("attachment.put");
+            if !disconnect {
+                wire.reply(
+                    &put,
+                    json!({"path":123,"attachmentId":"stored","bytes":20000}),
+                );
+                wire.detach();
+            }
+        });
+        let (mut terminal, child) = Terminal::launch(home.command());
+        terminal.until("\n> ");
+        terminal.paste(&"x".repeat(20000));
+        terminal.until("[Paste 1: 1 lines]");
+        terminal.write(b"\n");
+        terminal.until(if disconnect {
+            "App Server connection closed"
+        } else {
+            "Attachment outcome could not be confirmed"
+        });
+        assert_eq!(wait(child).status.code(), Some(1));
+        daemon.join().unwrap();
     }
 }
 
@@ -1226,7 +1674,7 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
     assert!(terminal.transcript.contains("(output truncated)"));
     assert_eq!(terminal.transcript.matches("[shell recorded]").count(), 1);
     assert!(!terminal.transcript.contains("opaque-private"));
-    assert!(!terminal.transcript.contains('\u{1b}'));
+    assert!(!terminal.transcript.contains("\x1b[31m"));
     assert!(!terminal.transcript.contains('\u{202e}'));
 }
 
@@ -1316,7 +1764,7 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
             .transcript
             .contains("late progress must be ignored")
     );
-    assert!(!terminal.transcript.contains('\u{1b}'));
+    assert!(!terminal.transcript.contains("\x1b[31m"));
     assert!(!terminal.transcript.contains('\u{202e}'));
 }
 
@@ -1479,6 +1927,8 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.until("\n> ");
     terminal.write(b"/reasoning high\n");
     wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for configuration result");
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     terminal.until("Waiting for configuration result");
     release.send(()).unwrap();
@@ -1896,12 +2346,17 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     fs::write(&image, &bytes).unwrap();
     let image_data = STANDARD.encode(bytes);
     let model_image = image_data.clone();
+    let paste = format!(
+        "native-paste-reader-marker\r\n{}",
+        "中 e\u{301} text\r\n".repeat(2000)
+    );
+    let model_paste = paste.clone();
     fs::write(home.0.join("marker.txt"), "production-read-marker\n").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let model = thread::spawn(move || {
-        for phase in 0..3 {
+        for phase in 0..5 {
             let deadline = Instant::now() + Duration::from_secs(15);
             let stream = loop {
                 match listener.accept() {
@@ -1982,6 +2437,34 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     json!({"tool_calls":[{"index":0,"id":"read-call","type":"function","function":{"name":"read","arguments":"{\"path\":\"marker.txt\"}"}}]}),
                     Value::Null,
                 ) + &frame(json!({}), json!("tool_calls"))
+            } else if phase == 3 {
+                let user = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|message| message["role"] == "user")
+                    .unwrap();
+                let text = match &user["content"] {
+                    Value::String(text) => text.as_str(),
+                    Value::Array(parts) => {
+                        assert_eq!(parts.len(), 1);
+                        assert_eq!(parts[0]["type"], "text");
+                        parts[0]["text"].as_str().unwrap()
+                    }
+                    other => panic!("Unexpected user content: {other}"),
+                };
+                let path = text
+                    .strip_prefix("[Pasted text: ")
+                    .unwrap()
+                    .split_once(" (")
+                    .unwrap()
+                    .0;
+                assert_eq!(fs::read(path).unwrap(), model_paste.as_bytes());
+                frame(
+                    json!({"tool_calls":[{"index":0,"id":"paste-read","type":"function","function":{"name":"read","arguments":serde_json::to_string(&json!({"path":path})).unwrap()}}]}),
+                    Value::Null,
+                ) + &frame(json!({}), json!("tool_calls"))
             } else {
                 if phase == 1 {
                     assert!(
@@ -1993,14 +2476,28 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                         ),
                         "The real read result did not reach the model"
                     );
-                } else {
+                } else if phase == 2 {
                     let messages = request["messages"].to_string();
                     assert!(messages.contains("dim-shell-input"));
                     assert!(messages.contains("cli-recorded-marker"));
                     assert!(!messages.contains("cli-private-marker"));
+                } else {
+                    assert!(
+                        request["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|message| {
+                                message["role"] == "tool"
+                                    && message["content"].as_str().is_some_and(|text| {
+                                        text.contains("native-paste-reader-marker")
+                                    })
+                            }),
+                        "The stored paste did not reach the model through read"
+                    );
                 }
                 frame(
-                    json!({"content":if phase == 1 {"read completed"} else {"session continued"}}),
+                    json!({"content":match phase {1 => "read completed", 2 => "session continued", _ => "paste read completed"}}),
                     json!("stop"),
                 )
             } + "data: [DONE]\n\n";
@@ -2056,6 +2553,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     ]);
     let (mut terminal, child) = Terminal::launch(interactive);
     terminal.until("\n> ");
+    terminal.until("Ctrl+J: newline");
     terminal.write(b"!printf cli-recorded-marker\n");
     terminal.until("[shell recorded] sequence:");
     terminal.until("\n> ");
@@ -2093,6 +2591,27 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         String::from_utf8(output.stdout).unwrap(),
         "session continued\n"
     );
+    let mut interactive = home.command();
+    interactive.args([
+        "--server",
+        &binary,
+        "--model-config",
+        config.to_str().unwrap(),
+        "--cwd",
+        home.0.to_str().unwrap(),
+        "--resume",
+        session,
+    ]);
+    let (mut terminal, child) = Terminal::launch(interactive);
+    terminal.until("\n> ");
+    terminal.until("Ctrl+J: newline");
+    terminal.paste(&paste);
+    terminal.until("[Paste 1: 2001 lines]");
+    terminal.write(b"\n");
+    terminal.until("paste read completed");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
     let exported = home
         .command()
         .args([
@@ -2123,6 +2642,21 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                 {"type":"image","source":{"type":"base64","mediaType":"image/png","data":image_data}}
             ])
     }));
+    assert!(
+        conversation["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["user"]["content"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| {
+                            text.starts_with("[Pasted text: ") && text.ends_with(" (2001 lines)]")
+                        })
+            })
+    );
     assert_eq!(
         conversation["events"]
             .as_array()

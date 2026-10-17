@@ -34,7 +34,10 @@ Options:\n\
   --provider ID --model ID         Model selection for a new session\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
-Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
+Enter sends an idle draft; Ctrl+J inserts a newline; bracketed paste does not submit.\n\
+Ctrl+C clears a nonempty idle draft; Ctrl+C or EOF exits only an empty draft.\n\
+During terminal paste, Ctrl+C twice cancels that paste and keeps the draft.\n\
+During execution, Ctrl+C requests stop and waits for settlement.\n\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle MCP commands: /mcp, /mcp login [--no-browser] [--client-secret] ID, /mcp logout ID.\n\
 Idle commands: /export <markdown|json> PATH, /exit.\n\

@@ -8,8 +8,8 @@ the implementation; the [native CLI contract](../../crates/dim-cli/README.md)
 describes the current executable.
 
 The [attachment input contract](cli-attachment-input.md) defines the idle draft editor,
-local image sources and paste handling. Its headless exec image arguments are implemented;
-the interactive editor and native insertion sources remain pending.
+local image sources and paste handling. The multiline/paste editor and headless exec image
+arguments are implemented; native clipboard/file insertion, completion and dropped paths remain pending.
 
 ## Commands
 
@@ -202,7 +202,10 @@ opened to change their permissions.
 No output file is created after a history error. A write failure is reported
 and may leave a partial newly created file; no success message is printed.
 Export-to-stdout failures return a nonzero code. Interactive export errors
-return to the input prompt and never become model input.
+return to the input prompt and never become model input. During an admitted
+interactive export, Ctrl+C reports that the CLI is waiting for the result and
+continues consuming further interrupts until the operation settles. Those
+interrupts do not become an exit or draft-clear action at the next prompt.
 
 ## Implementation and verification
 

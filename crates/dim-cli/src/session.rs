@@ -1,7 +1,8 @@
 use crate::{
     Result,
     args::{Action, Options},
-    client::{Client, Message},
+    client::{Client, Message, RequestTooLarge},
+    composer::{self, Draft},
     display::{self, Display, Event, Progress},
     export,
     input::Input,
@@ -24,6 +25,11 @@ use std::{
 struct Created {
     session_id: String,
     model: ModelId,
+}
+
+enum Submission {
+    Message(UserInput),
+    Shell(String),
 }
 
 #[derive(Deserialize)]
@@ -220,32 +226,33 @@ pub async fn chat(
         }).await?;
         display.failed = false;
         display.muted = false;
-        let mut code = wait_turn(client, &session_id, None, Vec::new(), &mut display, &mut input, &mut interrupts).await?;
+        let mut code = wait_turn(client, &session_id, None, &mut display, &mut input, &mut interrupts, None).await?;
         if code != 0 || interactive && input.is_none() {
             return Ok(code);
         }
         if options.prompt.is_some() || !images.is_empty() {
-            return wait_turn(client, &session_id, options.prompt.as_deref(), images, &mut display, &mut input, &mut interrupts).await;
+            let content = options.prompt.iter().filter(|text| !text.trim().is_empty()).map(|text| ContentBlock::Text { text: text.clone() })
+                .chain(images).collect();
+            return wait_turn(client, &session_id, Some(Submission::Message(UserInput { content })), &mut display, &mut input, &mut interrupts, None).await;
         }
+        let mut draft = Draft::default();
+        let mut notice = None;
         loop {
             let reader = input.as_mut().expect("interactive input");
-            reader.prompt("\n> ")?;
-            let text = tokio::select! {
-                _ = interrupts.recv() => { println!(); break; }
-                line = reader.line() => line?,
-            };
-            let Some(text) = text else {
-                println!();
+            if !composer::edit(reader, &mut draft, notice.take(), &mut interrupts).await? {
                 break;
-            };
-            if text.trim().is_empty() {
+            }
+            let text = draft.plain().map(str::to_owned);
+            if text.is_none() && draft.command().is_some() {
+                notice = Some("Commands require plain single-line input; draft retained".into());
                 continue;
             }
-            match text.split_whitespace().next() {
+            match text.as_deref().and_then(|text| text.split_whitespace().next()) {
                 Some("/mcp") => {
+                    let text = text.as_deref().expect("plain MCP command");
                     // MCP owns interrupts until its command finishes draining.
                     drop(interrupts);
-                    let result = mcp::command(client, options, reader, &session_id, &text).await;
+                    let result = mcp::command(client, options, reader, &session_id, text).await;
                     #[cfg(unix)]
                     { interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?; }
                     #[cfg(windows)]
@@ -253,50 +260,83 @@ pub async fn chat(
                     if let Err(error) = result {
                         display.record(&format!("Error: {}", mcp::error(error)))?;
                     }
+                    draft.clear();
                     continue;
                 }
                 Some("/effort" | "/reasoning" | "/fast" | "/agent") => {
+                    let text = text.as_deref().expect("plain configuration command");
                     let result = {
-                        let operation = configure(client, &session_id, &text, &mut display);
+                        let operation = configure(client, &session_id, text, &mut display);
                         tokio::pin!(operation);
-                        tokio::select! {
-                            result = &mut operation => result,
-                            _ = interrupts.recv() => {
-                                println!("\nWaiting for configuration result before accepting more input.");
-                                operation.await
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = interrupts.recv() => {
+                                    println!("\nWaiting for configuration result before accepting more input.");
+                                }
+                                result = &mut operation => break result,
                             }
                         }
                     };
                     if let Err(error) = result {
                         display.record(&format!("Error: {error}"))?;
                     }
+                    draft.clear();
                     continue;
                 }
                 Some("/exit") => {
-                    if text.trim() == "/exit" {
+                    if text.as_deref().is_some_and(|text| text.trim() == "/exit") {
                         break;
                     }
                     display.record("Usage: /exit")?;
+                    draft.clear();
                     continue;
                 }
                 Some("/export") => {
-                    let result = async {
+                    let operation = async {
+                        let text = text.as_deref().expect("plain export command");
                         let rest = text.trim_start().strip_prefix("/export").expect("export command").trim_start();
                         let (format, path) = rest.split_once(char::is_whitespace)
                             .filter(|(_, path)| !path.trim_start().is_empty())
                             .ok_or("Usage: /export <markdown|json> PATH\nPATH is relative to the CLI current directory; ~ is literal.")?;
                         let path = path.trim_start();
                         export::write(client, &session_id, format.parse()?, Some(std::path::Path::new(path))).await
-                    }.await;
+                    };
+                    tokio::pin!(operation);
+                    let result = loop {
+                        tokio::select! {
+                            biased;
+                            _ = interrupts.recv() => {
+                                println!("\nWaiting for export result before accepting more input.");
+                            }
+                            result = &mut operation => break result,
+                        }
+                    };
                     if let Err(error) = result {
                         display.record(&format!("Error: {error}"))?;
                     }
+                    draft.clear();
                     continue;
                 }
                 _ => {}
             }
+            let submission = if let Some(text) = text.filter(|text| text.starts_with('!')) {
+                Submission::Shell(text)
+            } else {
+                match draft.prepare(client, &session_id, &mut interrupts, &mut notice).await? {
+                    Some(user) => Submission::Message(user),
+                    None => continue,
+                }
+            };
             display.failed = false;
-            code = wait_turn(client, &session_id, Some(&text), Vec::new(), &mut display, &mut input, &mut interrupts).await?;
+            code = match wait_turn(client, &session_id, Some(submission), &mut display, &mut input, &mut interrupts, Some(&mut draft)).await {
+                Ok(code) => code,
+                Err(error) if error.is::<RequestTooLarge>() => {
+                    notice = Some(format!("{error}. Draft retained"));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if input.is_none() {
                 break;
             }
@@ -528,36 +568,31 @@ async fn configure(
 async fn wait_turn(
     client: &mut Client,
     session_id: &str,
-    prompt: Option<&str>,
-    images: Vec<ContentBlock>,
+    submission: Option<Submission>,
     display: &mut Display,
     input: &mut Option<Input>,
     #[cfg(unix)] interrupts: &mut tokio::signal::unix::Signal,
     #[cfg(windows)] interrupts: &mut tokio::signal::windows::CtrlC,
+    mut draft: Option<&mut Draft>,
 ) -> Result<i32> {
     let mut shell = None;
-    let mut submit = if let Some(text) = prompt
-        && input.is_some()
-        && text.starts_with('!')
-    {
-        shell = start_shell(client, session_id, text, display).await?;
-        None
-    } else if prompt.is_some() || !images.is_empty() {
-        let mut params = json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"mode":"queue"});
-        if images.is_empty() {
-            params["text"] = json!(prompt.expect("text submission"));
-        } else {
-            let content = prompt
-                .into_iter()
-                .filter(|text| !text.trim().is_empty())
-                .map(|text| ContentBlock::Text { text: text.into() })
-                .chain(images)
-                .collect();
-            params["user"] = json!(UserInput { content });
+    let mut submit = match submission {
+        Some(Submission::Shell(text)) => {
+            shell = start_shell(client, session_id, &text, display).await?;
+            if let Some(draft) = draft.take() {
+                draft.clear();
+            }
+            None
         }
-        Some(client.send("session.submit", params).await?)
-    } else {
-        None
+        Some(Submission::Message(user)) => {
+            let mut params = json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"mode":"queue"});
+            match user.content.as_slice() {
+                [ContentBlock::Text { text }] => params["text"] = json!(text),
+                _ => params["user"] = json!(user),
+            }
+            Some(client.send("session.submit", params).await?)
+        }
+        None => None,
     };
     let mut idle = if submit.is_none() {
         Some(
@@ -762,6 +797,9 @@ async fn wait_turn(
                         Some("invalid_params" | "session_invalid_input" | "session_closed" | "session_build_failed" | "service_reloading" | "unknown_method") => return Err(error.into()),
                         _ => return Err(format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again").into()),
                     }
+                }
+                if let Some(draft) = draft.take() {
+                    draft.clear();
                 }
                 submit = None;
                 if stop.is_none() && settled.is_none() {
