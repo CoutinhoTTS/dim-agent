@@ -31,9 +31,11 @@ test('packed plugin service types compile the author guide and enforce the publi
   });
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Sessions, FileScope, FileResult } from 'dimcode/plugin';
+import type { Sessions, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution } from 'dimcode/plugin';
 declare const sessions: Sessions;
 declare const files: FileScope;
+declare const tool: ToolContribution;
+declare const methods: SessionMethodsContribution;
 const at = { sessionId: 'session', branchId: 'main' };
 void sessions.launch({ cwd: '/workspace', policy: { preset: 'read-only' } });
 void sessions.input({ ...at, submissionId: 'notebook:unique', mode: 'queue', rawBlocks: [{ text: 'notebook' }], content: [] });
@@ -55,6 +57,27 @@ void sessions.input({ ...at, submissionId: 'id', mode: 'replace', rawBlocks: [],
 void sessions.launch({ cwd: '/workspace', policy: { allowed_tools: [] } });
 // @ts-expect-error lease replacement accepts text, not a host storage envelope.
 void files.withLock('state', file => file.replace({ version: 1, text: 'state' }));
+void tool.execute({
+  ...at, turnId: 'turn', callId: 'call', arguments: { text: 'hello' },
+  config: { permissionPolicy: { preset: 'read-only', allowedTools: [], disallowedTools: [] },
+    cwd: '/workspace', model: { providerId: 'test', modelId: 'model' },
+    systemPrompt: '', tools: ['example_echo'], collaborationRole: 'leader' },
+}, Promise.resolve());
+void methods.call({ callId: 'call', method: 'session.example.echo', params: { sessionId: 'session' } },
+  Promise.resolve(), () => {});
+const result: ToolResult = { content: [{ type: 'text', text: 'handle: owned-id' }],
+  structuredContent: { handle: 'owned-id' }, backgroundTask: { taskId: 'task', wakePolicy: 'manual' },
+  blobRefs: [{ blobId: 'blob', sessionId: 'session', kind: 'text', path: '/files/result' }],
+  contextMessages: [{ role: 'tool_result', content: [{ type: 'tool_result', tool_use_id: 'call', content: 'done', is_error: false }] }] };
+void result;
+// @ts-expect-error the foreign call uses neutral identities and arguments, not the native shape.
+void tool.execute({ id: 'call', name: 'example_echo', input: {} }, Promise.resolve());
+// @ts-expect-error result content is text or typed blocks, not an arbitrary object.
+const invalidResult: ToolResult = { content: { handle: 'owned-id' } };
+// @ts-expect-error contributed tools declare a Permission risk.
+const missingRisk: ReturnType<ToolContribution['declaration']> = { name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } };
+// @ts-expect-error C4 does not implement a handoff reply.
+const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
 `);
   const compiler = path.join(root, 'runtime/node_modules/typescript/bin/tsc');
   const declarations = spawnSync(process.execPath, [compiler,

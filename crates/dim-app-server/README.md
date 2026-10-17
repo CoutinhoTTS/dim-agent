@@ -406,8 +406,9 @@ It installs no production capability bridge or Session RPC methods.
 
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
 runtime package and anchor paths, plus ordinary loader rows. Tool names and Session method
-namespaces come from each row's existing `RowSchema.provides` dictionary; use one shared JSON
-file in the host and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md).
+namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
+source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
+and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The [public embedding example](examples/session_typescript.rs) starts the real server with offline
 mock model/tools, a protected Unix socket and a fresh temporary SQLite/trace home, then calls it

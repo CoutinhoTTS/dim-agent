@@ -95,3 +95,120 @@ export interface Sessions {
   idle(request: SessionRef): Promise<SessionsResult<SequenceReply>>;
   delete(request: { sessionId: string }): Promise<SessionsResult<Record<string, never>>>;
 }
+
+/** The host's creation-time snapshot; provider-owned nested objects remain JSON. */
+export interface SessionConfig {
+  readonly permissionPolicy: PermissionPolicy;
+  readonly cwd: string;
+  readonly model: Readonly<ModelId & {
+    capabilitySnapshot?: JsonObject;
+    config?: JsonObject;
+    metadata?: JsonObject;
+  }>;
+  readonly systemPrompt: string;
+  readonly tools: readonly string[];
+  readonly collaborationRole: 'leader' | 'member';
+  /** Native serde omits true; absence means interactive. */
+  readonly interactive?: false;
+}
+
+export type JsonSchema = JsonObject & {
+  type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
+  properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
+  required?: string[];
+  enum?: JsonValue[];
+  description?: string;
+};
+export type ToolMetadata = JsonObject & {
+  version?: string;
+  author?: string;
+  docsUrl?: string;
+  sourcePluginId?: string;
+  mcpServerId?: string;
+  mcpOriginalToolName?: string;
+};
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: JsonSchema;
+  source: 'static' | 'builtin' | 'extension' | 'dynamic';
+  /** Required and nonempty for a foreign contribution. */
+  risk: string;
+  metadata?: ToolMetadata;
+  fileChanges?: {
+    preExecutePaths?: { selector: 'path' | 'affectedPaths' };
+    postExecutePaths?: 'path' | 'affectedPaths';
+  };
+}
+export interface ToolCall extends SessionRef {
+  turnId: string;
+  callId: string;
+  arguments: JsonObject;
+  config: SessionConfig;
+}
+export type ToolContent = string | ContentBlock[];
+export interface BlobRef {
+  blobId: string;
+  sessionId: string;
+  kind: 'text' | 'binary' | 'file' | 'stream' | 'remote';
+  path: string;
+  ref?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+}
+export interface BackgroundTaskInfo {
+  taskId: string;
+  wakePolicy: 'auto' | 'manual';
+  outputPath?: string;
+  description?: string;
+}
+export type ContentMetadata =
+  { protocol: 'bedrock'; signature?: string } |
+  { protocol: 'bedrock-redacted' | 'anthropic-redacted'; data: string } |
+  { protocol: 'anthropic'; signature: string } |
+  { protocol: 'gemini'; thoughtSignature: string } |
+  { protocol: 'xai-responses'; itemId: string; encryptedContent?: string } |
+  { protocol: 'openai-responses'; itemId: string; encryptedContent?: string; summaryIndex?: number; phase?: string };
+export type MessagePart =
+  { type: 'text'; text: string; providerMetadata?: ContentMetadata; startTime?: string; endTime?: string } |
+  { type: 'image'; source: ImageSource } |
+  { type: 'tool_use'; id: string; name: string; input: JsonObject; providerMetadata?: ContentMetadata; startTime?: string } |
+  { type: 'tool_result'; tool_use_id: string; content: ToolContent; structuredContent?: JsonObject; is_error?: boolean } |
+  { type: 'thinking'; thinking: string; providerMetadata?: ContentMetadata; startTime?: string; endTime?: string };
+export interface Message {
+  role: 'user' | 'assistant' | 'tool_result';
+  content: string | MessagePart[];
+}
+export interface ToolResult {
+  content: ToolContent;
+  structuredContent?: JsonObject;
+  isError?: boolean;
+  blobRefs?: BlobRef[];
+  backgroundTask?: BackgroundTaskInfo;
+  contextMessages?: Message[];
+}
+/** Provide as `toolContribution:<name>`; declaration is synchronous. */
+export interface ToolContribution {
+  declaration(): ToolDefinition;
+  execute(call: ToolCall, cancelled: Promise<void>): Promise<ToolResult>;
+}
+
+export interface SessionMethodDeclaration {
+  name: string;
+  mutating: boolean;
+  interruption: 'report' | 'drain';
+  progress: boolean;
+}
+export interface SessionMethodCall {
+  callId: string;
+  method: string;
+  params: JsonObject & { sessionId: string; branchId?: string };
+}
+export type SessionMethodReply = { kind: 'value'; value?: JsonValue } |
+  { code: number; appError: string; message: string };
+/** Provide as `sessionMethods:<namespace>`; both methods are asynchronous. */
+export interface SessionMethodsContribution {
+  describe(): Promise<SessionMethodDeclaration[]>;
+  call(call: SessionMethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void): Promise<SessionMethodReply>;
+}

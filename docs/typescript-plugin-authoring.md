@@ -16,8 +16,8 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
 | Read/update business configuration | Settings business sources | Rust sources exist; S8b's named TypeScript contract is not implemented on main. |
-| Offer client methods or model tools | `sessionMethods`, `toolContribution`, Session | Rust bindings exist; C4's TypeScript binding is not implemented on main. |
-| Observe this Session or act on a branch | Session broadcast / branch Dispatcher | TypeScript bindings are pending C4/C5; do not replace them with polling or a process registry. |
+| Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
+| Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is tracked by #168; branch bindings remain C5 work. |
 
 See [Session TypeScript bindings](design/session-typescript.md) and
 [Settings](design/appserver/settings-service.md) for their contracts and delivery
@@ -131,6 +131,106 @@ timestamp fields are JSON numbers; event payloads belong to their declaring
 owners. The SDK types their envelope and JSON data without asserting that one
 event payload describes every domain. For complete publication, paging, failure
 and cleanup semantics, use the [sessions contract](design/appserver/sessions-service.md).
+
+## Session tools and client methods
+
+A Session part provides `toolContribution:<tool>` or `sessionMethods:<namespace>`.
+The host configures ordinary rows through `ServerConfig.session_typescript`;
+general CLI installation remains PluginManager work. Give each row the same
+`provides` dictionary the module exports. The host derives tool names and method
+namespaces from that dictionary; keep it as one packaging source rather than
+maintaining separate registration lists. The public
+[embedding example](../crates/dim-app-server/examples/session_typescript.rs)
+shows the row input and actual Session calls.
+
+```ts
+import { definePlugin, type MethodKind } from '@arcships/rutis';
+import type { ToolContribution, SessionMethodsContribution } from 'dimcode/plugin';
+
+export const provides = {
+  'toolContribution:example_echo': { declaration: 'sync', execute: 'async' },
+  'sessionMethods:session.example': { describe: 'async', call: 'async' },
+} satisfies Record<string, Record<string, MethodKind>>;
+
+export default definePlugin({
+  name: 'SessionExample',
+  provides,
+  apply(ctx) {
+    const tool: ToolContribution = {
+      declaration() {
+        return {
+          name: 'example_echo', description: 'Echo supplied text',
+          source: 'extension', risk: 'session',
+          inputSchema: {
+            type: 'object', properties: { text: { type: 'string' } },
+            required: ['text'], additionalProperties: false,
+          },
+        };
+      },
+      async execute(call) {
+        if (typeof call.arguments.text !== 'string') {
+          return { content: 'text must be a string', isError: true };
+        }
+        return { content: call.arguments.text };
+      },
+    };
+    ctx.provide('toolContribution:example_echo', tool);
+
+    const methods: SessionMethodsContribution = {
+      async describe() {
+        return [{ name: 'session.example.echo', mutating: false,
+          interruption: 'report', progress: true }];
+      },
+      async call(call, _cancelled, progress) {
+        progress({ phase: 'started' });
+        return { kind: 'value', value: call.params };
+      },
+    };
+    ctx.provide('sessionMethods:session.example', methods);
+  },
+});
+```
+
+Copy the exported declaration into the existing host row during your package's
+build. The App Server does not discover this export or install a plugin by itself.
+Online module metadata must match the configured row snapshot. Disabled, Pending
+and malformed rows have the outcomes in the
+[binding contract](design/session-typescript.md#host-input-and-declaration-discovery).
+ToolRegistry samples active providers once at branch initialization; a provider
+that becomes active later is available after the next registry/Session reload.
+
+`declaration` is synchronous and must not start asynchronous work. Its name matches
+the tool key and its Permission risk is nonempty. `execute` receives the neutral
+`ToolCall`: `sessionId`, `branchId`, `turnId`, `callId`, `arguments` and `config`.
+This is distinct from the native `{id, name, input}` call. Validate model-supplied
+arguments at the tool's external-input boundary. `config` is the creation-time
+Session snapshot; provider-owned nested configuration remains JSON in the SDK.
+The native serializer omits `interactive` when true, so an absent field means
+interactive and only `false` is written. It is not the latest adopted Prompt/model
+configuration after a configuration command.
+
+The second `execute` argument is a cancellation Promise. It settles when the call
+ends, is cancelled or its row unloads. Cooperative work releases its resources
+before settling. Ordinary provider failures return a valid `ToolResult` with
+`isError: true`; thrown exceptions are binding failures. Put every handle or
+reference the model needs into `content`; `structuredContent` is for persistence,
+UI and internal consumers. The SDK preserves the native result fields without
+another conversion layer.
+
+`describe` and `call` are asynchronous. Each method declares its full name,
+`mutating`, `interruption` and `progress`. `call` receives an opaque runtime
+`callId`, the method and original params containing `sessionId` and optional
+`branchId`; it also receives cancellation and a per-call progress callback.
+Return `{kind: 'value', value}` or `{code, appError, message}`. An omitted value
+becomes JSON null. Handoff and connection-bound notifications are not provided by
+this binding. On unload, C1 stops admission and settles accepted calls before the
+JavaScript row unloads: `report` replies with interruption, while `drain` preserves
+the provider's reply. No business task in this example runs during `apply`.
+
+Native Session broadcast remains [#168](https://github.com/arcships/dim/issues/168)
+work, waiting for a rutis release with leaf events and the binding contract.
+The tool/method binding does not expose `ctx.on`, a Session activation method,
+branch Dispatcher access or a replacement polling mechanism.
 
 ## Packaging and trust
 
