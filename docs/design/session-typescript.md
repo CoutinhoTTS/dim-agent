@@ -268,7 +268,7 @@ A consumer adds one entry to its existing `provides` dictionary:
 | Method | `bind`, sync: `bind({sessionId: string, config: SessionConfig}, closing: Promise<void>) -> null`. |
 | Invocation | Once during native row apply, after its projection is visible and before native row Active. |
 | Closing | Resolves on existing `SessionLifecycle::closing()` or original-row cancellation; never follows a replacement generation. |
-| Failure | Invalid declarations, thrown calls, non-null replies or a returned future fail the optional row through existing diagnostics and cleanup. |
+| Failure | Structural identity/mode errors are rejected at the existing configuration boundary. Thrown bind calls, non-null replies or a returned future fail the optional row through existing diagnostics and cleanup. |
 
 Only such a row adds native `InSession<SessionIdentity>`, `InSession<SessionConfig>` and
 `InSession<SessionLifecycle>` dependencies. Reuse existing projection and
