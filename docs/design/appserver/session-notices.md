@@ -6,7 +6,8 @@ Status: Implemented in C6 ([#49](https://github.com/arcships/dim/issues/49),
 [§6.2 constraint 2](../overview.md#62-constraints), [Appendix B.2](../overview.md#b2-app-server-process-plugins) (Rpc),
 [Appendix F](../overview.md#appendix-f-requirements-raised-to-mechanism-owners). Broadcast contract:
 [event-driven flows §6](../../architecture/rust-agent/event-driven-flows.md#6-session-广播). First emitter: SessionStore
-title metadata (S5b, [#60](https://github.com/arcships/dim/issues/60), not implemented).
+title metadata (S5b, [#60](https://github.com/arcships/dim/issues/60), [#96](https://github.com/arcships/dim/pull/96):
+[title metadata](session-title-metadata.md)).
 
 ## 1. Summary
 
@@ -65,7 +66,7 @@ pub struct SessionNotice {
 
 | Rule | Content |
 | --- | --- |
-| Meaning | Defined by the owner. `source` names the owner, and the owner documents what each `kind` and its `data` mean (the title notice: [SessionTitle A.2](../plugins/SessionTitle.md#a2-depended-on-shapes-owners-define-them)). The broadcast and Rpc never interpret them, and a client that does not handle a `source` or `kind` ignores it. |
+| Meaning | Defined by the owner. `source` names the owner, and the owner documents what each `kind` and its `data` mean (the title notice: [S5b §7](session-title-metadata.md#7-the-title-notice)). The broadcast and Rpc never interpret them, and a client that does not handle a `source` or `kind` ignores it. |
 | Session | The record does not name the Session; the channel does, as for `Event`. Owners need not repeat the Session id in `data`. |
 | Position | No sequence number and no batch; never persisted or replayed. A notice reports that state changed; it is not a fact that later decisions use. An owner whose clients must order or deduplicate its changes puts its own revision in `data`, as the title notice does. |
 | Body | Every listener shares one body through `Arc`, as for `Event`; nobody copies or rewrites it. |
@@ -89,8 +90,9 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice);
 | Non-Rust owners | No binding. SessionStore, the emitter SessionTitle needs, is Rust. The draft ExternalAgent redesign ([#145](https://github.com/arcships/dim/issues/145), P3, TypeScript first) plans `externalAgent.*` notices from a TypeScript Session part; that part needs a binding under the named-service rules of [#4](https://github.com/arcships/dim/issues/4), which ExternalAgent raises when its design is refined for Ready ([roadmap §2](../roadmap.md#2-排期原则) rule 5). |
 
 SessionStore's `setTitle` (S5b), for example, commits the new revision and then calls
-`notify(&ctx, session_id, SessionNotice { source: "SessionStore".into(), kind: "title".into(), data })`, where `data`
-is the shape given in SessionTitle A.2.
+`notify(&ctx, session_id, SessionNotice { source: "SessionStore".into(), kind: "title".into(), data })` inside its
+serialization of title writes, where `data` is `{title, titleSource, titleRevision}`
+([S5b §5, §7](session-title-metadata.md#7-the-title-notice)).
 
 ## 5. Rpc forwarding
 
@@ -166,7 +168,7 @@ WebSocket:
 | D1 | `Notice` is a record on the existing Session channel | One channel keeps notices in order with events and reuses Rpc's listener; a separate channel would need a second subscription and lose that order |
 | D2 | `notify` is a function, not a service or plugin | Owners must not depend on optional plugins, and a notice needs no lifecycle: an owner's reload only stops its notices |
 | D3 | No listener means dropped; nothing is queued or replayed | R1 requires it; the owner's query is the recovery, and a queue would need retention and its own lifecycle |
-| D4 | The record does not name the Session; Rpc adds `sessionId` | The channel identifies the Session, as for `Event`; every Session notification routes on `sessionId`, and an owner cannot mislabel it. This refines R1, whose wire form is the bare record: the title data's own `sessionId` becomes redundant, and S5b decides whether to keep it |
+| D4 | The record does not name the Session; Rpc adds `sessionId` | The channel identifies the Session, as for `Event`; every Session notification routes on `sessionId`, and an owner cannot mislabel it. This refines R1, whose wire form is the bare record: the title data's own `sessionId` becomes redundant, and S5b drops it ([S5b §7](session-title-metadata.md#7-the-title-notice)) |
 | D5 | Protocol v3 only, no version bump | v1 and v2 are frozen; the notification is additive, like v3's new event kinds |
 | D6 | Reliable delivery: a slow client is disconnected | Events behave the same way; a silently dropped notice would leave the client stale with no signal |
 | D7 | Notices after `Closed` are dropped | `session.closed` stays the subscription's last Session notification; the owner's query covers the gap |

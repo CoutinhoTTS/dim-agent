@@ -16,6 +16,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
+| Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
 | Resolve a credential reference | `credentials`, process | Host dispatch implemented; no product plugin provides a secret store. Inject only when the embedding host supplies one. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |

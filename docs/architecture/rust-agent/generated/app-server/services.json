@@ -1100,6 +1100,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionMetadata",
+        "provider": 8,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessions",
         "provider": 20,
         "generation": 1,
