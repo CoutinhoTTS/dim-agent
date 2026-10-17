@@ -1,7 +1,8 @@
 # Settings 服务
 
 状态：设计已通过评审；Rust 侧已实现（S8b 第 1 部分，§12）；C4 行上的声明和 TypeScript 所有者
-路径已实现（第 2 部分，§12）；向 TypeScript 部分投递事件待做。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
+路径已实现（第 2 部分，§12）；向 TypeScript 部分投递事件已实现（第 3 部分，§12）；产品的
+`credentials` 提供方尚未选定（§10 第 4 条）。路线图项 S8b（[#118](https://github.com/arcships/dim/issues/118)）。
 基于 S8a（[#54](https://github.com/arcships/dim/issues/54)，PR [#90](https://github.com/arcships/dim/pull/90)）；
 实现依赖 C4（[#63](https://github.com/arcships/dim/issues/63)）。
 总体设计：[§6.4 配置](../overview.md#64-约定)。作用域：
@@ -224,9 +225,27 @@ Provider 在这一边界把它解析为现有的 `AwsCredentials`，并照旧校
 声明的来源与 Rust 来源完全一样，在提交后发出 `settings.changed`，两条写入路径都如此。载荷从不
 带文档内容。使用方先读一次，再跟随事件。
 
-TypeScript 部分通过 C4 对 rutis 事件的绑定接收这些事件（§10 第 2 条）。S8b 不另建投递路径。
-在该绑定出现之前，TypeScript 所有者在使用时读取，大多数所有者本来就这样做（F2 的 Permission
-即如此）。
+Session 运行时中的 TypeScript 部分用 rutis 0.11 的 leaf 事件接收这两个事件：
+`ctx.on('settings.changed', (payload) => …)` 和 `ctx.on('settings.project_authorized', …)`，
+唯一的参数就是上表的 JSON 载荷。Session 运行时声明这两个事件名（`LocalRuntime::emits`），
+由它已有的行部分 `SessionNodeRows` 转发（§10 第 2 条）：
+
+```
+ Settings 发出（settings/<source>、settings/projects）
+   -> SessionNodeRows 监听：把 {name, payload} 入队后返回   （其他监听方从不等待 Node）
+   -> 一个任务按提交顺序：Process::emit(name, [payload])
+   -> 每个已加载部分的 ctx.on 监听
+```
+
+- 所有来源的变更都会转发，包括 Rust 来源；部分自行按 `source` 过滤。载荷从不携带文档，所以不会
+  暴露部分读不到的内容。
+- 不重放：部分启动时读一次，之后跟随事件，与 Rust 使用方相同。部分的行加载之前发出的事件
+  （例如它自己 Session 创建时的项目授权）不会投递给它。
+- 投递失败（监听方抛错）会记录日志，不影响后续事件。队列和任务随 `SessionNodeRows` 结束。
+- 监听只入队，所以慢的部分不会拖慢 Settings 的其他监听方。队列没有上限；Settings 写入很少，
+  与 Session 广播记录（#174）不同。
+
+不需要对变更做出反应的所有者仍可在使用时读取（F2 的 Permission 就是这样）。
 
 ### 4.6 Rust 绑定
 
@@ -383,7 +402,7 @@ target home；没有时装配失败，而不是丢弃它们。
 | 权限规则（F2） | 不变；见 §8.1 |
 | Provider | `ResolveProviderSecret` 被 `credentials` 取代（§4.4）。密钥存储仍按配置可选，与现在相同 |
 | ADR 004 D4 | 它写明 S8b 之前 Settings 不发布管理方法。S8b 新增 `settings` 命名空间，仅限声明的来源。ADR 004 随实现更新 |
-| C4（TypeScript 桥接） | 它的行就是结构化输入；S8b 在 `provides` 旁加上 `settings` 成员（§3.1）。把 rutis 事件投递给 TypeScript 部分的绑定仍归 C4（§10 第 2 条） |
+| C4（TypeScript 桥接） | 它的行就是结构化输入；S8b 在 `provides` 旁加上 `settings` 成员（§3.1）。它的 Session 运行时声明两个 Settings 事件名，由 `SessionNodeRows` 转发（§4.5） |
 | PluginManager（P3） | 它从自己的包边界生成 C4 行时，同时生成行的 `settings` 成员 |
 | Rpc | 不变；像分派任何所有者的命名空间一样分派新命名空间 |
 | Timeline、Dispatcher、rutis、loader | 不变 |
@@ -430,10 +449,9 @@ C4 既定工作的依赖，不是对 dim 运行时或 rutis 的新需求。
 
 1. ~~**哪个清单承载 `settings` 条目。**~~ 已随 C4 的加载路径定下：C4 不引入包清单，它的行承载包的
    结构化声明。条目就是行的 `settings` 成员，与 `provides` 并列（§3.1）。
-2. **TypeScript 部分如何监听 rutis 事件。** rutis 0.10 的 `definePlugin` 上下文只有 `use`、
-   `provide` 和 `effect`。rutis-bridge 能把 rutis 事件发进 Node 运行时（`EmitToCordis` 配合挂载的
-   `emits`），但只适用于挂载的 Cordis 插件。C4 spike 把事件订阅列为未决的绑定项。S8b 只需要该
-   绑定能传递 §4.5 的载荷，并让监听随部分一起结束。
+2. ~~**TypeScript 部分如何监听 rutis 事件。**~~ 已随 rutis 0.11 的 leaf 事件（#173）定下：Session
+   运行时声明两个事件名，由 `SessionNodeRows` 转发（§4.5）。Session 广播绑定（#168、#174）是另一回事，
+   不承载它们。
 3. **运行中安装的包。** 声明是 Settings 的工厂配置，因此运行时安装（PluginManager，P3）会重载
    Settings 及其依赖方（MCP、Skills）。ADR 002 D3 接受结构性操作后的重载，但这一次是否可接受
    随 PluginManager 决定。目前 TypeScript 包只在启动时加载。
@@ -502,11 +520,13 @@ TypeScript 行）：
   `settings`。客户端路径（§4.3、第 7 条）和声明边界（第 5 条：Rust 来源名、另一个包重复声明、
   条目格式错误）在同一文件中运行。它们是 `node_` 流程，由 CI 的 Node 步骤运行。
 
+**第 3 部分（S8b-3）。** `settings.changed` / `settings.project_authorized` 已能到达 TypeScript 部分
+（§4.5，§10 第 2 条）。`transport_flow/settings_methods.rs` 检查所有者 fixture 的 `ctx.on` 监听按提交
+顺序收到第 3 条的三次 `example` 变更，以及该部分加载后才创建的项目的授权。
+
 仍未完成：
 
 - 第 6 条的 TypeScript 部分。只有某个进程部分提供 `credentials` 时，TypeScript 所有者才能注入它，
   而 App Server 目前没有这样的部分或嵌入方输入：这就是 §10 第 4 条。Session 作用域的测试存储不是
   契约（§4.4 是进程作用域），注入缺失服务的行会一直处于 Pending。Provider 部分和服务形态已覆盖
   （第 1 部分）。
-- 把 `settings.changed` / `settings.project_authorized` 投递给 TypeScript 部分（§4.5，§10 第 2 条），
-  随 C4 的 leaf 事件绑定（[#174](https://github.com/arcships/dim/pull/174)）。
