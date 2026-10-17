@@ -72,7 +72,7 @@ sequenceDiagram
   participant S as Session
   participant Q as sessionMethods session.question
   participant QB as Questions branch service
-  participant TL as Branch Timeline
+  participant H as ask_user handler
   CL->>Rpc: session.question.respond {sessionId, branchId, ...}
   Rpc->>Rpc: not a built-in, not in a configured management namespace, sessionId in params, authorize Session access
   Rpc->>AI: acquire(sessionId), restoring if unloaded
@@ -81,7 +81,7 @@ sequenceDiagram
   S-->>Rpc: provider
   Rpc->>Q: call(MethodCall)
   Q->>QB: respond(callId, answers) on branchId
-  QB->>TL: question/answered
+  QB->>H: hand the answer to the waiting call
   Q-->>Rpc: MethodReply
   Rpc-->>CL: result
 ```
@@ -147,7 +147,7 @@ Proposed (P3, with RemoteGateway; not implemented): the connection's `Connection
 
 | Rule | How this document complies |
 | --- | --- |
-| §4 rule 1 (command events) | Not applicable: the services write no Timeline event themselves; a method that changes branch state calls its owner, which writes (for example `question/answered`). |
+| §4 rule 1 (command events) | Not applicable: the services write no Timeline event themselves; a method that changes branch state calls its owner, which writes (for example InputQueue's `input/deleted` for `session.input.withdraw`). |
 | §4 rule 2 (handover) | Not applicable: methods and tool contributions hand nothing over; a tool call is handed to ToolExecutor by the existing `step/tool-call` contract. |
 | §4 rule 3 (before callbacks only) | Rpc validates only param shape and `sessionId` authorization; feature checks belong to the method's owner, and acting before a commit is left to Timeline before callbacks. |
 | §4 rule 4 (no business meaning in core) | Rpc and ToolRegistry collect services by name and never name a provider or interpret a method. |
@@ -374,7 +374,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 
 | Scenario | Sequence order | Outcome | Owner of the decision |
 | --- | --- | --- | --- |
-| Session method during branch `stop/interrupt` | per owner's facts | Decided by the owner's Timeline order (for example, a Questions answer after the interrupt is `question/cancelled`) | Owning plugin |
+| Session method during branch `stop/interrupt` | per owner's facts | Decided by the owner (for example, a Questions answer after ToolExecutor cancelled the call replies `question_cancelled`) | Owning plugin |
 | Session method on a closed branch | — | Owner's `BranchMissing` error | Owning plugin |
 | Session method on an unloaded Session | — | Rpc restores it through `index.acquire`, then dispatches (unlike `approval.respond`, which returns `session_closed`) | Rpc |
 | Session-scoped provider reloads mid-call | admitted < reload | `report`: `operation_interrupted`; `drain`: the call's own result; the unload waits for both | Provider |

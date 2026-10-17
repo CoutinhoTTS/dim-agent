@@ -72,7 +72,7 @@ sequenceDiagram
   participant S as Session
   participant Q as sessionMethods session.question
   participant QB as Questions 分支服务
-  participant TL as 分支 Timeline
+  participant H as ask_user 处理函数
   CL->>Rpc: session.question.respond {sessionId, branchId, ...}
   Rpc->>Rpc: 非内建方法，不在已配置的管理命名空间内，params 中带 sessionId，授权 Session 访问
   Rpc->>AI: acquire(sessionId)，未装载时恢复
@@ -81,7 +81,7 @@ sequenceDiagram
   S-->>Rpc: 提供方
   Rpc->>Q: call(MethodCall)
   Q->>QB: 在 branchId 上 respond(callId, answers)
-  QB->>TL: question/answered
+  QB->>H: 把回答交给等待中的调用
   Q-->>Rpc: MethodReply
   Rpc-->>CL: 结果
 ```
@@ -147,7 +147,7 @@ sequenceDiagram
 
 | 规则 | 本文如何遵守 |
 | --- | --- |
-| §4 第 1 条（指令事件） | 不适用：这些服务自身不写 Timeline 事件；改变分支状态的方法调用状态所有者，由所有者写入（例如 `question/answered`）。 |
+| §4 第 1 条（指令事件） | 不适用：这些服务自身不写 Timeline 事件；改变分支状态的方法调用状态所有者，由所有者写入（例如 InputQueue 为 `session.input.withdraw` 写入的 `input/deleted`）。 |
 | §4 第 2 条（交接） | 不适用：方法与工具贡献不交接任何对象；工具调用按现有 `step/tool-call` 合同交给 ToolExecutor。 |
 | §4 第 3 条（只用 before 回调） | Rpc 只校验参数格式和 `sessionId` 授权；功能检查归方法所有者，提交前的处理只用 Timeline before 回调。 |
 | §4 第 4 条（核心不带业务含义） | Rpc 与 ToolRegistry 按名称收集服务，从不点名提供方，也不解释方法。 |
@@ -374,7 +374,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 
 | 场景 | 序号顺序 | 结果 | 决定所有者 |
 | --- | --- | --- | --- |
-| 分支 `stop/interrupt` 期间的 Session 方法 | 按所有者的事实 | 由所有者的 Timeline 顺序决定（例如，中断之后的 Questions 回答是 `question/cancelled`） | 所属插件 |
+| 分支 `stop/interrupt` 期间的 Session 方法 | 按所有者的事实 | 由所有者决定（例如，ToolExecutor 已取消调用之后的 Questions 回答回复 `question_cancelled`） | 所属插件 |
 | 对已关闭分支调用 Session 方法 | — | 所有者的 `BranchMissing` 错误 | 所属插件 |
 | 对未装载 Session 调用 Session 方法 | — | Rpc 通过 `index.acquire` 恢复后再分发（不同于 `approval.respond`，它返回 `session_closed`） | Rpc |
 | Session 级提供方在调用中途重载 | admitted < reload | `report`：`operation_interrupted`；`drain`：调用自己的结果；卸载等待两者 | 提供方 |

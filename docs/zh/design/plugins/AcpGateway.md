@@ -154,7 +154,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | 另一个客户端撤回编辑器的输入 | 晚于输入批次的 `input/withdraw` < `input_event_id` 的 `input/deleted` | Prompt `cancelled` | InputQueue、Gateway |
 | stop 落地前轮次已完成 | `turn/end` < `stop/interrupt` | Prompt `cancelled`（已请求取消）；stop 不覆盖任何轮次 | Loop、Gateway |
-| 模型在已加载的交互 Session 中提问 | `question/asked` | 显示为 `tool_call` 更新“waiting for an answer in another dim client”（A13）；prompt 等待；`session/cancel` 中断，Questions 写入 `question/cancelled` | Questions、Gateway |
+| 模型在已加载的交互 Session 中提问 | 含 `ask_user` 的 `step/tool-call` | 显示为 `tool_call` 更新“waiting for an answer in another dim client”（A13）；prompt 等待；`session/cancel` 中断，该调用的 `step/tool-result` 以取消结束它 | Questions、ToolExecutor、Gateway |
 | 审批已由另一个客户端回答 | 更早的 `approval/respond` | 编辑器之后的回答被拒；忽略 | Approval |
 | 轮次中守护进程重启 | 轮次结算为 `Failed` | 从历史追赶；`turn_failed`（若已请求取消则为 `cancelled`） | Loop |
 | Hooks `user_prompt_submit` 规则撤回 prompt | input、`input/withdraw {reason}` 在同一批次中 < `input/deleted` | 原因作为 `agent_message_chunk`；prompt 响应 `refusal`；不留下在途 prompt | Hooks、InputQueue、Gateway |
@@ -246,7 +246,7 @@ sequenceDiagram
 | `step/tool-use` | `tool_call_update {rawInput, locations}` |
 | `step/tool-start` | `tool_call_update {status: in_progress}` |
 | `step/tool-result`（每个调用，随整个批次发布） | `tool_call_update {status: completed or failed, content: text of ToolResult.content bounded 16 KiB}` |
-| `question/asked`（仅交互 Session） | 带文本“waiting for an answer in another dim client”的 `tool_call_update`（A13） |
+| 含 `ask_user` 调用的 `step/tool-call`（仅交互 Session） | 带文本“waiting for an answer in another dim client”的 `tool_call_update`（A13） |
 | 仅含 raw 块的输入、`exec/*`、`collaboration/*`、`context/*`、`branch/*`、`input/withdraw`、`input/deleted` | 无消息更新（A8） |
 
 根据工具名得出 `kind`：`read`→`read`；`write`、`edit`→`edit`；`glob`、`grep`→`search`；`exec`→`execute`；`web_fetch`、`web_search`→`fetch`；其他 `other`（A9）。存在 `path` 输入字段时 `locations` 使用它。
@@ -282,8 +282,8 @@ sequenceDiagram
 | 工具批次未结算 | — | 只有批次结果发布后才发送完成更新 | ToolExecutor |
 | 审批已在别处回答 | 更早的 `approval/respond` | 编辑器之后的回答被拒，忽略 | Approval |
 | 编辑器询问期间审批被 stop 取消 | `approval/cancelled` | ACP 请求无法收回；之后的回答被忽略 | Approval |
-| 已加载交互 Session 中的提问 | `question/asked` | 等待其他客户端；取消会中断 → `question/cancelled`（A13） | Questions |
-| ACP 创建的 Session 中的提问 | `question/asked` | 交互：与已装载的 Session 一样显示为等待另一个客户端（A13） | Questions |
+| 已加载交互 Session 中的提问 | `ask_user` 的 `step/tool-call` | 等待其他客户端；取消会中断 → 取消的 `step/tool-result`（A13） | Questions、ToolExecutor |
+| ACP 创建的 Session 中的提问 | `ask_user` 的 `step/tool-call` | 交互：与已装载的 Session 一样显示为等待另一个客户端（A13） | Questions |
 | prompt 期间压缩 | — | 无更新；流式传输不受影响 | — |
 | 模型创建的子分支 | — | 无消息更新；其审批被转发 | Gateway（A7） |
 | Session 关闭 | `session.closed` | 在途 prompt `cancelled`；之后为 `session_not_found` | Gateway |
