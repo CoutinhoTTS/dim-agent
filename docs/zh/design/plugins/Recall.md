@@ -32,58 +32,88 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
  +----------------------------+   +-------------------------------+    +-------------------------+
 ```
 
-## 3. 讲什么
+## 3. 叙事投影
+
+`project_history` 讲不了这个故事：它是为拼装模型请求服务的，把一次调用拆成一个 `ToolUse` 部分和一条单独的 `ToolResult` 消息，其余什么都不保留。审批、后台执行、子 agent、从未执行的调用都不在其中。所以 Recall 在事件之上有自己的投影。它用与上下文拼装相同的规则判断什么算数（§3.3），再以自己的形式讲出来。
 
 ### 3.1 固定的读取
 
-每次调用开始时，工具读取 `head = branch.sequence()`（已发布序号）和 `events = branch.history(Some(head))`，即分支的继承前缀加上其自身事件。其余一切都基于这一份固定的列表计算，所以一次调用不会混用两个 head。这与 `wait` 已有的做法一致（[wait.rs](../../../../crates/dim-agent-capabilities/src/wait.rs)）：一个 Session 工具从 `ToolExecutionContext.branch_id` 经 `TreeCommands` 找到调用方分支。
+每次调用开始时，工具读取 `head = branch.sequence()`（已发布序号）和 `events = branch.history(Some(head))`，即分支的继承前缀加上其自身事件。其余一切都基于这一份固定的列表计算，所以一次调用不会混用两个 head。这与 `wait` 已有的做法一致（[wait.rs](../../../../crates/dim-agent-capabilities/src/wait.rs)）：一个 Session 工具从 `ToolExecutionContext.branch_id` 经 `TreeCommands` 找到调用方分支。Recall 不应用压缩，遍历的是整个列表。
 
-### 3.2 与上下文拼装相同的选取
+### 3.2 事：一个起点事件和挂到它上面的事件
 
-模型上下文由 `project_history`（[history.rs](../../../../crates/dim-agent-capabilities/src/history.rs)）从事件拼装而来。Recall 用同样的规则选取，所以"模型经历过什么"只有一个定义：
+投影把事件折叠成**事**。一件事有一个**起点事件**，以及之后通过事件本来就带着的 id 挂到它上面的事件。一件事的那一行显示起点的时间和 id；它的结局是折叠完所有挂上来的事件之后剩下的状态。
 
-- 输入在被消费后才算；待处理、已撤回和已删除的输入从不出现；
-- 模型输出在完成时才算，或者作为中断留下的部分消息；
-- 工具结果连同其上下文消息一起算。
+| 事 | 起点事件 | 挂上来的事件（关联键） |
+| --- | --- | --- |
+| 用户输入 | 带用户内容的 `input/message` | `input/consumed`（`input_id`） |
+| 运行时块 | `input/message` 中的一个块 | `input/consumed`（`input_id`）；之后同一 `key` 的块 |
+| 你的回复 | `step/model-content` | `step/model-output-end`（`request_id`） |
+| 工具调用 | `step/tool-use` | 来源为 `tool` 的 `approval/request`（`call_id`），然后是 `approval/respond` 或 `approval/cancelled`（`approval_id`）；`step/tool-result` 中对应的那一项（`call_id`）；`exec/started`（`call_id`）与 `exec/ended`（`task_id`）；`collaboration/request`（`call_id`），然后是 `collaboration/message`（`call_id`）与 `collaboration/result`（`request_event_id`）；来源为 `tool` 的 `branch/create`（`call_id`） |
+| 中断 | `stop/interrupt` | — |
+| 权限变更 | `permission/changed` | — |
+| 压缩 | 结果为 `completed` 的 `context/compaction` | — |
+| fork | 本分支的 `branch/create` | — |
 
-Recall 原样使用 `project_history`，不做改动：它产出的每个条目都写明放置它的事件，而该事件的类型说明了这个条目是什么。Recall 不应用压缩，遍历的是整个列表。
+后四种从未进入模型上下文，但它们属于发生过的事：用户的决定，以及对话的形状。
 
-除了进过上下文的内容，还有少数公开事件，虽然从未被模型读到，却属于发生过的事：
+其余事件都是机制。它们作为中间状态被折叠或被丢弃，从不单独讲：`model/*`、`context/prepare`、`context/budget`、`context/configured`、`context/compact`、`context/compaction-start`、流式的 `step/*` 片段、`step/tool-call`、`step/tool-start`、`step/tool-completed`、`prompt/configure-*`、`input/applied`、`input/withdraw`、`input/deleted`。`turn/start` 与 `turn/end` 划分轮次（§3.6）。
 
-| 事件 | 讲作 |
+### 3.3 什么算数
+
+投影用上下文拼装的规则判断什么算数，所以"模型经历过什么"只有一个定义：
+
+- 输入在被消费后才算；待处理、已撤回或已删除的输入不是一件事；
+- 回复在其输出完成时才算，或者作为中断或失败留下的部分文本；
+- 工具结果按模型收到的样子讲：它的 `content`，而不是 `structuredContent`。
+
+一个流程测试把两种投影绑在一起：`project_history` 放进上下文的每个事件，都是某件事的起点或挂在某件事上（§14）。
+
+### 3.4 每件事怎么讲
+
+| 事 | 行 |
 | --- | --- |
-| `approval/respond` | 用户允许或拒绝了一次调用 |
-| `stop/interrupt` | 用户中断了这一轮 |
-| `permission/changed` | 权限模式变了 |
-| `context/compaction`（completed） | 到这里为止的对话被总结了 |
-| 本分支的 `branch/create` | 这个分支从另一个分支 fork 出来，以及它的任务 |
+| 用户输入 | `user: <文本>`，原文，图片为 `[image]`；`steer` 输入为 `user (while you were working): <文本>` |
+| 运行时块 | 按其标签和 `source` 属性，而不是外壳：`rule <source> set|replaced|revoked`、`state <source> updated|cleared`，其他为 `<tag>: <第一行>` |
+| 你的回复 | `you: <文本>`，省略 thinking；未完成的输出为 `your reply was cut off (<原因>): <部分文本>` |
+| 工具调用 | `you called <tool> <参数简述> → <结局>` |
+| 中断 | `the user interrupted the turn` |
+| 权限变更 | `permission mode changed to <mode>` |
+| 压缩 | `the conversation up to here was summarized` |
+| fork | `this branch was forked from <branch>; its task: <prompt>` |
 
-其余都是机制，从不讲：`model/*`、`context/prepare`、`context/budget`、`context/configured`、流式的 `step/*` 片段、工具的开始与完成、提示词配置控制、`exec/*`（工具自己的调用和结果已经讲了它）。`turn/start` 与 `turn/end` 只用来划分轮次。
+Recall 按标签、`source` 和 `key` 通用地读取运行时块；它不认识任何生产者，所以新增一种块不需要改它。
 
-### 3.3 每件事怎么讲
+**工具调用的结局**是折叠后的状态，取第一个适用的：
 
-| 来源 | 讲作 |
+| 挂上来的事件 | 结局 |
 | --- | --- |
-| 输入中用户的内容 | `user: <文本>`，原文；图片为 `[image]` |
-| 输入中的运行时块 | 按其标签和来源，而不是外壳：`rule AGENTS.md replaced`、`state <source> updated`、`<tag>: <第一行>` |
-| 模型输出 | `you: <文本>`；省略 thinking |
-| 一次工具调用及其结果 | 一行：`you called <tool> <关键输入> → ok|error, <长度> chars: <文本>` |
-| 经历事件（§3.2） | 上表中对应的句子 |
+| `approval/respond` 为 deny | `denied by the user` |
+| `approval/cancelled` | `approval cancelled: <reason>` |
+| 关闭一个从未派发的调用的结果（没有 `call_event_id`） | `not run: <结果文本>` |
+| `collaboration/result` | `sub-agent <agent> answered: <文本>`（或其失败） |
+| `exec/ended` | `ran in background task <task>; finished at HH:MM: ok|error|cancelled: <文本>` |
+| 有 `exec/started` 但没有 `exec/ended` | `running in background task <task>` |
+| 带 `is_error` 的结果 | `error: <文本>` |
+| 结果 | `ok: <文本>` |
+| 都没有（head 停在调用中间） | `no result yet` |
 
-一次调用和它的结果是同一件事，在调用的 id 下只讲一次；展开后显示完整输入和完整结果。Recall 按标签、`source` 属性和 `key` 通用地读取运行时块；它不认识任何生产者，所以新增一种块不需要改它。
+**参数简述**对所有工具通用：`input` 的标量字段写作 `key=value`，字符串截到约 60 个字符，嵌套的值显示为 `{…}`。展开这次调用时给出完整参数。
 
-### 3.4 不重复讲
+**结果**是 `content` 的文本；blob 和图片为 `[file]` 与 `[image]`；工具带入的上下文消息为 `with <n> context messages`。展开这次调用时给出全部内容。结果比调用晚到不同的分钟时，结局带上结果的时间。
+
+### 3.5 不重复讲
 
 有些经历此刻仍在模型眼前。Recall 指向它们，而不是重复：
 
 - `key` 仍然生效的块（当前的规则或 state）讲作 `…（current version in your context）`；展开显示当时投递的那个版本；
-- 最近一次的摘要就在上下文中；压缩那一行指出它，而不重复它。
+- 最近一次的摘要就在上下文中；它的压缩那一行指出这一点，而不重复它。
 
-流式片段从不与最终内容并列出现；同一个 key 以相同文本再次投递的块只讲一次。
+同一个 key 以相同文本再次投递的块只讲一次。
 
-### 3.5 轮次
+### 3.6 轮次
 
-一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的经历事件（在两轮之间运行的压缩、fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。
+一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。
 
 ## 4. 把手：时间与事件 id
 
@@ -171,9 +201,9 @@ Earlier: before=a7730e5f. Open one: open=<id>.
 2026-10-17 (UTC)
 14:03 9b1e4d70 user: Use the staging bucket, never prod. Name files YYYY-MM-DD-report.csv, e.g. 2026-10-01-report.csv.
 14:03 51c0aa3e you: I'll check the API limits first.
-14:04 3f9a2c1b you called web_fetch https://example.com/api/limits → ok, 12,400 chars: "Rate limits: 600 requests per minute per key…"
+14:04 3f9a2c1b you called web_fetch url=https://example.com/api/limits → ok: "Rate limits: 600 requests per minute per key…"
 14:10 8d2f6b04 rule AGENTS.md replaced (current version in your context)
-14:12 c0e95a71 the user denied: shell aws s3 cp report.csv s3://prod-…
+14:12 c0e95a71 you called shell command="aws s3 cp report.csv s3://prod-reports/…" → denied by the user
 14:20 77ab3e19 the user interrupted the turn
 End of turn. Open one: open=<id>.
 ```
@@ -213,7 +243,7 @@ End of turn. Open one: open=<id>.
 
 ## 9. 不做什么
 
-- **不写入，不改类型。** 没有事件、`StateCell`、快照或广播；`HistoryEntry` 与 `project_history` 原样使用。
+- **不写入，不改类型。** 没有事件、`StateCell`、快照或广播。叙事投影是 Recall 自己的；`project_history` 及其类型不变。
 - **不新增上下文输入路径。** 结果只以工具结果进入模型（AGENTS 第 10 条、设计规则 §4 第 6 条）。
 - **不给原始事件，不讲机制。** 只讲 §3 列出的内容。
 - **不读其他分支或 Session。** 分支取自 `ToolExecutionContext.branch_id`。
@@ -236,7 +266,7 @@ End of turn. Open one: open=<id>.
 | 设计规则 §4 第 4 条（核心不带业务含义） | 不改核心。它按标签和 key 通用地读取运行时块，不按生产者区分。 |
 | 设计规则 §4 第 5 条（原子批次） | 不适用：它不写入；读取固定在一个已发布的 head 上。 |
 | 设计规则 §4 第 6 条（上下文只来自交接后的事件） | 它按上下文拼装的规则选取，只额外加入公开的经历事件；结果只以工具结果进入模型。 |
-| 设计规则 §4 第 7 条（公开事件与服务） | 使用 `TreeCommands`、Branch 门面、`project_history` 和公开事件。不读任何插件的内部状态。 |
+| 设计规则 §4 第 7 条（公开事件与服务） | 使用 `TreeCommands`、Branch 门面，以及公开事件和它们的关联 id。不读任何插件的内部状态。 |
 | 设计规则 §4 第 8 条（基础设施不变） | Timeline、Dispatcher、信封、装配、门面和投影类型都不变。 |
 | 设计规则 §4 第 9 条（只有后续决定要用的事实进 Timeline） | 不新增事件。 |
 | 设计规则 §1（Capability 与 App Server 边界） | 是 `dim-agent-capabilities` 中的 Session Capability，由 App Server 安装在产品 profile 中。 |
@@ -258,7 +288,8 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | 是什么 | 把分支历史讲给模型听，就像客户端里的会话视图 |
 | 范围 | 整个分支历史，含继承前缀；压缩是一个事件，不是边界 |
-| 选取 | 与上下文拼装相同的规则（`project_history`），加上审批、中断、权限变更、压缩和 fork |
+| 投影 | 自己的投影：由一个起点事件和通过已有 id 挂上来的事件折叠成的事（§3.2）；按上下文拼装的规则判断是否算数，加上中断、权限变更、压缩和 fork |
+| 工具调用 | 每次调用一行，带通用的参数简述和折叠后的结局：审批、未执行、后台任务、子 agent、错误或成功（§3.4） |
 | 层级 | 轮次索引 → 一轮 → 一件事的全文；检索返回第 2 层的行 |
 | 把手 | 每行带时间和事件 id；id 以唯一前缀显示 |
 | 不重复 | 生效中的规则和 state、最近的摘要、流式片段、重复投递 |
@@ -277,14 +308,15 @@ End of turn. Open one: open=<id>.
 流程测试放在 `crates/dim-agent-capabilities/tests`，使用测试策略；另加一个 `crates/dim-app-server/tests` 中的产品 profile 测试：
 
 1. **轮次索引。** 无参数调用按最近在前列出各轮，带时间、id、第一段用户文本、工具及次数和结局；沿 `before=` 往前翻直到 `Nothing earlier.`。
-2. **一轮。** 展开一轮时按顺序讲出用户原文、回复、每次调用连同其结果的一行、一次被拒绝的审批和一次中断，各带时间和 id。
+2. **一轮。** 展开一轮时按顺序讲出用户原文、回复、每次调用连同其结局的一行，以及一次中断，各带时间和 id。
 3. **一件事。** 展开一次调用的 id 显示其完整输入和结果，用 `offset` 分页直到 `End.`；CJK 文本从不被拆开。
-4. **选取。** 已撤回和已删除的输入、thinking 和机制事件从不出现；运行时块按其标签和来源出现，key 仍生效的块说明当前版本在上下文中。
+4. **选取。** 已撤回和已删除的输入、thinking 和机制事件从不出现；运行时块按其标签和来源出现，key 仍生效的块说明当前版本在上下文中。`project_history` 放进上下文的每个事件都属于某件事。
 5. **压缩。** 两次压缩之后，Recall 仍能回到第一轮；每次压缩是一行；压缩前返回的 id 在压缩后仍展开同样的内容。
 6. **检索。** 顺序和大小写都不同的词作为 `about`，能找到第一次压缩之前的一条用户消息；`tool` 只保留该工具的调用。
-7. **id。** 唯一的短前缀可以展开；有歧义的前缀列出更长的前缀；子分支可以展开继承的 id。
-8. **边界与无副作用。** 没有结果超过 10,000 字符；Timeline 只新增 `step/tool-call` 与 `step/tool-result`。
-9. **权限。** 在 read-only 预设下，工具不经审批请求即运行。
+7. **工具调用的结局。** 被拒绝、从未派发、转入后台任务且之后结束、由子 agent 回答、失败和成功的调用各一次，都按 §3.4 的结局讲成一行；steer 输入讲作用户在模型工作时插话。
+8. **id。** 唯一的短前缀可以展开；有歧义的前缀列出更长的前缀；子分支可以展开继承的 id。
+9. **边界与无副作用。** 没有结果超过 10,000 字符；Timeline 只新增 `step/tool-call` 与 `step/tool-result`。
+10. **权限。** 在 read-only 预设下，工具不经审批请求即运行。
 
 ## 附录 A. Rust 绑定
 
@@ -296,7 +328,7 @@ pub struct RecallPlugin { scope: SessionScope }
 //   apply: ctx.provide_as(scope.named_key::<ToolContribution>(RECALL_TOOL),
 //                         ToolContribution { definition, handler: RecallTool(tree) })
 struct RecallTool(Arc<TreeCommands>);
-impl ToolHandler for RecallTool { /* §3–§6，使用 history::project_history */ }
+impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-app-server/src/main.rs，产品 profile（与 ProductSummaryStrategyPlugin 并列）
 builder.session_plugin(RecallPlugin::new)

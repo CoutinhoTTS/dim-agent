@@ -50,7 +50,13 @@ knowledge.
  +----------------------------+   +-------------------------------+    +-------------------------+
 ```
 
-## 3. What it tells
+## 3. The narrative projection
+
+`project_history` cannot tell the story: it builds model requests, so it splits a call into a
+`ToolUse` part and a separate `ToolResult` message and keeps nothing else. Approvals, background
+execution, sub-agents and calls that never ran are not in it. Recall therefore has its own
+projection over events. It selects what counts with the same rules as context assembly (§3.3),
+and it tells it in its own shape.
 
 ### 3.1 The pinned read
 
@@ -59,70 +65,102 @@ At the start of each call the tool reads `head = branch.sequence()` (the publish
 Everything else is computed from this one fixed list, so a call never mixes two heads. The pattern
 is the one `wait` already uses ([wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)): a
 Session tool that resolves the calling branch from `ToolExecutionContext.branch_id` through
-`TreeCommands`.
+`TreeCommands`. Recall does not apply compaction: it walks the whole list.
 
-### 3.2 The same selection as context assembly
+### 3.2 Things: an origin event and what joins it
 
-Model context is assembled from events by `project_history`
-([history.rs](../../../crates/dim-agent-capabilities/src/history.rs)). Recall selects with the same
-rules, so "what the model went through" has one definition:
+The projection folds events into **things**. A thing has one **origin event** and the later
+events that join it by an id the events already carry. A thing's line shows the origin's time and
+id; its ending is the state left after every joined event is folded in.
 
-- an input counts once it is consumed; pending, withdrawn and deleted inputs never appear;
-- a model output counts when it completed, or as the partial message an interruption left;
-- a tool result counts with its context messages.
+| Thing | Origin event | Joined events (join key) |
+| --- | --- | --- |
+| User input | `input/message` with user content | `input/consumed` (`input_id`) |
+| Runtime block | a block of an `input/message` | `input/consumed` (`input_id`); a later block with the same `key` |
+| Your reply | `step/model-content` | `step/model-output-end` (`request_id`) |
+| Tool call | `step/tool-use` | `approval/request` with source `tool` (`call_id`), then `approval/respond` or `approval/cancelled` (`approval_id`); the item of `step/tool-result` (`call_id`); `exec/started` (`call_id`) and `exec/ended` (`task_id`); `collaboration/request` (`call_id`), then `collaboration/message` (`call_id`) and `collaboration/result` (`request_event_id`); `branch/create` with source `tool` (`call_id`) |
+| Interrupt | `stop/interrupt` | — |
+| Permission change | `permission/changed` | — |
+| Compaction | `context/compaction` with outcome `completed` | — |
+| Fork | this branch's `branch/create` | — |
 
-Recall uses `project_history` itself without changing it: each entry it yields names the event
-that placed it, and that event's kind says what the entry is. Recall does not apply compaction:
-it walks the whole list.
+The last four never entered a model context, but they are part of what happened: the user's
+decisions and the shape of the conversation.
 
-Besides what entered context, a few public events are part of what happened although no model ever
-read them:
+Every other event is machinery. It is folded as an intermediate state or dropped, and never told
+on its own: `model/*`, `context/prepare`, `context/budget`, `context/configured`,
+`context/compact`, `context/compaction-start`, streaming `step/*` deltas, `step/tool-call`,
+`step/tool-start`, `step/tool-completed`, `prompt/configure-*`, `input/applied`, `input/withdraw`,
+`input/deleted`. `turn/start` and `turn/end` delimit turns (§3.6).
 
-| Event | Told as |
+### 3.3 What counts
+
+The projection counts with the rules context assembly uses, so "what the model went through" has
+one definition:
+
+- an input counts once it is consumed; an input that is pending, withdrawn or deleted is no thing;
+- a reply counts when its output completed, or as the partial text an interruption or failure
+  left;
+- a tool result is told as the model received it: its `content`, not `structuredContent`.
+
+A flow test holds the two projections together: every event that `project_history` places in
+context is the origin of, or joined to, a thing (§14).
+
+### 3.4 How each thing is told
+
+| Thing | Line |
 | --- | --- |
-| `approval/respond` | the user allowed or denied a call |
-| `stop/interrupt` | the user interrupted the turn |
-| `permission/changed` | the permission mode changed |
-| `context/compaction` (completed) | the conversation up to here was summarized |
-| `branch/create` of this branch | this branch was forked from another, with its task |
+| User input | `user: <text>`, verbatim, images as `[image]`; a `steer` input is `user (while you were working): <text>` |
+| Runtime block | by its tag and `source` attribute, not its wrapper: `rule <source> set|replaced|revoked`, `state <source> updated|cleared`, otherwise `<tag>: <first line>` |
+| Your reply | `you: <text>`, thinking left out; an output that did not complete is `your reply was cut off (<reason>): <partial text>` |
+| Tool call | `you called <tool> <input brief> → <ending>` |
+| Interrupt | `the user interrupted the turn` |
+| Permission change | `permission mode changed to <mode>` |
+| Compaction | `the conversation up to here was summarized` |
+| Fork | `this branch was forked from <branch>; its task: <prompt>` |
 
-Everything else is machinery and is never told: `model/*`, `context/prepare`, `context/budget`,
-`context/configured`, streaming `step/*` deltas, tool start and completion, prompt configuration
-controls, `exec/*` (the tool's own call and result tell it). `turn/start` and `turn/end` only
-delimit turns.
+Recall reads blocks generically, by tag, `source` and `key`; it knows no producer, so a new kind
+of block needs no change to it.
 
-### 3.3 How each thing is told
+**A tool call's ending** is the folded state, the first that applies:
 
-| From | Told as |
+| Joined events | Ending |
 | --- | --- |
-| The user's content in an input | `user: <text>`, verbatim; images as `[image]` |
-| A runtime block in an input | by its tag and source, not its wrapper: `rule AGENTS.md replaced`, `state <source> updated`, `<tag>: <first line>` |
-| A model output | `you: <text>`; thinking left out |
-| A tool call and its result | one line: `you called <tool> <key input> → ok|error, <length> chars: <text>` |
-| An experience event (§3.2) | its sentence from the table above |
+| `approval/respond` deny | `denied by the user` |
+| `approval/cancelled` | `approval cancelled: <reason>` |
+| a result that closed a call never dispatched (`call_event_id` absent) | `not run: <result text>` |
+| `collaboration/result` | `sub-agent <agent> answered: <text>` (or its failure) |
+| `exec/ended` | `ran in background task <task>; finished at HH:MM: ok|error|cancelled: <text>` |
+| `exec/started` without `exec/ended` | `running in background task <task>` |
+| a result with `is_error` | `error: <text>` |
+| a result | `ok: <text>` |
+| none (the head ends inside the call) | `no result yet` |
 
-A call and its result are one thing, told once under the call's id; opening it shows the full
-input and the full result. Recall reads blocks generically, by their tag, `source` attribute and
-`key`; it knows no producer, so a new kind of block needs no change to it.
+**The input brief** is generic, for every tool alike: the scalar fields of `input` as
+`key=value`, strings cut at about 60 characters, nested values as `{…}`. Opening the call shows the
+full input.
 
-### 3.4 Not telling twice
+**The result** is the `content` text; blobs and images are `[file]` and `[image]`; context messages
+the tool added are `with <n> context messages`. Opening the call shows all of it. When the result
+arrives in a later minute than the call, the ending carries its time.
+
+### 3.5 Not telling twice
 
 Some of what happened is still in front of the model. Recall points to it instead of repeating
 it:
 
 - a block whose `key` is still live (the current rule or state) is told as
-  `… (current version in your context)`; opening it shows the version that was delivered then;
-- the latest summary is in context; the compaction line names it and does not repeat it.
+  `… (current version in your context)`; opening it shows the version delivered then;
+- the latest summary is in context; its compaction line says so and does not repeat it.
 
-Streaming deltas are never shown beside the final content, and a block delivered again under the
-same key with the same text is told once.
+A block delivered again under the same key with the same text is told once.
 
-### 3.5 Turns
+### 3.6 Turns
 
-A turn is the span from `turn/start` to `turn/end` of one `turn_id`; the inputs it consumed belong
-to it. Experience events outside any turn (a compaction run between turns, the fork) are lines of
-their own between turns. A turn's line in the index gives its first user text, the tools it
-called with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`).
+A turn is the span of one `turn_id` from `turn/start` to `turn/end`; the inputs it consumed belong
+to it. Things outside any turn (a compaction between turns, the fork) are lines of their own
+between turns. A turn's line in the index gives its first user text, the tools it called with
+counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`).
 
 ## 4. Handles: time and event id
 
@@ -220,9 +258,9 @@ Earlier: before=a7730e5f. Open one: open=<id>.
 2026-10-17 (UTC)
 14:03 9b1e4d70 user: Use the staging bucket, never prod. Name files YYYY-MM-DD-report.csv, e.g. 2026-10-01-report.csv.
 14:03 51c0aa3e you: I'll check the API limits first.
-14:04 3f9a2c1b you called web_fetch https://example.com/api/limits → ok, 12,400 chars: "Rate limits: 600 requests per minute per key…"
+14:04 3f9a2c1b you called web_fetch url=https://example.com/api/limits → ok: "Rate limits: 600 requests per minute per key…"
 14:10 8d2f6b04 rule AGENTS.md replaced (current version in your context)
-14:12 c0e95a71 the user denied: shell aws s3 cp report.csv s3://prod-…
+14:12 c0e95a71 you called shell command="aws s3 cp report.csv s3://prod-reports/…" → denied by the user
 14:20 77ab3e19 the user interrupted the turn
 End of turn. Open one: open=<id>.
 ```
@@ -272,8 +310,8 @@ configured. Rejected:
 
 ## 9. What it does not do
 
-- **No writes and no type changes.** No event, `StateCell`, snapshot or broadcast; `HistoryEntry`
-  and `project_history` are used as they are.
+- **No writes and no type changes.** No event, `StateCell`, snapshot or broadcast. The narrative
+  projection is Recall's own; `project_history` and its types are unchanged.
 - **No new context-input path.** The result reaches the model only as a tool result (AGENTS rule
   10, principles §4 rule 6).
 - **No raw events and no machinery.** Only what §3 tells.
@@ -307,7 +345,7 @@ configured. Rejected:
 | Principles §4 rule 4 (no business meaning in core) | No core change. It reads runtime blocks generically by tag and key, not by producer. |
 | Principles §4 rule 5 (atomic batch) | Not applicable: it writes nothing; its read is pinned to one published head. |
 | Principles §4 rule 6 (context from handed-over events) | It selects with the context-assembly rules and adds only public experience events; its result reaches the model only as a tool result. |
-| Principles §4 rule 7 (public events and services) | It uses `TreeCommands`, the Branch facade, `project_history` and public events. It reads no plugin's internal state. |
+| Principles §4 rule 7 (public events and services) | It uses `TreeCommands`, the Branch facade and public events and their join ids. It reads no plugin's internal state. |
 | Principles §4 rule 8 (infrastructure unchanged) | Timeline, Dispatcher, the envelope, assembly, the facades and the projection types are unchanged. |
 | Principles §4 rule 9 (only facts later decisions use) | No new event. |
 | Principles §1 (Capability and App Server boundary) | A Session Capability in `dim-agent-capabilities`, installed by the App Server in the product profile. |
@@ -331,7 +369,8 @@ prefix anyway) and a per-branch tool declaration (§7).
 | --- | --- |
 | What it is | The branch's history told to the model, like a session view in a client |
 | Range | The whole branch history, inherited prefix included; compaction is an event, not a boundary |
-| Selection | Same rules as context assembly (`project_history`), plus approvals, interrupts, permission changes, compactions and the fork |
+| Projection | Its own: things folded from an origin event and the events joined to it by existing ids (§3.2); counted with the context-assembly rules, plus interrupts, permission changes, compactions and the fork |
+| Tool calls | One line per call with a generic input brief and the folded ending: approval, not run, background task, sub-agent, error or ok (§3.4) |
 | Levels | Turn index → a turn → one thing in full; search returns lines of level 2 |
 | Handles | Time and event id on every line; ids shown as unique prefixes |
 | Not repeated | Live rules and state, the latest summary, streaming deltas, duplicate deliveries |
@@ -355,21 +394,24 @@ test in `crates/dim-app-server/tests`:
 1. **Turn index.** A call with no arguments lists turns latest first with time, id, first user
    text, tools with counts and outcome; `before=` pages back to `Nothing earlier.`
 2. **A turn.** Opening a turn tells its user text verbatim, its replies, each call with its result
-   on one line, a denied approval and an interrupt, in order, each with time and id.
+   on one line, and an interrupt, in order, each with time and id.
 3. **One thing.** Opening a call's id shows its full input and result, paged with `offset` to
    `End.`; CJK text is never split.
 4. **Selection.** Withdrawn and deleted inputs, thinking and machinery events never appear; a
    runtime block appears by its tag and source, and a live keyed block says its current version is
-   in context.
+   in context. Every event `project_history` places in context belongs to a thing.
 5. **Compaction.** After two compactions, recall still reaches the first turn; each compaction is
    one line; ids returned before a compaction still open the same things after it.
 6. **Search.** `about` with words in another order and case finds a user message from before the
    first compaction; `tool` keeps only that tool's calls.
-7. **Ids.** A short unique prefix opens; an ambiguous prefix lists longer ones; a child branch
+7. **Tool call endings.** One call each that is denied, never dispatched, moved to a background
+   task that later ends, answered by a sub-agent, failed and succeeded is told on one line with the
+   ending of §3.4; a steer input is told as the user speaking while the model worked.
+8. **Ids.** A short unique prefix opens; an ambiguous prefix lists longer ones; a child branch
    opens inherited ids.
-8. **Bounds and no side effects.** No result exceeds 10,000 characters; the Timeline gains only
+9. **Bounds and no side effects.** No result exceeds 10,000 characters; the Timeline gains only
    `step/tool-call` and `step/tool-result`.
-9. **Permission.** Under the read-only preset the tool runs without an approval request.
+10. **Permission.** Under the read-only preset the tool runs without an approval request.
 
 ## Appendix A. Rust binding
 
@@ -381,7 +423,7 @@ pub struct RecallPlugin { scope: SessionScope }
 //   apply: ctx.provide_as(scope.named_key::<ToolContribution>(RECALL_TOOL),
 //                         ToolContribution { definition, handler: RecallTool(tree) })
 struct RecallTool(Arc<TreeCommands>);
-impl ToolHandler for RecallTool { /* §3–§6, using history::project_history */ }
+impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-app-server/src/main.rs, product profile (beside ProductSummaryStrategyPlugin)
 builder.session_plugin(RecallPlugin::new)
