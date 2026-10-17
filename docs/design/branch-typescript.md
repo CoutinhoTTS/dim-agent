@@ -5,6 +5,10 @@ Proposed contract for [C5 / #64](https://github.com/arcships/dim/issues/64), the
 not implemented. The declaration, reference binding and lifecycle choices below require architecture
 confirmation. Implementation also requires full C4 acceptance.
 
+This candidate is not yet review-ready: the Session-side TreeCommands and branch-owned service
+read paths required by the existing Goal design must be bound before C5's contract is complete.
+The branch-only input reference below is not a substitute for those paths.
+
 ## Scope and ownership
 
 A TypeScript branch part consumes its own branch's committed events through the existing
@@ -30,6 +34,24 @@ in the branch's ordered consumption. No Session notification queue is used for c
 The part must declare every dependency, including load-order dependencies. Missing providers retain
 the existing Pending behavior. A consumer cannot obtain a sibling branch's Dispatcher or mutable
 state; communication with another branch uses its validated input and does not wait for its work.
+
+## Existing consumer coverage
+
+[Goal's accepted design](plugins/Goal.md) is C5's scheduled consumer (Goal §1, §6,
+Appendix A.3 and Appendix G). It requires all of the following, not just an event-to-input example:
+
+| Consumer | Existing requirement | Binding work still to settle |
+| --- | --- | --- |
+| Goal's Session tool/method part | Resolves branches through `S:TreeCommands` and writes native Branch input. | The branch row's bind record does not reach a Session row. Define the normal named TreeCommands access for that Session part. |
+| Goal's branch part | Provides the branch-scoped `goal` service with `get({}) -> {goal, through}`; during unload the read fails `service_reloading`. | The candidate setup-only declaration below does not yet expose this business service through the branch facade. Define its declaration/projection and per-call public read. |
+| `session.goal.get` | Reads the branch owner's fold through its consumed cutoff. | A BranchRef containing only id/input is insufficient. Preserve the existing public-service read boundary; do not recompute Goal state in the Session part from committed history. |
+
+Native `Branch::service<T>` reads a service marked `BranchService + PublicService` through
+`BranchScope::key<T>()`. That is the existing read to evaluate for a language-neutral binding.
+The current named-reference proposal does not supply an arbitrary named service lookup. No
+additional facade method or core mechanism is chosen here; resolve this mapping before Ready.
+Do not replace it with a Session registry, cross-scope static dependency or a new input/reply
+protocol, and do not change Goal's agreed read contract to fit an easier C5 subset.
 
 ## Structural declaration and row placement
 
@@ -192,7 +214,8 @@ the existing source, not a reproduced C5 runtime failure.
 
 | Gate | Required result |
 | --- | --- |
-| Architecture confirmation | Confirm declaration-based branch placement, original-row async bind, named function/Promise references and the operation/error subset above. This document does not make them accepted APIs. |
+| Consumer coverage | Complete the Session-side TreeCommands binding and original branch service declaration/public read required above. The current setup-only declaration and input-only BranchRef are insufficient; keep the design draft even if documentation CI is green. |
+| Architecture confirmation | Review the complete consumer paths, declaration-based branch placement, original-row async bind, named references and operation/error contracts together. This document does not make them accepted APIs. |
 | C4 | Complete full #63/#168 implementation review and merge before C5 implementation. |
 | Original-row cleanup | Verify existing effect ordering closes admission, settles accepted callbacks/tasks and removes subscriptions before foreign unload. Do not return success merely because a reference was cancelled. |
 | Startup and recovery | Bind may register subscriptions and reconstruct local state. Background business work starts only after activated=true; closing ends it. During a row reload, its own reconstruction/live-consumption sequence uses a fixed committed cutoff and local cursor, as native owners do. No shared replay queue or lock is introduced. |
@@ -264,4 +287,5 @@ change to native event, publication, dependency-wait or lifecycle semantics.
 - [TimelineTree / TreeCommands](../../crates/dim-agent-capabilities/src/timeline_tree.rs)
 - [InputQueue reconstruction](../../crates/dim-agent-capabilities/src/input_queue.rs) and [Permission reconstruction](../../crates/dim-agent-capabilities/src/permission.rs)
 - [Existing C4 resolver and original-row binding](../../crates/dim-app-server/src/session_typescript.rs)
+- [Goal consumer contracts](plugins/Goal.md)
 - [Time bus](../architecture/rust-agent/time-bus.md), [design rules](../architecture/rust-agent/principles.md) and [ADR 002](../adr/002-plugin-scope.md)
