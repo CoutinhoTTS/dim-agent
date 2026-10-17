@@ -281,7 +281,8 @@ impl SessionStore {
             })
             .await
     }
-    /// Directory-only reads never validate or decode Timeline events.
+    /// Directory-only reads never validate or decode Timeline events. Each
+    /// record carries its title metadata, read in the same query.
     pub async fn directory(
         &self,
         agent: Option<String>,
@@ -296,9 +297,11 @@ impl SessionStore {
                     ""
                 };
                 let sql = format!(
-                    "SELECT s.session_id, s.config, s.created_at_ms, b.sequence, o.agent_id \
+                    "SELECT s.session_id, s.config, s.created_at_ms, b.sequence, o.agent_id, \
+                 m.revision, m.title, m.title_source \
                  FROM session_owners o JOIN agent_sessions s USING(session_id) \
                  JOIN timeline_branches b ON b.session_id=s.session_id AND b.branch_id='main' \
+                 LEFT JOIN session_metadata m ON m.session_id=s.session_id \
                  WHERE o.protocol_version=?1{filter} ORDER BY s.session_id"
                 );
                 let mut query = connection.prepare(&sql).map_err(error)?;
@@ -327,6 +330,7 @@ impl SessionStore {
                             running: false,
                             attached_clients: 0,
                             agent_id: Some(row.get(4).map_err(error)?),
+                            title: Some(metadata::decode(row, 5).map_err(error)?.into()),
                         })
                     })();
                     match parsed {

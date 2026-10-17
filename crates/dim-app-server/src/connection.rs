@@ -667,6 +667,9 @@ impl Connection {
                                 attached_clients: self.hub.attached_clients(s.id()),
                                 agent_id: (self.protocol_version() >= 3)
                                     .then(|| host.agent_id.clone()),
+                                // No native store, so no titles.
+                                title: (self.protocol_version() >= 3)
+                                    .then(crate::storage::TitleFields::default),
                             })
                         })
                         .collect::<Result<Vec<_>, RpcError>>()

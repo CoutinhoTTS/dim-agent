@@ -573,6 +573,10 @@ pub struct SessionInfo {
     pub attached_clients: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// `title`, `titleSource` and `titleRevision` from SessionStore (S5b);
+    /// protocol v3 only.
+    #[serde(flatten)]
+    pub title: Option<crate::storage::TitleFields>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
