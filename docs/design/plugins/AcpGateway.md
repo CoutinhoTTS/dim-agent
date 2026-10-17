@@ -154,7 +154,7 @@ Withdraw versus adoption is decided by InputQueue on Timeline order; the gateway
 | --- | --- | --- | --- |
 | Another client withdraws the editor's input | `input/withdraw` in a later batch than the input < `input/deleted` of `input_event_id` | Prompt `cancelled` | InputQueue, Gateway |
 | Turn completes before the stop lands | `turn/end` < `stop/interrupt` | Prompt `cancelled` (cancel was requested); the stop covers no turn | Loop, Gateway |
-| Model asks a question in a loaded interactive Session | `question/asked` | Shown as a `tool_call` update "waiting for an answer in another dim client" (A13); the prompt waits; `session/cancel` interrupts and Questions writes `question/cancelled` | Questions, Gateway |
+| Model asks a question in a loaded interactive Session | `step/tool-call` with `ask_user` | Shown as a `tool_call` update "waiting for an answer in another dim client" (A13); the prompt waits; `session/cancel` interrupts and the call's `step/tool-result` ends it cancelled | Questions, ToolExecutor, Gateway |
 | Approval answered by another client | `approval/respond` earlier | The editor's later answer is rejected; ignored | Approval |
 | Daemon restart mid-turn | turn settled `Failed` | Catch-up from history; `turn_failed` (or `cancelled` if cancel was requested) | Loop |
 | A Hooks `user_prompt_submit` rule withdraws the prompt | input, `input/withdraw {reason}` in one batch < `input/deleted` | Reason as `agent_message_chunk`; prompt response `refusal`; no in-flight prompt remains | Hooks, InputQueue, Gateway |
@@ -246,7 +246,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | `step/tool-use` | `tool_call_update {rawInput, locations}` |
 | `step/tool-start` | `tool_call_update {status: in_progress}` |
 | `step/tool-result` (each call, published with the whole batch) | `tool_call_update {status: completed or failed, content: text of ToolResult.content bounded 16 KiB}` |
-| `question/asked` (interactive Sessions only) | `tool_call_update` with text "waiting for an answer in another dim client" (A13) |
+| `step/tool-call` with an `ask_user` call (interactive Sessions only) | `tool_call_update` with text "waiting for an answer in another dim client" (A13) |
 | Raw-block-only inputs, `exec/*`, `collaboration/*`, `context/*`, `branch/*`, `input/withdraw`, `input/deleted` | No message update (A8) |
 
 `kind` from the tool name: `read`→`read`; `write`, `edit`→`edit`; `glob`, `grep`→`search`; `exec`→`execute`; `web_fetch`, `web_search`→`fetch`; else `other` (A9). `locations` uses a `path` input field when present.
@@ -282,8 +282,8 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 | Tool batch not settled | — | Completed updates only when the batch's results are published | ToolExecutor |
 | Approval answered elsewhere | earlier `approval/respond` | Later editor answer rejected, ignored | Approval |
 | Approval cancelled by stop while the editor asks | `approval/cancelled` | ACP request cannot be retracted; later answer ignored | Approval |
-| Question in a loaded interactive Session | `question/asked` | Waits for another client; cancel interrupts → `question/cancelled` (A13) | Questions |
-| Question in an ACP-created Session | `question/asked` | Interactive: shown as waiting for another client, as for a loaded Session (A13) | Questions |
+| Question in a loaded interactive Session | `ask_user` `step/tool-call` | Waits for another client; cancel interrupts → cancelled `step/tool-result` (A13) | Questions, ToolExecutor |
+| Question in an ACP-created Session | `ask_user` `step/tool-call` | Interactive: shown as waiting for another client, as for a loaded Session (A13) | Questions |
 | Compaction during the prompt | — | No update; streaming unaffected | — |
 | Child branch created by the model | — | No message updates; its approvals forwarded | Gateway (A7) |
 | Session closed | `session.closed` | In-flight prompt `cancelled`; later `session_not_found` | Gateway |

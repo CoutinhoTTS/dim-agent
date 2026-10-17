@@ -67,7 +67,7 @@ flowchart TB
 
 | 插件 | 进程 | Session | 分支 | 理由 |
 | --- | --- | --- | --- | --- |
-| Questions | — | `ask_user` 工具；`session.question.*` 方法；非交互 Session 中 `ask_user` 回答当前没有可以回答的对象 | 待答问题、`question/*` 事实，沿用 Approval 的做法 | 问题属于某个分支的 turn |
+| Questions | — | `ask_user` 工具；`session.question.*` 方法；非交互 Session 中 `ask_user` 回答当前没有可以回答的对象 | 运行中 `ask_user` 调用的等待者；没有事件（回答就是工具结果） | 问题属于某个分支的 turn |
 | Goal | — | `goal_update` 工具与 `session.goal.*` 方法，只写一条带 `goal:objective` 和/或 `goal:status` 块的 `input/message` | 目标状态由已消费的目标变更块按序号折叠得出；Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定续跑 | 一个目标只属于一个分支：折叠只用该分支自己的事件，因此子分支和分叉 Session 从没有目标开始；续跑按序跟随其事件 |
 | Hooks | — | 来自业务来源的规则；Session 启动 Hook | `input/message`（`user_prompt_submit`）与 `step/tool-call`（`pre_tool_use`）上的 before 回调；来自 Dispatcher 的工具后与 turn 结束 Hook | 规则作用于 Session；执行发生在分支 |
 | ShellInput | — | `shell.*` Session 方法；在 Session 的工作区中运行并写入其输入 | — | 命令属于 Session |
@@ -158,7 +158,7 @@ flowchart LR
 
 | 插件 | 作用域 | 职责 | 阶段 | 语言 | 文档 |
 | --- | --- | --- | --- | --- | --- |
-| Questions | Session + 分支 | `ask_user`；待答问题与回答；`session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md)（需要重新设计） |
+| Questions | Session + 分支 | `ask_user`；回答就是工具结果；`session.question.respond` | P1 | Rust | [Questions](plugins/Questions.md) |
 | ShellInput | Session | `!command` / `!!command`，作为 Session 方法 `shell.run/stop/list` | P1 | Rust | [ShellInput](plugins/ShellInput.md) |
 | Attachments | Session | 大段文本的 `attachment.put`；Session 文件 | P1 | Rust | [Attachments](plugins/Attachments.md) |
 | SessionTitle | Session | 由首条被采纳的用户输入生成标题；`session.rename` | P1 | TypeScript 优先 | [SessionTitle](plugins/SessionTitle.md) |
@@ -258,12 +258,12 @@ sequenceDiagram
   participant S as Session
   participant QS as Questions sessionMethods
   participant QB as Questions（分支）
-  participant TL as Timeline
+  participant H as ask_user 处理函数
   CL->>Rpc: session.question.respond {sessionId, branchId, callId, answers}
   Rpc->>S: acquire，sessionMethods session.question
   Rpc->>QS: call
   QS->>QB: branchId 上的分支服务，respond
-  QB->>TL: question/answered（若在覆盖它的 stop/interrupt 之后则拒绝）
+  QB->>H: 把回答交给等待中的调用（调用已取消则拒绝）
   QS-->>CL: 结果
 ```
 
@@ -368,13 +368,10 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 
 | 事件 | 写入方 | 必要性 |
 | --- | --- | --- |
-| `question/asked {call_id, turn_id, request_id, questions}` | Questions（分支） | 待答状态无法推导，因为结果只在整个批次完成后才发布（先例 Approval） |
-| `question/answered {call_id, answers, declined}` | Questions（分支），经 `session.question.respond` | 通过序号与中断排序 |
-| `question/cancelled {call_id, reason}` | Questions（分支） | 在中断、分支关闭或重载时结束待答问题 |
 | `input/withdraw {input_id, reason?}` | 客户端（`session.input.withdraw`，由 InputQueue 提供）、进程调用方（`sessions.withdraw`） | 一个通过序号与采纳排序的指令；可选的 `reason`（通用文本，不带业务含义）是客户端为被删除输入显示的内容 |
 | `input/deleted {input_id}` | InputQueue | 结果事实：被持有的输入永不被应用；队列状态必须可重建 |
 
-三行 `question/*` 正在复审：Questions 需要重新设计（[Questions](plugins/Questions.md)），这些事件可能被删除。
+Questions 不新增事件：待答问题是没有 `step/tool-result` 的 `ask_user` 的 `step/tool-call`，回答就是工具结果（[Questions §2](plugins/Questions.md#2-数据与状态)）。
 
 | 不新增的事件 | 改用什么 | 原因 |
 | --- | --- | --- |
@@ -393,7 +390,7 @@ rutis 节点通过链接相连，导出和导入服务，在对端运行插件�
 | 阶段 | 内容 |
 | --- | --- |
 | P0 基础 | 由 `session.create` 设置的 `SessionConfig.interactive`；带 `launch` 的 `sessions` 服务；`sessionMethods` 分发；Rpc 表中的 `managementMethods` 及现有管理方法的迁移；ToolRegistry 中的 `toolContribution`；带变更通知的 Settings 业务来源（S8a）；语言中立的 `settings` 服务与凭据解析器（S8b，随 C4）；`pluginFiles`（扩展：二进制、格式版本）；Provider `AuxiliaryModel`（会话外单次模型调用）；SessionStore 元数据与 Session 文件；FileStorage 列举与删除；HostPlatform argv 辅助 |
-| P1 核心交互 | Questions（需要重新设计）、ShellInput、Attachments、SessionTitle；InputQueue 撤回；Permission 规则；模型参数；SessionStore 删除、清理与 fork；HostPlatform 隔离；#4 为非 Rust 部分按名称暴露运行时的类型化服务；CLI 子命令、图像转换、`/export`、`exec --json` |
+| P1 核心交互 | Questions（已重新设计，M2）、ShellInput、Attachments、SessionTitle；InputQueue 撤回；Permission 规则；模型参数；SessionStore 删除、清理与 fork；HostPlatform 隔离；#4 为非 Rust 部分按名称暴露运行时的类型化服务；CLI 子命令、图像转换、`/export`、`exec --json` |
 | P2 功能扩展 | Goal、Web、Scheduler、Workflow；ModelProvider `ModelCallScope`；Collaboration 成员审批作为输入送到 leader；Mcp OAuth；生产环境压缩宿主 |
 | P3 外部集成 | ExternalAgent、AcpGateway、RemoteGateway 及 Transport `EntryHost` 与 `ConnectionEntry {name, deviceId}`、Modality；PluginManager；资源节点（按 `resourceNode` 在每次调用时查找服务） |
 
@@ -562,7 +559,7 @@ TypeScript 进程插件如今以 loader 行运行（仅在配置时启动 Node�
 | Agent 装配从 `provides` 收集具名服务，并按插件启用状态安装可选部分 | 运行时 | 待开 | 所有 Session 插件 | [Session 访问 §9](contracts/session-access.md#9-向机制所有者提出的需求) |
 | 按名称查找带 key 的 Session 服务（按命名空间查 `sessionMethods`）及收集具名 `toolContribution` | 运行时 | 待开 | Rpc、ToolRegistry | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** Session 级方法提供方卸载时等待其 `drain` 调用 | rutis 生命周期 | 待开 | Rpc | [方法与工具贡献 §9](contracts/session-boundary.md#9-向机制所有者提出的需求) |
-| 插件在运行时注册自己的事件类型 | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | 目前没有消费者（Questions 需要重新设计） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
+| 插件在运行时注册自己的事件类型 | 运行时 | [#2](https://github.com/arcships/dim/issues/2) | 目前没有消费者（Questions 重新设计后不定义事件） | [Questions §9](plugins/Questions.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** 经 rutis 链接导入的服务在链接断开期间保持登记，每次调用以 `node_unavailable` 失败（该节点上的进程由该节点自己的 HostPlatform 结束） | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent、Modality、ShellInput、Hooks、Attachments、Workflow、Scheduler、PluginManager、RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-向机制所有者提出的需求) |
 | **已撤回（Notifications 已撤回）。** 跨语言发出和监听具名进程事件 | rutis | 待开 | Scheduler、Notifications | [Scheduler §9](plugins/Scheduler.md#9-向机制所有者提出的需求) |
 | **已撤回（rutis 是外部依赖）。** 提供方在一次调用内向调用方发请求 | rutis | 待开 | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-提供方在调用内向调用方发请求) |

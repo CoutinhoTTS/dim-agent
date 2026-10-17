@@ -160,7 +160,7 @@ Every race between remote and local clients is decided by Timeline sequence insi
 
 | Scenario | Outcome | Owner |
 | --- | --- | --- |
-| Phone and terminal answer the same approval or question | First consumed fact decides; second fails | Approval, Questions |
+| Phone and terminal answer the same approval or question | Approval: first consumed fact decides; question: first accepted `session.question.respond` decides; second fails | Approval, Questions |
 | Phone `session.permission.update` races terminal | Two `permission/changed` facts; later sequence wins | Permission |
 | Phone withdraws an input (`session.input.withdraw`) as it is applied | `input/applied` before `input/withdraw`: `notHeld`, nothing written, consumed normally; `input/withdraw` first: `input/deleted`, never applied | InputQueue |
 | Disconnect with a pending approval | Stays pending; replayed on re-attach; no timeout (A14) | Approval |
@@ -317,7 +317,7 @@ RemoteGateway has no start or stop method and never writes its own `enabled` fie
 | Remote `session.exec.stop` vs exec completion | sequence | Earlier terminal fact wins | WorkspaceTools exec owner |
 | Compaction or child cut around a remote input | — | As any input ([session access](../contracts/session-access.md)) | ContextPreparation, InputQueue |
 | Fork after a remote permission change | — | The fork copies the preset with the facts (E4, #26) | SessionStore |
-| Question answered from two devices | first `question/answered` | First accepted | Questions |
+| Question answered from two devices | first accepted `session.question.respond` | First accepted; second `question_already_answered` | Questions |
 | Disconnect while an approval is pending | — | Stays pending; replayed on re-attach (A14) | Approval |
 | Disconnect after `session.submit` admitted, reply lost | input committed | Reconnect, `session.input_lookup` by `submissionId` | Client |
 | Revocation while a device's request runs | admitted < revoke | Connection closed; command continues; reply lost | Rpc |

@@ -101,7 +101,8 @@ async fn owner(client: &mut Client, session: &str, method: &str, mut params: Val
     reply["result"].clone()
 }
 
-/// §11 items 1–3 with the owner code running in the Node runtime.
+/// §11 items 1–3 with the owner code running in the Node runtime, and §4.5
+/// event delivery to that TypeScript part.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_settings_typescript_owner_reads_and_writes() {
@@ -228,6 +229,48 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     );
 
     assert_eq!(log.0.borrow().len(), 3);
+
+    // §4.5 delivery: the TypeScript part receives the same changes with
+    // `ctx.on`, in commit order, and a project authorized after it loaded.
+    let delivered = |events: &Value, name: &str| -> Vec<Value> {
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["name"] == name)
+            .map(|event| event["payload"].clone())
+            .collect()
+    };
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut other = create(json!([]));
+    other["cwd"] = json!(project);
+    assert_ok(&client.rpc("session.create", other).await);
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let events = owner(&mut client, &session, "events", json!({})).await;
+            if !delivered(&events, "settings.project_authorized").is_empty() {
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        delivered(&events, "settings.changed")
+            .into_iter()
+            .filter(|change| change["source"] == "example")
+            .collect::<Vec<_>>(),
+        changed
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect::<Vec<_>>()
+    );
+    let authorized = delivered(&events, "settings.project_authorized");
+    assert_eq!(authorized.len(), 1, "{events}");
+    assert_eq!(authorized[0]["cwd"], json!(project.canonicalize().unwrap()));
+    assert!(authorized[0]["root"].is_u64(), "{events}");
     server.shutdown();
     server.join().await.unwrap();
     let _ = std::fs::remove_dir_all(&home);
