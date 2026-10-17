@@ -6560,6 +6560,7 @@
         "path ModelChunk::MessageStop",
         "path ModelChunk::Text",
         "path ModelHost",
+        "path ModelStopReason::MaxTokens",
         "path ModelStopReason::ToolUse",
         "path ModelStream",
         "path ProviderConnectionResolver",

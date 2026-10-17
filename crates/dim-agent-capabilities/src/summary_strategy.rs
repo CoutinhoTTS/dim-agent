@@ -97,11 +97,11 @@ impl CompactionStrategy for SummaryStrategy {
                     continue;
                 }
                 if !chunk.is_empty() {
+                    let piece = std::mem::take(&mut chunk);
                     summary = Some(
-                        self.summarize(&input, summary.as_deref(), &chunk, &cancel)
+                        self.fold(&input, summary.take(), piece, &cancel, &mut calls)
                             .await?,
                     );
-                    calls += 1;
                 }
                 chunk = if fits(&input, summary.as_deref(), &line) {
                     line
@@ -112,10 +112,9 @@ impl CompactionStrategy for SummaryStrategy {
             }
             if !chunk.is_empty() {
                 summary = Some(
-                    self.summarize(&input, summary.as_deref(), &chunk, &cancel)
+                    self.fold(&input, summary.take(), chunk, &cancel, &mut calls)
                         .await?,
                 );
-                calls += 1;
             }
             let summary = summary.unwrap_or_default();
             let replacement = summary_message(&summary);
@@ -135,6 +134,52 @@ impl CompactionStrategy for SummaryStrategy {
 }
 
 impl SummaryStrategy {
+    /// Summarizes `chunk` on top of `summary`. A reply the model stopped at
+    /// `max_tokens` (thinking can use most of the allowance) is not a
+    /// summary: the chunk is halved and folded piece by piece, and below
+    /// `MIN_CHUNK_BYTES` the compaction fails rather than keep a cut-off text.
+    /// Each piece inherits the summary of the one before it, so every
+    /// request is checked against the input budget again and a piece that
+    /// no longer fits is halved too.
+    async fn fold(
+        &self,
+        input: &CompactionInput,
+        mut summary: Option<String>,
+        chunk: String,
+        cancel: &CancellationToken,
+        calls: &mut u64,
+    ) -> Result<String, HostError> {
+        let mut pending = vec![chunk];
+        while let Some(piece) = pending.pop() {
+            if !fits(input, summary.as_deref(), &piece) {
+                let (first, second) = split_half(&piece);
+                if first.is_empty() || second.is_empty() || !fits(input, summary.as_deref(), "") {
+                    return Err(no_fit());
+                }
+                pending.push(second.to_owned());
+                pending.push(first.to_owned());
+                continue;
+            }
+            *calls += 1;
+            match self
+                .summarize(input, summary.as_deref(), &piece, cancel)
+                .await?
+            {
+                Some(text) => summary = Some(text),
+                None if piece.len() > MIN_CHUNK_BYTES => {
+                    let (first, second) = split_half(&piece);
+                    pending.push(second.to_owned());
+                    pending.push(first.to_owned());
+                }
+                None => {
+                    return Err(HostError::failed(
+                        "The summary was cut off by the output limit",
+                    ));
+                }
+            }
+        }
+        Ok(summary.expect("a folded chunk yields a summary"))
+    }
     /// One summarizer request with the request's own model and failure
     /// policy; the resolved connection lives only inside this call.
     async fn summarize(
@@ -143,7 +188,7 @@ impl SummaryStrategy {
         earlier: Option<&str>,
         chunk: &str,
         cancel: &CancellationToken,
-    ) -> Result<String, HostError> {
+    ) -> Result<Option<String>, HostError> {
         let request = summary_request(input, earlier, chunk);
         let request = Arc::new(request);
         let resolved = self
@@ -151,7 +196,7 @@ impl SummaryStrategy {
             .0
             .resolve(request.clone(), cancel.clone())
             .await?;
-        let text = invoke_with_recovery(
+        let (text, complete) = invoke_with_recovery(
             &self.host,
             &request,
             resolved,
@@ -160,10 +205,13 @@ impl SummaryStrategy {
             |stream, _, _, _| Box::pin(collect(stream)),
         )
         .await?;
+        if !complete {
+            return Ok(None);
+        }
         if text.trim().is_empty() {
             return Err(HostError::failed("The summarizer returned no text"));
         }
-        Ok(text)
+        Ok(Some(text))
     }
 }
 
@@ -199,6 +247,10 @@ fn fits(input: &CompactionInput, earlier: Option<&str>, chunk: &str) -> bool {
         <= input.model.context_window() - input.model.output_tokens()
 }
 
+fn no_fit() -> HostError {
+    HostError::failed("The summarizer request does not fit the model window")
+}
+
 /// The longest middle truncation of `line` whose request fits: the start and
 /// the end are kept on UTF-8 character boundaries around a marker.
 fn truncate_to_fit(
@@ -208,9 +260,7 @@ fn truncate_to_fit(
 ) -> Result<String, HostError> {
     let (mut low, mut high) = (0, line.len());
     if !fits(input, earlier, &truncate_middle(line, 0)) {
-        return Err(HostError::failed(
-            "The summarizer request does not fit the model window",
-        ));
+        return Err(no_fit());
     }
     // The largest kept byte count whose request fits.
     while low < high {
@@ -224,8 +274,9 @@ fn truncate_to_fit(
     Ok(truncate_middle(line, low))
 }
 
-/// The text blocks of one reply; thinking is dropped, a tool stop fails.
-async fn collect(mut stream: ModelStream) -> Result<String, HostError> {
+/// The text blocks of one reply and whether it completed; thinking is
+/// dropped, a tool stop fails, a `max_tokens` stop is incomplete.
+async fn collect(mut stream: ModelStream) -> Result<(String, bool), HostError> {
     let mut text = String::new();
     let mut stop = None;
     while let Some(chunk) = stream.next().await {
@@ -240,7 +291,33 @@ async fn collect(mut stream: ModelStream) -> Result<String, HostError> {
         Some(ModelStopReason::ToolUse) => Err(HostError::failed(
             "The summarizer stopped for a tool it was not offered",
         )),
-        Some(_) => Ok(text),
+        Some(ModelStopReason::MaxTokens) => Ok((text, false)),
+        Some(_) => Ok((text, true)),
+    }
+}
+
+/// The smallest chunk halved again after a cut-off summary.
+const MIN_CHUNK_BYTES: usize = 2048;
+
+/// Two halves of `chunk`, split at the entry separator nearest its middle,
+/// or at a character boundary when it holds one entry. A half is empty only
+/// when `chunk` is a single character.
+fn split_half(chunk: &str) -> (&str, &str) {
+    let middle = chunk.len() / 2;
+    let at = chunk
+        .match_indices("\n\n")
+        .map(|(index, _)| index)
+        .filter(|&index| index > 0 && index + 2 < chunk.len())
+        .min_by_key(|&index| index.abs_diff(middle));
+    match at {
+        Some(index) => (&chunk[..index], &chunk[index + 2..]),
+        None => {
+            let index = (0..=middle)
+                .rev()
+                .find(|&index| chunk.is_char_boundary(index))
+                .unwrap_or(0);
+            chunk.split_at(index)
+        }
     }
 }
 

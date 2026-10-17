@@ -594,7 +594,9 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    // The third turn compacts the first, which delivered the keyed block.
+    // The second turn compacts the first, which delivered the keyed block:
+    // the retained turns hold no cut, so the latest cut that keeps the
+    // current input is taken (#169).
     session.input(context_input(), "main").await.unwrap();
     session.idle("main").await.unwrap();
     for text in ["next", "third"] {
@@ -633,17 +635,28 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             .iter()
             .any(|message| message.as_ref() == &baseline[0].message)
     }));
-    let final_budget = events
+    // The budget of the request whose compaction first completed.
+    let compacted = events
         .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::ContextBudget(data) => Some(data),
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                request_id: Some(request_id),
+                outcome: ContextCompactionResult::Completed { .. },
+                ..
+            }) => Some(request_id.clone()),
             _ => None,
         })
-        .next_back()
         .unwrap();
-    assert_eq!(final_budget.baseline_source, BaselineSource::FullEstimate);
+    let budget = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextBudget(data) if data.request_id == compacted => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(budget.baseline_source, BaselineSource::FullEstimate);
     assert_eq!(
-        final_budget.estimated_input_tokens, 1322.,
+        budget.estimated_input_tokens, 1219.,
         "budget is measured before the hook rewrites the committed baseline"
     );
     agent.close().await.unwrap();
@@ -1295,5 +1308,66 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
             .any(|event| matches!(event.kind, EventKind::ModelCall(_))),
         "the stopped request still does not reach the model"
     );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
+    // Past the threshold within the first turn: the retained turns hold every
+    // cut, yet the request after the tool result compacts at the latest cut
+    // that keeps something, instead of skipping until overflow (#169).
+    let context = Context {
+        threshold: Some(200.),
+        ..Context::default()
+    };
+    let agent =
+        builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context).build();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: vec!["echo".into()],
+            permission_policy: dim_agent_runtime::PermissionPolicy {
+                preset: dim_agent_runtime::PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let command = format!("tool:echo {{\"text\":\"{}\"}}", "y".repeat(600));
+    session
+        .submit(command, InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count(),
+        1
+    );
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Completed { retain_from, .. },
+                ..
+            }) => Some(retain_from.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed.len(), 1, "the long turn compacted inside itself");
+    // The cut keeps something: the replacement never swallows the whole
+    // request outside budget recovery.
+    let last_call = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(last_call.messages.len() >= 2);
     agent.close().await.unwrap();
 }
