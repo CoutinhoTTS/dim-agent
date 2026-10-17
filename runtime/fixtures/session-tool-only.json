@@ -1,0 +1,3 @@
+{
+  "toolContribution:ts_echo": {"declaration": "sync", "execute": "async"}
+}

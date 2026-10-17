@@ -2046,6 +2046,92 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
 }
 
 #[test]
+fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_sockets() {
+    let home = Home::new();
+    let server = home.0.join("server");
+    let started = home.0.join("server.started");
+    fs::write(
+        &server,
+        "#!/bin/sh\n: > \"$0.started\"\nwhile test -f \"$0\"; do sleep 0.01; done\n",
+    )
+    .unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = home.command();
+    command
+        .arg("--server")
+        .arg(&server)
+        .args(["models", "fixture"]);
+
+    let socket = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+    let rejected = command.output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("private socket"));
+    assert!(
+        !started.exists(),
+        "an existing insecure endpoint must not start a server"
+    );
+    drop(listener);
+    fs::remove_file(&socket).unwrap();
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "server was not started");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "startup must wait for a private endpoint"
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let (stream, _) = loop {
+        match listener.accept() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => break result.unwrap(),
+        }
+    };
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut wire = Wire(BufReader::new(stream));
+    let hello = wire.read("hello");
+    wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+    let catalog = wire.read("provider.catalog");
+    wire.reply(
+        &catalog,
+        json!({"catalog":{"models":[],"disabledModelIds":[]}}),
+    );
+    let output = wait(child);
+    fs::remove_file(&server).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn initial_attach_eof_settles_a_shell_started_before_the_first_prompt() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -2120,7 +2206,8 @@ fn interrupted_shell_reply_retains_its_run_for_explicit_stop_and_settlement_feed
 #[test]
 fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (release, finish) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.start(false);
         let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
         let idle = wire.read("session.idle");
@@ -2129,8 +2216,14 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
         wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"command":"inspect"}},"reason":"review"}));
         wire.reply(&run,json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"deferred output","truncated":false}));
         let stop=wire.read("session.stop");
+        finish.recv_timeout(Duration::from_secs(10)).unwrap();
         wire.notice("approval.cancelled",json!({"sessionId":"session","requestId":"approval"}));
         wire.reply(&idle,json!({"sequence":40})); wire.reply(&stop,json!({"sequence":40}));
+        let next = wire.read("session.submit");
+        assert_eq!(next["params"]["text"], "after interrupts");
+        wire.reply(&next,json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle,json!({"sequence":40}));
         wire.detach();
     });
     let (mut terminal, child) = Terminal::launch(home.command());
@@ -2142,6 +2235,11 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
     assert!(!terminal.transcript.contains("deferred output"));
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     terminal.until("[stopping] Waiting for resource settlement");
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("[stopping] Still waiting for resource settlement");
+    release.send(()).unwrap();
+    terminal.until("\n> ");
+    terminal.write(b"after interrupts\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(wait(child).status.success());

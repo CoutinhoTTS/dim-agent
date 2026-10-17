@@ -1275,6 +1275,9 @@ impl TypedPlugin for ModelHostOwner {
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let view = ctx.plugin(capability_plugin(ModelHostPlugin(self.scope)));
+            (&view).await.map_err(|error| {
+                rutis::CordisError::PluginFailed(format!("Model host failed: {error}").into())
+            })?;
             self.views.lock().unwrap().push(view);
             Ok(rutis::Effect::Done)
         })

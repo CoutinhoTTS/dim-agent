@@ -1001,7 +1001,9 @@ async fn a_session_reload_terminates_the_run_without_writing() {
 async fn progress_until_reply(client: &mut Client, id: u64) -> (Vec<Value>, Value) {
     let mut progress = vec![];
     loop {
-        let frame = client.read().await;
+        let frame = client
+            .read(&format!("response {id} or management.progress"))
+            .await;
         if frame["id"] == id {
             return (progress, frame);
         }
@@ -1025,7 +1027,10 @@ async fn the_caller_receives_progress_before_the_reply() {
         )
         .await;
     let first = loop {
-        let frame = shell.client.read().await;
+        let frame = shell
+            .client
+            .read(&format!("shell.run progress for request {id}"))
+            .await;
         if frame["method"] == "management.progress" {
             break frame["params"].clone();
         }
