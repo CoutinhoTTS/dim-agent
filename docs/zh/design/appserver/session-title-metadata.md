@@ -1,6 +1,6 @@
 # SessionStore 标题元数据
 
-状态：路线图 S5b 的设计（[#60](https://github.com/arcships/dim/issues/60)，[#96](https://github.com/arcships/dim/pull/96)），在 C6（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）之后。需求：[SessionTitle](../plugins/SessionTitle.md) §2、§4 与 [A.2](../plugins/SessionTitle.md#a2-依赖的形状由所有者定义)。总览：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 Rpc 行。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，在既有 SessionStore 插件内，外加三个 Rpc 列表字段。使用方：SessionTitle（P4，TypeScript 优先）。
+状态：已在路线图 S5b 实现（[#60](https://github.com/arcships/dim/issues/60)，[#96](https://github.com/arcships/dim/pull/96)），在 C6（[#49](https://github.com/arcships/dim/issues/49)，[#85](https://github.com/arcships/dim/pull/85)）之后；实现与本设计一致，没有改动。需求：[SessionTitle](../plugins/SessionTitle.md) §2、§4 与 [A.2](../plugins/SessionTitle.md#a2-依赖的形状由所有者定义)。总览：[附录 B.2](../overview.md#b2-app-server-进程插件) 的 SessionStore 与 Rpc 行。范围：[ADR 002](../../adr/002-plugin-scope.md) 进程作用域，在既有 SessionStore 插件内，外加三个 Rpc 列表字段。使用方：SessionTitle（P4，TypeScript 优先）。
 
 ## 1. 概要
 
@@ -277,6 +277,8 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 9. 空库建为 v16。一次性的 v15 与 v13 库原地升级为精确的 v16 结构，所有业务行不变，并报告一次升级；标记不符的 v16 结构、升级到一半的库与更旧的结构被拒绝并保留。
 10. 在 Node 中运行的 TypeScript Session 行注入 `sessionMetadata`，读写标题，附加的客户端收到通知（`node_` 测试，由 CI 的 Node 步骤运行）。
 11. 缺少 `title` 的 `setTitle` 请求被拒绝；插件 SDK 类型检查覆盖调用形状。
+
+测试：第 1 至 8 项与第 10 项在 [titles.rs](../../../../crates/dim-app-server/tests/transport_flow/titles.rs)，经由 Session 部件注入的 `sessionMetadata` 服务和 [session-metadata 夹具](../../../../runtime/fixtures/session-metadata.ts)；第 9 项是 [storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_v15_store_upgrades_in_place_once`、`a_v13_store_upgrades_in_place_once`、`the_daemon_reports_a_v13_upgrade_on_stderr_once` 与拒绝用例；第 11 项是 titles.rs 中格式错误的调用和 [plugin-sdk.test.mjs](../../../../runtime/plugin-sdk.test.mjs)。S5c 的删除测试也统计 `session_metadata` 的行。
 
 ## 17. 决定
 

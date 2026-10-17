@@ -1,8 +1,8 @@
 # SessionStore title metadata
 
-Status: Design for roadmap item S5b ([#60](https://github.com/arcships/dim/issues/60),
+Status: Implemented in roadmap item S5b ([#60](https://github.com/arcships/dim/issues/60),
 [#96](https://github.com/arcships/dim/pull/96)), after C6 ([#49](https://github.com/arcships/dim/issues/49),
-[#85](https://github.com/arcships/dim/pull/85)). Requirement: [SessionTitle](../plugins/SessionTitle.md) §2, §4 and
+[#85](https://github.com/arcships/dim/pull/85)); the implementation follows this design without changes. Requirement: [SessionTitle](../plugins/SessionTitle.md) §2, §4 and
 [A.2](../plugins/SessionTitle.md#a2-depended-on-shapes-owners-define-them). Overview:
 [Appendix B.2](../overview.md#b2-app-server-process-plugins), SessionStore and Rpc rows. Scope:
 [ADR 002](../../adr/002-plugin-scope.md) process scope, inside the existing SessionStore plugin, with three Rpc list
@@ -335,6 +335,13 @@ None. S5b uses C6's `notify`, the existing service catalog and `HostDispatch`, a
 10. A TypeScript Session row running in Node injects `sessionMetadata`, reads and sets the title, and the attached
     client receives the notice (`node_` test, run by CI's Node step).
 11. A `setTitle` request without `title` is rejected; the plugin SDK type check covers the call shapes.
+
+Tests: items 1 to 8 and 10 are in [titles.rs](../../../crates/dim-app-server/tests/transport_flow/titles.rs), through
+the `sessionMetadata` service as a Session part injects it and the [session-metadata
+fixture](../../../runtime/fixtures/session-metadata.ts); item 9 is `a_v15_store_upgrades_in_place_once`,
+`a_v13_store_upgrades_in_place_once`, `the_daemon_reports_a_v13_upgrade_on_stderr_once` and the refusal cases in
+[storage_flow.rs](../../../crates/dim-app-server/tests/storage_flow.rs); item 11 is the malformed calls in titles.rs and
+[plugin-sdk.test.mjs](../../../runtime/plugin-sdk.test.mjs). S5c's delete tests count the `session_metadata` rows.
 
 ## 17. Decisions
 
