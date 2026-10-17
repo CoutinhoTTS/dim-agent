@@ -16,7 +16,7 @@ This does not disable checking a plugin's calls against the service interfaces.
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented; use its native transactions and lifecycle scope. |
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
-| Read/update business configuration | `settings`, process | Owner read/write implemented; declare sources in the C4 row's `settings` member. TypeScript event delivery remains S8b work. |
+| Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
 | Resolve a credential reference | `credentials`, process | Host dispatch implemented; no product plugin provides a secret store. Inject only when the embedding host supplies one. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
 | Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is tracked by #168; branch bindings remain C5 work. |
@@ -169,8 +169,14 @@ defaults. Owner writes cannot change user-only fields; local client
 reading the current snapshot before deciding what to write. `unsynced` means the
 write is already installed and announced; read before retrying. Dropping a call
 cancels its wait, but does not undo a committed write. Native Settings events are
-emitted after commit; their TypeScript delivery is not yet bound. Read at use time
-until that binding lands; no subscription API or polling loop is added here.
+emitted after commit. In the Session TypeScript runtime, register
+`ctx.on('settings.changed', listener)` for `{source, scope, revision}` and
+`ctx.on('settings.project_authorized', listener)` for `{root, cwd}`. Register
+listeners during `apply`, filter changes by source and read the current document
+when needed; event payloads contain no document. Reading at use time remains valid
+for owners that do not need notifications. See the
+[event contract](design/appserver/settings-service.md#45-events); no separate
+subscription service or polling loop is needed.
 
 When the embedding host supplies a secret store, declare `credentials` as a
 dependency and use `ctx.use<Credentials>('credentials').resolve({owner, reference})`.
@@ -317,8 +323,8 @@ JavaScript row unloads: `report` replies with interruption, while `drain` preser
 the provider's reply. No business task in this example runs during `apply`.
 
 Native Session broadcast remains [#168](https://github.com/arcships/dim/issues/168)
-work. rutis 0.11 supplies leaf events, but the proposed Dim Session binding in
-[#174](https://github.com/arcships/dim/pull/174) is not implemented.
+work. rutis 0.11 supplies leaf events; the Dim Session binding design in
+[#174](https://github.com/arcships/dim/pull/174) is merged, but not implemented.
 A runtime `ctx.on` API alone does not deliver Dim Session records.
 The implemented tool/method binding supplies no Session activation method,
 branch Dispatcher access or replacement polling mechanism.
