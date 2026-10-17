@@ -235,7 +235,7 @@ Existing `SessionNodeRows` owns one
 `on_pattern(EventPattern<SessionBroadcastEvent>::prefix("session/"))` subscription.
 It uses its existing Runtime dependency. When an enabled row declares the event
 binding below, it also declares `When<Arc<AgentIndex>>`; managed-provider NodeRows
-does not. No new forwarding Capability or per-Session registry is introduced.
+does not. No new forwarding Capability or public subscription registry is introduced.
 
 At callback entry, derive the Session id from the matched channel and call the
 non-restoring `AgentIndex::session(id)`. Admit only a present Session whose
@@ -246,10 +246,25 @@ It neither creates/restores a Session nor adds a readiness wait.
 Declare `LocalRuntime::emits(["session.event"])`. Emit each admitted native
 `SessionBroadcastEvent::Event` once with one argument
 `{sessionId, branchId, event}`; `event` is the unchanged `AgentEvent` serialization.
-Native `emit` already queues and orders callbacks per Session channel. Await
-`Process::emit` there, preserving that order without blocking Dispatcher. Delivery
-failures use existing rutis event diagnostics; there are no retries or Timeline
-success facts. There is no additional order between branches or Sessions.
+Native `emit` orders callbacks per Session channel and awaits each listener.
+The callback therefore only admits the record to a Session-keyed FIFO owned by
+SessionNodeRows and returns; it never awaits Node I/O or queue capacity. One
+owned task per active channel drains that FIFO and awaits `Process::emit` in
+order. Other listeners on the same native channel, including Rpc notifications
+and delivery fences, never wait for leaf delivery. No extra ordering is imposed
+between branches beyond native channel order, or between Sessions.
+
+The FIFO and task are transient transport resources, not a service registry or
+business state. Register their cleanup immediately with the NodeRows effect.
+Session closing ends admission and discards queued observations; original-row
+cancellation stops that row's handlers. Native `Closed` retires that channel's
+transport resources, and NodeRows unload releases all of them. An in-flight
+emit may finish after closing; the original row's handlers still reject new work
+after their closing boundary. There is no replay, transfer of queued work across
+a NodeRows reload or retry after failed delivery. Delivery failures use existing rutis event diagnostics,
+without Timeline success facts. A slow leaf can accumulate pending observations
+only in its NodeRows transport, never delay native delivery; this proposal adds
+no bounded-queue wait or silent event dropping while the Session remains open.
 
 Eligibility is sampled at callback entry: a captured Loading-time emission
 processed after publication may be delivered; one processed earlier is dropped.
@@ -275,10 +290,13 @@ Only such a row adds native `InSession<SessionIdentity>`, `InSession<SessionConf
 by-reference Promise support. The original `config` stays unchanged; no second
 manifest/list, client method, tool or public Session facade service is added.
 Existing tool/method-only rows need no new entry.
-`config` in the bind request is the same creation-time SessionConfig used by
-ToolCall, including its existing interactive omission rule; it is separate from
-the plugin's structural options. SessionTitle needs it for interactive/leader
-eligibility. It does not report later Prompt/model adoption.
+`config` in the bind request is the same creation-time SessionConfig serde
+form used by ToolCall, separate from the plugin's structural options. This
+proposal explicitly retains that form's rule: absent `interactive` means true;
+only false is serialized. SessionTitle tests `config.interactive !== false &&
+config.collaborationRole === 'leader'`, never truthiness of the omitted field.
+No consumer fills or rewrites the snapshot. It does not report later Prompt/model
+adoption. Approval of the binding includes this serialized-config decision.
 
 The row's binding registers `ctx.on('session.event', listener)` and compares
 `payload.sessionId` with the supplied id before business code. This is required
@@ -300,13 +318,31 @@ flag, generic event service, per-row emitter or deduplication state.
 
 `Fence` and `Closed` stay native. Foreign lifetime ends through closing and row
 effects, with no additional end frame or fabricated `AgentEvent`. Approval of
-this proposal includes that end-boundary choice. C6 retains notice/Rpc ownership.
+this proposal includes that end-boundary choice. C6 retains notice/Rpc ownership:
+its proposed `{source, kind, data}` notice records are not `Event` records and
+are not forwarded to leaf parts here. SessionTitle observes `input/applied`;
+its stored title notice reaches clients through C6/Rpc, not this TS binding.
+
+Process-level `settings.changed` and `settings.project_authorized` are outside
+#168 and are not wrapped in `session.event`. S8b/#118 retains their TypeScript
+delivery work and its open binding question (settings-service §4.5/§10.2).
+The C4 owner (zerob13) must agree the shared NodeRows runtime `emits` declarations
+and forwarding with the S8b owner (eric8810) in that follow-up; the Settings owner
+cannot mutate a runtime declaration it does not own. Until that contract exists,
+TypeScript owners read Settings at use time. This proposal does not complete S8b.
+
 New public content is only the setup contract and fixed leaf event above; core,
 loader, facades, native broadcast types, Dispatcher, Rpc and persistence do not change.
 
 Extend existing real Node/App Server flows: two rows in one Session each receive
 one copy; another Session receives only its records; order/content match native
-history. Cover publication sampling and late listeners without replay. Hold
+history. Hold a leaf listener pending while an attached client receives the
+following native records and fence acknowledgement without waiting for Node;
+then release it and verify ordered, single-copy leaf delivery. Close with a
+pending emit and queued records: no queued observation starts new work after
+closing, and the channel's transport resources are released. Cover publication
+sampling, late listeners without replay, and interactive true/false plus leader/member
+eligibility using the serialized creation snapshot. Hold
 owned work through close and row-only reload: closing settles it before effects
 finish, stale listeners stop, and native/other-Session use continues. Check bind
 failures and throwing listeners; preserve Pending/disabled rows, first-read tools
@@ -396,6 +432,8 @@ service-publication wait covers tools and methods without moving declaration rea
 the original row's token ends stale native tool waits without a tracker, per-call subscription or
 new liveness API. Native pattern subscription avoids per-row transport and duplicate
 emissions; the one setup method carries identity/closing without a new core lifecycle API.
+The per-channel FIFO/task is necessary solely to preserve leaf order while returning
+immediately from the shared native channel; it introduces no second event source or registry.
 
 ## Rule check
 
