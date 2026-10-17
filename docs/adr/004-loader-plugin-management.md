@@ -53,8 +53,9 @@ management-method namespace and exposes no generic document bodies over RPC.
 
 Note: the overall design now splits that supplement ([§6.4](../design/overview.md#64-conventions)).
 S8a keeps `BusinessDocument` as the Rust binding and adds change notification
-for both user and project scope. S8b, with the TypeScript bridge and not yet
-implemented, adds the language-neutral named `settings` service, the client
+for both user and project scope. S8b (its Rust side implemented; manifest loading and
+TypeScript delivery wait for the TypeScript bridge)
+adds the language-neutral named `settings` service, the client
 management methods `settings.read`/`settings.update` and the credential
 resolver. MCP bearer tokens, `env` and `headers` values stay inline in the `mcp`
 documents until they move to credential references; that move is not part of S8.
@@ -109,8 +110,8 @@ Owners retain declarations, wire validation, business calls and the calls they
 accept: an owner's unload interrupts its `Report` calls and waits for its
 `Drain` calls. Rpc owns entry admission and reply delivery. There is no
 Methods/Management plugin, registration port or adapter row. MCP and Skills
-publish their existing management methods; Settings publishes none (S8b will
-add `settings.read`/`settings.update`, see D4). Local v3
+publish their existing management methods; Settings publishes none: S8b's
+`settings.read`/`settings.update` belong to SettingsMethods, which depends on Settings (see D4). Local v3
 hello lists the methods of the active owners. A namespace whose owner row is
 not running and has not failed (Pending, not started yet, or between
 generations) returns the retryable `service_reloading`, as before
