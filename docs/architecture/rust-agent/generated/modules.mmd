@@ -181,14 +181,18 @@ flowchart LR
   m177["dim_cli::@bin:dimcode"]
   m178["dim_cli::@bin:dimcode::args"]
   m179["dim_cli::@bin:dimcode::client"]
-  m180["dim_cli::@bin:dimcode::composer"]
-  m181["dim_cli::@bin:dimcode::display"]
-  m182["dim_cli::@bin:dimcode::export"]
-  m183["dim_cli::@bin:dimcode::images"]
-  m184["dim_cli::@bin:dimcode::input"]
-  m185["dim_cli::@bin:dimcode::login"]
-  m186["dim_cli::@bin:dimcode::mcp"]
-  m187["dim_cli::@bin:dimcode::session"]
+  m180["dim_cli::@bin:dimcode::clipboard"]
+  m181["dim_cli::@bin:dimcode::clipboard::native_flow"]
+  m182["dim_cli::@bin:dimcode::clipboard::windows_flow"]
+  m183["dim_cli::@bin:dimcode::composer"]
+  m184["dim_cli::@bin:dimcode::display"]
+  m185["dim_cli::@bin:dimcode::export"]
+  m186["dim_cli::@bin:dimcode::images"]
+  m187["dim_cli::@bin:dimcode::input"]
+  m188["dim_cli::@bin:dimcode::input::windows_flow"]
+  m189["dim_cli::@bin:dimcode::login"]
+  m190["dim_cli::@bin:dimcode::mcp"]
+  m191["dim_cli::@bin:dimcode::session"]
   m0 -.-> m1
   m0 -.-> m2
   m0 --> m3
@@ -1427,57 +1431,69 @@ flowchart LR
   m177 --> m178
   m177 --> m179
   m177 -.-> m180
-  m177 -.-> m181
-  m177 --> m182
-  m177 --> m183
-  m177 --> m184
+  m177 -.-> m183
+  m177 -.-> m184
   m177 --> m185
   m177 --> m186
   m177 --> m187
+  m177 --> m189
+  m177 --> m190
+  m177 --> m191
   m178 --> m177
-  m178 --> m182
+  m178 --> m185
   m179 --> m177
   m179 --> m178
   m180 --> m99
-  m180 --> m101
   m180 --> m177
-  m180 --> m179
-  m180 --> m181
-  m180 --> m184
-  m181 --> m97
-  m181 --> m99
-  m181 --> m101
-  m181 --> m177
-  m182 --> m99
-  m182 --> m101
-  m182 --> m177
-  m182 --> m179
-  m182 --> m181
-  m182 --> m187
+  m180 -.-> m181
+  m180 -.-> m182
+  m180 --> m186
+  m181 --> m180
+  m182 --> m180
   m183 --> m99
+  m183 --> m101
   m183 --> m177
+  m183 --> m179
+  m183 --> m180
+  m183 --> m186
+  m183 --> m187
+  m184 --> m97
+  m184 --> m99
+  m184 --> m101
   m184 --> m177
+  m185 --> m99
+  m185 --> m101
   m185 --> m177
-  m185 --> m178
   m185 --> m179
-  m185 --> m181
   m185 --> m184
+  m185 --> m191
+  m186 --> m99
   m186 --> m177
-  m186 --> m178
-  m186 --> m179
-  m186 --> m181
-  m186 --> m184
-  m186 --> m185
-  m187 --> m97
-  m187 --> m99
-  m187 --> m101
-  m187 --> m103
-  m187 --> m106
   m187 --> m177
-  m187 --> m178
-  m187 --> m179
-  m187 --> m180
-  m187 --> m181
-  m187 --> m182
-  m187 --> m184
-  m187 --> m186
+  m187 -.-> m188
+  m188 --> m183
+  m188 --> m187
+  m189 --> m177
+  m189 --> m178
+  m189 --> m179
+  m189 --> m184
+  m189 --> m187
+  m190 --> m177
+  m190 --> m178
+  m190 --> m179
+  m190 --> m184
+  m190 --> m187
+  m190 --> m189
+  m191 --> m97
+  m191 --> m99
+  m191 --> m101
+  m191 --> m103
+  m191 --> m106
+  m191 --> m177
+  m191 --> m178
+  m191 --> m179
+  m191 --> m183
+  m191 --> m184
+  m191 --> m185
+  m191 --> m187
+  m191 --> m190

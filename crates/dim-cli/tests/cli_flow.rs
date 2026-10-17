@@ -1095,6 +1095,10 @@ struct Terminal {
     consumed: usize,
 }
 impl Terminal {
+    fn editor(&mut self) {
+        self.until("\u{1b}[?2004h");
+        self.until("Ctrl+J: newline");
+    }
     fn launch(mut command: Command) -> (Self, Child) {
         let mut master = 0;
         let mut slave = 0;
@@ -1199,6 +1203,348 @@ impl Terminal {
         self.raw(text.as_bytes());
         self.raw(b"\x1b[201~");
     }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_reader() {
+    let home = Home::new();
+    let bin = home.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let helper = bin.join("wl-paste");
+    fs::write(&helper, "#!/bin/sh\nif [ \"$1\" = \"--list-types\" ]; then\n  printf 'text/plain;charset=utf-8\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$$\" > \"$DIM_CLIPBOARD_TEST_PID\"\nexec /bin/sleep 300\n").unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let pid_file = home.0.join("reader.pid");
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for text in ["after cancel", "retained"] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .env("PATH", &bin)
+        .env("WAYLAND_DISPLAY", "fixture")
+        .env("DIM_CLIPBOARD_TEST_PID", &pid_file);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"kept\x16");
+    terminal.until("Reading clipboard");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "Clipboard reader was not started"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let pid = fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    terminal.write(b"\n");
+    terminal.until("Wait for clipboard insertion");
+    terminal.raw(b"\x03");
+    terminal.until("Ctrl+C: clear");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "Cancelled clipboard reader was not reaped"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    terminal.write(b"after cancel\n");
+    terminal.editor();
+    fs::remove_file(helper).unwrap();
+    terminal.write(b"retained\x16");
+    terminal.until("Cannot start wl-paste");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn clipboard_uri_lists_fall_back_to_text_and_reject_mixed_file_groups() {
+    let home = Home::new();
+    let bin = home.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let helper = bin.join("wl-paste");
+    fs::write(
+        &helper,
+        r#"#!/bin/sh
+if [ "$1" = "--list-types" ]; then
+  printf 'text/uri-list\ntext/plain;charset=utf-8\n'
+elif [ "$3" = "text/uri-list" ]; then
+  /bin/cat "$DIM_CLIPBOARD_TEST_URIS"
+else
+  printf 'https://example.invalid/copied'
+fi
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let uris = home.0.join("uris");
+    fs::write(&uris, "# copied link\nhttps://example.invalid/copied\n").unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        for text in ["https://example.invalid/copied", "kept"] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .env("PATH", &bin)
+        .env("WAYLAND_DISPLAY", "fixture")
+        .env("DIM_CLIPBOARD_TEST_URIS", &uris);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"\x16");
+    terminal.until("https://example.invalid/copied");
+    terminal.write(b"\n");
+    terminal.editor();
+    fs::write(
+        &uris,
+        "file:///tmp/copied\nhttps://example.invalid/copied\n",
+    )
+    .unwrap();
+    terminal.write(b"kept\x16");
+    terminal.until("Clipboard file URL is not local");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+}
+
+#[test]
+fn interactive_file_sources_preserve_order_bytes_and_the_local_resume_base() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    let local = home.0.join("local");
+    let invoking = home.0.join("invoking");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&invoking).unwrap();
+    let png = image_fixture(image::ImageFormat::Png, 1, 1);
+    let jpeg = image_fixture(image::ImageFormat::Jpeg, 1, 1);
+    let first = local.join("wrong.txt");
+    let second = local.join("other image.bin");
+    let note = local.join("space note.md");
+    fs::write(&first, &png).unwrap();
+    fs::write(&second, &jpeg).unwrap();
+    fs::write(&note, "P1 ordinary text reference contents stay local").unwrap();
+    let expected_note = note.canonicalize().unwrap();
+    let other = second.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.start(true);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["user"]["content"], json!([
+            {"type":"text","text":"Compare "},
+            {"type":"image","source":{"type":"base64","mediaType":"image/png","data":STANDARD.encode(png)}},
+            {"type":"text","text":expected_note.to_str().unwrap()},
+            {"type":"image","source":{"type":"base64","mediaType":"image/jpeg","data":STANDARD.encode(jpeg)}},
+            {"type":"text","text":" done"}
+        ]));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
+        for text in [expected_note.to_str().unwrap().to_owned(), "prefix wrong.txt suffix".into(), "https://example.invalid/image.png".into(), "file://remote/tmp/photo.png".into()] {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":25}));
+        }
+        assert!(other.exists());
+        wire.detach();
+    });
+    let mut command = home.command();
+    command
+        .arg("--resume")
+        .arg("session")
+        .arg("--cwd")
+        .arg(&local)
+        .current_dir(&invoking);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"Compare ");
+    terminal.paste("'wrong.txt' space\\ note.md");
+    terminal.until("[File: space note.md]");
+    fs::write(&first, "changed after capture").unwrap();
+    terminal.paste(url::Url::from_file_path(&second).unwrap().as_str());
+    terminal.until("[Image 2: other image.bin]");
+    terminal.write(b" done\n");
+    terminal.editor();
+    fs::write(&note, "BM ordinary text is still a path reference").unwrap();
+    terminal.paste("space note.md");
+    terminal.until("[File: space note.md]");
+    terminal.write(b"\n");
+    terminal.editor();
+    for text in [
+        "prefix wrong.txt suffix",
+        "https://example.invalid/image.png",
+        "file://remote/tmp/photo.png",
+    ] {
+        terminal.paste(text);
+        terminal.write(b"\n");
+        terminal.editor();
+    }
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(terminal.transcript.contains("local files:"));
+    assert!(first.exists() && note.exists() && second.exists());
+}
+
+#[test]
+fn interactive_file_groups_reject_atomically_and_marker_removal_releases_capacity() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let home = Home::new();
+    fs::write(home.0.join("note.md"), "note").unwrap();
+    let broken = format!("broken-{}.png", "x".repeat(100));
+    fs::write(home.0.join(&broken), "not png").unwrap();
+    let png = image_fixture(image::ImageFormat::Png, 1, 1);
+    fs::write(home.0.join("one.png"), &png).unwrap();
+    let gif = image_fixture(image::ImageFormat::Gif, 1, 1);
+    fs::write(home.0.join("two.gif"), &gif).unwrap();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "kept");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        let submit = wire.read("session.submit");
+        let content = submit["params"]["user"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 20);
+        for part in &content[..19] {
+            assert_eq!(part["source"]["data"], STANDARD.encode(&png));
+        }
+        assert_eq!(content[19]["source"]["mediaType"], "image/gif");
+        assert_eq!(content[19]["source"]["data"], STANDARD.encode(gif));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":25}));
+        wire.detach();
+    });
+    let mut command = home.command();
+    command.arg("--cwd").arg(&home.0);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"kept");
+    terminal.paste(&format!("note.md {broken}"));
+    terminal.until("PNG, JPEG, WebP or GIF");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.paste(&["one.png"; 20].join(" "));
+    terminal.until("[Image 20: one.png]");
+    terminal.paste("note.md two.gif");
+    terminal.until("at most 20 images");
+    terminal.raw(b"\x7f");
+    terminal.paste("two.gif");
+    terminal.until("[Image 20: two.gif]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(home.0.join("one.png").exists());
+    assert!(home.0.join("two.gif").exists());
+}
+
+#[test]
+fn interactive_file_completion_navigates_selects_and_dismisses_without_submitting() {
+    let home = Home::new();
+    let dir = home.0.join("docs a");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("a.md"), "a").unwrap();
+    fs::write(dir.join("b.md"), "b").unwrap();
+    let hostile = "bad\n\u{1b}[31m.txt";
+    fs::write(home.0.join(hostile), "safe").unwrap();
+    let expected = [
+        dir.join("b.md")
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        "literal @docs".into(),
+        "kept @missing/file".into(),
+        home.0
+            .join(hostile)
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        "delayed @docsfragmented\n/exit\n".into(),
+    ];
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        for text in expected {
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            wire.reply(&idle, json!({"sequence":25}));
+        }
+        wire.detach();
+    });
+    let mut command = home.command();
+    command.arg("--cwd").arg(&home.0);
+    let (mut terminal, child) = Terminal::launch(command);
+    terminal.editor();
+    terminal.write(b"@docs");
+    terminal.until("* docs a/");
+    terminal.raw(b"\t");
+    terminal.until("* a.md");
+    terminal.raw(b"\x1b[B");
+    terminal.until("* b.md");
+    terminal.raw(b"\t");
+    terminal.until("[File: b.md]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"literal @docs");
+    terminal.until("Esc: close suggestions");
+    terminal.raw(b"\x1b");
+    terminal.until("Enter: send");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"kept @missing/file");
+    terminal.until("No such file or directory");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"@bad");
+    terminal.until("bad\\n\\u{1b}[31m.txt");
+    terminal.raw(b"\t");
+    terminal.until("[File: bad\\n\\u{1b}[31m.txt]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"delayed @docs");
+    terminal.until("Esc: close suggestions");
+    terminal.raw(b"\x1b");
+    terminal.until("Enter: send");
+    terminal.raw(b"[200~fragmented\n/exit\n\x1b[201~");
+    terminal.until("[Paste 1: 2 lines]");
+    terminal.write(b"\n");
+    terminal.editor();
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("\u{1b}[31m"));
 }
 
 #[test]
@@ -2346,6 +2692,10 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     fs::write(&image, &bytes).unwrap();
     let image_data = STANDARD.encode(bytes);
     let model_image = image_data.clone();
+    let outside = Home::new();
+    let reference = outside.0.join("outside reference.txt");
+    fs::write(&reference, "outside-attachment-marker\n").unwrap();
+    let model_reference = reference.clone();
     let paste = format!(
         "native-paste-reader-marker\r\n{}",
         "中 e\u{301} text\r\n".repeat(2000)
@@ -2356,7 +2706,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let model = thread::spawn(move || {
-        for phase in 0..5 {
+        for phase in 0..7 {
             let deadline = Instant::now() + Duration::from_secs(15);
             let stream = loop {
                 match listener.accept() {
@@ -2465,6 +2815,29 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     json!({"tool_calls":[{"index":0,"id":"paste-read","type":"function","function":{"name":"read","arguments":serde_json::to_string(&json!({"path":path})).unwrap()}}]}),
                     Value::Null,
                 ) + &frame(json!({}), json!("tool_calls"))
+            } else if phase == 5 {
+                let user = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|message| message["role"] == "user")
+                    .unwrap();
+                let parts = user["content"].as_array().unwrap();
+                assert_eq!(parts[0], json!({"type":"text","text":"selected "}));
+                assert_eq!(
+                    parts[1],
+                    json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}})
+                );
+                assert!(
+                    user["content"]
+                        .to_string()
+                        .contains(model_reference.to_str().unwrap())
+                );
+                frame(
+                    json!({"tool_calls":[{"index":0,"id":"selected-read","type":"function","function":{"name":"read","arguments":serde_json::to_string(&json!({"path":model_reference})).unwrap()}}]}),
+                    Value::Null,
+                ) + &frame(json!({}), json!("tool_calls"))
             } else {
                 if phase == 1 {
                     assert!(
@@ -2481,7 +2854,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     assert!(messages.contains("dim-shell-input"));
                     assert!(messages.contains("cli-recorded-marker"));
                     assert!(!messages.contains("cli-private-marker"));
-                } else {
+                } else if phase == 4 {
                     assert!(
                         request["messages"]
                             .as_array()
@@ -2495,9 +2868,18 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                             }),
                         "The stored paste did not reach the model through read"
                     );
+                } else {
+                    assert!(
+                        request["messages"].as_array().unwrap().iter().any(
+                            |message| message["role"] == "tool"
+                                && message["content"]
+                                    .as_str()
+                                    .is_some_and(|text| text.contains("outside-attachment-marker"))
+                        )
+                    );
                 }
                 frame(
-                    json!({"content":match phase {1 => "read completed", 2 => "session continued", _ => "paste read completed"}}),
+                    json!({"content":match phase {1 => "read completed", 2 => "session continued", 4 => "paste read completed", _ => "files read completed"}}),
                     json!("stop"),
                 )
             } + "data: [DONE]\n\n";
@@ -2609,7 +2991,15 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     terminal.until("[Paste 1: 2001 lines]");
     terminal.write(b"\n");
     terminal.until("paste read completed");
-    terminal.until("\n> ");
+    terminal.editor();
+    terminal.write(b"selected ");
+    terminal.paste(image.to_str().unwrap());
+    terminal.until("[Image 1: screenshot.dat]");
+    terminal.paste(url::Url::from_file_path(&reference).unwrap().as_str());
+    terminal.until("[File: outside reference.txt]");
+    terminal.write(b"\n");
+    terminal.until("files read completed");
+    terminal.editor();
     terminal.write(b"/exit\n");
     assert!(wait(child).status.success());
     let exported = home
@@ -2671,6 +3061,11 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         1
     );
     assert!(!conversation.to_string().contains("cli-private-marker"));
+    assert!(conversation["events"].as_array().unwrap().iter().any(|event| event["type"] == "input" && event["name"] == "message" && event["data"]["user"]["content"] == json!([
+        {"type":"text","text":"selected "},
+        {"type":"image","source":{"type":"base64","mediaType":"image/png","data":image_data}},
+        {"type":"text","text":reference.to_str().unwrap()}
+    ])));
     assert!(
         conversation["events"]
             .as_array()

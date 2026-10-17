@@ -1893,6 +1893,42 @@
       ]
     },
     {
+      "id": "dim_cli::@bin:dimcode::clipboard",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode",
+      "file": "crates/dim-cli/src/clipboard.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::clipboard::native_flow",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode::clipboard",
+      "file": "crates/dim-cli/src/clipboard.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::clipboard::windows_flow",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode::clipboard",
+      "file": "crates/dim-cli/src/clipboard.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "format",
+        "panic",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_cli::@bin:dimcode::composer",
       "crate": "dim_cli::@bin:dimcode",
       "parent": "dim_cli::@bin:dimcode",
@@ -1940,7 +1976,8 @@
       "parent": "dim_cli::@bin:dimcode",
       "file": "crates/dim-cli/src/images.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "matches"
       ]
     },
     {
@@ -1950,6 +1987,18 @@
       "file": "crates/dim-cli/src/input.rs",
       "unexpandedMacros": [
         "print",
+        "println"
+      ]
+    },
+    {
+      "id": "dim_cli::@bin:dimcode::input::windows_flow",
+      "crate": "dim_cli::@bin:dimcode",
+      "parent": "dim_cli::@bin:dimcode::input",
+      "file": "crates/dim-cli/src/input.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic",
         "println"
       ]
     },
@@ -15225,6 +15274,13 @@
     },
     {
       "from": "dim_cli::@bin:dimcode",
+      "to": "dim_cli::@bin:dimcode::clipboard",
+      "references": [
+        "mod clipboard"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode",
       "to": "dim_cli::@bin:dimcode::composer",
       "references": [
         "mod composer"
@@ -15325,9 +15381,71 @@
       ]
     },
     {
+      "from": "dim_cli::@bin:dimcode::clipboard",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ImageSource",
+        "use dim_agent_types::ImageSource"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::clipboard",
+      "to": "dim_cli::@bin:dimcode",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::clipboard",
+      "to": "dim_cli::@bin:dimcode::clipboard::native_flow",
+      "references": [
+        "mod native_flow"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::clipboard",
+      "to": "dim_cli::@bin:dimcode::clipboard::windows_flow",
+      "references": [
+        "mod windows_flow"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::clipboard",
+      "to": "dim_cli::@bin:dimcode::images",
+      "references": [
+        "path images::encoded",
+        "path images::pixels",
+        "use crate::images"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::clipboard::native_flow",
+      "to": "dim_cli::@bin:dimcode::clipboard",
+      "references": [
+        "path Source::Files",
+        "path Source::Image",
+        "path Source::Text",
+        "path read_board"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::clipboard::windows_flow",
+      "to": "dim_cli::@bin:dimcode::clipboard",
+      "references": [
+        "path Source::Files",
+        "path Source::Image",
+        "path Source::Text",
+        "path read"
+      ]
+    },
+    {
       "from": "dim_cli::@bin:dimcode::composer",
       "to": "dim_agent_types::content",
       "references": [
+        "path ContentBlock",
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
         "use dim_agent_types::ContentBlock"
       ]
     },
@@ -15361,10 +15479,25 @@
     },
     {
       "from": "dim_cli::@bin:dimcode::composer",
-      "to": "dim_cli::@bin:dimcode::display",
+      "to": "dim_cli::@bin:dimcode::clipboard",
       "references": [
-        "path display::safe",
-        "use crate::display"
+        "path Source",
+        "path Source::Files",
+        "path Source::Image",
+        "path Source::Text",
+        "path clipboard::file_url",
+        "path clipboard::read",
+        "use crate::clipboard",
+        "use crate::clipboard::Source"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::composer",
+      "to": "dim_cli::@bin:dimcode::images",
+      "references": [
+        "path images",
+        "path images::file",
+        "use crate::images"
       ]
     },
     {
@@ -15483,6 +15616,7 @@
       "references": [
         "path ContentBlock",
         "path ContentBlock::Image",
+        "path ContentBlock::Text",
         "path ImageSource",
         "path ImageSourceType::Base64",
         "use dim_agent_types::ContentBlock",
@@ -15504,6 +15638,29 @@
       "references": [
         "path Result",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::input",
+      "to": "dim_cli::@bin:dimcode::input::windows_flow",
+      "references": [
+        "mod windows_flow"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::input::windows_flow",
+      "to": "dim_cli::@bin:dimcode::composer",
+      "references": [
+        "path Draft::default",
+        "use crate::composer",
+        "use crate::composer::Draft"
+      ]
+    },
+    {
+      "from": "dim_cli::@bin:dimcode::input::windows_flow",
+      "to": "dim_cli::@bin:dimcode::input",
+      "references": [
+        "path Input::new"
       ]
     },
     {
@@ -16088,6 +16245,14 @@
     {
       "module": "dim_app_server::tree_protocol",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::clipboard",
+      "path": "NSString::from_str"
+    },
+    {
+      "module": "dim_cli::@bin:dimcode::composer",
+      "path": "char::is_whitespace"
     },
     {
       "module": "dim_cli::@bin:dimcode::display",

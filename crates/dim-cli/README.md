@@ -51,7 +51,8 @@ Multiline pastes and pastes over 16 KiB appear as atomic markers:
 ```text
 > Explain [Paste 1: 120 lines]
   and compare with the current file.
-Enter: send   Ctrl+J: newline   Ctrl+C: clear   Ctrl+C twice: cancel paste
+Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear
+Ctrl+C twice: cancel paste
 ```
 
 Arrows move by grapheme or display row; Home/End select the logical line's ends.
@@ -81,8 +82,39 @@ An ordinary single-line terminal paste is plain text, so a pasted command runs
 only after the user presses Enter. Text resembling a stored-paste reference is
 ordinary user text, not an authenticated attachment handle.
 
-Clipboard images/files, @ completion and dropped-path insertion are the remaining
-native sources in the [attachment input contract](../../docs/design/cli-attachment-input.md).
+Type `@` and a local path to see matching entries. Up/Down selects a suggestion;
+Tab enters a directory or inserts a file, and Esc closes suggestions without changing
+the draft. The displayed `local files` directory is the CLI's selected `--cwd`, including
+after resume. Paths outside that directory remain usable as explicit selections.
+
+```text
+local files: /work/project
+> Compare @docs/
+* guide.md
+  reference/
+Tab: select or enter directory   Esc: close suggestions
+
+> Compare [Image 1: screen.png] with [File: guide.md]
+Enter: send  Ctrl+J: newline  Ctrl+V: clipboard  Ctrl+C: clear
+```
+
+A paste containing only existing file paths inserts files. Quotes, escaped spaces and
+local file URLs work; prose and HTTP links remain text. Supported image bytes produce
+image markers even with another filename extension. Other ordinary files produce path
+references, which the model can read with its existing tool. Image data is captured at
+insertion; removing a marker never deletes the original file. A rejected file group
+leaves the draft unchanged. File references retain separate ordered text content blocks.
+
+Ctrl+V reaching the CLI reads clipboard files first, then an image, then plain text.
+macOS uses AppKit; Windows uses Win32. Linux needs `wl-paste` on Wayland or `xclip` on
+X11. Missing or failed clipboard access reports an inline error and retains the draft.
+The CLI reads only on that action and never changes the clipboard. A terminal that
+intercepts Ctrl+V uses its ordinary paste event instead. Linux reads remain pending while
+editing continues; Enter asks you to wait for insertion, and Ctrl+C clears the draft and
+cancels the reader. macOS and Windows read and convert clipboard data synchronously;
+editing and cancellation resume after that read returns.
+See the [attachment input contract](../../docs/design/cli-attachment-input.md) for native
+acceptance evidence; cross-compilation alone does not establish platform behavior.
 
 Use `dimcode session export SESSION_ID --format markdown|json [--output PATH]`
 for a fixed prefix of main-branch history. Without `--output`, it writes to stdout.
@@ -414,6 +446,6 @@ DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs" \
   -- --ignored
 ```
 
-The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows console and named-pipe behavior still require native Windows acceptance; compiling another target is not a substitute for that check.
+The test uses an isolated home and explicitly shuts down only the daemon it started. The external model service is a fixture; it does not spend a real provider's quota. Windows CI runs native clipboard and ConPTY editing flows; compiling another target is not a substitute for them. The named-pipe bridge still requires its separate native acceptance.
 
 Unix socket paths have an operating-system length limit, including the canonical home path. On macOS, `/var` resolves to `/private/var`, which adds bytes. Use a short isolated home such as `/tmp/dim-dev` for development/tests if the daemon reports `path must be shorter than SUN_LEN`; the CLI preserves that failure in `rust/daemon.log`.
