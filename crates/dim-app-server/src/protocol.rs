@@ -182,8 +182,10 @@ pub struct StopExec {
 pub struct UpdateModel {
     pub session_id: String,
     pub branch_id: String,
-    pub provider_id: String,
-    pub model_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub provider_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub model_id: Option<String>,
     #[serde(default)]
     pub model_preferences: crate::provider::ModelPreferences,
 }

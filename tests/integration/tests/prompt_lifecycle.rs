@@ -524,452 +524,555 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prepared_model_call_keeps_its_configuration_while_later_turn_uses_refresh() {
-    let started = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([(
-        "rules".into(),
-        Reply::Entry(entry("rules", "1", "rules one")),
-    )]))));
-    let prepare = Arc::new(GatedContext {
-        started: started.clone(),
-        release: release.clone(),
-        calls: AtomicUsize::new(0),
-    });
-    let agent = builder_with_context(host.clone(), prepare).build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    let target = PromptSourceTarget {
-        source: "rules".into(),
-        scope: PromptScope::Branch {
-            timeline: "main".into(),
-        },
-    };
-    session
-        .configure(
-            ConfigureUpdate {
-                sources: vec![target.clone()],
-                model: Some(configuration("one")),
-            },
-            "main",
-        )
-        .await
-        .unwrap();
-    let version_one = session
-        .history("main", None)
-        .await
-        .unwrap()
-        .into_iter()
-        .find_map(|event| match &event.kind {
-            EventKind::ContextConfigured(data) => Some(data.clone()),
-            _ => None,
-        })
-        .unwrap();
-    let child = session
-        .branch(
-            "main".into(),
-            session.sequence("main").unwrap(),
-            BranchOptions {
-                prompt: "first".into(),
-                source: BranchSource::Host {
-                    operation_id: "child".into(),
-                },
-            },
-        )
-        .await
-        .unwrap();
-    started.notified().await;
-
-    host.0.lock().unwrap().insert(
-        "rules".into(),
-        Reply::Entry(entry("rules", "2", "rules two")),
-    );
-    session
-        .configure(
-            ConfigureUpdate {
-                sources: vec![target],
-                model: Some(configuration("two")),
-            },
-            "main",
-        )
-        .await
-        .unwrap();
-    release.notify_waiters();
-    session.idle(&child).await.unwrap();
-
-    session
-        .submit("second".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
-
-    let child_events = session.history(&child, None).await.unwrap();
-    let child_configured = child_events
-        .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::ContextConfigured(data) => Some(data),
-            _ => None,
-        })
-        .unwrap();
-    let first_call = child_events
-        .iter()
-        .find_map(|event| match &event.kind {
-            EventKind::ModelCall(data) => Some(data),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(first_call.request.model_id, "one");
-    assert_eq!(
-        first_call
-            .request
-            .capability_snapshot
-            .as_ref()
-            .unwrap()
-            .capabilities
-            .context_window,
-        135791
-    );
-    assert_eq!(
-        first_call.request.system.as_deref(),
-        child_configured.system.as_ref()
-    );
-    assert_eq!(
-        first_call.configuration,
-        Some(PromptReference {
-            timeline: "main".into(),
-            revision: version_one.revision.clone(),
-        })
-    );
-    assert_eq!(first_call.prompt, version_one.prompt);
-
-    let main_events = session.history("main", None).await.unwrap();
-    let latest_configured = main_events
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::ContextConfigured(data) => Some(data),
-            _ => None,
-        })
-        .unwrap();
-    let second_call = main_events
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::ModelCall(data) => Some(data),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(second_call.request.model_id, "two");
-    assert_eq!(
-        second_call
-            .request
-            .capability_snapshot
-            .as_ref()
-            .unwrap()
-            .capabilities
-            .context_window,
-        98765
-    );
-    assert_eq!(
-        second_call.request.system.as_deref(),
-        latest_configured.system.as_ref()
-    );
-    assert_eq!(
-        second_call.configuration,
-        Some(PromptReference {
-            timeline: "main".into(),
-            revision: latest_configured.revision.clone(),
-        })
-    );
-    assert_eq!(second_call.prompt, latest_configured.prompt);
-    agent.close().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn configuration_is_atomic_failure_safe_and_inherited() {
-    let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([
-        (
+    for frozen in [false, true] {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([(
             "rules".into(),
             Reply::Entry(entry("rules", "1", "rules one")),
-        ),
-        ("broken".into(), Reply::Fail),
-    ]))));
-    let agent = builder(host.clone()).build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    let adopted = session
-        .configure(
-            ConfigureUpdate {
-                sources: vec![PromptSourceTarget {
-                    source: "rules".into(),
-                    scope: PromptScope::Branch {
-                        timeline: "main".into(),
-                    },
-                }],
-                model: Some(configuration("one")),
+        )]))));
+        let prepare = Arc::new(GatedContext {
+            started: started.clone(),
+            release: release.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let agent = builder_with_context(host.clone(), prepare).build();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let target = PromptSourceTarget {
+            source: "rules".into(),
+            scope: PromptScope::Branch {
+                timeline: "main".into(),
             },
-            "main",
-        )
-        .await
-        .unwrap();
-    assert_eq!(adopted, ConfigureOutcome::Adopted);
-    let events = session.history("main", None).await.unwrap();
-    let changed = events
-        .iter()
-        .position(|event| matches!(event.kind, EventKind::PromptChanged(_)))
-        .unwrap();
-    assert!(matches!(
-        events[changed + 1].kind,
-        EventKind::ContextConfigured(_)
-    ));
-    let configured_before = events
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::ContextConfigured(_)))
-        .count();
-    assert!(
+        };
         session
             .configure(
                 ConfigureUpdate {
-                    sources: vec![PromptSourceTarget {
-                        source: "broken".into(),
-                        scope: PromptScope::Branch {
-                            timeline: "main".into()
-                        }
-                    }],
-                    model: Some(configuration("broken")),
+                    sources: vec![target.clone()],
+                    model: Some(configuration("one")),
                 },
-                "main"
+                "main",
             )
             .await
-            .is_err()
-    );
-    assert_eq!(
-        session
+            .unwrap();
+        let version_one = session
             .history("main", None)
             .await
             .unwrap()
-            .iter()
-            .filter(|event| matches!(event.kind, EventKind::ContextConfigured(_)))
-            .count(),
-        configured_before
-    );
-    let at = session.sequence("main").unwrap();
-    let child = session
-        .branch(
-            "main".into(),
-            at,
-            BranchOptions {
-                prompt: "branch".into(),
-                source: BranchSource::Host {
-                    operation_id: "prompt".into(),
-                },
-            },
-        )
-        .await
-        .unwrap();
-    let inherited = session.history(&child, None).await.unwrap();
-    assert!(inherited.iter().any(|event| matches!(&event.kind, EventKind::PromptChanged(data) if data.changes.iter().any(|change| matches!(change, PromptChange::Set { entry } if entry.version == "1")))));
-    session.idle(&child).await.unwrap();
-    host.0.lock().unwrap().remove("rules");
-    assert_eq!(
-        session
-            .configure(
-                ConfigureUpdate {
-                    sources: vec![PromptSourceTarget {
-                        source: "rules".into(),
-                        scope: PromptScope::Branch {
-                            timeline: "main".into()
-                        }
-                    }],
-                    model: None,
-                },
-                &child
-            )
-            .await
-            .unwrap(),
-        ConfigureOutcome::Adopted
-    );
-    let child_state = session
-        .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&child)
-        .unwrap()
-        .unwrap();
-    let parent_state = session
-        .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
-        .unwrap()
-        .unwrap();
-    assert!(child_state.entries.is_empty());
-    assert_eq!(parent_state.system, "rules one");
-    host.0.lock().unwrap().insert(
-        "rules".into(),
-        Reply::Entry(entry("rules", "2", "child rules")),
-    );
-    assert_eq!(
-        session
-            .configure(
-                ConfigureUpdate {
-                    sources: vec![PromptSourceTarget {
-                        source: "rules".into(),
-                        scope: PromptScope::Branch {
-                            timeline: "main".into()
-                        }
-                    }],
-                    model: None,
-                },
-                &child
-            )
-            .await
-            .unwrap(),
-        ConfigureOutcome::Adopted
-    );
-    assert_eq!(
-        session
-            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&child)
-            .unwrap()
-            .unwrap()
-            .system,
-        "child rules"
-    );
-    assert_eq!(
-        session
-            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
-            .unwrap()
-            .unwrap()
-            .system,
-        "rules one"
-    );
-    agent.close().await.unwrap();
-}
+            .into_iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data) => Some(data.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let child = if frozen {
+            session
+                .submit("first".into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            "main".to_owned()
+        } else {
+            session
+                .branch(
+                    "main".into(),
+                    session.sequence("main").unwrap(),
+                    BranchOptions {
+                        prompt: "first".into(),
+                        source: BranchSource::Host {
+                            operation_id: "child".into(),
+                        },
+                    },
+                )
+                .await
+                .unwrap()
+        };
+        started.notified().await;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn overlapping_load_is_superseded_and_close_joins_cancellation() {
-    let started = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([(
-        "rules".into(),
-        Reply::IgnoreCancel(
-            started.clone(),
-            release.clone(),
-            entry("rules", "old", "old"),
-        ),
-    )]))));
-    let agent = builder(host.clone()).build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    let target = PromptSourceTarget {
-        source: "rules".into(),
-        scope: PromptScope::Branch {
-            timeline: "main".into(),
-        },
-    };
-    let mut first = tokio::spawn({
-        let session = session.clone();
-        let target = target.clone();
-        async move {
+        host.0.lock().unwrap().insert(
+            "rules".into(),
+            Reply::Entry(entry("rules", "2", "rules two")),
+        );
+        if frozen {
+            session
+                .service::<dim_agent_capabilities::prompt::Prompt>("main")
+                .unwrap()
+                .configure_loaded(
+                    Some(configuration("two")),
+                    vec![(target, Some(entry("rules", "2", "rules two")))],
+                )
+                .await
+                .unwrap();
+        } else {
             session
                 .configure(
                     ConfigureUpdate {
                         sources: vec![target],
-                        model: None,
+                        model: Some(configuration("two")),
                     },
                     "main",
                 )
                 .await
-                .unwrap()
+                .unwrap();
         }
-    });
-    started.notified().await;
-    host.0
-        .lock()
-        .unwrap()
-        .insert("rules".into(), Reply::Entry(entry("rules", "new", "new")));
-    let replacement = tokio::spawn({
-        let session = session.clone();
-        async move {
+        release.notify_waiters();
+        session.idle(&child).await.unwrap();
+
+        session
+            .submit("second".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+
+        let child_events = session.history(&child, None).await.unwrap();
+        let child_configured = child_events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data) => Some(data),
+                _ => None,
+            })
+            .unwrap();
+        let first_call = child_events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(data),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(first_call.request.model_id, "one");
+        assert_eq!(
+            first_call
+                .request
+                .capability_snapshot
+                .as_ref()
+                .unwrap()
+                .capabilities
+                .context_window,
+            135791
+        );
+        assert_eq!(
+            first_call.request.system.as_deref(),
+            child_configured.system.as_ref()
+        );
+        assert_eq!(
+            first_call.configuration,
+            Some(PromptReference {
+                timeline: "main".into(),
+                revision: version_one.revision.clone(),
+            })
+        );
+        assert_eq!(first_call.prompt, version_one.prompt);
+
+        let main_events = session.history("main", None).await.unwrap();
+        let latest_configured = main_events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data) => Some(data),
+                _ => None,
+            })
+            .unwrap();
+        let second_call = main_events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(data),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(second_call.request.model_id, "two");
+        assert_eq!(
+            second_call
+                .request
+                .capability_snapshot
+                .as_ref()
+                .unwrap()
+                .capabilities
+                .context_window,
+            98765
+        );
+        assert_eq!(
+            second_call.request.system.as_deref(),
+            latest_configured.system.as_ref()
+        );
+        assert_eq!(
+            second_call.configuration,
+            Some(PromptReference {
+                timeline: "main".into(),
+                revision: latest_configured.revision.clone(),
+            })
+        );
+        assert_eq!(second_call.prompt, latest_configured.prompt);
+        agent.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_is_atomic_failure_safe_and_inherited() {
+    for frozen in [false, true] {
+        let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([
+            (
+                "rules".into(),
+                Reply::Entry(entry("rules", "1", "rules one")),
+            ),
+            ("broken".into(), Reply::Fail),
+        ]))));
+        let agent = builder(host.clone()).build();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let frozen_sources = vec![(
+            PromptSourceTarget {
+                source: "rules".into(),
+                scope: PromptScope::Branch {
+                    timeline: "main".into(),
+                },
+            },
+            Some(entry("rules", "1", "rules one")),
+        )];
+        let adopted = if frozen {
+            session
+                .service::<dim_agent_capabilities::prompt::Prompt>("main")
+                .unwrap()
+                .configure_loaded(Some(configuration("one")), frozen_sources.clone())
+                .await
+                .unwrap()
+        } else {
             session
                 .configure(
                     ConfigureUpdate {
-                        sources: vec![target],
+                        sources: frozen_sources
+                            .iter()
+                            .map(|(target, _)| target.clone())
+                            .collect(),
                         model: Some(configuration("one")),
                     },
                     "main",
                 )
                 .await
                 .unwrap()
-        }
-    });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut first)
+        };
+        assert_eq!(adopted, ConfigureOutcome::Adopted);
+        assert_eq!(
+            session
+                .service::<dim_agent_capabilities::prompt::Prompt>("main")
+                .unwrap()
+                .configure_loaded(Some(configuration("one")), frozen_sources)
+                .await
+                .unwrap(),
+            ConfigureOutcome::Unchanged
+        );
+        assert_eq!(
+            session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+                .unwrap()
+                .unwrap()
+                .configuration
+                .unwrap()
+                .model_id,
+            "one"
+        );
+        let events = session.history("main", None).await.unwrap();
+        let changed = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::PromptChanged(_)))
+            .unwrap();
+        assert!(matches!(
+            events[changed + 1].kind,
+            EventKind::ContextConfigured(_)
+        ));
+        let configured_before = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ContextConfigured(_)))
+            .count();
+        assert!(
+            session
+                .configure(
+                    ConfigureUpdate {
+                        sources: vec![PromptSourceTarget {
+                            source: "broken".into(),
+                            scope: PromptScope::Branch {
+                                timeline: "main".into()
+                            }
+                        }],
+                        model: Some(configuration("broken")),
+                    },
+                    "main"
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            session
+                .history("main", None)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ContextConfigured(_)))
+                .count(),
+            configured_before
+        );
+        let at = session.sequence("main").unwrap();
+        let child = session
+            .branch(
+                "main".into(),
+                at,
+                BranchOptions {
+                    prompt: "branch".into(),
+                    source: BranchSource::Host {
+                        operation_id: "prompt".into(),
+                    },
+                },
+            )
             .await
-            .is_err()
-    );
-    release.notify_waiters();
-    assert_eq!(first.await.unwrap(), ConfigureOutcome::Superseded);
-    assert_eq!(replacement.await.unwrap(), ConfigureOutcome::Adopted);
-    let snapshot = session
-        .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
-        .unwrap()
-        .unwrap();
-    assert!(
-        snapshot
-            .entries
-            .values()
-            .all(|entry| entry.version != "old")
-    );
-    let started = Arc::new(Notify::new());
-    let finish = Arc::new(Notify::new());
-    host.0.lock().unwrap().insert(
-        "rules".into(),
-        Reply::IgnoreCancel(
-            started.clone(),
-            finish.clone(),
-            entry("rules", "late", "late"),
-        ),
-    );
-    let pending = tokio::spawn({
-        let session = session.clone();
-        async move {
+            .unwrap();
+        let inherited = session.history(&child, None).await.unwrap();
+        assert!(inherited.iter().any(|event| matches!(&event.kind, EventKind::PromptChanged(data) if data.changes.iter().any(|change| matches!(change, PromptChange::Set { entry } if entry.version == "1")))));
+        session.idle(&child).await.unwrap();
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: vec![],
+                    model: Some(configuration("two")),
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&child)
+                .unwrap()
+                .unwrap()
+                .configuration
+                .unwrap()
+                .model_id,
+            "one"
+        );
+        assert_eq!(
+            session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+                .unwrap()
+                .unwrap()
+                .configuration
+                .unwrap()
+                .model_id,
+            "two"
+        );
+        host.0.lock().unwrap().remove("rules");
+        assert_eq!(
             session
                 .configure(
                     ConfigureUpdate {
                         sources: vec![PromptSourceTarget {
                             source: "rules".into(),
                             scope: PromptScope::Branch {
-                                timeline: "main".into(),
-                            },
+                                timeline: "main".into()
+                            }
                         }],
                         model: None,
                     },
-                    "main",
+                    &child
                 )
                 .await
-        }
-    });
-    started.notified().await;
-    let closing = tokio::spawn(async move { agent.close().await });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), async {
-            while !closing.is_finished() {
-                tokio::task::yield_now().await;
+                .unwrap(),
+            ConfigureOutcome::Adopted
+        );
+        let child_state = session
+            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&child)
+            .unwrap()
+            .unwrap();
+        let parent_state = session
+            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+            .unwrap()
+            .unwrap();
+        assert!(child_state.entries.is_empty());
+        assert_eq!(parent_state.system, "rules one");
+        host.0.lock().unwrap().insert(
+            "rules".into(),
+            Reply::Entry(entry("rules", "2", "child rules")),
+        );
+        assert_eq!(
+            session
+                .configure(
+                    ConfigureUpdate {
+                        sources: vec![PromptSourceTarget {
+                            source: "rules".into(),
+                            scope: PromptScope::Branch {
+                                timeline: "main".into()
+                            }
+                        }],
+                        model: None,
+                    },
+                    &child
+                )
+                .await
+                .unwrap(),
+            ConfigureOutcome::Adopted
+        );
+        assert_eq!(
+            session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&child)
+                .unwrap()
+                .unwrap()
+                .system,
+            "child rules"
+        );
+        assert_eq!(
+            session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+                .unwrap()
+                .unwrap()
+                .system,
+            "rules one"
+        );
+        agent.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_load_is_superseded_and_close_joins_cancellation() {
+    for frozen in [false, true] {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let host = Arc::new(Prompts(Mutex::new(BTreeMap::from([(
+            "rules".into(),
+            Reply::IgnoreCancel(
+                started.clone(),
+                release.clone(),
+                entry("rules", "old", "old"),
+            ),
+        )]))));
+        let agent = builder(host.clone()).build();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let target = PromptSourceTarget {
+            source: "rules".into(),
+            scope: PromptScope::Branch {
+                timeline: "main".into(),
+            },
+        };
+        let mut first = tokio::spawn({
+            let session = session.clone();
+            let target = target.clone();
+            async move {
+                session
+                    .configure(
+                        ConfigureUpdate {
+                            sources: vec![target],
+                            model: None,
+                        },
+                        "main",
+                    )
+                    .await
+                    .unwrap()
             }
-        })
-        .await
-        .is_err()
-    );
-    finish.notify_waiters();
-    tokio::time::timeout(Duration::from_secs(2), closing)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        pending.await.unwrap(),
-        Ok(ConfigureOutcome::Superseded) | Err(AgentError::Closed(_))
-    ));
+        });
+        started.notified().await;
+        host.0
+            .lock()
+            .unwrap()
+            .insert("rules".into(), Reply::Entry(entry("rules", "new", "new")));
+        let replacement = tokio::spawn({
+            let session = session.clone();
+            async move {
+                if frozen {
+                    session
+                        .service::<dim_agent_capabilities::prompt::Prompt>("main")
+                        .unwrap()
+                        .configure_loaded(
+                            Some(configuration("one")),
+                            vec![(target, Some(entry("rules", "new", "new")))],
+                        )
+                        .await
+                        .unwrap()
+                } else {
+                    session
+                        .configure(
+                            ConfigureUpdate {
+                                sources: vec![target],
+                                model: Some(configuration("one")),
+                            },
+                            "main",
+                        )
+                        .await
+                        .unwrap()
+                }
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut first)
+                .await
+                .is_err()
+        );
+        release.notify_waiters();
+        assert_eq!(first.await.unwrap(), ConfigureOutcome::Superseded);
+        assert_eq!(replacement.await.unwrap(), ConfigureOutcome::Adopted);
+        let snapshot = session
+            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+            .unwrap()
+            .unwrap();
+        assert!(
+            snapshot
+                .entries
+                .values()
+                .all(|entry| entry.version != "old")
+        );
+        let started = Arc::new(Notify::new());
+        let finish = Arc::new(Notify::new());
+        host.0.lock().unwrap().insert(
+            "rules".into(),
+            Reply::IgnoreCancel(
+                started.clone(),
+                finish.clone(),
+                entry("rules", "late", "late"),
+            ),
+        );
+        let pending = tokio::spawn({
+            let session = session.clone();
+            async move {
+                session
+                    .configure(
+                        ConfigureUpdate {
+                            sources: vec![PromptSourceTarget {
+                                source: "rules".into(),
+                                scope: PromptScope::Branch {
+                                    timeline: "main".into(),
+                                },
+                            }],
+                            model: None,
+                        },
+                        "main",
+                    )
+                    .await
+            }
+        });
+        started.notified().await;
+        let closing = tokio::spawn(async move { agent.close().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), async {
+                while !closing.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err()
+        );
+        finish.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(2), closing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            pending.await.unwrap(),
+            Ok(ConfigureOutcome::Superseded) | Err(AgentError::Closed(_))
+        ));
+    }
 }
 
 #[tokio::test]
@@ -1515,6 +1618,15 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
     // The stored source version is gone, so ToolBinding re-adopts the
     // current tools once; the model and the system prompt stay adopted.
     assert_eq!(configured.len(), 2);
+    assert_eq!(
+        session
+            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .configuration
+            .as_ref(),
+        configured.last().map(|data| data.settings.as_ref())
+    );
     for data in &configured {
         assert_eq!(data.settings.model_id, "adopted-model");
         assert_eq!(
@@ -2037,4 +2149,52 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
         }
         agent.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn frozen_configuration_rejects_mismatched_identity_and_nonbranch_system_entries() {
+    let agent = builder(Arc::new(Prompts(Mutex::new(BTreeMap::new())))).build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let before = session.sequence("main").unwrap();
+    for (target, value) in [
+        (
+            PromptSourceTarget {
+                source: "rules".into(),
+                scope: PromptScope::Branch {
+                    timeline: "main".into(),
+                },
+            },
+            entry("other", "1", "invalid"),
+        ),
+        (
+            PromptSourceTarget {
+                source: "rules".into(),
+                scope: PromptScope::Turn {
+                    timeline: "main".into(),
+                    id: "turn".into(),
+                },
+            },
+            PromptEntry {
+                scope: PromptScope::Turn {
+                    timeline: "main".into(),
+                    id: "turn".into(),
+                },
+                ..entry("rules", "1", "invalid")
+            },
+        ),
+    ] {
+        assert!(matches!(
+            session
+                .service::<dim_agent_capabilities::prompt::Prompt>("main")
+                .unwrap()
+                .configure_loaded(Some(configuration("invalid")), vec![(target, Some(value))])
+                .await,
+            Err(AgentError::InvalidInput(_))
+        ));
+        assert_eq!(session.sequence("main").unwrap(), before);
+    }
+    agent.close().await.unwrap();
 }

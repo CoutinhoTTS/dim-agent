@@ -268,6 +268,7 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "/fast on");
         assert!(!submit["params"]["submissionId"].as_str().unwrap().is_empty());
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"model-request","textOffset":0,"text":"你\u{1b}[2J好"}));
         wire.reply(&submit, json!({"event":{}}));
@@ -282,7 +283,7 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     });
     let output = wait(
         home.command()
-            .args(["--prompt", "hello"])
+            .args(["--prompt", "/fast on"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -666,6 +667,7 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
 fn exec_json_preserves_public_notifications_and_only_observes_the_selected_session() {
     let home = Home::new();
     let notices = vec![
+        json!({"jsonrpc":"2.0","method":"session.mcp.state","params":{"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}}),
         json!({"jsonrpc":"2.0","method":"session.plugin.notice","params":{"sessionId":"session","branchId":"child","source":"fixture","future":{"control":"\u{1b}[2J\n"}}}),
         json!({"jsonrpc":"2.0","method":"session.model.progress","params":{"sessionId":"session","branchId":"main","requestId":"request","textOffset":0,"text":"Hello","newField":true}}),
         json!({"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session","branchId":"main","event":{"sequence":12,"type":"step","name":"text","data":{"turn_id":"turn","request_id":"request","delta":"Hello","newField":"preserved"}}}}),
@@ -999,12 +1001,19 @@ fn explicit_model_config_rejects_mock_and_mismatched_configured_profiles() {
 
 #[test]
 fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
-    for explicit_exec in [false, true] {
+    for (explicit_exec, input) in [
+        (false, "from stdin\n"),
+        (true, "from stdin\n"),
+        (false, "/mcp login docs\n"),
+        (true, "/mcp login docs\n"),
+        (false, "!!literal prompt\n"),
+        (true, "!!literal prompt\n"),
+    ] {
         let home = Home::new();
-        let daemon = home.daemon(|wire| {
+        let daemon = home.daemon(move |wire| {
             wire.start(false);
             let submit = wire.read("session.submit");
-            assert_eq!(submit["params"]["text"], "!!literal prompt\n");
+            assert_eq!(submit["params"]["text"], input);
             wire.reply(&submit, json!({"event":{}}));
             let idle = wire.read("session.idle");
             wire.end(
@@ -1027,7 +1036,7 @@ fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
             .stdin
             .take()
             .unwrap()
-            .write_all(b"!!literal prompt\n")
+            .write_all(input.as_bytes())
             .unwrap();
         let output = wait(child);
         daemon.join().unwrap();
@@ -1400,6 +1409,104 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
 }
 
 #[test]
+fn interactive_configuration_commands_route_and_recover_without_submitting_commands() {
+    fn history(wire: &mut Wire) {
+        let request = wire.read("session.history");
+        let events = if request["params"]["after"].as_u64().unwrap() < 9 {
+            json!([{"sequence":9,"type":"context","name":"configured","data":{
+                "timeline":"main","revision":"configured","previous":null,"prompt":null,
+                "provider_id":"test","model_id":"model"}}])
+        } else {
+            json!([])
+        };
+        wire.reply(
+            &request,
+            json!({"events":events,"through":9,"nextAfter":9,"done":true}),
+        );
+    }
+    fn catalog(wire: &mut Wire) {
+        let request = wire.read("provider.catalog");
+        assert_eq!(request["params"], json!({"providerId":"test"}));
+        let mut capabilities =
+            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        capabilities["reasoning"] = json!(true);
+        wire.reply(
+            &request,
+            json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]},
+                "serviceTier":{"supported":true,"options":["priority","default"]}}}]}}),
+        );
+    }
+    let home = Home::new();
+    let exported = home.0.join("configured.json");
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        history(wire);
+        catalog(wire);
+        history(wire);
+        catalog(wire);
+        let effort = wire.read("session.model.update");
+        assert_eq!(effort["params"], json!({"sessionId":"session","branchId":"main","modelPreferences":{"reasoningEffort":"high"}}));
+        entered.send(()).unwrap();
+        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+        wire.reply(&effort, json!({"outcome":"adopted","model":{"providerId":"test","modelId":"model"}}));
+        history(wire);
+        history(wire);
+        history(wire);
+        catalog(wire);
+        let fast = wire.read("session.model.update");
+        assert_eq!(fast["params"]["modelPreferences"], json!({"serviceTier":"default"}));
+        wire.send(json!({"jsonrpc":"2.0","id":fast["id"],"error":{"code":-32000,"message":"fixture preference rejection"}}));
+        let agents = wire.read("agent.list");
+        wire.reply(&agents, json!([{"agentId":"profile-id","name":"Reviewer","description":"Review changes"}]));
+        let agent = wire.read("session.agent.update");
+        assert_eq!(agent["params"], json!({"sessionId":"session","branchId":"main","agentId":"profile-id"}));
+        wire.reply(&agent, json!({"outcome":"adopted"}));
+        history(wire);
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "after configuration");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":9}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"/effort\n");
+    terminal.until("Reasoning effort choices: high, low");
+    terminal.until("\n> ");
+    terminal.write(b"/reasoning high\n");
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for configuration result");
+    release.send(()).unwrap();
+    terminal.until("Reasoning effort configuration adopted: high");
+    terminal.until("\n> ");
+    terminal.write(format!("/export json {}\n", exported.display()).as_bytes());
+    terminal.until("Exported JSON:");
+    terminal.until("\n> ");
+    terminal.write(b"/fast off\n");
+    terminal.until("Error: fixture preference rejection");
+    terminal.until("\n> ");
+    terminal.write(b"/agent\n");
+    terminal.until("profile-id\tReviewer\tReview changes");
+    terminal.until("\n> ");
+    terminal.write(b"/agent profile-id\n");
+    terminal.until("Session tools unchanged.");
+    terminal.until("\n> ");
+    terminal.write(b"after configuration\n");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    let data: Value = serde_json::from_slice(&fs::read(exported).unwrap()).unwrap();
+    assert_eq!(data["through"], 9);
+    assert_eq!(data["events"][0]["data"]["model_id"], "model");
+}
+
+#[test]
 fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -1600,7 +1707,7 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
         assert!(!output.contains("must-not-print"));
         output
     };
-    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\t—\n");
     let written = fs::read(project.join(".mcp.json")).unwrap();
     let enabled = run(&["mcp", "enable", "docs"]);
     assert!(
@@ -1613,17 +1720,17 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
         "Enabled \"docs\" (project).\n"
     );
     assert!(String::from_utf8_lossy(&enabled.stderr).contains(".mcp.json"));
-    assert_eq!(list(), "\"docs\"\tproject\tstdio\tenabled\n");
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tenabled\t—\n");
     // The choice belongs to this user and home, not the shared project file.
     assert_eq!(fs::read(project.join(".mcp.json")).unwrap(), written);
     assert!(run(&["daemon", "stop"]).status.success());
     assert_eq!(
         list(),
-        "\"docs\"\tproject\tstdio\tenabled\n",
+        "\"docs\"\tproject\tstdio\tenabled\t—\n",
         "restart lost the choice"
     );
     assert!(run(&["mcp", "disable", "docs"]).status.success());
-    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\t—\n");
     // An entry that leaves the file can still be disabled, and comes back off.
     assert!(run(&["mcp", "enable", "docs"]).status.success());
     fs::write(
@@ -1635,7 +1742,7 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     assert!(unlisted.status.success());
     assert!(String::from_utf8_lossy(&unlisted.stderr).contains("\"docs\" is not in mcp list"));
     fs::write(project.join(".mcp.json"), &written).unwrap();
-    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\t—\n");
     // Disabling does not need a readable .mcp.json.
     assert!(run(&["mcp", "enable", "docs"]).status.success());
     fs::write(project.join(".mcp.json"), "{broken").unwrap();
@@ -1652,7 +1759,7 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     );
     assert!(String::from_utf8_lossy(&unreadable.stderr).contains("could not be read"));
     fs::write(project.join(".mcp.json"), &written).unwrap();
-    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\n");
+    assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\t—\n");
     // A configuration the daemon cannot apply is reported on stderr.
     fs::write(
         project.join(".mcp.json"),
@@ -2043,6 +2150,388 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
             .contains("fixture-secret")
     );
     model.join().unwrap();
+}
+
+fn mcp_catalog(id: &str) -> Value {
+    json!({"userRevision":"user:1","projectRevision":"project:1",
+        "servers":[{"id":id,"source":"project","transport":"http","enabled":true,
+            "auth":{"status":"required","missingScopes":["files:read"]}}],
+        "userApplication":{"error":null,"cleanupError":null},"projectApplication":null})
+}
+
+fn mcp_hello(wire: &mut Wire) {
+    let hello = wire.read("hello");
+    wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+}
+
+fn mcp_started(wire: &mut Wire, redirect: &str, expired: bool) {
+    let request = wire.read("mcp.auth.start");
+    let expires = if expired {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 1200
+    } else {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 60_000
+    };
+    wire.reply(&request,json!({"attemptId":"fixture-attempt","authorizationUrl":"https://issuer.example/authorize?state=fixture","redirectUri":redirect,"issuer":"https://issuer.example","resource":"https://resource.example/mcp","expiresAt":expires}));
+}
+
+#[test]
+fn mcp_sign_in_rejects_noninteractive_and_argument_secrets_before_connecting() {
+    let home = Home::new();
+    fs::remove_dir_all(home.0.join("rust")).unwrap();
+    for args in [
+        vec!["mcp", "login", "docs"],
+        vec!["mcp", "login", "docs", "--client-secret=must-not-print"],
+        vec!["mcp", "login", "docs", "--client-secret", "must-not-print"],
+    ] {
+        let output = home
+            .command()
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("must-not-print"));
+        assert!(!home.0.join("rust").exists());
+    }
+}
+
+#[test]
+fn mcp_catalog_and_sign_out_use_public_auth_data_and_the_selected_source() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        mcp_hello(wire);
+        let request = wire.read("mcp.catalog");
+        let mut catalog = mcp_catalog("docs");
+        catalog["servers"].as_array_mut().unwrap().extend([
+            json!({"id":"authorized","source":"user","transport":"sse","enabled":true,"auth":{"status":"authorized"}}),
+            json!({"id":"expired","source":"user","transport":"http","enabled":true,"auth":{"status":"expired"}}),
+        ]);
+        wire.reply(&request,catalog);
+    });
+    let output = home.command().args(["mcp", "list"]).output().unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("sign-in required"));
+    assert!(text.contains("signed in"));
+    assert!(text.contains("sign-in expired"));
+    assert!(text.contains("files:read"));
+    fs::remove_file(home.0.join("rust/daemon.sock")).unwrap();
+    let daemon = home.daemon(|wire| {
+        mcp_hello(wire);
+        let request = wire.read("mcp.catalog");
+        wire.reply(&request, mcp_catalog("docs"));
+        let logout = wire.read("mcp.auth.logout");
+        assert_eq!(logout["params"]["source"], "project");
+        assert_eq!(logout["params"]["id"], "docs");
+        assert!(logout["params"]["cwd"].is_string());
+        wire.reply(&logout, json!({"revoked":false}));
+    });
+    let output = home
+        .command()
+        .args(["mcp", "logout", "docs"])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Revoked: false"));
+}
+
+#[test]
+fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_next_command() {
+    let home = Home::new();
+    let exported = home.0.join("signed-in.json");
+    let (release, finish) = std::sync::mpsc::channel();
+    let (accepted, admitted) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,mcp_catalog("docs team"));
+        let state = wire.read("session.mcp");
+        wire.reply(&state,json!({"sessionId":"session","servers":[{"id":"docs team","state":"auth_required"}],"catalogError":null,"closed":false}));
+        for other in ["connecting", "connected"] { wire.notice("session.mcp.state", json!({"sessionId":"session","servers":[{"id":"docs team","state":"auth_required"},{"id":"other","state":other}]})); }
+        let invalid = wire.read("mcp.catalog");
+        wire.reply(&invalid,mcp_catalog("docs team"));
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,mcp_catalog("docs team"));
+        let request = wire.read("mcp.auth.start");
+        assert_eq!(request["params"]["source"],"project");
+        assert_eq!(request["params"]["clientSecret"],"fixture-confidential-secret");
+        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
+        wire.reply(&request,json!({"attemptId":"fixture-attempt","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":expires}));
+        let callback = wire.read("mcp.auth.complete");
+        assert_eq!(callback["params"]["callbackUrl"],"http://localhost:1456/callback?code=wrong-code&state=wrong-state");
+        wire.send(json!({"jsonrpc":"2.0","id":callback["id"],"error":{"code":-32000,"message":"invalid callback","data":{"appError":"mcp_auth_callback_invalid"}}}));
+        let callback = wire.read("mcp.auth.complete");
+        assert_eq!(callback["params"]["attemptId"],"fixture-attempt");
+        assert_eq!(callback["params"]["callbackUrl"],"http://localhost:1456/callback?code=private-code&state=right-state");
+        accepted.send(()).unwrap();
+        finish.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.reply(&callback,json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let catalog = wire.read("mcp.catalog");
+        wire.reply(&catalog,mcp_catalog("docs team"));
+        let logout = wire.read("mcp.auth.logout");
+        wire.reply(&logout,json!({"revoked":true}));
+        let submit=wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
+        let idle=wire.read("session.idle"); wire.reply(&idle,json!({"sequence":8}));
+        wire.detach();
+    });
+    let (mut terminal, child) = Terminal::launch(home.command());
+    terminal.until("\n> ");
+    terminal.write(b"/mcp\n");
+    terminal.until("auth_required");
+    terminal.until("\n> ");
+    terminal.write(b"/mcp login docs team --no-browser\n");
+    terminal.until("Usage: /mcp login");
+    terminal.until("\n> ");
+    terminal.write(b"/mcp login --client-secret argument-secret docs\n");
+    terminal.until("No matching MCP server");
+    terminal.until("\n> ");
+    terminal.write(b"/mcp login --no-browser --client-secret docs team\n");
+    terminal.until("Client secret (hidden): ");
+    terminal.write(b"fixture-confidential-secret\n");
+    terminal.until("Resource: https://resource.example/mcp");
+    terminal.until("Authorization server: issuer.example");
+    terminal.until("Callback URL: ");
+    terminal.write(b"http://localhost:1456/callback?code=wrong-code&state=wrong-state\n");
+    terminal.until("try again");
+    terminal.until("Callback URL: ");
+    terminal.write(b"http://localhost:1456/callback?code=private-code&state=right-state\n");
+    admitted.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    terminal.until("Waiting for the MCP operation to settle");
+    release.send(()).unwrap();
+    terminal.until("Signed in to");
+    terminal.until("\n> ");
+    terminal.write(format!("/export json {}\n", exported.display()).as_bytes());
+    terminal.until("Exported JSON:");
+    terminal.until("\n> ");
+    terminal.write(b"/mcp logout docs team\n");
+    terminal.until("Revoked: true");
+    terminal.until("\n> ");
+    terminal.write(b"continue after sign-out\n");
+    terminal.until("sign-in required. Run mcp login");
+    terminal.until("\n> ");
+    terminal.write(b"/exit\n");
+    assert!(wait(child).status.success());
+    daemon.join().unwrap();
+    let data: Value = serde_json::from_slice(&fs::read(exported).unwrap()).unwrap();
+    assert_eq!(data["through"], 8);
+    assert_eq!(data["events"], json!([]));
+    assert!(!terminal.transcript.contains("fixture-confidential-secret"));
+    assert_eq!(
+        terminal.transcript.matches("argument-secret").count(),
+        1,
+        "only the terminal echo of the typed command may contain it"
+    );
+    assert_eq!(
+        terminal
+            .transcript
+            .matches("sign-in required. Run mcp login")
+            .count(),
+        1
+    );
+    assert!(!terminal.transcript.contains("wrong-code"));
+    assert!(!terminal.transcript.contains("private-code"));
+}
+
+#[test]
+fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidden_input() {
+    for mode in ["ipv4", "ipv6", "busy", "paste", "noise", "cancel", "expiry"] {
+        let home = Home::new();
+        let reserve = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reserve.local_addr().unwrap().port();
+        let check = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).unwrap();
+        drop(check);
+        let redirect = format!("http://localhost:{port}/callback");
+        let expected = format!("{redirect}?code=private-callback&state=fixture");
+        if mode != "busy" {
+            drop(reserve);
+        }
+        let daemon = home.daemon(move |wire| {
+            mcp_hello(wire);
+            let catalog = wire.read("mcp.catalog");
+            wire.reply(&catalog, mcp_catalog("docs"));
+            mcp_started(wire, &redirect, mode == "expiry");
+            if matches!(mode, "cancel" | "expiry") {
+                let mut line = String::new();
+                assert_eq!(wire.0.read_line(&mut line).unwrap(), 0);
+                return;
+            }
+            let callback = wire.read("mcp.auth.complete");
+            assert_eq!(callback["params"]["callbackUrl"], expected);
+            wire.reply(&callback, json!({}));
+        });
+        let bin = home.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        for name in ["open", "xdg-open"] {
+            let path = bin.join(name);
+            fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut command = home.command();
+        command
+            .args(["mcp", "login", "docs"])
+            .env("PATH", &bin)
+            .env_remove("SSH_CONNECTION")
+            .env_remove("SSH_TTY");
+        let (mut terminal, child) = Terminal::launch(command);
+        if matches!(mode, "cancel" | "expiry") {
+            terminal.until("Callback URL: ");
+            if mode == "cancel" {
+                assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            }
+            terminal.until(if mode == "expiry" {
+                "Sign-in expired"
+            } else {
+                "Stopped waiting"
+            });
+            assert_eq!(
+                wait(child).status.code(),
+                Some(if mode == "expiry" { 1 } else { 130 })
+            );
+            assert!(std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err());
+            assert!(std::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port)).is_err());
+            daemon.join().unwrap();
+            continue;
+        }
+        if matches!(mode, "busy" | "paste") {
+            if mode == "paste" {
+                terminal.until("Waiting for the browser callback");
+            }
+            terminal.until("Callback URL: ");
+            terminal.write(
+                format!("http://localhost:{port}/callback?code=private-callback&state=fixture\n")
+                    .as_bytes(),
+            );
+        } else {
+            terminal.until("Callback URL: ");
+            if mode == "noise" {
+                let mut wrong =
+                    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+                wrong
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                wrong
+                    .write_all(b"GET /unrelated HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .unwrap();
+                let mut response = String::new();
+                wrong.read_to_string(&mut response).unwrap();
+                assert!(response.contains("404 Not Found"));
+                let mut oversized =
+                    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+                oversized
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                oversized.write_all(&vec![b'x'; 16385]).unwrap();
+                let mut response = Vec::new();
+                let _ = oversized.read_to_end(&mut response);
+                let mut idle =
+                    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+                idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                assert_eq!(idle.read(&mut [0]).unwrap(), 0);
+            }
+            let mut browser = if mode == "ipv6" {
+                std::net::TcpStream::connect((std::net::Ipv6Addr::LOCALHOST, port)).unwrap()
+            } else {
+                std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap()
+            };
+            browser
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            write!(browser,"GET /callback?code=private-callback&state=fixture HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").unwrap();
+            let mut page = String::new();
+            browser.read_to_string(&mut page).unwrap();
+            assert!(page.contains("Sign-in completed"));
+            assert!(!page.contains("private-callback"));
+        }
+        terminal.until("Signed in to");
+        assert!(wait(child).status.success());
+        daemon.join().unwrap();
+        assert!(!terminal.transcript.contains("private-callback"));
+    }
+}
+
+#[test]
+fn mcp_sign_in_stops_on_interrupt_or_expiry_without_a_cleanup_request() {
+    for expired in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            mcp_hello(wire);
+            let catalog = wire.read("mcp.catalog");
+            wire.reply(&catalog, mcp_catalog("docs"));
+            mcp_started(wire, "http://localhost:1456/callback", expired);
+            let mut line = String::new();
+            assert_eq!(
+                wire.0.read_line(&mut line).unwrap(),
+                0,
+                "no cancellation RPC exists for MCP attempts"
+            );
+        });
+        let mut command = home.command();
+        command.args(["mcp", "login", "--no-browser", "docs"]);
+        let (mut terminal, child) = Terminal::launch(command);
+        if !expired {
+            terminal.until("Callback URL: ");
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        }
+        terminal.until(if expired {
+            "Sign-in expired"
+        } else {
+            "Stopped waiting"
+        });
+        assert_eq!(
+            wait(child).status.code(),
+            Some(if expired { 1 } else { 130 })
+        );
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
+    for expires in [false, true] {
+        let home = Home::new();
+        let (admitted, accepted) = std::sync::mpsc::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let daemon=home.daemon(move |wire| {
+            mcp_hello(wire);
+            let catalog=wire.read("mcp.catalog"); wire.reply(&catalog,mcp_catalog("docs"));
+            let start=wire.read("mcp.auth.start");
+            let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            wire.reply(&start,json!({"attemptId":"held","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":now+if expires {1200} else {60_000}}));
+            let callback=wire.read("mcp.auth.complete"); admitted.send(()).unwrap();
+            wait_release.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.reply(&callback,json!({}));
+        });
+        let mut command = home.command();
+        command.args(["mcp", "login", "--no-browser", "docs"]);
+        let (mut terminal, child) = Terminal::launch(command);
+        terminal.until("Callback URL: ");
+        terminal.write(b"http://localhost:1456/callback?code=held-secret&state=held\n");
+        accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+        if expires {
+            terminal.until("Sign-in expired; waiting for the submitted operation");
+        } else {
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+            terminal.until("Waiting for the MCP operation to settle");
+        }
+        release.send(()).unwrap();
+        terminal.until("Signed in to");
+        assert!(wait(child).status.success());
+        daemon.join().unwrap();
+        assert!(!terminal.transcript.contains("held-secret"));
+    }
 }
 
 #[test]
