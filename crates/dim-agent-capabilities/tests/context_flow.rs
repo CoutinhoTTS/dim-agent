@@ -717,6 +717,8 @@ mod context_reads;
 mod manual_compaction;
 #[path = "context_flow/product_summary.rs"]
 mod product_summary;
+#[path = "context_flow/retention.rs"]
+mod retention;
 
 struct ExpandFinal {
     scope: BranchScope,

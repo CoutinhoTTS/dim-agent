@@ -255,7 +255,8 @@
         "format",
         "matches",
         "tracing::warn",
-        "unreachable"
+        "unreachable",
+        "vec"
       ]
     },
     {

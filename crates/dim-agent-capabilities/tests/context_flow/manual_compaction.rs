@@ -14,7 +14,7 @@ enum Mode {
     Cut,
     /// The same cut with a two-message replacement.
     TwoMessages,
-    /// A cut after the limit: inside the retained turns.
+    /// A cut after the limit: inside the retained tail.
     InsideRetained,
     /// The first call fails; later calls cut.
     FailFirst,
@@ -423,15 +423,16 @@ async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
     else {
         panic!("expected completion, got {:?}", result.outcome)
     };
-    // The cut keeps the last two turns: it is the second turn's start.
+    // A manual step keeps only the latest turn, although the last two fit
+    // the token budget: the cut is the third turn's start.
     let starts: Vec<_> = events
         .iter()
         .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
         .collect();
-    assert_eq!(retain_from, &starts[1].id);
+    assert_eq!(retain_from, &starts[2].id);
     assert_eq!(name, "scripted");
     assert_eq!(diagnostics.reason, CompactionReason::Manual);
-    assert_eq!(diagnostics.retain_limit.as_ref(), Some(&starts[1].id));
+    assert_eq!(diagnostics.retain_limit.as_ref(), Some(&starts[2].id));
     // The next turn starts from the compacted context.
     turns(&session, &["fourth"]).await;
     let events = session.history("main", None).await.unwrap();
@@ -445,9 +446,90 @@ async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
         .unwrap();
     assert_eq!(*request.messages[0], summary_message("short"));
     let text = serde_json::to_string(&request.messages).unwrap();
-    assert!(!text.contains("first") && text.contains("second") && text.contains("third"));
+    assert!(!text.contains("first") && !text.contains("second") && text.contains("third"));
     assert_paired(&events);
     agent.close().await.unwrap();
+}
+
+/// Answers every request with a short text.
+struct ShortReply;
+impl ModelDriver for ShortReply {
+    fn invoke(
+        &self,
+        _: Arc<ModelRequest>,
+        _: ModelConnection,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        Box::pin(async {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "reply".into(),
+                }),
+                Ok(ModelChunk::Text("ok".into())),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "reply".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+/// A manual step on a short session compacts at the latest turn's start,
+/// or inside that turn when the token rule keeps less.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_manual_compaction_keeps_at_most_the_latest_turn() {
+    for (model, latest) in [
+        (
+            Arc::new(EchoModel) as Arc<dyn ModelDriver>,
+            "second".to_owned(),
+        ),
+        // The latest input alone exceeds the retention budget (1,008); its
+        // short reply fits.
+        (Arc::new(ShortReply), "y".repeat(1_500)),
+    ] {
+        let large = latest.len() > 100;
+        let agent = builder_with_strategy(
+            model,
+            HistoryRenderer::default(),
+            Scripted::new(Mode::Cut),
+            None,
+        )
+        .build();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        turns(&session, &[first().as_str(), latest.as_str()]).await;
+        let command = session
+            .service::<AgentLoop>("main")
+            .unwrap()
+            .compact()
+            .unwrap();
+        let events = until(&session, |events| result_for(events, command).is_some()).await;
+        let ContextCompactionResult::Completed { retain_from, .. } =
+            &result_for(&events, command).unwrap().outcome
+        else {
+            panic!("a manual step on two turns compacts")
+        };
+        let position = |id: &str| events.iter().position(|event| event.id == id).unwrap();
+        let starts: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .collect();
+        if large {
+            assert!(position(retain_from) > position(&starts[1].id));
+        } else {
+            assert_eq!(retain_from, &starts[1].id);
+        }
+        let messages = projected(&session, "main").await;
+        let text = serde_json::to_string(&messages).unwrap();
+        assert!(!text.contains("first"));
+        assert!(!text.contains("yyyy"));
+        assert_eq!(text.contains("second"), !large);
+        assert_paired(&events);
+        agent.close().await.unwrap();
+    }
 }
 
 /// Acceptance 4: inside a turn the step waits for the next step boundary,
@@ -651,7 +733,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     let timeline_context = session.context("main", fact).await.unwrap();
     let history = renamed_history(&timeline_context).unwrap();
     assert_eq!(context_messages(&timeline_context, &history), messages);
-    // A cut inside the retained turns is rejected: the record fails and the
+    // A cut inside the retained tail is rejected: the record fails and the
     // projection stays as it was.
     let command = session
         .service::<AgentLoop>("main")
@@ -662,7 +744,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     assert!(matches!(
         &result_for(&events, command).unwrap().outcome,
         ContextCompactionResult::Failed { error, .. }
-            if error == "Compaction cut lies inside the retained turns."
+            if error == "Compaction cut lies inside the retained tail."
     ));
     assert_eq!(projected(&session, "main").await, messages);
     assert_paired(&events);
