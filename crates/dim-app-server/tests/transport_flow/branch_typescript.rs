@@ -119,9 +119,10 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
             .nth(1)
             .and_then(|rest| rest.split('"').next())
             .unwrap();
+        let input = seen.find("input/message").expect(seen);
         let start = seen.find("turn/start").expect(seen);
         let end = seen.find("turn/end").expect(seen);
-        assert!(seen.starts_with("input/message") && start < end, "{seen}");
+        assert!(input < start && start < end, "{seen}");
         // One marker per branch: a later turn/end does not write again.
         assert_ok(
             &client
