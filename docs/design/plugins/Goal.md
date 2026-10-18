@@ -1,12 +1,10 @@
 # Goal
 
-Status: Draft. Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)). Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)). Depends on ([roadmap](../roadmap.md) P5): C1, C3, C4, C5, S1, S8b ([#118](https://github.com/arcships/dim/issues/118)).
-
-Note: the links to the F1 (PR #108), S8a (PR #90) and S8b (PR #119) designs point at their branches; replace them with in-repo paths once those PRs merge.
+Status: Implemented (TypeScript, `runtime/plugins/goal`, §10). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)). Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)). Depends on ([roadmap](../roadmap.md) P5): C1, C3, C4, C5, S1, S8b ([#118](https://github.com/arcships/dim/issues/118)).
 
 Requirement ([feature list](../../feature-list.md), BranchScope Agent behavior): `/goal` sets, edits, pauses, resumes and clears a goal ("switch Goal mode"), and Goal continuation keeps working toward an explicit goal and records its completion or blockage.
 
-Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses, clears or interrupts, or a continuation limit is reached. Goal is an event-driven state machine on the branch. **Every change is one `input/message`** on the branch whose raw blocks carry one of two keys: `goal:objective` holds the objective and is written by `set` and `edit`; `goal:status` holds the status and is written by `set`, `pause` and `resume` from the user, `completed` or `blocked` from the model's `goal_update` tool, and Goal's own automatic pause; `clear` retires both keys. **A goal belongs to exactly one branch**: Goal's fold for branch `B` uses only the events written on `B` itself (its local suffix, from `B`'s `branch/start`), never the inherited prefix, so a child branch and the `main` branch of a forked Session start with no goal; a new branch whose inherited prefix still has a live goal key retires both keys with one `clear` of its own ([§3.4](#34-a-new-branch-clears-the-inherited-goal)). Continuations carry no key and are not changes. The tool and the methods only write that event; they never read Goal's state and never decide whether the change is allowed. **Goal's state is the fold of the events Goal has consumed**, in sequence order, under fixed rules ([§2](#2-data-and-state)). The **branch part** owns that fold and decides continuation itself when its Dispatcher handler consumes `turn/end`, `stop/interrupt` or `input/deleted`, from consumed state only; when a decision needs a write (a continuation or an automatic pause), the handler registers the write as owned work and returns. The **Session part** provides the `goal_update` tool as a `toolContribution` service (Session scope, key `goal_update`) and the `session.goal.*` methods through a `sessionMethods` service (Session scope, key `session.goal`) ([session-boundary](../contracts/session-boundary.md)); each call resolves the calling or named branch and writes through the branch's public input entry `Branch::input`, and only `session.goal.get` asks the branch part for its fold. Goal writes no events of its own type and has no separate "Goal mode": the presence and status of a goal, visible through `session.goal.get` and the goal blocks, cover the feature-list wording "switch Goal mode". Every contract here is language-neutral (service name, scope, key, methods with data shapes), so a TypeScript implementation satisfies it without a hand-written Rust binding; the Rust form is [Appendix G](#appendix-g-rust-binding). Goal also uses the runtime's typed services (`S:TreeCommands`, `B:Timeline`, `B:Dispatcher`); exposing them by name to non-Rust capability parts is the work of [#4](https://github.com/arcships/dim/issues/4) (requirement stated in [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners)), and Goal starts in Rust until then.
+Goal keeps a standing objective on a branch and continues the branch automatically until the model reports the objective completed or blocked, the user pauses, clears or interrupts, or a continuation limit is reached. Goal is an event-driven state machine on the branch. **Every change is one `input/message`** on the branch whose raw blocks carry one of two keys: `goal:objective` holds the objective and is written by `set` and `edit`; `goal:status` holds the status and is written by `set`, `pause` and `resume` from the user, `completed` or `blocked` from the model's `goal_update` tool, and Goal's own automatic pause; `clear` retires both keys. **A goal belongs to exactly one branch**: Goal's fold for branch `B` uses only the events written on `B` itself (its local suffix, from `B`'s `branch/start`), never the inherited prefix, so a child branch and the `main` branch of a forked Session start with no goal; a new branch whose inherited prefix still has a live goal key retires both keys with one `clear` of its own ([§3.4](#34-a-new-branch-clears-the-inherited-goal)). Continuations carry no key and are not changes. The tool and the methods only write that event; they never read Goal's state and never decide whether the change is allowed. **Goal's state is the fold of the events Goal has consumed**, in sequence order, under fixed rules ([§2](#2-data-and-state)). The **branch part** owns that fold and decides continuation itself when its Dispatcher handler consumes `turn/end`, `stop/interrupt` or `input/deleted`, from consumed state only; when a decision needs a write (a continuation or an automatic pause), the handler registers the write as owned work and returns. The **Session part** provides the `goal_update` tool as a `toolContribution` service (Session scope, key `goal_update`) and the `session.goal.*` methods through a `sessionMethods` service (Session scope, key `session.goal`) ([session-boundary](../contracts/session-boundary.md)); each call writes one input to the calling or named branch by id through `treeCommands.input`, which is `Branch::input`, the branch's public input entry. No call reads the fold: the Session part never asks the branch part for anything, and a Session part cannot depend on a per-branch service (ADR 002 D3). Goal writes no events of its own type and has no separate "Goal mode": the presence and status of a goal, visible through the live goal blocks on the branch (§6), cover the feature-list wording "switch Goal mode". Every contract here is language-neutral (service name, scope, key, methods with data shapes), so a TypeScript implementation satisfies it without a hand-written Rust binding; the Rust form is [Appendix G](#appendix-g-rust-binding). Goal uses the runtime's services through their exports by name ([branch TypeScript binding](../branch-typescript.md), C5): `treeCommands` in the Session part, and `dispatcher`, `timelineIdentity` and `treeCommands` in the branch part.
 
 ## 1. Structure
 
@@ -28,9 +26,8 @@ flowchart LR
   end
   TR -- "collects toolContribution by name" --> GS
   Rpc -- "resolves the Session, calls sessionMethods session.goal" --> GS
-  GS -- "per call: calling or named branch" --> TC
+  GS -- "per call: treeCommands.input(branchId, change)" --> TC
   TC -- "Branch::input: change input (goal:objective, goal:status)" --> TL
-  TC -- "get only" --> GB
   TL -- "branch/start, input/*, turn/*, stop/interrupt in order" --> GB
   GB -- "owned write task: continuation, automatic pause or start clear" --> TL
   Settings -- "settings.changed (source goal): re-read maxContinuations" --> GB
@@ -42,10 +39,10 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `GoalPlugin` | Session | `S:TreeCommands` | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal`; writes change inputs through `Branch::input` |
-| `GoalBranchPlugin` | Branch | `B:Timeline`, `B:Dispatcher`, process service `settings` (S8b, [#118](https://github.com/arcships/dim/issues/118)) for its source `goal` | `goal` (branch scope; `get` only), used only by the Session part; the fold, the continuation decision and Goal's own writes |
+| `GoalPlugin` | Session | `treeCommands` (Session export) | `toolContribution` key `goal_update`; `sessionMethods` key `session.goal`; writes change inputs by branch id through `treeCommands.input` |
+| `GoalBranchPlugin` | Branch | `dispatcher`, `timelineIdentity` (branch exports), `treeCommands`, process service `settings` (S8b) for its source `goal` | No service; it owns the fold, the continuation decision and Goal's own writes |
 
-Both parts declare their services in the plugin's `provides`; ToolRegistry and Rpc collect them by name and scope. An assembly that installs Goal records `session.goal` with `AgentBuilder::session_methods`, so every Session of that assembly lists the namespace and runs Goal's Session part ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions), Known namespaces). `maxContinuations` is a field of the document in Goal's Settings source `goal`, business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4). Goal is a TypeScript plugin and reads it only through the language-neutral process service `settings` of S8b ([settings service](https://github.com/arcships/dim/blob/roadmap/s8b-settings-named-service/docs/design/appserver/settings-service.md), [#118](https://github.com/arcships/dim/issues/118), PR #119), never through App Server types. Goal's package manifest declares the source as S8b §3.1 specifies: `source: "goal"`, a user file, no project file (user scope only), no user-only fields, and a JSON Schema in which `maxContinuations` is an integer with `minimum: 1`, `maximum: 1000` and `default: 20` (A4). Settings applies the default and validates on write and when reading a persisted file, so Goal uses the document as delivered; a change is a data update, never a reload. Settings has no subscription API ([S8a, PR #90](https://github.com/arcships/dim/pull/90); S8b keeps it so): a committed write emits the rutis event `settings.changed` on the channel `settings/goal`, with the serializable payload `{source, scope, revision}` and never the document. `settings.read` is async and the Dispatcher handler never awaits, so the branch part calls `settings.read {source: "goal", scope: "user"}` once at load, listens to `settings.changed` from `apply` (a TypeScript part receives rutis events through C4's binding, S8b §4.5), re-reads on each event, and every decision uses the latest document read; a change takes effect at the first decision after its re-read. No Goal tool writes it; it is written through the client methods `settings.read`/`settings.update` (S8b, not implemented). Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
+The Session part declares its services in its row's `provides`; ToolRegistry and Rpc collect them by name and scope. The branch part provides nothing; injecting `dispatcher` places it in every branch (C5). An assembly that installs Goal records `session.goal` with `AgentBuilder::session_methods`, so every Session of that assembly lists the namespace and runs Goal's Session part ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions), Known namespaces). `maxContinuations` is a field of the document in Goal's Settings source `goal`, business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4). Goal is a TypeScript plugin and reads it only through the language-neutral process service `settings` of S8b ([settings service](../appserver/settings-service.md)), never through App Server types. Goal's branch row declares the source in its `settings` member as S8b §3.1 specifies: `source: "goal"`, a user file, no project file (user scope only), no user-only fields, and a JSON Schema in which `maxContinuations` is an integer with `minimum: 1`, `maximum: 1000` and `default: 20` (A4). Settings applies the default and validates on write and when reading a persisted file, so Goal uses the document as delivered; a change is a data update, never a reload. Settings has no subscription API: a committed write emits the rutis event `settings.changed` with the payload `{source, scope, revision}` and never the document. `settings.read` is async and the Dispatcher handler never awaits, so the branch part calls `settings.read {source: "goal", scope: "user"}` once at load, listens with `ctx.on('settings.changed')` (S8b §4.5), re-reads when its source changes, and every decision uses the latest document read; a change takes effect at the first decision after its re-read. No Goal tool writes it; clients write it through `settings.read`/`settings.update`. Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
 
 ## 2. Data and state
 
@@ -71,7 +68,7 @@ flowchart TB
 
 Goal owns no persistent state. The goal of branch `B` is a pure function of the local events of `B` consumed so far, from `B`'s own `branch/start` on; the inherited ancestor prefix (a child branch) or the copied facts (a forked Session's `main`, A11) precede that `branch/start` and never contribute a goal. The branch part folds the local events at load and advances the fold on each Dispatcher delivery. Compaction does not change it because the fold is built from events, not model context. Compaction ([ContextCompaction](https://github.com/arcships/dim/blob/roadmap/f1-production-compaction-host-compact-and-u/docs/design/plugins/ContextCompaction.md), F1, PR #108, design only) is a Loop step, not a turn: inside a turn it is a step of that turn and the turn continues, and a manual compaction with no turn running writes only `context/compact`, `context/compaction-start` and `context/compaction`, with no `turn/start` or `turn/end`. It therefore never triggers a Goal decision (§4.3).
 
-A change takes effect at the sequence of its `input/message`. A change that InputQueue later deletes (`input/deleted`) is removed and the fold is recomputed without it, because a deleted input never takes effect ([session access](../contracts/session-access.md#a2-source-input-conventions)). Fixed fold rules, applied in sequence order to `B`'s local events, with no exceptions: the current objective is the latest live local `goal:objective` block and the current status is the latest live local `goal:status` block, exactly the latest block of each key the model context shows after any compaction ([§5](#5-context-mapping)) once a new branch's inherited keys are retired by its start `clear` (§3.4), so the replay equals the fold (A16). A goal exists only while `goal:objective` is live. A status block written while no objective is live still becomes the current status, but `session.goal.get` reports no goal and C1 fails until an objective is live again:
+A change takes effect at the sequence of its `input/message`. A change that InputQueue later deletes (`input/deleted`) is removed and the fold is recomputed without it, because a deleted input never takes effect ([session access](../contracts/session-access.md#a2-source-input-conventions)). Fixed fold rules, applied in sequence order to `B`'s local events, with no exceptions: the current objective is the latest live local `goal:objective` block and the current status is the latest live local `goal:status` block, exactly the latest block of each key the model context shows after any compaction ([§5](#5-context-mapping)) once a new branch's inherited keys are retired by its start `clear` (§3.4), so the replay equals the fold (A16). A goal exists only while `goal:objective` is live. A status block written while no objective is live still becomes the current status, but there is no goal and C1 fails until an objective is live again:
 
 | Change (`op` in the marker) | Written by | Keys | Effect on the fold |
 | --- | --- | --- | --- |
@@ -145,7 +142,7 @@ sequenceDiagram
   Note over G: next turn/end: C1 false, no continuation
 ```
 
-The block commits before the batch's `step/tool-result`, so after a later compaction the latest `goal:status` block the model sees is `completed` (verbatim in the retained turns, or through the keyed baseline once the block lies before `retain_from`), the same as the fold, until a later status block replaces it. The tool confirms the write; the block becomes the current status by the fold rule, visible through the goal blocks and `session.goal.get`.
+The block commits before the batch's `step/tool-result`, so after a later compaction the latest `goal:status` block the model sees is `completed` (verbatim in the retained turns, or through the keyed baseline once the block lies before `retain_from`), the same as the fold, until a later status block replaces it. The tool confirms the write; the block becomes the current status by the fold rule, visible through the goal blocks.
 
 ### 3.3 Interrupt pauses the goal
 
@@ -243,8 +240,7 @@ Exact texts: [Appendix A.5](#a5-model-visible-texts).
 | --- | --- | --- |
 | `goal_update {status, summary}` | `toolContribution` (Session, key `goal_update`), risk `session` | Model reports completion or blocking; writes one change input and confirms the write |
 | `session.goal.set/edit/pause/resume/clear` | `sessionMethods` (Session, key `session.goal`) | User changes the goal; each writes one change input and replies with its sequence |
-| `session.goal.get` | Same service | The fold of a branch and the sequence it covers; replaces any "mode" query (A8) |
-| `goal` | Branch service, internal to Goal | `get` of the fold |
+| Reading the goal | The branch's events | The latest live `goal:objective` and `goal:status` blocks of the branch's local events are its objective and status (§2, A16), the same blocks the model sees. Clients read them from the branch history and live events they already receive; there is no query method (A8) |
 | `goal` source: `maxContinuations` | Business configuration (Settings) | Continuation limit; each decision uses the latest document read (§1) |
 
 Details: [Appendix A](#appendix-a-interface-details).
@@ -266,20 +262,38 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.5 Batch | The fold advances over every event in sequence order, and decisions on `branch/start`, `turn/end`, `stop/interrupt` and `input/deleted` are taken when Goal consumes them, from consumed state only, with the recheck before writing using consumed state only. |
 | §4.6 Context only from handed-off events | Goal blocks and continuations reach the model only after adoption; deleted inputs never do and leave the fold. |
 | §4.7 Public events and services only | Goal reads only public `branch/start`, `input/*`, `turn/*` and `stop/interrupt` contracts and writes through `Branch::input`. |
-| §4.8 Requirements to mechanism owners | The only requirement, #4, is stated in [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). |
+| §4.8 Requirements to mechanism owners | None: the runtime services Goal uses are exported by name (C5, #4). |
 | §4.9 Only facts later decisions use enter the Timeline | Each change input is both model context and an input to the fold, and Goal's own writes drive turns or end continuation; the fold is the latest live block of each key, which compaction replays (A16); the fold, in-flight tasks and diagnostics stay out of the Timeline. |
 | §1 Capability and App Server boundary | Both parts are Capabilities in their own package; Rpc only dispatches `sessionMethods`. |
 | ADR 002 D1 Scope | The tool and methods are Session services; the goal, its fold and its decisions are branch state. |
 | ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect Goal's services by name and scope; nothing names Goal. |
-| ADR 002 D3 Scope dependencies | The branch part depends on branch services and the enclosing process service `settings` (S8b); reloads refold and are accepted. |
+| ADR 002 D3 Scope dependencies | The branch part depends on branch services and the enclosing Session and process services (`treeCommands`, `settings`); the Session part depends on no branch service; reloads refold and are accepted. |
 | ADR 002 D4 Configuration | `maxContinuations` in the `goal` source is business configuration, read at load and re-read on `settings.changed`; a change never reloads Goal. |
-| ADR 002 D5 Language-neutral contracts | Tool, methods, branch service and block formats are neutral; Appendix G is one binding. |
+| ADR 002 D5 Language-neutral contracts | Tool, methods and block formats are neutral; §10 is the TypeScript binding, Appendix G a Rust one. |
 
 ## 9. Requirements raised to mechanism owners
 
-| Requirement | Owner | Five items |
+None. The earlier requirement, runtime services exposed by name to non-Rust parts (#4), is delivered by C5 ([branch TypeScript binding](../branch-typescript.md)).
+
+## 10. Implementation
+
+TypeScript, in `runtime/plugins/goal` (C4 tool/method row, C5 branch row):
+
+| File | Part | Row |
 | --- | --- | --- |
-| Runtime services exposed by name to non-Rust capability parts | Runtime, [#4](https://github.com/arcships/dim/issues/4) | See [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); Goal needs `S:TreeCommands`, `B:Timeline`, `B:Dispatcher` and `Branch::input` for a TypeScript implementation and starts in Rust until then |
+| `goal.ts` | Shared: change and continuation inputs (A.5), marker parsing, the fold (§2) and the decisions (A.4) | — |
+| `session.ts`, `session.json` | `GoalPlugin`: `toolContribution:goal_update`, `sessionMethods:session.goal`; writes with `treeCommands.input` | Session row, `inject: ["treeCommands"]` |
+| `branch.ts`, `settings.json` | `GoalBranchPlugin`: subscribes with `dispatcher.listen`, rebuilds through `dispatcher.committed()`/`local()`, decides, and writes owned tasks; reads `maxContinuations`; declares the `goal` source | Branch row, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings"]`, `settings` from `settings.json` |
+
+The new-branch check (§3.4) reads the inherited prefix with `dispatcher.history(S)` and excludes the
+branch's local events. An embedder installs Goal by adding the two rows to
+`ServerConfig.session_typescript`; product packaging belongs to PluginManager.
+
+Covered by `crates/dim-app-server/tests/transport_flow/goal.rs` (real Node): Appendix D 1 (set,
+continuation, `goal_update completed` ends continuation), 2 (limit pause at `maxContinuations`), 7
+(child branch: one start `clear`, the parent unchanged), the method boundary and order of
+`pause`/`resume`/`clear`, and 5 (a restored branch refolds and repeats no decision). The other
+Appendix D rows are not yet covered by flow tests.
 
 ## Appendix A. Interface details
 
@@ -293,11 +307,11 @@ Service `toolContribution`, Session scope, key `goal_update`: `declaration(): sy
 | Result | `ToolResult.content`: `goal_update recorded: completed.` or `goal_update recorded: blocked.` The result confirms the write only; the block becomes the current status by the fold rule (A15). Errors are parameter errors only |
 | Risk category | `session` (writes only branch input) (A9) |
 | Offered | In every Session of an assembly that installs Goal, all roles (A9) |
-| Handler | Validates the parameters, writes one change input (`op` = status, Append) on the calling branch through `Branch::input` via `S:TreeCommands`, awaits its commit, returns. It does not read the fold. On cancellation before the append nothing is written; once appended the write stands |
+| Handler | Validates the parameters, writes one change input (`op` = status, Append) on the calling branch (`ToolCall.branchId`) through `treeCommands.input`, awaits its commit, returns. It does not read the fold. On cancellation before the append nothing is written; once appended the write stands |
 
 ### A.2 Session methods
 
-Service `sessionMethods`, Session scope, key `session.goal`. `describe()` returns one `MethodDecl` per row with `interruption: report`, `progress: false`, `notifications: []`, `reply: direct`, and `mutating: true` except for `get`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; errors are `MethodError` data (Appendix C). The implemented Rust binding (C1) covers `name`, `mutating`, `interruption` and `progress` only (Appendix G).
+Service `sessionMethods`, Session scope, key `session.goal`. `describe()` returns one `MethodDecl` per row with `interruption: report`, `progress: false` and `mutating: true`. `call(MethodCall)` takes the params below and replies with the result as `MethodReply`; errors are `MethodError` data (Appendix C). The implemented Rust binding (C1) covers `name`, `mutating`, `interruption` and `progress` only (Appendix G).
 
 | Method | Params | Result | Write |
 | --- | --- | --- | --- |
@@ -306,19 +320,18 @@ Service `sessionMethods`, Session scope, key `session.goal`. `describe()` return
 | `session.goal.pause` | `{sessionId, branchId?}` | `{sequence}` | `pause` (reason `user`), Append |
 | `session.goal.resume` | `{sessionId, branchId?}` | `{sequence}` | `resume`, Queue (A12) |
 | `session.goal.clear` | `{sessionId, branchId?}` | `{sequence}` | `clear` (key retired), Append |
-| `session.goal.get` | `{sessionId, branchId?}` | `{goal: GoalView \| null, through}` | None (A8) |
 
-`branchId` defaults to `main` (A13). `GoalView = {status, objective, reason?, summary?, count, limit, sequence}`; `through` is the last sequence the fold has consumed, so a client sees the effect of its write once `through >= sequence`. The writing methods validate only their own parameters; what a change does is decided by the fold rules of §2 (each block becomes the current value of its key), never by the method. Rpc reads `sessionId` from the params, authorizes it, resolves the Session through `index.acquire` (restoring it if unloaded) and sends the call with the raw params; the handler resolves the named branch through `S:TreeCommands`.
+`branchId` defaults to `main` (A13). The reply's `sequence` is the change input's; a client sees its effect in the branch's events at that sequence. The writing methods validate only their own parameters; what a change does is decided by the fold rules of §2 (each block becomes the current value of its key), never by the method. Rpc reads `sessionId` from the params, authorizes it, resolves the Session through `index.acquire` (restoring it if unloaded) and sends the call with the raw params; the handler writes to the named branch by id through `treeCommands.input`.
 
-### A.3 Branch service `goal`
+### A.3 Reading the goal
 
-Branch scope, no key, provided by `GoalBranchPlugin` and called only by its Session part.
-
-| Method | Request | Reply | Errors |
-| --- | --- | --- | --- |
-| `get` | `{}` | `{goal: GoalView \| null, through}` | — |
-
-During unload `get` fails `service_reloading`.
+There is no `get` method and no branch service. The branch part folds the same public facts a
+client can read: on the branch's local events, the latest live block keyed `goal:objective` is the
+objective (none if retired), and the latest live block keyed `goal:status` is the status, whose
+marker gives it: `kind="status" status="active"`, `op="resume"` (active), `op="pause" reason=...`,
+`op="completed"` / `op="blocked"` with the summary in its body, or retired (no status). A goal exists
+only while an objective is live (A16). The marker formats in A.5 are the contract. The continuation
+count and limit are in each continuation marker (`count`, `limit`).
 
 ### A.4 Continuation decision
 
@@ -398,11 +411,11 @@ Status blocks state only the status and the objective is a separate block, so a 
 | Branch-scoped interrupt or branch close | close < write | Nothing written; branch part ends | Runtime facade |
 | Tool batch not settled | terminal block < `step/tool-result` | Block consumed after the batch result; `turn/end` sees a non-active goal | ToolExecutor, Loop |
 | Two `goal_update` calls in one batch | first < second | Both written, both confirm the write; the fold applies both in order, so the second is the current status | Goal |
-| `goal_update` while the goal is not active | — | Written; the block becomes the current status (a `paused` goal becomes `completed` or `blocked`); with no live objective `get` reports no goal; the result confirms the write | Goal |
+| `goal_update` while the goal is not active | — | Written; the block becomes the current status (a `paused` goal becomes `completed` or `blocked`); with no live objective there is no goal; the result confirms the write | Goal |
 | `completed` after `blocked`, the reverse, or `pause` after either | first < second | Latest wins; a repeated report restates the status with its new summary | Goal |
 | `resume` after `completed` or `blocked` | terminal block < resume | Reopens: `active`, count restarts, the Queue input drives a turn; compaction replays the resume block | Goal |
 | `goal_update` vs `edit`/`clear`/`pause` | sequence order | The fold applies them in sequence; a later change overrides an earlier one | Goal |
-| `pause` or `resume` without a goal | — | Written; the status key goes live and compaction replays it, but `get` reports no goal and C1 fails; `resume` still drives one turn, with no continuation | Goal |
+| `pause` or `resume` without a goal | — | Written; the status key goes live and compaction replays it, but there is no goal and C1 fails; `resume` still drives one turn, with no continuation | Goal |
 | `edit` without a goal | — | The objective goes live, so a goal exists with the latest live status (`none` after `clear`); continuation follows only if that status is `active` | Goal |
 | Compaction between a goal write and its consumption | write < compaction < consumed | Block placed at its consumed position, after `retain_from`, so it is kept verbatim; a later compaction whose `retain_from` lies after it replays it through the keyed baseline while it is the latest of its key | History projection |
 | Compaction after several goal blocks | — | Before `retain_from`, only the latest `goal:objective` block and the latest `goal:status` block are replayed (keyed baseline) and continuations are not; goal blocks and continuations in the retained turns stay verbatim; the fold reads events | History projection; Goal |
@@ -437,10 +450,10 @@ Status blocks state only the status and the objective is a separate block, so a 
 | `session_closed` | Session or branch closing or gone |
 | `session_invalid_input` | Unknown `branchId` (the runtime's unknown-branch error as mapped by `RpcError`) |
 | `service_reloading` | The Session or Goal's Session part is not active; the call was not admitted and nothing was written |
-| `operation_interrupted` | Goal's Session part or Rpc unloaded during an admitted call (`interruption: report`); the write may have committed, and `get` shows its effect |
+| `operation_interrupted` | Goal's Session part or Rpc unloaded during an admitted call (`interruption: report`); the write may have committed, and the branch's events show it |
 | `unknown_method` | The assembly does not install Goal (`session.goal` not recorded), or the method is not declared |
 
-State errors such as "no goal" or "not active" do not exist: every change is written and becomes the current value of its key; a status written while no objective is live leaves `get` reporting no goal. Goal never retries a write on its own. Process exit leaves only committed facts; the next load refolds them.
+State errors such as "no goal" or "not active" do not exist: every change is written and becomes the current value of its key; a status written while no objective is live leaves no goal. Goal never retries a write on its own. Process exit leaves only committed facts; the next load refolds them.
 
 ## Appendix D. Acceptance
 
@@ -451,13 +464,13 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 3. Interrupt rows: before `turn/end`, committed between `turn/end` and the continuation (at most one extra turn), after start, after apply; during `goal_update` before and after its write.
 4. Pending Queue/Steer input suppresses continuation; Append does not; a deleted input does not suppress it; an input deleted after the `turn/end` it suppressed triggers that decision again; a withdrawn `pause` is removed from the fold.
 5. Branch part reload and restart after an undecided `turn/end`: exactly one decision; a reload with a write task in flight yields exactly one write.
-6. Compaction after `completed`: the latest `goal:status` block in the compacted context is `completed`, not `active`, and `get` reports `completed`. With the goal blocks before `retain_from`, the keyed baseline contains the latest `goal:objective` block and the latest `goal:status` block and no continuation; goal blocks and continuations in the retained turns are kept verbatim. A compaction inside a goal turn (automatic and manual) writes no `turn/end` and causes no Goal write; a manual compaction with no turn writes no `turn/*` and no continuation; a manual compaction pending at `turn/end` runs before the continuation's turn.
-7. Child branch created after a goal is set on the parent: the child's `get` reports no goal from its first event, Goal writes exactly one start `clear` and the child's context after it shows no parent goal as its own, and there is no continuation; a reload or restart of the child writes no second `clear`; a `goal_update` or `set` on the child changes the child's `get` only, never the parent's. A forked Session's `main`: the same, with no goal and one start `clear`.
+6. Compaction after `completed`: the latest `goal:status` block in the compacted context is `completed`, not `active`, and it is the branch's current status. With the goal blocks before `retain_from`, the keyed baseline contains the latest `goal:objective` block and the latest `goal:status` block and no continuation; goal blocks and continuations in the retained turns are kept verbatim. A compaction inside a goal turn (automatic and manual) writes no `turn/end` and causes no Goal write; a manual compaction with no turn writes no `turn/*` and no continuation; a manual compaction pending at `turn/end` runs before the continuation's turn.
+7. Child branch created after a goal is set on the parent: the child has no goal from its first event, Goal writes exactly one start `clear` and the child's context after it shows no parent goal as its own, and there is no continuation; a reload or restart of the child writes no second `clear`; a `goal_update` or `set` on the child changes the child's goal only, never the parent's. A forked Session's `main`: the same, with no goal and one start `clear`.
 8. Unloaded Session: `session.goal.pause` restores it and writes. An assembly without Goal: `unknown_method`. Changing `maxContinuations` in the `goal` source takes effect at the first decision after its `settings.changed` event, without reloading Goal.
-9. Two `goal_update` calls in one batch both return the confirmation and the fold shows the second status; `pause` and `resume` without a goal write a block that compaction replays while `get` reports no goal; `edit` without a goal makes a goal exist with the latest live status; the tool and the methods never read the fold (tested by writing while the branch part is reloading).
-10. `edit` (only `goal:objective` changes), `clear` (both retired keys not replayed), forged `</dim-goal>` in an objective or summary is escaped; `session.goal.get` reflects every status and `through` reaches each write's `sequence`.
-11. Set → `completed` → `resume`: the goal reopens (`active`, count restarted), the resume input drives a turn and its normal end writes a continuation; after a compaction following the resume, the latest `goal:status` block in the context is the resume block and `get` reports `active`.
-12. Set → `completed` → `blocked`: `get` reports `blocked` with the second summary; after a compaction following each status change, the latest `goal:status` block in the context is the status `get` reports.
+9. Two `goal_update` calls in one batch both return the confirmation and the fold shows the second status; `pause` and `resume` without a goal write a block that compaction replays while there is no goal; `edit` without a goal makes a goal exist with the latest live status; the tool and the methods never read the fold (tested by writing while the branch part is reloading).
+10. `edit` (only `goal:objective` changes), `clear` (both retired keys not replayed), forged `</dim-goal>` in an objective or summary is escaped; the branch's latest live blocks reflect every status at each write's `sequence`.
+11. Set → `completed` → `resume`: the goal reopens (`active`, count restarted), the resume input drives a turn and its normal end writes a continuation; after a compaction following the resume, the latest `goal:status` block in the context is the resume block and the goal is `active`.
+12. Set → `completed` → `blocked`: the current status is `blocked` with the second summary; after a compaction following each status change, the latest `goal:status` block in the context is the current status.
 
 ## Appendix E. Assumptions
 
@@ -470,7 +483,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | A5 | Count restarts on `set`, `resume` and operator input only: `user` content and no source marker as first raw block | Judgment | Another plugin's automatic input would reset the limit |
 | A6 | A failed turn pauses the goal (`turn_failed`) | Judgment (avoid retry loops on provider errors) | Failed turns would continue and consume the limit |
 | A7 | Pause does not interrupt the running turn | Judgment | Pause would also call `stop` |
-| A8 | `session.goal.get` is the status query that replaces a "Goal mode" | Decision E18; decisions §3 (no Goal mode) | CLI derives status by parsing Goal's blocks |
+| A8 | No status query: clients read the latest live goal blocks, which are also what the model sees (decision 2026-10-18: callers write, owners decide; a Session part reads no branch state) | Decision E18; decisions §3 (no Goal mode) | A query would need a Session part to read a per-branch service, against ADR 002 D3 |
 | A9 | `goal_update` risk `session`, offered to all roles | Judgment | Tool hidden for some roles or admitted under another category |
 | A10 | Objective ≤ 4000 characters, summary ≤ 2000 | Judgment | Other limits |
 | A11 | A forked Session's `main` starts with no goal; its `branch/start` follows the copied facts, as for any new Session's root branch ([prompt](../../architecture/rust-agent/prompt.md)) | User decision; the position of `branch/start` after the copied facts is a judgment, since the fork copy is not yet specified (Session fork is not implemented, S5c) | If a forked `main` has no local `branch/start`, Goal takes the start `clear` decision at its first load on the new Session, with the same `inherited_live` recheck |
@@ -478,7 +491,7 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | A13 | `branchId` defaults to `main`; any branch may hold its own goal | Judgment | Goal limited to `main` |
 | A14 | A change takes effect at its `input/message` sequence and is removed from the fold when InputQueue deletes it | Judgment: a pause written during a turn must stop that turn's continuation before the Append is applied | Changes would take effect at `input/applied`, and a pause written during a turn would not stop its continuation |
 | A15 | A second `goal_update`, or one without an active goal, returns the write confirmation, not an error, and its block becomes the current status (A16) | Decision G1 (behaviour change; answers the PR review "Goal calls observe earlier committed writes" by removing caller-side decisions) | The tool would have to read the fold and wait for it, which reintroduces caller-side decisions |
-| A16 | The fold has no exceptions: the latest live local block of each key is the current objective and status, and a goal exists only while a local `goal:objective` block is live | User decision (answers the PR review "Keep replayed Goal status consistent with the fold") | A status replayed after compaction could disagree with `get` |
+| A16 | The fold has no exceptions: the latest live local block of each key is the current objective and status, and a goal exists only while a local `goal:objective` block is live | User decision (answers the PR review "Keep replayed Goal status consistent with the fold") | A status replayed after compaction could disagree with the fold |
 
 ## Appendix F. Open questions
 
@@ -490,15 +503,14 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 
 ## Appendix G. Rust binding
 
-Goal is TypeScript first; a Rust implementation (or a Rust start before #4) binds the neutral contracts as follows.
+Goal is implemented in TypeScript (§10); a Rust implementation would bind the neutral contracts as follows.
 
 | Neutral contract | Rust binding |
 | --- | --- |
 | `toolContribution` key `goal_update` | `S:ToolContribution`, collected by ToolRegistry as `Contributions<ToolContribution>` entry `goal_update`; cancel request = batch `CancellationToken`; `cancelled` = `HostError::Cancelled` |
 | `sessionMethods` key `session.goal` | `SessionMethods::provide(ctx, &scope, "session.goal", Vec<MethodDecl>, Handler)` in the Session part's `apply`, key `SessionScope::named_key::<SessionMethods>("session.goal")`; the assembly records the namespace with `AgentBuilder::session_methods("session.goal")`. `describe` = the `MethodDecl` list (`name`, `mutating`, `interruption: Report`, `progress: false`); `call` = the `Handler` `(method, params, CancellationToken, Progress)` returning `Result<Value, RpcError>` ([session-boundary Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
-| `goal` | `B:Goal`, key `BranchScope::key::<Goal>()`, `get` returning the fold |
 | Keys | `const OBJECTIVE_KEY: &str = "objective"` and `const STATUS_KEY: &str = "status"`, written as `KeyUse::Live(name)` / `KeyUse::Retire(name)` and stored as `goal:objective` / `goal:status`; continuations carry no `KeyUse` |
 | Unload disposer | `ctx.effect` |
-| `goal` Settings source | Not bound in Rust: even a Rust start reads it through the named service `settings` (S8b `read`) and follows `settings.changed` on `settings/goal`; the source is declared in Goal's package manifest, not as a Rust document type |
+| `goal` Settings source | Not bound in Rust: even a Rust start reads it through the named service `settings` (S8b `read`) and follows `settings.changed` on `settings/goal`; the source is declared in Goal's branch row `settings`, not as a Rust document type |
 | Write task | A task registered on the branch part's `ctx` by the Dispatcher handler, keyed by the deciding sequence; ended by unload |
 | Writes | `Branch::input` through `S:TreeCommands`, from the Session part's calls and from the write tasks |

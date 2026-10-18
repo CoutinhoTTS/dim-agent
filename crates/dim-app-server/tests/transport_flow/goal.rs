@@ -1,0 +1,369 @@
+//! Goal (docs/design/plugins/Goal.md) as a TypeScript plugin: its Session
+//! part writes change inputs by branch id, and its branch part folds the
+//! branch's events and decides continuation.
+use super::*;
+use dim_app_server::session_typescript::SessionTypeScriptConfig;
+use std::path::{Path, PathBuf};
+
+fn repository() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
+}
+fn goal_rows() -> SessionTypeScriptConfig {
+    let goal = repository().join("runtime/plugins/goal");
+    SessionTypeScriptConfig {
+        node: std::env::var_os("DIM_TEST_NODE")
+            .expect("DIM_TEST_NODE")
+            .into(),
+        js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME")
+            .expect("DIM_TEST_JS_RUNTIME")
+            .into(),
+        anchor: repository().join("runtime/package.json"),
+        rows: vec![
+            json!({
+                "id": "goal-session",
+                "name": goal.join("session.ts"),
+                "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/session.json")).unwrap(),
+                "inject": ["treeCommands"],
+                "config": {},
+            }),
+            json!({
+                "id": "goal-branch",
+                "name": goal.join("branch.ts"),
+                "provides": {},
+                "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings"],
+                "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/settings.json")).unwrap(),
+                "config": {},
+            }),
+        ],
+    }
+}
+fn product_home() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let home = PathBuf::from("/tmp").join(format!("dg-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    home
+}
+async fn select_model(client: &mut Client) {
+    let models = [
+        json!({"modelId":"fixture","displayName":"fixture","status":"active",
+        "capabilities":dim_agent_types::ModelCapabilities::default()}),
+    ];
+    assert_ok(&client.rpc("provider.save", json!({"provider":{
+        "providerId":"goal-fixture","displayName":"Fixture","driverKind":"openai-compatible",
+        "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"models":models,"enabled":true
+    }})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":"goal-fixture","modelId":"fixture"}),
+            )
+            .await,
+    );
+}
+async fn set_limit(client: &mut Client, limit: u32) {
+    let user = json!({"source":"goal","scope":"user"});
+    let read = client.rpc("settings.read", user).await;
+    assert_ok(&read);
+    assert_ok(
+        &client
+            .rpc(
+                "settings.update",
+                json!({"source":"goal","scope":"user","expectedRevision":read["result"]["revision"],
+                    "document":{"maxContinuations":limit}}),
+            )
+            .await,
+    );
+}
+async fn new_session(client: &mut Client) -> String {
+    let mut params = create(json!(["goal_update"]));
+    params["permissionPolicy"]["allowedTools"] = json!(["goal_update"]);
+    let created = client.rpc("session.create", params).await;
+    assert_ok(&created);
+    created["result"]["sessionId"].as_str().unwrap().to_owned()
+}
+async fn goal(client: &mut Client, method: &str, params: Value) -> Value {
+    client.rpc(&format!("session.goal.{method}"), params).await
+}
+/// Goal's blocks on `branch`, in order: each input's first `<dim-goal>`
+/// marker line, and the input's sequence.
+async fn goal_writes(session: &dim_agent_runtime::Session, branch: &str) -> Vec<(u64, String)> {
+    session
+        .local(branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
+                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                text.starts_with("<dim-goal ")
+                    .then(|| (event.sequence, text.lines().next().unwrap().to_owned()))
+            }),
+            _ => None,
+        })
+        .collect()
+}
+/// Waits until a Goal block on `branch` contains `needle`.
+async fn wait_for(session: &dim_agent_runtime::Session, branch: &str, needle: &str) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !goal_writes(session, branch)
+            .await
+            .iter()
+            .any(|(_, line)| line.contains(needle))
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no Goal block with {needle}"));
+}
+async fn idle(client: &mut Client, session: &str, branch: &str) {
+    assert_ok(
+        &client
+            .rpc(
+                "session.idle",
+                json!({"sessionId":session,"branchId":branch}),
+            )
+            .await,
+    );
+}
+fn cleanup(home: &Path) {
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
+    let home = product_home();
+    let (server, agent) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            session_typescript: Some(goal_rows()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 2).await;
+
+    // Limit (Appendix D 1, 2): set drives a turn; each normal end writes a
+    // continuation until the third decision pauses with `limit`.
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    let set = goal(
+        &mut client,
+        "set",
+        json!({"sessionId":id,"objective":"ship <it>"}),
+    )
+    .await;
+    assert_ok(&set);
+    assert!(set["result"]["sequence"].is_u64(), "{set}");
+    wait_for(&session, "main", r#"reason="limit""#).await;
+    idle(&mut client, &id, "main").await;
+    let writes: Vec<String> = goal_writes(&session, "main")
+        .await
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    assert_eq!(writes.len(), 4, "{writes:#?}");
+    assert!(writes[0].contains(r#"op="set""#), "{writes:#?}");
+    assert!(
+        writes[1].contains(r#"kind="continuation" count="1" limit="2""#),
+        "{writes:#?}"
+    );
+    assert!(
+        writes[2].contains(r#"kind="continuation" count="2" limit="2""#),
+        "{writes:#?}"
+    );
+    assert!(
+        writes[3].contains(r#"op="pause" reason="limit""#),
+        "{writes:#?}"
+    );
+
+    // A child branch cut after the goal starts with none: Goal retires the
+    // inherited keys once (§3.4, Appendix D 7).
+    let child = session
+        .branch(
+            "main".into(),
+            session.sequence("main").unwrap(),
+            dim_agent_runtime::BranchOptions {
+                prompt: "child task".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "goal-child".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    wait_for(&session, &child, r#"reason="new_branch""#).await;
+    idle(&mut client, &id, &child).await;
+    let child_writes = goal_writes(&session, &child).await;
+    assert_eq!(child_writes.len(), 1, "{child_writes:#?}");
+    assert_eq!(goal_writes(&session, "main").await.len(), 4);
+
+    // Completion (Appendix D 1): the model's goal_update records `completed`
+    // and no continuation follows it.
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"finish"}),
+        )
+        .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main",
+                    "text":r#"tool:goal_update {"status":"completed","summary":"all done"}"#}),
+            )
+            .await,
+    );
+    wait_for(&session, "main", r#"op="completed""#).await;
+    idle(&mut client, &id, "main").await;
+    let writes = goal_writes(&session, "main").await;
+    let (completed, _) = writes
+        .iter()
+        .find(|(_, line)| line.contains(r#"op="completed""#))
+        .unwrap()
+        .clone();
+    assert!(
+        writes
+            .iter()
+            .all(|(sequence, line)| *sequence <= completed || !line.contains("continuation")),
+        "{writes:#?}"
+    );
+    let results: Vec<String> = session
+        .local("main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(serde_json::to_string(data).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("goal_update recorded: completed.")),
+        "{results:#?}"
+    );
+
+    // The methods validate only their own parameters and write by branch id.
+    for (params, error) in [
+        (json!({"sessionId":id,"objective":""}), "invalid_params"),
+        (
+            json!({"sessionId":id,"branchId":"missing","objective":"x"}),
+            "session_invalid_input",
+        ),
+    ] {
+        assert_eq!(
+            goal(&mut client, "set", params).await["error"]["data"]["appError"],
+            error
+        );
+    }
+    for method in ["pause", "resume", "clear"] {
+        assert_ok(&goal(&mut client, method, json!({"sessionId":id})).await);
+    }
+    wait_for(&session, "main", r#"op="clear""#).await;
+    let after: Vec<String> = goal_writes(&session, "main")
+        .await
+        .into_iter()
+        .filter(|(sequence, _)| *sequence > completed)
+        .map(|(_, line)| line)
+        .collect();
+    let at = |op: &str| {
+        after
+            .iter()
+            .position(|line| line.contains(&format!(r#"op="{op}""#)))
+            .unwrap_or_else(|| panic!("no {op}: {after:#?}"))
+    };
+    assert!(
+        at("pause") < at("resume") && at("resume") < at("clear"),
+        "{after:#?}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+/// A server on the product home's persistent storage, so a restart
+/// restores the Sessions.
+async fn launch_stored(home: &Path) -> (RunningServer, dim_agent_runtime::Agent) {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(home.join("server.sock")),
+            product_home: Some(home.to_owned()),
+            target_home: Some(home.join("rust")),
+            session_typescript: Some(goal_rows()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_restore_refolds_without_repeating_decisions() {
+    let home = product_home();
+    let (server, agent) = launch_stored(&home).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 1).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"persist"}),
+        )
+        .await,
+    );
+    wait_for(&session, "main", r#"reason="limit""#).await;
+    idle(&mut client, &id, "main").await;
+    let before = goal_writes(&session, "main").await;
+    assert_eq!(before.len(), 3, "{before:#?}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // Restored, the branch part refolds: the goal stays paused, so an
+    // operator turn ends without a continuation, and no decision repeats.
+    let (server, agent) = launch_stored(&home).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"hello again"}),
+            )
+            .await,
+    );
+    idle(&mut client, &id, "main").await;
+    let session = agent.get_session(&id).unwrap();
+    assert_eq!(goal_writes(&session, "main").await, before);
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
