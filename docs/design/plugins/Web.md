@@ -10,6 +10,7 @@ Web is a Session plugin that gives the model `web_search` and `web_fetch` as two
 flowchart LR
   subgraph PROC["Process"]
     Settings["Settings: web business source"]
+    Credentials["Host secret store: credentials, when configured"]
   end
   subgraph SESS["Session"]
     Web["Web: toolContribution web_search, web_fetch"]:::new
@@ -19,6 +20,7 @@ flowchart LR
     Exec["ToolBinding, ToolExecutor, Approval, Permission"]
   end
   Web -->|"read source web at use"| Settings
+  Web -->|"resolve secretRef per call"| Credentials
   ToolRegistry -.->|"attaches toolContribution on first branch initialization"| Web
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall), cancel request"| Web
@@ -27,15 +29,15 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Web` | Session (installed only when enabled) | Named `settings`; a missing service keeps the existing Pending semantics | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
+| `Web` | Session (installed only when enabled) | Named `settings` and `credentials`; missing services keep the existing Pending semantics | `toolContribution` keys `web_search` and `web_fetch`, declared in Web's `provides` |
 
-**Contracts depended on:** the implemented [C4 tool binding](../session-typescript.md), [named Settings/source declarations](../appserver/settings-service.md), and Permission's existing `network` risk. #150 supplies tools, #166/#175 supply Settings, and #177 supplies Settings events. Web consumes no Session broadcast and does not wait for #168. **Contracts defined here:** the two tools, result formats and the `web` document.
+**Contracts depended on:** the implemented [C4 tool binding](../session-typescript.md), [named Settings/source declarations](../appserver/settings-service.md), `credentials.resolve`, and Permission's existing `network` risk. #150 supplies tools, #166/#175 supply Settings and the named credential binding, and #177 supplies Settings events. Web consumes no Session broadcast and does not wait for #168. **Contracts defined here:** the two tools, result formats and the `web` document.
 
 Web uses one JSON declaration in its own TypeScript package and gives it to the existing Session row entry; App Server gains no business code, registry or host port. Calls read Settings at use time, so the existing events require no additional subscription or cache-invalidation protocol. Non-fatal configuration diagnostics use existing `ToolResult.structuredContent`; there is no assumed injectable TypeScript diagnostics channel.
 
-Web owns its search-service credential ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)). The API key is the `apiKey` field of `search_service` in Web's own user file, declared user-only, and Web reads it with the rest of the document at call time. Dim provides no credential service, so Web depends on no secret store and enabling it waits on nothing else. rutis leases only a row's required `inject` services into Node; this proposal declares only `settings`. Whether Web later keeps the key in an OS keychain instead is Web's own choice.
+The product credential-store provider remains open in #118. `CredentialsHost::provide` already lets an embedding host supply the named resolver; it does not establish a default product store. rutis leases only a row's required `inject` services into Node: undeclared `ctx.use` is not optional lookup of a native service. This proposal declares both `settings` and `credentials`. Without the resolver the whole Web row remains Pending, with native Session use unchanged; no assembly wait rule or hot attachment is added. A test-host resolver can verify the protocol; product enablement still depends on #118.
 
-**Reload.** Web depends only on an enclosing process service (Settings). Enabling, disabling or upgrading Web, or a Settings reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). Configuration edits never reload.
+**Reload.** Web depends only on enclosing process services (Settings and credentials). Enabling, disabling or upgrading Web, or a Settings/credential-service reload, reloads Web only: ToolRegistry attaches Web's tools on the first registry read during branch initialization and does not depend on Web (session-boundary A.5, C3), so the Session keeps running and Web's tools are absent until its next reload; an in-flight call is settled by ToolExecutor as reloaded. This is the accepted cost of a rare structural operation ([ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)). Configuration edits never reload.
 
 **Node.** Requests leave from the App Server process that hosts the Session, not from the Session's resource node (A2).
 
@@ -45,7 +47,7 @@ Web owns its search-service credential ([settings-service §1.2](../appserver/se
 flowchart TB
   subgraph CFG["Business configuration (Settings source web)"]
     WebCfg["search_service, allow_private_hosts, proxy"]
-    Secret["search_service.apiKey (user-only)"]
+    Secret["secretRef (reference only)"]
   end
   subgraph MEM["Web memory per Session (not persisted)"]
     Cache["Fetch cache, bounded (A9)"]
@@ -55,7 +57,7 @@ flowchart TB
     Calls["step/tool-call ... step/tool-result, approval/*"]
   end
   WebCfg -->|"read at call start"| Inflight
-  Secret -->|"read at call start"| Inflight
+  Secret -->|"resolved per call"| Inflight
   Inflight -->|"one ToolResult per call, written by ToolExecutor"| Calls
 ```
 
@@ -95,12 +97,14 @@ sequenceDiagram
   participant X as ToolExecutor
   participant W as Web handler
   participant S as Settings
+  participant C as credentials
   participant Q as Search service
   X->>W: execute(ToolCall: query, filters)
-  W->>S: read search_service (with apiKey)
+  W->>S: read search_service
   alt no usable service
     W-->>X: error search_unavailable
   else configured adapter
+    W->>C: resolve secretRef (per call, never stored)
     W->>Q: query over HTTPS
     Q-->>W: hits
     W-->>X: numbered result list, domain filters applied by Web
@@ -129,7 +133,7 @@ sequenceDiagram
 | --- | --- | --- |
 | Configuration edit during a call | Call continues with values read at its start; next call uses the new values | Web |
 | Service removed between calls | Next `web_search` returns `search_unavailable` | Web |
-| Web or Settings reload mid-call | The call is settled as reloaded; ToolRegistry and Loop keep running and Web's tools are absent until the Session's next reload (D3, C3) | ToolExecutor |
+| Web, Settings or credential service reload mid-call | The call is settled as reloaded; ToolRegistry and Loop keep running and Web's tools are absent until the Session's next reload (D3, C3) | ToolExecutor |
 | Process restart mid-call | ToolExecutor settles the committed call as not surviving recovery; Web never repeats a request | ToolExecutor |
 | Compaction after a result | Fetched text survives only through the summary | ContextPreparation |
 
@@ -145,7 +149,7 @@ Full table in Appendix B.
 - Compaction: declarations survive as configuration; results only through the summary.
 - Child branches inherit results in their ancestor prefix.
 - Non-interactive Sessions see the same tools and can use them; the tool set stays the same across Sessions (#30).
-- Never visible: `structuredContent`, the service name, configuration, the API key, private-host exceptions, diagnostics.
+- Never visible: `structuredContent`, the service name, configuration, credential references, private-host exceptions, diagnostics.
 - Fetched page text is untrusted third-party content placed in a tool result without instruction framing (A14).
 
 ## 6. Interfaces (summary)
@@ -160,7 +164,7 @@ No Session methods, `managementMethods` or CLI subcommand: protected client conf
 
 ### 6.1 C4 row and source
 
-The package ships this declaration as one JSON file: the module imports its `provides` and the host uses the same row. Row id `web` is the source owner; TypeScript does not register sources again. The example retains existing loader and Settings shapes:
+The package ships this declaration as one JSON file: the module imports its `provides` and the host uses the same row. Row id `web` is both the source owner and the owner passed to `credentials.resolve`; TypeScript does not register sources again. The example retains existing loader and Settings shapes:
 
 ```json
 {
@@ -200,7 +204,7 @@ The package ships this declaration as one JSON file: the module imports its `pro
                 "type": "string",
                 "format": "uri"
               },
-              "apiKey": {
+              "secretRef": {
                 "type": "string",
                 "minLength": 1
               }
@@ -220,7 +224,6 @@ The package ships this declaration as one JSON file: the module imports its `pro
         }
       },
       "userOnly": [
-        "/search_service",
         "/allow_private_hosts"
       ]
     }
@@ -228,7 +231,7 @@ The package ships this declaration as one JSON file: the module imports its `pro
 }
 ```
 
-The plugin declares `inject: ["settings"]`; apply registers tools and cleanup only. Synchronous `declaration()` performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:"user"})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and takes `search_service.apiKey` from that document when the adapter needs it. The delivered document is neither revalidated nor filled by Web.
+The plugin declares `inject: ["settings", "credentials"]`; apply registers tools and cleanup only. Synchronous `declaration()` performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:"user"})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and uses `credentials.resolve({owner:"web", reference})` only when a secretRef is needed. The delivered document is neither revalidated nor filled by Web.
 
 This proposal starts with the `web.json` user source, declares no projectFile and invents no user/project merge rule (A16, subject to design review). Clients write private-host exceptions; Web has no configuration-writing tool. Package installation and editable loader intent remain PluginManager work.
 
@@ -237,7 +240,7 @@ This proposal starts with the `web.json` user source, declares no projectFile an
 - Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
 - SSRF: Web resolves names itself, checks every address against the blocked ranges and connects only to the checked address, with or without `proxy`; cross-host redirects need a new call and a new admission (A.4, A10).
 - No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
-- Credentials: the API key is Web's own user-only field, kept in the user file and never in a project file; it never appears in definitions, results, `structuredContent`, diagnostics or errors.
+- Credentials: references resolved per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
 - With `proxy`, Web asks the proxy for an HTTP `CONNECT` to the validated IP and port, never to the hostname, so the proxy does not resolve the target name; TLS SNI and the `Host` header carry the original hostname. Pinning and private-address protection are the same as for a direct connection (A.4).
 
@@ -251,19 +254,19 @@ This proposal starts with the `web.json` user source, declares no projectFile an
 | Principles §4 rule 4 (no business meaning in core) | No core change; the tools use the generic `toolContribution` contract. |
 | Principles §4 rule 5 (batch) | Not applicable: Web decides from call arguments and configuration, not from events. |
 | Principles §4 rule 6 (context from handed-over events) | Results reach the model only as `step/tool-result` facts written by ToolExecutor. |
-| Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution` and the Settings business source. |
-| Principles §4 rule 8 (requirements to mechanism owners) | Reuse implemented C4 and Settings bindings; Web handles its own credential without adding core, rutis or loader capability. |
+| Principles §4 rule 7 (public events and services only) | Web uses only `toolContribution`, the Settings business source and the credential resolver. |
+| Principles §4 rule 8 (requirements to mechanism owners) | Reuse implemented C4, Settings and named credential bindings; the absent product store stays in #118 without adding core, rutis or loader capability. |
 | Principles §4 rule 9 (only facts later decisions use) | Web writes no event; its fetch cache is memory only. |
 | Principles §1 (Capability and App Server boundary) | Web is a Session Capability in its own plugin package; App Server holds none of its code. |
 | ADR 002 D1 (scope follows state) | Session scope: Web holds no state shared across Sessions. |
 | ADR 002 D2 (no wiring modules) | No wiring module; search adapters are built in (A1). |
-| ADR 002 D3 (dependencies follow scope) | Settings is a process service; a missing required service leaves Web Pending and reload follows real dependencies while native Sessions continue. |
+| ADR 002 D3 (dependencies follow scope) | Settings/credentials are process services; missing required services leave Web Pending and reload follows real dependencies while native Sessions continue. |
 | ADR 002 D4 (structural vs business configuration) | Enabling is structural; the `web` document is business configuration in Web's own Settings source, read at each call. |
 | ADR 002 D5 (language-neutral contracts) | Contracts are neutral; the Rust form is Appendix G. |
 
 ## 9. Requirements raised to mechanism owners
 
-None. Tool attachment, row source declarations and Settings read/write/events already have contracts and implementations. Web keeps its own credential; it raises no additional core, rutis, loader, lifecycle, optional-dependency or diagnostics-service requirement. Node rows retain their existing required-dependency/Pending semantics.
+None. Tool attachment, row source declarations, Settings read/write/events and named credential resolution already have contracts and implementations. The absent product store is the provider decision already tracked by #118; Web raises no additional core, rutis, loader, lifecycle, optional-dependency or diagnostics-service requirement. Node rows retain their existing required-dependency/Pending semantics.
 
 ## Appendix A. Interface details
 
@@ -352,11 +355,11 @@ Bracketed lines appear only when they apply. `structuredContent`: `{ url, final_
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` or absent; user-only | absent (`web_search` returns `search_unavailable`) |
+| `search_service` | `{ kind: "<built-in adapter id>", endpoint?: string, secretRef?: string }` or absent | absent (`web_search` returns `search_unavailable`) |
 | `allow_private_hosts` | string[] | `[]` |
 | `proxy` | string (URL) | absent |
 
-Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). The API key is `search_service.apiKey`, a non-empty string Web owns; `search_service` is user-only, so only the user sets it through `settings.update`.
+Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. Only Web's enablement is structural configuration. Built-in adapter ids are an implementation choice listed in the plugin README (A13). Credentials appear only as `secretRef`, an opaque non-empty reference resolved per call through the credential resolver.
 
 ### A.6 Timeline and capability mechanics
 
@@ -406,7 +409,7 @@ Every error is an error `ToolResult` (`isError: true`) with content `web_fetch f
 | `http_status` | Non-2xx final status |
 | `too_many_redirects` | More than 5 same-host hops |
 | `unsupported_content_type` | Type not in A.3 |
-| `search_unavailable` | No service configured, adapter unusable, or a required API key missing |
+| `search_unavailable` | No service configured, adapter unusable, or credential unresolvable |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `cancelled` | Call cancelled |
 
@@ -426,7 +429,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 8. Interrupt before dispatch, during approval and during a slow response (socket closed, one result).
 9. Restart settlement repeats no request.
 10. Non-interactive Session declares both tools.
-11. Diagnostics and results never contain the API key.
+11. Diagnostics and results never contain the resolved credential.
 
 ## Appendix E. Assumptions
 
@@ -454,6 +457,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | Question | Current boundary |
 | --- | --- |
 | Design confirmation | Tool parameters, network/content policy and A1–A16 require design review before implementation; A16 does not assume existing project merge semantics |
+| Product credential store | #118 retains the provider decision; a test host can use existing CredentialsHost::provide, while a product without it leaves Web Pending rather than extending the protocol for Web |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 
 ## Appendix G. Rust binding
