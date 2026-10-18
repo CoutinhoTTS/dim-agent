@@ -608,13 +608,17 @@ impl Session {
     /// The host must exclude new uses while checking and releasing an instance.
     /// Idle release records no stop events and emits no business close notice.
     /// Every branch is checked while its commit lock is held; only when all
-    /// pass is each frozen at that tail, and it stays frozen until its dispatch
-    /// stops so nothing slips past the release. Finalizers commit afterwards.
-    /// A refused release never freezes a branch, so appends only wait briefly.
+    /// pass and no [`SessionHold`] exists is each frozen at that tail, and it
+    /// stays frozen until its dispatch stops so nothing slips past the release.
+    /// Finalizers commit afterwards. A refused release never freezes a branch,
+    /// so appends only wait briefly; a hold held at the call refuses it
+    /// without taking a lock.
     pub async fn unload_if_idle(&self) -> Result<bool> {
+        let lifecycle = &self.0.owner.lifecycle;
         if self.is_closing()
             || self.failure().is_some()
             || self.0.owner.assembly.ephemeral_store.is_some()
+            || lifecycle.held()
         {
             return Ok(false);
         }
@@ -638,6 +642,12 @@ impl Session {
         else {
             return Ok(false);
         };
+        // Decided with every commit lock held: an owner drops its hold only
+        // after its last fact is appended, so that fact cannot slip in between
+        // the branch checks and this decision. Later holds get `None`.
+        if !lifecycle.refuse_holds() {
+            return Ok(false);
+        }
         tails.into_iter().for_each(TailLock::freeze);
         self.0.owner.unloading.cancel();
         self.finish(true).await?;

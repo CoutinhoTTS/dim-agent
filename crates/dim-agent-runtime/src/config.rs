@@ -1,6 +1,10 @@
 pub use dim_agent_types::ModelId;
 use dim_agent_types::ModelSelection;
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,16 +194,24 @@ impl BranchLifecycle {
 /// the phase is `Closing` from the moment its closing token is cancelled, by
 /// `Session::close`, by `Agent::close` or during assembly, so no observer sees
 /// a closing Session as active.
+///
+/// Owners of accepted detached work take a [`SessionHold`] with
+/// [`Self::hold`], which keeps an idle release from ending that work.
 #[derive(Clone)]
 pub struct SessionLifecycle {
     phases: Phases<SessionPhase>,
     closing: tokio_util::sync::CancellationToken,
+    /// Live holds, with [`RELEASING`] set once an idle release is decided.
+    holds: Arc<AtomicUsize>,
 }
+/// Set in the hold count by the idle release decision; no hold follows it.
+const RELEASING: usize = 1 << (usize::BITS - 1);
 impl SessionLifecycle {
     pub(crate) fn new(closing: tokio_util::sync::CancellationToken) -> Self {
         Self {
             phases: Phases::new(),
             closing,
+            holds: Arc::default(),
         }
     }
     pub fn phase(&self) -> SessionPhase {
@@ -230,5 +242,43 @@ impl SessionLifecycle {
     }
     pub(crate) fn advance(&self, next: SessionPhase) {
         self.phases.advance(next);
+    }
+    /// Takes an activity hold for one piece of accepted detached work: while
+    /// any hold exists, [`crate::Session::unload_if_idle`] refuses. Take it
+    /// while the turn or lease that admitted the work still keeps the Session
+    /// loaded, and drop it once the work's last fact is committed. `None` once
+    /// the Session is closing or an idle release has been decided. A hold
+    /// reports and cancels nothing, and never delays or refuses a close.
+    #[must_use = "dropping the hold releases it"]
+    pub fn hold(&self) -> Option<SessionHold> {
+        if self.phase() >= SessionPhase::Closing {
+            return None;
+        }
+        self.holds
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |holds| {
+                (holds & RELEASING == 0).then_some(holds + 1)
+            })
+            .ok()?;
+        Some(SessionHold(self.holds.clone()))
+    }
+    /// True while a hold exists or once a release has been decided.
+    pub(crate) fn held(&self) -> bool {
+        self.holds.load(Ordering::Acquire) != 0
+    }
+    /// The idle release decision: true only while no hold exists, and then
+    /// every later [`Self::hold`] is `None`.
+    pub(crate) fn refuse_holds(&self) -> bool {
+        self.holds
+            .compare_exchange(0, RELEASING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+/// An activity hold from [`SessionLifecycle::hold`]; dropping it releases it.
+/// It carries no identity, result or cancellation.
+pub struct SessionHold(Arc<AtomicUsize>);
+impl Drop for SessionHold {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
