@@ -2,7 +2,7 @@
 
 Status: Proposed; Ready confirmation pending. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the generic notice record is a runtime requirement in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
+SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 0. Delivered mechanisms and Ready gates
 
@@ -11,7 +11,7 @@ Settings #166/#175/#177, C6 notices #85 and S5b title metadata #96 are delivered
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
-| Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then its own session.event records. Full broadcast implementation #180 still needs re-review/manual merge; #63/#168 remain open. |
+| Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then its own session.event records. C4 broadcast #180 is delivered; #63/#168 are closed. |
 | History | Use the implemented process sessions.history service, not private TimelineTree reads or proposed C5 bindings. |
 | Configuration | Existing named Settings, row source declarations and change events. Read settings.read({source:"session-title",scope:"user"}) and use its validated/defaulted document directly. A12 proposes source scope/file. |
 | Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). The Ready review adopts S5b's names, modes, handover and errors. |
@@ -207,11 +207,11 @@ The first input's text is sent to the model in the `session-title` source; unset
 | Principles §4 rule 1 (commands for others' state) | The title is SessionStore's process-level state with no Timeline; SessionTitle changes it only through SessionStore's typed `setTitle`, and SessionStore decides through its revision check (principles §4 rule 9). |
 | Principles §4 rule 2 (handover) | SessionTitle reads an input only after its handover (`input/applied`) and never acts on the input itself. |
 | Principles §4 rule 3 (before callbacks only) | No intervention before a write; rename rules are checked by SessionTitle's own method, not at an entry. |
-| Principles §4 rule 4 (no business meaning in core) | The Session broadcast notice requested in §9 is a generic record for any owner of process-level Session state. |
+| Principles §4 rule 4 (no business meaning in core) | The delivered C6 Session broadcast notice in §9 is a generic record for any owner of process-level Session state. |
 | Principles §4 rule 5 (batch) | The trigger acts on `input/applied` when it is consumed, in sequence order. |
 | Principles §4 rule 6 (context from handed-over events) | SessionTitle adds nothing to model context; the auxiliary request contains only adopted input text. |
 | Principles §4 rule 7 (public events and services only) | It uses the Session broadcast, fixed-prefix read, SessionStore `setTitle`, `AuxiliaryModel` and Settings, all public. |
-| Principles §4 rule 8 (requirements to mechanism owners) | The runtime requirement (generic broadcast notice record) is stated in §9; #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). Requirements to other plugins (SessionStore title metadata and notice emission, Rpc forwarding of notices) are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
+| Principles §4 rule 8 (requirements to mechanism owners) | C6 and S5b deliver the notice and metadata contracts in §9; #4 is stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners). Requirements to other plugins (SessionStore title metadata and notice emission, Rpc forwarding of notices) are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 | Principles §4 rule 9 (only facts later decisions use) | The title is process-level SessionStore state: it never enters the Timeline, changes through `setTitle` and reaches UIs as a Session broadcast notice. |
 | Principles §1 (Capability and App Server boundary) | SessionTitle is a Session Capability in its own plugin package; Rpc only dispatches `session.rename` and reads title fields from SessionStore. |
 | ADR 002 D1 (scope follows state) | Session scope: the title belongs to the Session; the stored title is SessionStore's. |
@@ -222,11 +222,14 @@ The first input's text is sent to the model in the `session-title` source; unset
 
 ## 9. Requirements raised to mechanism owners
 
-**R1. Session broadcast notice for process-level state.**
+**R1. Session broadcast notice for process-level state — delivered.**
+
+C6 #85 supplies the notice record and Rpc forwarding; S5b #96 supplies title metadata and
+post-commit title notices. SessionTitle consumes these delivered contracts.
 
 | Item | Content |
 | --- | --- |
-| Blocked by | Principles §4 rules 9 and 4: process-level state such as the SessionStore title must not enter the Timeline, yet clients must see title changes live; the Session broadcast carries only `Event`, `Fence` and `Closed` records ([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)). |
+| Blocked by | Principles §4 rules 9 and 4: process-level state such as the SessionStore title must not enter the Timeline, yet clients must see title changes live; the delivered C6 `Notice` record carries these post-commit changes ([session_broadcast.rs](../../../crates/dim-agent-capabilities/src/session_broadcast.rs)). |
 | Existing mechanisms considered | A `session/titled` Timeline event (puts process state on the Timeline; rejected in overview §7); client polling of `session.list` (no live update); a title-specific channel (a business-specific port, rule 8). |
 | Generic capability | A notice record `{source, kind, data}` on a Session's broadcast channel, emitted by the owner of process-level state about that Session after a committed change; no business meaning. The title notice is this record with `source: "SessionStore"`, `kind: "title"`, `data: {title, titleSource, titleRevision}` ([S5b §7](../appserver/session-title-metadata.md#7-the-title-notice)). Rpc forwards that record unchanged as `session.notice`, adding the channel's `sessionId` ([C6 D4](../appserver/session-notices.md#10-decisions)), so `data` does not repeat it. |
 | Effect on sequence, batch, interrupt, reload | No sequence number and no batch; not replayed: a client that resubscribes reads current state through the owner's query (`session.list`); interrupts do not apply; a reload of the emitter only stops notices. |
