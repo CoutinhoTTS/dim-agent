@@ -1,13 +1,11 @@
 # TypeScript plugin authoring
 
 Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/rutis`
-to the host's pinned runtime: main uses 0.11.0; older hosts may still use 0.10.0.
+to the host's pinned runtime: main uses 0.12.1; older hosts may still use 0.11.0 or 0.10.0.
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.
 These declarations add no runtime wrapper or service.
 The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts).
-The pinned rutis 0.11 declarations have an optional/required `Plugin.inject`
-inheritance conflict under TypeScript 6.0.3. Consumer examples use `skipLibCheck`;
-Dim's service declarations are checked separately with strict library checking.
+The pinned rutis 0.12 declarations pass `tsc --strict` without `skipLibCheck`.
 This does not disable checking a plugin's calls against the service interfaces.
 
 ## Available services
@@ -42,8 +40,8 @@ cleanup. Business input consumption and background work start after publication,
 as required by [the architecture rules](architecture/rust-agent/principles.md).
 An injected dependency becoming available is not Session publication. Do not
 start a timer or task from `apply` and assume that the Session is ready. The
-rutis 0.10 TypeScript `Context` has `use`, `provide` and `effect`; rutis 0.11 also
-has leaf event APIs such as `ctx.on`. Neither supplies Dim Session activation;
+rutis TypeScript `Context` has `use`, `provide` and `effect`, and since rutis 0.11
+leaf event APIs such as `ctx.on`. Neither supplies Dim Session activation;
 there is no `activated()` method. C4 owns the Session binding rather than a plugin inventing
 a second readiness mechanism.
 
@@ -389,7 +387,7 @@ Observation supplies no branch write/context-input path or Session activation
 method. Critical ordered branch consumption remains C5 work, rather than polling
 or using a Session observer as a Dispatcher.
 
-With rutis 0.11, integer values beyond ±(2^53−1) cross into TypeScript as `bigint`,
+Since rutis 0.11, integer values beyond ±(2^53−1) cross into TypeScript as `bigint`,
 including integers nested in model-supplied tool arguments or event data. Ordinary
 Dim sequence and millisecond timestamp values remain within the safe-number range.
 The SDK's `JsonValue` describes JSON-only values and does not model this bridge
