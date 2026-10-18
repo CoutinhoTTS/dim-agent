@@ -121,8 +121,11 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
 - In two Sessions sharing the runtime, each `main` part reads its own identity, follows
   `input/message`, `turn/start` and `turn/end` in commit order, and writes one marked input to its
   branch through `treeCommands.input`. Later turn ends do not write again.
+- A child in the first Session uses its own Dispatcher, identity and local fold. It writes its own
+  marker despite inheriting its parent's prefix, without writing another marker to the parent.
 - After a restart, each restored Session's part rebuilds from committed history through a nonzero
-  cutoff, does not write the first marker again, and acts on its next live turn end.
+  cutoff, including the child branch. It does not write the first marker again and acts on its next
+  live turn end.
 
 Existing C4 tools, methods, observation and Settings flows keep their own `node_` flows.
 

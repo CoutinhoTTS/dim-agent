@@ -29,13 +29,17 @@ fn branch_part() -> SessionTypeScriptConfig {
     }
 }
 
-/// The first `main` input whose raw block starts with `prefix`, once it is
-/// committed.
-async fn marked(agent: &dim_agent_runtime::Agent, session: &str, prefix: &str) -> String {
+/// The first input owned by `branch` whose raw block starts with `prefix`.
+async fn marked(
+    agent: &dim_agent_runtime::Agent,
+    session: &str,
+    branch: &str,
+    prefix: &str,
+) -> String {
     let session = agent.get_session(session).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            for event in session.history("main", None).await.unwrap() {
+            for event in session.local(branch, ..).await.unwrap() {
                 if let EventKind::InputMessage(data) = &event.kind {
                     for block in &data.blocks {
                         let dim_agent_types::InputBlock::Raw { text, .. } = block;
@@ -51,12 +55,17 @@ async fn marked(agent: &dim_agent_runtime::Agent, session: &str, prefix: &str) -
     .await
     .expect("the branch part writes its marker")
 }
-/// How many `main` inputs carry a raw block starting with `prefix`.
-async fn count(agent: &dim_agent_runtime::Agent, session: &str, prefix: &str) -> usize {
+/// How many inputs owned by `branch` carry a raw block starting with `prefix`.
+async fn count(
+    agent: &dim_agent_runtime::Agent,
+    session: &str,
+    branch: &str,
+    prefix: &str,
+) -> usize {
     agent
         .get_session(session)
         .unwrap()
-        .history("main", None)
+        .local(branch, ..)
         .await
         .unwrap()
         .iter()
@@ -111,7 +120,7 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         sessions.push(session);
     }
     for session in &sessions {
-        let marker = marked(&agent, session, "<c5-marker").await;
+        let marker = marked(&agent, session, "main", "<c5-marker").await;
         // Its own branch identity, and the events in commit order.
         assert!(marker.contains(r#"branch="main""#), "{marker}");
         let seen = marker
@@ -132,8 +141,30 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
                 )
                 .await,
         );
-        assert_eq!(count(&agent, session, "<c5-marker").await, 1);
+        assert_eq!(count(&agent, session, "main", "<c5-marker").await, 1);
     }
+
+    // A child shares its Session services, but has its own Dispatcher,
+    // identity and local fold, despite inheriting its parent's marker.
+    let parent = agent.get_session(&sessions[0]).unwrap();
+    let child = parent
+        .branch(
+            "main".into(),
+            parent.sequence("main").unwrap(),
+            dim_agent_runtime::BranchOptions {
+                prompt: "child branch input".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "c5-child".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let marker = marked(&agent, &sessions[0], &child, "<c5-marker").await;
+    assert!(marker.contains(&format!(r#"branch="{child}""#)), "{marker}");
+    parent.idle(&child).await.unwrap();
+    assert_eq!(count(&agent, &sessions[0], &child, "<c5-marker").await, 1);
+    assert_eq!(count(&agent, &sessions[0], "main", "<c5-marker").await, 1);
 
     drop(client);
     server.shutdown();
@@ -144,19 +175,23 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     // on its first live turn end.
     let (server, agent) = launch_stored(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    for session in &sessions {
+    for (session, branch) in [
+        (&sessions[0], "main"),
+        (&sessions[1], "main"),
+        (&sessions[0], child.as_str()),
+    ] {
         assert_ok(
             &client
                 .rpc(
                     "session.submit",
-                    json!({"sessionId":session,"branchId":"main","text":"again"}),
+                    json!({"sessionId":session,"branchId":branch,"text":"again"}),
                 )
                 .await,
         );
-        let rebuilt = marked(&agent, session, "<c5-rebuilt").await;
+        let rebuilt = marked(&agent, session, branch, "<c5-rebuilt").await;
         assert!(!rebuilt.contains(r#"from="0""#), "{rebuilt}");
-        assert_eq!(count(&agent, session, "<c5-marker").await, 1);
-        assert_eq!(count(&agent, session, "<c5-rebuilt").await, 1);
+        assert_eq!(count(&agent, session, branch, "<c5-marker").await, 1);
+        assert_eq!(count(&agent, session, branch, "<c5-rebuilt").await, 1);
     }
     server.shutdown();
     server.join().await.unwrap();
