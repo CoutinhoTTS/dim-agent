@@ -28,9 +28,28 @@ const REASONS: Record<Exclude<PauseReason, 'user'>, string> = {
   turn_failed: 'the last turn failed',
 }
 
-/** Escapes text placed inside a marker body or attribute (A.5, §7). */
+/**
+ * Encodes text placed inside a marker body or attribute, so user and model
+ * text cannot forge a marker (A.5, §7). The encoding is reversible: the fold
+ * and clients read values back with `unescape`.
+ */
 export function escape(text: string): string {
   return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+}
+/** The inverse of `escape`. */
+export function unescape(text: string): string {
+  return text.replaceAll('&quot;', '"').replaceAll('&gt;', '>').replaceAll('&lt;', '<').replaceAll('&amp;', '&')
+}
+/**
+ * The decoded value a change block carries after its `label` line (an
+ * objective after `Objective:`, a summary after `Result:` or `Blocker:`): the
+ * body up to the block's fixed closing text, which follows the last blank line.
+ */
+function value(text: string, label: string): string | undefined {
+  const start = text.indexOf(`\n${label}\n`)
+  const end = text.lastIndexOf('\n\n')
+  if (start < 0 || end < start) return undefined
+  return unescape(text.slice(start + label.length + 2, end))
 }
 
 function block(attrs: Record<string, string | number>, body: string[], key?: string, retire = false): RawBlock {
@@ -113,7 +132,7 @@ export function marker(text: string): Record<string, string> | undefined {
   const match = /^<dim-goal ([^>]*)>/.exec(text)
   if (!match) return undefined
   const attrs: Record<string, string> = {}
-  for (const [, name, value] of match[1].matchAll(/(\w+)="([^"]*)"/g)) attrs[name] = value
+  for (const [, name, value] of match[1].matchAll(/(\w+)="([^"]*)"/g)) attrs[name] = unescape(value)
   return attrs
 }
 
@@ -126,8 +145,7 @@ function statusOf(attrs: Record<string, string>, text: string): { status: Status
     case 'pause': return { status: 'paused', reason: attrs.reason }
     case 'resume': return { status: 'active' }
     default: {
-      const body = text.split('\n')
-      return { status: attrs.op as Status, summary: body[2] }
+      return { status: attrs.op as Status, summary: value(text, attrs.op === 'completed' ? 'Result:' : 'Blocker:') }
     }
   }
 }
@@ -189,7 +207,7 @@ export class Fold {
           if (!attrs || (raw.key !== OBJECTIVE_KEY && raw.key !== STATUS_KEY)) continue
           this.localBlocks++
           if (raw.key === OBJECTIVE_KEY) {
-            this.objective = raw.retire ? undefined : raw.text.split('\n')[2]
+            this.objective = raw.retire ? undefined : value(raw.text, 'Objective:')
           } else if (raw.retire) {
             this.status = undefined
           } else {

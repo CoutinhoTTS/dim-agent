@@ -290,7 +290,7 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 
 由 `crates/dim-app-server/tests/transport_flow/goal.rs`（真实 Node）覆盖：附录 D 第 1 条（set、续跑、
 `goal_update completed` 结束续跑）、第 2 条（达到 `maxContinuations` 时暂停 `limit`）、第 7 条（子分支：一次起始
-`clear`，父分支不变）、方法边界与 `pause`/`resume`/`clear` 的顺序，以及第 5 条（恢复后的分支重新折叠，不重复决策）。
+`clear`，父分支不变）、方法边界与 `pause`/`resume`/`clear` 的顺序，第 5 条（恢复后的分支重新折叠，不重复决策），以及含 `<`、`&`、引号和空行的目标文本与 summary 经 set、edit、`goal_update` 与恢复后的 A.5 编码往返。
 附录 D 的其余各条尚无流程测试覆盖。
 
 ## 附录 A. 接口细节
@@ -326,7 +326,7 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 没有 `get` 方法，也没有分支服务。分支部分折叠的正是客户端也能读到的公开事实：在分支的本地事件上，最新存活的
 `goal:objective` 块就是目标文本（退役则没有），最新存活的 `goal:status` 块就是状态，由其标记给出：
 `kind="status" status="active"`、`op="resume"`（active）、`op="pause" reason=...`、`op="completed"` /
-`op="blocked"`（正文中带 summary），或已退役（没有状态）。只有目标文本存活时目标才存在（A16）。A.5 的标记格式就是契约。
+`op="blocked"`（正文中带 summary），或已退役（没有状态）。只有目标文本存活时目标才存在（A16）。A.5 的标记格式与可逆编码就是契约；读取的值都先解码。
 续跑计数与上限在每个续跑标记中（`count`、`limit`）。
 
 ### A.4 续跑决策
@@ -354,6 +354,8 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 ### A.5 模型可见文本
 
 每次写入都是一条没有 `user` 内容的 `input/message`。其第一个 raw 块为标记 `<dim-goal kind="..." ...>`、换行、转义后的正文、换行、`</dim-goal>`（A2）；`set` 和 `clear` 再加一个同样形式的块。一条 `InputWrite` 可携带任意多个 `RawBlock`，每个块有自己的 key（[session access A.1](../contracts/session-access.md#a1-sessions-服务)），因此每次变更仍是一条输入。无 key 的续跑不是变更。
+
+编码：目标文本、summary 与每个属性值中的 `&`、`<`、`>`、`"` 写成 `&amp;`、`&lt;`、`&gt;`、`&quot;`，因此用户或模型的文本无法伪造模型会当作 Goal 的标记。该编码可逆：折叠与客户端依次把 `&quot;`、`&gt;`、`&lt;`、`&amp;` 替换回原字符来解码。目标文本是 `Objective:` 行与块中最后一个空行之间的正文，summary 是 `Result:` 或 `Blocker:` 行与最后一个空行之间的正文；空行之后的固定文本不含空行。模型读到的是编码后的形式。
 
 | 写入 | 块（key 用法） | 模式 | 文本 |
 | --- | --- | --- | --- |

@@ -131,6 +131,38 @@ async fn idle(client: &mut Client, session: &str, branch: &str) {
             .await,
     );
 }
+/// The value a change block carries after its `label` line, decoded by the
+/// block encoding of Goal A.5.
+fn block_value(text: &str, label: &str) -> String {
+    let start = text.find(&format!("\n{label}\n")).unwrap() + label.len() + 2;
+    let end = text.rfind("\n\n").unwrap();
+    text[start..end]
+        .replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+}
+/// The full text of the last Goal block on `branch` whose marker contains `needle`.
+async fn goal_block(session: &dim_agent_runtime::Session, branch: &str, needle: &str) -> String {
+    session
+        .local(branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
+                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                (text.starts_with("<dim-goal ") && text.lines().next().unwrap().contains(needle))
+                    .then(|| text.clone())
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no Goal block with {needle}"))
+}
+/// Text with `<`, `&`, quotes, an entity-like run and a blank line.
+const SPECIAL: &str = "ship <it> & \"now\"\n\nthen &amp; done";
+
 fn cleanup(home: &Path) {
     let _ = std::fs::remove_dir_all(home);
 }
@@ -226,12 +258,16 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
             .rpc(
                 "session.submit",
                 json!({"sessionId":id,"branchId":"main",
-                    "text":r#"tool:goal_update {"status":"completed","summary":"all done"}"#}),
+                    "text":format!("tool:goal_update {}", json!({"status":"completed","summary":SPECIAL}))}),
             )
             .await,
     );
     wait_for(&session, "main", r#"op="completed""#).await;
     idle(&mut client, &id, "main").await;
+    // The summary is encoded in the block and decodes to the model's text.
+    let completed_block = goal_block(&session, "main", r#"op="completed""#).await;
+    assert!(!completed_block.contains("<it>"), "{completed_block}");
+    assert_eq!(block_value(&completed_block, "Result:"), SPECIAL);
     let writes = goal_writes(&session, "main").await;
     let (completed, _) = writes
         .iter()
@@ -332,18 +368,38 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
     set_limit(&mut client, 1).await;
     let id = new_session(&mut client).await;
     let session = agent.get_session(&id).unwrap();
+    // An objective with `<`, `&`, quotes and a blank line: the fold still
+    // finds a live goal (it continues), and the block decodes to it.
     assert_ok(
         &goal(
             &mut client,
             "set",
-            json!({"sessionId":id,"objective":"persist"}),
+            json!({"sessionId":id,"objective":SPECIAL}),
         )
         .await,
     );
     wait_for(&session, "main", r#"reason="limit""#).await;
     idle(&mut client, &id, "main").await;
+    assert_eq!(
+        block_value(
+            &goal_block(&session, "main", r#"op="set""#).await,
+            "Objective:"
+        ),
+        SPECIAL
+    );
+    let edited = format!("{SPECIAL} (edited)");
+    assert_ok(
+        &goal(
+            &mut client,
+            "edit",
+            json!({"sessionId":id,"objective":edited}),
+        )
+        .await,
+    );
+    wait_for(&session, "main", r#"op="edit""#).await;
+    idle(&mut client, &id, "main").await;
     let before = goal_writes(&session, "main").await;
-    assert_eq!(before.len(), 3, "{before:#?}");
+    assert_eq!(before.len(), 4, "{before:#?}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -363,6 +419,16 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
     idle(&mut client, &id, "main").await;
     let session = agent.get_session(&id).unwrap();
     assert_eq!(goal_writes(&session, "main").await, before);
+    assert_eq!(
+        block_value(
+            &goal_block(&session, "main", r#"op="edit""#).await,
+            "Objective:"
+        ),
+        edited
+    );
+    // The restored fold sees the edited objective live: a resume continues it.
+    assert_ok(&goal(&mut client, "resume", json!({"sessionId":id})).await);
+    wait_for(&session, "main", r#"kind="continuation" count="1""#).await;
     server.shutdown();
     server.join().await.unwrap();
     cleanup(&home);

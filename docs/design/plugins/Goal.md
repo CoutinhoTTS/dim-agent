@@ -292,7 +292,7 @@ branch's local events. An embedder installs Goal by adding the two rows to
 Covered by `crates/dim-app-server/tests/transport_flow/goal.rs` (real Node): Appendix D 1 (set,
 continuation, `goal_update completed` ends continuation), 2 (limit pause at `maxContinuations`), 7
 (child branch: one start `clear`, the parent unchanged), the method boundary and order of
-`pause`/`resume`/`clear`, and 5 (a restored branch refolds and repeats no decision). The other
+`pause`/`resume`/`clear`, 5 (a restored branch refolds and repeats no decision), and the A.5 encoding round trip of objectives and summaries containing `<`, `&`, quotes and blank lines through set, edit, `goal_update` and restore. The other
 Appendix D rows are not yet covered by flow tests.
 
 ## Appendix A. Interface details
@@ -330,7 +330,7 @@ client can read: on the branch's local events, the latest live block keyed `goal
 objective (none if retired), and the latest live block keyed `goal:status` is the status, whose
 marker gives it: `kind="status" status="active"`, `op="resume"` (active), `op="pause" reason=...`,
 `op="completed"` / `op="blocked"` with the summary in its body, or retired (no status). A goal exists
-only while an objective is live (A16). The marker formats in A.5 are the contract. The continuation
+only while an objective is live (A16). The marker formats and the reversible encoding in A.5 are the contract; values are read decoded. The continuation
 count and limit are in each continuation marker (`count`, `limit`).
 
 ### A.4 Continuation decision
@@ -358,6 +358,8 @@ Delivery of `branch/start` at `S`: if `inherited_live` and `S` is not `decided`,
 ### A.5 Model-visible texts
 
 Each write is one `input/message` with no `user` content. Its first raw block is the marker `<dim-goal kind="..." ...>`, newline, escaped body, newline, `</dim-goal>` (A2); `set` and `clear` add a second block of the same form. One `InputWrite` carries any number of `RawBlock`s, each with its own key ([session access A.1](../contracts/session-access.md#a1-the-sessions-service)), so every change stays one input. A key-less continuation is not a change.
+
+Encoding: the objective, the summary and every attribute value are written with `&`, `<`, `>` and `"` as `&amp;`, `&lt;`, `&gt;` and `&quot;`, so user or model text cannot forge a marker the model would read as Goal's. The encoding is reversible: the fold and clients decode a value by replacing `&quot;`, `&gt;`, `&lt;` and then `&amp;`. An objective is the body between the `Objective:` line and the block's last blank line, a summary the body between the `Result:` or `Blocker:` line and the last blank line; the fixed text after that blank line contains none. The model reads the encoded form.
 
 | Write | Blocks (key use) | Mode | Text |
 | --- | --- | --- | --- |
