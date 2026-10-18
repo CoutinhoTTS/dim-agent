@@ -34,6 +34,7 @@
 - [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Session broadcast notices](design/appserver/session-notices.md) (C6)（[中文](zh/design/appserver/session-notices.md)）
+- [SessionStore title metadata](design/appserver/session-title-metadata.md) (S5b)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Idle Session unload](design/appserver/idle-unload.md) (proposed, #126)（[中文](zh/design/appserver/idle-unload.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)
