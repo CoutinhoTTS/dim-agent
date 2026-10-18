@@ -140,8 +140,8 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | --- | --- | --- | --- |
 | 1 | ~~A2 契约定稿~~ #79、~~A3 Goal 决策~~ #80、~~A4 权限类别~~ #81 | ~~S6 FileStorage~~ #87、~~R1 Failed 错误码~~ #117 | ~~C3 工具接入~~ #82、~~C4 spike~~ #99、~~S7 argv 辅助~~ #88、~~S10 pluginFiles~~ #91/#135；完整 C4（工具/方法 #150、广播 #180）已合入，#63/#168 已关闭 |
 | 2 | ~~S8a Settings 源~~ #90、~~S4 AuxiliaryModel~~ #89 | ~~C1 sessionMethods~~ #83、~~C2 interactive~~ #84、~~S5a Session 文件~~ #95 | ~~装配前置~~ #137；F5 spike #112、设计 #152 已合入；产品实现提交评审，默认开启，显式目录列表完整覆盖默认值 |
-| 3 | ~~S1 InputQueue 撤回~~ #94、S8b 设计 #119、Rust 实现 #166、C4 行来源/owner 读写 #175 与事件 #177 已合入（产品凭据存储待选定）、~~S11 图片占位~~ #92、~~F2 权限命令规则~~ #109 | ~~C6 通知~~ #85、~~S5b 标题~~ #96 已合入；~~P1 ShellInput 服务端~~ #101；~~S3 活动句柄~~（不需要） | C5 设计 #100 已合入；#186 保持 Draft，按 #187 的机制方意见等待 rutis #440 通用导出；~~P1 CLI~~ #155、~~F6 CLI~~ #149/#153、~~F3 模型参数~~ #148；rutis 升级 #173、广播设计 #174 与实现 #180 已合入 |
-| 4 | ~~F1 压缩宿主~~ #108、研究 #165、#169 修复 #172、#128 运行时调参 #183 已合入；P5 Goal 设计 #105 已合入（实现等自身前置） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | ~~F4 CLI~~ #151、~~CLI Attachments~~ #154/#160/#163/#164；作者指南 #167 已合入；P3 Web #103 评审中，P4 SessionTitle #104 已以 Proposed 合入，尚未 Ready |
+| 3 | ~~S1 InputQueue 撤回~~ #94、S8b 设计 #119、Rust 实现 #166、C4 行来源/owner 读写 #175 与事件 #177 已合入（产品凭据存储待选定）、~~S11 图片占位~~ #92、~~F2 权限命令规则~~ #109 | ~~C6 通知~~ #85、~~S5b 标题~~ #96 已合入；~~P1 ShellInput 服务端~~ #101；~~S3 活动句柄~~（不需要） | C5 设计 #100 已合入；#186 保持 Draft，按 #187 的机制方意见等待 rutis0.12 的 #440 通用导出（已纳入计划，尚未发布）；~~P1 CLI~~ #155、~~F6 CLI~~ #149/#153、~~F3 模型参数~~ #148；rutis 升级 #173、广播设计 #174 与实现 #180 已合入 |
+| 4 | ~~F1 压缩宿主~~ #108、研究 #165、#169 修复 #172、#128 运行时调参 #183 已合入；P5 Goal 设计 #105 已合入（实现等自身前置） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | ~~F4 CLI~~ #151、~~CLI Attachments~~ #154/#160/#163/#164；作者指南 #167/#190 已合入；P3 Web #103 评审中，P4 SessionTitle #104 已以 Proposed 合入，尚未 Ready |
 | 5 | — | — | P6 Scheduler #106、P7 Workflow #107 已以 Proposed 合入，尚未 Ready；工具/方法、Settings owner 读写与事件前置已满足，可准备 Ready 设计；凭据引用还需产品存储提供方 |
 
 跨人的交接（都不在同一批文件上）：
@@ -210,7 +210,7 @@ flowchart LR
   S10 --> WF
 ```
 
-ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。完整 C4 #150/#173/#174/#180、C6 #85 和 S5b #96 已交付；#156 已关闭且不采用。S8b #166/#175/#177 提供 Rust 服务、行来源声明、真实 Node owner 读写和事件，产品凭据存储仍未交付。Web、SessionTitle、Scheduler、Workflow 均按自身 Ready 条件推进。C5 #186 的手写分支绑定按 eric 在 #187 的意见停止扩展，等待 rutis #440 的通用服务导出；现有 Promise<void> 创建取消方式已获确认，不扩充 Core 或协议。Goal 等待完整 C5。F5 的默认持久 Shell 写权限包含工作区和宿主拥有的当前分支输出目录；显式 writablePaths 完整覆盖默认值，包括空列表。原生 macOS/Linux 执行、后台任务、持久 PTY 与文件/网络边界由真实流程验收。
+ShellInput 与 Attachments 的服务端及 CLI 输入链路已合入。完整 C4 #150/#173/#174/#180、C6 #85 和 S5b #96 已交付；#156 已关闭且不采用。S8b #166/#175/#177 提供 Rust 服务、行来源声明、真实 Node owner 读写和事件，产品凭据存储仍未交付。Web、SessionTitle、Scheduler、Workflow 均按自身 Ready 条件推进。C5 #186 的手写分支绑定按 eric 在 #187 的意见停止扩展，等待 rutis0.12 的 #440 通用服务导出（已纳入计划，尚未发布）；现有 Promise<void> 创建取消方式已获确认，不扩充 Core 或协议。Goal 等待完整 C5。F5 的默认持久 Shell 写权限包含工作区和宿主拥有的当前分支输出目录；显式 writablePaths 完整覆盖默认值，包括空列表。原生 macOS/Linux 执行、后台任务、持久 PTY 与文件/网络边界由真实流程验收。
 
 ## 5. 设计变更空间
 

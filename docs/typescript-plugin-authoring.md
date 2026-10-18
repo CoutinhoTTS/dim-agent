@@ -5,7 +5,7 @@ to the host's pinned runtime: main uses 0.11.0; older hosts may still use 0.10.0
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.
 These declarations add no runtime wrapper or service.
 The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts).
-The pinned rutis 0.10 declarations have an optional/required `Plugin.inject`
+The pinned rutis 0.11 declarations have an optional/required `Plugin.inject`
 inheritance conflict under TypeScript 6.0.3. Consumer examples use `skipLibCheck`;
 Dim's service declarations are checked separately with strict library checking.
 This does not disable checking a plugin's calls against the service interfaces.
@@ -20,7 +20,8 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the C4 row's `settings` member. |
 | Resolve a credential reference | `credentials`, process | Host dispatch implemented; no product plugin provides a secret store. Inject only when the embedding host supplies one. |
 | Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Implemented by C4 through ordinary structural rows and the existing App Server embedding entry. |
-| Observe this Session or act on a branch | Session broadcast / branch Dispatcher | Native Session broadcast is tracked by #168; branch bindings remain C5 work. |
+| Observe this Session | `sessionEvents:<part>` setup and `session.event`, Session | Implemented by C4 on the original row; filter by its bound Session id. |
+| Consume branch events in order or act on branches | branch Dispatcher / TreeCommands | C5 awaits rutis generic service export [#440](https://github.com/arcships/rutis/issues/440); the hand-written binding is not available. |
 
 See [Session TypeScript bindings](design/session-typescript.md) and
 [Settings](design/appserver/settings-service.md) for their contracts and delivery
@@ -323,24 +324,82 @@ this binding. On unload, C1 stops admission and settles accepted calls before th
 JavaScript row unloads: `report` replies with interruption, while `drain` preserves
 the provider's reply. No business task in this example runs during `apply`.
 
-Native Session broadcast remains [#168](https://github.com/arcships/dim/issues/168)
-work. rutis 0.11 supplies leaf events; the Dim Session binding design in
-[#174](https://github.com/arcships/dim/pull/174) is merged, but not implemented.
-A runtime `ctx.on` API alone does not deliver Dim Session records.
-The implemented tool/method binding supplies no Session activation method,
-branch Dispatcher access or replacement polling mechanism.
+## Session observation
+
+A Session row adds `sessionEvents:<part>: {bind: 'sync'}` to the same `provides`
+dictionary used for tools/methods. C4 invokes `bind` once on that original row,
+after its projection is visible and before it becomes Active. It supplies the
+Session id, creation-time configuration and original-generation closing Promise.
+Register subscriptions/effects synchronously and return JSON null; returning a
+Promise, a non-null value or throwing fails the optional row. An event-only row
+needs no tool or client method.
+
+```ts
+import { definePlugin, type MethodKind } from '@arcships/rutis';
+import type { SessionEventRecord, SessionEventsContribution } from 'dimcode/plugin';
+
+export const provides = {
+  'sessionEvents:example': { bind: 'sync' },
+} satisfies Record<string, Record<string, MethodKind>>;
+
+export default definePlugin({
+  name: 'SessionObserver',
+  provides,
+  apply(ctx) {
+    const observer: SessionEventsContribution = {
+      bind(binding, closing) {
+        let closed = false;
+        closing.then(() => { closed = true; });
+        ctx.effect(() => { closed = true; });
+        ctx.on('session.event', (record: SessionEventRecord) => {
+          if (closed || record.sessionId !== binding.sessionId) return;
+          console.info(record.branchId, record.event.type, record.event.name);
+        });
+        return null;
+      },
+    };
+    ctx.provide('sessionEvents:example', observer);
+  },
+});
+```
+
+`SessionEventRecord` is `{sessionId, branchId, event}` using the existing
+`AgentEvent` envelope. `ctx.on` is runtime-wide, so compare the bound Session id
+before business code. The immutable `config` uses the same serialized form as
+ToolCall: absent `interactive` means true; eligibility that needs an interactive
+leader checks `config.interactive !== false && config.collaborationRole === 'leader'`.
+It does not report later Prompt/model adoption.
+
+The example only logs transient observations. Handlers that start async work
+register it with their original owner and return; on closing, stop admission,
+cancel/release resources and join accepted work in a row effect. `ctx.on` removes
+the listener on unload. Closing settles for native Session close or original-row
+cancellation; captured handlers must not start work afterward or follow a replacement.
+
+C4 forwards native Event records after publication, preserving per-Session native
+channel order without imposing order between Sessions. It does not replay history
+or deliver native Fence/Closed frames, C6 title notices or Settings changes as
+`session.event`. Process Settings events keep their own names. Already-admitted
+delivery may finish during close; a newly bound listener can receive a delayed
+observation but receives no replay of completed emissions. A slow leaf does not
+block native Session delivery; pending observations can accumulate in its transport.
+The [binding contract](design/session-typescript.md#native-session-broadcast) and
+[real fixture](../runtime/fixtures/session-observer.ts) describe these boundaries.
+Observation supplies no branch write/context-input path or Session activation
+method. Critical ordered branch consumption remains C5 work, rather than polling
+or using a Session observer as a Dispatcher.
 
 With rutis 0.11, integer values beyond ±(2^53−1) cross into TypeScript as `bigint`,
 including integers nested in model-supplied tool arguments or event data. Ordinary
 Dim sequence and millisecond timestamp values remain within the safe-number range.
 The SDK's `JsonValue` describes JSON-only values and does not model this bridge
-`bigint` case; a declared `JsonValue` is not proof that incoming tool data can be
+`bigint` case; a declared `JsonValue` is not proof that incoming tool or event data can be
 JSON-encoded unchanged.
 `JSON.stringify` throws on `bigint`; do not stringify an unchecked argument object
 or coerce every integer to `number`. At the tool's external-input boundary, validate
 against its actual schema and explicitly choose a lossless representation when
-sending such a value to a JSON-only API. This transport behavior does not make the
-pending Session-event binding available.
+sending such a value to a JSON-only API. Preserve the native value when passing
+it to a compatible owner.
 
 ## Packaging and trust
 
