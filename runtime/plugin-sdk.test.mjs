@@ -29,6 +29,9 @@ test('packed plugin service types compile the author guide and enforce the publi
     writeFileSync(file, source);
     return file;
   });
+  const branchFixture = path.join(directory, 'branch-part.mts');
+  writeFileSync(branchFixture, readFileSync(path.join(root, 'runtime/fixtures/branch-part.ts'), 'utf8')
+    .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
 import type { Settings, SettingsResult, Credentials, CredentialsResult, Sessions, SessionMetadata, SessionMetadataResult, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
@@ -156,6 +159,6 @@ const lossyCut: number = cutoff;
   assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
   const checked = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
-    ...files, calls, path.join(root, 'runtime/fixtures/branch-part.ts')], { encoding: 'utf8' });
+    ...files, calls, branchFixture], { encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
 });
