@@ -14,7 +14,7 @@ Capability 实现 rutis `TypedPlugin` 与 runtime `Capability`：`Deps` 声明�
 
 所有可装配的运行能力和跨插件服务均由 Plugin 提供，包括文件访问、数据库和代码执行。普通模块只作为所属 Plugin 内部的函数、类型与算法实现，不能藏有绕过依赖声明的全局服务、资源或订阅。资源归属是单父树，服务依赖是允许多个上游的无环图；根、校验、失效重载以及唯一事件总线的目标约束见[单树装配](single-tree.md#产品装配约束目标)。
 
-框架按 rutis 0.11.0 设计：使用 `TypeKey` 和 `require` / `require_as` 读取必需服务，使用 `EventKey<E>` 注册和派发事件。EventKey 的类型约束不代替 caps 事件声明（尚未实现，动态事件为 [ADR 001](../../adr/001-harness-foundation.md) 中的 Proposed）或产品授权，严格读取不代替依赖环预检。具体接口统一见[单树合同](single-tree.md#rutis)，不增第二套服务容器、事件总线或生命周期管理器。
+框架按 rutis 0.12.0 设计：使用 `TypeKey` 和 `require` / `require_as` 读取必需服务，使用 `EventKey<E>` 注册和派发事件。EventKey 的类型约束不代替 caps 事件声明（尚未实现，动态事件为 [ADR 001](../../adr/001-harness-foundation.md) 中的 Proposed）或产品授权，严格读取不代替依赖环预检。具体接口统一见[单树合同](single-tree.md#rutis)，不增第二套服务容器、事件总线或生命周期管理器。
 
 ## 2. 作用域的含义
 
