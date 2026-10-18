@@ -935,7 +935,12 @@ impl TypedPlugin for BranchScopePlugin {
                 session.faults.clone(),
             );
             // The Timeline is closed by its handle or by build rollback.
-            let dispatcher = Dispatcher::new(diagnostics.clone(), scope.instance, owner.sequence);
+            let dispatcher = Dispatcher::new(
+                diagnostics.clone(),
+                scope.instance,
+                owner.sequence,
+                timeline.clone(),
+            );
             ctx.provide_as(scope.key::<Timeline>(), Arc::new(timeline.clone()))?;
             ctx.provide_as(scope.key::<Dispatcher>(), Arc::new(dispatcher.clone()))?;
             ctx.provide_as(scope.key::<Diagnostics>(), Arc::new(diagnostics.clone()))?;

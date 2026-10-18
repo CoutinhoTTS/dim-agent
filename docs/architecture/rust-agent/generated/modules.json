@@ -1701,6 +1701,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "rutis_bridge::include_exports",
         "serde_json::json",
         "tokio::select",
         "tracing::warn",
@@ -9925,6 +9926,7 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
+        "path dim_agent_runtime::BRANCH_GROUP",
         "path wait_active",
         "use dim_agent_runtime::AgentBuilder",
         "use dim_agent_runtime::wait_active"
@@ -14270,8 +14272,10 @@
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
+        "path BRANCH_GROUP",
         "path SESSION_GROUP",
         "use dim_agent_runtime::AgentBuilder",
+        "use dim_agent_runtime::BRANCH_GROUP",
         "use dim_agent_runtime::SESSION_GROUP"
       ]
     },
@@ -16379,6 +16383,10 @@
     {
       "module": "dim_app_server::session_typescript",
       "path": "E::NAME"
+    },
+    {
+      "module": "dim_app_server::session_typescript",
+      "path": "exports::all"
     },
     {
       "module": "dim_app_server::settings",

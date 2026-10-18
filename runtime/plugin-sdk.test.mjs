@@ -123,8 +123,7 @@ const unscopedRecord: SessionEventRecord = { event: record.event };
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
     path.join(packageRoot, 'plugin.d.ts')], { encoding: 'utf8' });
   assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
-  // rutis 0.11 has an optional/required Plugin inheritance conflict; check our declarations separately.
-  const checked = spawnSync(process.execPath, [compiler, '--skipLibCheck',
+  const checked = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
     ...files, calls], { encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);

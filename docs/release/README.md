@@ -65,7 +65,7 @@ In CI, configure the `release-build` Environment with `DIM_OAUTH_PACKAGE_URL` an
 
 An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `dist/index.js`. The manifest uses schema 1, host API 2 and rutis 0.10.0. Host API 2 requires `quiesce` and supports native file transactions; API 1 archives are rejected. The private SDK is bundled in `dist/index.js`; source maps, tests and account files are excluded.
 
-The bundled host runtime is rutis 0.11.0, which also accepts plugin API 1 exports from the 0.10.0 SDK. The managed-provider manifest and host API contract above are unchanged; its SDK version is distinct from the host runtime version recorded in the release inventory.
+The bundled host runtime is rutis 0.12.1, which also accepts plugin API 1 exports from the 0.10.0 SDK. The managed-provider manifest and host API contract above are unchanged; its SDK version is distinct from the host runtime version recorded in the release inventory.
 
 Account-enabled native staging copies the pinned host Node and its license. Cross-target staging downloads the pinned official Node distribution for the **target** OS/CPU and verifies its archive against the official `SHASUMS256.txt`. Both install the locked rutis runtime with [npm target OS/CPU overrides](https://docs.npmjs.com/cli/v11/using-npm/config/#cpu) and install scripts disabled, then copy the verified plugin. Staging never bundles the host Node into a cross-target payload.
 
