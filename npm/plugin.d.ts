@@ -149,6 +149,13 @@ export interface SessionConfig {
   readonly interactive?: false;
 }
 
+/** Native `session.event`; the event envelope and data are unchanged. */
+export interface SessionEventRecord extends SessionRef { event: AgentEvent }
+/** Original-row `sessionEvents:<part>` setup; register listeners/effects and return null. */
+export interface SessionEventsContribution {
+  bind(binding: { sessionId: string; config: SessionConfig }, closing: Promise<void>): null;
+}
+
 export type JsonSchema = JsonObject & {
   type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
   properties?: Record<string, JsonSchema>;
