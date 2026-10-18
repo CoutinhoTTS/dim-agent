@@ -1,7 +1,7 @@
 # TypeScript plugin authoring
 
 Dim loads trusted JavaScript/TypeScript plugins through rutis. Match `@arcships/rutis`
-to the host's pinned runtime: main uses 0.12.0; older hosts may still use 0.11.0 or 0.10.0.
+to the host's pinned runtime: main uses 0.12.1; older hosts may still use 0.11.0 or 0.10.0.
 Use type-only imports from `dimcode/plugin` for Dim's implemented named services.
 These declarations add no runtime wrapper or service.
 The source declaration is [npm/plugin.d.ts](../npm/plugin.d.ts).

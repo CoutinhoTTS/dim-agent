@@ -2882,9 +2882,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a3656ea45533e34f6480a218e71648e0ace7878cd6d371b408a6d35a6b9b1f5"
+checksum = "ed8b36642aa032921d3c406ae1815286f84a0cad4721c4d520d5f2f84045d848"
 dependencies = [
  "shuttle",
  "thiserror 2.0.20",
@@ -2894,9 +2894,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60c0109a4e4cbf4f9f34ba15581b809f004c9d65a7fd06fa2f1047dc38dcc842"
+checksum = "2af4f66922a217999e1cf727437bf0748b8fe277f666e8667aa61c347c8fb67b"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -2912,9 +2912,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bea03fe564c550a21faa2d967e0d40bc66988b5744512d8a050349fc70318b16"
+checksum = "3604c8fc32c1a03dbeb650e3d5e341916e4f90f10e9682a4966ddbdca03d53cc"
 dependencies = [
  "rutis",
  "rutis-bridge",
