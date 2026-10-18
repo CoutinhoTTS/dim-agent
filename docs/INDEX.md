@@ -21,7 +21,7 @@
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
-- [C5 branch TypeScript binding contract (proposed)](design/branch-typescript.md)
+- [C5 branch TypeScript binding](design/branch-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
 - [F5 HostPlatform process isolation policy](design/host-platform-isolation.md) (proposed)
@@ -34,6 +34,7 @@
 - [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
 - [Session broadcast notices](design/appserver/session-notices.md) (C6)（[中文](zh/design/appserver/session-notices.md)）
+- [SessionStore title metadata](design/appserver/session-title-metadata.md) (S5b)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Idle Session unload](design/appserver/idle-unload.md) (proposed, #126)（[中文](zh/design/appserver/idle-unload.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

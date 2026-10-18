@@ -91,6 +91,34 @@ impl TreeCommands {
             .branch(parent, at, options, admission)
             .await
     }
+    // The data methods below spell out `std::result::Result` for rutis'
+    // export generator, which resolves an alias's item type where the alias
+    // is defined (arcships/rutis#463).
+    /// The directory record of branch `id`.
+    pub fn info(&self, id: String) -> std::result::Result<TimelineInfo, AgentError> {
+        self.list()
+            .into_iter()
+            .find(|info| info.id == id)
+            .ok_or(AgentError::UnknownBranch(id))
+    }
+    /// Commits `input` to branch `id` through its validating `Branch::input`
+    /// and returns the committed event.
+    pub fn input(
+        &self,
+        id: String,
+        input: InputMessageData,
+    ) -> std::result::Result<Arc<AgentEvent>, AgentError> {
+        self.get(&id)?.input(input)
+    }
+    /// Creates a child of `parent` cut at `at` and returns its id. Dropping
+    /// the call cancels its admission, as [`Self::branch`]'s token does.
+    pub async fn create(&self, parent: String, at: u64, options: BranchOptions) -> Result<String> {
+        let admission = CancellationToken::new();
+        let cancel_on_drop = admission.clone().drop_guard();
+        let created = self.branch(parent, at, options, admission).await;
+        cancel_on_drop.disarm();
+        Ok(created?.id().to_owned())
+    }
 }
 impl TimelineTree {
     fn create_failed(info: &TimelineInfo, error: &AgentError) -> BranchCreateFailedData {
